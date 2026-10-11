@@ -1,10 +1,14 @@
-"""Once-per-PR Python unit evidence; compilation remains current-source evidence."""
+"""Once-per-PR Python unit evidence; compilation remains current-source evidence.
+
+Earlier passes of the same PR are ADOPTED only when they authenticate. History
+never refuses the lane: evidence that does not authenticate is reported and
+its tests simply run again. Only the current run's own integrity refuses.
+"""
 
 from __future__ import annotations
 
 import argparse
 import ast
-import base64
 import copy
 import hashlib
 import io
@@ -36,7 +40,15 @@ MAX_SOURCE_CACHE_AST_NODES = 1000000
 
 
 class ReceiptError(RuntimeError):
-    """Evidence is unavailable, ambiguous, or invalid: do not execute units."""
+    """Evidence is unavailable, ambiguous, or invalid.
+
+    For a historical record this means "not adopted": its tests run again.
+    Raised from the current run's own checks it refuses the lane.
+    """
+
+
+class IntegrityError(ReceiptError):
+    """The current run itself is unsafe; never downgraded to "not adopted"."""
 
 
 class ReceiptHTTPError(ReceiptError):
@@ -48,6 +60,16 @@ class ReceiptHTTPError(ReceiptError):
 def require(condition, message):
     if not condition:
         raise ReceiptError(message)
+
+
+# What a failed historical authentication can raise. Each one only withholds
+# adoption of that record; IntegrityError is re-raised before this is caught.
+NOT_ADOPTED = (ReceiptError, LookupError, TypeError, ValueError, AttributeError,
+               zipfile.BadZipFile)
+
+
+def not_adopted(subject, error):
+    print(f"{subject} not adopted — {error}; its tests run again")
 
 
 def positive(value):
@@ -111,7 +133,7 @@ class API:
 
     def bytes(self, path, query=None):
         self.requests += 1
-        require(self.requests <= 200, "Receipt request budget exhausted; inspect retained evidence")
+        require(self.requests <= 200, "Receipt request budget exhausted")
         require((path == "" or path.startswith("/")) and ".." not in path
                 and len(path) <= 1024 and re.fullmatch(r"[A-Za-z0-9_./-]*", path),
                 "Unsafe API path")
@@ -144,7 +166,7 @@ class API:
             items.extend(batch)
             if len(batch) < 50:
                 return items
-        raise ReceiptError("Evidence pagination limit reached; preserve journals and inspect history")
+        raise ReceiptError("Evidence pagination limit reached")
 
 
 def artifact_json(data):
@@ -211,448 +233,19 @@ def verify_attestor(api, scope, author):
             "Receipt attestor is not an authenticated repository writer")
 
 
-def pre_unit_recovery(api, scope, prior, jobs):
-    """One source/run/job/log-bound failed prepare; never a generic skip list."""
-    proof_path = Path("validation/python-unit-preunit-failure3705.json")
-    require(proof_path.is_file() and not proof_path.is_symlink(), "Pre-unit recovery proof unavailable")
-    proof = bounded_json(proof_path.read_bytes())
-    require(set(proof) == {"version", "scope", "run", "job", "commit", "log_sha256",
-                           "source_hashes", "provenance"} and proof["version"] == 1
-            and proof["run"] == 3705 and proof["job"] == 39306
-            and proof["scope"] == {"repository": 1, "pr": 668,
-                                    "branch": "codex/python-unit-pr-receipts",
-                                    "base": "effort/architecture-review-2026-09-20"}
-            and proof["commit"] == "a3b795a37db1c796353a622028b0cf4d383f3c26"
-            and proof["log_sha256"] == "61eda0ef7be00f3fc9ae12c07f5302a75b2cbaa5d7de7b66bb48841a01c158fe",
-            "Unknown or corrupt bounded pre-unit recovery record")
-    if proof["scope"] != scope or proof["run"] != prior["id"]:
-        return False
-    require(prior["commit_sha"] == proof["commit"], "Pre-unit recovery source mismatch")
-    actual = api.get(f"/actions/runs/{proof['run']}")
-    require(actual["repository"]["id"] == scope["repository"]
-            and actual["commit_sha"] == proof["commit"]
-            and actual["prettyref"] == scope["branch"]
-            and actual["workflow_id"] == "effort-ci.yml" and actual["status"] == "failure",
-            "Pre-unit recovery run metadata mismatch")
-    matching = [job for job in jobs if job["id"] == proof["job"]]
-    require(len(matching) == 1 and matching[0]["run_id"] == proof["run"]
-            and matching[0]["repo_id"] == scope["repository"] and matching[0]["attempt"] == 1
-            and matching[0]["name"] == "" and matching[0]["status"] == "failure",
-            "Pre-unit recovery job metadata mismatch")
-    for path, expected in proof["source_hashes"].items():
-        require(path in (".github/workflows/effort-ci.yml", "validation/python_unit_receipts.py"),
-                "Unknown pre-unit recovery source")
-        require(hashlib.sha256(api.bytes("/raw/" + path, {"ref": proof["commit"]})).hexdigest() == expected,
-                "Pre-unit recovery exact-source hash mismatch")
-    require(set(proof["source_hashes"]) == {
-        ".github/workflows/effort-ci.yml", "validation/python_unit_receipts.py"}, "Incomplete source-order proof")
-    raw = api.bytes(f"/actions/jobs/{proof['job']}/logs")
-    require(hashlib.sha256(raw).hexdigest() == proof["log_sha256"], "Pre-unit recovery log mismatch")
-    log = raw.decode("utf-8")
-    require(proof["commit"] in log
-            and "Python receipt refusal: HTTPError: Evidence unavailable" in log
-            and "skipping post step for 'Publish Python attempt-start marker'; main step was skipped" in log
-            and "skipping post step for 'Preserve Python success journal even on unit failure'; main step was skipped" in log
-            and not any(marker in log for marker in ("discovered=", "historical-passes=", "pending=", "Ran ")),
-            "Pre-unit recovery contradicts zero-unit source-order evidence")
-    require(not api.pages("/actions/artifacts", {"name": key(scope) + f"-start-{proof['run']}"}),
-            "Pre-unit recovery unexpectedly has a started attempt")
-    print(f"Recovered failed prepare run {proof['run']}/job {proof['job']}: zero units, no successes imported")
-    return True
-
-
-def prepare_refusal_case():
-    """One reviewed actual failure; callers cannot enroll arbitrary attempts."""
-    path = Path('validation/python-unit-preunit-failure3747.json')
-    require(path.is_file() and not path.is_symlink(), 'Prepare refusal proof unavailable')
-    with path.open('rb') as source:
-        raw = source.read(MAX_BYTES + 1)
-    require(len(raw) <= MAX_BYTES, 'Prepare refusal descriptor exceeds byte cap')
-    require(hashlib.sha256(raw).hexdigest() ==
-            'd19d54eb94dadfef94ab0af765885131465386b1258e047fde5bee876836fbad',
-            'Unknown or corrupt prepare refusal proof')
-    return bounded_json(raw)
-
-
-def zero_unit_prepare_recovery(api, scope, prior, jobs):
-    """Authenticate a missing-journal prepare refusal; import no successes."""
-    proof = prepare_refusal_case()
-    require(set(proof) == {'version', 'scope', 'run', 'job', 'commit',
-                           'log_sha256', 'source_hashes', 'provenance'}
-            and proof['version'] == 1, 'Invalid prepare refusal descriptor')
-    if proof['scope'] != scope or proof['run'] != prior['id']:
-        return False
-    require(prior['commit_sha'] == proof['commit'], 'Prepare refusal prior source mismatch')
-    actual = api.get(f"/actions/runs/{proof['run']}")
-    require(actual['id'] == proof['run']
-            and actual['repository']['id'] == scope['repository']
-            and actual['commit_sha'] == proof['commit']
-            and actual['prettyref'] == scope['branch']
-            and actual['workflow_id'] == 'effort-ci.yml' and actual['status'] == 'failure',
-            'Prepare refusal run metadata mismatch')
-    matching = [job for job in jobs if job['name'] == job_name(scope)]
-    require(len(matching) == 1 and matching[0]['id'] == proof['job']
-            and matching[0]['run_id'] == proof['run']
-            and matching[0]['repo_id'] == scope['repository']
-            and matching[0]['attempt'] == 1 and matching[0]['status'] == 'failure',
-            'Prepare refusal job metadata mismatch')
-    require(set(proof['source_hashes']) == {
-        '.github/workflows/effort-ci.yml', 'validation/python_unit_receipts.py'},
-        'Incomplete prepare source-order proof')
-    for path, expected in proof['source_hashes'].items():
-        require(hashlib.sha256(api.bytes('/raw/' + path, {'ref': proof['commit']})).hexdigest()
-                == expected, 'Prepare refusal exact-source hash mismatch')
-    raw = api.bytes(f"/actions/jobs/{proof['job']}/logs")
-    require(hashlib.sha256(raw).hexdigest() == proof['log_sha256'],
-            'Prepare refusal log mismatch')
-    log = raw.decode('utf-8')
-    refusal = 'Python receipt refusal: ReceiptError: Local pass receipts await authenticated PR hash attestation'
-    start = "skipping post step for 'Publish Python attempt-start marker'; main step was skipped"
-    final = "skipping post step for 'Preserve Python success journal even on unit failure'; main step was skipped"
-    require(proof['commit'] in log and log.count(refusal) == 1
-            and log.count(start) == 1 and log.count(final) == 1
-            and log.index(refusal) < min(log.index(start), log.index(final))
-            and not any(marker in log for marker in (
-                'discovered=', 'historical-passes=', 'pending=', 'Ran ',
-                'Unit discovery failed', 'fixture_errors', '... ok', '... FAIL', '... ERROR')),
-            'Prepare refusal contradicts zero-unit phase evidence')
-    require(not any(artifact['run_id'] == proof['run']
-                    for artifact in api.pages('/actions/artifacts', {'name': key(scope)}))
-            and not api.pages('/actions/artifacts', {'name': key(scope) + f"-start-{proof['run']}"})
-            and api.get(f"/actions/runs/{proof['run']}/artifacts") == [],
-            'Prepare refusal unexpectedly has start/final/run artifacts')
-    print(f"Recovered failed prepare run {proof['run']}/job {proof['job']}: zero units, no successes imported")
-    return True
-
-
-def lost_journal_case():
-    """One immutable archival witness, not caller-selected enrollment."""
-    path = Path('validation/python-unit-lost-journals742.json')
-    require(path.is_file() and not path.is_symlink(), 'Lost journal witness unavailable')
-    with path.open('rb') as stream:
-        raw = stream.read(MAX_BYTES + 1)
-    digest = hashlib.sha256(raw).hexdigest()
-    require(len(raw) <= MAX_BYTES and digest ==
-            '31ef59fb7a45a480df9129499d34772fcfe071c03a284a2967caa4e8bd96ed31',
-            'Unknown or corrupt lost journal witness')
-    return bounded_json(raw), digest
-
-
-def authenticate_lost_journal(api, scope, digest):
-    expected = {'repository': scope['repository'], 'pr': scope['pr'], 'sha256': digest}
-    matches = []
-    for comment in api.pages(f"/issues/{scope['pr']}/comments"):
-        for line in comment['body'].splitlines():
-            if line.startswith('Python-Journal-Recovery: '):
-                claim = bounded_json(line.removeprefix('Python-Journal-Recovery: ').encode())
-                if claim == expected:
-                    verify_attestor(api, scope, comment['user'])
-                    matches.append(positive(comment['id']))
-    require(matches, 'Lost journal awaits authenticated PR hash attestation')
-
-
-def recovery_metadata(api, scope, prior, jobs, proof, status):
-    require(prior['commit_sha'] == proof['commit'], 'Lost journal prior source mismatch')
-    actual = api.get(f"/actions/runs/{proof['run']}")
-    require(actual['id'] == proof['run'] and actual['repository']['id'] == scope['repository']
-            and actual['commit_sha'] == proof['commit'] and actual['prettyref'] == scope['branch']
-            and actual['workflow_id'] == 'effort-ci.yml' and actual['status'] == 'failure',
-            'Lost journal run metadata mismatch')
-    matching = [job for job in jobs if job['name'] == job_name(scope)]
-    require(len(matching) == 1 and matching[0]['id'] == proof['job']
-            and matching[0]['run_id'] == proof['run'] and matching[0]['repo_id'] == scope['repository']
-            and matching[0]['attempt'] == 1 and matching[0]['status'] == status,
-            'Lost journal Python job metadata mismatch')
-    require(set(proof['source_hashes']) == {
-        '.github/workflows/effort-ci.yml', 'validation/python_unit_receipts.py'},
-        'Lost journal source-order proof incomplete')
-    for path, expected in proof['source_hashes'].items():
-        require(hashlib.sha256(api.bytes('/raw/' + path, {'ref': proof['commit']})).hexdigest()
-                == expected, 'Lost journal original source mismatch')
-    raw = api.bytes(f"/actions/jobs/{proof['job']}/logs")
-    require(hashlib.sha256(raw).hexdigest() == proof['log_sha256'], 'Lost journal original log mismatch')
-    require(proof['commit'] in raw.decode(), 'Lost journal checkout source absent')
-    return [re.sub(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', line)
-            for line in raw.decode().splitlines()]
-
-
-def recovery_absence(api, scope, run):
-    require(not any(artifact['run_id'] == run for artifact in
-                    api.pages('/actions/artifacts', {'name': key(scope)}))
-            and not api.pages('/actions/artifacts', {'name': key(scope) + f'-start-{run}'})
-            and api.get(f'/actions/runs/{run}/artifacts') == [],
-            'Lost journal unexpectedly has live start/final/run artifacts')
-
-
-def recover_lost_pr742(api, scope, prior, jobs):
-    """Return (handled, journal); a zero-unit refusal never imports a journal."""
-    # Avoid imposing this exceptional record or authority on unrelated PRs.
-    if scope != {'repository': 1, 'pr': 742, 'branch': 'opus/client-evidence',
-                 'base': 'effort/architecture-review-2026-09-20'} or prior['id'] not in (3915, 3930):
-        return False, None
-    proof, digest = lost_journal_case()
-    require(proof['version'] == 1 and proof['scope'] == scope
-            and proof['journal']['run'] == 3915 and proof['journal']['job'] == 40909
-            and proof['journal']['commit'] == '5fa478987bf464ef6ab9b50bf49dea842acef018'
-            and proof['refusal']['run'] == 3930 and proof['refusal']['job'] == 41018
-            and proof['refusal']['commit'] == '2a299d44b38e67c029b66087f69edc4d5315222e',
-            'Lost journal exact-case identity mismatch')
-    authenticate_lost_journal(api, scope, digest)
-    zero = prior['id'] == proof['refusal']['run']
-    case = proof['refusal'] if zero else proof['journal']
-    lines = recovery_metadata(api, scope, prior, jobs, case, 'failure' if zero else 'success')
-    recovery_absence(api, scope, case['run'])
-    if zero:
-        refusal = 'Python receipt refusal: ReceiptError: Missing final receipt for run 3915; do not rerun possibly passed tests'
-        start = "skipping post step for 'Publish Python attempt-start marker'; main step was skipped"
-        final = "skipping post step for 'Preserve Python success journal even on unit failure'; main step was skipped"
-        require(lines.count(refusal) == lines.count(start) == lines.count(final) == 1
-                and lines.index(refusal) < min(lines.index(start), lines.index(final))
-                and not any(marker in '\n'.join(lines) for marker in (
-                    'discovered=', 'historical-passes=', 'pending=', 'Ran ', 'Unit discovery failed',
-                    'fixture_errors', '... ok', '... FAIL', '... ERROR')),
-                'Lost journal refusal contradicts zero-unit phase evidence')
-        print(f"Recovered failed prepare run {case['run']}/job {case['job']}: zero units, no successes imported")
-        return True, None
-    archives, uploads = {}, {}
-    for label in ('start', 'final'):
-        artifact = case['artifacts'][label]
-        require(isinstance(artifact['zip_base64'], str) and len(artifact['zip_base64']) <= MAX_BYTES,
-                'Lost journal encoded archive exceeds bound')
-        try:
-            raw = base64.b64decode(artifact['zip_base64'], validate=True)
-        except ValueError:
-            raise ReceiptError('Lost journal archive encoding invalid') from None
-        require(len(raw) == artifact['size'] <= MAX_BYTES
-                and hashlib.sha256(raw).hexdigest() == artifact['sha256'],
-                'Lost journal archive witness mismatch')
-        upload = (f"Artifact {key(scope)}" + (f"-start-{case['run']}" if label == 'start' else '')
-                  + f" has been successfully uploaded! Final size is {artifact['size']} bytes. Artifact ID is {artifact['id']}")
-        require(lines.count(upload) == 1, 'Lost journal upload metadata mismatch')
-        uploads[label] = lines.index(upload)
-        archives[label] = artifact_json(raw)
-    start, journal = archives['start'], archives['final']
-    validate_journal(start, scope, case['run'], case['commit'], completed=False)
-    validate_journal(journal, scope, case['run'], case['commit'])
-    require(start['complete'] is False and len(start['passes']) == case['baseline_count']
-            and all(source == {'run': case['baseline_run'], 'commit': case['baseline_commit']}
-                    and journal['passes'].get(test_key) == source
-                    for test_key, source in start['passes'].items()),
-            'Lost journal inherited baseline changed')
-    fresh = {test_key: source for test_key, source in journal['passes'].items()
-             if test_key not in start['passes']}
-    require(all(source == {'run': case['run'], 'commit': case['commit']} for source in fresh.values())
-            and {suite: sum(test_key.startswith(suite + ':') for test_key in fresh)
-                 for suite in SUITES} == case['fresh_counts'], 'Lost journal fresh attribution mismatch')
-    headers = [(i, re.match(r'^test\w+ \((test_[A-Za-z0-9_.]+)\)', line))
-               for i, line in enumerate(lines)]
-    headers = [(i, match.group(1)) for i, match in headers if match]
-    require(len(headers) == len(fresh) and len({name for _, name in headers}) == len(fresh),
-            'Lost journal individual events ambiguous')
-    require(headers and uploads['start'] < headers[0][0]
-            and headers[-1][0] < uploads['final'], 'Lost journal publication ordering mismatch')
-    seen = set()
-    for position, (i, name) in enumerate(headers):
-        end = headers[position + 1][0] if position + 1 < len(headers) else len(lines)
-        outcomes = [line for line in lines[i:end] if line == 'ok' or line.endswith(' ... ok')]
-        candidates = [test_key for test_key in fresh if test_key.endswith(':' + name)]
-        require(len(outcomes) == len(candidates) == 1, 'Lost journal lacks one positive event per fresh ID')
-        seen.add(candidates[0])
-    require(seen == set(fresh) and lines.count('OK') == 2
-            and sum(bool(re.fullmatch(r'Ran 2 tests in [0-9.]+s', line)) for line in lines) == 1
-            and sum(bool(re.fullmatch(r'Ran 7 tests in [0-9.]+s', line)) for line in lines) == 1
-            and lines.count('validation: discovered=283, historical-passes=281, pending=2') == 1
-            and lines.count('operations: discovered=652, historical-passes=645, pending=7') == 1
-            and lines.index('validation: discovered=283, historical-passes=281, pending=2') < uploads['final']
-            and lines.index('operations: discovered=652, historical-passes=645, pending=7') < uploads['final'],
-            'Lost journal completed phase/count evidence mismatch')
-    print(f"Recovered original {len(journal['passes'])} passes from run {case['run']}/job {case['job']}; no units replayed")
-    return True, journal
-
-
-def inherited_failure_case():
-    """Two reviewed PR742 attempts; never a general incomplete waiver."""
-    path = Path(__file__).resolve().parent / 'python-unit-inherited-failure742.json'
-    require(path.is_file() and not path.is_symlink(), 'Inherited failure witness unavailable')
-    with path.open('rb') as source:
-        raw = source.read(MAX_BYTES + 1)
-    digest = hashlib.sha256(raw).hexdigest()
-    require(len(raw) <= MAX_BYTES and digest ==
-            'c94d6df515346d3ce24a99959b112ad5585f9294dfc966937f6c22b1ce351e55',
-            'Unknown or corrupt inherited failure witness')
-    return bounded_json(raw), digest
-
-
-def recover_inherited_pr742(api, scope, prior, jobs, marker=None, marker_raw=None,
-                           artifact=None, final_raw=None, journal=None):
-    """Preserve an unchanged inherited map, or prove an empty prepare refusal."""
-    if scope != {'repository': 1, 'pr': 742, 'branch': 'opus/client-evidence',
-                 'base': 'effort/architecture-review-2026-09-20'} or prior['id'] not in (3994, 4002):
-        return False
-    proof, digest = inherited_failure_case()
-    require(proof['version'] == 1 and proof['scope'] == scope
-            and (proof['inherited']['run'], proof['inherited']['job'], proof['inherited']['commit']) ==
-            (3994, 41507, 'b18c01904af3f33193be3ee15db88bac69c519c7')
-            and (proof['refusal']['run'], proof['refusal']['job'], proof['refusal']['commit']) ==
-            (4002, 41568, '4a087b75be2ad886f664c72596c36f8cc0311914'),
-            'Inherited failure exact-case identity mismatch')
-    authenticate_lost_journal(api, scope, digest)
-    zero = prior['id'] == 4002
-    case = proof['refusal'] if zero else proof['inherited']
-    lines = recovery_metadata(api, scope, prior, jobs, case, 'failure')
-    log = '\n'.join(lines)
-    require(not any(token in log for token in (
-        'discovered=', 'historical-passes=', 'pending=', 'Ran ', 'Unit discovery failed',
-        'fixture_errors', '... ok', '... FAIL', '... ERROR')),
-        'Inherited failure contradicts zero-unit phase evidence')
-    if zero:
-        require(all(value is None for value in (marker, marker_raw, artifact, final_raw, journal)),
-                'Prepare refusal unexpectedly has journal inputs')
-        refusal = ('Python receipt refusal: ReceiptError: Incomplete receipt attempt 3994; '
-                   'preserve artifact and recover individual evidence')
-        start = "skipping post step for 'Publish Python attempt-start marker'; main step was skipped"
-        final = "skipping post step for 'Preserve Python success journal even on unit failure'; main step was skipped"
-        require(lines.count(refusal) == lines.count(start) == lines.count(final) == 1
-                and lines.index(refusal) < min(lines.index(start), lines.index(final)),
-                'Inherited prepare refusal phase evidence mismatch')
-        recovery_absence(api, scope, case['run'])
-        print('Recovered failed prepare run 4002/job 41568: zero units, no successes imported')
-        return True
-    require(all(value is not None for value in (marker, marker_raw, artifact, final_raw, journal)),
-            'Inherited failure requires both live start and final witnesses')
-    uploads = []
-    for label, item, raw, name in (
-            ('start', marker, marker_raw, key(scope) + '-start-3994'),
-            ('final', artifact, final_raw, key(scope))):
-        expected = case['artifacts'][label]
-        require(item['id'] == expected['id'] and item['run_id'] == case['run']
-                and item['name'] == name and not item['expired']
-                and item['size_in_bytes'] == len(raw) == expected['size'] <= MAX_BYTES
-                and hashlib.sha256(raw).hexdigest() == expected['sha256'],
-                'Inherited failure artifact mismatch')
-        upload = (f"Artifact {name} has been successfully uploaded! Final size is "
-                  f"{expected['size']} bytes. Artifact ID is {expected['id']}")
-        require(lines.count(upload) == 1, 'Inherited failure upload evidence mismatch')
-        uploads.append(lines.index(upload))
-    start = artifact_json(marker_raw)
-    validate_journal(start, scope, case['run'], case['commit'], completed=False)
-    validate_journal(journal, scope, case['run'], case['commit'], completed=False)
-    require(start == journal and start['complete'] is False
-            and len(start['passes']) == case['count']
-            and start.get('applicability_commit') == case['commit']
-            and all(source in case['sources'] and source['run'] != case['run']
-                    and source['commit'] != case['commit'] for source in start['passes'].values()),
-            'Inherited failure changed its initial map or attribution')
-    history = 'historical regression coverage is incomplete:'
-    failure = 'make: *** [Makefile:140: history-check] Error 1'
-    require(lines.count(history) == lines.count(failure) == 1
-            and uploads[0] < lines.index(history) < lines.index(failure) < uploads[1]
-            and lines.count("Job 'Python unit receipts' failed") == 1,
-            'Inherited failure history-before-units ordering mismatch')
-    print('Preserved unchanged inherited map from failed run 3994/job 41507; zero new passes')
-    return True
-
-
-
-def zero_failure869_case():
-    """Three exact zero-unit PR869 attempts; never a general incomplete waiver."""
-    path = Path(__file__).resolve().parent / 'python-unit-zero-failure869.json'
-    require(path.is_file() and not path.is_symlink(), 'Inherited failure witness unavailable')
-    with path.open('rb') as source:
-        raw = source.read(MAX_BYTES + 1)
-    digest = hashlib.sha256(raw).hexdigest()
-    require(len(raw) <= MAX_BYTES and digest ==
-            'f9d2e22c4e8095478146809c9100669d2211f832da7d59baba0851b6885ab408',
-            'Unknown or corrupt inherited failure witness')
-    return bounded_json(raw), digest
-
-
-def recover_zero_pr869(api, scope, prior, jobs, marker=None, marker_raw=None,
-                           artifact=None, final_raw=None, journal=None):
-    """Authenticate three zero-unit failures without importing any successes."""
-    if scope != {'repository': 1, 'pr': 869, 'branch': 'codex/cinema-remotes-foundations-gate',
-                 'base': 'effort/cinema-remotes'} or prior['id'] not in (4391, 4394, 4397):
-        return False
-    proof, digest = zero_failure869_case()
-    require(proof['version'] == 1 and proof['scope'] == scope
-            and (proof['inherited']['run'], proof['inherited']['job'], proof['inherited']['commit']) ==
-            (4391, 44632, '2b21cc0354561c737b53c73f00804337024e3c61')
-            and (proof['refusal']['run'], proof['refusal']['job'], proof['refusal']['commit']) ==
-            (4394, 44658, '1041d72407d937efe265f7263926cacf332e6b22')
-            and (proof['history4397']['run'], proof['history4397']['job'],
-                 proof['history4397']['commit']) ==
-            (4397, 44684, '69f092b1e3efc43073399c1d835f87c90f796101'),
-            'Inherited failure exact-case identity mismatch')
-    authenticate_lost_journal(api, scope, digest)
-    zero = prior['id'] == 4394
-    case = (proof['refusal'] if zero else
-            proof['history4397'] if prior['id'] == 4397 else proof['inherited'])
-    lines = recovery_metadata(api, scope, prior, jobs, case, 'failure')
-    log = '\n'.join(lines)
-    require(not any(token in log for token in (
-        'discovered=', 'historical-passes=', 'pending=', 'Ran ', 'Unit discovery failed',
-        'fixture_errors', '... ok', '... FAIL', '... ERROR')),
-        'Inherited failure contradicts zero-unit phase evidence')
-    if zero:
-        require(all(value is None for value in (marker, marker_raw, artifact, final_raw, journal)),
-                'Prepare refusal unexpectedly has journal inputs')
-        refusal = ('Python receipt refusal: ReceiptError: Incomplete receipt attempt 4391; '
-                   'preserve artifact and recover individual evidence')
-        start = "skipping post step for 'Publish Python attempt-start marker'; main step was skipped"
-        final = "skipping post step for 'Preserve Python success journal even on unit failure'; main step was skipped"
-        require(lines.count(refusal) == lines.count(start) == lines.count(final) == 1
-                and lines.index(refusal) < min(lines.index(start), lines.index(final)),
-                'Inherited prepare refusal phase evidence mismatch')
-        recovery_absence(api, scope, case['run'])
-        print('Recovered failed prepare run 4394/job 44658: zero units, no successes imported')
-        return True
-    require(all(value is not None for value in (marker, marker_raw, artifact, final_raw, journal)),
-            'Inherited failure requires both live start and final witnesses')
-    uploads = []
-    for label, item, raw, name in (
-            ('start', marker, marker_raw, key(scope) + f"-start-{case['run']}"),
-            ('final', artifact, final_raw, key(scope))):
-        expected = case['artifacts'][label]
-        require(item['id'] == expected['id'] and item['run_id'] == case['run']
-                and item['name'] == name and not item['expired']
-                and item['size_in_bytes'] == len(raw) == expected['size'] <= MAX_BYTES
-                and hashlib.sha256(raw).hexdigest() == expected['sha256'],
-                'Inherited failure artifact mismatch')
-        upload = (f"Artifact {name} has been successfully uploaded! Final size is "
-                  f"{expected['size']} bytes. Artifact ID is {expected['id']}")
-        require(lines.count(upload) == 1, 'Inherited failure upload evidence mismatch')
-        uploads.append(lines.index(upload))
-    start = artifact_json(marker_raw)
-    validate_journal(start, scope, case['run'], case['commit'], completed=False)
-    validate_journal(journal, scope, case['run'], case['commit'], completed=False)
-    require(start == journal and start['complete'] is False
-            and start['passes'] == {} and case['count'] == 0 and case['sources'] == []
-            and start.get('applicability_commit') == case['commit'],
-            'Inherited failure changed its initial map or attribution')
-    history = 'historical regression coverage is incomplete:'
-    failure = 'make: *** [Makefile:140: history-check] Error 1'
-    require(lines.count(history) == lines.count(failure) == 1
-            and uploads[0] < lines.index(history) < lines.index(failure) < uploads[1]
-            and lines.count("Job 'Python unit receipts' failed") == 1,
-            'Inherited failure history-before-units ordering mismatch')
-    print(f"Preserved empty incomplete journal from failed run {case['run']}/job {case['job']}; zero new passes")
-    return True
-
-
 def validate_journal(journal, scope, run, commit, completed=True):
     require(journal.get("version") == VERSION and journal.get("scope") == scope,
             "Receipt repository/PR/branch/base mismatch")
     require(journal.get("run") == run and journal.get("commit") == commit,
             "Receipt artifact/run/source mismatch")
     require(not completed or journal.get("complete") is True,
-            f"Incomplete receipt attempt {run}; preserve artifact and recover individual evidence")
+            f"Incomplete receipt attempt {run}")
     fixture_errors = journal.get("fixture_errors")
     require(isinstance(fixture_errors, list) and len(fixture_errors) <= MAX_TESTS
             and all(isinstance(item, str) and len(item) <= 4096 for item in fixture_errors),
             "Invalid/missing unit fixture-error evidence")
     require(not fixture_errors,
-            f"Unresolved fixture errors in run {run}: {'; '.join(fixture_errors[:3])}; "
-            "preserve successes and recover failed-fixture-only evidence")
+            f"Unresolved fixture errors in run {run}: {'; '.join(fixture_errors[:3])}")
     passes = journal.get("passes")
     require(isinstance(passes, dict) and len(passes) <= MAX_TESTS,
             "Invalid receipt success map")
@@ -672,109 +265,16 @@ def validate_journal(journal, scope, run, commit, completed=True):
         if source["run"] is not None:
             positive(source["run"])
         else:
-            require(source.get("provenance") == "approved-local-linux-pr663-correction"
-                    or source.get("provenance", "").startswith("attested-local:"),
+            require(source.get("provenance", "").startswith("attested-local:"),
                     "Unknown non-CI source attribution")
     return passes
-
-
-def discovery_recovery_case():
-    """One reviewed historical case, not a caller-provided incomplete waiver."""
-    path = Path(__file__).resolve().parent / "python-unit-discovery-failure3719.json"
-    require(path.is_file() and not path.is_symlink(), "Discovery recovery record unavailable")
-    raw = path.read_bytes()
-    require(hashlib.sha256(raw).hexdigest() == "8f41ac8eb0fed5881df00ab0a2f4189db9af0a7057e3d3dbec4056138b2d1836",
-            "Discovery recovery descriptor differs from approved exact record")
-    proof = bounded_json(raw)
-    require(proof["version"] == 1 and proof["run"] == 3719 and proof["job"] == 39416
-            and proof["scope"] == {"repository": 1, "pr": 674,
-                "branch": "codex/k06-owned-measurement-launcher",
-                "base": "effort/architecture-review-2026-09-20"}
-            and proof["commit"] == "cd2e2f1467ab0e77e8e9e09c90b75580d6411294"
-            and proof["log_sha256"] == "1c7b7b0fd2738988a5e1aef91ebc7ad0c446e7d3882264b6b429fa665c2d0f40"
-            and proof["count"] == 277 and proof["local_count"] == 4,
-            "Unknown discovery recovery case")
-    return proof
-
-
-def recover_discovery_passes(api, scope, prior, job, marker, marker_raw,
-                             artifact, final_raw, journal, legacy):
-    proof = discovery_recovery_case()
-    if scope != proof["scope"] or prior["id"] != proof["run"]:
-        return False
-    require(prior["commit_sha"] == proof["commit"], "Discovery recovery source mismatch")
-    actual = api.get(f"/actions/runs/{proof['run']}")
-    require(actual["repository"]["id"] == scope["repository"]
-            and actual["commit_sha"] == proof["commit"]
-            and actual["prettyref"] == scope["branch"]
-            and actual["workflow_id"] == "effort-ci.yml" and actual["status"] == "failure",
-            "Discovery recovery run metadata mismatch")
-    require(job["id"] == proof["job"] and job["run_id"] == proof["run"]
-            and job["repo_id"] == scope["repository"] and job["attempt"] == 1
-            and job["name"] == job_name(scope) and job["status"] == "failure",
-            "Discovery recovery job metadata mismatch")
-    for item, raw, expected, name in (
-            (marker, marker_raw, proof["start"], key(scope) + f"-start-{proof['run']}"),
-            (artifact, final_raw, proof["final"], key(scope))):
-        require(item["id"] == expected["id"] and item["run_id"] == proof["run"]
-                and item["name"] == name and not item["expired"]
-                and item["size_in_bytes"] == len(raw) == expected["bytes"]
-                and hashlib.sha256(raw).hexdigest() == expected["sha256"],
-                "Discovery recovery artifact mismatch")
-    start = artifact_json(marker_raw)
-    validate_journal(start, scope, proof["run"], proof["commit"], completed=False)
-    validate_journal(journal, scope, proof["run"], proof["commit"], completed=False)
-    require(start["complete"] is False and journal["complete"] is False,
-            "Discovery recovery must retain incomplete historical attempt")
-    baseline = start["passes"]
-    require(len(baseline) == proof["local_count"]
-            and all(k.startswith("operations:") and legacy.get(k) == source
-                    and source["commit"] is None and source["run"] is None
-                    and source.get("provenance", "").startswith("attested-local:")
-                    and journal["passes"].get(k) == source for k, source in baseline.items()),
-            "Discovery recovery local baseline lacks current authenticated attribution")
-    fresh = {k: v for k, v in journal["passes"].items() if k not in baseline}
-    require(len(fresh) == proof["count"] and all(k.startswith("validation:")
-            and v == {"commit": proof["commit"], "run": proof["run"]}
-            for k, v in fresh.items()), "Discovery recovery positive pass provenance mismatch")
-    require(set(proof["source_hashes"]) == {
-        ".github/workflows/effort-ci.yml", "validation/python_unit_receipts.py"},
-        "Discovery recovery source-order proof incomplete")
-    for path, digest in proof["source_hashes"].items():
-        require(hashlib.sha256(api.bytes("/raw/" + path, {"ref": proof["commit"]})).hexdigest() == digest,
-                "Discovery recovery original source mismatch")
-    raw = api.bytes(f"/actions/jobs/{proof['job']}/logs")
-    require(hashlib.sha256(raw).hexdigest() == proof["log_sha256"], "Discovery recovery log mismatch")
-    lines = [re.sub(r"^\d{4}-\d\d-\d\dT[0-9:.]+Z ", "", line) for line in raw.decode().splitlines()]
-    require(proof["commit"] in raw.decode() and lines.count(proof["summary"]) == 1
-            and lines.count("OK") == 1 and lines.count(
-                "Python receipt refusal: ReceiptError: Unit discovery failed; no cached pass may hide import errors") == 1
-            and lines.count(f"validation: discovered={proof['count']}, historical-passes=0, pending={proof['count']}") == 1
-            and not any(line.startswith("operations: discovered=") for line in lines),
-            "Discovery recovery phase evidence mismatch")
-    summary = lines.index(proof["summary"])
-    okay = lines.index("OK")
-    refusal = next(i for i, line in enumerate(lines) if line.startswith("Python receipt refusal:"))
-    require(summary < okay < refusal, "Discovery failure preceded validation completion")
-    headers = [(i, re.match(r"^test\w+ \((test_[A-Za-z0-9_.]+)\)", line))
-               for i, line in enumerate(lines)]
-    headers = [(i, match.group(1)) for i, match in headers if match]
-    require(len(headers) == proof["count"] and len({identity for _, identity in headers}) == proof["count"]
-            and all(i < summary for i, _ in headers), "Discovery recovery individual IDs ambiguous")
-    for position, (i, identity) in enumerate(headers):
-        end = headers[position + 1][0] if position + 1 < len(headers) else summary
-        outcomes = [line for line in lines[i:end] if line == "ok" or line.endswith(" ... ok")]
-        require(len(outcomes) == 1 and "validation:" + identity in fresh,
-                "Discovery recovery lacks one positive event per journal ID")
-    print(f"Recovered {proof['count']} individual validation passes from incomplete run {proof['run']}; operations not executed")
-    return True
 
 
 def test_source_path(test_key):
     match = re.fullmatch(
         r"(validation|operations):(test_[A-Za-z0-9_]+)\."
         r"([A-Za-z_][A-Za-z0-9_]*)\.(test[A-Za-z0-9_]*)", test_key)
-    require(match is not None, "Unsupported unit source identity; preserve evidence")
+    require(match is not None, "Unsupported unit source identity")
     suite, module, class_name, method = match.groups()
     return SUITES[suite] + "/" + module + ".py", class_name, method
 
@@ -795,7 +295,7 @@ def read_git_test_source(commit, path):
             ["git", "cat-file", "blob", object_name], stderr=subprocess.DEVNULL,
             timeout=5)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        raise ReceiptError("Historical unit source unavailable; retain receipts and recover exact source") from None
+        raise ReceiptError(f"Unit source {object_name} unavailable in this checkout") from None
     require(len(raw) == int(size), "Immutable unit source size mismatch")
     return raw
 
@@ -811,7 +311,7 @@ def read_worktree_test_source(path):
             require(0 < metadata.st_size <= MAX_TEST_SOURCE, "Current unit source exceeds byte bound")
             raw = stream.read(MAX_TEST_SOURCE + 1)
     except OSError:
-        raise ReceiptError("Current unit source unavailable; preserve evidence") from None
+        raise ReceiptError("Current unit source unavailable") from None
     require(0 < len(raw) <= MAX_TEST_SOURCE, "Current unit source exceeds byte bound")
     return raw
 
@@ -830,25 +330,34 @@ class SourceApplicability:
         self.node_count = 0
         self.changed = set()
         self.refusals = {}
+        self.unavailable = {}
 
     def source(self, commit, path):
         key = (sha(commit), path)
         if key in self.files:
             return self.files[key]
+        if key in self.unavailable:
+            raise ReceiptError(self.unavailable[key])
         require(len(self.files) < MAX_SOURCE_CACHE_FILES,
                 "Unit applicability source-cache file bound exhausted")
-        raw = self.source_reader(commit, path)
+        try:
+            raw = self.source_reader(commit, path)
+        except ReceiptError as error:
+            # A blob absent from this checkout (e.g. a force-pushed-away
+            # commit) stays absent: ask git once per file, not once per test.
+            self.unavailable[key] = str(error)
+            raise
         require(isinstance(raw, bytes) and 0 < len(raw) <= MAX_TEST_SOURCE,
                 "Unit applicability source exceeds byte bound")
-        if commit == self.current_commit:
-            require(self.worktree_reader(path) == raw,
-                    "Current unit worktree differs from dispatched Git source")
+        if commit == self.current_commit and self.worktree_reader(path) != raw:
+            # The current run's own checkout, not history: always refuse.
+            raise IntegrityError("Current unit worktree differs from dispatched Git source")
         require(self.byte_count + len(raw) <= MAX_SOURCE_CACHE_BYTES,
                 "Unit applicability source-cache byte bound exhausted")
         try:
             tree = ast.parse(raw, filename=path)
         except (SyntaxError, ValueError, RecursionError):
-            raise ReceiptError("Unit source cannot be normalized; preserve evidence") from None
+            raise ReceiptError("Unit source cannot be normalized") from None
         nodes = sum(1 for _ in ast.walk(tree))
         require(nodes <= MAX_SOURCE_AST_NODES,
                 "Unit applicability AST node bound exhausted")
@@ -856,7 +365,7 @@ class SourceApplicability:
                 "Unit applicability aggregate AST bound exhausted")
         require(not any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                         and node.name in ("load_tests", "__getattr__") for node in tree.body),
-                "Unsupported dynamic unit discovery; preserve evidence")
+                "Unsupported dynamic unit discovery")
         classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
         require(len({node.name for node in classes}) == len(classes),
                 "Ambiguous unit class definition")
@@ -911,9 +420,9 @@ class SourceApplicability:
         _, classes, context, unittest_names, case_names, all_classes, imported = self.source(commit, path)
         if class_name not in classes:
             require(class_name not in all_classes,
-                    "Unsupported nested/dynamic unit class; preserve evidence")
+                    "Unsupported nested/dynamic unit class")
             require(class_name not in imported,
-                    "Unsupported imported unit class; preserve evidence")
+                    "Unsupported imported unit class")
             return None  # Removed IDs remain in historical artifacts, not current pending work.
         methods = []
 
@@ -931,10 +440,10 @@ class SourceApplicability:
             if not direct:
                 require(not any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
                                 and item.name == method for item in ast.walk(node)),
-                        "Unsupported conditional unit method; preserve evidence")
+                        "Unsupported conditional unit method")
                 require(not any(isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)
                                 and item.id == method for item in ast.walk(node)),
-                        "Unsupported assigned unit method; preserve evidence")
+                        "Unsupported assigned unit method")
             local_bases = []
             for base in node.bases:
                 standard = (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
@@ -944,7 +453,7 @@ class SourceApplicability:
                 if isinstance(base, ast.Name) and base.id in classes:
                     local_bases.append(base.id)
                 else:
-                    require(standard, "Unsupported external/dynamic unit base; preserve evidence")
+                    require(standard, "Unsupported external/dynamic unit base")
             inherited = []
             for base in local_bases:
                 inherited.extend(visit(base, seen | {name}))
@@ -953,7 +462,7 @@ class SourceApplicability:
         methods = visit(class_name, set())
         if not methods:
             return None
-        require(len(methods) == 1, "Ambiguous inherited unit method; preserve evidence")
+        require(len(methods) == 1, "Ambiguous inherited unit method")
         normalized = ast.dump(methods[0], include_attributes=False)
         result = hashlib.sha256((context + "\n" + normalized).encode()).hexdigest()
         require(len(self.fingerprints) < MAX_TESTS * 2, "Unit fingerprint bound exhausted")
@@ -963,18 +472,26 @@ class SourceApplicability:
     def __call__(self, test_key, source):
         try:
             return self.matches(test_key, source)
+        except IntegrityError:
+            raise
         except ReceiptError as error:
-            # A later authenticated candidate may prove this current method.
-            # Otherwise finish refuses BEFORE any method can execute.
+            # Unprovable applicability is "not adopted": the method executes
+            # unless a later authenticated candidate proves it applicable.
             self.refusals[test_key] = str(error)
             return False
 
     def finish(self, passes):
+        """Report IDs no candidate proved applicable; they are not adopted."""
         unresolved = sorted(set(self.refusals) - set(passes))
-        if unresolved:
-            test_key = unresolved[0]
-            raise ReceiptError(f"Unit applicability unavailable: {test_key}: "
-                               f"{self.refusals[test_key]}; retain historical evidence")
+        reasons = {}
+        for test_key in unresolved:
+            reasons.setdefault(self.refusals[test_key], []).append(test_key)
+        for reason, keys in sorted(reasons.items()):
+            print(f"Unit applicability unavailable for {len(keys)} test(s) — {reason}; "
+                  "not adopted, they run again if still discovered:")
+            for test_key in keys:
+                print("  " + test_key)
+        return unresolved
 
     def matches(self, test_key, source):
         current = self.fingerprint(self.current_commit, test_key)
@@ -987,7 +504,7 @@ class SourceApplicability:
             require(match is not None, "Null unit source lacks a bound local file witness")
             path, _, _ = test_source_path(test_key)
             require(self.source(self.current_commit, path)[0] == match.group(1),
-                    "Null-source unit file changed; recover original bytes, never guess or replay")
+                    "Null-source unit file changed since its local receipt")
             return True
         if source.get("provenance", "").startswith("attested-local:"):
             match = re.fullmatch(r"attested-local:[0-9a-f]{64}:([0-9a-f]{64}):comment-[1-9][0-9]*",
@@ -997,7 +514,7 @@ class SourceApplicability:
             require(self.source(sha(source["commit"]), path)[0] == match.group(1),
                     "Local unit file witness differs from its recorded commit")
         prior = self.fingerprint(sha(source["commit"]), test_key)
-        require(prior is not None, "Historical passing method source missing; preserve evidence")
+        require(prior is not None, "Historical passing method source missing")
         if current == prior:
             return True
         if test_key not in self.changed:
@@ -1006,118 +523,146 @@ class SourceApplicability:
         return False
 
 
+def authenticate_journal(api, scope, artifact, prior):
+    """Every proof one earlier final journal needs; raises unless all hold."""
+    rid = positive(artifact["run_id"])
+    require(artifact["name"] == key(scope), "artifact name filter mismatch")
+    require(not artifact["expired"] and artifact["size_in_bytes"] <= MAX_BYTES,
+            f"final artifact {positive(artifact['id'])} is expired or oversize")
+    # The run must be this branch's effort-ci workflow run, as the forge lists it.
+    require(prior is not None, "no effort-ci run of this branch has that id")
+    commit = sha(prior["commit_sha"])
+    jobs = api.pages(f"/actions/runs/{rid}/jobs")
+    matching = [job for job in jobs if job["name"] == job_name(scope)]
+    require(len(matching) == 1 and matching[0]["repo_id"] == scope["repository"],
+            "ambiguous receipt job identity")
+    # A re-run attempt shares the run id; its outcomes are not attributable.
+    require(matching[0]["attempt"] == 1, "receipt job was re-run")
+    markers = api.pages("/actions/artifacts", {"name": key(scope) + f"-start-{rid}"})
+    require(len(markers) == 1 and markers[0]["run_id"] == rid and not markers[0]["expired"],
+            "start marker missing, duplicated or expired")
+    marker = artifact_json(api.bytes(f"/actions/artifacts/{positive(markers[0]['id'])}/zip"))
+    validate_journal(marker, scope, rid, commit, completed=False)
+    require(marker["complete"] is False, "start marker is not an initial attempt")
+    journal = artifact_json(api.bytes(f"/actions/artifacts/{positive(artifact['id'])}/zip"))
+    validate_journal(journal, scope, rid, commit)
+    return journal
+
+
 def restore(api, scope, run, applicability=None):
-    """Authenticate history; the CI prepare consumer also filters applicability."""
-    local_attributions = set()
-    legacy = {**legacy_pr663(api, scope),
-              **local_receipts(api, scope, applicability, local_attributions)}
-    artifacts = api.pages("/actions/artifacts", {"name": key(scope)})
-    indexed = {}
+    """Adopt this PR's authenticated earlier passes; history never refuses.
+
+    Each final journal under the PR's key is authenticated on its own (see
+    authenticate_journal) and adopted only if every proof holds. A run with
+    no journal contributes nothing, whatever the reason; an inherited record
+    is kept only when the run it names was itself adopted. Anything not
+    adopted is reported and its tests run again. Only this run's own
+    integrity refuses. The CI prepare consumer also filters applicability.
+    """
+    attributions = set()
+    passes = local_receipts(api, scope, applicability, attributions)
+    try:
+        artifacts = api.pages("/actions/artifacts", {"name": key(scope)})
+    except IntegrityError:
+        raise
+    except NOT_ADOPTED as error:
+        not_adopted("Prior final journals", error)
+        artifacts = []
+    by_run = {}
     for artifact in artifacts:
-        require(artifact["name"] == key(scope), "Artifact name filter mismatch")
-        aid, rid = positive(artifact["id"]), positive(artifact["run_id"])
-        require(not artifact["expired"] and artifact["size_in_bytes"] <= MAX_BYTES,
-                f"Expired/oversize receipt artifact {aid}; recover evidence before retry")
-        require(rid not in indexed, "Multiple final journals for one run: ambiguous attempt")
-        indexed[rid] = artifact
-    passes = {test_key: source for test_key, source in legacy.items()
-              if applicability is None or applicability(test_key, source)}
-    runs = api.pages("/actions/runs", {"workflow_id": "effort-ci.yml",
-                                     "ref": "refs/heads/" + scope["branch"]},
-                     "workflow_runs")
-    trusted_sources = set()
-    journals = []
-    for prior in runs:
-        rid = positive(prior["id"])
+        try:
+            rid = positive(artifact["run_id"])
+        except IntegrityError:
+            raise
+        except NOT_ADOPTED as error:
+            not_adopted("Final journal artifact", error)
+            continue
         if rid == run:
-            require(rid not in indexed, "This run already published units; dispatch a fresh run")
-            continue
-        jobs = api.pages(f"/actions/runs/{rid}/jobs")
-        matching = [job for job in jobs if job["name"] == job_name(scope)]
-        if not matching:
-            workflow = api.bytes("/raw/.github/workflows/effort-ci.yml", {"ref": sha(prior["commit_sha"])})
-            if b"python3 -m validation.python_unit_receipts prepare" in workflow:
-                require(pre_unit_recovery(api, scope, prior, jobs),
-                        f"Unknown receipt-policy attempt in run {rid}; recover exact job evidence")
-            continue  # Legacy policy has no individually attributable journal.
-        require(len(matching) == 1 and matching[0]["repo_id"] == scope["repository"],
-                "Ambiguous receipt job identity")
-        require(matching[0]["attempt"] == 1,
-                f"Run {rid} was re-run; ambiguous receipt attempt, dispatch fresh runs only")
-        from validation.python_unit_empty_recovery import recover_empty_pr920
-        if recover_empty_pr920(api, scope, prior, jobs):
-            indexed.pop(rid, None)
-            continue  # Exact empty failures remain incomplete; no outcomes are imported.
-        if matching[0]["status"] == "skipped":
-            continue
-        from validation.python_unit_zero_failure931 import recover as recover_zero_pr931
-        if rid not in indexed:
-            if recover_zero_pr931(api, scope, prior, jobs):
-                continue
-            if recover_zero_pr869(api, scope, prior, jobs):
-                continue
-            if recover_inherited_pr742(api, scope, prior, jobs):
-                continue
-            from validation.python_unit_interrupted_recovery import recover_interrupted_pr767
-            handled, recovered_journal = recover_interrupted_pr767(api, scope, prior, jobs, legacy, run)
-            if handled:
-                if recovered_journal is not None:
-                    trusted_sources.add((rid, prior["commit_sha"]))
-                    journals.append(recovered_journal)
-                continue
-            handled, recovered_journal = recover_lost_pr742(api, scope, prior, jobs)
-            if handled:
-                if recovered_journal is not None:
-                    trusted_sources.add((rid, prior['commit_sha']))
-                    journals.append(recovered_journal)
-                continue
-            if zero_unit_prepare_recovery(api, scope, prior, jobs):
-                continue
-        require(rid in indexed, f"Missing final receipt for run {rid}; do not rerun possibly passed tests")
-        markers = api.pages("/actions/artifacts", {"name": key(scope) + f"-start-{rid}"})
-        require(len(markers) == 1 and markers[0]["run_id"] == rid
-                and not markers[0]["expired"], f"Missing/expired start marker for run {rid}")
-        marker_raw = api.bytes(f"/actions/artifacts/{positive(markers[0]['id'])}/zip")
-        marker = artifact_json(marker_raw)
-        validate_journal(marker, scope, rid, sha(prior["commit_sha"]), completed=False)
-        require(marker["complete"] is False, "Start marker is not an initial attempt")
-        artifact = indexed.pop(rid)
-        final_raw = api.bytes(f"/actions/artifacts/{artifact['id']}/zip")
-        journal = artifact_json(final_raw)
-        from validation.python_unit_preunit_history import recover as recover_preunit_history
-        preunit_history = journal.get('complete') is False and recover_preunit_history(
-            api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
-        zero869 = journal.get('complete') is False and recover_zero_pr869(
-            api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
-        zero931 = journal.get('complete') is False and recover_zero_pr931(
-            api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
-        inherited = preunit_history or zero931 or zero869 or journal.get('complete') is False and recover_inherited_pr742(
-            api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
-        from validation.python_unit_inherited_recovery920 import recover_inherited_pr920
-        inherited = inherited or recover_inherited_pr920(
-            api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
-        recovered = inherited or journal.get("complete") is False and recover_discovery_passes(
-            api, scope, prior, matching[0], markers[0], marker_raw, artifact, final_raw, journal, legacy)
-        validate_journal(journal, scope, rid, sha(prior["commit_sha"]), completed=not recovered)
-        if not inherited:
-            trusted_sources.add((rid, prior["commit_sha"]))
-        journals.append(journal)
-    require(not indexed, "Receipt artifacts lack corresponding trusted workflow/job metadata")
-    for journal in journals:
+            raise IntegrityError("This run already published units; dispatch a fresh run")
+        by_run.setdefault(rid, []).append(artifact)
+    runs = {}
+    if by_run:
+        try:
+            runs = {positive(prior["id"]): prior for prior in api.pages(
+                "/actions/runs", {"workflow_id": "effort-ci.yml",
+                                  "ref": "refs/heads/" + scope["branch"]}, "workflow_runs")}
+        except IntegrityError:
+            raise
+        except NOT_ADOPTED as error:
+            not_adopted("Prior final journals", error)
+            by_run = {}
+    journals = {}
+    # Newest first: if a request budget runs out, the oldest evidence is lost.
+    for rid in sorted(by_run, reverse=True):
+        try:
+            require(len(by_run[rid]) == 1, "multiple final journals for one run")
+            journals[rid] = authenticate_journal(api, scope, by_run[rid][0], runs.get(rid))
+        except IntegrityError:
+            raise
+        except NOT_ADOPTED as error:
+            not_adopted(f"Run {rid}: journal", error)
+    trusted = {(rid, journal["commit"]) for rid, journal in journals.items()}
+    for rid, journal in journals.items():
+        dropped = 0
         for test_key, source in journal["passes"].items():
-            require((source["run"], source["commit"]) in trusted_sources
-                    or legacy.get(test_key) == source
-                    or (test_key, json.dumps(source, sort_keys=True)) in local_attributions,
-                    "Success source has no trusted completed journal")
+            if not ((source["run"], source["commit"]) in trusted
+                    or (test_key, json.dumps(source, sort_keys=True)) in attributions):
+                dropped += 1
+                continue
             if applicability is None or applicability(test_key, source):
                 passes.setdefault(test_key, source)
+        if dropped:
+            not_adopted(f"Run {rid}: {dropped} inherited record(s)",
+                        "the run each names was not adopted")
     if applicability is not None:
         applicability.finish(passes)
     return passes
 
 
+def attested_receipt(api, scope, comment, documents):
+    """One comment's authenticated attestation of one local document, or None."""
+    claims = [line.removeprefix("Python-Unit-Receipt: ")
+              for line in comment["body"].splitlines()
+              if line.startswith("Python-Unit-Receipt: ")]
+    if not claims:
+        return None
+    require(len(claims) == 1, "ambiguous duplicate receipt attestations")
+    claim = bounded_json(claims[0].encode())
+    require(set(claim) == {"repository", "pr", "suite", "sha256"},
+            "unknown receipt attestation fields")
+    if claim["sha256"] not in documents:
+        return None
+    require(claim["repository"] == scope["repository"] and claim["pr"] == scope["pr"]
+            and claim["suite"] in SUITES, "attestation repository/PR/suite mismatch")
+    verify_attestor(api, scope, comment["user"])
+    proof = documents[claim["sha256"]]
+    require(proof["version"] == 1 and proof["suite"] == claim["suite"]
+            and proof["result"] == {"failed": 0, "errors": 0, "skipped": 0,
+                                   "expected_failures": 0, "unexpected_successes": 0,
+                                   "count": len(proof["test_ids"])}
+            and 0 < len(proof["test_ids"]) <= MAX_TESTS
+            and len(proof["test_ids"]) == len(set(proof["test_ids"]))
+            and isinstance(proof["command"], str) and proof["command"]
+            and isinstance(proof["output"], str) and proof["output"]
+            and re.fullmatch(r"[0-9a-f]{64}", proof["test_file_sha256"]),
+            "local receipt does not prove exclusively passing tests")
+    require(re.fullmatch(SUITES[proof["suite"]] + r"/test_[a-z0-9_]+\.py", proof["test_file"]),
+            "unsafe local test source path")
+    for test_id in proof["test_ids"]:
+        require(isinstance(test_id, str) and len(test_id) <= 1024
+                and test_id.startswith(Path(proof["test_file"]).stem + "."),
+                "local receipt ID does not belong to named suite/module")
+    source_commit = sha(proof["source_commit"]) if proof.get("source_commit") else None
+    return claim["sha256"], proof, source_commit, positive(comment["id"])
+
+
 def local_receipts(api, scope, applicability=None, attributions=None):
-    """Only exact receipt hashes attested by authenticated repository writers."""
+    """Only exact receipt hashes attested by authenticated repository writers.
+
+    The directory is current source, so an unsafe entry refuses. A document
+    whose attestation does not authenticate, or that nobody attested, is not
+    adopted: its tests run again.
+    """
     directory = Path("validation/python-unit-local")
     if not directory.exists():
         return {}
@@ -1137,165 +682,38 @@ def local_receipts(api, scope, applicability=None, attributions=None):
             documents[digest] = proof
     if not documents:
         return {}
-    comments = api.pages(f"/issues/{scope['pr']}/comments")
-    passes = {}
-    attested = set()
+    try:
+        comments = api.pages(f"/issues/{scope['pr']}/comments")
+    except IntegrityError:
+        raise
+    except NOT_ADOPTED as error:
+        not_adopted("Local receipts", error)
+        return {}
+    passes, attested = {}, set()
     for comment in comments:
-        claims = [line.removeprefix("Python-Unit-Receipt: ")
-                  for line in comment["body"].splitlines()
-                  if line.startswith("Python-Unit-Receipt: ")]
-        if not claims:
+        label = comment.get("id") if isinstance(comment, dict) else None
+        try:
+            adopted = attested_receipt(api, scope, comment, documents)
+        except IntegrityError:
+            raise
+        except NOT_ADOPTED as error:
+            not_adopted(f"Local receipt attestation comment {label}", error)
             continue
-        require(len(claims) == 1, "Ambiguous duplicate receipt attestations")
-        claim = bounded_json(claims[0].encode())
-        require(set(claim) == {"repository", "pr", "suite", "sha256"},
-                "Unknown receipt attestation fields")
-        if claim["sha256"] not in documents:
+        if adopted is None:
             continue
-        require(claim["repository"] == scope["repository"] and claim["pr"] == scope["pr"]
-                and claim["suite"] in SUITES, "Attestation repository/PR/suite mismatch")
-        author = comment["user"]
-        login = author["login"]
-        require(re.fullmatch(r"[A-Za-z0-9_.-]+", login), "Unsafe attestor identity")
-        verify_attestor(api, scope, author)
-        proof = documents[claim["sha256"]]
-        require(proof["version"] == 1 and proof["suite"] == claim["suite"]
-                and proof["result"] == {"failed": 0, "errors": 0, "skipped": 0,
-                                       "expected_failures": 0, "unexpected_successes": 0,
-                                       "count": len(proof["test_ids"])}
-                and 0 < len(proof["test_ids"]) <= MAX_TESTS
-                and len(proof["test_ids"]) == len(set(proof["test_ids"]))
-                and isinstance(proof["command"], str) and proof["command"]
-                and isinstance(proof["output"], str) and proof["output"]
-                and re.fullmatch(r"[0-9a-f]{64}", proof["test_file_sha256"]),
-                "Local receipt does not prove exclusively passing tests")
-        require(re.fullmatch(SUITES[proof["suite"]] + r"/test_[a-z0-9_]+\.py", proof["test_file"]),
-                "Unsafe local test source path")
+        digest, proof, source_commit, comment_id = adopted
+        attested.add(digest)
         for test_id in proof["test_ids"]:
-            require(isinstance(test_id, str) and len(test_id) <= 1024
-                    and test_id.startswith(Path(proof["test_file"]).stem + "."),
-                    "Local receipt ID does not belong to named suite/module")
             test_key = proof["suite"] + ":" + test_id
-            source = {
-                "commit": sha(proof["source_commit"]) if proof.get("source_commit") else None, "run": None,
-                "provenance": f"attested-local:{claim['sha256']}:{proof['test_file_sha256']}:comment-{positive(comment['id'])}"}
-            attested.add(test_key)
+            source = {"commit": source_commit, "run": None, "provenance":
+                      f"attested-local:{digest}:{proof['test_file_sha256']}:comment-{comment_id}"}
             if attributions is not None:
                 attributions.add((test_key, json.dumps(source, sort_keys=True)))
             if applicability is None or applicability(test_key, source):
                 passes[test_key] = source
-    # A present but unattested proof must not quietly rerun its successful IDs.
-    claimed = {test_id for proof in documents.values()
-               for test_id in (proof["suite"] + ":" + item for item in proof["test_ids"])}
-    require(claimed.issubset(attested), "Local pass receipts await authenticated PR hash attestation")
+    for digest in sorted(set(documents) - attested):
+        not_adopted(f"Local receipt {digest}", "no authenticated PR hash attestation")
     return passes
-
-
-def git_source(api, commit, path):
-    require(re.fullmatch(r"tests/(operations|validation)/test_[a-z0-9_]+\.py", path)
-            or path in ("Makefile", ".github/workflows/effort-ci.yml", "scripts/package-windows"),
-            "Unsafe legacy source path")
-    return api.bytes("/raw/" + path, {"ref": sha(commit)})
-
-
-def legacy_pr663(api, scope):
-    """One reviewed reconstruction, not a generic pass-ID import or skip switch."""
-    if scope != {"repository": 1, "pr": 663,
-                 "branch": "codex/p02-packed-debug-artifacts",
-                 "base": "effort/architecture-review-2026-09-20"}:
-        return {}
-    root = Path(__file__).resolve().parent
-    proof = bounded_json((root / "python-unit-legacy-pr663.json").read_bytes())
-    commit = sha(proof["source_sha"])
-    prior = api.get("/actions/runs/3703")
-    require(prior["commit_sha"] == commit and prior["workflow_id"] == "effort-ci.yml"
-            and prior["prettyref"] == scope["branch"], "Legacy run source/branch mismatch")
-    jobs = api.pages("/actions/runs/3703/jobs")
-    require(any(job["id"] == 39297 and job["run_id"] == 3703
-                and job["repo_id"] == 1 and job["status"] == "failure"
-                and job["attempt"] == 1 for job in jobs), "Legacy job identity mismatch")
-    log = api.bytes("/actions/jobs/39297/logs")
-    require(hashlib.sha256(log).hexdigest() == proof["log_sha256"],
-            "Legacy original job log hash mismatch/unavailable")
-    text = log.decode()
-    require(text.count("Ran 603 tests in 83.021s") == 1
-            and text.count("FAILED (errors=1)") == 1
-            and proof["failure"] in text and text.count(commit) >= 2,
-            "Legacy exhaustive result/checkout evidence mismatch")
-    ids = []
-    for path, digest in proof["test_file_sha256"].items():
-        source = git_source(api, commit, path)
-        require(hashlib.sha256(source).hexdigest() == digest, "Legacy test source hash mismatch")
-        tree = ast.parse(source)
-        require(not any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and node.name == "load_tests"
-                        for node in tree.body), "Legacy custom discovery refusal")
-        for node in tree.body:
-            if not isinstance(node, ast.ClassDef):
-                continue
-            methods = [m for m in node.body if isinstance(m, ast.FunctionDef)
-                       and m.name.startswith("test")]
-            if not methods:
-                continue
-            require(len(node.bases) == 1 and isinstance(node.bases[0], ast.Attribute)
-                    and isinstance(node.bases[0].value, ast.Name)
-                    and node.bases[0].value.id == "unittest"
-                    and node.bases[0].attr == "TestCase"
-                    and not any(isinstance(m, ast.FunctionDef)
-                                and m.name in ("__init__", "run") for m in node.body),
-                    "Legacy test class changes discovery semantics")
-            ids.extend(Path(path).stem + "." + node.name + "." + m.name for m in methods)
-    require(len(ids) == 603 and len(set(ids)) == 603
-            and sorted(ids) == proof["all_ids"], "Legacy exact source inventory mismatch")
-    require(b"python3 -m unittest discover -s tests/operations -p 'test_*.py'"
-            in git_source(api, commit, "Makefile")
-            and b"run: make operations-check" in git_source(api, commit, ".github/workflows/effort-ci.yml"),
-            "Legacy command was not exhaustive unittest discovery")
-    correction = (root / "python-unit-legacy-pr663-correction.txt").read_bytes()
-    require(hashlib.sha256(correction).hexdigest() == proof["correction_receipt_sha256"],
-            "Approved local correction receipt mismatch")
-    require(hashlib.sha256(git_source(api, proof["correction_commit"],
-                                     "tests/operations/test_release_pdb.py")).hexdigest()
-            == "f856b72abc429cc9ba24d76eef6a409ddc1a59e270d4994113b549ac88c3565c",
-            "Corrected Linux test source mismatch")
-    successes = {"operations:" + test_id: {
-        "commit": commit, "run": 3703, "provenance": "aggregate-reconstruction-603-minus-sole-error"}
-        for test_id in ids if test_id != proof["failure"]}
-    validation = bounded_json((root / "python-unit-legacy-pr663-validation.json").read_bytes())
-    require(validation["source_sha"] == commit and validation["log_sha256"] == proof["log_sha256"]
-            and text.count("Ran 252 tests in 23.016s") == 1
-            and "2026-10-01T02:29:29.5929720Z OK" in text,
-            "Legacy validation summary/source mismatch")
-    validation_ids = []
-    for path, digest in validation["test_file_sha256"].items():
-        source = git_source(api, commit, path)
-        require(hashlib.sha256(source).hexdigest() == digest,
-                "Legacy validation module hash mismatch")
-        tree = ast.parse(source)
-        require(not any(isinstance(node, ast.FunctionDef) and node.name == "load_tests"
-                        for node in tree.body), "Legacy validation custom discovery refusal")
-        for node in tree.body:
-            if not isinstance(node, ast.ClassDef):
-                continue
-            require(not any(isinstance(method, ast.FunctionDef)
-                            and method.name in ("__init__", "run") for method in node.body),
-                    "Legacy validation constructor/run override")
-            methods = [method for method in node.body if isinstance(method, ast.FunctionDef)
-                       and method.name.startswith("test")]
-            if not methods:
-                continue
-            class_id = Path(path).stem + "." + node.name
-            require([ast.unparse(base) for base in node.bases]
-                    == validation["test_class_bases"][class_id],
-                    "Legacy validation inheritance differs from audited inventory")
-            validation_ids.extend(class_id + "." + method.name for method in methods)
-    require(len(validation_ids) == 252 and len(set(validation_ids)) == 252
-            and sorted(validation_ids) == validation["all_ids"],
-            "Legacy validation exact inventory mismatch")
-    successes.update({"validation:" + test_id: {
-        "commit": commit, "run": 3703, "provenance": "aggregate-reconstruction-252-exhaustive-OK"}
-        for test_id in validation_ids})
-    return successes
 
 
 def flatten(suite):
@@ -1353,7 +771,7 @@ def execute(journal, path, suites=None):
                       if applicability(test_key, source)}
         applicability.finish(applicable)
         require(applicable == journal["passes"],
-                "Prepared passes lack current applicability; retain evidence and prepare again")
+                "Prepared passes lack current applicability; prepare again")
     require(not journal.get("fixture_errors"), "Unresolved fixture error; never rerun successful methods")
     journal.setdefault("fixture_errors", [])
     # Discovery is an all-suite precondition: no first-suite successes before
@@ -1422,12 +840,13 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    # Recovery consumers must share the CLI's exception and API identities.
+    # Anything importing this module by name must share the CLI's exception
+    # and API identities, or an `except ReceiptError` would miss the CLI's own.
     sys.modules["validation.python_unit_receipts"] = sys.modules[__name__]
     try:
         sys.exit(main())
     except Exception as error:
         # Never include request headers, token values, or response bodies.
-        detail = str(error) if isinstance(error, ReceiptError) else "Evidence unavailable; preserve run/job identity"
+        detail = str(error) if isinstance(error, ReceiptError) else "Evidence unavailable"
         print(f"Python receipt refusal: {type(error).__name__}: {detail}", file=sys.stderr)
         sys.exit(1)
