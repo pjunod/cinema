@@ -61,14 +61,16 @@ its units contributes no journal, and therefore nothing to adopt.
 
 ## What "authenticated" means
 
-A prior final journal is adopted only when all of these hold, exactly as
-before the 2026-10-11 change:
+A prior final journal is adopted only when all of these hold. These are the
+checks from before the 2026-10-11 change; the effort lane also gained the
+terminal-status check:
 
 - **Run:**
   - The artifact belongs to an authenticated workflow run of this
     repository and PR (main) or branch (effort).
   - The run's event, head and base bind to the PR.
-  - The receipt job is unique, terminal, attempt 1, and was assigned to a
+  - The receipt job is unique, terminal (success, failure or cancelled)
+    and attempt 1. On the main lane it must also have been assigned to a
     runner.
 - **Start marker:** exactly one live marker exists for that run, and it
   validates against the same scope, run and commit.
@@ -77,8 +79,10 @@ before the 2026-10-11 change:
     with schema, producer and manifest blobs (main) and environment.
   - It keeps every record of its start marker unchanged.
   - It carries no fixture or phase errors.
-  - The journal's commit objects are present in the checkout. A force-pushed
-    commit that is gone is not adopted. It does not crash prepare.
+  - On the main lane, the journal's commit objects must be present in the
+    checkout, or the journal is not adopted. On the effort lane the journal
+    is adopted, but its passes fail the applicability check below. The
+    outcome is the same on both lanes: those tests run, and nothing crashes.
 - **Records:**
   - An own record needs its original executable outcome event in the job log
     (main adoption journal).
@@ -87,12 +91,21 @@ before the 2026-10-11 change:
 
 The main Python lane also keeps one generic second channel. If a run's final
 artifact upload failed, a complete start/final snapshot pair printed in that
-run's own successful job log can stand in for it. Anything less is not
-adopted.
+run's own terminal job log can stand in for it. The log must bind the
+checked-out source and the pull-request event. Anything less is not adopted.
 
 A failure of any check prints one line naming the run and the reason, ending
-"its tests run again". Runs without journals produce no line; they simply
-contribute nothing.
+"its tests run again". Exceptions other than `ReceiptError` print with their
+type name, so a code bug cannot quietly turn adoption off. Every run without
+a final journal contributes nothing. On the main lane each one also prints a
+line, because the log channel above is tried for it. Transport errors also
+mean "not adopted": a connection reset, a timeout or a truncated download.
+So does a failure to list history, which leaves every test pending.
+
+The run step re-checks the retained passes before skipping them. A pass whose
+re-check cannot complete is executed, never refused. A run that withdraws a
+pass this way publishes a final journal that no longer matches its start
+marker, so that run's journal is not adopted later.
 
 ## What "applies" means
 
@@ -190,5 +203,5 @@ Each one covers:
 - dropped inherited records;
 - current-run refusals.
 
-Each authentication check was also deleted in turn in a scratch copy. Every
-deletion made a test fail.
+Each authentication check was deleted in turn in a scratch copy during
+review. Every deletion made a test fail.
