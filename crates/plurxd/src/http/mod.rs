@@ -4863,8 +4863,38 @@ mod tests {
                 "files_for_item",
                 "get_file_probe_json",
                 "watch_summary",
+                "display_settings",
             ],
         );
+        // The cluster-artefact fallback is a catalogue read too (drill F5,
+        // 2026-10-11: it was two Authority reads on every item page). The
+        // handler hands the reader to the VOD layer, which must read through
+        // it and never through its own Store handle.
+        let item_detail = compact_handler(
+            browse,
+            "pub async fn item_detail",
+            "pub async fn home_previews",
+        );
+        assert!(item_detail.contains(".cluster_index_availability(&state.catalogue,&lookups)"));
+        // Its two display settings are one bounded read, not two Authority
+        // reads through the transcode manager's own Store handle.
+        assert!(!item_detail.contains("state.transcode.lang_prefs()"));
+        assert!(!item_detail.contains("state.transcode.dv_convert_enabled()"));
+        let construct: String = include_str!("../vod/serve/construct.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let availability = construct
+            .split_once("pub(crate)asyncfncluster_index_availability(")
+            .expect("batched cluster availability")
+            .1
+            .split_once("pub(super)asyncfntry_cluster_fragment_index(")
+            .expect("batched cluster availability boundary")
+            .0;
+        assert!(
+            availability.contains("catalogue.cluster_fragment_index_availability(node_id,chunk)")
+        );
+        assert!(!availability.contains("store.cluster_fragment_index_availability"));
         assert_catalogue_methods(
             &compact_handler(browse, "pub async fn home_previews", "pub async fn hubs"),
             &[

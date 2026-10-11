@@ -27359,6 +27359,24 @@ async fn bounded_catalogue_reader_matches_authority_and_falls_back_exactly_once(
     assert_catalogue_parity!("item media facts", item_media_facts(&[10, 20]));
     assert_catalogue_parity!("media shape", media_shape());
     assert_catalogue_parity!("probe JSON", get_file_probe_json(30));
+    // Item detail's cluster-artefact fallback (drill F5). Unattested here, so
+    // only its first statement runs; both paths must agree on the answer.
+    let availability_probes = [plurx_core::store::ClusterIndexAvailabilityProbe {
+        file_id: 30,
+        source_size: 1,
+        source_mtime: 1,
+        object_version: "s1:1:2:1:1:0:1:0".to_owned(),
+        pipeline_sha256: "0".repeat(64),
+    }];
+    assert_catalogue_parity!(
+        "cluster index availability",
+        cluster_fragment_index_availability("detail-node", &availability_probes)
+    );
+    // Item detail's display settings (drill F5): one bounded read.
+    assert_catalogue_parity!(
+        "display settings",
+        display_settings(&["instance.id", "absent.display.key"])
+    );
 
     let expected = authority
         .get_item(20)

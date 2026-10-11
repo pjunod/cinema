@@ -438,9 +438,11 @@ impl VodServe {
     /// the caller already made; the answer is [`Self::cluster_index_available`]'s
     /// for each, in order, from one Store read per
     /// [`plurx_core::store::FRAGMENT_INDEX_STATUS_CHUNK`] lookups and no
-    /// filesystem access at all.
+    /// filesystem access at all. The read goes through `catalogue`, so it is
+    /// answered locally within the bounded-replica lag budget (K-04).
     pub(crate) async fn cluster_index_availability(
         &self,
+        catalogue: &plurx_core::store::CatalogueReader,
         lookups: &[(&MediaFile, CopyVideoOptions, String)],
     ) -> Result<Vec<bool>, String> {
         let Some(node_id) = self.shared.cluster_node_id.as_deref() else {
@@ -469,9 +471,7 @@ impl VodServe {
             .collect();
         let mut present = Vec::with_capacity(probes.len());
         for chunk in probes.chunks(plurx_core::store::FRAGMENT_INDEX_STATUS_CHUNK) {
-            let answers = self
-                .shared
-                .store
+            let answers = catalogue
                 .cluster_fragment_index_availability(node_id, chunk)
                 .await
                 .map_err(|error| format!("reading cluster index catalog: {error}"))?;

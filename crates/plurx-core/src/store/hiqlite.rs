@@ -1738,6 +1738,23 @@ impl HiqliteAuthStore {
         ))
     }
 
+    /// [`SettingsStore::get_settings`] from this node's replica, for
+    /// [`super::CatalogueReader::display_settings`]'s bounded path only.
+    pub(super) async fn local_get_settings(
+        &self,
+        keys: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        let keys = super::selected_settings_json(keys)?;
+        let rows = self
+            .client()
+            .query_map::<SettingEntryRow, _>(
+                "SELECT key, value FROM settings WHERE key IN (SELECT value FROM json_each($1)) ORDER BY key",
+                params!(keys),
+            )
+            .await?;
+        Ok(rows.into_iter().map(|row| (row.key, row.value)).collect())
+    }
+
     pub(super) fn client(&self) -> &TimedClient {
         &self.client
     }
