@@ -2031,12 +2031,12 @@ assert.equal(context.ACT_TIMER, null);
     def test_coverage_refreshes_on_main_without_full_ci(self):
         workflow = read(".github/workflows/coverage.yml")
         trigger = workflow.split("\non:\n", 1)[1].split("\nenv:", 1)[0]
-        self.assertIn("  push:\n    branches: [main]", trigger)
+        self.assertNotIn("  push:", trigger)
         self.assertIn("  workflow_dispatch:", trigger)
         self.assertNotIn("pull_request", trigger)
         self.assertNotIn("paths", trigger)
         self.assertIn("group: coverage-main", workflow)
-        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertIn("cancel-in-progress: true", workflow)
         jobs = workflow_job_blocks(".github/workflows/coverage.yml")
         self.assertEqual(set(jobs), {"coverage"})
         coverage = jobs["coverage"]
@@ -2071,12 +2071,16 @@ assert.equal(context.ACT_TIMER, null);
                 self.assertNotIn("--filename coverage", path.read_text())
 
     def test_coverage_uses_general_runner_with_pinned_ffmpeg_container(self):
+        # Retain this historical regression anchor after reserving its pool.
         coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
         self.assertIn(
-            "runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]\n",
+            "runs-on: [self-hosted, Linux, X64, lab, ci-coverage]\n",
             coverage,
         )
-        self.assertIn("container: ubuntu:24.04", coverage)
+        self.assertIn("image: ubuntu:24.04", coverage)
+        self.assertIn("options: --cpus 2 --memory 6g --memory-swap 10g", coverage)
+        self.assertIn('CARGO_BUILD_JOBS: "1"', coverage)
+        self.assertIn('RUST_TEST_THREADS: "2"', coverage)
         steps = workflow_step_blocks(coverage)
         install = steps["Install coverage prerequisites"]
         for package in ("git", "jq", "nodejs", "python3", "build-essential", "clang"):
@@ -3823,7 +3827,7 @@ assert.equal(context.ACT_TIMER, null);
                 }:
                     expected = general
                 elif path == ".github/workflows/coverage.yml" and name == "coverage":
-                    expected = high_cpu
+                    expected = local("Linux", "X64", "lab", "ci-coverage")
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
                     expected = "    runs-on: ${{ fromJSON(matrix.runs_on) }}"
                 elif path == ".github/workflows/ci.yml" and name == "publish_main":
@@ -4289,7 +4293,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("make effort-rust-check", fast)
         self.assertNotIn("make unit", fast)
         coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
-        self.assertIn("container: ubuntu:24.04", coverage)
+        self.assertIn("image: ubuntu:24.04", coverage)
         self.assertIn('major: "6"', coverage)
         self.assertNotIn("plurx-ci@sha256:", coverage)
         self.assertIn("cargo llvm-cov --workspace --locked --exclude plurx-cluster-check", coverage)

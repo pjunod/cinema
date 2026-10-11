@@ -35,11 +35,13 @@
 > receipts require no Windows result. The explicit public-release archive build
 > remains in [github-release.yml](../.github/workflows/github-release.yml).
 
-> **Coverage amendment, 2026-09-30:** [coverage.yml](../.github/workflows/coverage.yml)
-> refreshes the dated unit coverage badge on pushes to `main`, independently
-> of full CI. It also accepts manual retries on `main`. Coverage runs serialize
-> and measure current `main` when they start; failed runs retain the last
-> successful badge and its UTC measurement date.
+> **Coverage amendment, 2026-10-11:** [coverage.yml](../.github/workflows/coverage.yml)
+> refreshes the dated unit coverage badge only by manual dispatch on `main`.
+> Its `ci-coverage` runner is a reserved VM outside the general merge pool;
+> the job has two CPUs, 6 GiB RAM, two Cargo jobs and two test threads.
+> A new request cancels the stale measurement. Failed runs retain the last
+> successful badge and its UTC measurement date. See
+> [runner recovery and budgets](ci/RUNNER-DISK.md#runner-recovery-and-memory-budgets).
 
 
 **Status:** accepted and implemented · **Decider:** Paul · **Written:**

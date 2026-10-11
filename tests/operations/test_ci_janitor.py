@@ -1184,9 +1184,16 @@ class MacosJanitorContractCase(unittest.TestCase):
             ),
             "launchctl": (
                 "#!/bin/sh\n"
+                'if [ "$1" = print-disabled ]; then echo "${FIXTURE_DISABLED:-}"; exit 0; fi\n'
                 'if [ "$1" = print ]; then printf \'\\tpid = %s\\n\' '
-                '"$FIXTURE_PID"; exit 0; fi\n'
+                '"$FIXTURE_PID"; [ ! -f "$FIXTURE_UNLOADED" ]; exit $?; fi\n'
                 'printf \'%s %s\\n\' "$1" "$2" >> "$FIXTURE_LOG"\n'
+                'if [ "$1" = bootout ]; then touch "$FIXTURE_UNLOADED"; fi\n'
+                'if [ "$1" = bootstrap ]; then\n'
+                '  [ "${FIXTURE_BOOTSTRAP_FAIL:-0}" = 0 ] || exit 5\n'
+                '  if [ -f "$FIXTURE_RETRY_ONCE" ]; then rm "$FIXTURE_RETRY_ONCE"; exit 5; fi\n'
+                '  rm -f "$FIXTURE_UNLOADED"\n'
+                'fi\n'
             ),
             "pgrep": "#!/bin/sh\nexit $FIXTURE_PGREP_STATUS\n",
             "df": (
@@ -1224,6 +1231,9 @@ class MacosJanitorContractCase(unittest.TestCase):
                 # would pass a script that reads a path naming nothing.
                 "FIXTURE_PLIST_JSON": self.plist_json(),
                 "FIXTURE_LOG": str(self.log),
+                "FIXTURE_UNLOADED": str(fixture / "unloaded"),
+                "FIXTURE_RETRY_ONCE": str(fixture / "retry-once"),
+                "PLURX_JANITOR_RETRY_SECONDS": "0",
                 "FIXTURE_PID": "4242",
                 "FIXTURE_PGREP_STATUS": "1",
                 "FIXTURE_FS_KB": str(460 * 1024 * 1024),
@@ -1378,12 +1388,63 @@ class MacosJanitorContractCase(unittest.TestCase):
         )
 
         self.assertIn("<string>/usr/local/bin/plurx-ci-janitor</string>", plist)
-        self.assertIn("<integer>3600</integer>", plist)
+        self.assertIn("<integer>300</integer>", plist)
         self.assertIn("bootstrap system /Library/LaunchDaemons", installer)
         self.assertIn("--dry-run", installer)
         # The Linux installer must not be run here and vice versa: the Linux one
         # writes systemd drop-ins that do not exist on a Mac.
         self.assertIn('[ "$(uname -s)" = Darwin ]', installer)
+
+    def test_failed_bootstrap_is_retried_and_verified(self):
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        Path(self.environment["FIXTURE_RETRY_ONCE"]).touch()
+        result = self.run_janitor()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.launchctl_calls().count("bootstrap"), 2)
+        self.assertFalse(Path(self.environment["FIXTURE_UNLOADED"]).exists())
+        self.assertEqual(self.last_run()["failures"], 0)
+
+    def test_unloaded_daemon_is_recovered_even_without_a_cache(self):
+        import shutil
+
+        shutil.rmtree(self.cache)
+        Path(self.environment["FIXTURE_UNLOADED"]).touch()
+        result = self.run_janitor()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.last_run()["recovered"], 1)
+        self.assertEqual(self.last_run()["instances"], 1)
+        self.assertEqual(self.launchctl_calls(), ["bootstrap", "system"])
+
+    def test_permanent_bootstrap_failure_is_not_reported_healthy(self):
+        Path(self.environment["FIXTURE_UNLOADED"]).touch()
+        self.environment["FIXTURE_BOOTSTRAP_FAIL"] = "1"
+        result = self.run_janitor()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.last_run()["failures"], 1)
+        self.assertIn("ERROR", result.stderr)
+
+    def test_small_cache_on_short_disk_does_not_churn_the_daemon(self):
+        self.environment["FIXTURE_AVAIL_KB"] = str(20 * 1024 * 1024)
+        self.environment["FIXTURE_USED_KB"] = "64"
+        result = self.run_janitor()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.launchctl_calls(), [])
+        self.assertIn("no useful reset", result.stdout)
+
+    def test_shared_mac_volume_uses_job_reserve_instead_of_percentage(self):
+        self.environment["FIXTURE_AVAIL_KB"] = str(64 * 1024 * 1024)
+        result = self.run_janitor()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.launchctl_calls(), [])
+        self.assertEqual(self.last_run()["reserve_gb"], 25)
+
+    def test_intentionally_disabled_daemon_is_not_recovered(self):
+        Path(self.environment["FIXTURE_UNLOADED"]).touch()
+        self.environment["FIXTURE_DISABLED"] = f'"{self.LABEL}" => true'
+        result = self.run_janitor()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.launchctl_calls(), [])
+        self.assertEqual(self.last_run()["recovered"], 0)
 
 
 if __name__ == "__main__":

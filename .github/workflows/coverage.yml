@@ -1,9 +1,8 @@
 name: coverage
 
-# Refresh the diagnostic badge independently of the manual full-CI sweep.
+# Coverage is diagnostic work. Manual runs use a reserved VM so pushes never
+# consume the runners needed to merge pull requests.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 env:
@@ -11,17 +10,20 @@ env:
 
 concurrency:
   group: coverage-main
-  # Let a measurement finish even while main is busy. Pending runs coalesce;
-  # each checks out current main when it starts, including manual retries.
-  cancel-in-progress: false
+  # A new manual measurement supersedes stale requests; each measures main.
+  cancel-in-progress: true
 
 jobs:
   coverage:
     name: coverage
-    # Available general runners carry FFmpeg 8. Supply the pinned FFmpeg 6
-    # environment in a container, as the main fast Rust lane does.
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    container: ubuntu:24.04
+    # This label belongs only to a reserved VM, outside the merge pool.
+    runs-on: [self-hosted, Linux, X64, lab, ci-coverage]
+    container:
+      image: ubuntu:24.04
+      options: --cpus 2 --memory 6g --memory-swap 10g
+    env:
+      CARGO_BUILD_JOBS: "1"
+      RUST_TEST_THREADS: "2"
     # Instrumented cold builds need headroom beyond the ordinary unit lane.
     # The uninstrumented suite alone grew to ~55 minutes in the week of
     # 2026-09-27 (the fast lane went 35 -> 60 -> 90). Runs 4087, 4103, 4106 and
