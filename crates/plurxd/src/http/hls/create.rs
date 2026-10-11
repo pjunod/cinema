@@ -5226,6 +5226,20 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
     // that class are not all waits: one tells the client to ask for a smaller
     // height, and one reports a scratch ceiling above the configured budget
     // that no retry can satisfy. Those keep the codeless 503 nothing retries.
+    // This source's Dolby Vision pixel proof did not finish — a probe timed
+    // out, failed to start or exited non-zero. Nothing was learned about the
+    // source and nothing was remembered, so the next start measures again:
+    // the same "ask again" every client's create-retry ladder already reads
+    // from `startup_timeout`. It used to be cached as "not Dolby Vision" and
+    // answered `unsupported_build` for the life of the process.
+    if crate::transcode::is_source_proof_pending_error(&error) {
+        return ApiError::TypedRetry {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "startup_timeout",
+            message: error,
+            retry_after_seconds: SOURCE_PROOF_PENDING_RETRY_AFTER_SECS,
+        };
+    }
     if crate::transcode::is_replacement_wait_error(&error) {
         return ApiError::TypedRetry {
             status: StatusCode::SERVICE_UNAVAILABLE,

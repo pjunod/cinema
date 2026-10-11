@@ -1079,6 +1079,16 @@ impl AppState {
             data_dir.join("sharing-tls"),
             sharing_network,
         ));
+        // A replicated daemon applies the Raft log in this process; that watch
+        // is how an idle Live TV settings observer learns of a save elsewhere.
+        let live_tv_settings_changes = match backup_client
+            .as_ref()
+            .and_then(|client| client.local_db_raft_metrics().ok())
+        {
+            Some(applied) => crate::live_tv::SettingsChangeSource::Applied(applied),
+            None if membership.is_replicated() => crate::live_tv::SettingsChangeSource::Polled,
+            None => crate::live_tv::SettingsChangeSource::LocalOnly,
+        };
         let backup = crate::backup::BackupManager::new(
             Arc::clone(&store),
             Arc::clone(&jobs),
@@ -1173,6 +1183,7 @@ impl AppState {
             live_tv_scratch,
             runtime_cache.join("live-tv"),
         );
+        live_tv.set_settings_changes(live_tv_settings_changes);
         AppState {
             store,
             sharing,

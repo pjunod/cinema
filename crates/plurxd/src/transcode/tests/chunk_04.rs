@@ -662,8 +662,16 @@
             transcode_audio: false, preserve_dolby_vision: false, convert_dolby_vision: false,
         }, "user", "playback").await.expect("a retaining rolling copy needs no proof");
         assert!(mgr.stop_session(&started.session_id, "test cleanup").await);
-        assert!(LiveRecoveryReason::from_refusal("hevc_configuration_unverified").is_none());
-        assert!(LiveRecoveryReason::from_refusal("hevc_configuration_unsupported").is_none());
+        // So a VOD refusal for a missing HEVC proof is "only VOD cannot build
+        // this" (S-05): the start falls back to the rolling copy shown above.
+        assert_eq!(
+            LiveRecoveryReason::from_refusal("hevc_configuration_unverified"),
+            Some(LiveRecoveryReason::HevcConfigurationUnverified)
+        );
+        assert_eq!(
+            LiveRecoveryReason::from_refusal("hevc_configuration_unsupported"),
+            Some(LiveRecoveryReason::HevcConfigurationUnsupported)
+        );
 
         let file = store.get_file(file_id).await.expect("file").expect("file");
         for (preserve, convert) in [(false, false), (true, false), (true, true)] {
@@ -2364,3 +2372,115 @@ quality_catalog: None,
         );
         session.kill_child().await;
     }
+
+/// S-05: every code production passes to `vod_refusal_error` is classified
+/// in `VOD_REFUSAL_CODES`, so no refusal can fail playback merely because
+/// nobody decided whether the rolling engine could have played the title.
+/// Walks the plurxd sources (as `seam_census` does) rather than trusting a
+/// hand-kept list: the first argument of each call is scanned for its
+/// string literals, which also covers `if`/`match` code expressions.
+#[test]
+fn every_vod_refusal_code_is_classified() {
+    fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read source dir") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && !path.components().any(|part| part.as_os_str() == "tests")
+                && !path.to_string_lossy().ends_with("tests.rs")
+            {
+                out.push(path);
+            }
+        }
+    }
+    /// The string literals in the first argument of the call whose `(` is at
+    /// `open`.
+    fn first_argument_literals(text: &str, open: usize) -> Vec<String> {
+        let bytes = text.as_bytes();
+        let (mut depth, mut index, mut literals) = (0usize, open, Vec::new());
+        while index < bytes.len() {
+            match bytes[index] {
+                b'(' | b'{' | b'[' => depth += 1,
+                b')' | b'}' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                b',' if depth == 1 => break,
+                b'"' => {
+                    let end = text[index + 1..].find('"').expect("closed literal") + index + 1;
+                    literals.push(text[index + 1..end].to_owned());
+                    index = end;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        literals
+    }
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    sources(&root, &mut files);
+    let mut unclassified = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file).expect("read source");
+        for (at, _) in text.match_indices("vod_refusal_error(") {
+            if text[..at].ends_with("fn ") {
+                continue;
+            }
+            let open = at + "vod_refusal_error".len();
+            for code in first_argument_literals(&text, open) {
+                if vod_refusal_class(&code).is_none() {
+                    unclassified.push(format!("{}: {code}", file.display()));
+                }
+                seen.insert(code);
+            }
+        }
+    }
+    assert!(
+        unclassified.is_empty(),
+        "classify each new VOD refusal code in VOD_REFUSAL_CODES: {unclassified:?}"
+    );
+    assert!(
+        seen.len() >= 30 && seen.contains("hevc_configuration_unverified"),
+        "the walk reads the real tree: {seen:?}"
+    );
+    // Each code appears once, and each fallback reason is labelled with
+    // the code that chooses it.
+    let mut codes = std::collections::BTreeSet::new();
+    for (code, class) in VOD_REFUSAL_CODES {
+        assert!(codes.insert(*code), "{code} is classified twice");
+        if let VodRefusalClass::LiveRecovery(reason) = class {
+            assert_eq!(reason.label(), *code);
+            assert_eq!(LiveRecoveryReason::from_refusal(code), Some(*reason));
+        }
+    }
+    // The lead's S-05 rulings: only VOD cannot build these.
+    for code in [
+        "hevc_configuration_unverified",
+        "hevc_configuration_unsupported",
+        "vod_frame_cadence_unknown",
+        "vod_video_geometry_unknown",
+        "vod_disabled",
+    ] {
+        assert!(
+            LiveRecoveryReason::from_refusal(code).is_some(),
+            "{code} falls back to the rolling engine"
+        );
+    }
+    // `vod_engine_unattested` is a retryable not-yet the clients wait out
+    // (and a failed font attestation must refuse the burn), never a reason
+    // to serve another engine.
+    for code in [
+        "vod_audio_track_missing",
+        "vod_invalid_height",
+        "vod_session_ended",
+        "vod_engine_unattested",
+    ] {
+        assert!(LiveRecoveryReason::from_refusal(code).is_none(), "{code}");
+    }
+}

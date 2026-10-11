@@ -1108,6 +1108,7 @@
     "media_owner_lost",
     "media_owner_transition",
     "producer_failed",
+    "segment_publication_failed",
     "producer_exited",
     "producer_ended",
     "session_gone",

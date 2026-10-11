@@ -2619,6 +2619,67 @@ async fn the_two_blocked_get_caps_answer_a_client_apart() {
     );
 }
 
+/// S-02: the three verdicts an expired materialize deadline can return
+/// answer a client as three different things. A rendition that never got an
+/// encoder permit is the retryable segment wait every client already reads
+/// as "not yet" on an attached playback (`segment_pending`, in the
+/// contract's `segment_503_not_yet` row), with the capacity classification
+/// carried in its body — not the terminal 502 `producer_failed`.
+#[tokio::test]
+async fn expired_materialize_verdicts_answer_capacity_producer_and_publication_apart() {
+    let (capacity_status, capacity) = error_body(vod_error(
+        "sess-a",
+        crate::vodserve::VodError::CapacityUnavailable {
+            reason: "waiting for an encoder permit".into(),
+            retry_after: std::time::Duration::from_secs(2),
+        },
+    ))
+    .await;
+    assert_eq!(capacity_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(capacity["code"], "segment_pending");
+    assert_eq!(capacity["cause"], "transcode_capacity_pending");
+    assert!(
+        capacity["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("waiting for an encoder permit")),
+        "{capacity}"
+    );
+    let contract: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/playback/playback-surface-contract.json"),
+        )
+        .expect("read the surface contract"),
+    )
+    .expect("surface contract");
+    let segment_not_yet = contract["sources"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == "segment_503_not_yet"))
+        .expect("segment_503_not_yet row");
+    assert!(
+        segment_not_yet["codes"]
+            .as_array()
+            .is_some_and(|codes| codes.iter().any(|code| *code == capacity["code"])),
+        "a capacity wait on a segment must carry a code clients retry: {segment_not_yet}"
+    );
+
+    let (producer_status, producer) = error_body(vod_error(
+        "sess-a",
+        crate::vodserve::VodError::ProducerFailed("no fragment".into()),
+    ))
+    .await;
+    assert_eq!(producer_status, StatusCode::BAD_GATEWAY);
+    assert_eq!(producer["code"], "producer_failed");
+
+    let (publication_status, publication) = error_body(vod_error(
+        "sess-a",
+        crate::vodserve::VodError::PublicationFailed("delivered, not published".into()),
+    ))
+    .await;
+    assert_eq!(publication_status, StatusCode::BAD_GATEWAY);
+    assert_eq!(publication["code"], "segment_publication_failed");
+}
+
 /// The detail object is data. A route that somehow carried a `code` field
 /// must not be able to rename the error a client dispatches on.
 #[tokio::test]

@@ -2531,6 +2531,7 @@ impl LiveTvManager {
                         registry
                             .transports
                             .insert(row.channel_id.clone(), Arc::clone(&transport));
+                        self.wake_settings_observer();
                         SinkAdmission::Open(transport)
                     }
                 }
