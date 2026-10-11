@@ -124,17 +124,17 @@ async function refreshLiveTvGuide(button){
   finally{ if(button.isConnected) button.disabled=false; }
 }
 function liveTvPanel(settings,readiness){
-  return `${setHead("Live TV","Manage your tuner, programme guide, recordings and library channels.",`<a class="ghost sm" href="#/live-tv" style="text-decoration:none">Browse channels ↗</a>`)}${liveTvSettingsCard(settings)}${liveTvGuideCard(settings)}${dvrCard(settings,readiness)}${libraryChannelsSettingsCard(settings,readiness)}`;
+  return `${setHead("Live TV","Turn Live TV on, and manage your tuner, programme guide, recordings and library channels.",`<a class="ghost sm" href="#/live-tv" style="text-decoration:none">Browse channels ↗</a>`)}${liveTvEnableCard(settings)}${liveTvSettingsCard(settings)}${liveTvDeinterlaceCard(settings)}${liveTvGuideCard(settings)}${dvrCard(settings,readiness)}${libraryChannelsSettingsCard(settings,readiness)}`;
 }
 function liveTvSettingsCard(s){
-  return setCard(`${cardHead("HDHomeRun Live TV","One network device shared by eligible cluster servers.",`<span class="pill">${s.live_tv_enabled?"Enabled":"Disabled"}</span>`)}
+  return setCard(`${cardHead("HDHomeRun Live TV","One network device shared by eligible cluster servers.")}
     <p>Viewers and recordings on the same channel share one tuner stream. A session stays on its selected server; the tuner itself belongs to the cluster.</p>
     <div class="setfields">
       <div><label for="ltip">Tuner private IPv4</label><input id="ltip" value="${esc(s.live_tv_device_ipv4||"")}" placeholder="10.42.4.100" inputmode="decimal"></div>
       <div><label for="ltlimit">Maximum channel streams</label><select id="ltlimit">${[1,2,3,4].map(n=>`<option value="${n}"${n===Number(s.live_tv_max_sessions)?' selected':''}>${n}</option>`).join("")}</select></div>
       <div><label for="ltheight">Maximum quality</label><select id="ltheight">${[[0,"Original / Auto"],[480,"480p ceiling"],[720,"720p ceiling"],[1080,"1080p ceiling"],[2160,"2160p ceiling"]].map(([n,label])=>`<option value="${n}"${n===Number(s.live_tv_max_output_height||0)?' selected':''}>${label}</option>`).join("")}</select></div>
     </div>
-    <p class="hint">Saving changes ends streams using the previous configuration. Enablement and advisory prerequisites are in <a href="#/settings/developer">Developer → Enable Live TV</a>.</p>
+    <p class="hint">Saving changes ends streams using the previous configuration. The on/off switch and its advisory prerequisites are the Live TV card above.</p>
     <div id="ltreadiness" aria-live="polite"></div><div class="err" id="lterr" role="alert"></div>
     ${setCardFoot("saveLiveTvSettings")}
     <div class="row"><button class="ghost sm" onclick="checkLiveTvReadiness(this)">Check saved configuration</button><a href="#/live-tv">Browse channels</a></div>`,{id:"live-tv-settings"});
@@ -234,4 +234,53 @@ function libraryChannelsSettingsCard(settings,readiness){
       ${devReq(readiness,"library_channels","compatible_clients","Compatible clients","Old clients retain VOD and Live TV, but do not know the dedicated channel-session purpose or boundary controller.")}
       <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice. No tuner, metadata service, AI key, or external provider is required.</p>
       </div></details><div class="err" id="lcdeverr" role="alert"></div>${setCardFoot("saveLibraryChannelsSettings")}`);
+}
+
+// The on/off switch and the deinterlace cadence. Both waited in Developer
+// until 2026-10-10; they are permanent Live TV settings now.
+function liveTvEnableCard(settings){
+  queueMicrotask(()=>{const mount=document.getElementById("lt-enable-readiness");if(mount)refreshLiveTvEnableReadiness(mount);});
+  return setCard(`${cardHead("Live TV","Turn the network tuner on or off for every eligible server.",`<span class="pill">${settings.live_tv_enabled?"enabled":"off"}</span>`)}
+    ${togRow("lt-enable","Enable Live TV","This saved choice is authoritative. Readiness observations never disable the control.",!!settings.live_tv_enabled)}
+    <p class="hint">${settingsClusterEnabled()?"For safe operation, upgrade cluster servers, keep their clocks synchronized, and keep a ready voter majority. At least one server needs tuner connectivity and writable scratch. DVR workers need writable recording storage; matching paths alone do not prove shared storage.":"This server needs tuner connectivity and writable scratch. DVR recordings need writable recording storage."}</p>
+    <div id="lt-enable-readiness" aria-live="polite">Checking current prerequisites…</div>
+    <p class="hint">A lost worker can leave a physical tuner connection behind temporarily. Other free tuners remain available. DRM remains unsupported.</p>
+    <div id="lt-enable-error" class="err" role="alert"></div>${setCardFoot("saveLiveTvEnable")}`,{id:"live-tv-enable"});
+}
+async function refreshLiveTvEnableReadiness(mount){
+  try{
+    const r=await api("/live-tv/readiness",{signal:AbortSignal.timeout(40000)});
+    if(!mount.isConnected)return;
+    mount.innerHTML=`<ul>${r.checks.map(c=>`<li><strong>${c.ready?"Met":"Not met"}:</strong> ${esc(c.message)}</li>`).join("")}</ul><p class="hint">Advisory only. Unknown or unmet requirements do not prevent enabling.</p>`;
+  }catch(e){if(mount.isConnected)mount.textContent=`Readiness unavailable: ${e.message}. You can still enable Live TV.`;}
+}
+async function saveLiveTvEnable(button){
+  // The same writer as the tuner card: it fences a reply that lands after the
+  // operator left Live TV, and names a configuration-generation conflict.
+  const saved=await liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
+    live_tv_enabled:/** @type {HTMLInputElement} */ (document.getElementById("lt-enable")).checked},button,"lt-enable-error");
+  if(saved&&typeof saved==="object") replaceLiveTvCard("live-tv-enable",liveTvEnableCard(saved),"lt-enable");
+  return !!saved;
+}
+function liveTvDeinterlaceCard(settings){
+  const selected=settings.live_tv_deinterlace_output==="frame"?"frame":"field";
+  return setCard(`${cardHead("Live TV deinterlace cadence","Choose whether software deinterlacing preserves frame cadence or emits one frame per field.",`<span class="pill">${selected==="field"?"Field rate":"Frame rate"}</span>`)}
+      <label for="ltdeint">Output cadence</label>
+      <select id="ltdeint"><option value="field"${selected==="field"?" selected":""}>Field rate (smoother motion)</option><option value="frame"${selected==="frame"?" selected":""}>Frame rate (lower bitrate)</option></select>
+      <details class="setdetails"><summary>Prerequisites and current status</summary><div class="setdetails-body">
+      ${devStaticReq("Current selection",selected==="field"?"field rate":"frame rate","Applied to subsequent Live TV sessions that require software deinterlacing.","ok")}
+      ${devStaticReq("Source identification","required","The tuner probe must report one of tt, bb, tb or bt. Unknown and future tokens remain unknown and do not opt into deinterlacing.","")}
+      ${devStaticReq("Encoder readiness","not measured on this node","Field rate asks the software H.264 path to sustain up to 59.94 fps. Check the live FFmpeg log and playback stability on the target device.","warn")}
+      <p class="devcheck-note">Advisory only. Readiness never disables this choice and this setting never gates Live TV. If the player can copy an interlaced source, no deinterlace filter is inserted.</p>
+      </div></details><div class="err" id="ltdeinterr" role="alert"></div>
+      ${setCardFoot("saveLiveTvDeinterlace")}`,{id:"live-tv-deinterlace"});
+}
+async function saveLiveTvDeinterlace(btn){
+  const err=document.getElementById("ltdeinterr");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const output=(/** @type {HTMLSelectElement} */ (document.getElementById("ltdeint"))).value;
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{live_tv_deinterlace_output:output}}));
+    const card=btn.closest(".setcard");if(card)card.outerHTML=liveTvDeinterlaceCard(saved);
+    toast("Live TV deinterlace cadence saved");
+  }catch(e){if(err)err.textContent=e.message||String(e);btn.disabled=false;}
 }

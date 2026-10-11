@@ -81,12 +81,12 @@ test("copied diagnostics expose retry and selected-video evidence without interp
 
 test("Analysis owns the durable queue switch without a duplicate Developer control", () => {
   const card = new Function(
-    "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc", "presetOpts", "analysisSummaryCard",
+    "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc", "presetOpts", "analysisSummaryCard", "subtitleBackfillCard",
     `${shippedFunction("analysisSettingsPanel")} return analysisSettingsPanel;`,
   )(
     () => "", (html) => html, () => "",
     (id, title, detail, checked) => `<input id="${id}" type="checkbox"${checked ? " checked" : ""}>`,
-    (save) => `<button data-save="${save}">Save</button>`, esc, () => "", () => "",
+    (save) => `<button data-save="${save}">Save</button>`, esc, () => "", () => "", () => "",
   );
   assert.match(card({vod_index_cluster_cache:true}), /id="an-enabled"[^>]*checked/);
   assert.doesNotMatch(card({vod_index_cluster_cache:false}), /checked|disabled/);

@@ -114,31 +114,6 @@ async function saveLibraryChannelsSettings(btn){
     toast("Library-channel setting saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
-async function savePreparedQuality(btn){
-  const err=document.getElementById("pqherr"); err.textContent="";
-  const card=btn&&btn.closest?btn.closest(".setcard"):null;
-  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
-  const requested=document.getElementById("pqh").checked;
-  if(btn) btn.disabled=true;
-  try{
-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
-      prepared_quality_handoff:requested}}));
-    // The input remains editable while the request is in flight. A later
-    // change is a new draft: keep it visible and dirty instead of overwriting
-    // it with the older response and claiming the newer choice was saved.
-    const currentRevision=Number(card&&card.dataset?card.dataset.revision||0:0);
-    if(card&&!card.isConnected) return true;
-    if(card&&card.isConnected&&currentRevision!==revision){
-      toast("Earlier quality change saved; newer edit remains unsaved");
-      return true;
-    }
-    const toggle=document.getElementById("pqh");
-    if(toggle) toggle.checked=!!saved.prepared_quality_handoff;
-    const state=document.getElementById("pqhstate");
-    if(state) state.textContent=saved.prepared_quality_handoff?"Enabled":"Disabled";
-    toast("Quality switching saved"); if(btn) setCardSaved(btn);
-  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
-}
 async function saveVerifiedDecode(btn){
   const err=document.getElementById("dhqerr"); err.textContent="";
   if(btn) btn.disabled=true;
@@ -168,46 +143,6 @@ async function saveChapterThumbnails(btn){
     const card=document.getElementById("chthumbcard");
     if(card) card.outerHTML=chapterThumbnailsCard(saved,DEVELOPER_READINESS);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
-}
-async function saveSubtitleStoredSources(btn){
-  const err=document.getElementById("subsrcerr"); err.textContent="";
-  if(btn) btn.disabled=true;
-  try{
-    const saved=await api("/settings",{method:"PUT",body:{
-      subtitle_stored_sources:document.getElementById("subsrc").checked}});
-    cacheSettings(saved);
-    toast("Stored subtitle track setting saved"); if(btn) setCardSaved(btn);
-    const card=document.getElementById("subsrccard");
-    if(card) card.outerHTML=subtitleStoredSourcesCard(saved,DEVELOPER_READINESS);
-  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
-}
-async function savePgsOverlay(btn){
-  const err=document.getElementById("pgsoverlayerr"); err.textContent="";
-  if(btn) btn.disabled=true;
-  try{
-    const saved=await api("/settings",{method:"PUT",body:{
-      pgs_overlay:(/** @type {HTMLInputElement} */ (document.getElementById("pgsoverlay"))).checked}});
-    cacheSettings(saved);
-    toast("PGS overlay setting saved"); if(btn) setCardSaved(btn);
-    const card=document.getElementById("pgsoverlaycard");
-    if(card) card.outerHTML=pgsOverlayCard(saved,DEVELOPER_READINESS);
-  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
-}
-async function saveSubtitleClusterSources(btn){
-  const err=document.getElementById("subclustererr");err.textContent="";if(btn)btn.disabled=true;
-  try{
-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{subtitle_cluster_sources:document.getElementById("subcluster").checked}}));
-    const card=document.getElementById("subclustercard");if(card)card.outerHTML=subtitleClusterSourcesCard(saved,DEVELOPER_READINESS);
-    toast("Cluster subtitle source setting saved");if(btn)setCardSaved(btn);
-  }catch(error){err.textContent=error.message;if(btn)btn.disabled=false;}
-}
-async function saveSubtitleBackfill(btn){
-  const err=document.getElementById("subbackfillerr");err.textContent="";if(btn)btn.disabled=true;
-  try{
-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{subtitle_backfill:document.getElementById("subbackfill").checked}}));
-    const card=document.getElementById("subbackfillcard");if(card)card.outerHTML=subtitleBackfillCard(saved,DEVELOPER_READINESS);
-    toast("Subtitle backfill setting saved");if(btn)setCardSaved(btn);
-  }catch(error){err.textContent=error.message;if(btn)btn.disabled=false;}
 }
 async function saveAutomaticDecoderRecovery(btn){
   const err=document.getElementById("adrerr"); err.textContent="";
@@ -514,5 +449,153 @@ async function saveRateControl(btn){
     // the default it resolves an unset request to, is what is in force.
     const card=document.getElementById("rccard");
     if(card) card.outerHTML=rateControlCard(saved);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+
+// Prepared quality handoff (server switch and this browser's second player)
+// and the PGS overlay graduated from Developer on 2026-10-10.
+function setPreparedHandoff(on){
+  setPreparedHandoffEnabled(!!on);
+  // Honest about when: the capability is read on every exchange and the server
+  // keeps the newest document it was sent, so this reaches it on the next
+  // exchange of whatever is playing — not at the next stream.
+  toast(on
+    ?"This browser now offers prepared handoff — from the next control exchange"
+    :"Prepared handoff switched off for this browser");
+}
+function preparedQualityCard(settings,readiness){
+  return setCard(`${cardHead("Quality switching","Prepare the next stream before replacing the one you are watching.",`<span class="pill" id="pqhstate">${settings.prepared_quality_handoff?"Enabled":"Disabled"}</span>`)}
+      ${togRow("pqh",`Prepare quality changes`,`Uses a second player and temporary server capacity to reduce interruptions. Applies after saving to the next eligible quality change.`,settings.prepared_quality_handoff)}
+      <div class="hint">On by default. This saved switch is authoritative; readiness is advisory and never overrides your choice. Each browser and device can still opt out of holding a second player.</div>
+      <details class="setdetails"><summary>Readiness and device qualification</summary><div class="setdetails-body">
+      <p class="hint">These readings describe this server. Missing evidence does not disable the setting.</p>
+      <h3 class="devcheck-group">Server readiness</h3>
+      ${devStaticReq("Control protocol",settings.playback_control_protocol_v1?"met":"not met","Enable protocol advertisement in Playback → Advanced server delivery for new sessions. An existing session without the control block cannot prepare a replacement.",settings.playback_control_protocol_v1?"ok":"warn")}
+      ${devReq(readiness,"prepared_quality_handoff","server_preparation_is_real","Server preparation","The server must reserve capacity, warm the unpublished replacement, and release both the worker and capacity slot on cancellation.")}
+      ${devStaticReq("Throughput measurement","supported","Client and server reporting exists. This is implementation support, not proof that a particular session has enough measured throughput.","")}
+      <h3 class="devcheck-group">Device qualification</h3>
+      ${devReq(readiness,"prepared_quality_handoff","client_two_player_handoff","Client handoff","Apple, Android, and web contain the adapter. Physical-device evidence must still demonstrate aligned playback and a visible first frame.")}
+      ${devReq(readiness,"prepared_quality_handoff","fleet_receipt","Fleet observation","Consecutive physical-client handoffs, stable memory, and measured fallback interruption improve confidence; they do not unlock or block the switch.")}
+      <p class="devcheck-note">Missing qualification does not disable the feature or override the saved choice. A failed preparation falls back to reopening the stream.</p>
+      </div></details><div class="err" id="pqherr" role="alert"></div>
+      ${setCardFoot("savePreparedQuality")}`);
+}
+// This browser's half of prepared quality handoff: whether it advertises a
+// second player. Saved locally on change; the server switch above decides
+// whether any client is offered a prepared replacement at all.
+function preparedHandoffBrowserCard(){
+  return setCard(`${cardHead("Second player in this browser","Advertise this browser's ability to prepare a replacement stream.",`<span class="pill acc">this browser</span>`)}
+      ${togRow("pdp","Allow a second player","Uses additional device memory and decoder capacity. Saved automatically in this browser; the next reporter exchange sends the change.",preparedHandoffEnabled(),'onchange="setPreparedHandoff(this.checked)"')}
+      <div class="hint">A failed preparation falls back to reopening the stream. Prepare quality changes must also be on for the server.</div>
+      ${directedChangeRows()}`,{local:true});
+}
+// Advisory rows about the last directed quality change, inside the card that
+// already exists. Paul's standing rule: features are not gated in code, so
+// nothing here is read by anything that decides anything -- it is a window
+// onto state the player keeps regardless.
+//
+// Empty when there is no player and no history, which is what the settings
+// page looks like at rest. The rows appear only once there is something true
+// to say about a change that actually happened.
+function directedChangeRows(){
+  const p=PLAYER;
+  if(!p) return "";
+  const change=p.directedChange;
+  const outcome=change&&change.outcome;
+  const said={committed:"committed",declined:"declined",timed_out:"timed out",
+    failed:"fell back",superseded:"superseded"}[outcome]||null;
+  const outcomeText=!change ? "no directed change yet"
+    : said==null ? "waiting for an offer"
+    : outcome==="committed"&&Number.isFinite(change.detail)
+      ? `committed ${Math.round(change.detail)} ms` : said;
+  const preparation=p.controlLastPreparation||"not reported";
+  const requested=p.autoRequestedHeight>0?`${Math.round(p.autoRequestedHeight)}p`:"none";
+  const delivered=p.autoHeight>0?`${Math.round(p.autoHeight)}p`:"unknown";
+  if(!change&&!p.controlLastPreparation&&!(p.autoRequestedHeight>0)&&!(p.autoHeight>0))
+    return "";
+  return `<details class="setdetails"><summary>Last quality change</summary><div class="setdetails-body">
+    ${devStaticReq("Outcome",esc(outcomeText),
+      "What became of the most recent directed quality change in this player.")}
+    ${devStaticReq("Server preparation",esc(String(preparation)),
+      "The server's own last word on staging a successor for this session. An absent value means a relay peer that does not evaluate it, which is never a refusal.")}
+    ${devStaticReq("Auto rung",`${esc(requested)} &rarr; ${esc(delivered)}`,
+      "Requested by this browser's automatic controller, then delivered by the server. They are deliberately separate readings.")}
+    <p class="devcheck-note">Advisory only. Nothing on these rows enables, disables or blocks a quality change.</p>
+    </div></details>${preparedSwitchRows(p)}`;
+}
+// M3's rows, and the one measurement this client does not take.
+//
+// The first three are what the last prepared commit in this player measured.
+// The enable section below them says what an audible-seam probe would need and
+// whether each condition is met -- and every answer is "no", which is why the
+// probe is not built. It is advisory in the strict sense: there is no switch
+// here, nothing reads these back, and the prepared handoff is unaffected by
+// every word of it.
+function preparedSwitchRows(p){
+  if(!p||!p.switchCommit) return "";
+  const ledger=preparedSwitchLedger(p);
+  return `<details class="setdetails"><summary>Measuring the last switch</summary><div class="setdetails-body">
+    ${devStaticReq("Frames at the switch",esc(String(ledger.frames)),
+      "Dropped frames on the predecessor over the two seconds before the commit plus the successor over the two seconds after, and how much of that window was sampled.")}
+    ${devStaticReq("Tap to new quality",esc(String(ledger.visible)),
+      "From the viewer's tap to the successor's first frame. Reported, never judged.")}
+    ${devStaticReq("Audio at the switch",esc(String(ledger.audio)),"")}
+    <p class="devcheck-note">An audible-seam probe would need all three of the following. None of them hold, so it is not built \u2014 and this section blocks nothing, because there is nothing here to enable.</p>
+    ${preparedSwitchAudioEnable().map(([title,detail,met])=>
+      devStaticReq(esc(title),met?"Met":"Not met",esc(detail),met?"ok":"")).join("")}
+    <p class="devcheck-note">Advisory only. Instrumentation never gates a quality change, and an unmeasurable row is never read as a failure.</p>
+    </div></details>`;
+}
+async function savePreparedQuality(btn){
+  const err=document.getElementById("pqherr"); err.textContent="";
+  const card=btn&&btn.closest?btn.closest(".setcard"):null;
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const requested=document.getElementById("pqh").checked;
+  if(btn) btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{
+      prepared_quality_handoff:requested}}));
+    // The input remains editable while the request is in flight. A later
+    // change is a new draft: keep it visible and dirty instead of overwriting
+    // it with the older response and claiming the newer choice was saved.
+    const currentRevision=Number(card&&card.dataset?card.dataset.revision||0:0);
+    if(card&&!card.isConnected) return true;
+    if(card&&card.isConnected&&currentRevision!==revision){
+      toast("Earlier quality change saved; newer edit remains unsaved");
+      return true;
+    }
+    const toggle=document.getElementById("pqh");
+    if(toggle) toggle.checked=!!saved.prepared_quality_handoff;
+    const state=document.getElementById("pqhstate");
+    if(state) state.textContent=saved.prepared_quality_handoff?"Enabled":"Disabled";
+    toast("Quality switching saved"); if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+function pgsOverlayCard(s,readiness){
+  const enabled=!!s.pgs_overlay;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Serve PGS subtitles as an overlay","Give capable clients a bitmap subtitle overlay while keeping the video in its original grade.",state)}
+      ${togRow("pgsoverlay",`Serve PGS subtitles as an overlay`,`Applies immediately to new playback requests on every node. Only clients that advertise pgs-v1 receive an overlay.`,enabled)}
+      <div class="hint">Off burns PGS subtitles into the picture as before. If a client draws overlay cues wrongly, turn this off here; no restart is needed.</div>
+      <details class="setdetails"><summary>Readiness and device qualification</summary><div class="setdetails-body">
+      ${devReq(readiness,"pgs_overlay","clients_render_overlays","A client renders pgs-v1","A served manifest proves a client requested an overlay, not that it drew the cues correctly.")}
+      ${devReq(readiness,"pgs_overlay","overlay_acceptance","Physical-client acceptance","Confirm cue timing, placement and seeking on Android and Apple hardware while video remains HDR or Dolby Vision.")}
+      <p class="devcheck-note">These observations are advisory. The saved switch remains authoritative.</p>
+      </div></details>
+      <div class="err" id="pgsoverlayerr" role="alert"></div>
+      ${setCardFoot("savePgsOverlay")}`,{id:"pgsoverlaycard"});
+}
+async function savePgsOverlay(btn){
+  const err=document.getElementById("pgsoverlayerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    const saved=await api("/settings",{method:"PUT",body:{
+      pgs_overlay:(/** @type {HTMLInputElement} */ (document.getElementById("pgsoverlay"))).checked}});
+    cacheSettings(saved);
+    toast("PGS overlay setting saved"); if(btn) setCardSaved(btn);
+    const card=document.getElementById("pgsoverlaycard");
+    if(card) card.outerHTML=pgsOverlayCard(saved,DEVELOPER_READINESS);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }

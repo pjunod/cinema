@@ -3484,9 +3484,13 @@ pub trait MediaStore: Send + Sync + 'static {
     async fn library_file_paths(&self, library_id: i64) -> Result<Vec<(i64, PathBuf)>, StoreError>;
     /// Establish the stable identity of the mounted roots for this library,
     /// or compare a later scanner's observation with cluster truth.
+    /// `configured_paths` is the path set the scan walked; when the library
+    /// no longer has exactly that set the answer is `ConfigurationChanged`
+    /// and nothing is established.
     async fn ensure_library_root_fingerprint(
         &self,
         library_id: i64,
+        configured_paths: &[PathBuf],
         fingerprint: &str,
         allow_establish: bool,
     ) -> Result<RootFingerprintStatus, StoreError>;
@@ -3505,6 +3509,19 @@ pub trait MediaStore: Send + Sync + 'static {
         gone_file_ids: &[i64],
         prune_limit: u64,
     ) -> Result<ReconcileOutcome, StoreError>;
+    /// Remove `file_ids` — files of the library that the caller found under
+    /// none of `configured_paths`, which is what an operator removing a
+    /// library path leaves behind — and the items that leaves empty, in one
+    /// transaction, only while the library's paths are still exactly
+    /// `configured_paths`. Unlike [`Self::reconcile_library`] this is not an
+    /// observation of the disk, so neither the root identity nor the prune
+    /// bound applies. At most `MAX_RECONCILE_FILE_IDS` ids per call.
+    async fn remove_files_outside_library_roots(
+        &self,
+        library_id: i64,
+        configured_paths: &[PathBuf],
+        file_ids: &[i64],
+    ) -> Result<RootRemovalOutcome, StoreError>;
     async fn delete_files(&self, ids: &[i64]) -> Result<u64, StoreError>;
     /// Remove items left childless/file-less after a scan. Returns rows removed.
     async fn prune_empty_items(&self, library_id: i64) -> Result<u64, StoreError>;
@@ -3566,7 +3583,14 @@ pub enum RootFingerprintStatus {
     Established,
     Matched,
     Unestablished,
-    Mismatch { expected: String },
+    Mismatch {
+        expected: String,
+    },
+    /// The library's configured paths are no longer the set the scan walked:
+    /// an operator edited them while it ran. Nothing was established or
+    /// compared — an identity taken from the outdated set would refuse every
+    /// later scan of the current one. The scan queued by the edit reconciles.
+    ConfigurationChanged,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3597,6 +3621,52 @@ pub(crate) fn reconcile_payload_refusal(
         requested: gone_file_ids.len() as u64,
         limit: prune_limit.min(MAX_RECONCILE_FILE_IDS as u64),
     })
+}
+
+/// What [`MediaStore::remove_files_outside_library_roots`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RootRemovalOutcome {
+    /// The given files were removed — except one a Dolby Vision conversion
+    /// is rewriting, the same exclusion reconcile makes — and with them the
+    /// items left empty.
+    Applied {
+        deleted_files: u64,
+        pruned_items: u64,
+    },
+    /// The library's configured paths are no longer the set the caller
+    /// classified against, or the library is gone. Nothing was removed.
+    ConfigurationChanged,
+}
+
+/// One root removal carries at most as many file ids as one reconcile, for
+/// the same reason: the replicated backend ships them as one JSON payload.
+pub(crate) fn root_removal_payload(file_ids: &[i64]) -> Result<(), StoreError> {
+    if file_ids.len() > MAX_RECONCILE_FILE_IDS {
+        return Err(StoreError::Task(format!(
+            "a root removal carries at most {MAX_RECONCILE_FILE_IDS} file ids, not {}",
+            file_ids.len()
+        )));
+    }
+    Ok(())
+}
+
+/// The JSON a library's `paths` column holds for `paths`.
+pub(crate) fn library_paths_json(paths: &[PathBuf]) -> Result<String, StoreError> {
+    serde_json::to_string(paths).map_err(|error| StoreError::Database(error.to_string()))
+}
+
+/// SQL predicate: library `library`'s configured paths are exactly the set in
+/// the JSON array `paths`. Set equality over the decoded strings, so neither
+/// order nor JSON spelling matters — the root fingerprint ignores order too.
+/// Both arguments are placeholders, spelled for the backend.
+pub(crate) fn library_paths_are_sql(library: &str, paths: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM libraries WHERE libraries.id = {library} \
+           AND NOT EXISTS (SELECT value FROM json_each(libraries.paths) \
+                           EXCEPT SELECT value FROM json_each({paths})) \
+           AND NOT EXISTS (SELECT value FROM json_each({paths}) \
+                           EXCEPT SELECT value FROM json_each(libraries.paths)))"
+    )
 }
 
 #[async_trait]
@@ -4762,6 +4832,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
     async fn ensure_library_root_fingerprint_fenced(
         &self,
         library_id: i64,
+        configured_paths: &[PathBuf],
         fingerprint: &str,
         allow_establish: bool,
         lease: &Lease,
@@ -4777,6 +4848,14 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<ReconcileOutcome, StoreError>;
+    async fn remove_files_outside_library_roots_fenced(
+        &self,
+        library_id: i64,
+        configured_paths: &[PathBuf],
+        file_ids: &[i64],
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<RootRemovalOutcome, StoreError>;
     #[allow(clippy::too_many_arguments)]
     async fn claim_cache_entry_fenced(
         &self,

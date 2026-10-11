@@ -21,7 +21,7 @@ use crate::store::dv_conversion::validate_recovery_guard_identity;
 use crate::store::{
     ArtworkRepairFence, DvRecoveryGuardState, FencedPublicationStore, IdentityRepairOutcome,
     IdentityRepairPlan, IdentityRepairSnapshot, ReconcileOutcome, RootFingerprintStatus,
-    SeriesHintOutcome,
+    RootRemovalOutcome, SeriesHintOutcome,
 };
 
 const ATOMIC_PUBLICATION_TTL_MS: i64 = 90_000;
@@ -1478,27 +1478,32 @@ impl FencedPublicationStore for HiqliteAuthStore {
     async fn ensure_library_root_fingerprint_fenced(
         &self,
         library_id: i64,
+        configured_paths: &[std::path::PathBuf],
         fingerprint: &str,
         allow_establish: bool,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<RootFingerprintStatus, StoreError> {
+        let configured_paths = crate::store::library_paths_json(configured_paths)?;
         let results = self
             .atomic_publication(
                 lease,
                 replacement,
                 vec![
                     (
-                        "INSERT INTO library_roots (library_id, fingerprint)
-                 SELECT $1, $2 WHERE $3 AND EXISTS (
-                   SELECT 1 FROM job_leases WHERE resource = $4 AND owner_node_id = $5
-                     AND fence = $6 AND revision = $7 AND expires_at_ms = $8)
-                 ON CONFLICT(library_id) DO NOTHING"
-                            .to_owned(),
+                        format!(
+                            "INSERT INTO library_roots (library_id, fingerprint)
+                 SELECT $1, $2 WHERE $3 AND {} AND EXISTS (
+                   SELECT 1 FROM job_leases WHERE resource = $5 AND owner_node_id = $6
+                     AND fence = $7 AND revision = $8 AND expires_at_ms = $9)
+                 ON CONFLICT(library_id) DO NOTHING",
+                            crate::store::library_paths_are_sql("$1", "$4")
+                        ),
                         params!(
                             library_id,
                             fingerprint,
                             allow_establish,
+                            configured_paths.as_str(),
                             lease.resource.as_str(),
                             lease.owner_node_id.as_str(),
                             lease_i64("fence", lease.fence)?,
@@ -1527,6 +1532,11 @@ impl FencedPublicationStore for HiqliteAuthStore {
         if results.first().copied() == Some(1) {
             return Ok(RootFingerprintStatus::Established);
         }
+        if !super::hiqlite_media::library_paths_are(self.client(), library_id, &configured_paths)
+            .await?
+        {
+            return Ok(RootFingerprintStatus::ConfigurationChanged);
+        }
         let expected = self
             .client()
             .query_consistent_map::<FingerprintRow, _>(
@@ -1545,6 +1555,42 @@ impl FencedPublicationStore for HiqliteAuthStore {
         } else {
             Ok(RootFingerprintStatus::Mismatch { expected })
         }
+    }
+
+    async fn remove_files_outside_library_roots_fenced(
+        &self,
+        library_id: i64,
+        configured_paths: &[std::path::PathBuf],
+        file_ids: &[i64],
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<RootRemovalOutcome, StoreError> {
+        crate::store::root_removal_payload(file_ids)?;
+        let configured_paths = crate::store::library_paths_json(configured_paths)?;
+        let ids = serde_json::to_string(file_ids).map_err(database_error)?;
+        let authority = params!(
+            lease.resource.as_str(),
+            lease.owner_node_id.as_str(),
+            lease_i64("fence", lease.fence)?,
+            lease_i64("revision", lease.revision)?,
+            lease.expires_at_unix_ms
+        );
+        let statements = super::hiqlite_media::root_removal_statements(
+            library_id,
+            &configured_paths,
+            &ids,
+            Some(&authority),
+        )?;
+        let results = self
+            .atomic_publication(lease, replacement, statements)
+            .await?;
+        super::hiqlite_media::root_removal_outcome(
+            self.client(),
+            library_id,
+            &configured_paths,
+            &results,
+        )
+        .await
     }
 
     async fn reconcile_library_fenced(

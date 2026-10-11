@@ -14,10 +14,9 @@
 // build now makes unconditionally, because a client that declares it and is
 // never offered a preparation behaves exactly as it did before.
 //
-// Settings → Developer owns Gate A for this browser. It is advisory there —
-// the card lists what is measured and what is not, and whether each is
-// currently met — and it does not gate the switch: an operator who wants the
-// path on gets it on, and the readiness list is what tells them the cost.
+// Settings → Playback owns Gate A for this browser ("Second player in this
+// browser"). Its rows report what the last change measured, and nothing on
+// that card gates the switch: an operator who wants the path on gets it on.
 const PREPARED_HANDOFF_KEY="plurx.prepared_handoff";
 // How far past the incumbent's current film position the successor must be
 // buffered before this client will switch. A handoff that commits at the

@@ -17,7 +17,8 @@ readout, stop and flag it.
 
 **2026-09-29 source correction:** [PR #572](http://forge.lan:3000/noirr/plurx/pulls/572)
 merged E1's web echo and on-by-default bounded-read preference (`5ba02212f`)
-to `main` as `82df7f59e`. The Developer switch saves the replicated preference
+to `main` as `82df7f59e`. The switch (Settings → Cluster since 2026-10-10;
+Developer before that) saves the replicated preference
 with advisory readiness; absent or stale replica proof and unknown watch-write
 positions still use Authority. The browser keeps decimal u64 indexes intact,
 echoes for a monotonic 60-second window, and discards receipts across an auth
