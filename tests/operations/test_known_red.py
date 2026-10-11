@@ -143,6 +143,12 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/pipeprobe/census.rs::pipeprobe::census::tests::"
             "census_smoke_on_this_host"
         ] = "needs real ffmpeg and, for a hardware encoder, a GPU"
+        # Shared-read indexing adds one operator-run differential over a real
+        # source on the target storage, named by PLURX_SHARED_READ_SOURCE.
+        additional_fixture_reasons[
+            "crates/plurxd/src/fragindex.rs::fragindex::tests::"
+            "real_source_shared_read_differential"
+        ] = "reads a whole real source several times; run by hand on the target storage"
         additional_fixtures = tuple(
             item for item in ignored if item.identity in additional_fixture_reasons
         )
@@ -150,8 +156,9 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 7)
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 31)
+        self.assertEqual(len(additional_fixtures), 8)
+        # Shared-read indexing's real-source differential: 31 -> 32.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 32)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())
