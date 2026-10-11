@@ -118,6 +118,14 @@ class Host:
             '  chmod 755 "$dir/$t"\n'
             "done\n",
         )
+        # The source-parser builder (`python3 BUILDER --output DIR ...`) writes a
+        # module that starts with the WebAssembly magic, as the real one does.
+        self.stub(
+            "python3",
+            'out=; prev=; for a in "$@"; do [ "$prev" = --output ] && out=$a; prev=$a; done\n'
+            '[ -n "$out" ] || exit 2\n'
+            'mkdir -p "$out/bin"; printf \'\\000asm\\001\\000\\000\\000built\' > "$out/bin/plurx-source-parser.wasm"\n',
+        )
         # `install` is the one stub that has to do its job, because later
         # assertions read what it wrote. It honours -d and copies otherwise;
         # ownership flags are logged, not applied (no root here).
@@ -401,8 +409,21 @@ class InstallerCase(unittest.TestCase):
         shutil.copy2(ROOT / "deploy/com.plurx.plurxd.plist", archive / "com.plurx.plurxd.plist")
         shutil.copy2(self.host.fake_binary, archive / "plurxd")
         prefix = self.tmp / "homebrew"
+        # An archive without the source parser cannot build one and says so
+        # before installing a plurxd that could transcode nothing.
+        result = self.host.run("--prefix", str(prefix), installer=archive / "install")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("no plurx-source-parser.wasm to install", result.stderr)
+        self.assertFalse((prefix / "bin/plurxd").exists())
+        (archive / "plurx-source-parser.wasm").write_bytes(b"\0asm\1\0\0\0archive")
+        self.host.log.write_text("")
         result = self.host.run("--prefix", str(prefix), installer=archive / "install")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("installing the plurx-source-parser.wasm shipped beside this script", result.stdout)
+        engine = prefix / "libexec/plurx" / f"jellyfin-ffmpeg-{MAC_FFMPEG_VERSION}"
+        self.assertEqual((engine / "plurx-source-parser.wasm").read_bytes(), (archive / "plurx-source-parser.wasm").read_bytes())
+        self.assertFalse([c for c in self.host.calls() if c.startswith("python3 ")])
+        self.assertIn(f"xattr -d com.apple.quarantine {engine}/plurx-source-parser.wasm", self.host.calls())
         self.assertIn("installing the plurxd shipped beside this script", result.stdout)
         self.assertEqual(
             (prefix / "bin/plurxd").read_bytes(), self.host.fake_binary.read_bytes()
@@ -423,6 +444,62 @@ class InstallerCase(unittest.TestCase):
         result = self.host.run("linux", "--binary", str(self.host.fake_binary))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse([call for call in self.host.calls() if call.startswith("xattr")])
+
+    def test_macos_installs_the_source_parser_beside_the_pinned_ffprobe(self):
+        # plurxd binds decoder facts on macOS only through the WebAssembly
+        # FFprobe it finds beside the configured ffprobe; an engine without it
+        # refuses every transcode. A checkout builds it with the pinned builder.
+        self.host.stub("launchctl", "")
+        prefix = self.tmp / "homebrew"
+        engine = prefix / "libexec/plurx" / f"jellyfin-ffmpeg-{MAC_FFMPEG_VERSION}"
+        builder = ROOT / "scripts/build-macos-source-parser"
+        abi = re.search(r'^ABI_ID = "(.*)"$', builder.read_text(encoding="utf-8"), re.M).group(1)
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        module = engine / "plurx-source-parser.wasm"
+        self.assertTrue(module.read_bytes().startswith(b"\0asm"), "the module sits beside the pinned ffprobe")
+        self.assertEqual((engine / "plurx-source-parser.wasm.abi").read_text().strip(), abi)
+        builds = [c for c in self.host.calls() if c.startswith("python3 ")]
+        self.assertEqual(len(builds), 1, self.host.calls())
+        self.assertIn(f"python3 {builder} --output", builds[0])
+        self.assertOrdered(self.host.calls(), "python3 ", f"install -m 0444", "launchctl bootstrap")
+
+        # Reinstalling with the same builder ABI keeps the module.
+        self.host.log.write_text("")
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([c for c in self.host.calls() if c.startswith("python3 ")])
+        self.assertIn(f"source parser ({abi}) already in", result.stdout)
+
+        # A module built for another ABI is rebuilt rather than trusted.
+        (engine / "plurx-source-parser.wasm.abi").write_text("an-older-abi\n")
+        self.host.log.write_text("")
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len([c for c in self.host.calls() if c.startswith("python3 ")]), 1)
+        self.assertEqual((engine / "plurx-source-parser.wasm.abi").read_text().strip(), abi)
+
+    def test_macos_installs_a_given_source_parser_and_refuses_one_that_is_not_webassembly(self):
+        self.host.stub("launchctl", "")
+        prefix = self.tmp / "homebrew"
+        engine = prefix / "libexec/plurx" / f"jellyfin-ffmpeg-{MAC_FFMPEG_VERSION}"
+        given = self.tmp / "parser.wasm"
+        given.write_bytes(b"\0asm\1\0\0\0given")
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix),
+                               "--source-parser", str(given))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((engine / "plurx-source-parser.wasm").read_bytes(), given.read_bytes())
+        self.assertFalse((engine / "plurx-source-parser.wasm.abi").exists(), "an unbuilt module claims no ABI")
+        self.assertFalse([c for c in self.host.calls() if c.startswith("python3 ")])
+
+        other = self.tmp / "other-prefix"
+        bogus = self.tmp / "parser.txt"
+        bogus.write_text("not a module")
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(other),
+                               "--source-parser", str(bogus))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("is not a WebAssembly module", result.stderr)
+        self.assertFalse((other / "bin/plurxd").exists(), "nothing past the engine is installed without its parser")
 
     def test_macos_refuses_an_engine_archive_that_is_not_the_pinned_build(self):
         self.host.stub("launchctl", "")
@@ -544,6 +621,8 @@ class InstallerCase(unittest.TestCase):
         # it, goes through sudo, and the plist it writes belongs to the user.
         checkout = self.tmp / "checkout"
         shutil.copytree(ROOT / "deploy", checkout / "deploy")
+        (checkout / "scripts").mkdir()
+        shutil.copy2(ROOT / "scripts/build-macos-source-parser", checkout / "scripts")
         agents = self.host.home / "Library/LaunchAgents"
         agents.mkdir(parents=True)
         agents.chmod(0o555)
@@ -585,6 +664,8 @@ class InstallerCase(unittest.TestCase):
         self.host.stub("sudo", f'[ "$1" = install ] && chmod u+w "{agents}"\n"$@"\n')
         checkout = self.tmp / "checkout"
         shutil.copytree(ROOT / "deploy", checkout / "deploy")
+        (checkout / "scripts").mkdir()
+        shutil.copy2(ROOT / "scripts/build-macos-source-parser", checkout / "scripts")
         prefix = self.tmp / "hb"
         result = self.host.run(
             "macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix),
@@ -612,6 +693,8 @@ class InstallerCase(unittest.TestCase):
         self.host.stub("launchctl", "")
         checkout = self.tmp / "checkout"
         shutil.copytree(ROOT / "deploy", checkout / "deploy")
+        (checkout / "scripts").mkdir()
+        shutil.copy2(ROOT / "scripts/build-macos-source-parser", checkout / "scripts")
         target = checkout / "target"
         (target / "release").mkdir(parents=True)
         self.host.stub("cargo", f'cp "{self.host.fake_binary}" "{target}/release/plurxd"\n')

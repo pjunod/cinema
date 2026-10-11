@@ -19,6 +19,10 @@
 #   --ffmpeg-archive PATH
 #                   macOS: the Jellyfin FFmpeg portable archive, already
 #                   downloaded (offline installs); still checksum-verified
+#   --source-parser PATH
+#                   macOS: a built plurx-source-parser.wasm to install instead
+#                   of building one (a release archive's own module, beside
+#                   this script, is used without it)
 #   --uninstall     remove the service and the binary; keep data and config
 #   --dry-run       print every command instead of running it
 #
@@ -36,6 +40,7 @@ mode=auto
 binary=
 prefix=
 ffmpeg_archive=
+source_parser=
 uninstall=0
 dry_run=0
 
@@ -150,6 +155,8 @@ while [ $# -gt 0 ]; do
     --prefix=*) prefix=${1#--prefix=} ;;
     --ffmpeg-archive) shift; [ $# -gt 0 ] || die "--ffmpeg-archive needs a path"; ffmpeg_archive=$1 ;;
     --ffmpeg-archive=*) ffmpeg_archive=${1#--ffmpeg-archive=} ;;
+    --source-parser) shift; [ $# -gt 0 ] || die "--source-parser needs a path"; source_parser=$1 ;;
+    --source-parser=*) source_parser=${1#--source-parser=} ;;
     --uninstall) uninstall=1 ;;
     --dry-run) dry_run=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -535,6 +542,77 @@ macos_ensure_jellyfin_ffmpeg() {
   say "installed Jellyfin FFmpeg $jellyfin_ffmpeg_version into $dest"
 }
 
+# On macOS plurxd reads a source's decoder facts only through the bounded
+# WebAssembly build of the pinned FFprobe, which it looks for beside the
+# configured ffprobe. Without it no facts can be bound and every transcode is
+# refused, so it is part of the media engine and installed with it. It is
+# built by scripts/build-macos-source-parser from the same pinned Jellyfin
+# source with checksum-verified inputs; a release archive ships one built the
+# same way. The builder's ABI is recorded beside a module built here, so a
+# checkout whose parser ABI changed rebuilds it and an unchanged one does not.
+source_parser_name=plurx-source-parser.wasm
+
+# The parser ABI this checkout's builder produces; empty outside a checkout.
+source_parser_builder_abi() {
+  local builder=$root/scripts/build-macos-source-parser
+  [ -f "$builder" ] || return 0
+  sed -n 's/^ABI_ID = "\(.*\)"$/\1/p' "$builder"
+}
+
+# True when $1 starts with the WebAssembly magic.
+is_wasm_module() {
+  [ -f "$1" ] && [ "$(head -c 4 "$1" | tr -d '\000')" = asm ]
+}
+
+macos_ensure_source_parser() {
+  local dir=$1 dest module stamp abi candidate work= recorded
+  dest=$(macos_ffmpeg_dir "$dir")
+  module=$dest/$source_parser_name
+  stamp=$dest/$source_parser_name.abi
+  abi=$(source_parser_builder_abi)
+  if [ -n "$source_parser" ]; then
+    [ -f "$source_parser" ] || die "no such file: $source_parser"
+    candidate=$source_parser
+  elif [ -f "$here/$source_parser_name" ]; then
+    say "installing the $source_parser_name shipped beside this script"
+    candidate=$here/$source_parser_name
+  elif [ -z "$abi" ]; then
+    die "no $source_parser_name to install: run from a checkout or a release archive, or pass --source-parser <file>"
+  elif is_wasm_module "$module" && [ "$(cat "$stamp" 2>/dev/null || true)" = "$abi" ]; then
+    say "source parser ($abi) already in $dest"
+    return
+  elif [ "$dry_run" = 1 ]; then
+    say "would build $source_parser_name ($abi) with scripts/build-macos-source-parser into $dest"
+    return
+  else
+    work=$(mktemp -d "${TMPDIR:-/tmp}/plurx-source-parser.XXXXXX")
+    say "building $source_parser_name ($abi) from the pinned Jellyfin source; this takes a few minutes"
+    python3 "$root/scripts/build-macos-source-parser" --output "$work/parser" --jobs 4 >/dev/null \
+      || { rm -rf "$work"; die "could not build $source_parser_name (pass --source-parser <file> to install a built one)"; }
+    candidate=$work/parser/bin/$source_parser_name
+  fi
+  if [ "$dry_run" = 1 ]; then
+    say "would install $candidate into $dest"
+    return
+  fi
+  if ! is_wasm_module "$candidate"; then
+    [ -z "$work" ] || rm -rf "$work"
+    die "$candidate is not a WebAssembly module"
+  fi
+  run_for_dir "$dest" install -d "$dest"
+  run_for_dir "$dest" install -m 0444 "$candidate" "$module"
+  if command -v xattr >/dev/null 2>&1; then xattr -d com.apple.quarantine "$module" 2>/dev/null || true; fi
+  if [ -n "$work" ]; then
+    new_temp_file recorded
+    printf '%s\n' "$abi" > "$recorded"
+    run_for_dir "$dest" install -m 0644 "$recorded" "$stamp"
+    rm -rf "$work"
+  else
+    run_for_dir "$dest" rm -f "$stamp"
+  fi
+  say "installed $source_parser_name into $dest"
+}
+
 # One <string> value under <key>NAME</key> in EnvironmentVariables.
 plist_env_get() {
   awk -v key="<key>$2</key>" '
@@ -616,6 +694,7 @@ macos_install() {
   resolve_binary
   macos_claim_prefix "$dir"
   macos_ensure_jellyfin_ffmpeg "$dir"
+  macos_ensure_source_parser "$dir"
   # Boot a running agent out before its binary is replaced. A fresh install
   # has nothing to boot out and that is fine.
   run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true

@@ -424,6 +424,10 @@ jobs:
           test "$(lipo -archs "dist/$name/plurxd")" = "x86_64 arm64"
           test "$("dist/$name/plurxd" --version)" = "$EXPECT_VERSION"
           cp deploy/install deploy/com.plurx.plurxd.plist "dist/$name/"
+          # plurxd reads decoder facts on macOS only through this module; the
+          # installer puts it beside the pinned FFprobe.
+          python3 scripts/build-macos-source-parser --output "$RUNNER_TEMP/source-parser" --jobs 3
+          cp "$RUNNER_TEMP/source-parser/bin/plurx-source-parser.wasm" "dist/$name/"
           cp deploy/macos/README.md "dist/$name/README.md"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           rm -rf "dist/$name"

@@ -93,6 +93,19 @@ is on your `PATH`.
 | Intel archive | `jellyfin-ffmpeg_8.1.3-1_portable_mac64-gpl.tar.xz`, SHA-256 `cb2b5c154d49a6b6bfe29fa6c16510e85dcbf60b805764121a167b093d4bb6fb` |
 | Installed to | `<prefix>/libexec/plurx/jellyfin-ffmpeg-8.1.3-1/` — `/opt/homebrew/libexec/plurx/jellyfin-ffmpeg-8.1.3-1/` on Apple Silicon; deliberately not on `PATH` |
 | Agent settings | `PLURX_FFMPEG` and `PLURX_FFPROBE` point at the two files there |
+| Source parser | `plurx-source-parser.wasm` in the same directory — see below |
+
+**The source parser.** On macOS plurxd reads a file's decoder facts (frame
+geometry, colour, HDR metadata) only through a sandboxed WebAssembly build of
+the same pinned FFprobe, which it looks for beside `PLURX_FFPROBE`. Without it
+no facts can be bound and every transcode is refused with `no bound FFprobe
+identity`. The installer builds it from a checkout with
+[`scripts/build-macos-source-parser`](../scripts/build-macos-source-parser)
+(the pinned Jellyfin source, WASI SDK and wasi-libc, all checksum-verified;
+about two minutes) and records the builder's parser ABI beside it as
+`plurx-source-parser.wasm.abi`, so a rerun keeps it until that ABI changes. A
+release archive ships the module built the same way, beside `install`. To
+install one you built elsewhere, pass `--source-parser <file>`.
 
 An archive whose checksum differs stops the install before anything is
 replaced. A rerun finds the pinned build already in place and does not
@@ -229,6 +242,8 @@ awake. For a Mac that is mainly a server:
 |---|---|
 | `make install-macos` says `is not the pinned Jellyfin FFmpeg` | The download was cut short or the file is a different build. Rerun, or fetch the exact archive named in [the media engine](#the-media-engine-jellyfin-ffmpeg-813-1) and pass `--ffmpeg-archive`. |
 | `make install-macos` notes that a `rustc` `comes before rustup on PATH` | Homebrew's `rust` formula is shadowing rustup. The install itself used the pinned release, but every other `cargo` and `make` build on this Mac uses Homebrew's: `brew uninstall rust`. |
+| `make install-macos` says `could not build plurx-source-parser.wasm` | The builder needs network for its pinned downloads and the Command Line Tools (`python3`, `make`, `patch`). Build it on any Mac or Linux machine with `python3 scripts/build-macos-source-parser --output /tmp/parser`, copy `/tmp/parser/bin/plurx-source-parser.wasm` over, and pass `--source-parser`. |
+| Every transcode fails with `no bound FFprobe identity`; the log says `packaged capability-bound source parser is unavailable` | The engine directory has no `plurx-source-parser.wasm` (an install from before 2026-10-11 lacks it). Rerun `make install-macos`. |
 | `make install-macos` says `cargo is not on PATH` | Run `source "$HOME/.cargo/env"` (or open a new terminal) after installing Rust, or pass `--binary`. |
 | `make install-macos` times out waiting for `/readyz` | `tail -100 ~/Library/Logs/plurxd.log`. A port already in use on `32400` is the usual cause. |
 | Agent is loaded but `state` is not `running` | `launchctl print gui/$(id -u)/com.plurx.plurxd` shows `last exit code`; the log shows why. |
