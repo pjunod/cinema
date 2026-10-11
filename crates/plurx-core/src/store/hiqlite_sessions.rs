@@ -2042,6 +2042,19 @@ async fn live_local_route(
         .transpose()
 }
 
+/// A route and, from the same statement, the current incarnation of the
+/// playback pointer it is checked against (`committed_pointer`). One
+/// Authority round trip where a post-write projection used to take two; a
+/// missing route is no row, whatever the pointer says.
+struct RoutePointerRow(Result<MediaSessionRoute, StoreError>, Option<String>);
+
+impl From<&mut Row<'_>> for RoutePointerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let pointer = row.get("committed_pointer");
+        Self(decode_route(row), pointer)
+    }
+}
+
 async fn request_row(
     store: &HiqliteAuthStore,
     user_id: i64,
@@ -2747,25 +2760,32 @@ async fn activate_with_authority(
     // post-commit projection so replay cannot regress a finite/ready fence
     // or overwrite progress in the route cache. Read failure remains
     // commit-unknown to the caller's exact activation reconciler.
-    let route = route_by(store, "incarnation_id", &activation.incarnation_id)
-        .await?
-        .filter(|route| activation_route_matches(route, activation));
-    let Some(route) = route else {
-        return Ok(None);
-    };
-    let committed_pointer = store
+    let route_cols = "__PLURX_ROUTE_PROJECTION__";
+    let projection = store
         .session_client()
-        .query_consistent_map::<PointerRow, _>(
+        // authority: the post-commit projection must observe this activation and any later writer of the route or pointer.
+        .query_consistent_map::<RoutePointerRow, _>(
             format!(
-                "SELECT current_incarnation_id FROM media_playback_pointers
-                  WHERE {owner_1} AND playback_id = $2"
+                "SELECT {route_cols},
+                        (SELECT current_incarnation_id FROM media_playback_pointers
+                          WHERE {owner_1} AND playback_id = $2) AS committed_pointer
+                   FROM media_sessions WHERE incarnation_id = $3"
             ),
-            params!(principal_value.clone(), activation.playback_id.as_str()),
+            params!(
+                principal_value.clone(),
+                activation.playback_id.as_str(),
+                activation.incarnation_id.as_str()
+            ),
         )
         .await?
         .into_iter()
         .next()
-        .map(|row| row.0);
+        .map(|row| row.0.map(|route| (route, row.1)))
+        .transpose()?
+        .filter(|(route, _)| activation_route_matches(route, activation));
+    let Some((route, committed_pointer)) = projection else {
+        return Ok(None);
+    };
     if committed_pointer.as_deref() != Some(activation.incarnation_id.as_str()) {
         return Ok(None);
     }
@@ -4199,32 +4219,39 @@ impl MediaSessionStore for HiqliteAuthStore {
                         ),
                     )
                     .await?;
-                let route = route_by(self, "incarnation_id", &activation.incarnation_id)
-                    .await?
-                    .filter(|route| {
-                        activation_route_matches(route, activation)
-                            && route.publication_ready_at_ms != MEDIA_SESSION_PUBLICATION_BLOCKED
-                            // Identity alone would accept a boundary some other
-                            // confirmation of this incarnation committed. A
-                            // replay of *this* call wrote exactly $1.
-                            && route.publication_ready_at_ms == publication_ready_at_ms
-                    });
-                let committed_pointer = self
+                // The route and the pointer in one post-write read. A missing
+                // route answers `None` whatever the pointer says, as before.
+                let route_cols = "__PLURX_ROUTE_PROJECTION__";
+                let (route, committed_pointer) = self
                     .session_client()
-                    .query_consistent_map::<PointerRow, _>(
+                    // authority: the confirmation must observe this write and any later writer of the route or pointer.
+                    .query_consistent_map::<RoutePointerRow, _>(
                         format!(
-                            "SELECT current_incarnation_id FROM media_playback_pointers
-                          WHERE {owner_1} AND playback_id = $2"
+                            "SELECT {route_cols},
+                                    (SELECT current_incarnation_id FROM media_playback_pointers
+                                      WHERE {owner_1} AND playback_id = $2) AS committed_pointer
+                               FROM media_sessions WHERE incarnation_id = $3"
                         ),
                         params!(
                             crate::store::local_media_principal_id(&activation.principal)?,
-                            activation.playback_id.as_str()
+                            activation.playback_id.as_str(),
+                            activation.incarnation_id.as_str()
                         ),
                     )
                     .await?
                     .into_iter()
                     .next()
-                    .map(|row| row.0);
+                    .map(|row| row.0.map(|route| (Some(route), row.1)))
+                    .transpose()?
+                    .unwrap_or((None, None));
+                let route = route.filter(|route| {
+                    activation_route_matches(route, activation)
+                        && route.publication_ready_at_ms != MEDIA_SESSION_PUBLICATION_BLOCKED
+                        // Identity alone would accept a boundary some other
+                        // confirmation of this incarnation committed. A
+                        // replay of *this* call wrote exactly $1.
+                        && route.publication_ready_at_ms == publication_ready_at_ms
+                });
                 if matches!(changed, 1 | 0)
                     && committed_pointer.as_deref() == Some(activation.incarnation_id.as_str())
                 {
@@ -4819,24 +4846,26 @@ impl MediaSessionStore for HiqliteAuthStore {
             ));
         }
         let (owner_predicate, owner) = principal_lookup(principal)?;
+        // The pointer and the route it names, in one statement: the route is
+        // selected by a sub-select of the pointer's current incarnation. No
+        // pointer, or a pointer whose route is gone, still answers `None`.
+        let route_cols = "__PLURX_ROUTE_PROJECTION__";
         let sql = format!(
-            "SELECT current_incarnation_id FROM media_playback_pointers
-                  WHERE {owner_predicate} AND playback_id = $2"
+            "SELECT {route_cols} FROM media_sessions
+              WHERE incarnation_id = (
+                    SELECT current_incarnation_id FROM media_playback_pointers
+                     WHERE {owner_predicate} AND playback_id = $2)"
         );
         validate_sql(&sql)?;
-        let incarnation = self
-            .session_client()
-            .query_consistent_map::<PointerRow, _>(sql, params!(owner, playback_id))
+        self.session_client()
+            // authority: a create's predecessor must be the pointer's committed incarnation, read after the admission claim.
+            .query_consistent_map::<RouteRow, _>(sql, params!(owner, playback_id))
             .await?
             .into_iter()
             .next()
-            .map(|row| row.0);
-        match incarnation {
-            Some(incarnation) => Ok(route_by(self, "incarnation_id", &incarnation)
-                .await?
-                .filter(|route| route.principal == *principal)),
-            None => Ok(None),
-        }
+            .map(|row| row.0)
+            .transpose()
+            .map(|route| route.filter(|route| route.principal == *principal))
     }
 
     async fn bind_continuous_family(
@@ -6948,9 +6977,13 @@ mod tests {
             ),
             "all-zero transactions must prove the exact pointer after commit"
         );
-        assert!(
-            source.contains(".filter(|route| activation_route_matches(route, activation))"),
-            "all-zero transactions must also prove the immutable activation identity"
+        assert_eq!(
+            source
+                .matches(".filter(|(route, _)| activation_route_matches(route, activation))")
+                .count(),
+            1,
+            "all-zero transactions must also prove the immutable activation identity \
+             on the post-commit route-and-pointer projection"
         );
     }
 
