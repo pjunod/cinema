@@ -1098,6 +1098,32 @@ impl From<&MediaSessionRoute> for MediaSessionTakeoverCursor {
     }
 }
 
+/// The takeover inventory as the authority answered it.
+///
+/// Both takeover switches (`cluster.media_pool_enabled` and
+/// `cluster.session_takeover_enabled`) are read by the same statement that
+/// lists the expired routes. A node's own view of the switches can lag a
+/// disable saved on another node until its replica applies the save; this
+/// answer cannot, so a node still holding an "on" is refused here, before it
+/// spends an offer round trip or an ffmpeg spawn on any route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TakeoverInventory {
+    /// At least one switch is off or absent at the authority.
+    Disabled,
+    /// Both switches are on: the bounded, oldest-first page.
+    Expired(Vec<MediaSessionRoute>),
+}
+
+impl TakeoverInventory {
+    /// The page, or `None` when the authority refused because a switch is off.
+    pub fn into_expired(self) -> Option<Vec<MediaSessionRoute>> {
+        match self {
+            Self::Disabled => None,
+            Self::Expired(routes) => Some(routes),
+        }
+    }
+}
+
 /// Bounded, immutable acknowledgement for one accepted terminal control.
 ///
 /// The response body is retained independently of the process-local player so

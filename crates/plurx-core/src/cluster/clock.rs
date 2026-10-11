@@ -1950,6 +1950,19 @@ impl ClusterClockGuard {
                 if node_id == &reference.target_node_id {
                     continue;
                 }
+                // The voters-only rule (`recompute`): a surviving learner
+                // holds no vote, so neither its absence nor its measured
+                // bound refuses removing another member. Its bound still
+                // gates the routes it owns and its own promotion. An
+                // unrelated VOTER, unobserved or over the bound, is never
+                // excused.
+                if Self::is_learner_peer(
+                    captured.membership.as_ref(),
+                    captured.directory.as_ref(),
+                    node_id,
+                ) {
+                    continue;
+                }
                 let fresh = match observation {
                     PeerClockOffset::Bounded { observed_at, .. } => now
                         .checked_duration_since(*observed_at)
@@ -1957,16 +1970,6 @@ impl ClusterClockGuard {
                     PeerClockOffset::Unknown => false,
                 };
                 let Some(upper) = Self::upper_bound(observation).filter(|_| fresh) else {
-                    // The coverage rule: an unobserved surviving learner
-                    // holds no vote and does not refuse the reduction. An
-                    // unrelated unobserved VOTER is never excused.
-                    if Self::is_learner_peer(
-                        captured.membership.as_ref(),
-                        captured.directory.as_ref(),
-                        node_id,
-                    ) {
-                        continue;
-                    }
                     return Err(ClockRefusal::Unknown);
                 };
                 if upper > CLOCK_OFFSET_REFUSAL_MS * 1_000 {

@@ -767,6 +767,31 @@ impl From<&mut Row<'_>> for RouteRow {
     }
 }
 
+/// One row of the gated takeover inventory: the switch pair as the same
+/// statement read it, and the route, if any. The inventory LEFT JOINs the page
+/// onto the one-row switch gate, so an off switch or an empty page is one row
+/// whose route columns are all NULL; `has_route` says which, because a
+/// replicated row hands each column out once.
+struct TakeoverInventoryRow {
+    enabled: Result<bool, StoreError>,
+    route: Option<Result<MediaSessionRoute, StoreError>>,
+}
+
+impl From<&mut Row<'_>> for TakeoverInventoryRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let enabled: Result<i64, _> = row.try_get("takeover_enabled");
+        let has_route: Result<i64, _> = row.try_get("has_route");
+        Self {
+            enabled: enabled.map(|enabled| enabled != 0).map_err(database_error),
+            route: match has_route {
+                Ok(0) => None,
+                Ok(_) => Some(decode_route(row)),
+                Err(error) => Some(Err(database_error(error))),
+            },
+        }
+    }
+}
+
 fn decode_session_principal(
     row: &mut Row<'_>,
 ) -> Result<crate::playback_principal::PlaybackPrincipal, StoreError> {
@@ -5311,16 +5336,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         now_ms: i64,
         after: Option<MediaSessionTakeoverCursor>,
         limit: usize,
-    ) -> Result<Vec<MediaSessionRoute>, StoreError> {
+    ) -> Result<crate::domain::TakeoverInventory, StoreError> {
         if now_ms < 0 {
             return Err(StoreError::Task(
                 "invalid media-session takeover inventory time".to_owned(),
             ));
         }
         let limit = i64::try_from(limit.min(MAX_TAKEOVER_CANDIDATES)).unwrap_or(0);
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
         let (has_cursor, after_lease_expires_at_ms, after_incarnation_id) = match after {
             Some(after) => {
                 if after.lease_expires_at_ms < 0 || after.incarnation_id.is_empty() {
@@ -5334,10 +5356,19 @@ impl MediaSessionStore for HiqliteAuthStore {
         };
         let route_cols = "__PLURX_ROUTE_PROJECTION__";
         let owner_column = LocalSessionSql::load(self).await?.column();
+        // The switch pair is read by this statement, on the leader, rather
+        // than trusted from the caller: a node whose replica has not applied
+        // a disable saved elsewhere still holds "on", and this is the read it
+        // must pass before it spends an offer or a spawn on any route.
         let sql = format!(
-            "SELECT {route_cols} FROM media_sessions
-              WHERE state = 'active' AND lease_expires_at_ms <= $1
-                AND publication_ready_at_ms != $2
+            "SELECT page.*, gate.takeover_enabled,
+                page.incarnation_id IS NOT NULL AS has_route FROM
+              (SELECT EXISTS (SELECT 1 FROM settings WHERE key = $1 AND value = '1')
+                  AND EXISTS (SELECT 1 FROM settings WHERE key = $2 AND value = '1')
+                  AS takeover_enabled) gate
+              LEFT JOIN (SELECT {route_cols} FROM media_sessions
+              WHERE state = 'active' AND lease_expires_at_ms <= $3
+                AND publication_ready_at_ms != $4
                 -- A draining predecessor is not work to inherit; the sweep
                 -- ends it. See the SQLite twin.
                 AND drain_deadline_ms IS NULL
@@ -5347,15 +5378,20 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND request.state = 'starting'
                     AND media_sessions.publication_ready_at_ms = 0
                     AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
-                AND ($3 = 0 OR lease_expires_at_ms > $4
-                  OR (lease_expires_at_ms = $4 AND incarnation_id > $5))
-              ORDER BY lease_expires_at_ms, incarnation_id LIMIT $6"
+                AND ($5 = 0 OR lease_expires_at_ms > $6
+                  OR (lease_expires_at_ms = $6 AND incarnation_id > $7))
+              ORDER BY lease_expires_at_ms, incarnation_id LIMIT $8) page
+              ON gate.takeover_enabled
+              ORDER BY page.lease_expires_at_ms, page.incarnation_id"
         );
         validate_sql(&sql)?;
-        self.session_client()
-            .query_consistent_map::<RouteRow, _>(
+        let rows = self
+            .session_client()
+            .query_consistent_map::<TakeoverInventoryRow, _>(
                 sql,
                 params!(
+                    crate::store::keys::CLUSTER_MEDIA_POOL_ENABLED,
+                    crate::store::keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
                     now_ms,
                     MEDIA_SESSION_PUBLICATION_BLOCKED,
                     has_cursor,
@@ -5364,10 +5400,20 @@ impl MediaSessionStore for HiqliteAuthStore {
                     limit
                 ),
             )
-            .await?
-            .into_iter()
-            .map(|row| row.0)
-            .collect()
+            .await?;
+        let mut enabled = false;
+        let mut routes = Vec::new();
+        for row in rows {
+            enabled = row.enabled?;
+            if let Some(route) = row.route {
+                routes.push(route?);
+            }
+        }
+        Ok(if enabled {
+            crate::domain::TakeoverInventory::Expired(routes)
+        } else {
+            crate::domain::TakeoverInventory::Disabled
+        })
     }
 
     async fn claim_media_session_takeover(

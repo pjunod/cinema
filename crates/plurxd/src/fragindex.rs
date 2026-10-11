@@ -3952,7 +3952,7 @@ mod tests {
                 .map(|row| row.video_bytes)
                 .collect();
             assert_eq!(
-                segplan::match_landing(&index, &observed),
+                segplan::match_landing(&index, &observed, start),
                 Ok(start),
                 "a real fixture's fragment byte counts must place a landing"
             );

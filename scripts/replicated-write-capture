@@ -394,9 +394,12 @@ def after_acquisition(raw, epoch, node, expected_build, source):
         observed = observation["epoch"]
         if type(observed) is not int or not 0 <= epoch - observed <= AFTER_TTL:
             raise ValueError("stale/future acquisition")
+        # Every boolean pair is admitted: since the takeover gate holds its
+        # answer between change signals, on/on reaches the bar by
+        # construction. The pair stays in the retained evidence and readout.
         pair = (observation["cluster_media_pool_enabled"], observation["cluster_session_takeover_enabled"])
-        if any(type(value) is not bool for value in pair) or all(pair):
-            raise ValueError("missing/malformed/on-on switch pair")
+        if any(type(value) is not bool for value in pair):
+            raise ValueError("missing/malformed switch pair")
         facts[identity] = observation
     return facts[node]
 
@@ -448,6 +451,7 @@ def evaluate_after(lines, evidence_dir, expected_build, source):
     previous_epoch = None
     row_count = 0
     previous = {}
+    switches = {}
     for row in reader:
         row_count += 1
         if row_count > 16384 or None in row or any(value is None for value in row.values()):
@@ -473,7 +477,9 @@ def evaluate_after(lines, evidence_dir, expected_build, source):
         metrics, _ = after_metrics(after_evidence(evidence_dir, row["metrics_sha256"], ".prom"))
         if row["build"] != expected_build or any(row[field] != value for field, value in metrics.items()):
             raise ValueError("sample does not match retained actual metrics/build")
-        after_acquisition(after_evidence(evidence_dir, row["acquisition_sha256"], ".json"), observed, node, expected_build, source)
+        fact = after_acquisition(after_evidence(evidence_dir, row["acquisition_sha256"], ".json"), observed, node, expected_build, source)
+        switches.setdefault(node, set()).add(
+            (fact["cluster_media_pool_enabled"], fact["cluster_session_takeover_enabled"]))
         if row["local_is_voter"] != "1" or any(row[field] != "0" for field in IDLE_ZERO):
             raise ValueError("not continuously idle/current voter")
         for field in AFTER_MONOTONIC:
@@ -498,6 +504,8 @@ def evaluate_after(lines, evidence_dir, expected_build, source):
             rates[field] = {"delta": delta, "elapsed_seconds": seconds, "per_day_numerator": delta * 86400,
                             "per_day_denominator": seconds, "per_day": delta * 86400 / seconds if seconds else None}
         rates["takeover_below_1500_per_day"] = bool(seconds and rates["takeover_started"]["per_day_numerator"] < 1500 * seconds)
+        rates["switch_pairs"] = [{"cluster_media_pool_enabled": pool, "cluster_session_takeover_enabled": takeover}
+                                 for pool, takeover in sorted(switches[node])]
         per_node[node] = rates
     eligible = overlap >= 43200
     return {"mode": "strict_after", "source_commit": source, "expected_build": expected_build,
@@ -550,8 +558,8 @@ def observe_after_tick(deployment_raw, deployment_digest, credentials, fetch, ep
         settings = json.loads(settings_raw, object_pairs_hook=unique)
         pair = {key: settings.get(key) for key in (
             "cluster_media_pool_enabled", "cluster_session_takeover_enabled")}
-        if any(type(value) is not bool for value in pair.values()) or all(pair.values()):
-            raise ValueError("actual switch pair missing/malformed/on-on")
+        if any(type(value) is not bool for value in pair.values()):
+            raise ValueError("actual switch pair missing/malformed")
         observed.append(dict(node=node, build=metrics["build"], source_commit=row["source_commit"],
                              epoch=epoch(), **pair))
         # Never return, log or persist the credential-bearing settings DTO.

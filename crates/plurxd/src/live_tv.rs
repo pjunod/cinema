@@ -28,6 +28,7 @@ use crate::live_tv_delivery::{
     LiveDeinterlaceOutput, LiveDeliveryPlan, LiveExecutionSupport, LivePackaging,
     LivePlaybackRequest, LiveQualityPolicy, LiveSourceFacts, LiveTrackAction,
 };
+use crate::settings_changes::SettingsChangeSource;
 use crate::state::SystemInfo;
 
 pub(crate) mod dvr;
@@ -3311,58 +3312,6 @@ enum StartPlanSource {
 
 impl StartPlanSource {
     const LABELS: [&'static str; 4] = ["cold", "joined", "warm_agreed", "warm_disagreed"];
-}
-
-/// What tells a parked settings observer that the replicated settings may
-/// have changed on another node.
-pub(crate) enum SettingsChangeSource {
-    /// Nothing but this process writes the settings (a single-node store), and
-    /// its saves reach `observe_config` themselves. No other process writes
-    /// Live TV settings into a running daemon's SQLite database: `restore`
-    /// runs only while the daemon is stopped, `reset-password` refuses, and
-    /// `refresh-metadata` writes no settings.
-    LocalOnly,
-    /// A replicated store whose Raft log is applied in another process: no
-    /// change signal reaches this one, so the observer reads every interval.
-    Polled,
-    /// This node's in-process Raft watch: a write anywhere in the cluster
-    /// moves the applied index once this replica applies it.
-    Applied(hiqlite::LocalDbRaftMetrics),
-    /// An applied index a test moves by hand.
-    #[cfg(test)]
-    Test(tokio::sync::watch::Receiver<u64>),
-}
-
-impl SettingsChangeSource {
-    fn applied_index(&self) -> Option<u64> {
-        match self {
-            Self::LocalOnly | Self::Polled => None,
-            Self::Applied(metrics) => metrics.snapshot().last_applied_index,
-            #[cfg(test)]
-            Self::Test(applied) => Some(*applied.borrow()),
-        }
-    }
-
-    /// Whether a change made elsewhere would be seen at all.
-    fn live(&self) -> bool {
-        match self {
-            Self::LocalOnly => true,
-            Self::Polled => false,
-            Self::Applied(metrics) => metrics.snapshot().running,
-            #[cfg(test)]
-            Self::Test(_) => true,
-        }
-    }
-
-    /// The next observation; `false` once the source can report none.
-    async fn changed(&mut self) -> bool {
-        match self {
-            Self::LocalOnly | Self::Polled => std::future::pending().await,
-            Self::Applied(metrics) => metrics.wait_for_change().await,
-            #[cfg(test)]
-            Self::Test(applied) => applied.changed().await.is_ok(),
-        }
-    }
 }
 
 /// One node's latest validated reading of the replicated Live TV settings.

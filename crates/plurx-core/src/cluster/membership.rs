@@ -13979,6 +13979,17 @@ mod tests {
     }
 
     fn publish_clock_round(guard: &ClusterClockGuard, roster: &ClockPeerRoster, bounded: &[u64]) {
+        let at_zero: Vec<_> = bounded.iter().map(|raft_id| (*raft_id, 0)).collect();
+        publish_clock_offsets(guard, roster, &at_zero);
+    }
+
+    /// One complete round: each listed peer is measured at its offset (µs)
+    /// with 1 ms uncertainty; every other peer is `Unknown`.
+    fn publish_clock_offsets(
+        guard: &ClusterClockGuard,
+        roster: &ClockPeerRoster,
+        bounded: &[(u64, i64)],
+    ) {
         let round = guard
             .roster_for_peer_directory(roster)
             .expect("exact directory");
@@ -13986,14 +13997,13 @@ mod tests {
             .peers
             .iter()
             .map(|peer| {
-                let observation = if bounded.contains(&peer.raft_id) {
-                    PeerClockOffset::Bounded {
-                        offset_us: 0,
+                let observation = match bounded.iter().find(|(id, _)| *id == peer.raft_id) {
+                    Some((_, offset_us)) => PeerClockOffset::Bounded {
+                        offset_us: *offset_us,
                         uncertainty_us: 1_000,
                         observed_at: std::time::Instant::now(),
-                    }
-                } else {
-                    PeerClockOffset::Unknown
+                    },
+                    None => PeerClockOffset::Unknown,
                 };
                 (peer.node_id.clone(), observation)
             })
@@ -14049,6 +14059,55 @@ mod tests {
             ),
             Err(ClockRefusal::Unknown),
             "an unobserved surviving voter is never excused"
+        );
+    }
+
+    /// The voters-only rule applies to the surviving set of a fenced
+    /// removal: a learner measured at +10 s does not block removing a dead
+    /// voter, and the skewed learner itself stays removable. A surviving
+    /// VOTER over the bound still refuses.
+    #[test]
+    fn k06_fenced_removal_ignores_a_skewed_surviving_learner_not_a_voter() {
+        const STEPPED_US: i64 = 10_000_000;
+        let (guard, roster) = clock_fixture(&[1, 2, 3, 4], &[1, 2, 3], true);
+        // Voter 2 is dead (unobserved), voter 3 bounded, learner 4 at +10 s.
+        publish_clock_offsets(&guard, &roster, &[(3, 0), (4, STEPPED_US)]);
+        let captured = guard.capture_removal_raft(2).expect("exact capture");
+        assert_eq!(
+            guard.admit_fenced_removal(
+                &captured,
+                &removal_fence(2, RemovalFenceEvidence::AuthoritativeUnreachable)
+            ),
+            Ok(()),
+            "a skewed surviving learner must not block removing a dead voter"
+        );
+        drop(captured);
+        // Every voter bounded: the stepped learner is itself removable.
+        publish_clock_offsets(&guard, &roster, &[(2, 0), (3, 0), (4, STEPPED_US)]);
+        let captured = guard.capture_removal_raft(4).expect("exact capture");
+        assert_eq!(
+            guard.admit_fenced_removal(
+                &captured,
+                &removal_fence(4, RemovalFenceEvidence::TargetApplied)
+            ),
+            Ok(()),
+            "the skewed learner itself stays removable"
+        );
+        drop(captured);
+        // Voter 3 stepped instead; the learner is within the bound.
+        publish_clock_offsets(&guard, &roster, &[(3, STEPPED_US), (4, 0)]);
+        let captured = guard.capture_removal_raft(2).expect("exact capture");
+        assert_eq!(
+            guard.admit_fenced_removal(
+                &captured,
+                &removal_fence(2, RemovalFenceEvidence::AuthoritativeUnreachable)
+            ),
+            Err(ClockRefusal::Offset),
+            "a surviving voter over the bound still refuses the removal"
+        );
+        assert_eq!(
+            counter(&guard, "plurx_cluster_clock_refusals_total", "offset"),
+            "1"
         );
     }
 
