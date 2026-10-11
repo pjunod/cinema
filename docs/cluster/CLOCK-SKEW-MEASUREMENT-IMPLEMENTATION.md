@@ -185,6 +185,7 @@ operational acceptance remain open until actually recorded.
 
 | Date | Model | Session | Milestone | Outcome / evidence |
 |---|---|---|---|---|
+| 2026-10-11 | claude-opus-5-5 | https://claude.ai/code/session_0158MVmDzgMccTLGCMdYLHXA | Post-#983 ten-minute window | On `05bf60381` (slow intersecting probes Bounded by their own interval; voter-only cluster bound): media1, lab4 and lab3 flat; lab6 +1 unknown round and +5 enforced `expiry_scan` unknown refusals in one burst at 00:42:50–00:43:50 UTC, flat for the remaining ten minutes, cause undetermined; max \|offset\|+uncertainty 0.003 s on every pair ([fleet evidence](../reviews/ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-10-11.md#k-06-cluster-clock)). A post-deploy point window, not the 24-hour, loaded or drill bar. |
 | 2026-10-01 | gpt-6.1-sol | agent:/root/s14_resume_sol61 | E0 sequencing clarification | `codex/k06-pure-clock-policy` prepares core policy only on current effort. No production consumer or measurement receipt is invented; an identified owned-lab artifact is eligible for the unchanged observation safety bar, not main/fleet qualification. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M0–M2 measurement runtime | `codex/k06-measurement-runtime`, based on effort `8a7dbf533`; exact signed exchange, core continuity/generations, roster/filter observer, passive metrics and read-only Developer facts implemented. §4.1 records focused development proofs. Sole review, release gate and identified fleet evidence remain open. |
 
