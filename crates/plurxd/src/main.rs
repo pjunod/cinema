@@ -671,7 +671,10 @@ async fn dispatch(
                 .await?;
                 println!("{}", serde_json::to_string_pretty(&report)?);
                 eprintln!(
-                    "restore created a fenced first voter; stop every surviving old voter and rename its hiqlite directory before directing clients here"
+                    "restore created a fenced first voter; before directing clients here, stop \
+                     every surviving old member and move its whole data directory aside, then \
+                     rejoin each one by starting it with an empty data directory and a fresh join \
+                     token issued by this voter"
                 );
                 Ok(())
             }

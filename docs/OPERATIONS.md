@@ -480,13 +480,27 @@ archive age at failure as RPO and time from restore start to readiness plus
 rejoin completion as RTO.
 
 Before directing production clients at the restored voter, stop every
-surviving old voter and rename its `hiqlite/` directory to
-`hiqlite.retired-<UTC>`. The restore keeps `instance.id` for clients but mints a
-new node id and new Raft/API/signing secrets; retiring the old directories is
-the procedural half of that fence. Start the restored voter, check `/readyz`,
-then issue fresh join tokens and rejoin the other machines. Never start an old
-directory beside the restored lineage and never restore over a live or
-existing `hiqlite/` target.
+surviving old member and move its **whole data directory** aside — for
+example `mv /srv/plurx /srv/plurx.retired-<UTC>` — and keep it as evidence.
+Renaming only `hiqlite/` does not work: the directory still holds
+`hiqlite-activated.json`, so the daemon refuses to start rather than
+re-import the stale `plurx.db` beside it, and a join refuses any directory
+that still holds a `plurx.db`. The restore keeps `instance.id` for clients but
+mints a new node id and new Raft/API/signing secrets; retiring the old
+directories is the procedural half of that fence.
+
+Start the restored voter and wait for `/readyz` 200. On its first boot it
+publishes a state-machine snapshot that covers the restored image before it
+serves, because its Raft log begins at the restore and cannot replay the
+restored rows to anyone; a joining member is sent that snapshot. Then issue a
+fresh join token on the restored voter for each other machine, and start each
+one with an **empty** data directory at its configured path and the token in
+its `join_token_file`. Join admission answers `restored_image_not_transferable`
+(503) while a restored node has not published that snapshot, which a cluster
+that is joined the way this section says never reaches; if it appears, run
+`plurxd cluster backup` against the leader (it publishes one) and retry. Never
+start an old directory beside the restored lineage and never restore over a
+live or existing `hiqlite/` target.
 
 ### Upgrading an activated v5, v6, v7, or v8 cluster to v9
 

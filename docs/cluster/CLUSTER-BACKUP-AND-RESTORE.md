@@ -283,9 +283,14 @@ can replicate with it or be admitted by it, and every old `membership.json`
 names peers that no longer answer with the same secret. That is the
 mechanical fence. The procedural fence is written into the runbook and
 enforced by the restore command's output: before clients are pointed at the
-restored instance, every surviving old node's `hiqlite/` is renamed to
-`hiqlite.retired-<UTC>` with the daemon stopped, and rejoins through a fresh
-join token like any new node. `restore` additionally binds one parameter,
+restored instance, every surviving old node is stopped and its whole data
+directory is moved aside, and it rejoins with an empty data directory and a
+fresh join token like any new node. *(Corrected 2026-10-11, drill F3: this
+said to rename only `hiqlite/` to `hiqlite.retired-<UTC>`. Startup refuses
+that directory — `hiqlite-activated.json` without `hiqlite/` is the
+"already activated, refusing to re-import" case — before it reads
+`join_token_file`, and a join refuses a directory that still holds
+`plurx.db`.)* `restore` additionally binds one parameter,
 `settings.cluster.restore_generation = <built_at_unix_ms>`, into the image
 before activation so the Cluster page can say "restored from
 2026-09-20T02:30Z artefact" and a support bundle can prove which lineage a
@@ -438,8 +443,8 @@ rejoins without any restore step; (2) stop lab1 and lab2, on lab4 with an
 empty /srv/plurx run `plurxd restore --archive <latest> --data-dir
 /srv/plurx --advertise-host 10.42.0.14`, start it, log in with a token that
 existed before the loss, open Home and one title, report DVR schedule count
-and Trakt link status; then stop lab3, rename its hiqlite/ to
-hiqlite.retired-<UTC>, issue a join token on lab4 and rejoin lab3. Report:
+and Trakt link status; then stop lab3, move its whole data directory aside,
+issue a join token on lab4 and rejoin lab3 from an empty data directory. Report:
 DB size, artefact bytes, minutes from restore start to /readyz 200, minutes
 to lab3 voter again, and anything the restore command told you to do that
 you did not expect.
@@ -597,8 +602,9 @@ without Paul's explicit go-ahead in chat for that step):
 D. Production majority loss (DESTRUCTIVE; only with Paul's explicit go-ahead). Stop two
    voters, restore the latest artefact onto the designated first voter's EMPTY data dir
    with its production --advertise-host, start it, `/readyz` 200, then on every other
-   node stop plurxd, rename hiqlite/ to hiqlite.retired-<UTC>, and rejoin with a fresh
-   join token (docs/OPERATIONS.md "Backing up and restoring an activated cluster").
+   node stop plurxd, move its whole data directory aside, and rejoin from an empty data
+   directory with a fresh join token (docs/OPERATIONS.md "Backing up and restoring an
+   activated cluster").
    RTO = restore start to /readyz 200 plus last rejoin as voter. Writes newer than the
    artefact on the survivors are discarded by design (§7 Q4).
 ```

@@ -589,7 +589,10 @@ pub async fn select_daemon_store_observing(
             "{} was already activated as cluster {} but {} is missing: refusing to \
              re-import {}, which is the pre-activation rollback source and would \
              discard every change since. Restore the replicated target from a copy, \
-             or delete {} to deliberately accept that rollback and its data loss",
+             or delete {} to deliberately accept that rollback and its data loss. To \
+             rejoin a cluster instead (for example one restored from a backup), move \
+             this whole data directory aside and start this node with an empty one \
+             and a fresh join token",
             config.storage.data_dir.display(),
             record.cluster_id,
             active.display(),

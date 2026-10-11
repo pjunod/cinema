@@ -19265,6 +19265,14 @@ async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
         error.contains(&breadcrumb.display().to_string()),
         "refusal must name the file to delete to accept the rollback: {error}"
     );
+    // Drill F3 (2026-10-11): the restore runbook renamed only `hiqlite/`,
+    // which lands exactly here. Rejoining a cluster takes the whole directory
+    // aside, and the refusal has to say so.
+    assert!(
+        error.contains("move this whole data directory aside")
+            && error.contains("fresh join token"),
+        "refusal must name the rejoin procedure: {error}"
+    );
     assert!(
         !fixture.path().join("hiqlite.incoming").exists(),
         "the refusal must not stage an import"
