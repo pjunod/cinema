@@ -2919,7 +2919,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # stop token, and drops its permit and child before it returns. Three are
 # test-only: the census driven on a test task in the queued, stop and yield
 # regressions, each joined before the test ends.
-expected_occurrences = 941
+# +1 test-only: `rolling_fallback_starts_from_a_source_replaced_after_the_vod_attempt`
+# (vodencode_manager_tests.rs) drives the create on one spawned task that the
+# test holds at the fallback hook and then awaits; it owns no producer.
+# +1 test-only: its candidate-route twin drives the same way.
+# +2 test-only for the census review: the heavy-gate queue test and the
+# stopped-run test each drive the census on one joined task.
+expected_occurrences = 945
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4464,7 +4470,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # census task, end with it, and own no producer. Six are test-only: the
 # `settle` and two child-started waits' `sleep`, the queued test's
 # `sleep(POLL * 3)`, and two `timeout`s bounding the stop and yield tests.
-expected_occurrences = 1701
+# +4 test-only for the census review: the heavy-gate test's `sleep(POLL * 3)`,
+# the stopped-run test's polling sleep and its `timeout`, and the
+# no-hardware test's `timeout` that proves it fails without waiting.
+expected_occurrences = 1705
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4895,7 +4904,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # starts (signal encode, graph runs, stills) goes through pipeprobe's existing
 # `Spawn::command` constructor and its two `output_job_owned` calls, under its
 # own Activity purpose ("tone-map census"). No new constructor or launcher.
-expected_occurrences = 259
+# +1 test-only: the same regression writes its replacement source with one
+# awaited `Command::new(ffmpeg())` through `testfixtures::run`; no producer.
+# +1 test-only: the candidate-route twin writes its replacement the same way.
+expected_occurrences = 261
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
