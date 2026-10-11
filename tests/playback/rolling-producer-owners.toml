@@ -4931,7 +4931,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # P-02 zombie read-back (process/priority.rs): +1, test-only: the same `true` child, constructed with
 # `std::process::Command::new` so it is not registered at spawn.
 # +2 from effort/startup-tone-map (tone-map census and the create-path regressions; reviewed in its commits).
-expected_occurrences = 262
+# Shared-read indexing (+1, test-only): the fragindex differential builds its
+# plain HEVC fixture with one `Command::new(ffmpeg)` it runs to completion
+# with `.output()`; it owns no producer.
+expected_occurrences = 263
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5546,7 +5549,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # fallback itself launches nothing.
 # P-02 zombie read-back (process/priority.rs): +1, test-only: the same child's `.spawn()`; not a second
 # child.
-expected_occurrences = 749
+# Shared-read indexing (+1, test-only): that fixture command's `.output()`,
+# awaited to completion in the test.
+expected_occurrences = 750
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
