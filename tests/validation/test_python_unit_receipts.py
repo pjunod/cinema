@@ -298,16 +298,34 @@ class Case(Helper, unittest.TestCase):
                 with self.assertRaisesRegex(receipts.ReceiptError, "CLI applicability"):
                     receipts.execute(journal(), Path(root) / "receipt.json")
             discovery.assert_not_called()
+        # The run step re-proves every prepared pass. A pass that now differs,
+        # or whose recheck cannot complete (a git timeout), is executed; it is
+        # neither retained nor a refusal.
+        timed_out = {"commit": "e" * 40, "run": 8}
+
+        def slow_reader(commit, path):
+            if commit == timed_out["commit"]:
+                with patch.object(receipts.subprocess, "check_output",
+                                  side_effect=subprocess.TimeoutExpired("git", 5)):
+                    return receipts.read_git_test_source(commit, path)
+            return source_reader(commit, path)
         raw_state = {**journal(), "commit": current_commit,
                      "applicability_commit": current_commit,
-                     "passes": {changed: old_pass}}
-        with patch.object(receipts, "SourceApplicability", return_value=guard()), \
-                patch.object(receipts, "discover") as discovery, \
-                patch("sys.stdout", new=io.StringIO()):
+                     "passes": {changed: old_pass, unchanged: old_pass, other: timed_out}}
+        events = []
+        inventory = {"validation": [Fake(changed.split(":", 1)[1], events),
+                                    Fake(unchanged.split(":", 1)[1], events)],
+                     "operations": [Fake(other.split(":", 1)[1], events)]}
+        with patch.object(receipts, "SourceApplicability", return_value=receipts.SourceApplicability(
+                    current_commit, slow_reader, current_files.__getitem__)), \
+                patch.object(receipts, "discover", side_effect=inventory.__getitem__), \
+                patch("sys.stderr", new=io.StringIO()), patch("sys.stdout", new=io.StringIO()) as log:
             with tempfile.TemporaryDirectory() as root:
-                with self.assertRaisesRegex(receipts.ReceiptError, "lack current applicability"):
-                    receipts.execute(raw_state, Path(root) / "receipt.json")
-            discovery.assert_not_called()
+                self.assertEqual(receipts.execute(raw_state, Path(root) / "receipt.json"), 0)
+        self.assertEqual(events, [changed.split(":", 1)[1], other.split(":", 1)[1]])
+        self.assertEqual(raw_state["passes"][unchanged], old_pass)
+        self.assertEqual(raw_state["passes"][other], {"commit": current_commit, "run": 10})
+        self.assertIn("unavailable in this checkout", log.getvalue())
         source = Path(receipts.__file__).read_text()
         self.assertIn("applicability=SourceApplicability(commit)", source)
         self.assertIn('"applicability_commit": commit', source)
@@ -756,6 +774,7 @@ class ReceiptHistoryCase(unittest.TestCase):
         "receipt job ambiguous": dict(jobs_edit=lambda jobs: jobs.append(dict(jobs[0]))),
         "receipt job in another repository": dict(jobs_edit=lambda jobs: jobs[0].update(repo_id=8)),
         "receipt job absent": dict(job=False),
+        "receipt job still running": dict(jobs_edit=lambda jobs: jobs[0].update(status="running")),
         "final journal expired": dict(final_item={"expired": True}),
         "final journal under another name": dict(final_item={"name": receipts.key(SCOPE) + "-x"}),
         "final journal from another producer": dict(final_edit=lambda v: v.update(scope={**SCOPE, "pr": 43})),
@@ -821,7 +840,56 @@ class ReceiptHistoryCase(unittest.TestCase):
         restored, log = self.restore(api)
         self.assertEqual(restored, {**ok("test_x", 49, OLD), **ok("test_z", 51, NEW)})
         self.assertIn("Run 50: journal not adopted — start marker missing", log)
-        self.assertIn("Run 51: 1 inherited record(s) not adopted — the run each names was not adopted", log)
+        self.assertIn("Run 51: 1 inherited record(s) not adopted — no adopted run recorded it as its own pass", log)
+
+    def test_inherited_record_the_named_run_never_recorded_is_dropped(self):
+        api = HistoryAPI().add(59, OLD, ok("test_r", 59, OLD))
+        api.add(60, OLD, {**ok("test_p", 60, OLD), **ok("test_r", 59, OLD)})
+        # Run 61 credits run 60 with a pass run 60 never recorded, and with
+        # one that run 60 only inherited from run 59.
+        api.add(61, NEW, {**ok("test_q", 60, OLD), **ok("test_r", 60, OLD),
+                          **ok("test_p", 60, OLD), **ok("test_s", 61, NEW)})
+        restored, log = self.restore(api)
+        self.assertEqual(restored, {**ok("test_p", 60, OLD), **ok("test_r", 59, OLD),
+                                    **ok("test_s", 61, NEW)})
+        self.assertIn("Run 61: 2 inherited record(s) not adopted", log)
+
+    def test_transport_failure_fetching_old_journal_is_not_adopted(self):
+        """The real API transport: a reset or a truncated body never refuses."""
+        import http.client
+        import urllib.parse
+        history = HistoryAPI().add(70, OLD, ok("test_a", 70, OLD))
+        history.add(71, NEW, ok("test_b", 71, NEW))
+        broken = f"/actions/artifacts/{history.finals[0]['id']}/zip"
+
+        for failure in (ConnectionResetError("reset by fixture-token peer"),
+                        http.client.IncompleteRead(b"partial-secret")):
+            class Opener:
+                def open(self, request, timeout):
+                    self.headers = dict(request.header_items())
+                    url = urllib.parse.urlsplit(request.full_url)
+                    path = url.path.removeprefix("/api/v1/repos/owner/repo")
+                    query = dict(urllib.parse.parse_qsl(url.query))
+                    if path == broken:
+                        raise failure
+                    if path in history.zips:
+                        return io.BytesIO(history.zips[path])
+                    page = int(query.pop("page"))
+                    query.pop("limit")
+                    if path == "/actions/runs":
+                        body = {"workflow_runs": history.pages(path, query) if page == 1 else []}
+                    else:
+                        body = history.pages(path, query) if page == 1 else []
+                    return io.BytesIO(json.dumps(body).encode())
+            api = receipts.API("https://forge.example.test/api/v1", "owner/repo", "fixture-token")
+            api.opener = Opener()
+            with self.subTest(failure=type(failure).__name__):
+                restored, log = self.restore(api)
+                self.assertEqual(restored, ok("test_b", 71, NEW))
+                self.assertIn(f"Run 70: journal not adopted — {type(failure).__name__} at "
+                              f"/repos/owner/repo{broken}; evidence unavailable", log)
+                self.assertNotIn("secret", log)
+                self.assertNotIn("fixture-token", log)
 
     def test_current_run_integrity_still_refuses(self):
         api = HistoryAPI().add(40, OLD, ok("test_a", 40, OLD)).add(99, NEW, ok("test_b", 99, NEW))

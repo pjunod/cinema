@@ -11,6 +11,7 @@ import argparse
 import ast
 import copy
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -150,6 +151,12 @@ class API:
         except urllib.error.HTTPError as error:
             # Never include URL query, response body, headers, reason or token.
             raise ReceiptHTTPError(error.code, "/repos/" + self.repository + path) from None
+        except (OSError, http.client.HTTPException) as error:
+            # Resets, timeouts, URLError and truncated bodies are unavailable
+            # evidence like any other: history is not adopted, the current
+            # run refuses. Name only the exception type and normalized path.
+            raise ReceiptError(f"{type(error).__name__} at /repos/{self.repository}{path}; "
+                               "evidence unavailable") from None
         require(len(data) <= MAX_BYTES, "API response exceeds limit")
         return data
 
@@ -538,6 +545,9 @@ def authenticate_journal(api, scope, artifact, prior):
             "ambiguous receipt job identity")
     # A re-run attempt shares the run id; its outcomes are not attributable.
     require(matching[0]["attempt"] == 1, "receipt job was re-run")
+    # A job still running may have uploaded a partial journal.
+    require(matching[0]["status"] in ("success", "failure", "cancelled"),
+            "receipt job has not finished")
     markers = api.pages("/actions/artifacts", {"name": key(scope) + f"-start-{rid}"})
     require(len(markers) == 1 and markers[0]["run_id"] == rid and not markers[0]["expired"],
             "start marker missing, duplicated or expired")
@@ -601,11 +611,17 @@ def restore(api, scope, run, applicability=None):
             raise
         except NOT_ADOPTED as error:
             not_adopted(f"Run {rid}: journal", error)
-    trusted = {(rid, journal["commit"]) for rid, journal in journals.items()}
+    def originated(test_key, source):
+        # The adopted journal of the run a record names must itself hold that
+        # exact record as its own pass; an adopted run vouches for nothing else.
+        origin = journals.get(source["run"])
+        return (origin is not None and origin["commit"] == source["commit"]
+                and origin["passes"].get(test_key) == source)
+
     for rid, journal in journals.items():
         dropped = 0
         for test_key, source in journal["passes"].items():
-            if not ((source["run"], source["commit"]) in trusted
+            if not (originated(test_key, source)
                     or (test_key, json.dumps(source, sort_keys=True)) in attributions):
                 dropped += 1
                 continue
@@ -613,7 +629,7 @@ def restore(api, scope, run, applicability=None):
                 passes.setdefault(test_key, source)
         if dropped:
             not_adopted(f"Run {rid}: {dropped} inherited record(s)",
-                        "the run each names was not adopted")
+                        "no adopted run recorded it as its own pass")
     if applicability is not None:
         applicability.finish(passes)
     return passes
@@ -766,12 +782,14 @@ def execute(journal, path, suites=None):
     if suites is None:
         require(journal.get("applicability_commit") == journal.get("commit"),
                 "Production unit execution requires current CLI applicability prepare")
+        # Re-prove every prepared pass. One that cannot be re-proved now (a
+        # git timeout, a changed source) is executed, never retained and
+        # never a refusal.
         applicability = SourceApplicability(sha(journal["commit"]))
         applicable = {test_key: source for test_key, source in journal["passes"].items()
                       if applicability(test_key, source)}
         applicability.finish(applicable)
-        require(applicable == journal["passes"],
-                "Prepared passes lack current applicability; prepare again")
+        journal["passes"] = applicable
     require(not journal.get("fixture_errors"), "Unresolved fixture error; never rerun successful methods")
     journal.setdefault("fixture_errors", [])
     # Discovery is an all-suite precondition: no first-suite successes before
