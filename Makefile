@@ -1606,6 +1606,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node tests/web/asset-layout.test.js
 	@node --test tests/web/continuous-media-worker.test.js
 	@node --test tests/web/hitch-lifecycle.test.js
+	@node --test tests/web/section-nav.test.js
 
 ## ---- packaging & setup -------------------------------------------------
 

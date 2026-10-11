@@ -681,6 +681,9 @@ function dvrIndicatorText(value,fresh=dvrOverviewFresh(value,DVR_SHARED.received
 }
 function dvrPaintGlobal(){
   const mount=document.getElementById("dvr-global");if(!mount)return;
+  // The header indicator is part of the Recordings section's nav presence:
+  // with the DVR switch off it stays dark (.dvr-global without .on is hidden).
+  if(!featureVisible("recordings")){mount.className="dvr-global";mount.innerHTML="";mount.title="DVR status";return;}
   const value=DVR_SHARED.overview, fresh=dvrOverviewFresh(value,DVR_SHARED.receivedAt);
   const unavailable=!fresh;
   const text=dvrIndicatorText(value,fresh);

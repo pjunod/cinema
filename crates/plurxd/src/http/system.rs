@@ -113,6 +113,65 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
     }))
 }
 
+/// The optional sections a signed-in client may list in its navigation.
+///
+/// Each client builds its top-level navigation from this, so a section whose
+/// switch is off is not offered. The switches themselves live in the
+/// admin-only `/settings`; this is the read every viewer needs, carrying
+/// nothing but the four booleans. It decides presentation only: the routes
+/// stay reachable and answer with their own "turned off" state.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct FeaturesDto {
+    /// Live TV (`live_tv.enabled`).
+    pub live_tv: bool,
+    /// Recordings follow the DVR switch (`dvr.enabled`).
+    pub recordings: bool,
+    /// Libraries other Cinemas share with this one (`sharing_enabled`).
+    pub shared_libraries: bool,
+    /// Library channels (`library_channels.enabled`).
+    pub library_channels: bool,
+}
+
+impl FeaturesDto {
+    /// The only settings `from_snapshot` reads.
+    const KEYS: [&'static str; 4] = [
+        keys::LIVE_TV_ENABLED,
+        keys::DVR_ENABLED,
+        keys::SHARING_ENABLED,
+        keys::LIBRARY_CHANNELS_ENABLED,
+    ];
+
+    /// Read with the same parsers `/settings` uses, so the navigation and the
+    /// Settings switches can never disagree about one stored value.
+    pub(crate) fn from_snapshot(settings: &BTreeMap<String, String>, node_id: &str) -> Self {
+        let setting = |key: &str| settings.get(key).map(String::as_str);
+        Self {
+            live_tv: crate::live_tv::LiveTvConfig::from_snapshot(settings, node_id).enabled,
+            recordings: crate::live_tv::DvrConfig::from_snapshot(settings).enabled,
+            shared_libraries: plurx_core::store::stored_switch(
+                setting(keys::SHARING_ENABLED),
+                false,
+            ),
+            library_channels: plurx_core::store::stored_switch(
+                setting(keys::LIBRARY_CHANNELS_ENABLED),
+                false,
+            ),
+        }
+    }
+}
+
+/// GET /api/v1/features — any signed-in user.
+pub async fn features(
+    AuthUser(_user): AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<FeaturesDto>, ApiError> {
+    // Every client reads this on each home load, so it names its four keys
+    // instead of taking the whole settings table, which grows with the
+    // catalogue. One snapshot keeps the four mutually consistent.
+    let settings = state.store.get_settings(&FeaturesDto::KEYS).await?;
+    Ok(Json(FeaturesDto::from_snapshot(&settings, &state.node_id)))
+}
+
 #[derive(Deserialize)]
 pub struct SetupRequest {
     pub username: String,

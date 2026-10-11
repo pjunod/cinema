@@ -1,13 +1,36 @@
 "use strict";
+// ---- section visibility ---------------------------------------------------
+// The top-level nav of every layout reflects the server's enable switches: a
+// section whose switch is off is not offered as a tab. Only the nav — the
+// routes stay reachable, so a deep link or bookmark to #/live-tv with Live TV
+// off still lands on that page's own disabled state. Sections without a
+// switch (Home, Activity, Settings, Libraries, Search) are always shown, and
+// so is everything while FEATURES is unknown (see loadFeatures()).
+const NAV_FEATURES={"shared":"shared_libraries","live-tv":"live_tv","recordings":"recordings","library-channels":"library_channels"};
+function featureVisible(tab){
+  const key=Object.prototype.hasOwnProperty.call(NAV_FEATURES,tab)?NAV_FEATURES[tab]:null;
+  return !key||!FEATURES||FEATURES[key]!==false;
+}
 // ---- chrome ---------------------------------------------------------------
+function classicNavHtml(active){
+  const link=(tab,href,label)=>featureVisible(tab)?`<a href="${href}" class="${active===tab?'active':''}">${label}</a>`:"";
+  return link("home","#/","Home")+link("shared","#/shared","Shared libraries")+link("live-tv","#/live-tv","Live TV")
+    +link("recordings","#/recordings","Recordings")+link("library-channels","#/library-channels","Library channels")
+    +link("activity","#/activity","Activity")+(ME&&ME.is_admin?link("settings","#/settings","Settings"):"");
+}
+// A switch flipped in Settings repaints the section links in place: the page
+// under them (the Settings card the admin just saved) is left alone.
+function classicNavChanged(active){
+  const nav=document.querySelector("header.top > nav");
+  if(nav) nav.innerHTML=classicNavHtml(active);
+}
 function classicChrome(active, inner){
   const searchFocus=captureSearchFocus();
-  const admin = ME&&ME.is_admin ? `<a href="#/settings" class="${active==='settings'?'active':''}">Settings</a>`:"";
   const getapp = installAvailable() ? `<button class="ghost sm getappbtn" onclick="showInstall()" title="Install the ${APP_NAME} app">Get app</button>` : "";
   document.getElementById("app").innerHTML=`
    <header class="top${getQ()||searchFocus?' search-open':''}">
      <a href="#/" class="logo">${APP_NAME}</a>
-     <nav><a href="#/" class="${active==='home'?'active':''}">Home</a><a href="#/shared" class="${active==='shared'?'active':''}">Shared libraries</a><a href="#/live-tv" class="${active==='live-tv'?'active':''}">Live TV</a><a href="#/recordings" class="${active==='recordings'?'active':''}">Recordings</a><a href="#/library-channels" class="${active==='library-channels'?'active':''}">Library channels</a><a href="#/activity" class="${active==='activity'?'active':''}">Activity</a>${admin}</nav>
+     <nav>${classicNavHtml(active)}</nav>
      <span class="spacer"></span>
      <button class="dvr-global" id="dvr-global" onclick="location.hash='#/activity'" aria-label="Recording status"></button>
      <span class="activity" id="activity" onclick="location.hash='#/activity'"></span>
