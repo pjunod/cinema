@@ -327,15 +327,16 @@ async fn wait_ready(client: &reqwest::Client, daemon: &mut Daemon, port: u16) {
     }
 }
 
-async fn wait_for_two_voters(
+async fn wait_for_voters(
     client: &reqwest::Client,
     daemon: &mut Daemon,
     base: &str,
     token: &str,
+    count: usize,
 ) -> Value {
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
-        daemon.assert_running("waiting for two voters");
+        daemon.assert_running("waiting for voters");
         if let Ok(response) = client
             .get(format!("{base}/api/v1/cluster/nodes"))
             .bearer_auth(token)
@@ -343,15 +344,17 @@ async fn wait_for_two_voters(
             .await
         {
             if let Ok(body) = response.json::<Value>().await {
-                if body["nodes"]
-                    .as_array()
-                    .is_some_and(|nodes| nodes.len() == 2)
-                {
+                if body["nodes"].as_array().is_some_and(|nodes| {
+                    nodes.len() == count
+                        && nodes
+                            .iter()
+                            .all(|node| node["is_voter"].as_bool() == Some(true))
+                }) {
                     return body;
                 }
             }
         }
-        assert!(Instant::now() < deadline, "two-voter join timed out");
+        assert!(Instant::now() < deadline, "{count}-voter join timed out");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -675,7 +678,7 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
     b_api.release();
     let mut node_b = Daemon::spawn(&b_config, root.path().join("node-b.log"), "plurx-node-b");
     wait_ready(&client, &mut node_b, b_http_port).await;
-    let roster = wait_for_two_voters(&client, &mut node_a, &a_base, &token).await;
+    let roster = wait_for_voters(&client, &mut node_a, &a_base, &token, 2).await;
     let local_node = roster["local_node_id"].as_str().expect("local node id");
     let remote_node = roster["nodes"]
         .as_array()
@@ -1344,7 +1347,7 @@ async fn start_two_voters(client: &reqwest::Client, root: &Path) -> TwoVoters {
     let mut node_b = Daemon::spawn(&b_config, root.join("node-b.log"), "plurx-node-b");
     wait_ready(client, &mut node_b, b_http).await;
     let b_base = format!("http://127.0.0.1:{b_http}");
-    let roster = wait_for_two_voters(client, &mut node_a, &a_base, &token).await;
+    let roster = wait_for_voters(client, &mut node_a, &a_base, &token, 2).await;
     TwoVoters {
         node_a,
         node_b,
@@ -1521,4 +1524,147 @@ async fn simultaneous_sign_outs_through_both_voters_both_revoke() {
             );
         }
     }
+}
+
+/// Join one more voter through node A, returning it and its base URL.
+async fn join_voter(
+    client: &reqwest::Client,
+    root: &Path,
+    voters: &TwoVoters,
+    name: &str,
+) -> (Daemon, String) {
+    let mut reserved = reserved_ports(3);
+    let [http, raft, api] = std::array::from_fn(|index| reserved[index].port);
+    let issued = client
+        .post(format!("{}/api/v1/cluster/join-tokens", voters.a_base))
+        .bearer_auth(&voters.token)
+        .json(&json!({"expires_in_seconds":600}))
+        .send()
+        .await
+        .expect("issue join token");
+    assert_eq!(issued.status(), StatusCode::OK);
+    let join_token = issued.json::<Value>().await.expect("join-token JSON")["token"]
+        .as_str()
+        .expect("join token")
+        .to_owned();
+    let data = root.join(name);
+    std::fs::create_dir_all(&data).expect("joiner data");
+    let join_file = root.join(format!("{name}.join"));
+    std::fs::write(&join_file, format!("{join_token}\n")).expect("write join token");
+    std::fs::set_permissions(&join_file, Permissions::from_mode(0o600))
+        .expect("protect join token");
+    let config = root.join(format!("{name}.toml"));
+    std::fs::write(
+        &config,
+        two_voter_config(http, &data, raft, api, Some(&join_file)),
+    )
+    .expect("joiner config");
+    for port in &mut reserved {
+        port.release();
+    }
+    let mut daemon = Daemon::spawn(
+        &config,
+        root.join(format!("{name}.log")),
+        &format!("plurx-{name}"),
+    );
+    wait_ready(client, &mut daemon, http).await;
+    (daemon, format!("http://127.0.0.1:{http}"))
+}
+
+/// CLUSTER-DRILLS-2026-10-11 F2: an operator removes a follower from three
+/// voters, on the schema the daemon really creates. The removal proof once
+/// read `last_applied_index` from `cluster_nodes`, which has no such column,
+/// so every removal answered 503 and no lost member could be replaced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_operator_removes_a_follower_from_three_voters() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let mut voters = start_two_voters(&client, root.path()).await;
+    let (node_c, c_base) = join_voter(&client, root.path(), &voters, "node-c").await;
+    let roster = wait_for_voters(
+        &client,
+        &mut voters.node_a,
+        &voters.a_base,
+        &voters.token,
+        3,
+    )
+    .await;
+    let mut bases = Vec::new();
+    for base in [&voters.a_base, &voters.b_base, &c_base] {
+        let own: Value = client
+            .get(format!("{base}/api/v1/cluster/nodes"))
+            .bearer_auth(&voters.token)
+            .send()
+            .await
+            .expect("own roster")
+            .json()
+            .await
+            .expect("own roster JSON");
+        let node_id = own["local_node_id"]
+            .as_str()
+            .expect("local node id")
+            .to_owned();
+        bases.push((node_id, base.clone()));
+    }
+    let leader = roster["nodes"]
+        .as_array()
+        .expect("node rows")
+        .iter()
+        .find(|node| node["is_leader"].as_bool() == Some(true))
+        .and_then(|node| node["node_id"].as_str())
+        .expect("a leader")
+        .to_owned();
+    let leader_base = bases
+        .iter()
+        .find(|(node_id, _)| *node_id == leader)
+        .map(|(_, base)| base.clone())
+        .expect("the leader's base");
+    let target = bases
+        .iter()
+        .map(|(node_id, _)| node_id.clone())
+        .find(|node_id| *node_id != leader)
+        .expect("a follower");
+
+    // A cluster this young may not have published every member's removal
+    // capability and clock observation yet; those answers name themselves.
+    // Anything else, the old `no such column` included, fails at once.
+    let ready_by = Instant::now() + Duration::from_secs(60);
+    let removed = loop {
+        let response = client
+            .delete(format!("{leader_base}/api/v1/cluster/nodes/{target}"))
+            .bearer_auth(&voters.token)
+            .send()
+            .await
+            .expect("remove a follower");
+        let status = response.status();
+        let body: Value = response.json().await.unwrap_or_default();
+        if status == StatusCode::OK {
+            break body;
+        }
+        let code = body["code"].as_str().unwrap_or_default();
+        assert!(
+            matches!(
+                code,
+                "membership_upgrade_required" | "cluster_clock_unbounded"
+            ) && Instant::now() < ready_by,
+            "voter removal answered {status} {body}\nnode A: {}\nnode B: {}\nnode C: {}",
+            voters.node_a.diagnostics(),
+            voters.node_b.diagnostics(),
+            node_c.diagnostics()
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    assert_eq!(
+        removed["capacity"]["voting_nodes"].as_u64(),
+        Some(2),
+        "{removed}"
+    );
+    assert!(
+        removed["nodes"]
+            .as_array()
+            .expect("node rows")
+            .iter()
+            .all(|node| node["node_id"] != target.as_str() || node["is_voter"] == false),
+        "the removed follower is still a voter: {removed}"
+    );
 }
