@@ -80,4 +80,310 @@ final class HLSFragmentCadenceTests: XCTestCase {
             fragment: box("moof", box("traf", header + duplicate)) + box("mdat", Data([1, 2]))))
     }
 
+    // MARK: - Real muxer output
+
+    private typealias Fixtures = HLSFragmentCadenceFixtures
+
+    /// Split a progressive fragmented MP4 into its init (through `moov`) and
+    /// the media that follows, as an HLS packager would.
+    private func splitInit(_ file: Data) throws -> (initData: Data, media: Data) {
+        var at = 0
+        while at + 8 <= file.count {
+            let size = file[at..<(at + 4)].reduce(0) { ($0 << 8) | Int($1) }
+            let type = String(decoding: file[(at + 4)..<(at + 8)], as: UTF8.self)
+            at += size
+            if type == "moov" { return (Data(file.prefix(at)), Data(file.suffix(from: at))) }
+        }
+        throw XCTSkip("no moov")
+    }
+
+    func testRealFragmentedSegmentsResolveTheirOwnCadence() throws {
+        XCTAssertEqual(try XCTUnwrap(HLSFragmentCadence.minimumDuration(initData: Fixtures.initMP4, fragment: Fixtures.copySegment)),
+                       1 / 24.0, accuracy: 1e-9)
+        let vod = try splitInit(Fixtures.fragmentedMP4)
+        XCTAssertEqual(try XCTUnwrap(HLSFragmentCadence.minimumDuration(initData: vod.initData, fragment: vod.media)),
+                       1001 / 30_000.0, accuracy: 1e-9)
+    }
+
+    /// The walk is identical whatever the chunking, retains only `moof`
+    /// boxes, and steps over each `mdat` by naming where the next read starts.
+    func testFragmentIndexRetainsOnlyMoofsAndStepsOverMedia() throws {
+        let vod = try splitInit(Fixtures.fragmentedMP4)
+        for size in [1, 7, 188, 4096] {
+            var walk = HLSFragmentCadence.FragmentIndex(total: vod.media.count)
+            var at = 0
+            while at < vod.media.count {
+                let end = min(at + size, vod.media.count)
+                try walk.consume(Data(vod.media[at..<end]), at: at)
+                at = end
+            }
+            XCTAssertTrue(walk.finished)
+            XCTAssertEqual(try XCTUnwrap(HLSFragmentCadence.minimumDuration(initData: vod.initData, index: walk)),
+                           1001 / 30_000.0, accuracy: 1e-9, "chunk \(size)")
+        }
+        // Hop: read only up to each mdat header, then resume past its payload.
+        var walk = HLSFragmentCadence.FragmentIndex(total: vod.media.count)
+        var offset = 0, reads = 0, read = 0
+        while !walk.finished {
+            let end = min(offset + 64, vod.media.count)
+            try walk.consume(Data(vod.media[offset..<end]), at: offset)
+            reads += 1; read += end - offset
+            XCTAssertGreaterThan(walk.resumeOffset, offset)
+            offset = walk.resumeOffset
+            XCTAssertLessThan(reads, 1_000)
+        }
+        XCTAssertNil(walk.index.range(of: Data("mdat".utf8)), "the media payload is never retained")
+        XCTAssertLessThan(read, vod.media.count, "stepping over mdat skips its payload")
+        XCTAssertEqual(try XCTUnwrap(HLSFragmentCadence.minimumDuration(initData: vod.initData, index: walk)),
+                       1001 / 30_000.0, accuracy: 1e-9)
+        // A resume anywhere but the announced offset is refused.
+        var strict = HLSFragmentCadence.FragmentIndex(total: vod.media.count)
+        try strict.consume(Data(vod.media.prefix(64)), at: 0)
+        XCTAssertThrowsError(try strict.consume(Data(vod.media[100..<120]), at: 100))
+    }
+
+    private func transportCadence(_ data: Data, chunk: Int = 4096) -> Double? {
+        var stream = TransportStreamCadence()
+        var at = 0
+        while at < data.count {
+            let end = min(at + chunk, data.count)
+            guard (try? stream.consume(Data(data[at..<end]))) != nil else { return nil }
+            at = end
+        }
+        return stream.minimumDuration()
+    }
+
+    func testTransportStreamSegmentsResolveVideoPESCadence() throws {
+        for chunk in [1, 100, 188, 4096, 1 << 20] {
+            XCTAssertEqual(try XCTUnwrap(transportCadence(Fixtures.avcTransportSegment, chunk: chunk)), 1 / 24.0, accuracy: 1e-9)
+            XCTAssertEqual(try XCTUnwrap(transportCadence(Fixtures.hevcTransportSegment, chunk: chunk)), 1 / 25.0, accuracy: 1e-9)
+        }
+        // Truncation, a lost video packet and a PES carrying two frames all
+        // refuse rather than widen the tolerance.
+        XCTAssertNil(transportCadence(Fixtures.avcTransportSegment.prefix(Fixtures.avcTransportSegment.count - 100)))
+        var packets = [Data]()
+        for at in stride(from: 0, to: Fixtures.avcTransportSegment.count, by: 188) {
+            packets.append(Data(Fixtures.avcTransportSegment[at..<(at + 188)]))
+        }
+        let videoStarts = packets.indices.filter { packets[$0][1] & 0x40 != 0 && packets[$0][1] & 0x1F == 0x01 && packets[$0][2] == 0x00 }
+        XCTAssertGreaterThan(videoStarts.count, 3)
+        var merged = packets
+        merged[videoStarts[2]][1] &= ~0x40
+        XCTAssertNil(transportCadence(merged.reduce(Data(), +)), "two access units in one PES cannot prove one frame")
+        var lost = packets
+        lost.remove(at: videoStarts[2])
+        XCTAssertNil(transportCadence(lost.reduce(Data(), +)))
+        var notSync = Fixtures.avcTransportSegment
+        notSync[188] = 0x48
+        XCTAssertNil(transportCadence(notSync))
+    }
+
+    // MARK: - The network path
+
+    /// The real copy segment's `moof`, then one `mdat` whose payload is
+    /// `payload` zero bytes, served lazily.
+    private func largeCopySegment(payload: Int, ranges: Bool) throws -> CadenceStub.Resource {
+        let real = Fixtures.copySegment
+        var at = 0, mdat = 0
+        while at + 8 <= real.count {
+            let size = real[at..<(at + 4)].reduce(0) { ($0 << 8) | Int($1) }
+            if String(decoding: real[(at + 4)..<(at + 8)], as: UTF8.self) == "mdat" { mdat = at; break }
+            at += size
+        }
+        XCTAssertGreaterThan(mdat, 0)
+        var built = Data(real.prefix(mdat))
+        built.append(contentsOf: [UInt8((payload + 8) >> 24), UInt8(((payload + 8) >> 16) & 255), UInt8(((payload + 8) >> 8) & 255), UInt8((payload + 8) & 255)])
+        built.append(contentsOf: Array("mdat".utf8))
+        let head = built
+        return CadenceStub.Resource(length: mdat + 8 + payload, ranges: ranges) { range in
+            var out = Data()
+            if range.lowerBound < head.count { out.append(head[range.lowerBound..<min(range.upperBound, head.count)]) }
+            out.append(Data(count: range.count - out.count))
+            return out
+        }
+    }
+
+    private func inspectCopy(_ segment: CadenceStub.Resource) async throws -> (host: String, cadence: PreparedDecodedCadence?) {
+        let host = CadenceStub.host()
+        CadenceStub.install(host, [
+            "/hls/s1/index.m3u8": .text(Self.playlist(map: true)),
+            "/hls/s1/init.mp4": .bytes(Fixtures.initMP4),
+            "/hls/s1/seg0.m4s": segment,
+        ])
+        let cadence = await HLSFragmentCadence.inspect(
+            url: try XCTUnwrap(URL(string: "http://\(host)/hls/s1/index.m3u8")), itemSeconds: 1, boundMs: 4_000,
+            configuration: CadenceStub.configuration())
+        return (host, cadence)
+    }
+
+    func testLargeCopySegmentIsReadThroughItsIndexNotItsPayload() async throws {
+        // A 21 Mb/s copy segment of six seconds is ~16 MB; this one is 40 MB.
+        let inspected = try await inspectCopy(try largeCopySegment(payload: 40_000_000, ranges: true))
+        let cadence = try XCTUnwrap(inspected.cadence)
+        XCTAssertEqual(cadence.frameDurationSeconds, 1 / 24.0, accuracy: 1e-9)
+        XCTAssertEqual(cadence.itemInterval, 0..<6)
+        XCTAssertLessThanOrEqual(CadenceStub.served(inspected.host, "/hls/s1/seg0.m4s"), HLSFragmentCadence.indexWindowBytes)
+    }
+
+    /// A server that ignores Range answers with the whole object. Its body is
+    /// walked as it arrives, keeping only `moof` bytes, up to the byte cap
+    /// the earlier whole-segment read allowed; past the cap it is refused.
+    func testServerIgnoringRangeIsWalkedContiguouslyWithinTheCap() async throws {
+        let walked = try await inspectCopy(try largeCopySegment(payload: 12_000_000, ranges: false))
+        let cadence = try XCTUnwrap(walked.cadence)
+        XCTAssertEqual(cadence.frameDurationSeconds, 1 / 24.0, accuracy: 1e-9)
+        XCTAssertEqual(cadence.itemInterval, 0..<6)
+        let refused = try await inspectCopy(try largeCopySegment(payload: HLSFragmentCadence.maximumUnrangedFragmentBytes, ranges: false))
+        XCTAssertNil(refused.cadence)
+    }
+
+    func testTransportStreamSuccessorWithoutAMapResolvesItsCadence() async throws {
+        let host = CadenceStub.host()
+        CadenceStub.install(host, [
+            "/hls/s2/index.m3u8": .text(Self.playlist(map: false, segment: "seg0.ts")),
+            "/hls/s2/seg0.ts": .bytes(Fixtures.avcTransportSegment),
+        ])
+        let inspected = await HLSFragmentCadence.inspect(
+            url: try XCTUnwrap(URL(string: "http://\(host)/hls/s2/index.m3u8")), itemSeconds: 2, boundMs: 4_000,
+            configuration: CadenceStub.configuration())
+        let cadence = try XCTUnwrap(inspected)
+        XCTAssertEqual(cadence.frameDurationSeconds, 1 / 24.0, accuracy: 1e-9)
+        XCTAssertEqual(cadence.itemInterval, 0..<6)
+    }
+
+    /// A TS read stops once a complete prefix proves the cadence just past
+    /// the rendezvous, and the proof is scoped to that prefix.
+    func testTransportStreamSuccessorStopsAtACompletePrefix() async throws {
+        let host = CadenceStub.host()
+        CadenceStub.install(host, [
+            "/hls/s3/index.m3u8": .text(Self.playlist(map: false, segment: "seg0.ts", seconds: "1.000000")),
+            "/hls/s3/seg0.ts": .bytes(Fixtures.avcTransportSegment),
+        ])
+        let inspected = await HLSFragmentCadence.inspect(
+            url: try XCTUnwrap(URL(string: "http://\(host)/hls/s3/index.m3u8")), itemSeconds: 0.2, boundMs: 4_000,
+            configuration: CadenceStub.configuration())
+        let cadence = try XCTUnwrap(inspected)
+        XCTAssertEqual(cadence.frameDurationSeconds, 1 / 24.0, accuracy: 1e-9)
+        let interval = try XCTUnwrap(cadence.itemInterval)
+        XCTAssertEqual(interval.lowerBound, 0)
+        XCTAssertGreaterThanOrEqual(interval.upperBound, 0.2 + HLSFragmentCadence.transportStreamProofMarginSeconds)
+        XCTAssertLessThan(interval.upperBound, 1, "the proof is scoped to the prefix it read")
+        XCTAssertTrue(cadence.covers(itemPositionMs: 200))
+    }
+
+    func testTransportStreamPrefixProofReadsLessThanTheSegment() throws {
+        for (segment, rate) in [(Fixtures.avcTransportSegment, 24.0), (Fixtures.hevcTransportSegment, 25.0)] {
+            var stream = TransportStreamCadence()
+            var consumed = 0
+            var proof: (duration: Double, span: Double)?
+            while consumed < segment.count, proof == nil {
+                try stream.consume(Data(segment[consumed..<(consumed + 188)]))
+                consumed += 188
+                proof = stream.completePrefix(covering: 0.5)
+            }
+            let found = try XCTUnwrap(proof)
+            XCTAssertEqual(found.duration, 1 / rate, accuracy: 1e-9)
+            XCTAssertGreaterThanOrEqual(found.span, 0.5)
+            XCTAssertLessThan(consumed, segment.count)
+        }
+        // A two-frame PES inside the prefix still refuses before any proof.
+        var packets = [Data]()
+        for at in stride(from: 0, to: Fixtures.avcTransportSegment.count, by: 188) {
+            packets.append(Data(Fixtures.avcTransportSegment[at..<(at + 188)]))
+        }
+        let videoStarts = packets.indices.filter { packets[$0][1] & 0x40 != 0 && packets[$0][1] & 0x1F == 0x01 && packets[$0][2] == 0x00 }
+        packets[videoStarts[2]][1] &= ~0x40
+        var stream = TransportStreamCadence()
+        var refused = false
+        for packet in packets {
+            if (try? stream.consume(packet)) == nil { refused = true; break }
+            XCTAssertNil(stream.completePrefix(covering: 0.5))
+        }
+        XCTAssertTrue(refused)
+    }
+
+    private static func playlist(map: Bool, segment: String = "seg0.m4s", seconds: String = "6.000000") -> String {
+        """
+        #EXTM3U
+        #EXT-X-VERSION:7
+        #EXT-X-TARGETDURATION:6
+        #EXT-X-MEDIA-SEQUENCE:0
+        \(map ? "#EXT-X-MAP:URI=\"init.mp4\"" : "#EXT-X-INDEPENDENT-SEGMENTS")
+        #EXTINF:\(seconds),
+        \(segment)
+        #EXT-X-ENDLIST
+
+        """
+    }
+}
+
+/// Serves fixed resources to `HLSFragmentCadence.inspect`, honouring
+/// single `bytes=a-b` ranges when a resource allows them, and counts the
+/// body bytes it actually delivers.
+final class CadenceStub: URLProtocol {
+    struct Resource {
+        let length: Int
+        let ranges: Bool
+        let bytes: @Sendable (Range<Int>) -> Data
+        init(length: Int, ranges: Bool, bytes: @escaping @Sendable (Range<Int>) -> Data) {
+            self.length = length; self.ranges = ranges; self.bytes = bytes
+        }
+        static func bytes(_ data: Data) -> Resource {
+            Resource(length: data.count, ranges: true) { Data(data[$0]) }
+        }
+        static func text(_ value: String) -> Resource { bytes(Data(value.utf8)) }
+    }
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var resources: [String: [String: Resource]] = [:]
+    nonisolated(unsafe) private static var counts: [String: Int] = [:]
+    private var stopped = false
+
+    static func host() -> String { "cadence-\(UUID().uuidString.lowercased()).test" }
+    static func install(_ host: String, _ table: [String: Resource]) {
+        lock.lock(); resources[host] = table; lock.unlock()
+    }
+    static func served(_ host: String, _ path: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return counts[host + path] ?? 0
+    }
+    static func configuration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CadenceStub.self]
+        return configuration
+    }
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host?.hasSuffix(".test") == true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard let url = request.url, let host = url.host else { return }
+        Self.lock.lock(); let resource = Self.resources[host]?[url.path]; Self.lock.unlock()
+        guard let resource else {
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: [:])!,
+                                cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+        var range = 0..<resource.length
+        var status = 200
+        var headers: [String: String] = [:]
+        if resource.ranges, let header = request.value(forHTTPHeaderField: "Range"), header.hasPrefix("bytes=") {
+            let span = header.dropFirst(6).split(separator: "-").compactMap { Int($0) }
+            if span.count == 2, span[0] < resource.length {
+                range = span[0]..<min(span[1] + 1, resource.length)
+                status = 206
+                headers["Content-Range"] = "bytes \(range.lowerBound)-\(range.upperBound - 1)/\(resource.length)"
+            }
+        }
+        headers["Content-Length"] = String(range.count)
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!,
+                            cacheStoragePolicy: .notAllowed)
+        var at = range.lowerBound
+        while at < range.upperBound, !stopped {
+            let end = min(at + 65_536, range.upperBound)
+            client?.urlProtocol(self, didLoad: resource.bytes(at..<end))
+            Self.lock.lock(); Self.counts[host + url.path, default: 0] += end - at; Self.lock.unlock()
+            at = end
+        }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() { stopped = true }
 }
