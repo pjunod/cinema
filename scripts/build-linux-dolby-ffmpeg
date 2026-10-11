@@ -630,8 +630,9 @@ def main():
                 build_arguments.extend(["--build-arg", argument + "=" + getattr(args, argument.lower())])
             subprocess.run(["docker", "buildx", "build", "--load", *build_arguments, "--platform", "linux/amd64",
                 "--build-context", "linux-dolby-package=" + str(args.output.resolve(strict=True)),
-                "--target", "runtime-dolby-amd64", "-t", args.image, str(args.root)], check=True,
-                timeout=args.deadline_seconds)
+                "--target", "runtime-dolby-amd64", "-t", args.image, str(args.root)], check=True)
+            # No deadline: this compiles plurxd, which a cold cache cannot do
+            # in a package phase's 600 s. The bounded phases are the package's.
     elif args.step == "prepare":
         if args.sdk is None or args.source_archive is None:
             parser.error("prepare requires --sdk and --source-archive")
