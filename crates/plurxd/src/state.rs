@@ -756,6 +756,9 @@ pub struct AppState {
     pub(crate) media_pool: Arc<crate::media_pool::MediaPool>,
     /// Authenticated remote start/abort and streaming HLS relay transport.
     pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
+    /// What tells an idle reader of replicated settings that a save may have
+    /// landed on another node. Each reader takes its own clone.
+    pub(crate) settings_changes: crate::settings_changes::SettingsChangeSource,
     /// Always-compiled HDHomeRun configuration, readiness, and lineup owner.
     pub(crate) live_tv: Arc<crate::live_tv::LiveTvManager>,
     /// One HTTP client for every Live TV ingress-to-owner exchange, plus a
@@ -1080,14 +1083,17 @@ impl AppState {
             sharing_network,
         ));
         // A replicated daemon applies the Raft log in this process; that watch
-        // is how an idle Live TV settings observer learns of a save elsewhere.
-        let live_tv_settings_changes = match backup_client
+        // is how an idle settings reader (the Live TV observer, the takeover
+        // gate, the clock-enforcement follower) learns of a save elsewhere.
+        let settings_changes = match backup_client
             .as_ref()
             .and_then(|client| client.local_db_raft_metrics().ok())
         {
-            Some(applied) => crate::live_tv::SettingsChangeSource::Applied(applied),
-            None if membership.is_replicated() => crate::live_tv::SettingsChangeSource::Polled,
-            None => crate::live_tv::SettingsChangeSource::LocalOnly,
+            Some(applied) => crate::settings_changes::SettingsChangeSource::Applied(applied),
+            None if membership.is_replicated() => {
+                crate::settings_changes::SettingsChangeSource::Polled
+            }
+            None => crate::settings_changes::SettingsChangeSource::LocalOnly,
         };
         let backup = crate::backup::BackupManager::new(
             Arc::clone(&store),
@@ -1183,7 +1189,7 @@ impl AppState {
             live_tv_scratch,
             runtime_cache.join("live-tv"),
         );
-        live_tv.set_settings_changes(live_tv_settings_changes);
+        live_tv.set_settings_changes(settings_changes.clone());
         AppState {
             store,
             sharing,
@@ -1206,6 +1212,7 @@ impl AppState {
             membership,
             media_pool,
             media_sessions,
+            settings_changes,
             live_tv,
             live_tv_peers,
             server_name,

@@ -73,6 +73,7 @@ mod scratch_ledger;
 mod scratch_put;
 mod seam_hooks;
 mod serving_fence;
+mod settings_changes;
 mod shared_cache;
 mod sharing;
 mod sharing_client;

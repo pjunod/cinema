@@ -4429,7 +4429,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # session end; the hung-read interval sleep), two in transcode/tests/chunk_05.rs
 # (the first-snapshot poll and its 30 s bound), and one 5 s timeout each in
 # vod/tests/chunk_03.rs and vodencode_tests.rs around the parked GET.
-expected_occurrences = 1691
+# K-03 takeover gate held on change signals: +2, test-only, in
+# media_sessions::takeover_gate_tests. The remote-enable test's 3 s sleep
+# (the save lands while the gate sleeps, joined with the gate's own loop,
+# no spawn) and the unwatched-cadence test's one sleep past the 60 s off
+# hold. Production adds no timer: the off sleep gains a select arm on the
+# applied-index watch that the gate already owns, and no task.
+expected_occurrences = 1693
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
