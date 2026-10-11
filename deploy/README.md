@@ -718,7 +718,15 @@ your home directory and the real `plurxd`/`ffmpeg`/`ffprobe` paths, bootstraps
 and starts it, then waits for `/readyz` and prints the version the server
 reports. Run it again to upgrade: the agent is booted out before its binary
 is replaced, and an existing plist is yours — the installer never overwrites
-it, so `plutil -replace` edits survive. `make uninstall` boots the agent out
+it, so `plutil -replace` edits survive. Run it as your login user, never through
+`sudo`: the agent belongs to your GUI session (`gui/<uid>`), so a root run is
+refused before it builds anything. The installer asks for sudo itself when it
+needs it: for a destination you cannot write (`/usr/local/bin` on Intel), and
+once to hand back whatever an earlier `sudo` run left root-owned — the build
+tree and cargo cache, the binary and engine in a Homebrew prefix,
+`~/Library/LaunchAgents` itself (not the other agents in it), the plist,
+`~/Library/Application Support/plurx` and the log.
+`make uninstall` boots the agent out
 and removes the plist and binary, and keeps
 `~/Library/Application Support/plurx`. `make uninstall-docker` is the Compose
 counterpart (`docker compose down`; `.env`, the override, and data stay).
