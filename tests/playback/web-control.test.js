@@ -7899,6 +7899,16 @@ test("startup diagnosis names a failed level playlist, not missing media (#978)"
   }
   {
     const h = levelPlaylistStartupHarness();
+    h.request("manifest", "/master.m3u8").answer(200);
+    h.emit("parsed");
+    h.request("level", "/720/index.m3u8");
+    h.emit("frag_loaded", {});
+    assert.equal(h.episode.levelState, "loading", "LEVEL_LOADED was not observed");
+    assert.equal(h.diagnose().title, "Playback did not start.",
+      "media that arrived proves the level loaded; a later failure is not a playlist failure");
+  }
+  {
+    const h = levelPlaylistStartupHarness();
     h.request("manifest", "/master.m3u8").answer(503);
     assert.equal(h.diagnose().title, "The stream playlist could not be loaded.",
       "a master failure keeps its own diagnosis");
