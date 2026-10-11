@@ -777,6 +777,17 @@ impl TranscodeManager {
                                 "VOD prerequisite unavailable; using temporary live-HLS recovery"
                             );
                             self.hooks.get().before_vod_fallback_start().await;
+                            // The fallback is a second execution of this
+                            // request, a whole VOD attempt after the dispatch
+                            // revalidation. A candidate-route rolling start
+                            // reuses the snapshot its plan was accepted from
+                            // (`rolling_start_inputs`), so the source and
+                            // settings are revalidated again here: a catalog
+                            // never authorizes stale execution. A legacy
+                            // route carries no binding and its rolling start
+                            // reads the source itself.
+                            self.validate_candidate_planning_binding(req, replacement_deadline)
+                                .await?;
                             let started = self
                                 .start_live_recovery_session(
                                     req,
