@@ -5247,7 +5247,7 @@ async fn renew_with_authority(
         .await
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hiqlite-store"))]
 pub(crate) fn census_local_principal_fragment(
     method: &str,
     parameter: usize,
