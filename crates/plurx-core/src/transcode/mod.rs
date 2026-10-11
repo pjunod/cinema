@@ -48,11 +48,11 @@ pub use dolby::{
     StrictDolbyImplementation, StrictDolbyPolicy,
 };
 pub use encoder::{
-    benchmark_encoder, detect_encoders, detect_video_decoders, validate_quality_rate_control,
-    validate_quality_rate_control_yielding, vbv_maxrate_bps, vbv_maxrate_kbps,
-    CompletedReconstructedOutputContract, EffectiveRateControl, Encoder, EncoderCaps,
-    OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
-    VideoCodec,
+    benchmark_encoder, detect_encoders, detect_video_decoders, vaapi_device,
+    validate_quality_rate_control, validate_quality_rate_control_yielding, vbv_maxrate_bps,
+    vbv_maxrate_kbps, CompletedReconstructedOutputContract, EffectiveRateControl, Encoder,
+    EncoderCaps, OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc,
+    RateMode, VideoCodec,
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
@@ -1269,11 +1269,7 @@ fn video_filters_for_contract(
                  color_trc=bt709:format=yuv420p"
                     .to_owned(),
             ),
-            ToneMap::Tonemapx => chain.push(
-                "tonemapx=tonemap=bt2390:transfer=bt709:matrix=bt709:\
-                 primaries=bt709:range=tv:format=yuv420p:apply_dovi=1"
-                    .to_owned(),
-            ),
+            ToneMap::Tonemapx => chain.push(dovi_tonemapx_sdr_filter()),
             ToneMap::Zscale => {
                 // Declare the input transfer/primaries/matrix explicitly instead
                 // of letting zscale read them off the frame. Hardware decode
@@ -1378,6 +1374,27 @@ pub fn zscale_tone_map_filter(transfer_in: &str, peak_nits: u32) -> String {
          tonemap=tonemap=hable:desat=0:peak={peak},\
          zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p",
         peak = f64::from(peak_nits) / 100.0,
+    )
+}
+
+/// The Dolby Vision reshape + SDR tone map: `tonemapx` applies the RPU
+/// (`apply_dovi=1`) and maps to 8-bit BT.709 limited range with bt2390.
+///
+/// The one spelling of it. The renderer graph
+/// ([`Pipeline::DoviTonemapx`]), the CPU-pipeline `ToneMap::Tonemapx` arm and
+/// the daemon's boot probe of the renderer all build their filter from this,
+/// so the graph a node proves at boot is the graph its sessions run. Every
+/// colour term comes from [`OutputGrade::Sdr`], the same value the encoder's
+/// tags come from.
+pub fn dovi_tonemapx_sdr_filter() -> String {
+    let grade = OutputGrade::Sdr;
+    format!(
+        "tonemapx=tonemap=bt2390:transfer={transfer}:matrix={matrix}:\
+         primaries={primaries}:range=tv:format={format}:apply_dovi=1",
+        transfer = grade.transfer(),
+        matrix = grade.matrix(),
+        primaries = grade.primaries(),
+        format = grade.pixel_format(),
     )
 }
 
@@ -3024,6 +3041,27 @@ pub fn hls_copy_args_with_audio_delivery(
 mod tests {
     use super::*;
     use crate::domain::MediaFile;
+
+    /// The Profile 5 renderer string, byte for byte. Three call sites build
+    /// from this one function (the renderer graph, the CPU-pipeline arm and
+    /// the boot probe); the argv goldens pin each site, this pins the source.
+    #[test]
+    fn the_dolby_tonemapx_builder_is_the_shipped_string() {
+        assert_eq!(
+            dovi_tonemapx_sdr_filter(),
+            "tonemapx=tonemap=bt2390:transfer=bt709:matrix=bt709:primaries=bt709:\
+             range=tv:format=yuv420p:apply_dovi=1"
+        );
+        assert_eq!(
+            Pipeline::DoviTonemapx
+                .filters(Some(1920), 1080, Some("dolby_vision"))
+                .as_deref(),
+            Some(
+                "tonemapx=tonemap=bt2390:transfer=bt709:matrix=bt709:primaries=bt709:\
+                 range=tv:format=yuv420p:apply_dovi=1,scale=1920:1080,format=yuv420p"
+            )
+        );
+    }
 
     pub(super) fn file(hdr: Option<&str>) -> MediaFile {
         MediaFile {

@@ -431,6 +431,12 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
       await pollTranscoderOptimization(SETTINGS_DATA.sys.node_id,generation);
       if(!settingsCurrent(generation,tab)) return;
     }
+    // A queued or running tone-map census reports its step on the System row.
+    if(tab==="system"&&toneMapCensusActive()){
+      const census=await api("/system/tone-map/census");
+      if(!settingsCurrent(generation,tab)) return;
+      paintToneMapCensus(census);
+    }
     const secondary=[];
     const auto=document.getElementById("logauto");
     if(auto&&auto.checked) secondary.push(refreshLogs());
