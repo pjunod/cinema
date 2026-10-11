@@ -6191,3 +6191,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/AuthScreens.kt"
 source_anchor = "GmsBarcodeScanning.getClient(context, options).startScan()"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/ConnectScreenStartupTest.kt"
 test_anchor = "connectionScreenOpensWithoutStartingQrScanner"
+
+[[fixes]]
+id = "apple.prepared-hls-cadence-index-and-ts"
+commits = ["12a6c7a4fc0c47eaa82eb77731a35ff6f91ef33d"]
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "let index = try await fragmentIndex(fragmentURL, deadline: deadline, session: session, loads: loads)"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "func testLargeCopySegmentIsReadThroughItsIndexNotItsPayload()"
