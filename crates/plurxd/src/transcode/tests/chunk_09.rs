@@ -2035,6 +2035,10 @@ async fn transcode_manager_shipped_shape() {
             "after_vod_publication_admission",
             hooks.after_vod_publication_admission(),
         ),
+        (
+            "before_vod_fallback_start",
+            hooks.before_vod_fallback_start(),
+        ),
     ] {
         assert!(
             hook.as_mut().poll(&mut context).is_ready(),

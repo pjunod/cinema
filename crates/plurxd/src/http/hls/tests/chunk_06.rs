@@ -455,27 +455,34 @@ async fn a05_candidate_auto_fallback_ignores_both_legacy_prior_branches() {
         link_worst_rung_height: None,
         link_starved_at_ms: None,
     };
-    let neutral = resolve_height(&state, Some(&source), None, false, None).await;
+    let neutral = resolve_height(&state, Some(&source), None, false, None, None).await;
+    // A create hands in its snapshot's HWACCEL value instead of reading
+    // it; an unset preference ("") must resolve exactly as the read does.
+    assert_eq!(
+        resolve_height(&state, Some(&source), None, false, None, Some("")).await,
+        neutral
+    );
     let isolated = resolve_height(
         &state,
         Some(&source),
         crate::http::stream::prior_for_candidate_policy(Some(&prior), true),
         false,
         None,
+        None,
     )
     .await;
-    let legacy = resolve_height(&state, Some(&source), Some(&prior), false, None).await;
+    let legacy = resolve_height(&state, Some(&source), Some(&prior), false, None, None).await;
     assert_eq!(isolated, neutral);
     assert!(
         legacy < isolated,
         "legacy policy still consumes its old rate/starvation history"
     );
     assert_eq!(
-        resolve_height(&state, Some(&source), Some(&prior), false, Some(1440)).await,
+        resolve_height(&state, Some(&source), Some(&prior), false, Some(1440), None).await,
         1440
     );
     assert_eq!(
-        resolve_height(&state, Some(&source), Some(&prior), false, Some(2160)).await,
+        resolve_height(&state, Some(&source), Some(&prior), false, Some(2160), None).await,
         2160
     );
 }
@@ -5376,6 +5383,7 @@ fn planning_binding_detects_same_timestamp_probe_and_generation_changes() {
         probe_json: Some("{\"streams\":[]}".to_owned()),
         settings: Default::default(),
         generation: 1,
+        item_title: None,
     };
     let original = crate::media_pool::PlanningBinding::from_snapshot(&snapshot);
     snapshot.probe_json = Some("{\"streams\":[{\"codec_name\":\"hevc\"}]}".to_owned());
