@@ -20,7 +20,7 @@ unclaimed pending measurement fleet evidence. Paul clarified on 2026-09-30
 that switches apply only where manual on/off is meaningful, rather than to
 every unfinished feature. K-06 therefore retains the accepted no-switch
 design, read-only Developer facts and separate releases. (Since 2026-10-04
-`main` has the switch anyway — Settings → Developer *Cluster clock guard*,
+`main` has the switch anyway — Settings → Cluster *Cluster clock guard* (moved out of Developer by the 2026-10-10 graduation pass),
 `cluster.clock_guard_enforced`, default off, with advisory readiness rows;
 see the §3.8 note.) Runtime work is now
 authorized; production rollout and clock-step drills remain separate actions.

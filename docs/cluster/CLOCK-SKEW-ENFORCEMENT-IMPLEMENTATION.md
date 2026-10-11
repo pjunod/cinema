@@ -22,7 +22,7 @@ supply the required release separation.
 Paul's 2026-09-30 clarification, recorded in measurement §1, requires a switch
 only where manual on/off is meaningful. K-06 retains its accepted no-switch
 contract, automatic observation, and separate enforcement release. (`main`
-nevertheless has the switch — Developer *Cluster clock guard*,
+nevertheless has the switch — Settings → Cluster *Cluster clock guard* (Developer until the 2026-10-10 graduation pass),
 `cluster.clock_guard_enforced`, default off, advisory readiness rows; see the
 2026-10-04 note below.) Developer
 facts remain read-only and advisory. Enforcement still waits for the merged
