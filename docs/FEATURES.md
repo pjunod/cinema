@@ -70,7 +70,8 @@ books, and home media.
   default, hearing-impaired/SDH), and chapters.
 - **Incremental rescan:** unchanged files are skipped by size + mtime, so a
   rescan of a large library is cheap. Vanished files are reconciled (the item
-  reflects what's actually on disk).
+  reflects what's actually on disk), and removing a path from a library
+  removes the items under it.
 - **Repairable inspection.** A file whose probe failed — bad permissions, an
   unmounted share, a half-copied download — is retried on every scan, because
   the fixes for all three leave size and mtime untouched and it would otherwise

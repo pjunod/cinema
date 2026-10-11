@@ -956,6 +956,19 @@ identity whose scan saw no media — vanished-file cleanup is **skipped** and
 the scan reports a note instead. That is what stops an unmounted NAS or a
 container path mix-up from wiping a library.
 
+Removing a path from a library is not that case: it is configuration, not an
+observation of the disk, so neither the identity check nor the prune bound
+applies. The library's files that no remaining path covers — a path as
+configured, normalised, or canonicalised on the scanning node — leave the
+catalog with the items that leaves empty (a file a Dolby Vision conversion is
+rewriting stays until the conversion ends). The scan `PUT /libraries/{id}`
+queues does this once it has walked every path without an error: the walk
+re-attaches media moved to a newly added path to its items first, so they
+keep their identity and watch state, and a path it could not read keeps the
+old entries until it can. Every complete scan makes the same removal, and a
+scan that started before an edit removes nothing and records no identity —
+the scan the edit queued covers the new paths.
+
 `POST /api/v1/libraries/{id}/root-identity/reset` deletes that row so the next
 scan can establish a new identity, for the case where an operator genuinely
 replaced the storage. It returns `{"ok": true, "cleared": <bool>}`. It
