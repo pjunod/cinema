@@ -210,6 +210,7 @@ catalog|activity@1280x860|req|GET /api/v1/activity/detail|2
 catalog|activity@1280x860|req|GET /api/v1/cluster/jobs|1
 catalog|activity@1280x860|req|GET /api/v1/dvr/attention|1
 catalog|activity@1280x860|req|GET /api/v1/dvr/recordings|1
+catalog|activity@1280x860|req|GET /api/v1/features|1
 catalog|activity@1280x860|req|GET /api/v1/me|1
 catalog|activity@1280x860|req|GET /api/v1/server|1
 catalog|activity@390x780|dom|^ > div#app|1
@@ -388,6 +389,7 @@ catalog|activity@390x780|req|GET /api/v1/activity/detail|2
 catalog|activity@390x780|req|GET /api/v1/cluster/jobs|1
 catalog|activity@390x780|req|GET /api/v1/dvr/attention|1
 catalog|activity@390x780|req|GET /api/v1/dvr/recordings|1
+catalog|activity@390x780|req|GET /api/v1/features|1
 catalog|activity@390x780|req|GET /api/v1/me|1
 catalog|activity@390x780|req|GET /api/v1/server|1
 catalog|analysis@1280x860|dom|^ > div#app|1
@@ -506,6 +508,7 @@ catalog|analysis@1280x860|focus|023|<wrap>
 catalog|analysis@1280x860|req|GET /api/v1/activity|2
 catalog|analysis@1280x860|req|GET /api/v1/analysis/jobs|1
 catalog|analysis@1280x860|req|GET /api/v1/analysis/summary|1
+catalog|analysis@1280x860|req|GET /api/v1/features|1
 catalog|analysis@1280x860|req|GET /api/v1/me|1
 catalog|analysis@1280x860|req|GET /api/v1/server|1
 catalog|analysis@390x780|dom|^ > div#app|1
@@ -624,6 +627,7 @@ catalog|analysis@390x780|focus|023|<wrap>
 catalog|analysis@390x780|req|GET /api/v1/activity|2
 catalog|analysis@390x780|req|GET /api/v1/analysis/jobs|1
 catalog|analysis@390x780|req|GET /api/v1/analysis/summary|1
+catalog|analysis@390x780|req|GET /api/v1/features|1
 catalog|analysis@390x780|req|GET /api/v1/me|1
 catalog|analysis@390x780|req|GET /api/v1/server|1
 catalog|auth@1280x860|dom|^ > div#app|1
@@ -832,6 +836,7 @@ catalog|category@1280x860|focus|039|div.poster.k-movie.unw "TS The Signal 2021 1
 catalog|category@1280x860|focus|040|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
 catalog|category@1280x860|focus|041|<wrap>
 catalog|category@1280x860|req|GET /api/v1/activity|2
+catalog|category@1280x860|req|GET /api/v1/features|1
 catalog|category@1280x860|req|GET /api/v1/libraries/<id>/items|2
 catalog|category@1280x860|req|GET /api/v1/libraries|1
 catalog|category@1280x860|req|GET /api/v1/me|1
@@ -989,6 +994,7 @@ catalog|category@390x780|focus|030|a.px-tab "Shared"
 catalog|category@390x780|focus|031|a.px-tab "Activity"
 catalog|category@390x780|focus|032|<wrap>
 catalog|category@390x780|req|GET /api/v1/activity|2
+catalog|category@390x780|req|GET /api/v1/features|1
 catalog|category@390x780|req|GET /api/v1/libraries/<id>/items|2
 catalog|category@390x780|req|GET /api/v1/libraries|1
 catalog|category@390x780|req|GET /api/v1/me|1
@@ -1118,6 +1124,7 @@ catalog|home@1280x860|focus|028|div.poster.k-show.unw "SH Signal Hill 2019"
 catalog|home@1280x860|focus|029|<wrap>
 catalog|home@1280x860|req|GET /api/v1/activity|2
 catalog|home@1280x860|req|GET /api/v1/coming-soon|1
+catalog|home@1280x860|req|GET /api/v1/features|1
 catalog|home@1280x860|req|GET /api/v1/home/previews|1
 catalog|home@1280x860|req|GET /api/v1/hubs|1
 catalog|home@1280x860|req|GET /api/v1/me|1
@@ -1249,6 +1256,7 @@ catalog|home@390x780|focus|026|a.px-tab "Activity"
 catalog|home@390x780|focus|027|<wrap>
 catalog|home@390x780|req|GET /api/v1/activity|2
 catalog|home@390x780|req|GET /api/v1/coming-soon|1
+catalog|home@390x780|req|GET /api/v1/features|1
 catalog|home@390x780|req|GET /api/v1/home/previews|1
 catalog|home@390x780|req|GET /api/v1/hubs|1
 catalog|home@390x780|req|GET /api/v1/me|1
@@ -1420,6 +1428,7 @@ catalog|item@1280x860|focus|029|button.ghost.sm "Generate subtitles"
 catalog|item@1280x860|focus|030|summary "More actions"
 catalog|item@1280x860|focus|031|<wrap>
 catalog|item@1280x860|req|GET /api/v1/activity|2
+catalog|item@1280x860|req|GET /api/v1/features|1
 catalog|item@1280x860|req|GET /api/v1/files/<id>/preparation|1
 catalog|item@1280x860|req|GET /api/v1/items/<id>|1
 catalog|item@1280x860|req|GET /api/v1/libraries|1
@@ -1589,6 +1598,7 @@ catalog|item@390x780|focus|026|a.px-tab "Shared"
 catalog|item@390x780|focus|027|a.px-tab "Activity"
 catalog|item@390x780|focus|028|<wrap>
 catalog|item@390x780|req|GET /api/v1/activity|2
+catalog|item@390x780|req|GET /api/v1/features|1
 catalog|item@390x780|req|GET /api/v1/files/<id>/preparation|1
 catalog|item@390x780|req|GET /api/v1/items/<id>|1
 catalog|item@390x780|req|GET /api/v1/libraries|1
@@ -1749,6 +1759,7 @@ catalog|library@1280x860|focus|033|button.ghost.sm "Scroll H right"
 catalog|library@1280x860|focus|034|div.poster.k-movie "H Heat 1995 180p"
 catalog|library@1280x860|focus|035|<wrap>
 catalog|library@1280x860|req|GET /api/v1/activity|2
+catalog|library@1280x860|req|GET /api/v1/features|1
 catalog|library@1280x860|req|GET /api/v1/libraries/<id>/items|1
 catalog|library@1280x860|req|GET /api/v1/libraries|1
 catalog|library@1280x860|req|GET /api/v1/me|1
@@ -1901,6 +1912,7 @@ catalog|library@390x780|focus|026|a.px-tab "Shared"
 catalog|library@390x780|focus|027|a.px-tab "Activity"
 catalog|library@390x780|focus|028|<wrap>
 catalog|library@390x780|req|GET /api/v1/activity|2
+catalog|library@390x780|req|GET /api/v1/features|1
 catalog|library@390x780|req|GET /api/v1/libraries/<id>/items|1
 catalog|library@390x780|req|GET /api/v1/libraries|1
 catalog|library@390x780|req|GET /api/v1/me|1
@@ -2027,6 +2039,7 @@ catalog|live-tv-grid@1280x860|req|GET /api/v1/dvr/overview|2
 catalog|live-tv-grid@1280x860|req|GET /api/v1/dvr/reminders|1
 catalog|live-tv-grid@1280x860|req|GET /api/v1/dvr/schedule|1
 catalog|live-tv-grid@1280x860|req|GET /api/v1/dvr/status|1
+catalog|live-tv-grid@1280x860|req|GET /api/v1/features|1
 catalog|live-tv-grid@1280x860|req|GET /api/v1/live-tv/channels|1
 catalog|live-tv-grid@1280x860|req|GET /api/v1/live-tv/guide|1
 catalog|live-tv-grid@1280x860|req|GET /api/v1/me|1
@@ -2153,6 +2166,7 @@ catalog|live-tv-grid@390x780|req|GET /api/v1/dvr/overview|2
 catalog|live-tv-grid@390x780|req|GET /api/v1/dvr/reminders|1
 catalog|live-tv-grid@390x780|req|GET /api/v1/dvr/schedule|1
 catalog|live-tv-grid@390x780|req|GET /api/v1/dvr/status|1
+catalog|live-tv-grid@390x780|req|GET /api/v1/features|1
 catalog|live-tv-grid@390x780|req|GET /api/v1/live-tv/channels|1
 catalog|live-tv-grid@390x780|req|GET /api/v1/live-tv/guide|1
 catalog|live-tv-grid@390x780|req|GET /api/v1/me|1
@@ -2275,6 +2289,7 @@ catalog|live-tv@1280x860|req|GET /api/v1/dvr/overview|2
 catalog|live-tv@1280x860|req|GET /api/v1/dvr/reminders|1
 catalog|live-tv@1280x860|req|GET /api/v1/dvr/schedule|1
 catalog|live-tv@1280x860|req|GET /api/v1/dvr/status|1
+catalog|live-tv@1280x860|req|GET /api/v1/features|1
 catalog|live-tv@1280x860|req|GET /api/v1/live-tv/channels|1
 catalog|live-tv@1280x860|req|GET /api/v1/live-tv/guide|1
 catalog|live-tv@1280x860|req|GET /api/v1/me|1
@@ -2397,6 +2412,7 @@ catalog|live-tv@390x780|req|GET /api/v1/dvr/overview|2
 catalog|live-tv@390x780|req|GET /api/v1/dvr/reminders|1
 catalog|live-tv@390x780|req|GET /api/v1/dvr/schedule|1
 catalog|live-tv@390x780|req|GET /api/v1/dvr/status|1
+catalog|live-tv@390x780|req|GET /api/v1/features|1
 catalog|live-tv@390x780|req|GET /api/v1/live-tv/channels|1
 catalog|live-tv@390x780|req|GET /api/v1/live-tv/guide|1
 catalog|live-tv@390x780|req|GET /api/v1/me|1
@@ -2565,6 +2581,7 @@ catalog|player@1280x860|focus|005|button#pblarger.picon "Larger"
 catalog|player@1280x860|focus|006|button#pbfs.picon "Fullscreen"
 catalog|player@1280x860|focus|007|<wrap>
 catalog|player@1280x860|req|GET /api/v1/activity|2
+catalog|player@1280x860|req|GET /api/v1/features|1
 catalog|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 catalog|player@1280x860|req|GET /api/v1/files/<id>/preparation|1
 catalog|player@1280x860|req|GET /api/v1/items/<id>|1
@@ -2736,6 +2753,7 @@ catalog|player@390x780|focus|004|button#pbpip.picon "Picture in picture"
 catalog|player@390x780|focus|005|button#pbfs.picon "Fullscreen"
 catalog|player@390x780|focus|006|<wrap>
 catalog|player@390x780|req|GET /api/v1/activity|2
+catalog|player@390x780|req|GET /api/v1/features|1
 catalog|player@390x780|req|GET /api/v1/files/<id>/direct|1
 catalog|player@390x780|req|GET /api/v1/files/<id>/preparation|1
 catalog|player@390x780|req|GET /api/v1/items/<id>|1
@@ -2838,6 +2856,7 @@ catalog|search@1280x860|focus|015|div.poster.k-movie.unw "SF Signal Fire 2003"
 catalog|search@1280x860|focus|016|div.poster.k-movie.unw "TS The Signal 2021"
 catalog|search@1280x860|focus|017|<wrap>
 catalog|search@1280x860|req|GET /api/v1/activity|2
+catalog|search@1280x860|req|GET /api/v1/features|1
 catalog|search@1280x860|req|GET /api/v1/me|1
 catalog|search@1280x860|req|GET /api/v1/search/related|1
 catalog|search@1280x860|req|GET /api/v1/search|1
@@ -2935,6 +2954,7 @@ catalog|search@390x780|focus|015|a.px-tab "Shared"
 catalog|search@390x780|focus|016|a.px-tab "Activity"
 catalog|search@390x780|focus|017|<wrap>
 catalog|search@390x780|req|GET /api/v1/activity|2
+catalog|search@390x780|req|GET /api/v1/features|1
 catalog|search@390x780|req|GET /api/v1/me|1
 catalog|search@390x780|req|GET /api/v1/search/related|1
 catalog|search@390x780|req|GET /api/v1/search|1
@@ -3338,6 +3358,7 @@ catalog|settings-developer@1280x860|req|GET /api/remote/v1/grants|1
 catalog|settings-developer@1280x860|req|GET /api/remote/v1/receivers|1
 catalog|settings-developer@1280x860|req|GET /api/v1/activity|2
 catalog|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
+catalog|settings-developer@1280x860|req|GET /api/v1/features|2
 catalog|settings-developer@1280x860|req|GET /api/v1/live-tv/readiness|1
 catalog|settings-developer@1280x860|req|GET /api/v1/me|1
 catalog|settings-developer@1280x860|req|GET /api/v1/server|1
@@ -3741,6 +3762,7 @@ catalog|settings-developer@390x780|req|GET /api/remote/v1/grants|1
 catalog|settings-developer@390x780|req|GET /api/remote/v1/receivers|1
 catalog|settings-developer@390x780|req|GET /api/v1/activity|2
 catalog|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
+catalog|settings-developer@390x780|req|GET /api/v1/features|2
 catalog|settings-developer@390x780|req|GET /api/v1/live-tv/readiness|1
 catalog|settings-developer@390x780|req|GET /api/v1/me|1
 catalog|settings-developer@390x780|req|GET /api/v1/server|1
@@ -3901,6 +3923,7 @@ catalog|settings@1280x860|focus|037|button.ghost "Save storage domains"
 catalog|settings@1280x860|focus|038|<wrap>
 catalog|settings@1280x860|req|GET /api/v1/activity|2
 catalog|settings@1280x860|req|GET /api/v1/dv-conversions|1
+catalog|settings@1280x860|req|GET /api/v1/features|2
 catalog|settings@1280x860|req|GET /api/v1/libraries|1
 catalog|settings@1280x860|req|GET /api/v1/me|1
 catalog|settings@1280x860|req|GET /api/v1/scan/status|3
@@ -4062,6 +4085,7 @@ catalog|settings@390x780|focus|037|a.px-tab "Activity"
 catalog|settings@390x780|focus|038|<wrap>
 catalog|settings@390x780|req|GET /api/v1/activity|2
 catalog|settings@390x780|req|GET /api/v1/dv-conversions|1
+catalog|settings@390x780|req|GET /api/v1/features|2
 catalog|settings@390x780|req|GET /api/v1/libraries|1
 catalog|settings@390x780|req|GET /api/v1/me|1
 catalog|settings@390x780|req|GET /api/v1/scan/status|3
@@ -4215,6 +4239,7 @@ classic|activity@1280x860|req|GET /api/v1/activity/detail|2
 classic|activity@1280x860|req|GET /api/v1/cluster/jobs|1
 classic|activity@1280x860|req|GET /api/v1/dvr/attention|1
 classic|activity@1280x860|req|GET /api/v1/dvr/recordings|1
+classic|activity@1280x860|req|GET /api/v1/features|1
 classic|activity@1280x860|req|GET /api/v1/me|1
 classic|activity@1280x860|req|GET /api/v1/server|1
 classic|activity@390x780|dom|^ > div#app|1
@@ -4365,6 +4390,7 @@ classic|activity@390x780|req|GET /api/v1/activity/detail|2
 classic|activity@390x780|req|GET /api/v1/cluster/jobs|1
 classic|activity@390x780|req|GET /api/v1/dvr/attention|1
 classic|activity@390x780|req|GET /api/v1/dvr/recordings|1
+classic|activity@390x780|req|GET /api/v1/features|1
 classic|activity@390x780|req|GET /api/v1/me|1
 classic|activity@390x780|req|GET /api/v1/server|1
 classic|analysis@1280x860|dom|^ > div#app|1
@@ -4455,6 +4481,7 @@ classic|analysis@1280x860|focus|023|<wrap>
 classic|analysis@1280x860|req|GET /api/v1/activity|2
 classic|analysis@1280x860|req|GET /api/v1/analysis/jobs|1
 classic|analysis@1280x860|req|GET /api/v1/analysis/summary|1
+classic|analysis@1280x860|req|GET /api/v1/features|1
 classic|analysis@1280x860|req|GET /api/v1/me|1
 classic|analysis@1280x860|req|GET /api/v1/server|1
 classic|analysis@390x780|dom|^ > div#app|1
@@ -4545,6 +4572,7 @@ classic|analysis@390x780|focus|023|<wrap>
 classic|analysis@390x780|req|GET /api/v1/activity|2
 classic|analysis@390x780|req|GET /api/v1/analysis/jobs|1
 classic|analysis@390x780|req|GET /api/v1/analysis/summary|1
+classic|analysis@390x780|req|GET /api/v1/features|1
 classic|analysis@390x780|req|GET /api/v1/me|1
 classic|analysis@390x780|req|GET /api/v1/server|1
 classic|auth@1280x860|dom|^ > div#app|1
@@ -4719,6 +4747,7 @@ classic|category@1280x860|focus|035|div.poster.k-movie.unw "TS The Signal 2021 1
 classic|category@1280x860|focus|036|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
 classic|category@1280x860|focus|037|<wrap>
 classic|category@1280x860|req|GET /api/v1/activity|2
+classic|category@1280x860|req|GET /api/v1/features|1
 classic|category@1280x860|req|GET /api/v1/libraries/<id>/items|2
 classic|category@1280x860|req|GET /api/v1/libraries|1
 classic|category@1280x860|req|GET /api/v1/me|1
@@ -4845,6 +4874,7 @@ classic|category@390x780|focus|029|div.poster.k-movie.unw "TS The Signal 2021 18
 classic|category@390x780|focus|030|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
 classic|category@390x780|focus|031|<wrap>
 classic|category@390x780|req|GET /api/v1/activity|2
+classic|category@390x780|req|GET /api/v1/features|1
 classic|category@390x780|req|GET /api/v1/libraries/<id>/items|2
 classic|category@390x780|req|GET /api/v1/libraries|1
 classic|category@390x780|req|GET /api/v1/me|1
@@ -4943,6 +4973,7 @@ classic|home@1280x860|focus|026|div.poster.k-show.unw "SH Signal Hill 2019"
 classic|home@1280x860|focus|027|<wrap>
 classic|home@1280x860|req|GET /api/v1/activity|2
 classic|home@1280x860|req|GET /api/v1/coming-soon|1
+classic|home@1280x860|req|GET /api/v1/features|1
 classic|home@1280x860|req|GET /api/v1/home/previews|1
 classic|home@1280x860|req|GET /api/v1/hubs|1
 classic|home@1280x860|req|GET /api/v1/me|1
@@ -5045,6 +5076,7 @@ classic|home@390x780|focus|026|div.poster.k-show.unw "SH Signal Hill 2019"
 classic|home@390x780|focus|027|<wrap>
 classic|home@390x780|req|GET /api/v1/activity|2
 classic|home@390x780|req|GET /api/v1/coming-soon|1
+classic|home@390x780|req|GET /api/v1/features|1
 classic|home@390x780|req|GET /api/v1/home/previews|1
 classic|home@390x780|req|GET /api/v1/hubs|1
 classic|home@390x780|req|GET /api/v1/me|1
@@ -5186,6 +5218,7 @@ classic|item@1280x860|focus|027|button.ghost.sm "Generate subtitles"
 classic|item@1280x860|focus|028|summary "More actions"
 classic|item@1280x860|focus|029|<wrap>
 classic|item@1280x860|req|GET /api/v1/activity|2
+classic|item@1280x860|req|GET /api/v1/features|1
 classic|item@1280x860|req|GET /api/v1/files/<id>/preparation|1
 classic|item@1280x860|req|GET /api/v1/items/<id>|1
 classic|item@1280x860|req|GET /api/v1/libraries|1
@@ -5328,6 +5361,7 @@ classic|item@390x780|focus|027|button.ghost.sm "Generate subtitles"
 classic|item@390x780|focus|028|summary "More actions"
 classic|item@390x780|focus|029|<wrap>
 classic|item@390x780|req|GET /api/v1/activity|2
+classic|item@390x780|req|GET /api/v1/features|1
 classic|item@390x780|req|GET /api/v1/files/<id>/preparation|1
 classic|item@390x780|req|GET /api/v1/items/<id>|1
 classic|item@390x780|req|GET /api/v1/libraries|1
@@ -5451,6 +5485,7 @@ classic|library@1280x860|focus|029|button.ghost.sm "Scroll H right"
 classic|library@1280x860|focus|030|div.poster.k-movie "H Heat 1995 180p"
 classic|library@1280x860|focus|031|<wrap>
 classic|library@1280x860|req|GET /api/v1/activity|2
+classic|library@1280x860|req|GET /api/v1/features|1
 classic|library@1280x860|req|GET /api/v1/libraries/<id>/items|1
 classic|library@1280x860|req|GET /api/v1/libraries|1
 classic|library@1280x860|req|GET /api/v1/me|1
@@ -5569,6 +5604,7 @@ classic|library@390x780|focus|025|button.ghost.sm "View all H items"
 classic|library@390x780|focus|026|div.poster.k-movie "H Heat 1995 180p"
 classic|library@390x780|focus|027|<wrap>
 classic|library@390x780|req|GET /api/v1/activity|2
+classic|library@390x780|req|GET /api/v1/features|1
 classic|library@390x780|req|GET /api/v1/libraries/<id>/items|1
 classic|library@390x780|req|GET /api/v1/libraries|1
 classic|library@390x780|req|GET /api/v1/me|1
@@ -5671,6 +5707,7 @@ classic|live-tv-grid@1280x860|req|GET /api/v1/dvr/overview|2
 classic|live-tv-grid@1280x860|req|GET /api/v1/dvr/reminders|1
 classic|live-tv-grid@1280x860|req|GET /api/v1/dvr/schedule|1
 classic|live-tv-grid@1280x860|req|GET /api/v1/dvr/status|1
+classic|live-tv-grid@1280x860|req|GET /api/v1/features|1
 classic|live-tv-grid@1280x860|req|GET /api/v1/live-tv/channels|1
 classic|live-tv-grid@1280x860|req|GET /api/v1/live-tv/guide|1
 classic|live-tv-grid@1280x860|req|GET /api/v1/me|1
@@ -5773,6 +5810,7 @@ classic|live-tv-grid@390x780|req|GET /api/v1/dvr/overview|2
 classic|live-tv-grid@390x780|req|GET /api/v1/dvr/reminders|1
 classic|live-tv-grid@390x780|req|GET /api/v1/dvr/schedule|1
 classic|live-tv-grid@390x780|req|GET /api/v1/dvr/status|1
+classic|live-tv-grid@390x780|req|GET /api/v1/features|1
 classic|live-tv-grid@390x780|req|GET /api/v1/live-tv/channels|1
 classic|live-tv-grid@390x780|req|GET /api/v1/live-tv/guide|1
 classic|live-tv-grid@390x780|req|GET /api/v1/me|1
@@ -5871,6 +5909,7 @@ classic|live-tv@1280x860|req|GET /api/v1/dvr/overview|2
 classic|live-tv@1280x860|req|GET /api/v1/dvr/reminders|1
 classic|live-tv@1280x860|req|GET /api/v1/dvr/schedule|1
 classic|live-tv@1280x860|req|GET /api/v1/dvr/status|1
+classic|live-tv@1280x860|req|GET /api/v1/features|1
 classic|live-tv@1280x860|req|GET /api/v1/live-tv/channels|1
 classic|live-tv@1280x860|req|GET /api/v1/live-tv/guide|1
 classic|live-tv@1280x860|req|GET /api/v1/me|1
@@ -5969,6 +6008,7 @@ classic|live-tv@390x780|req|GET /api/v1/dvr/overview|2
 classic|live-tv@390x780|req|GET /api/v1/dvr/reminders|1
 classic|live-tv@390x780|req|GET /api/v1/dvr/schedule|1
 classic|live-tv@390x780|req|GET /api/v1/dvr/status|1
+classic|live-tv@390x780|req|GET /api/v1/features|1
 classic|live-tv@390x780|req|GET /api/v1/live-tv/channels|1
 classic|live-tv@390x780|req|GET /api/v1/live-tv/guide|1
 classic|live-tv@390x780|req|GET /api/v1/me|1
@@ -6112,6 +6152,7 @@ classic|player@1280x860|focus|005|button#pblarger.picon "Larger"
 classic|player@1280x860|focus|006|button#pbfs.picon "Fullscreen"
 classic|player@1280x860|focus|007|<wrap>
 classic|player@1280x860|req|GET /api/v1/activity|2
+classic|player@1280x860|req|GET /api/v1/features|1
 classic|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 classic|player@1280x860|req|GET /api/v1/files/<id>/preparation|1
 classic|player@1280x860|req|GET /api/v1/items/<id>|1
@@ -6258,6 +6299,7 @@ classic|player@390x780|focus|004|button#pbpip.picon "Picture in picture"
 classic|player@390x780|focus|005|button#pbfs.picon "Fullscreen"
 classic|player@390x780|focus|006|<wrap>
 classic|player@390x780|req|GET /api/v1/activity|2
+classic|player@390x780|req|GET /api/v1/features|1
 classic|player@390x780|req|GET /api/v1/files/<id>/direct|1
 classic|player@390x780|req|GET /api/v1/files/<id>/preparation|1
 classic|player@390x780|req|GET /api/v1/items/<id>|1
@@ -6338,6 +6380,7 @@ classic|search@1280x860|focus|015|div.poster.k-movie.unw "SF Signal Fire 2003"
 classic|search@1280x860|focus|016|div.poster.k-movie.unw "TS The Signal 2021"
 classic|search@1280x860|focus|017|<wrap>
 classic|search@1280x860|req|GET /api/v1/activity|2
+classic|search@1280x860|req|GET /api/v1/features|1
 classic|search@1280x860|req|GET /api/v1/me|1
 classic|search@1280x860|req|GET /api/v1/search/related|1
 classic|search@1280x860|req|GET /api/v1/search|1
@@ -6414,6 +6457,7 @@ classic|search@390x780|focus|016|div.poster.k-movie.unw "SF Signal Fire 2003"
 classic|search@390x780|focus|017|div.poster.k-movie.unw "TS The Signal 2021"
 classic|search@390x780|focus|018|<wrap>
 classic|search@390x780|req|GET /api/v1/activity|2
+classic|search@390x780|req|GET /api/v1/features|1
 classic|search@390x780|req|GET /api/v1/me|1
 classic|search@390x780|req|GET /api/v1/search/related|1
 classic|search@390x780|req|GET /api/v1/search|1
@@ -6792,6 +6836,7 @@ classic|settings-developer@1280x860|req|GET /api/remote/v1/grants|1
 classic|settings-developer@1280x860|req|GET /api/remote/v1/receivers|1
 classic|settings-developer@1280x860|req|GET /api/v1/activity|2
 classic|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
+classic|settings-developer@1280x860|req|GET /api/v1/features|2
 classic|settings-developer@1280x860|req|GET /api/v1/live-tv/readiness|1
 classic|settings-developer@1280x860|req|GET /api/v1/me|1
 classic|settings-developer@1280x860|req|GET /api/v1/server|1
@@ -7170,6 +7215,7 @@ classic|settings-developer@390x780|req|GET /api/remote/v1/grants|1
 classic|settings-developer@390x780|req|GET /api/remote/v1/receivers|1
 classic|settings-developer@390x780|req|GET /api/v1/activity|2
 classic|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
+classic|settings-developer@390x780|req|GET /api/v1/features|2
 classic|settings-developer@390x780|req|GET /api/v1/live-tv/readiness|1
 classic|settings-developer@390x780|req|GET /api/v1/me|1
 classic|settings-developer@390x780|req|GET /api/v1/server|1
@@ -7305,6 +7351,7 @@ classic|settings@1280x860|focus|037|button.ghost "Save storage domains"
 classic|settings@1280x860|focus|038|<wrap>
 classic|settings@1280x860|req|GET /api/v1/activity|2
 classic|settings@1280x860|req|GET /api/v1/dv-conversions|1
+classic|settings@1280x860|req|GET /api/v1/features|2
 classic|settings@1280x860|req|GET /api/v1/libraries|1
 classic|settings@1280x860|req|GET /api/v1/me|1
 classic|settings@1280x860|req|GET /api/v1/scan/status|3
@@ -7441,6 +7488,7 @@ classic|settings@390x780|focus|037|button.ghost "Save storage domains"
 classic|settings@390x780|focus|038|<wrap>
 classic|settings@390x780|req|GET /api/v1/activity|2
 classic|settings@390x780|req|GET /api/v1/dv-conversions|1
+classic|settings@390x780|req|GET /api/v1/features|2
 classic|settings@390x780|req|GET /api/v1/libraries|1
 classic|settings@390x780|req|GET /api/v1/me|1
 classic|settings@390x780|req|GET /api/v1/scan/status|3
@@ -7596,6 +7644,7 @@ theater|activity@1280x860|req|GET /api/v1/activity/detail|2
 theater|activity@1280x860|req|GET /api/v1/cluster/jobs|1
 theater|activity@1280x860|req|GET /api/v1/dvr/attention|1
 theater|activity@1280x860|req|GET /api/v1/dvr/recordings|1
+theater|activity@1280x860|req|GET /api/v1/features|1
 theater|activity@1280x860|req|GET /api/v1/me|1
 theater|activity@1280x860|req|GET /api/v1/server|1
 theater|activity@390x780|dom|^ > div#app|1
@@ -7748,6 +7797,7 @@ theater|activity@390x780|req|GET /api/v1/activity/detail|2
 theater|activity@390x780|req|GET /api/v1/cluster/jobs|1
 theater|activity@390x780|req|GET /api/v1/dvr/attention|1
 theater|activity@390x780|req|GET /api/v1/dvr/recordings|1
+theater|activity@390x780|req|GET /api/v1/features|1
 theater|activity@390x780|req|GET /api/v1/me|1
 theater|activity@390x780|req|GET /api/v1/server|1
 theater|analysis@1280x860|dom|^ > div#app|1
@@ -7840,6 +7890,7 @@ theater|analysis@1280x860|focus|023|<wrap>
 theater|analysis@1280x860|req|GET /api/v1/activity|2
 theater|analysis@1280x860|req|GET /api/v1/analysis/jobs|1
 theater|analysis@1280x860|req|GET /api/v1/analysis/summary|1
+theater|analysis@1280x860|req|GET /api/v1/features|1
 theater|analysis@1280x860|req|GET /api/v1/me|1
 theater|analysis@1280x860|req|GET /api/v1/server|1
 theater|analysis@390x780|dom|^ > div#app|1
@@ -7932,6 +7983,7 @@ theater|analysis@390x780|focus|023|<wrap>
 theater|analysis@390x780|req|GET /api/v1/activity|2
 theater|analysis@390x780|req|GET /api/v1/analysis/jobs|1
 theater|analysis@390x780|req|GET /api/v1/analysis/summary|1
+theater|analysis@390x780|req|GET /api/v1/features|1
 theater|analysis@390x780|req|GET /api/v1/me|1
 theater|analysis@390x780|req|GET /api/v1/server|1
 theater|auth@1280x860|dom|^ > div#app|1
@@ -8106,6 +8158,7 @@ theater|category@1280x860|focus|035|div.poster.k-movie.unw "TS The Signal 2021 1
 theater|category@1280x860|focus|036|div.poster.k-movie.unw "SF Signal Fire 2003 180p"
 theater|category@1280x860|focus|037|<wrap>
 theater|category@1280x860|req|GET /api/v1/activity|2
+theater|category@1280x860|req|GET /api/v1/features|1
 theater|category@1280x860|req|GET /api/v1/libraries/<id>/items|2
 theater|category@1280x860|req|GET /api/v1/libraries|1
 theater|category@1280x860|req|GET /api/v1/me|1
@@ -8232,6 +8285,7 @@ theater|category@390x780|focus|029|a "Activity"
 theater|category@390x780|focus|030|a "Settings"
 theater|category@390x780|focus|031|<wrap>
 theater|category@390x780|req|GET /api/v1/activity|2
+theater|category@390x780|req|GET /api/v1/features|1
 theater|category@390x780|req|GET /api/v1/libraries/<id>/items|2
 theater|category@390x780|req|GET /api/v1/libraries|1
 theater|category@390x780|req|GET /api/v1/me|1
@@ -8345,6 +8399,7 @@ theater|home@1280x860|focus|028|div.poster.k-show.unw "SH Signal Hill 2019"
 theater|home@1280x860|focus|029|<wrap>
 theater|home@1280x860|req|GET /api/v1/activity|2
 theater|home@1280x860|req|GET /api/v1/coming-soon|1
+theater|home@1280x860|req|GET /api/v1/features|1
 theater|home@1280x860|req|GET /api/v1/home/previews|1
 theater|home@1280x860|req|GET /api/v1/hubs|1
 theater|home@1280x860|req|GET /api/v1/me|1
@@ -8462,6 +8517,7 @@ theater|home@390x780|focus|028|a "Settings"
 theater|home@390x780|focus|029|<wrap>
 theater|home@390x780|req|GET /api/v1/activity|2
 theater|home@390x780|req|GET /api/v1/coming-soon|1
+theater|home@390x780|req|GET /api/v1/features|1
 theater|home@390x780|req|GET /api/v1/home/previews|1
 theater|home@390x780|req|GET /api/v1/hubs|1
 theater|home@390x780|req|GET /api/v1/me|1
@@ -8605,6 +8661,7 @@ theater|item@1280x860|focus|026|button.ghost.sm "Generate subtitles"
 theater|item@1280x860|focus|027|summary "More actions"
 theater|item@1280x860|focus|028|<wrap>
 theater|item@1280x860|req|GET /api/v1/activity|2
+theater|item@1280x860|req|GET /api/v1/features|1
 theater|item@1280x860|req|GET /api/v1/files/<id>/preparation|1
 theater|item@1280x860|req|GET /api/v1/items/<id>|1
 theater|item@1280x860|req|GET /api/v1/libraries|1
@@ -8749,6 +8806,7 @@ theater|item@390x780|focus|026|a "Activity"
 theater|item@390x780|focus|027|a "Settings"
 theater|item@390x780|focus|028|<wrap>
 theater|item@390x780|req|GET /api/v1/activity|2
+theater|item@390x780|req|GET /api/v1/features|1
 theater|item@390x780|req|GET /api/v1/files/<id>/preparation|1
 theater|item@390x780|req|GET /api/v1/items/<id>|1
 theater|item@390x780|req|GET /api/v1/libraries|1
@@ -8872,6 +8930,7 @@ theater|library@1280x860|focus|029|button.ghost.sm "Scroll H right"
 theater|library@1280x860|focus|030|div.poster.k-movie "H Heat 1995 180p"
 theater|library@1280x860|focus|031|<wrap>
 theater|library@1280x860|req|GET /api/v1/activity|2
+theater|library@1280x860|req|GET /api/v1/features|1
 theater|library@1280x860|req|GET /api/v1/libraries/<id>/items|1
 theater|library@1280x860|req|GET /api/v1/libraries|1
 theater|library@1280x860|req|GET /api/v1/me|1
@@ -8990,6 +9049,7 @@ theater|library@390x780|focus|025|a "Activity"
 theater|library@390x780|focus|026|a "Settings"
 theater|library@390x780|focus|027|<wrap>
 theater|library@390x780|req|GET /api/v1/activity|2
+theater|library@390x780|req|GET /api/v1/features|1
 theater|library@390x780|req|GET /api/v1/libraries/<id>/items|1
 theater|library@390x780|req|GET /api/v1/libraries|1
 theater|library@390x780|req|GET /api/v1/me|1
@@ -9093,6 +9153,7 @@ theater|live-tv-grid@1280x860|req|GET /api/v1/dvr/overview|2
 theater|live-tv-grid@1280x860|req|GET /api/v1/dvr/reminders|1
 theater|live-tv-grid@1280x860|req|GET /api/v1/dvr/schedule|1
 theater|live-tv-grid@1280x860|req|GET /api/v1/dvr/status|1
+theater|live-tv-grid@1280x860|req|GET /api/v1/features|1
 theater|live-tv-grid@1280x860|req|GET /api/v1/live-tv/channels|1
 theater|live-tv-grid@1280x860|req|GET /api/v1/live-tv/guide|1
 theater|live-tv-grid@1280x860|req|GET /api/v1/me|1
@@ -9196,6 +9257,7 @@ theater|live-tv-grid@390x780|req|GET /api/v1/dvr/overview|2
 theater|live-tv-grid@390x780|req|GET /api/v1/dvr/reminders|1
 theater|live-tv-grid@390x780|req|GET /api/v1/dvr/schedule|1
 theater|live-tv-grid@390x780|req|GET /api/v1/dvr/status|1
+theater|live-tv-grid@390x780|req|GET /api/v1/features|1
 theater|live-tv-grid@390x780|req|GET /api/v1/live-tv/channels|1
 theater|live-tv-grid@390x780|req|GET /api/v1/live-tv/guide|1
 theater|live-tv-grid@390x780|req|GET /api/v1/me|1
@@ -9295,6 +9357,7 @@ theater|live-tv@1280x860|req|GET /api/v1/dvr/overview|2
 theater|live-tv@1280x860|req|GET /api/v1/dvr/reminders|1
 theater|live-tv@1280x860|req|GET /api/v1/dvr/schedule|1
 theater|live-tv@1280x860|req|GET /api/v1/dvr/status|1
+theater|live-tv@1280x860|req|GET /api/v1/features|1
 theater|live-tv@1280x860|req|GET /api/v1/live-tv/channels|1
 theater|live-tv@1280x860|req|GET /api/v1/live-tv/guide|1
 theater|live-tv@1280x860|req|GET /api/v1/me|1
@@ -9394,6 +9457,7 @@ theater|live-tv@390x780|req|GET /api/v1/dvr/overview|2
 theater|live-tv@390x780|req|GET /api/v1/dvr/reminders|1
 theater|live-tv@390x780|req|GET /api/v1/dvr/schedule|1
 theater|live-tv@390x780|req|GET /api/v1/dvr/status|1
+theater|live-tv@390x780|req|GET /api/v1/features|1
 theater|live-tv@390x780|req|GET /api/v1/live-tv/channels|1
 theater|live-tv@390x780|req|GET /api/v1/live-tv/guide|1
 theater|live-tv@390x780|req|GET /api/v1/me|1
@@ -9537,6 +9601,7 @@ theater|player@1280x860|focus|005|button#pblarger.picon "Larger"
 theater|player@1280x860|focus|006|button#pbfs.picon "Fullscreen"
 theater|player@1280x860|focus|007|<wrap>
 theater|player@1280x860|req|GET /api/v1/activity|2
+theater|player@1280x860|req|GET /api/v1/features|1
 theater|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 theater|player@1280x860|req|GET /api/v1/files/<id>/preparation|1
 theater|player@1280x860|req|GET /api/v1/items/<id>|1
@@ -9683,6 +9748,7 @@ theater|player@390x780|focus|004|button#pbpip.picon "Picture in picture"
 theater|player@390x780|focus|005|button#pbfs.picon "Fullscreen"
 theater|player@390x780|focus|006|<wrap>
 theater|player@390x780|req|GET /api/v1/activity|2
+theater|player@390x780|req|GET /api/v1/features|1
 theater|player@390x780|req|GET /api/v1/files/<id>/direct|1
 theater|player@390x780|req|GET /api/v1/files/<id>/preparation|1
 theater|player@390x780|req|GET /api/v1/items/<id>|1
@@ -9763,6 +9829,7 @@ theater|search@1280x860|focus|015|div.poster.k-movie.unw "SF Signal Fire 2003"
 theater|search@1280x860|focus|016|div.poster.k-movie.unw "TS The Signal 2021"
 theater|search@1280x860|focus|017|<wrap>
 theater|search@1280x860|req|GET /api/v1/activity|2
+theater|search@1280x860|req|GET /api/v1/features|1
 theater|search@1280x860|req|GET /api/v1/me|1
 theater|search@1280x860|req|GET /api/v1/search/related|1
 theater|search@1280x860|req|GET /api/v1/search|1
@@ -9838,6 +9905,7 @@ theater|search@390x780|focus|015|a "Activity"
 theater|search@390x780|focus|016|a "Settings"
 theater|search@390x780|focus|017|<wrap>
 theater|search@390x780|req|GET /api/v1/activity|2
+theater|search@390x780|req|GET /api/v1/features|1
 theater|search@390x780|req|GET /api/v1/me|1
 theater|search@390x780|req|GET /api/v1/search/related|1
 theater|search@390x780|req|GET /api/v1/search|1
@@ -10218,6 +10286,7 @@ theater|settings-developer@1280x860|req|GET /api/remote/v1/grants|1
 theater|settings-developer@1280x860|req|GET /api/remote/v1/receivers|1
 theater|settings-developer@1280x860|req|GET /api/v1/activity|2
 theater|settings-developer@1280x860|req|GET /api/v1/developer/readiness|1
+theater|settings-developer@1280x860|req|GET /api/v1/features|2
 theater|settings-developer@1280x860|req|GET /api/v1/live-tv/readiness|1
 theater|settings-developer@1280x860|req|GET /api/v1/me|1
 theater|settings-developer@1280x860|req|GET /api/v1/server|1
@@ -10598,6 +10667,7 @@ theater|settings-developer@390x780|req|GET /api/remote/v1/grants|1
 theater|settings-developer@390x780|req|GET /api/remote/v1/receivers|1
 theater|settings-developer@390x780|req|GET /api/v1/activity|2
 theater|settings-developer@390x780|req|GET /api/v1/developer/readiness|1
+theater|settings-developer@390x780|req|GET /api/v1/features|2
 theater|settings-developer@390x780|req|GET /api/v1/live-tv/readiness|1
 theater|settings-developer@390x780|req|GET /api/v1/me|1
 theater|settings-developer@390x780|req|GET /api/v1/server|1
@@ -10735,6 +10805,7 @@ theater|settings@1280x860|focus|037|button.ghost "Save storage domains"
 theater|settings@1280x860|focus|038|<wrap>
 theater|settings@1280x860|req|GET /api/v1/activity|2
 theater|settings@1280x860|req|GET /api/v1/dv-conversions|1
+theater|settings@1280x860|req|GET /api/v1/features|2
 theater|settings@1280x860|req|GET /api/v1/libraries|1
 theater|settings@1280x860|req|GET /api/v1/me|1
 theater|settings@1280x860|req|GET /api/v1/scan/status|3
@@ -10873,6 +10944,7 @@ theater|settings@390x780|focus|037|a.on "Settings"
 theater|settings@390x780|focus|038|<wrap>
 theater|settings@390x780|req|GET /api/v1/activity|2
 theater|settings@390x780|req|GET /api/v1/dv-conversions|1
+theater|settings@390x780|req|GET /api/v1/features|2
 theater|settings@390x780|req|GET /api/v1/libraries|1
 theater|settings@390x780|req|GET /api/v1/me|1
 theater|settings@390x780|req|GET /api/v1/scan/status|3
