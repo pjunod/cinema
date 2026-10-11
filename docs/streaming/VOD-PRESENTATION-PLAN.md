@@ -256,9 +256,16 @@ stable time inside the bytes):
   DTS carries no film time — `-avoid_negative_ts make_zero` rebases every
   generation to zero and `-copyts` does not change it — so a DTS-equality test
   can never converge, which M0 measured over 43 boundaries before this rule
-  replaced it. Two outcomes are a typed producer failure plus an index
-  invalidation, not a silent drift: a 3-sequence matching **nowhere** in the
-  index, and one matching in **two** places. That is what keeps D4's promise
+  replaced it. Only rows at or before the target entry's row are candidates,
+  because `-noaccurate_seek` never lands after it; a match past it is
+  neither an answer nor a veto. When three fragments leave more than one
+  candidate (three equal counts are ordinary in black, static or slide
+  content), the producer reads on and every fragment it has seen must match,
+  until one candidate is left or the landing buffer reaches one segment's
+  byte ceiling. Two outcomes are a typed producer failure plus an index
+  invalidation, not a silent drift: a sequence matching **nowhere** at or
+  before the target, and one still matching in **two** places when the
+  reading stops. That is what keeps D4's promise
   that an ffmpeg upgrade which re-fragments differently fails loudly —
   different fragmentation means different output byte counts, so the sequence
   misses rather than misaligning.

@@ -58,7 +58,7 @@ pub const SEGPLAN_VERSION: u32 = 3;
 /// refusal rules change.
 pub const VALIDATION_REVISION: u32 = 1;
 
-/// How many consecutive fragments a landing match compares.
+/// How many consecutive fragments a landing match compares at least.
 ///
 /// One fragment's byte count is not enough: two fragments of a 90-minute film
 /// can plausibly weigh the same, and a confidently wrong landing puts the
@@ -66,6 +66,11 @@ pub const VALIDATION_REVISION: u32 = 1;
 /// smallest window that makes a collision require three consecutive
 /// coincidences, and it costs the producer nothing — it reads the fragments it
 /// was going to read anyway.
+///
+/// It is a minimum, not the whole probe. Three equal counts are unremarkable
+/// in low-entropy film — black or static scenes, slides, a test pattern — so
+/// when three leave more than one possible landing, the producer keeps reading
+/// and [`match_landing`] compares every fragment it has seen.
 pub const LANDING_WINDOW: usize = 3;
 
 /// Audio headroom over the pipe's *nominal* bitrate, as a fraction.
@@ -993,8 +998,16 @@ pub enum LandingError {
     TooShort { observed: usize, needed: usize },
     /// The observed sequence appears nowhere in the index.
     NoMatch,
-    /// It appears more than once, so the landing is not determined.
-    Ambiguous { first: usize, second: usize },
+    /// It appears only after the row the generation was positioned at, where
+    /// `-noaccurate_seek` never lands — the plan and the index disagree.
+    PastTarget { row: usize, target: usize },
+    /// It appears more than once at or before the target row, over every
+    /// fragment observed so far, so the landing is not determined.
+    Ambiguous {
+        first: usize,
+        second: usize,
+        compared: usize,
+    },
 }
 
 impl fmt::Display for LandingError {
@@ -1010,10 +1023,20 @@ impl fmt::Display for LandingError {
                 "the repositioned generation's fragment byte sequence appears \
                  nowhere in the index; the index no longer describes this pipe"
             ),
-            LandingError::Ambiguous { first, second } => write!(
+            LandingError::PastTarget { row, target } => write!(
                 f,
                 "the repositioned generation's fragment byte sequence appears \
-                 at index rows {first} and {second}; the landing is undetermined"
+                 only at index row {row}, past its target row {target}"
+            ),
+            LandingError::Ambiguous {
+                first,
+                second,
+                compared,
+            } => write!(
+                f,
+                "the repositioned generation's fragment byte sequence appears \
+                 at index rows {first} and {second} over {compared} fragments; \
+                 the landing is undetermined"
             ),
         }
     }
@@ -1031,57 +1054,90 @@ impl std::error::Error for LandingError {}
 /// entry — always forward, because `-noaccurate_seek -ss` lands at the RAP
 /// at-or-before the boundary by design.
 ///
+/// `target` is that row, and it bounds the search: a landing after it is
+/// physically impossible, so a match there is neither an answer nor a reason
+/// to call a real landing ambiguous. Every candidate must reproduce the
+/// whole observation, not only its first [`LANDING_WINDOW`] fragments, so a
+/// caller that gets [`LandingError::Ambiguous`] can read further fragments and
+/// ask again; the copy pipe reproduces the index fragment for fragment, so
+/// the true landing keeps matching while a coincidence stops.
+///
 /// A short observation is accepted only when the match sits within
 /// [`LANDING_WINDOW`] of the end of the index — i.e. the stream genuinely ran
 /// out of fragments. Anywhere else, a short window is a weaker claim than this
 /// function is willing to make.
-pub fn match_landing(index: &FragmentIndex, observed: &[u32]) -> Result<usize, LandingError> {
+pub fn match_landing(
+    index: &FragmentIndex,
+    observed: &[u32],
+    target: usize,
+) -> Result<usize, LandingError> {
     if observed.is_empty() {
         return Err(LandingError::TooShort {
             observed: 0,
             needed: 1,
         });
     }
-    let window = observed.len().min(LANDING_WINDOW);
-    let probe = &observed[..window];
+    let probe = observed;
     let rows = &index.rows;
-    if rows.len() < window {
+    if rows.len() < probe.len().min(LANDING_WINDOW) {
         return Err(LandingError::TooShort {
             observed: rows.len(),
-            needed: window,
+            needed: probe.len().min(LANDING_WINDOW),
         });
     }
-
-    let mut found: Option<usize> = None;
-    for start in 0..=rows.len() - window {
-        let matches = rows[start..start + window]
+    let Some(last_start) = rows.len().checked_sub(probe.len()) else {
+        // More fragments than the index has rows: no landing reproduces it.
+        return Err(LandingError::NoMatch);
+    };
+    let matches_at = |start: usize| {
+        rows[start..start + probe.len()]
             .iter()
             .zip(probe)
-            .all(|(row, bytes)| row.video_bytes == *bytes);
-        if !matches {
+            .all(|(row, bytes)| row.video_bytes == *bytes)
+    };
+
+    let mut found: Option<usize> = None;
+    for start in 0..=last_start.min(target) {
+        if !matches_at(start) {
             continue;
         }
-        // Every match counts toward ambiguity, including ones the tail rule
-        // below will reject. Skipping them silently was how a byte count that
-        // appeared twice could still return a confident answer.
+        // Every possible landing counts toward ambiguity, including ones the
+        // tail rule below will reject. Skipping them silently was how a byte
+        // count that appeared twice could still return a confident answer.
         match found {
             None => found = Some(start),
             Some(first) => {
                 return Err(LandingError::Ambiguous {
                     first,
                     second: start,
+                    compared: probe.len(),
                 })
             }
         }
     }
-    let start = found.ok_or(LandingError::NoMatch)?;
+    let Some(start) = found else {
+        let past = (target.saturating_add(1)..=last_start).find(|&start| matches_at(start));
+        return Err(match past {
+            Some(row) => LandingError::PastTarget { row, target },
+            None => LandingError::NoMatch,
+        });
+    };
     // A probe shorter than the window is only believable when the generation
     // genuinely ran out of fragments — that is, when the match lands exactly
     // at the end of the index. Anywhere else it should have produced more.
-    if window < LANDING_WINDOW && start + window != rows.len() {
+    if probe.len() < LANDING_WINDOW && start + probe.len() != rows.len() {
         return Err(LandingError::NoMatch);
     }
     Ok(start)
+}
+
+/// The index row that begins `entry`, or `None` when the plan and the index
+/// disagree about where it starts.
+pub fn entry_row(index: &FragmentIndex, entry: &PlanEntry) -> Option<usize> {
+    index
+        .rows
+        .iter()
+        .position(|row| row.dts == entry.start_ticks)
 }
 
 /// How many fragments to discard to reach `entry` from a landing at `row`.
@@ -1090,11 +1146,7 @@ pub fn match_landing(index: &FragmentIndex, observed: &[u32]) -> Result<usize, L
 /// landing is already past it — both of which mean the caller is holding a
 /// plan and an index that disagree.
 pub fn discards_to(index: &FragmentIndex, landed_row: usize, entry: &PlanEntry) -> Option<usize> {
-    let target = index
-        .rows
-        .iter()
-        .position(|row| row.dts == entry.start_ticks)?;
-    target.checked_sub(landed_row)
+    entry_row(index, entry)?.checked_sub(landed_row)
 }
 
 #[cfg(test)]
@@ -1412,7 +1464,7 @@ mod tests {
             .iter()
             .map(|row| row.video_bytes)
             .collect();
-        assert_eq!(match_landing(&index, &observed), Ok(11));
+        assert_eq!(match_landing(&index, &observed, 12), Ok(11));
     }
 
     #[test]
@@ -1421,7 +1473,7 @@ mod tests {
         // counts change and the sequence misses instead of misaligning.
         let index = gop_index(30, CutClass::CleanIdr);
         assert_eq!(
-            match_landing(&index, &[7, 8, 9]),
+            match_landing(&index, &[7, 8, 9], 29),
             Err(LandingError::NoMatch)
         );
     }
@@ -1429,8 +1481,10 @@ mod tests {
     #[test]
     fn a_byte_sequence_that_repeats_is_refused_rather_than_guessed() {
         // A duplicated run near the landing: rows 11..14 and 20..23 weigh the
-        // same. The M0 corpus never produced this, which is exactly why it is
-        // constructed rather than sampled.
+        // same, and both sit at or before the target row, so either is a
+        // landing `-noaccurate_seek` could have made. The M0 corpus never
+        // produced this, which is exactly why it is constructed rather than
+        // sampled.
         let mut index = gop_index(30, CutClass::CleanIdr);
         for offset in 0..3 {
             index.rows[20 + offset].video_bytes = index.rows[11 + offset].video_bytes;
@@ -1440,10 +1494,90 @@ mod tests {
             .map(|row| row.video_bytes)
             .collect();
         assert_eq!(
-            match_landing(&index, &observed),
+            match_landing(&index, &observed, 21),
             Err(LandingError::Ambiguous {
                 first: 11,
-                second: 20
+                second: 20,
+                compared: 3,
+            })
+        );
+    }
+
+    /// Lab F1 (2026-10-11): a frontier generation at index row 715 failed
+    /// because rows 505..508 weighed the same as its first three fragments.
+    /// Three equal counts are unremarkable in low-entropy film, and one of
+    /// them sitting anywhere in the index vetoed the real landing.
+    #[test]
+    fn a_repeat_after_the_target_cannot_veto_the_landing() {
+        let mut index = gop_index(40, CutClass::CleanIdr);
+        for offset in 0..3 {
+            index.rows[30 + offset].video_bytes = index.rows[11 + offset].video_bytes;
+        }
+        let observed: Vec<u32> = index.rows[11..14]
+            .iter()
+            .map(|row| row.video_bytes)
+            .collect();
+        // Row 30 is past target row 12: `-noaccurate_seek` never lands there.
+        assert_eq!(match_landing(&index, &observed, 12), Ok(11));
+    }
+
+    #[test]
+    fn a_repeat_far_before_the_target_is_settled_by_reading_further() {
+        // Rows 5..8 weigh the same as rows 25..28, both at or before target
+        // row 26, so three fragments cannot tell them apart — the lab's
+        // shape, with the copy at 715 and the coincidence at 505.
+        let mut index = gop_index(40, CutClass::CleanIdr);
+        for offset in 0..3 {
+            index.rows[5 + offset].video_bytes = index.rows[25 + offset].video_bytes;
+        }
+        let observed: Vec<u32> = index.rows[25..29]
+            .iter()
+            .map(|row| row.video_bytes)
+            .collect();
+        assert_eq!(
+            match_landing(&index, &observed[..3], 26),
+            Err(LandingError::Ambiguous {
+                first: 5,
+                second: 25,
+                compared: 3,
+            })
+        );
+        // The fourth fragment is where the coincidence stops.
+        assert_eq!(match_landing(&index, &observed, 26), Ok(25));
+    }
+
+    #[test]
+    fn a_run_that_stays_identical_inside_the_window_is_still_refused() {
+        // Static film: rows 10..20 all weigh the same, so a landing inside the
+        // run is genuinely undetermined however far the producer reads into
+        // it, and the matcher must keep refusing rather than pick one.
+        let mut index = gop_index(40, CutClass::CleanIdr);
+        for row in &mut index.rows[10..20] {
+            row.video_bytes = 4_242;
+        }
+        let observed = vec![4_242u32; 5];
+        assert_eq!(
+            match_landing(&index, &observed, 15),
+            Err(LandingError::Ambiguous {
+                first: 10,
+                second: 11,
+                compared: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn a_landing_only_past_the_target_is_reported_as_such() {
+        let index = gop_index(30, CutClass::CleanIdr);
+        let observed: Vec<u32> = index.rows[20..23]
+            .iter()
+            .map(|row| row.video_bytes)
+            .collect();
+        assert_eq!(
+            match_landing(&index, &observed, 12),
+            Err(LandingError::PastTarget {
+                row: 20,
+                target: 12
             })
         );
     }
@@ -1456,7 +1590,7 @@ mod tests {
             .iter()
             .map(|row| row.video_bytes)
             .collect();
-        assert_eq!(match_landing(&index, &tail), Ok(28));
+        assert_eq!(match_landing(&index, &tail, 29), Ok(28));
 
         // Two fragments from the middle: the generation should have produced a
         // third, so refuse rather than accept a weaker claim.
@@ -1464,14 +1598,17 @@ mod tests {
             .iter()
             .map(|row| row.video_bytes)
             .collect();
-        assert_eq!(match_landing(&index, &middle), Err(LandingError::NoMatch));
+        assert_eq!(
+            match_landing(&index, &middle, 29),
+            Err(LandingError::NoMatch)
+        );
     }
 
     #[test]
     fn an_empty_observation_is_refused() {
         let index = gop_index(30, CutClass::CleanIdr);
         assert_eq!(
-            match_landing(&index, &[]),
+            match_landing(&index, &[], 29),
             Err(LandingError::TooShort {
                 observed: 0,
                 needed: 1
