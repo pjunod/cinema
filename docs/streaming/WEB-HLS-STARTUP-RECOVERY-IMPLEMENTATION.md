@@ -345,7 +345,8 @@ Do not extend the startup deadline to wait for it.
 |---|---|---|
 | Current typed startup/publication timeout | “The stream did not become ready in time.” Show server detail; Try again/Close | Unsupported codec |
 | Manifest failed, generic HTTP/network error | “The stream playlist could not be loaded.” Preserve status/code if safe | Extension or FFmpeg failure without evidence |
-| Manifest parsed, media unavailable | “The video data did not arrive in time.” | Manifest HTTP 200 means media arrived |
+| Manifest parsed, level playlist failed or not loaded (hls.js) | “The video playlist could not be loaded.” Preserve status if safe | A parsed master means media was requestable |
+| Level playlist loaded, media unavailable | “The video data did not arrive in time.” | Manifest HTTP 200 means media arrived |
 | Media transferred, no frame, no decoder error | “Playback did not start.” Report uncertainty and offer retry | Guaranteed decoder failure |
 | Actual decoder/media rejection | Existing decoder failure/fallback path | HTTP failures are decoder evidence |
 | Explicit authentication, terminal or owner verdict | Existing typed action and explanation | Retryable startup overrides authoritative terminal state |

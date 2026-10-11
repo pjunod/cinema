@@ -155,6 +155,12 @@ fn media_io_observation() -> MediaIoObservation {
 pub(crate) struct MediaNodeSnapshot {
     #[serde(default)]
     pub retained_output_receipts: bool,
+    /// This node answers an authenticated PREPARE of a pending VOD successor
+    /// by sealing its first-preparation output capture. A peer that predates
+    /// capture (absent field, read as false) primes a full uncaptured
+    /// attachment instead, which the origin's durable re-check then refuses.
+    #[serde(default)]
+    pub prepared_output_capture: bool,
     pub node_id: String,
     pub observed_at_unix_ms: i64,
     pub build: String,
@@ -754,6 +760,36 @@ impl MediaPool {
                     && cached.snapshot.protocol_version == PROTOCOL_VERSION
                     && cached.snapshot.retained_output_receipts
             })
+    }
+
+    /// A remote successor owner seals first-preparation output capture only
+    /// when its fresh, same-protocol advertisement says so — the same
+    /// negotiation as [`Self::retained_output_receiver`], and a capture
+    /// receiver is necessarily also a retained-output receiver.
+    pub(crate) async fn prepared_output_capture_receiver(&self, node_id: &str) -> bool {
+        let now = tokio::time::Instant::now();
+        self.snapshots
+            .read()
+            .await
+            .get(node_id)
+            .is_some_and(|cached| {
+                now <= cached.expires_at
+                    && cached.snapshot.protocol_version == PROTOCOL_VERSION
+                    && cached.snapshot.retained_output_receipts
+                    && cached.snapshot.prepared_output_capture
+            })
+    }
+
+    /// Cache one peer advertisement as the poll loop would.
+    #[cfg(test)]
+    pub(crate) async fn cache_snapshot_for_test(&self, snapshot: MediaNodeSnapshot) {
+        self.snapshots.write().await.insert(
+            snapshot.node_id.clone(),
+            CachedSnapshot {
+                snapshot,
+                expires_at: tokio::time::Instant::now() + SNAPSHOT_EXPIRY,
+            },
+        );
     }
     pub(crate) fn new(membership: MembershipManager) -> Arc<Self> {
         Arc::new(Self {
@@ -1719,6 +1755,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
     let workload_pressure = count_pressure(runtime.active_sessions, runtime.session_pressure_limit);
     MediaNodeSnapshot {
         retained_output_receipts: true,
+        prepared_output_capture: true,
         node_id: state.node_id.clone(),
         observed_at_unix_ms: unix_ms(),
         build: crate::version::BUILD.to_owned(),
@@ -1888,6 +1925,12 @@ pub(crate) async fn prepared_vod_owner(
     if let Some(decoder) = remote.decoder_caps.as_ref() {
         query.caps.video = decoder.device_caps().video;
     }
+    // `deadline` is the whole prime's (up to 45 s): it must also cover the
+    // attachment this lookup only advises. The lookup itself is the same
+    // eligible-source catalog an ordinary create bounds as one 2 s stage, so
+    // it gets that stage's bound; a miss is the conservative cache miss above
+    // and leaves the rest of the prime budget to the attachment.
+    let deadline = deadline.min(create_stage_deadline(QUALITY_CATALOG_DEADLINE));
     let result = local_quality_catalog(state, &query, deadline, Some(&catalog.binding)).await;
     if result.complete && !result.authority_refused {
         return result.candidates.into_iter().find(|entry| {
@@ -2372,6 +2415,7 @@ mod tests {
     fn snapshot(node: &str, decoders: &[&str], max_height: i64) -> MediaNodeSnapshot {
         MediaNodeSnapshot {
             retained_output_receipts: false,
+            prepared_output_capture: false,
             node_id: node.to_owned(),
             observed_at_unix_ms: unix_ms(),
             build: "test".to_owned(),
@@ -2940,6 +2984,7 @@ mod tests {
             CachedSnapshot {
                 snapshot: MediaNodeSnapshot {
                     retained_output_receipts: false,
+                    prepared_output_capture: false,
                     node_id: "peer".to_owned(),
                     observed_at_unix_ms: 1,
                     build: "test".to_owned(),
