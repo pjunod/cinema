@@ -5,7 +5,7 @@
 //! Production graph spelling belongs to `Pipeline`, including processing order.
 
 mod live;
-mod p5;
+pub(crate) mod p5;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -128,6 +128,7 @@ pub(crate) struct MacosVideoReport {
     pub(crate) hdr10_metal: GraphObservation,
     graphs: BTreeMap<MacosProcessingGraph, GraphObservation>,
     identity: Option<MacosProcessingIdentity>,
+    text_font_digest: Option<String>,
 }
 
 impl MacosVideoReport {
@@ -138,6 +139,7 @@ impl MacosVideoReport {
             hdr10_metal: GraphObservation::pending(),
             graphs: BTreeMap::new(),
             identity: None,
+            text_font_digest: None,
         }
     }
 
@@ -148,13 +150,26 @@ impl MacosVideoReport {
             hdr10_metal: GraphObservation::from_result(Err(reason)),
             graphs: BTreeMap::new(),
             identity: None,
+            text_font_digest: None,
         }
     }
 
     /// Capture one report for one new plan; readiness never modifies `enabled`.
     pub(crate) fn context(&self, enabled: bool) -> Option<MacosProcessingContext> {
+        self.context_for_fonts(enabled, None)
+    }
+
+    pub(crate) fn context_for_fonts(
+        &self,
+        enabled: bool,
+        font_digest: Option<&str>,
+    ) -> Option<MacosProcessingContext> {
+        let text_matches = self
+            .text_font_digest
+            .as_deref()
+            .is_some_and(|digest| Some(digest) == font_digest);
         self.identity.as_ref().map(|identity| {
-            self.graphs.iter().fold(
+            let context = self.graphs.iter().fold(
                 MacosProcessingContext::new(
                     enabled,
                     identity.clone(),
@@ -162,9 +177,29 @@ impl MacosVideoReport {
                     self.hdr10_metal.availability,
                 ),
                 |context, (graph, observation)| {
-                    context.with_graph(*graph, observation.availability)
+                    let availability = if matches!(
+                        graph,
+                        MacosProcessingGraph::SdrTextBurn
+                            | MacosProcessingGraph::Hdr10TextBurn
+                            | MacosProcessingGraph::HlgTextBurn
+                    ) && !text_matches
+                    {
+                        MacosProcessingAvailability::Unavailable
+                    } else {
+                        observation.availability
+                    };
+                    context.with_graph(*graph, availability)
                 },
-            )
+            );
+            if text_matches {
+                context.with_text_identity(
+                    identity
+                        .clone()
+                        .with_text_fonts(font_digest.expect("matching font digest").to_owned()),
+                )
+            } else {
+                context
+            }
         })
     }
 
@@ -186,6 +221,7 @@ impl MacosVideoReport {
         json!({
             "generation": self.generation,
             "implementation": identity,
+            "text_font_digest": self.text_font_digest,
             "sdr_scale": self.sdr_scale.diagnostics(),
             "hdr10_metal": self.hdr10_metal.diagnostics(),
             "graphs": self.graphs.iter().map(|(graph, observation)| (serde_json::to_value(graph).expect("enum serializes").as_str().expect("enum string").to_owned(), observation.diagnostics())).collect::<serde_json::Map<String, Value>>(),
@@ -200,6 +236,8 @@ pub(crate) struct MacosVideoProbe {
     runtime_cache: PathBuf,
     report: RwLock<Arc<MacosVideoReport>>,
     serial: tokio::sync::Mutex<()>,
+    #[cfg(target_os = "linux")]
+    linux_report: RwLock<crate::ffmpeg::linux_dolby::ReportSnapshot>,
 }
 
 impl MacosVideoProbe {
@@ -213,6 +251,65 @@ impl MacosVideoProbe {
             runtime_cache,
             report: RwLock::new(Arc::new(initial)),
             serial: tokio::sync::Mutex::new(()),
+            #[cfg(target_os = "linux")]
+            linux_report: RwLock::new(Arc::new(
+                crate::ffmpeg::linux_dolby::LinuxDolbyReport::initial(),
+            )),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn linux_snapshot(&self) -> crate::ffmpeg::linux_dolby::ReportSnapshot {
+        Arc::clone(
+            &self
+                .linux_report
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    pub(crate) fn linux_diagnostics(&self) -> Value {
+        #[cfg(target_os = "linux")]
+        {
+            self.linux_snapshot().diagnostics()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            serde_json::json!({"availability": "unavailable", "reason": "unsupported_platform", "generation": 0})
+        }
+    }
+
+    /// One serial lifecycle serves platform-specific observations. Linux is
+    /// automatic and does not consult the saved Mac processing preference.
+    pub(crate) async fn reprobe_video_processing(&self, cancelled: &CancellationToken) {
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(_serial) = self.serial.try_lock() else {
+                return;
+            };
+            let generation = self.linux_snapshot().generation.saturating_add(1);
+            *self
+                .linux_report
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Arc::new(crate::ffmpeg::linux_dolby::LinuxDolbyReport::unavailable(
+                    generation,
+                    "probe_pending",
+                ));
+            let report = crate::ffmpeg::linux_dolby::run_generation(
+                generation,
+                &self.runtime_cache,
+                cancelled,
+            )
+            .await;
+            *self
+                .linux_report
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(report);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.reprobe(cancelled).await;
         }
     }
 
@@ -230,6 +327,15 @@ impl MacosVideoProbe {
     /// manager remains the sole owner of the saved processing preference.
     #[cfg(test)]
     pub(crate) fn publish_context_for_test(&self, context: &MacosProcessingContext) {
+        self.publish_context_with_fonts_for_test(context, None);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_context_with_fonts_for_test(
+        &self,
+        context: &MacosProcessingContext,
+        font_digest: Option<String>,
+    ) {
         fn observation(availability: MacosProcessingAvailability) -> GraphObservation {
             match availability {
                 MacosProcessingAvailability::Available => GraphObservation::from_result(Ok(())),
@@ -242,6 +348,7 @@ impl MacosVideoProbe {
         self.publish(MacosVideoReport {
             generation: self.snapshot().generation.saturating_add(1),
             identity: Some(context.identity().clone()),
+            text_font_digest: font_digest,
             sdr_scale: observation(context.sdr_scale()),
             hdr10_metal: observation(context.hdr10_metal()),
             graphs: context
@@ -891,7 +998,7 @@ async fn prepare_corpus(
 }
 
 #[cfg(unix)]
-async fn verify_private_directory(
+pub(crate) async fn verify_private_directory(
     directory: &plurx_core::fs_secure::SecureDirectory,
 ) -> Result<(), ProbeReason> {
     let directory = directory.clone();
@@ -913,7 +1020,7 @@ async fn verify_private_directory(
 }
 
 #[cfg(not(unix))]
-async fn verify_private_directory(
+pub(crate) async fn verify_private_directory(
     _directory: &plurx_core::fs_secure::SecureDirectory,
 ) -> Result<(), ProbeReason> {
     Err(ProbeReason::UnsupportedPlatform)
@@ -924,6 +1031,7 @@ struct Implementation {
     ffprobe: crate::ffmpeg::EncodedExecutable,
     identity: MacosProcessingIdentity,
     filters: String,
+    text_engine: Option<crate::ffmpeg::EncodedEngine>,
 }
 
 // The admitted Jellyfin distribution statically supplies its non-Apple libraries.
@@ -1079,6 +1187,7 @@ async fn capture_implementation(
         ffprobe,
         identity,
         filters,
+        text_engine: None,
     };
     if !bounded_identity_io(deadline, cancelled, async {
         Ok(implementation_is_current(&implementation).await)
@@ -1193,13 +1302,29 @@ async fn run_generation(
         Ok(prepared) => prepared,
         Err(reason) => return MacosVideoReport::unavailable(generation, reason),
     };
-    let implementation = match capture_implementation(cancelled).await {
+    let mut implementation = match capture_implementation(cancelled).await {
         Ok(implementation) => implementation,
         Err(reason) => return MacosVideoReport::unavailable(generation, reason),
     };
+    implementation.text_engine = bounded_graph_io(
+        tokio::time::Instant::now() + GRAPH_BUDGET,
+        cancelled,
+        async {
+            crate::ffmpeg::EncodedEngine::capture(Some(&owner.runtime_cache))
+                .await
+                .map_err(|_| ProbeReason::IdentityUnavailable)
+        },
+    )
+    .await
+    .ok();
     let mut report = MacosVideoReport {
         generation,
         identity: Some(implementation.identity.clone()),
+        text_font_digest: implementation
+            .text_engine
+            .as_ref()
+            .and_then(|engine| engine.font_digest())
+            .map(str::to_owned),
         sdr_scale: GraphObservation::pending(),
         hdr10_metal: GraphObservation::pending(),
         graphs: BTreeMap::new(),
@@ -1658,8 +1783,8 @@ async fn run_smoke(
         };
     }
     match operation {
-        SmokeOperation::Text => required.extend(["hwdownload", "subtitles"]),
-        SmokeOperation::Bitmap => required.extend(["hwdownload", "overlay", "scale"]),
+        SmokeOperation::Text => required.extend(["subtitles_vt_images", "overlay_videotoolbox"]),
+        SmokeOperation::Bitmap => required.extend(["overlay_videotoolbox", "format", "scale"]),
         SmokeOperation::BwdifFrame | SmokeOperation::BwdifField => {
             required.push("bwdif_videotoolbox")
         }
@@ -1781,6 +1906,22 @@ async fn run_smoke(
     std::io::Seek::rewind(&mut source).map_err(|_| ProbeReason::CacheUnavailable)?;
     let source_path = prepared.path.join(format!("{}.mp4", fixture.sha256));
     let mut encode = tokio::process::Command::new(&implementation.ffmpeg.path);
+    if operation == SmokeOperation::Text {
+        let engine = implementation
+            .text_engine
+            .as_ref()
+            .ok_or(ProbeReason::IdentityUnavailable)?;
+        if !bounded_graph_io(deadline, cancelled, async {
+            Ok(engine
+                .is_current_with_executable(&implementation.ffmpeg)
+                .await)
+        })
+        .await?
+        {
+            return Err(ProbeReason::ImplementationChanged);
+        }
+        encode.envs(engine.child_env());
+    }
     let ass = if operation == SmokeOperation::Text {
         Some(
             bounded_graph_io(
@@ -1822,7 +1963,7 @@ async fn run_smoke(
         encode.args(pipeline.decode_args());
     }
     encode.arg("-i").arg(source_arg).args(["-an", "-sn", "-dn"]);
-    if operation != SmokeOperation::Bitmap {
+    if !matches!(operation, SmokeOperation::Bitmap | SmokeOperation::Text) {
         encode.args(["-map", "0:v:0"]);
     }
     let mut filter = pipeline
@@ -1842,11 +1983,11 @@ async fn run_smoke(
             encode.args(["-vf", &filter]);
         }
         SmokeOperation::Text => {
-            filter.push_str(",hwdownload,format=nv12,subtitles='/dev/fd/4'");
-            encode.args(["-vf", &filter]);
+            let composite = format!("[0:v]{filter},split[main][clock];[clock]subtitles_vt_images='/dev/fd/4':font_provider=fontconfig[images];[main][images]overlay_videotoolbox=ass=1:eof_action=pass[o]");
+            encode.args(["-filter_complex", &composite, "-map", "[o]"]);
         }
         SmokeOperation::Bitmap => {
-            let composite = format!("[0:v]{filter},hwdownload,format=nv12[vburn];[0:s:0]scale=160:90[sburn];[vburn][sburn]overlay=eof_action=pass[o]");
+            let composite = format!("[0:v]{filter}[vburn];[0:s:0]scale=160:90,format=yuva420p[sburn];[vburn][sburn]overlay_videotoolbox=bitmap=1:eof_action=pass[o]");
             // Replace the simple video map with the existing bitmap compositor's output.
             encode.args(["-filter_complex", &composite, "-map", "[o]"]);
         }
@@ -2031,12 +2172,77 @@ async fn run_smoke(
     if !matches!(cleanup, Ok(Ok(()))) {
         return Err(ProbeReason::CacheUnavailable);
     }
+    if operation == SmokeOperation::Text {
+        let engine = implementation
+            .text_engine
+            .as_ref()
+            .ok_or(ProbeReason::IdentityUnavailable)?;
+        if !bounded_graph_io(deadline, cancelled, async {
+            Ok(engine
+                .is_current_with_executable(&implementation.ffmpeg)
+                .await)
+        })
+        .await?
+        {
+            return Err(ProbeReason::ImplementationChanged);
+        }
+    }
     observe
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_observation_requires_matching_held_font_authority() {
+        let identity = MacosProcessingIdentity::new(
+            "1".repeat(64),
+            "2".repeat(64),
+            "3".repeat(64),
+            "4".repeat(64),
+            "test-build".to_owned(),
+            "arm64".to_owned(),
+            "Apple test SoC".to_owned(),
+        )
+        .expect("valid implementation");
+        let mut report = MacosVideoReport::pending(1);
+        report.identity = Some(identity.clone());
+        report.text_font_digest = Some("a".repeat(64));
+        report.sdr_scale = GraphObservation::from_result(Ok(()));
+        for graph in [
+            MacosProcessingGraph::SdrTextBurn,
+            MacosProcessingGraph::SdrBitmapBurn,
+        ] {
+            report
+                .graphs
+                .insert(graph, GraphObservation::from_result(Ok(())));
+        }
+        for digest in [None, Some("b".repeat(64))] {
+            let context = report
+                .context_for_fonts(true, digest.as_deref())
+                .expect("base context");
+            assert_eq!(
+                context.graph(MacosProcessingGraph::SdrTextBurn),
+                MacosProcessingAvailability::Unavailable
+            );
+            assert_eq!(
+                context.graph(MacosProcessingGraph::SdrBitmapBurn),
+                MacosProcessingAvailability::Available
+            );
+            assert_eq!(context.identity(), &identity);
+        }
+        let digest = "a".repeat(64);
+        let context = report
+            .context_for_fonts(true, Some(&digest))
+            .expect("matched context");
+        assert_eq!(
+            context.graph(MacosProcessingGraph::SdrTextBurn),
+            MacosProcessingAvailability::Available
+        );
+        assert_ne!(context.text_identity().digest(), identity.digest());
+        assert_eq!(context.identity(), &identity);
+    }
 
     #[test]
     fn macos_pgs_observation_rejects_opaque_missing_and_stale_cues() {
@@ -2809,5 +3015,37 @@ mod tests {
     #[tokio::test]
     async fn graph_cancellation_kills_and_reaps_the_owned_child() {
         killed_probe(ProbeReason::Cancelled).await;
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn neutral_linux_reprobe_reuses_serial_owner_and_keeps_mac_report_separate() {
+        let directory = crate::test_tempdir().expect("neutral probe directory");
+        let probe = MacosVideoProbe::new(directory.path().join("never-prepared"));
+        let cancelled = CancellationToken::new();
+        let serial = probe.serial.try_lock().expect("one compatibility owner");
+        probe.reprobe_video_processing(&cancelled).await;
+        assert_eq!(
+            probe.linux_snapshot().generation,
+            0,
+            "an overlapping request must not start a second generation"
+        );
+        drop(serial);
+        cancelled.cancel();
+        probe.reprobe_video_processing(&cancelled).await;
+        assert_eq!(probe.linux_snapshot().reason, "cancelled");
+        assert_eq!(probe.linux_snapshot().generation, 1);
+        assert_eq!(
+            probe.snapshot().generation,
+            0,
+            "Linux state must not be published as Mac availability"
+        );
+        assert_eq!(
+            probe.snapshot().sdr_scale.reason,
+            ProbeReason::UnsupportedPlatform
+        );
+        assert!(
+            !directory.path().join("never-prepared").exists(),
+            "cancellation must avoid package/media/device work"
+        );
     }
 }

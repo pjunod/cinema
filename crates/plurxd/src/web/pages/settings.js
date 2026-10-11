@@ -127,6 +127,11 @@ function settingsManifest(tab){
 }
 function cacheSettings(value){
   SETTINGS=value; SETTINGS_DATA.settings=value; SETTINGS_LOADED.add("settings");
+  // Every settings read and save lands here, so this is the one place an
+  // enable switch the admin just flipped reaches the nav: re-read /features
+  // (the nav's only source of truth) in the background. Fire-and-forget, and
+  // a refusal or a missing loader must never fail the save that got here.
+  if(typeof refreshFeatures==="function") void refreshFeatures();
   return value;
 }
 function cacheTrakt(value){

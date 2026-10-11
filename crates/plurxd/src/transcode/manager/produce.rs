@@ -444,7 +444,8 @@ impl TranscodeManager {
             .vod_settings(&request)
             .await?
             .ok_or(PreparationError::Fail("vod_policy_unavailable"))?;
-        let executable = crate::ffmpeg::EncodedExecutable::capture().await?;
+        let executable =
+            crate::ffmpeg::EncodedExecutable::capture_for_preparation(&encoding.executable).await?;
         if executable.digest != intent.executable_digest {
             return Err(PreparationError::Fail("encoded_executable_changed"));
         }
@@ -2594,9 +2595,7 @@ impl TranscodeManager {
         // Bind before reading/resuming cached parts, so the configured encoder
         // cannot enter an older Mac implementation's generation.
         let macos_executable = capture_macos_plan_executable(plan, &producer_ffmpeg_bin()).await?;
-        let macos_completion_sha256 = plan
-            .macos_processing_identity()
-            .map(|identity| identity.ffmpeg_sha256());
+        let macos_completion_sha256 = plan.captured_processing_ffmpeg_sha256();
         let max = self.max_hw_sessions().await;
         // Whatever an earlier pass got through. Usually nothing; on a busy box
         // making a long film, this is how it eventually finishes.
@@ -2833,7 +2832,7 @@ impl TranscodeManager {
                     return Err("macos_processing_implementation_changed: captured offline encoder changed before launch".to_owned());
                 }
             }
-            let (mut child, _child_job, diagnostics) = spawn_ffmpeg_at(
+            let (mut child, _child_job, diagnostics) = spawn_ffmpeg_at_with_env(
                 macos_executable
                     .as_ref()
                     .map(|executable| executable.path.as_path())
@@ -2861,6 +2860,10 @@ impl TranscodeManager {
                     descriptors
                 },
                 observation.clone(),
+                &macos_executable
+                    .as_ref()
+                    .map(|executable| executable.processing_child_env())
+                    .unwrap_or_default(),
             )?
             .into_parts();
 

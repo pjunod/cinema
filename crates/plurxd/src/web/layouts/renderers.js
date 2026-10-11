@@ -7,11 +7,24 @@
 // Resolve through the active layout, then classic. Two lookups rather than one
 // because a layout that only redefines Home must still get the classic body for
 // every route it has not converted — a missing renderer is normal, not an error.
+// The section the current chrome was painted for, kept so a nav repaint can
+// light the same tab without re-rendering the page under it.
+let LAYOUT_ACTIVE="home";
 function layoutChrome(active, inner){
+  LAYOUT_ACTIVE=active;
   const L=LAYOUTS[layoutId()];
   const answer=(L&&L.chrome?L.chrome:classicChrome)(active, inner);
   dvrPaintGlobal();
   return answer;
+}
+// FEATURES changed under a painted page (an admin saved an enable switch):
+// each layout repaints only its own section links, through its navChanged()
+// hook, and the DVR indicator re-reads whether Recordings is shown at all.
+function layoutNavChanged(){
+  const L=LAYOUTS[layoutId()];
+  const repaint=L&&L.chrome?L.navChanged:classicNavChanged;
+  if(typeof repaint==="function") repaint(LAYOUT_ACTIVE);
+  dvrPaintGlobal();
 }
 function layoutView(name, page){
   const L=LAYOUTS[layoutId()];

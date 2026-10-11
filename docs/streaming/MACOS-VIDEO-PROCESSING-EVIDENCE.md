@@ -1,7 +1,7 @@
-# macOS processing — initial experiment evidence
+# macOS processing — experiment and delivery evidence
 
-**Status:** open; feasibility evidence, not release qualification · **Observed:**
-2026-10-07 · **Scope:** M0/M1 of the
+**Status:** open; each result is bound to its stated source and workload · **Observed:**
+2026-10-07–08 · **Scope:** initial experiments, delivery and required follow-ups in the
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md).
 The [status ledger](MACOS-VIDEO-PROCESSING-STATUS.md) tracks every outstanding
 implementation, review and qualification item.
@@ -1072,3 +1072,1083 @@ The successful continuation links original failed receipt SHA-256
 Source/binary identities, original driver hashes and normalized executed
 copies are retained. Media, credentials, private session URLs/configuration,
 full daemon logs and binaries are excluded.
+
+## 29. Required follow-up mechanisms — 2026-10-08
+
+These controls support the active GPU-subtitle, non-Mac P5 and caption-bearing
+VOD work. They are not final shipping-package or normal-API qualification.
+The [status ledger](MACOS-VIDEO-PROCESSING-STATUS.md) names the remaining work.
+
+| Control | Observed result | Limit |
+|---|---|---|
+| Animated ordered ASS | 24 frames, exact Y/UV and PTS, including blank transitions | Tiny analytical input; direct graph only |
+| Colored bitmap odd boundary | 24 frames, exact Y/UV and PTS after matching CPU boundary alpha arithmetic | Generic BGRA overlay is outside this new mode |
+| ASS clipping at all edges/corners | 24 frames, exact Y/UV and PTS, including negative coordinates and blank frames | Same staged Fontconfig provider; no performance claim |
+| Caption-preserving H.264 VT | Seven direct controls pass; caption-positive HEVC and MPEG-2 each retain 48 caption records | HEVC output still has no A53; actual API acceptance remains separate |
+| Original finite-VOD clock | Two decoded source frames near PTS 66,272 yield 17 scheduled observations of one picture | Confirms source-origin defect; output presence is not preservation |
+| Corrected seek/A-V clock | 17 observed video frames and 144 actual audio frames match normalized reference in timing/checksums | Direct seek3/preroll2 plus175ms correction; final API still required |
+| Intel VAAPI strict P5 | All 28 diagnostic controls pass; fresh/variable raw hardware/software pixels equal | Ubuntu diagnostic, 320×180→160×90; no Bookworm shipping, 4K, other backend or performance claim |
+
+The subtitle tolerance was declared before comparison: maximum absolute
+luma/chroma error two, with cue-free frames byte-identical. None of these
+passing cases required tolerance changes. Rejected BGRA/affine alternatives,
+initial frame-pool and class-layout errors, animation timestamp rounding and
+bitmap boundary errors remain recorded in the ledger. The three passing
+compositor receipts bind different intermediate binaries; no result is
+silently attributed to a later final package.
+
+The caption parser repair corrects logical RBSP payload counting through
+escaped EBSP and preserves the existing SEI prefix. Its direct-control binary
+is `9c9e91054999531e7543f603ca4d4a6db32a6399f92f9b283b245ae0d104c3ea`.
+The VOD-clock controls use
+`10aedbbbb73c6c4aa78a090c001620dc84f5d94c810ca5b207d1ba9aee6acd37`.
+The [caption record](VIDEOTOOLBOX-CAPTION-VOD-FOLLOWUP.md) explains both
+independent causes, the initially discarded audio, and the reference's
+corrected timestamp precision. The actual API's padding-heavy output and
+forced shutdown remain failures until corrected-candidate delivery proves
+otherwise. Neither frame count nor a successful child exit closes that work.
+
+The Intel diagnostic binary is
+`8baa3b11d77f469f16169de4b3d2992568c05c419a41666948507c1ed70e4d14`.
+It observes selected opaque VAAPI frames, mandatory download and effective
+current-frame Dolby metadata through the strict CPU renderer. Correct
+canonical Jellyfin driver lookup was necessary; ordinary libva overrides
+were insufficient. Changed deployment state and stale transfer preflight
+were refused before GPU access. All owned work was reaped after the window.
+
+[Follow-up mechanism evidence](evidence/macos-video-20261008/followup-mechanism-evidence.tar.gz)
+contains one curated JSON file, 3,824 compressed bytes, SHA-256
+`f242819010450715562f1a5e6d03e81925d15a207cc8a1da5c6ad1163fdc368b`.
+It retains exact tool/source hashes, private raw-receipt hashes, declared
+thresholds, per-case outcomes and canonical observation hashes. Media,
+caption text, credentials, private paths, session configuration, raw commands
+and full daemon logs are excluded. The assembler's SHA-256 is
+`d4455b56fb904a63ad805dc07d9d2b0389e836feb9b9b490a96f4a62950b19ee`;
+its raw inputs remain in the owned evidence workspace for final review.
+
+## 30. Caption-bearing normal API delivery — 2026-10-08
+
+The combined source `1f154545619d49e81f994983ea58dd6b6c160f5a`, signed
+debug daemon `ddb72eb4a83cc412f885e2a958bd9aa7908c74db0f0d1bbc325223c4a9c54797`
+and FFmpeg `10aedbbbb…` deliver the corrected finite-VOD graph through normal
+file scanning, session creation, HTTP media and cancellation. Captured held-FD
+commands select `h264_videotoolbox`, apply the held source offset to both
+media inputs, and disable their extra automatic seek trimming. This is a
+private correctness package, not a release or performance result.
+
+| Input | Delivered frames | Caption evidence | Independent picture PSNR, minimum / mean |
+|---|---:|---|---|
+| Public reordered HEVC/AC-4 | 120 | Exact raw per-frame CC/PTS equality with the identical software graph; all 120 due 608 and 66 due valid 708 records retained in source order | 41.48 / 42.4773 |
+| Original MPEG-2/A53 | 50 | All 48 ordered 608 records retained; exact software CC/PTS equality; initial-frame oracle corrected as described below | 37.86 / 38.4124 |
+| Caption-free original | 50 | Zero caption records; exact software CC/PTS equality | 37.86 / 38.4124 |
+
+The picture oracle was frozen before execution at minimum PSNR 24 and mean
+30, with source-picture progression and packet/decoded-frame PTS checks.
+It compares independently normalized source pictures; output frame count
+alone is insufficient. Caption comparison retains raw tuple bytes and PTS.
+No client caption-presentation claim follows from these server-side results.
+
+The MPEG-2 run initially failed its source-time oracle. Format start is 1.4 s
+and the first video picture starts 38.7 ms later. At 30000/1001 fps, the first
+two pictures round to ticks 1 and 2. The pinned `fps` filter queues their
+captions before cloning the first picture at output tick 0; its 608 FIFO
+drains two records into that first output. The second record's source time,
+72.0667 ms, exceeded the original two-frame allowance of 66.7333 ms.
+
+The revised oracle recognizes only that exact initial assignment: output
+tick 0, source frames 0/1, nearest first tick 1, consecutive source frame
+timing and exactly two queued/drained ordered 608 records at 30000/1001.
+The two-frame bound remains unchanged for every later record. Reassessment
+uses the same hash-verified source, served media and software reference;
+there was no second API or GPU run and no production change. The frozen
+failure remains in the evidence. Existing first-picture padding does not
+promise preservation of the original initial video presentation onset.
+
+All session cancellations return 204, but all three debug daemons exceed
+the 30-second shutdown settlement bound. Owned-PID stack samples identify
+Tokio's blocking-pool shutdown waiting for startup `DecodeProbeIdentity`
+WebAssembly compilation. Parser identity had already exceeded its deadline;
+the worker continues compiling. This is separate from the completed
+VideoToolbox producers. The owned processes were terminated and reaped.
+The exact-source release-profile check in §31 distinguishes the debug compiler
+cost from its observed release lifecycle; no watchdog, deadline increase or
+parser-capability bypass was added.
+
+[Caption API delivery evidence](evidence/macos-video-20261008/caption-api-delivery-evidence.tar.gz)
+contains three sanitized JSON records, 2,674 compressed bytes, SHA-256
+`e4cc44d9665c057e5b2696b396e3d37dea42e120100d052723fa9f2e3f54ea6a`.
+They retain the original failures, reassessment, exact artifact/observer hashes
+and qualification limits. The archive excludes media, caption text, private
+paths and raw logs. Its assembler is
+`a245edf2880a060ceccb800331eec0f1988434c07d7da07912d6a23091450131`;
+all referenced raw receipt/media hashes were checked before assembly.
+
+## 31. Release parser lifecycle and retained subtitle-driver failure — 2026-10-08
+
+Exact source `1f154545619d49e81f994983ea58dd6b6c160f5a` builds with pinned
+Rust 1.97.1 in the release profile. The first bounded window expired after
+600 seconds; no source error was reported, and the exact unfinished crate
+was not recorded. A separately authorized 1,800-second window completed in
+792.69 seconds with two compiler jobs. Both receipts remain retained.
+
+The immutable unsigned daemon is 168,070,376 bytes, SHA-256
+`a1ba7bdfb904671a77afa465c90c77db81abc89e4838c5438047d664e4610507`.
+Its arm64 UUID `D8A72604-6217-3E8D-A1F5-52E45FAEB4B6` matches the retained
+debug symbols. The signed qualification daemon is
+`42fdd61b5431fe657bfd1435497fc5dc8c11595b38cc385b86a8f3a4ac0d83cb`;
+FFmpeg, FFprobe and sealed-parser bytes remain unchanged from §30. This is
+ad hoc package qualification, not a notarized installation claim.
+
+With the owned build prefix hidden, the first normal CPU subtitle API run
+passes all 49 independent source-cue observations, has no startup parser
+identity warning and shuts down with exit zero. Its overall result remains
+**failed**: the first hold request returned 200, but the private driver then
+sent `play` for resume, which protocol v1 rejects. The valid value is `active`.
+The original receipt and executed driver are retained unchanged; the driver
+correction changes no application behavior.
+
+This result supports release parser initialization and clean shutdown for
+that case. It does not turn the three debug caption shutdown failures into
+passes, qualify GPU subtitles, or establish complete control lifecycle or
+performance. Text/bitmap API work continues separately in the status ledger.
+
+[Release parser lifecycle evidence](evidence/macos-video-20261008/release-parser-lifecycle-evidence.tar.gz)
+contains one curated JSON record, 1,359 compressed bytes, SHA-256
+`bf81a44ed7b08a1e0a0527b148ffee91cd0688c85224dba931bb4c0147d965df`.
+The assembler verifies the unsigned daemon and all symbol hashes, retains
+the original receipt hashes and failing overall result, and excludes runtime
+directories, media, credentials, paths and commands. Its SHA-256 is
+`6896e303ace63b5d8c65a0a22f74b151283f2368dc7a75d442a5d677c06a7f03`.
+
+## 32. GPU bitmap API delivery and local text authority — 2026-10-08
+
+The same signed release source and package as §31 now pass normal bitmap
+subtitle delivery with the owned build prefix hidden. The actual producer
+selects `overlay_videotoolbox=bitmap=1` and a two-second containing entry for
+a requested 3.5-second start. All 25 served frames match the independent
+source-event model described below. Hold, resume and seek-back-to-zero
+requests return 200; DELETE returns 204, and the daemon shuts down with exit
+zero with parser identity available. The build prefix is restored and all
+owned media processes are reaped. Control acceptance is not proof of a
+client-presented frame or rendered seek-back accuracy.
+
+The first GPU and incumbent CPU cases both failed the original raw-interval
+oracle on the frame at 3.750 s. Source packets and decoded sidecar timestamps
+remain 0.021, 0.521, 3.271 and 3.771 s; no 21 ms origin subtraction occurs.
+Tracing the pinned `sub2video` and frame scheduler establishes the exact
+assignment:
+
+- With pass-through EOF behavior the secondary input has `sync=0`, so the
+  main 1/12 clock determines nearest timestamp conversion.
+- A blank heartbeat at 3.270999 s precedes the active subtitle at 3.271 s.
+  Both become tick 39. The scheduler consumes one queued next event per
+  input and emits the main frame on the first tie, leaving tick 39 blank.
+  The active event takes effect before tick 40, at 3.333333 s.
+- The clear event at 3.771 s becomes tick 45 and applies to the main frame
+  at 3.750 s.
+
+The deterministic reassessment passes all 25 retained frames in both original
+CPU and GPU outputs. Their failed receipts remain unchanged. This is an
+oracle correction derived from exact event ordering, with no application
+change or tolerance increase. A separate corrected-driver GPU run then
+completed the controls that those failed runs had not reached. DELETE's 204
+is established by the executed driver's assertion and passing path, not an
+invented receipt field.
+
+The text case exposed a different, real integration defect: local resolution
+received a font digest only from shared-source evidence, while local engine
+capture happened after planning. Repair `b7d21934b` moves the same capture
+before resolution and retains that engine through encoding. Matching, absent
+and mismatched font regression sources compile. The pinned all-target check
+and normal hook pass without unit execution; updated text runtime acceptance
+is still outstanding. The bitmap runtime results above use `1f1545456` and
+must not be attributed to the later text repair.
+
+[Bitmap API and text authority evidence](evidence/macos-video-20261008/subtitle-bitmap-api-evidence.tar.gz)
+contains one curated JSON record, 3,844 compressed bytes, SHA-256
+`2a478286f56658f4916757d0092a5a01528924fb159c9eb6b56771ed89b4ec29`.
+All 33 raw allowlist entries were independently checked for hash and size
+before archiving; the archive was reopened and compared byte-for-byte. It
+includes the per-frame expectations, original failures, exact artifact and
+driver identities, and explicitly separate compile-only evidence. It excludes
+media, paths, raw commands, session identifiers, credentials and runtime state.
+The curator is
+`e04fb3b735a5c347b00ededf549f537eb2a9e41309841ecd1a634a79dfcd569d`.
+
+
+## 33. Linux SDK generation and release integration — 2026-10-08
+
+Static staging and actual generation are distinct. The first 75-role static
+stage required a source-format correction: authenticated Debian format 1.0
+uses an original archive plus a declared `.diff.gz`, whereas 3.0 (quilt) uses
+an original archive plus a Debian archive. The helper now checks the genuine
+DSC source/version, exact SHA-256 member set and sizes for each format. The
+original refusal and a blank-continuation parser failure remain retained.
+
+The actual generator used committed source
+`070ac88142ffd2c473e2149dea34371d272e9c1b` and static manifest
+`5898c47a16ad92cf71ac71354b38b269eb90c7556eec7f981ac9f4e81e4a2316`.
+Its source-only helper/lock archive is
+`8823e91a2d40213898db293674c8d2c7be7e43e662f6df876b338e7ab2b16ae7`.
+Fresh preflight observed Debian 12 amd64, GCC 12.2 and Python 3.11.2; input
+hashes passed. The isolated container had two CPUs, 2 GiB, no swap, no GPU
+and no network during generation. No repository metadata or credentials were
+transferred. The attempt failed after 21.60 seconds, without an OOM or timeout;
+its container stopped and its original network configuration was restored.
+
+The failure was an omitted upstream FFTW metadata target. Float configure
+produced `fftw.pc` with `Libs: -lfftw3f`. The authentic Makefile declares
+`PREC_SUFFIX=f`, `pkgconfig_DATA=fftw3f.pc`, and copies `fftw.pc` through the
+`fftw3f.pc` target. Configure alone therefore cannot satisfy that selector.
+
+| Evidence | SHA-256 |
+|---|---|
+| Authenticated FFTW source archive | `5630c24cdeb33b131612f7eb4b1a9934234754f9f388ff8617458d0be6f239a1` |
+| Original `Makefile.am` | `0f4b72d870b6f532de6ca06ae1a97a8be2feec50ac37afd7c4e0e899e02875e4` |
+| Actual generated Makefile | `d1ea4e50ecdca5be544355581563d4e71b183f36dc8cf64f152061b2fb90e1d4` |
+| Actual float `fftw.pc` | `6e8b35f3d26ee0e7f15d9a17d85636e3106ee723e0213b7f6067eebec24f17e6` |
+
+The repair adds the genuine `make -j{jobs} fftw3f.pc` step. Float options,
+expected installed module and missing-output refusal remain unchanged.
+Fresh local static staging passes in 6.59 seconds with approximately 764 MiB
+peak RSS. The new role lock is
+`dd3309c482684114a69a788f104f69ae49a527ef78efa59e9ddd4a87a18d76bb`;
+the new static manifest is
+`68e6a4b63a4e33328e48f4127a298ca5a023800681b2041eca1417ac70be6f2b`.
+It retains 25 upstream dependency sources, 49 distribution roles, one pinned
+Meson provider and all 57 Jellyfin configure tokens.
+
+The corrected retry uses committed source
+`c4beb5b5f1b26fdbb865ffc4ef47e26053fece97`. Its source-only archive is
+`9cc24a0df4511a706caf19335aa4154add356453b08d7ce17233ccc0a655e221`.
+All 6,596 input-file hashes verify before execution. The same isolated
+Bookworm container runs offline with the same two-CPU/2-GiB bound. FFTW's
+actual upstream metadata target succeeds, completing the AMF, dav1d,
+FDK-AAC, FFNVCODEC and FFTW generation roles. The attempt then fails after
+21.91 seconds while configuring FreeType 2.14.3, without an OOM or deadline.
+The owned container stops and its network configuration is restored; both
+failed attempts remain retained.
+
+FreeType's genuine `check_out_submodule` rule invokes `git submodule update`
+for `subprojects/dlg`. The archive-only source lacks that pinned submodule,
+so configure cannot complete. This is a source-closure omission, not a
+compiler-resource failure. The repair must include the authentic parent
+revision's gitlink source, license and source offer. Fake Git metadata,
+disabling the feature or weakening output checks would conceal the omission.
+The source repair now supplies six required submodules: FreeType's `dlg`
+and libplacebo's GLAD, Jinja, MarkupSafe, fast_float and Vulkan-Headers.
+Each is bound to the actual parent gitlink and `.gitmodules` declaration,
+its downloaded archive and authentic license. Composition refuses to replace
+existing parent source bytes. Optional demo/test submodules are not consumed.
+The same source audit finds eleven dependency roles whose accepted local
+Git-archive hashes are paired with repository URLs in the cold-fetch path.
+Those URLs cannot supply the declared archive bytes. The repair must bind
+actual downloadable public archives of the same pinned commits, with observed
+hashes and normalized source-tree equivalence; cached files cannot establish
+that a fresh release build works. Prior accepted archive evidence remains
+historical. All eleven replacement archives now have observed hashes and
+exact normalized-tree equivalence, including contents, executability and
+symlink targets. The equivalence receipt is
+`5c3c0ff7e89df2af4d13b42563af43b095b9a15afd48a9a764c1b4470158b8c3`;
+the required-submodule authority receipt is
+`d7c9b6b9d4aac59b44f3939b290f3ab4231797f1cac8435e396737d694d0aa2f`.
+The repair is committed as `50784a2b6a803b27403f545117bdd053fbec76d0`.
+Its normal hook passes in 73.04 seconds. Fresh static staging passes in
+7.25 seconds with peak RSS 800,325,632 bytes and manifest
+`ca95708df14a920a004a41f68d7c55e8c7bc378ed4820787f84c450b116d5188`.
+The exact source-only retry verifies all 6,620 input-file hashes before
+generation. FreeType autogen and configure now pass, proving the required
+submodule repair reaches the actual generator. The collector then refuses
+the absent `builds/unix/freetype2.pc` after 23.60 seconds. There is no OOM or
+deadline; the isolated container stops and its network configuration is
+restored. The repair appends `make -j{jobs} builds/unix/freetype2.pc` after
+the unchanged configure step. The pinned `unix-def.in` defines that genuine
+target; the actual configured makefile resolves `OBJ_BUILD` to `builds/unix`.
+The producer audit finds no further concrete omission of an upstream make
+target in the remaining generator recipes. Actual post-repair generation
+remains pending; no generated metadata is substituted by hand. Linking and runtime
+qualification remain open.
+
+| Evidence for the source-closure retry | SHA-256 |
+|---|---|
+| Static staging receipt | `1db36bd6e28fa902e16a99c4a36076a744a770010464c76cf55886771ae4ea2e` |
+| Source-only helper/lock archive | `f0c20a8880a8957bd2c222eb82c27da1b2eb2eede1308f1a9c5680e0d1522be0` |
+| Actual generator terminal receipt | `d11a6a76e80532415d63ec0c297f3ae8fab3eb9c379cd9cab7c4b07237352798` |
+| FreeType upstream producer evidence | `9e0935266890627002b1150471205e22f79c4b7378c61cb43a39b69badfdad4c` |
+
+The FreeType retry on `7ae44966d5f57b684d281ed2f7628efdf05e3bdb` passes
+the genuine metadata make target. It proceeds through the remaining earlier
+roles, then Vulkan-Loader's CMake configuration cannot find
+`VulkanHeadersConfig.cmake`. The headers role exports headers and registry
+XML but omits the upstream CMake package export that its consumer requires.
+The attempt fails after 73.36 seconds without an OOM or deadline; its owned
+container stops and its network configuration is restored. The terminal
+receipt is `b40cfee95003358da0da797b7efe3c7dc7132e5cd2421d7da3a34d1cc5bd4c07`.
+
+The repair configures the pinned Vulkan-Headers project and uses its genuine
+header-only CMake install into an isolated build subdirectory. Only its
+declared relocatable package exports are copied into the SDK. A general
+install into the SDK or host remains refused, as do existing-output
+replacement and exports containing the build path. CMake consumers search
+the authenticated SDK/sysroot for packages, libraries and headers; bootstrap
+programs retain their fixed tool path. The consumer/producer audit covers
+the remaining CMake, Meson and pkg-config dependencies. Actual generation
+and dependency-path observations on this repair remain pending. The upstream
+export evidence is
+`69796eeca0e1da2d89ca4d838393294d7b7b63774bc551e133f43df8b0c14b59`.
+
+The next actual generator on `2cd6000b3d2ad1da200dd83abc72a23ddefaad91`
+passes the authentic Vulkan-Headers isolated install and Vulkan-Loader's
+CMake consumer. Fontconfig's Meson setup then cannot find `gperf`; its
+upstream fallback attempts a Git download, which the offline container
+refuses. The attempt fails after 78.77 seconds without an OOM or deadline.
+The container stops and its network configuration is restored. The terminal
+receipt is `7f3a694cd573ef14889d7216e69b1784e5134867233313595b5297ae36900621`.
+
+The repair binds Bookworm `gperf` 3.1-1 amd64, its copyright, and its authentic
+DSC/original/Debian source offers through the existing distribution-source
+owner. The private bootstrap validates regular-file extraction, executable
+hash, ELF architecture and version, and rechecks its source/license authority
+around execution. It neither installs into the host nor substitutes generated
+metadata. The remaining upstream program/custom-target declarations were
+audited against the controlled tool path; optional test/documentation tools
+are not added as production requirements. Actual execution of this repair
+remains pending. The binary hash is
+`57cc814ac7be078e80b59e2baad4bfa6944f62ea7575de73e0f2d50b2adaa858`;
+the source/tool evidence is
+`be07d4d93f6a660b4f1d5a9d7ee92e0e8bd3b856a4f47e487a4748c321360f32`.
+
+The `2139fa9c4c0aff8a0503d72f53b8eaaa9d54630f` static staging passes
+in 7.62 seconds with a sampled peak RSS of 801,980,416 bytes. The manifest is
+`d6e7781535210c1ab2e6f72a5a564d564e9463891b78632380867ed12919fead`.
+An earlier copy attempt stopped on the obsolete warning-only guard; a second
+admission refused before launching a child. Those records remain negative.
+The bounded copy now uses measured headroom with its unchanged 1 GiB RSS and
+90-second limits, and still refuses critical pressure or exhausted headroom.
+
+The remote attempt verifies all 6,630 input hashes, then refuses before any
+upstream generator because the newly generalized bootstrap claim comparison
+expects raw lock fields in Meson's existing execution record. That record
+omits transport filename and explanatory rationale, and stores the license
+under its staged `source/` path. The repair compares version, URL, archive
+hash and normalized license location while retaining the independent raw
+archive, complete module inventory, launcher and license-byte checks. The
+same function owns the exact tool-role inventory; `gperf` claims remain
+exact. The 0.291-second failure has no OOM; the owned container is stopped
+and network state restored. Its terminal receipt is
+`48291b910d032146571334b54e6b6accb1758432915c0a780fd80da77b6595b2`.
+The repaired generator on `4481f8e90240674f96a8d1ea3041cb18a5525d7d`
+passes in 92.66 seconds, producing 513 outputs across all 25 upstream
+projects. Source, module and bootstrap checks pass before and after execution.
+Its actual SDK manifest is
+`a5fa50c8473a6d565e9fa1245a80d49fb409f610e287837e77704a98698af2ed`.
+The container stops with no OOM and its network state is restored. This is
+generator evidence; producer linking and the shipping package remain open.
+
+Producer preparation then verifies the full generated SDK and official
+source patches. Configuration preserves all 57 feature tokens but fails a
+real GNU linker probe: `libchromaprint.so` needs `libfftw3f.so.3`, which is
+present in the SDK but is not found through direct-library `-L` flags.
+The repair adds link-time-only `-rpath-link` directories from the verified
+SDK, including its system-library roots. It preserves the official runtime
+RPATH and does not fabricate pkg-config files or disable a codec. The audit
+covers all 180 SDK ELF paths and their dependency search order; final runtime
+closure still must account for 14 named Bookworm system dependencies.
+
+The configure attempt fails after 12.96 seconds without an OOM. Its owned
+container stops and network state is restored. The terminal receipt is
+`19cc1d2d6aad163c944b87ff3ddbd5e3ce30e36c6c2cbfa344a14edfb1d8eaa4`;
+the source/search evidence is
+`d9c8a21a9067bd272158d0c3c63f33611b6eddedde57715fdb2d663678605ed5`.
+The next configure attempt on `b8bfc491` passes the previously failing
+Chromaprint dependency search and the FDK, Fontconfig and FreeType probes.
+It fails after 10.13 seconds on Fribidi's missing generated public header,
+`fribidi-unicode-version.h`. The genuine upstream target consumes its pinned
+Unicode data; generating and exporting that declared output is required.
+The terminal receipt is
+`9a71f4bf42201dc51d73bbe9be8b262fbc5d091edb0bf3953f475f151b972195`.
+
+A serial compiler-preprocessor audit then checks 38 enabled public-header
+groups. Thirty-six pass; Fribidi and Opus fail. The first Opus probe omitted
+the producer's `--define-prefix` and is retained as an invalid diagnostic.
+A focused Opus retry with that actual producer option also fails: the
+multiarch pkg-config location produces a prefix ending in `usr/lib`, so its
+include path becomes `usr/lib/include/opus`. The authentic header is present
+under `usr/include/opus`. This establishes a metadata relocation defect,
+not a missing codec or justification for invented dependency metadata.
+Both diagnosis containers stop without an OOM and restore their network and
+resource configuration. They perform preprocessing, not linking or unit
+execution. The consolidated source repair runs Fribidi's actual Ninja target
+and exports its generated header. It retains every authenticated Debian PC
+at its original path and projects identical bytes into `usr/lib/pkgconfig`,
+where `--define-prefix` computes the correct `/usr` root. Generated private
+SDK metadata keeps its separate prefix and lookup precedence. Every
+projection records its source member, archive role, hash and size, and
+refuses collisions or changed source associations. A read-only inventory
+checks all 30 actual multiarch PCs: each has the required `/usr` prefix and
+each projection destination is absent. That inventory's SHA-256 is
+`29b3bd24b075d930785db517f3c9c879f462b24b520962b0dbbf50b22591f1e3`.
+Actual generation on `829bf9a9c6d9e4c5d5c441d65124ae17d2fcfb5d` passes
+in 91.92 seconds and produces all 514 declared outputs. Fribidi's actual
+327-byte header comes from its successful upstream Ninja target; its hash is
+`130eba40727bb2c7608fab839333443f938b9769cfcba2122c9caf83ab12c839`.
+Focused Fribidi and Opus preprocessing both pass with the production
+pkg-config invocation. The generated SDK manifest is
+`0cb35aca40bb55160ea7ded2131b37c317fc6369ff4c8af0031927eed39907cb`;
+the generator receipt is
+`8806f4c122e6554727a490df068e23ca8db33eeae277d4695c0bb8edb3ab8ca6`.
+The bounded phase completes cleanup with the container stopped and no OOM.
+Full producer configuration and linking remain separate requirements.
+
+Producer configuration on `829bf9a9` fails after 9.262 seconds. Fribidi and
+the earlier dependency probes pass, but FFmpeg invokes plain pkg-config;
+the uppercase `PKG_CONFIG` environment variable does not select its
+lower-case configure variable. Inspection of the pinned configure's scalar
+option parsing and defaults also finds that uppercase `CC` and `CXX` are
+ignored, although their defaults happen to select the same controlled GCC
+tools. The repair passes all three already verified tool commands through
+their explicit configure options. The official feature tokens, consumed
+LDFLAGS/runtime RPATH, SDK outputs and source authority remain unchanged.
+The failed container stops without an OOM and restores its network state.
+The next configure attempt can reuse the successful generated SDK.
+
+The shipping source also closes a separate integration gap: published and CI
+smoke images bypassed the local `make docker` seam. Both now have a shared
+Bookworm package-export contract and consume its audited output; the renderer
+selects the architecture-specific runtime while excluding build-tool stages.
+The assets-only publication path does not require daemon Rust compilation.
+No successful export, image build or physical-backend qualification is claimed
+from source or syntax checks alone.
+
+## 34. Complete subtitle graph correctness and final release — 2026-10-08
+
+All eight frozen complete-graph comparisons pass: SDR and PQ sources, ASS
+and PGS subtitles, and 2560×1440 and 3840×2160 output. Every workload has
+120 equal frame timestamps, zero CPU/GPU pixel difference on both planes,
+and exact blank-frame equality with the no-burn reference. These results
+use the unchanged qualified native FFmpeg package, not a substitute encoder.
+They establish correctness; timing and final daemon API acceptance remain
+separate requirements.
+
+The PGS diagnostic observes a blank heartbeat and active subtitle at the
+same 250 ms boundary, followed by a 749.999 ms heartbeat and 750 ms clear.
+The pinned scheduler converts those events to the main 24 fps clock and
+consumes one queued next event per input. For this exact fixture that makes
+frames 7–18 active. Reassessment of retained per-frame hashes passes with
+that independently derived mapping. The original blank-interval failure
+and a diagnostic regex that accidentally included secondary timestamps
+remain negative records. Neither pixel tolerance nor application behavior
+changed to accommodate them.
+
+The combined ledger binds the separate successful executions to identical
+source, cue, font, package and plan hashes. It does not describe them as one
+execution. Its SHA-256 is
+`86e3cb0239742d2714d9702bae3137ad1fac30fb3da2b5f76e4cada4e003669b`;
+the retained-frame oracle reassessment is
+`63a55a8d3a845aabb05bd47617b6fc0b5d7fbcb408e56566f8540b683deb2bc8`.
+
+The exact `2139fa9c4c0aff8a0503d72f53b8eaaa9d54630f` native release
+continuation passes in 1,991.254 seconds using pinned Rust 1.97.1, one job
+and the unchanged release profile. Its owned process group is absent;
+capture of the executable and matching arm64 debug symbols finishes in
+1,992.202 seconds. The unsigned executable hash is
+`d172ebdcf197ce810706251df4ae6b783f450856439164816a9729020e8ee604`,
+with UUID `C8F25B24-9B5C-33FF-96A7-2A052E434C20`. The build/capture receipt is
+`e7ebdf83d983ee33f5e9878cd7e4ebddbf4ff7e3529dcbe9cbe89a5291469620`.
+The earlier bounded timeout remains recorded; this successful continuation
+does not erase it. Later SDK-only helper changes have unchanged Rust and Mac
+package inputs and do not relabel this artifact's source identity.
+
+The signed bundle's first final text API attempt does not pass. Observation
+reports `sdr_text_burn` available, but normal creation selects CPU processing
+with `runtime_probe_failed`. Initial investigation focuses on font authority
+on the captured source-evidence engine. A separate wrapper UID assertion
+interrupts its telemetry. The actual driver also records the native-plan
+failure, completes daemon shutdown, and leaves no owned driver or daemon;
+the build prefix is restored. These are distinct failures, not evidence of
+successful text delivery or an encoder failure.
+
+The follow-up passive capture identifies the changed input. The first font
+capture contains 23 active configuration lines. After the failing wrapper
+prematurely restores the build prefix, Source capture discovers 44 additional
+inactive available rules. Loaded rules, font listing and all 394 consumed
+font/rule object versions are unchanged. The identity nevertheless hashes
+the entire configuration listing, including inactive entries. Source capture
+already includes fonts; the earlier missing-font hypothesis is disproven.
+The corrective design retains active rule order, paths and content/version
+authority while excluding unconsumed inactive entries from that identity.
+The mismatch refusal itself remains required; no digest comparison is bypassed.
+
+The single bounded passive diagnostic with corrected wrapper cleanup passes
+normal text API delivery on the existing signed `2139fa9c` bundle in 70.911
+seconds. First-probe and Source captures both retain the same font digest,
+`3cf7da2420b034171bf51a37204cd2ccb7d488fc615a7e02d2578f87c0263524`.
+The actual plan selects the native graph and passes the independent cue,
+control, parser and shutdown assertions. Its owned processes are absent and
+the prefix is restored after settlement. This proves the existing capture
+path works with unchanged inputs. It does not qualify the proposed identity
+correction, and the original failed attempt remains negative evidence.
+
+The same final signed `2139fa9c` bundle separately passes all three F3
+file-VOD cases: public HEVC/AC-4 in 53.243 seconds, original caption-bearing
+MPEG-2 in 46.554 seconds, and the caption-free control in 43.421 seconds.
+Each uses the ordinary API and the same held-source producer path, then
+settles its owned processes. The HEVC case retains the strict caption and
+software-reference observer; the MPEG-2 case uses only the previously
+approved first-frame padding correction. The caption-free case retains its
+zero-caption expectation. These successful caption cases do not establish
+native text routing, performance, DVR delivery or client presentation.
+
+[Final release correctness and font-identity evidence](evidence/macos-video-20261008/final-2139-correctness-evidence.tar.gz)
+contains one neutral JSON record, 4,570 compressed bytes, SHA-256
+`4dcc3fc0708d3fa156f2d0e8a3227604d32ae4015626ec667f5f11634170701d`.
+All 15 raw allowlist entries were independently checked for size and hash;
+the archive was reopened and compared byte-for-byte. It preserves the
+eight graph results, 25 independent text cue checks, controls, three caption
+cases, exact artifact identities and separate failed attempts. MPEG-2's 50
+A53-bearing frames include padding; its 48 due 608 payloads are separately
+verified in order. The corrected MPEG-2 observer is explicitly bound.
+No paths, commands, infrastructure, media or credentials are included.
+This archive qualifies the captured `2139fa9c` bundle, not the later
+active-configuration identity repair or the pending performance campaign.
+
+## 35. Linux SDK generation and current-source compiler evidence
+
+The `829bf9a9` SDK generation passes in 91.919 seconds and produces all 514
+declared outputs. Focused Fribidi and Opus public-header preprocessing also
+passes. SDK digest `0cbe4a367143c6c7daeed342f8398673c80c5dbfdcf0b3aaf2ebc7029b650c84`
+and source-offer digest
+`df0334eb12a30765edd3d4aeba4b0a57d837368a73ca47c044842c8b362b585b`
+bind the generated material. They do not establish a linked FFmpeg package.
+
+Exact source `e9fdc02a6c89626d72d7f5fb13d9bca0e14b0fd8` passes Linux
+Rust 1.97.1 check (1 minute 16 seconds) and Clippy with denied warnings
+(1 minute 47 seconds), for core and daemon, all targets and `hiqlite-store`.
+The one-job phase finishes in 192.074 seconds, reaps its processes and leaves
+no compiler target holder. No unit tests execute. This ARM Linux compiler
+result does not replace the required amd64 daemon or hardware acceptance.
+
+The isolated Bookworm base receives exactly the three runtime packages
+already required by the shipping Jellyfin runtime chain: `libnuma1`,
+`libelf1` and `libpng16-16`. Recursive dependency and version-symbol checks
+cover 197 ELF objects with no unresolved dependency. The SDK is unchanged.
+A subsequent configure failure separately identifies the missing system
+PNG development linker alias. The compiler-image repair adds the genuine
+matching `libpng-dev` package; it does not fabricate a link or regenerate
+the SDK. The development install and subsequent producer qualification are
+recorded separately from this archive's runtime-base result.
+
+[Linux SDK and compiler evidence](evidence/macos-video-20261008/linux-sdk-and-compile-evidence.tar.gz)
+contains one neutral JSON record, 4994 compressed bytes, SHA-256
+`cbe4d34c06b61172df224c44ad148b3368e8c2d8e8ae472ae745324bb9d526fd`. All 18 retained raw
+allowlist entries were independently verified for size and hash; the archive
+was reopened and its member compared byte-for-byte. Failed configure and
+preflight attempts remain separate records. Producer and parser compilation
+are qualified separately in §37; package audit and physical normal-API
+acceptance remain outstanding.
+
+## 36. Active font identity survives an inactive-rule change
+
+The exact `e9fdc02a6c89626d72d7f5fb13d9bca0e14b0fd8` release build
+passes in 1,870.295 seconds; immutable executable and matching arm64 debug
+symbols are captured by 1,871.106 seconds. The UUID is
+`FEA9CF14-F1F7-3890-BDCE-073C387D197B`; the signed daemon SHA-256 is
+`dcd3776303e181e7ab1dcbe8aff9c746efd1cde0189c6519b9465fe8901e2586`.
+The FFmpeg, FFprobe and Wasm parser bytes remain identical to the earlier
+qualified native package. This is an ad-hoc signed candidate, not a
+notarization, installation or distribution receipt.
+
+The ordinary API case deliberately changes inactive Fontconfig inventory
+from zero to 44 entries after startup. Its 23 ordered active rows and font
+listing remain identical. A fresh Source profile created after that change
+has the same font digest as startup:
+`f77ef0de8e1688423aa6236c6b2033ddf3fcfacd3c2bfa90fcdd863e9ba7a92d`.
+The actual producer selects `vt_scale_sdr` with prepared GPU text and passes
+25 independent source-position cue checks, including blank boundaries and
+nonzero entry. Hold, resume and seek return HTTP 200; the executed deletion
+assertion requires 204. Parser identity has no warning and shutdown exits
+zero. The 86.630-second owned run finishes with no owned processes and the
+controlled prefix restored. This qualifies the actual identity repair;
+it does not claim performance or client display acceptance.
+
+[Active-font release and API evidence](evidence/macos-video-20261008/font-active-e9fd-evidence.tar.gz)
+contains one neutral JSON record, 2813 compressed bytes, SHA-256
+`9aa5be6a4db9d40a3efbf9e25c356da95995115e85e2650a565becf115562697`. All 15 private raw
+inputs were independently verified for size and hash, and the archived
+member was reopened and compared byte-for-byte. Earlier `2139fa9c` raw graph
+and caption proofs retain their original source identities and are not
+replayed or relabelled. No unit tests execute during this qualification.
+
+## 37. Full Bookworm producer and matching static parser build
+
+The production recipe at `354bd87e5f4356ae677bc16c67672985dd58f261`
+configures, compiles and installs the full Jellyfin producer. All 57 official
+configuration tokens remain, including `--enable-lto=auto`; all three steps
+exit zero. This uses the 514-output authenticated SDK from §35 and the
+original Jellyfin `v8.1.3-1` source, its 100 quilt patches and the generic
+strict-Dolby patch. It does not substitute the earlier diagnostic binary.
+
+The matching sealed parser builds in 170.238 seconds. Its SHA-256 is
+`e4defc74375b5170d574b65256969340ad8e1268b695350dc8998b2a981ce191`.
+The retained ELF headers have no interpreter or dynamic segment; resolved
+configuration enables AC-4 decoding and demuxing. Producer and parser source,
+local patch and canonical quilt identities agree. This establishes their
+build relationship, not an actual decoder/driver or normal-API result.
+
+A recorded compile-time cgroup sample has a two-CPU limit, 2 GiB memory
+limit and no swap. Its memory peak reaches that limit, with 1099 limit
+events and zero OOM or OOM-kill events at that sample. This is resource
+evidence for the build, not a throughput measurement or final telemetry
+for every process. The original compiled parser is preserved while the
+normal packaging path acquires source records for its actual static system
+dependencies. At this checkpoint the package audit and physical hardware/API
+qualification remained open; §38 records the later package audit.
+
+[Producer and sealed-parser build evidence](evidence/macos-video-20261008/linux-producer-parser-build-evidence.tar.gz)
+contains one neutral JSON record, 2800 compressed bytes, SHA-256
+`da9405c96130f240f74447b829a49e5bc58653f0b2671e4c3aee7729ec192155`.
+All 16 retained private records were verified by size and hash, including
+the actual configure, compile, install and parser logs against their build
+receipts. The archived member was reopened and compared byte-for-byte.
+No binaries, source archives, private paths or full logs are included, and
+no build or unit test was replayed to curate this evidence.
+
+## 38. Audited Linux package with preserved build authority
+
+The corrected assembly at `d9c9926025c56e264ef925fcb15dec2bef3b1348`
+retains the producer/parser binaries compiled in §37. It copies regular
+provenance files without following scratch-tree or host-tool aliases, records
+those aliases as metadata, and binds the original compilation recipe
+separately from the packaging recipe. It does not rewrite build witnesses.
+
+The first complete ELF audit exposes missing system packages in the isolated
+diagnostic container. A consolidated dependency inventory identifies 23
+absent packages: 17 original authenticated inputs already retained by the
+SDK and six additional public packages with matching source offers. The
+installation changes exactly those 23 rows and preserves every prior package
+version and the SDK. Installation itself takes 4.441 seconds. A first attempt
+fails before installation because the private driver omitted system
+administration directories from PATH; the standard PATH fixes that cause.
+
+The unchanged audit owner then passes in 7.797 seconds on a byte-verified
+copy of the assembled package. Only the copy's failed audit directory is
+moved aside; the original package remains unchanged. There are 121 runtime
+objects and 167 recursive closure entries. The final capsule SHA-256 is
+`c2a07f88dcdbcfab086256711108a8860bacb8e619814b210a64bed9c7bc8695`.
+It explicitly retains `runtime_qualification: false`: a complete ELF audit
+does not establish driver behavior, P5 output correctness or ordinary daemon
+API delivery. Those require the authentic shipping runtime and physical
+Intel/AMD checks still in progress.
+
+[Linux package audit evidence](evidence/macos-video-20261008/linux-package-audit-evidence.tar.gz)
+contains one neutral JSON record, 2109 compressed bytes, SHA-256
+`3c216b4f440e3787e8d97ee5d3f7336074f2f0ef4a5454908d78ea20d098e73a`.
+Eight raw receipts, logs and the actual capsule were independently verified
+against their recorded sizes and hashes. The neutral record includes exact
+producer/parser and recipe identities, package additions, closure counts,
+original-package preservation and raw-record hashes. Its archived member
+was reopened and compared byte-for-byte. No compiler or unit execution was
+repeated to curate this evidence.
+
+## 39. Exact merged-source compilation
+
+Integration `c10f16f009a723c4fb579ead278bec8d233d283f` incorporates main
+`e7a973887cff09af9307d39508045c1be9a20e70` without conflicts. The exact
+merged tree is `3d7efe3ae8d3ff9919685b30c3e2813a0ff1d006`. Pinned Rust
+1.97.1 all-target checking of core and daemon with `hiqlite-store` passes on
+Mac in 320.513 seconds. The first bounded phase expires during the normal
+commit hook. A hook-only continuation passes in 67.421 seconds, preserving
+the successful check and running the normal catalog, formatting, Clippy and
+embedded JavaScript checks. Its owned process group and target holders are
+absent afterward.
+
+The same committed source is archived into the existing local Linux arm64
+compiler lane. All-target check and Clippy with denied warnings both pass,
+using one job and the pinned compiler. The host phase takes 413.866 seconds;
+its child receipts show zero exits and settled processes. This provides
+Linux source/type/lint evidence, not an amd64 daemon or physical hardware
+result. No unit suite is executed. The changed daemon/storage integration
+still receives fresh release and focused normal-API qualification.
+
+[Merged-source compiler evidence](evidence/macos-video-20261008/merged-c10-compile-evidence.tar.gz)
+contains one neutral JSON record, 1762 compressed bytes, SHA-256
+`3051d8064d975b3a0aafcc2ec300d16fa2c34199b8a70c5b51b8f75f6e78b5d7`.
+It records the successful phases, retained first-phase timeout, exact source
+identities, compiler commands and hashes of 14 underlying receipts/logs.
+The archived member was reopened and compared byte-for-byte.
+
+## 40. Merged Mac release and focused ordinary-API delivery
+
+The exact `c10f16f009a723c4fb579ead278bec8d233d283f` release build passes
+in 1736.431 seconds; capture finishes in 1737.326 seconds. Its unsigned
+executable SHA-256 is
+`8d83886720747b506b29dbe4129d99f1218a7b00de2376d6047d3f034d4ea1cb`.
+The executable and arm64 debug symbols share UUID
+`1FD2F940-E474-3130-9FD5-14733826FE25`. The signed candidate executable is
+`5f12aeb7b6cda3549d61dad7285648f0cb491bc6a0fccce639ed8ce30a06377a`.
+Native FFmpeg, probe and parser retain the previously qualified exact bytes;
+this is an ad-hoc signed candidate, not a notarization or deployment claim.
+
+The focused text case passes in 72.754 seconds. Its 25 independent cue
+observations include six visible-cue points and 19 blank points, all matching
+the oracle. Inactive Fontconfig inventory changes after startup while active
+font authority remains the same; the actual native text route, lifecycle,
+parser identity and zero shutdown exit pass. The original MPEG-2 caption
+case passes in 41.669 seconds using the unchanged corrected observer from
+§34. Payload/timing and picture checks remain intact. Both owned process
+groups are absent after settlement. These checks exercise the newly merged
+daemon/storage path; unchanged raw compositor and other caption controls
+retain their earlier component identities without a blanket replay.
+
+The first admitted timing campaign stops after 32.050 seconds when a foreign
+build process appears. Two complete workloads and one incomplete workload
+are retained. Because the foreign start time cannot be recovered, those
+measurements are not qualified as uncontaminated performance evidence. They
+will not be mixed into a later clean campaign. The release/API success does
+not depend on claiming a performance result.
+
+[Merged Mac release and API evidence](evidence/macos-video-20261008/final-c10-release-api-evidence.tar.gz)
+contains one neutral JSON record, 1562 compressed bytes, SHA-256
+`b91ab12de641acabcf2a10a2ab396a0b1e1bf2698aaf5595a37b539c1f12def3`.
+All nine raw inputs, 780580 bytes in total, were independently checked by
+size and hash. The archived member was reopened and compared byte-for-byte.
+No unit tests execute during this qualification.
+
+## 41. Complete subtitle performance campaign
+
+One uninterrupted campaign passes all eight complete graphs in 126.545
+seconds on the exact qualified native FFmpeg. Each workload produces 120
+encoded frames per sample. One CPU and one GPU warmup are excluded, followed
+by three alternating timed pairs: 16 excluded warmups and 48 timed children
+in total, with one child running at a time. All 64 encoded outputs have the
+expected frame count and matching timestamps. Earlier raw comparisons
+establish the separate pixel-correctness result.
+
+| Workload | CPU graph median, s | GPU graph median, s | Wall-time reduction | FFmpeg child CPU/frame reduction |
+|---|---:|---:|---:|---:|
+| SDR · 2560x1440 · ASS | 1.310 | 0.998 | 23.87% | 52.15% |
+| SDR · 2560x1440 · PGS | 1.188 | 0.841 | 29.21% | 72.69% |
+| SDR · 3840x2160 · ASS | 2.364 | 1.640 | 30.63% | 62.72% |
+| SDR · 3840x2160 · PGS | 1.764 | 1.534 | 13.02% | 81.73% |
+| HDR10 · 2560x1440 · ASS | 1.375 | 1.074 | 21.90% | 49.90% |
+| HDR10 · 2560x1440 · PGS | 1.381 | 0.951 | 31.14% | 69.64% |
+| HDR10 · 3840x2160 · ASS | 2.478 | 1.726 | 30.33% | 58.94% |
+| HDR10 · 3840x2160 · PGS | 2.076 | 1.544 | 25.61% | 81.37% |
+
+The original continuous guard observes no competing named work or critical
+resource event during this campaign. Every recorded memory-pressure sample
+is normal; minimum reclaimable memory is 18.12 GB and peak sampled owned RSS
+is 848 MB. The process exits zero with no owned descendants left. The four
+pre-start refusals and interrupted fifth campaign remain recorded, and no
+samples from them enter these medians.
+
+The result is 13.02–31.14% lower median wall time and 49.90–81.73% lower
+measured FFmpeg child CPU time per frame across this short eight-workload
+envelope. CPU measurement excludes external VideoToolbox services and GPU
+execution. This is not an energy, total-system CPU, physical-copy-count,
+long-duration capacity or client-presentation claim. It does not introduce
+threshold-based feature switching.
+
+[Complete subtitle performance evidence](evidence/macos-video-20261008/final-c10-subtitle-performance-evidence.tar.gz)
+contains one neutral JSON record, 5136 compressed bytes, SHA-256
+`e78b5a2d6a29413e2cf82221b9c2e4d0fb698ee46980226a59ba4fb2178809ec`.
+All six raw inputs, 641088 bytes, were independently checked by size and
+hash, and the archived member was reopened and compared byte-for-byte. The
+record binds the original driver, raw correctness ledger, actual source and
+native binary, every workload's medians and output checks, resource
+settlement, and the explicitly excluded interrupted campaign.
+
+## 42. Shipping Linux image and AMD raw strict-P5 qualification — 2026-10-09/10
+
+**Shipping image.** The authentic amd64 shipping media image
+`sha256:4a3164fbfce2f4f9da67d6434af56754dbce70f402e2010e2b1cfa3d56e36497`
+carries the audited package capsule
+`c2a07f88dcdbcfab086256711108a8860bacb8e619814b210a64bed9c7bc8695`
+(Jellyfin `v8.1.3-1`, source `253db2a7b0a8045c54ce68ce33d7f601229b1822`,
+matching static parser). A separate qualification observer,
+`sha256:11308ed37ec5a7a84db334a288a1ebd8c48dd2051f2c101ef0d71642b36c58a2`,
+adds only a Python runtime. Its preservation receipt passes: the original
+ten root-filesystem layers are an exact prefix, and all 314 original package
+versions are unchanged. The observer is a measuring instrument; the shipping
+image is what production would run.
+
+**First AMD attempts.** Two bounded windows on the AMD VA-API render node
+(`radeonsi`, vendor `0x1002`, device `0x15bf`) recorded failures before any
+qualification:
+
+1. The collector could not create its output directory as the unprivileged
+   container user. No graph ran. The rerun maps the owned output directory
+   to that user.
+2. The rerun's first discovery graph decoded and observed current-frame
+   Dolby metadata. Then the encoder refused to open:
+   `Hardware does not support encoding at size 160x96 (constraints: width
+   128-4096 height 128-4096)`. The tiny positive controls downscaled the
+   320×180 corpus to 160×90, VA-API aligned that to 160×96, and AMD's H.264
+   encoder has a 128-row minimum. The decoder worked. A probe raster the
+   encoder cannot accept was being reported as missing Dolby support.
+
+**Root cause and correction.** The 160×90 raster belongs to the
+independent color oracle, not to the encoded stream. Encoded tiny positive
+probes on Linux now keep the corpus source raster `SOURCE_RASTER` (320×180,
+the manifest's `source_shape`). This applies to every software, VA-API and
+QSV path, with no device-specific size. Inspection still decodes the
+delivered stream and projects it to 160×90 before the gray-ramp,
+neutral-chroma, timestamp and color-patch checks. `observe_encoded` checks
+the encoded stream's declared raster exactly and never rewrites it to fit.
+The macOS `observe` wrapper keeps its exact 160×90 contract. The changes:
+
+- Raw negative controls stay 160×90 and never open an encoder.
+- UHD positive output stays 1920×1080.
+- Metadata, timing, pixel tolerances and negative assertions are unchanged.
+
+Regressions: `crates/plurxd/src/macos_video/p5.rs::encoded_raster_is_checked_exactly_while_pixels_keep_the_oracle_projection`,
+`crates/plurxd/src/macos_video/p5.rs::source_raster_is_the_manifest_source_shape`
+and `crates/plurxd/src/ffmpeg/linux_dolby.rs::encoded_tiny_probes_keep_source_raster_on_every_backend`.
+
+**Collector correction exposed a second, collector-only defect.** With the
+source raster, all 12 tiny software-decode controls passed. The UHD positive
+then failed only the collector's timestamp check. The VA-API H.264 output used
+the ordinary VOD B-frame policy, so the fragmented MP4 began at one frame
+(0.041667 s). The collector demanded an exact zero origin. The product
+contract, `observe_uhd_output`, accepts a presentation offset of at most two
+frames with exact cadence. The collector now mirrors that product contract.
+Tiny controls keep `-bf 0` and an exact zero origin.
+
+**Corrected AMD window passes.** Collector SHA-256
+`f0203b91cb9af54b73ac5e508e4b1e5effa61c8048aec71ad3b600a59e11e3c5` passes all
+32 raw controls in 20.59 seconds. That is 14 software-decode and 14 VA-API-decode
+strict cases, covering:
+
+- fresh and variable metadata;
+- missing, malformed and omitted-color metadata at first, mid-stream and seek-start;
+- three terminal-NAL variants;
+- UHD fresh and missing-mid-stream;
+- four raw-plane comparisons.
+
+All cases encode through `h264_vaapi`. Negative controls exit non-zero within
+their frame bounds with the required Dolby-state refusal. Software and VA-API
+decode planes are byte-identical for both the fresh and variable fixtures.
+Selected opaque VA-API frames and the actual `radeonsi` driver are bound to
+the capsule hashes.
+
+The window ran under the following limits and checks:
+
+- Limits: two CPUs, 2 GiB memory, no swap, no network, all capabilities dropped.
+- Admission found no device holders, 0% GPU busy and the production container
+  running.
+- Production was sampled every two seconds: no foreign GPU holder appeared,
+  the production epoch was unchanged, and peak GPU busy was 3%.
+- The owned container was removed afterward.
+
+A fifth window reran the collector as SHA-256
+`aa95d683c930fff44286c0c6c10f02d308b49ca6286824457fd0e87d32ab381a` after §43
+found the daemon's progress-meter defect. That collector runs its graphs with
+`-nostats` and reads stderr as newline-only records, exactly as the daemon's
+observer does, and it passes all 32 controls again in 22.51 seconds.
+
+This is raw shipping-graph evidence. It is not an API, availability,
+performance or production claim, and it says nothing about Intel, NVIDIA or
+other AMD devices.
+
+[Shipping image evidence](evidence/macos-video-20261008/shipping-linux-image-evidence.tar.gz)
+contains one neutral JSON record, 4156 compressed bytes, SHA-256
+`e196c21199f6c3aad707e431e408a32f9b89c700fb475f22b188d8b82245f745`. It
+records the preservation receipt, both image archive hashes and a size/hash
+inventory of 57 retained raw files. Credential and builder-state directories
+are excluded. This record was rebuilt on 2026-10-10 from those retained raw
+files, because the original workstation archive (SHA-256 `5e1efe39…`) was lost
+with its temporary directory.
+[AMD raw qualification evidence](evidence/macos-video-20261008/amd-raw-p5-qualification-evidence.tar.gz)
+contains one neutral JSON record, 12571 compressed bytes, SHA-256
+`7b23b2419e600a8948aaa089dc1e9b8bc80074b4564b8bb1fe093b02b01074a8`.
+It records all five windows with their dispositions, per-run results,
+window/admission facts and a size/hash inventory of every retained
+observation. Each archived member was reopened and compared byte-for-byte.
+No unit suite ran.
+
+## 43. Daemon probe and normal-API strict-P5 delivery on the shipping image — 2026-10-10
+
+**Merge.** Current `main` (`c96142ac5`) was merged into the effort as
+`911a1704`:
+
+- `plurx-core` `transcode/mod.rs`: kept both modules and took the union of
+  the re-exports.
+- `create.rs`: kept the effort's clock-pair engine binding, followed by
+  main's DV window.
+- The backlog took the effort's rows.
+
+One semantic conflict remained. Main's DV runtime called
+`held_source_probe_json`, which the effort had narrowed to tests so that every
+production held probe names its reporter. The DV completed-output check now
+captures the current reporter for that query and calls
+`held_source_probe_json_bound`. Workspace Clippy with denied warnings passes.
+
+**The daemon's own probe refused every hardware graph.** The corrected
+daemon (`876800ed`, release build 1146.0 seconds) ran inside the authentic
+shipping image on the AMD node, on private loopback and private state. Its
+automatic Linux probe published only `hardware_graph_unobserved`, although the
+same graphs pass the raw collector. An ffmpeg timeline taken from inside the
+container showed that discovery succeeded and then all four validation runs
+failed. Replicating the six discovery graphs by hand found no loader or
+closure difference.
+
+Replaying their stderr with the daemon's newline-only record splitting then
+failed the selected-metadata observer every time. The Linux graph left ffmpeg's progress meter on.
+Its `frame=` records end with a bare carriage return, so the next showinfo
+record is spliced onto them and that frame vanishes from the observer. The
+collector had masked this by splitting on carriage returns as well. The
+macOS strict graph already passes `-nostats`; the Linux graph now shares one
+argument list with it (`e4033409`).
+
+The defect stayed hidden because the probe gave no reasons. Discovery dropped
+failed candidates silently, validation collapsed every failure into
+`output_contract_failed`, and a refused report then discarded even that. Each
+refusal now keeps its stage and reason on the operator report, and a refused
+report still gives the planner no context (`15075896`).
+
+**Hardware decode delivered; encode fell back.** The `15075896` daemon
+(1209.5 seconds) admits the package: Software/Software, Software/VA-API,
+VA-API/Software and VA-API/VA-API are observed, and both QSV candidates are
+reported as `discovery · graph_failed`. Normal scan and session creation
+select the strict graph with `-hwaccel vaapi`, `-strict_dovi 1` and
+`tonemapx … apply_dovi=1:require_dovi=1`, and all 24 served frames pass.
+
+The response named x264, though. The log said "the Dolby Vision reshape
+cannot use this hardware encoder". That pairing proof encodes one 64×64
+frame, and AMD VA-API refuses anything under 128×128. On the shipping image,
+the same graph exits 234 at 64×64 and 0 at 1920×1080. So every Dolby Vision
+session on such a node was pinned to software encoding. The proof now encodes
+the 1080p delivery raster, as the VA-API Main10 proof already does
+(`c862c6a9`).
+
+**Final window passes.** Daemon `c862c6a9` (1207.1 seconds; `plurxd` SHA-256
+`09b0c07fb71649440700743a6c56f009a39dd34f321049d0a087f93a8fe85d01`, debug
+`.dwp` `9d2a5c7470fdae1b962ad5437a57b9a508bb45e164f375f133668e2b3b496686`)
+admits the same observed envelope. Normal library scan and HLS create return
+encoder `VA-API`. The producer runs the strict graph with VA-API hardware P5
+decode and `h264_vaapi` encode. The first object arrives in 1.28 seconds.
+All 24 independently decoded frames pass:
+
+- 256×144 AVC 8-bit limited range;
+- BT.709 progressive;
+- no Dolby or mastering side data;
+- exact 12 fps cadence.
+
+The window then closes cleanly:
+
+- the daemon shuts down with exit 0;
+- the window takes 135.7 seconds;
+- production's epoch is unchanged and no foreign GPU holder appears;
+- the owned container is removed.
+
+Regressions:
+
+- `crates/plurxd/src/ffmpeg/linux_dolby.rs::probe_graph_stderr_is_line_records_without_the_progress_meter`
+- `crates/plurxd/src/ffmpeg/linux_dolby.rs::refused_hardware_report_keeps_each_graph_reason_and_no_context`
+- `crates/plurxd/src/ffmpeg.rs::dovi_reshape_pairing_proof_uses_a_delivery_raster_every_encoder_accepts`
+
+These and the 16 surrounding `linux_dolby`/`p5` tests pass on the merged
+tree (19 total).
+
+All daemon builds use the following setup:
+
+- the unchanged release profile, pinned public Rust 1.97.1 and one Cargo job;
+- two CPUs, 12 GiB memory and no network;
+- the retained warm target, rebuilt only for changed sources.
+
+Two build attempts and two windows were refused or aborted:
+
+- a wrong commit argument, caught by the archive-identity check;
+- a memory admission, while a CI VM held 14 GB;
+- a monitor race that misread a short-lived owned child as a foreign GPU
+  holder (the monitor now reads each holder's cgroup);
+- the first refused probe, which is the defect above.
+
+All of these remain recorded.
+
+This is one AMD VA-API render node. It makes no Intel, NVIDIA, deployment,
+performance, concurrency or client-presentation claim.
+
+**Contracts the effort had left unrun.** Before handoff, the operations and
+validation suites ran locally on the candidate after a second merge of
+current `main` (`865a1ae93`). The effort itself had never run them, and five
+groups failed on the effort branch, independent of the merge:
+
+- The release Dockerfile renderer took the audited
+  `runtime-assets-dolby-amd64` stage for a second shipped runtime, because
+  it matched the substring `FROM runtime-assets AS runtime`. It now matches
+  the whole FROM declaration and accepts the one named Dolby package context
+  in its own render mode (`10c6f7f6`).
+- The Dockerfile contracts are updated for the trailing default-runtime
+  alias and the `scratch` export base.
+- The new admin reprobe route is documented in API.md.
+- The rolling-producer ownership census records the reviewed new task,
+  timer and process shapes.
+
+Both suites then pass: operations with 936 tests and validation with 393. No
+Rust unit suite ran.
+
+[Linux normal-API evidence](evidence/macos-video-20261008/linux-normal-api-p5-evidence.tar.gz)
+contains one neutral JSON record, 8583 compressed bytes, SHA-256
+`4cd99bf560669b5dfbe1dcb96bc68aef778407dd0638470e45d3e5efe6b04584`.
+It records:
+
+- the five daemon builds with artifact hashes and refused attempts, including
+  the frozen candidate in §44;
+- the six API windows, with observations, strict producer argv and ffmpeg
+  timelines;
+- the six-graph discovery replication;
+- both findings above.
+
+The archived member was reopened and compared byte-for-byte. No unit suite
+ran.
+
+## 44. Combined adversarial review and its dispositions — 2026-10-10
+
+One independent adversarial review read the complete PR #980 diff against
+`main`. It reported three major and five minor findings, and all were
+addressed before the fast lane.
+
+1. **Major: strict recovery was refused while a reprobe was pending.**
+   `select_linux_strict_p5` kept a plan's captured observation while no
+   current Linux report existed, but `authorize_strict_p5` demanded a current
+   one. Authorization now matches selection (`c3f91dd3`). Building the three
+   Linux strict tests on catalogue-bound facts showed they had never passed
+   (`058bc925`); they now pass, and the recovery test fails without the fix.
+2. **Major: 16 plain test functions never ran.** These are module-level
+   tests in three operations files, which `unittest discover` does not
+   collect. A `load_tests` hook now collects them, and all pass (`fd009de1`).
+3. **Major: a failed control ended the whole probe generation.** One
+   failing control discarded every refusal row and stopped later candidates
+   from being qualified. It now refuses only its own candidate (`e4a76971`).
+4. **Minor: every VOD start re-hashed both media tools.** The capture cache
+   held one attestation, so the reporter and encoder captures evicted each
+   other. It now holds one per path (`11b7392c`).
+5. **Minor: `SOURCE_RASTER` was compiled where it is unused.** It is now
+   compiled only where it is used (`ee85ac7c`).
+6. **Minor: release stage bounds still used text matches.** Both bounds now
+   come from the FROM parser, and names compare without case (`2c5a15c5`).
+7. **Minor: two new regressions could not fail on the behaviour they name.**
+   The observer now has an executed carriage-return splice test (`ee85ac7c`).
+   The pairing proof is now built from the production reshape chain
+   (`1df27269`).
+8. **Minor, plausible: the reconstructed DV soundtrack ignored the frozen
+   held origin**, which the recipe digest already claims. It now uses that
+   origin (`e32d2c2d`).
+
+Pinned Rust 1.97.1 workspace Clippy with denied warnings passes after the
+fixes. So do `decoder_selection` (98 tests), the focused `linux_dolby`, `p5`,
+`ffmpeg` and `dv_segment` tests (33 tests), the reconstructed VOD tests, and
+the complete operations and validation suites.
+
+**Frozen candidate requalified.** The final tree `2c5a15c5` builds in
+1361.3 seconds (`plurxd` SHA-256
+`e9191b68e548c62523565cc0fddbd578bd36a248d73ef6c99dd06b69c83a134b`, debug
+`.dwp` `76dd228a9708f88ad275a4b586a852adbfd46f50cbf0f338d210c4747754ed2e`).
+On the shipping image, its probe admits the same four observed graphs and
+again refuses both QSV candidates with their reasons. Normal-API delivery
+returns encoder `VA-API`. The strict graph runs with VA-API decode and
+encode, and all 24 decoded frames pass. The first object arrives in 1.48
+seconds, shutdown exits 0, and the window takes 129.5 seconds with
+production unchanged. The window is recorded in the §43 evidence record.
+
