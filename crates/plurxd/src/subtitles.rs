@@ -151,6 +151,99 @@ pub fn vtt_path_for_identity(
     dir.join(vtt_name(file_id, index, size, mtime))
 }
 
+/// What one [`sweep_orphaned_sidecars`] call did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct SidecarSweep {
+    /// Sidecar files removed because their file row is gone.
+    pub(crate) removed: usize,
+    /// The last file id this call examined, to resume after; `None` once the
+    /// walk has reached the end of the directory.
+    pub(crate) next: Option<i64>,
+}
+
+/// The file id a sidecar in the subtitle cache belongs to, from its name:
+/// every sidecar this module writes is `f<id>-s<track>-…` (the VTT, its
+/// windows and the burn source).
+fn sidecar_file_id(name: &str) -> Option<i64> {
+    let (id, rest) = name.strip_prefix('f')?.split_once('-')?;
+    let track = rest.strip_prefix('s')?;
+    if id.is_empty()
+        || !id.bytes().all(|byte| byte.is_ascii_digit())
+        || !track.bytes().next()?.is_ascii_digit()
+    {
+        return None;
+    }
+    id.parse().ok()
+}
+
+/// Remove the subtitle sidecars of files that no longer exist, one bounded
+/// page of file ids after `after` at a time.
+///
+/// A sidecar's name carries its source's size and mtime, so a file id reused
+/// after a deletion can never be served another file's cues; but nothing ever
+/// removed them, so every deleted library left its extracted subtitles in the
+/// cache for good (lab N7, 2026-10-11). Node-local like the VOD rows the same
+/// tick sweeps, and for the same reason asked by each node of the replicated
+/// `files` table rather than hooked into the delete.
+pub(crate) async fn sweep_orphaned_sidecars(
+    store: &dyn plurx_core::store::Store,
+    dir: &Path,
+    after: Option<i64>,
+    page: usize,
+) -> Result<SidecarSweep, String> {
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SidecarSweep::default())
+        }
+        Err(error) => return Err(format!("listing {}: {error}", dir.display())),
+    };
+    let mut by_file: std::collections::BTreeMap<i64, Vec<PathBuf>> = Default::default();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("listing {}: {error}", dir.display()))?
+    {
+        let Some(file_id) = entry.file_name().to_str().and_then(sidecar_file_id) else {
+            continue;
+        };
+        if after.is_some_and(|after| file_id <= after) {
+            continue;
+        }
+        if !entry.file_type().await.is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        by_file.entry(file_id).or_default().push(entry.path());
+    }
+    let more = by_file.len() > page;
+    let examined: Vec<i64> = by_file.keys().take(page).copied().collect();
+    if examined.is_empty() {
+        return Ok(SidecarSweep::default());
+    }
+    let alive: HashSet<i64> = store
+        .surviving_file_ids(&examined)
+        .await
+        .map_err(|error| format!("checking which files still exist: {error}"))?
+        .into_iter()
+        .collect();
+    let mut removed = 0;
+    for file_id in examined.iter().filter(|file_id| !alive.contains(file_id)) {
+        for path in &by_file[file_id] {
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "removing an orphaned subtitle sidecar");
+                }
+            }
+        }
+    }
+    Ok(SidecarSweep {
+        removed,
+        next: more.then(|| examined.last().copied()).flatten(),
+    })
+}
+
 fn vtt_name(file_id: i64, index: i64, size: i64, mtime: i64) -> String {
     format!("f{file_id}-s{index}-{size}-{mtime}.vtt")
 }
@@ -5409,6 +5502,63 @@ mod cluster_consumer_tests {
             spawns_of(SUBTITLE_WARM_UP) > before,
             "the warm-up's extraction was not started at the background class"
         );
+    }
+
+    /// Lab N7 (2026-10-11): deleting a library left every extracted
+    /// subtitle of its files in the cache for good. The sweep removes the
+    /// sidecars of files that are gone, a page of file ids at a time, and
+    /// leaves a live file's sidecars and anything it did not write alone.
+    #[tokio::test]
+    async fn the_sidecars_of_deleted_files_are_swept_and_a_live_files_kept() {
+        let dir = crate::test_tempdir().expect("dir");
+        let source = dir.path().join("live.mkv");
+        std::fs::write(&source, b"a catalogued source").expect("source");
+        let store = SqliteStore::open_in_memory().expect("SQLite");
+        let live = catalogued_text_source(&store, &source).await;
+        let (gone, also_gone) = (live.id + 1, live.id + 2);
+        let subs = dir.path().join("subs");
+        std::fs::create_dir_all(subs.join("pgs")).expect("subs");
+        let kept = [
+            vtt_name(live.id, 0, live.size, live.mtime),
+            "notes.txt".to_owned(),
+            format!("f{gone}-something-else.vtt"),
+        ];
+        let swept = [
+            vtt_name(gone, 0, 3, 4),
+            format!("f{gone}-s1-3-4-w0-60.vtt"),
+            format!("f{also_gone}-s0-abc-burn-v2.mks"),
+        ];
+        for name in kept.iter().chain(&swept) {
+            std::fs::write(subs.join(name), b"sidecar").expect("sidecar");
+        }
+
+        let first = sweep_orphaned_sidecars(&store, &subs, None, 2)
+            .await
+            .expect("first page");
+        assert_eq!(
+            first,
+            SidecarSweep {
+                removed: 2,
+                next: Some(gone)
+            }
+        );
+        let second = sweep_orphaned_sidecars(&store, &subs, first.next, 2)
+            .await
+            .expect("second page");
+        assert_eq!(
+            second,
+            SidecarSweep {
+                removed: 1,
+                next: None
+            }
+        );
+        for name in &kept {
+            assert!(subs.join(name).exists(), "{name} must be kept");
+        }
+        for name in &swept {
+            assert!(!subs.join(name).exists(), "{name} must be swept");
+        }
+        assert!(subs.join("pgs").is_dir());
     }
 
     async fn catalogued_text_source(store: &SqliteStore, source: &Path) -> MediaFile {

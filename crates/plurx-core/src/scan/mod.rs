@@ -593,6 +593,10 @@ pub struct ScanProgress {
     pub processed: AtomicUsize,
     /// Files added or updated so far.
     pub changed: AtomicUsize,
+    /// The ids of those files, in the order the walk recorded them, for work
+    /// that should reach new and changed media before its backlog (the
+    /// fragment-index pass). The scan's owner takes them when it ends.
+    pub changed_files: std::sync::Mutex<Vec<i64>>,
 }
 
 fn is_video(path: &Path) -> bool {
@@ -1689,6 +1693,10 @@ async fn record_candidates(
         }
         if let Some(p) = progress {
             p.changed.fetch_add(1, Ordering::Relaxed);
+            p.changed_files
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(file_id);
         }
     }
 

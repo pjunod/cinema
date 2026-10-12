@@ -9,8 +9,8 @@
 use serde_json::Value;
 
 use super::{
-    bounded_json_response, provider_client, provider_outcome, record_provider_request,
-    request_error, Provider, ProviderOutcome, PROVIDER_CONNECT_TIMEOUT, PROVIDER_READ_TIMEOUT,
+    bounded_json_response, provider_client, provider_outcome, record_provider_request, HostHealth,
+    Provider, ProviderOutcome, PROVIDER_CONNECT_TIMEOUT, PROVIDER_READ_TIMEOUT,
     PROVIDER_TOTAL_TIMEOUT,
 };
 use crate::error::MetadataError;
@@ -57,6 +57,10 @@ pub struct AniListClient {
     http: reqwest::Client,
     /// GraphQL endpoint (defaults to [`API`]); overridable for tests.
     base: String,
+    /// The GraphQL host and the image CDN, as in `TmdbClient`. AniList has no
+    /// retry loop, so one call that fails in transport is the definitive one.
+    api_health: HostHealth,
+    image_health: HostHealth,
 }
 
 impl AniListClient {
@@ -78,7 +82,19 @@ impl AniListClient {
                     .redirect(reqwest::redirect::Policy::limited(3)),
             ),
             base: API.to_owned(),
+            api_health: HostHealth::default(),
+            image_health: HostHealth::default(),
         }
+    }
+
+    /// Why this client stopped calling AniList in this pass, if it has.
+    pub fn unreachable(&self) -> Option<&str> {
+        self.api_health.cause()
+    }
+
+    /// The same for AniList's image CDN.
+    pub fn images_unreachable(&self) -> Option<&str> {
+        self.image_health.cause()
     }
 
     /// Point the GraphQL endpoint elsewhere (mock server in tests).
@@ -93,13 +109,14 @@ impl AniListClient {
             "query": SEARCH_QUERY,
             "variables": { "search": title },
         });
+        self.api_health.check()?;
         super::budget::acquire(&self.budget, Provider::AniList).await?;
         let response =
             super::budget::cancellable(self.http.post(&self.base).json(&body).send()).await?;
         let resp = match response {
             Ok(response) => response,
             Err(error) => {
-                let error = request_error(error);
+                let error = self.api_health.failed(error);
                 record_provider_request(Provider::AniList, provider_outcome(&error));
                 return Err(error);
             }
@@ -132,12 +149,13 @@ impl AniListClient {
 
     /// Download an image from an absolute URL (AniList serves full URLs).
     pub async fn download_image(&self, url: &str) -> Result<Vec<u8>, MetadataError> {
+        self.image_health.check()?;
         super::budget::acquire(&self.budget, Provider::AniList).await?;
         let response = super::budget::cancellable(self.http.get(url).send()).await?;
         let resp = match response {
             Ok(response) => response,
             Err(error) => {
-                let error = request_error(error);
+                let error = self.image_health.failed(error);
                 record_provider_request(Provider::AniList, provider_outcome(&error));
                 return Err(error);
             }

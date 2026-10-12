@@ -147,7 +147,8 @@ pub(crate) struct VodIndexCoverage {
 /// probe JSON and this node's bounded availability observation. The source
 /// object comes from that observation — never a second stat, which a hung
 /// mount would turn into a stalled page — and the artifact state from one
-/// batched Store read per chunk, not two reads per identity. Also returns the
+/// batched read per chunk, not two reads per identity, through the catalogue
+/// reader so a follower answers it from its own replica. Also returns the
 /// local projection rows, which item detail feeds to its read metrics.
 pub(crate) async fn vod_index_coverage(
     state: &AppState,
@@ -214,7 +215,12 @@ pub(crate) async fn vod_index_coverage(
     }
     let cluster_present: std::collections::HashSet<usize> = lookup_slots
         .into_iter()
-        .zip(state.transcode.cluster_index_availability(&lookups).await)
+        .zip(
+            state
+                .transcode
+                .cluster_index_availability(&state.catalogue, &lookups)
+                .await,
+        )
         .filter_map(|(slot, present)| present.then_some(slot))
         .collect();
     let mut coverage = Vec::with_capacity(files.len());
@@ -673,7 +679,16 @@ pub async fn item_detail(
     // stored stream rows plus one settings snapshot, never a playback decision
     // or a media probe. Missing/unmounted files can therefore still explain
     // which tracks they contain and which policy choice would apply.
-    let playback_prefs = state.transcode.lang_prefs().await;
+    //
+    // Both settings this page uses are display choices, read once through the
+    // catalogue reader (K-04): they were two Authority reads on every item
+    // page, which alone put the route over its one-read bar.
+    let (playback_prefs, convert_setting) = state.transcode.detail_display_from(
+        state
+            .catalogue
+            .display_settings(&crate::transcode::TranscodeManager::DETAIL_DISPLAY_SETTING_KEYS)
+            .await,
+    );
     let availability = state
         .detail_availability
         .observe_many(
@@ -689,7 +704,7 @@ pub async fn item_detail(
         .iter()
         .any(|file| crate::copyseg::supports(file.video_codec.as_deref()));
     let have_dovi = has_video && crate::ffmpeg::has_dovi_rpu().await;
-    let convert = has_video && state.transcode.dv_convert_enabled().await;
+    let convert = has_video && convert_setting;
     let mut probes = Vec::with_capacity(files.len());
     let mut probe_bytes = 0_usize;
     for file in &files {
@@ -1887,6 +1902,231 @@ mod tests {
             .expect("recently added")
             .is_empty();
         assert_eq!(reads, 1 + u64::from(recent), "hubs: {body}");
+    }
+
+    /// Local, Authority and write operations one handler performed, in the
+    /// order the route layer exports them (`plurx_http_store_reads_total{class}`).
+    async fn route_reads_of<T: serde::Serialize>(
+        handler: impl std::future::Future<Output = Result<Json<T>, super::ApiError>>,
+    ) -> ([u64; 3], u64) {
+        let counts = HttpStoreOperationCounts::default();
+        let Ok(Json(_)) = scope_http_store_operations(counts.clone(), handler).await else {
+            panic!("handler failed");
+        };
+        (counts.snapshot(), counts.cluster_index_availability_calls())
+    }
+
+    /// K-04's M4 bar (BOUNDED-REPLICA-READS-ROLLOUT.md §5.5: library and item
+    /// at most one Authority read per request, home at most two) measured on a
+    /// real replicated voter with the route accounting the daemon exports. The
+    /// handler is called with its `AuthUser` already resolved, so every count
+    /// here excludes the request's one authentication read: a handler count of
+    /// zero is a route total of one.
+    ///
+    /// Drill F5 (2026-10-11) measured item at three with a fresh echo: the
+    /// cluster-artefact fallback issued two Authority statements whenever a
+    /// stat-proven identity was not in the node-local index. It is now a
+    /// bounded catalogue read. Without an echo (Apple and Android today, or the
+    /// web more than 60 s after a write) each watch read stays Authority by
+    /// design (§3.3), so those counts are asserted as they stand, for the §7
+    /// Q1 ruling rather than as a regression.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn browse_routes_meet_the_k04_authority_bar_on_a_replicated_voter() {
+        Box::pin(browse_routes_k04_bar()).await;
+    }
+
+    async fn browse_routes_k04_bar() {
+        plurx_core::testfixtures::require_ffmpeg();
+        let root = crate::test_tempdir().expect("replicated browse fixture");
+        let mut config = plurx_core::config::Config::default();
+        config.storage.data_dir = root.path().join("database");
+        let raft = std::net::TcpListener::bind("127.0.0.1:0").expect("Raft port");
+        let api = std::net::TcpListener::bind("127.0.0.1:0").expect("API port");
+        config.cluster.raft_bind = raft.local_addr().expect("Raft address");
+        config.cluster.api_bind = api.local_addr().expect("API address");
+        config.cluster.advertise_host = "localhost".into();
+        drop((raft, api));
+        let selected = crate::sharing_fixture_clock::select_applied_singleton(&config)
+            .await
+            .expect("actual replicated voter");
+        let mut state = AppState::new(
+            "test".into(),
+            std::sync::Arc::clone(&selected.store),
+            crate::state::Dirs {
+                artwork: root.path().join("artwork"),
+                transcode: root.path().join("transcode"),
+                cache: root.path().join("cache"),
+                subs: root.path().join("subs"),
+                runtime_cache: root.path().join("runtime"),
+                renditions: root.path().join("renditions"),
+            },
+            selected.identity.node_id.clone(),
+            Default::default(),
+            Default::default(),
+            std::sync::Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        state.catalogue = selected.catalogue_reader();
+        // The daemon runs this sampler; without it no bounded proof exists
+        // and every read is Authority.
+        let sampler = tokio::spawn(
+            selected
+                .replication_monitor()
+                .passive_metrics_loop(std::future::pending()),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while state.catalogue.bounded_read_observation().await != Some(true) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the replicated voter publishes a bounded-read proof");
+        let store = &state.store;
+        let user = store
+            .create_user("k04-bar", "hash", false)
+            .await
+            .expect("user");
+        let media = root.path().join("media");
+        std::fs::create_dir_all(&media).expect("media root");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "k04".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.clone()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let movie = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "k04 movie".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("movie");
+        let path = media.join("Movie.mkv");
+        let probe = plurx_core::domain::ProbeResult {
+            video_codec: Some("h264".into()),
+            duration_ms: Some(1000),
+            ..Default::default()
+        };
+        store
+            .upsert_file(movie, &path.to_string_lossy(), 4096, 100, &probe)
+            .await
+            .expect("file");
+        // A real source whose stat matches the scanner's identity, so the
+        // item page reaches the cluster-artefact fallback for it.
+        std::fs::write(&path, vec![0_u8; 4096]).expect("owned source");
+        std::fs::File::open(&path)
+            .expect("source handle")
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(100)),
+            )
+            .expect("fixture scanner mtime");
+        store
+            .put_progress(user.id, movie, 10_000, Some(100_000))
+            .await
+            .expect("progress");
+        let client = selected.local_client().expect("local voter client");
+        let applied = client
+            .metrics_db()
+            .await
+            .expect("voter metrics")
+            .last_applied
+            .expect("applied index")
+            .index;
+        let echo = Some(applied);
+
+        let item = |read_after| {
+            super::item_detail(
+                AuthUser(user.clone()),
+                State(state.clone()),
+                ReadAfter(read_after),
+                Path(movie),
+            )
+        };
+        let library_grid = |read_after| {
+            super::list_items(
+                AuthUser(user.clone()),
+                State(state.clone()),
+                ReadAfter(read_after),
+                Path(library.id),
+                Query(serde_json::from_value(serde_json::json!({})).expect("default query")),
+            )
+        };
+        let previews = |read_after| {
+            super::home_previews(
+                AuthUser(user.clone()),
+                State(state.clone()),
+                ReadAfter(read_after),
+            )
+        };
+        let hubs = |read_after| {
+            super::hubs(
+                AuthUser(user.clone()),
+                State(state.clone()),
+                ReadAfter(read_after),
+                Query(serde_json::from_value(serde_json::json!({})).expect("default query")),
+            )
+        };
+
+        // [local, authority, write]
+        const LOCAL: usize = 0;
+        const AUTHORITY: usize = 1;
+        let (item_echo, item_lookups) = route_reads_of(item(echo)).await;
+        assert_eq!(
+            item_lookups, 1,
+            "the fixture must reach the cluster-artefact fallback"
+        );
+        let (library_echo, _) = route_reads_of(library_grid(echo)).await;
+        let (previews_echo, _) = route_reads_of(previews(echo)).await;
+        let (hubs_echo, _) = route_reads_of(hubs(echo)).await;
+        // Header-less clients: one Authority read per watch dependency.
+        let (item_bare, _) = route_reads_of(item(None)).await;
+        let (library_bare, _) = route_reads_of(library_grid(None)).await;
+        let (previews_bare, _) = route_reads_of(previews(None)).await;
+        let (hubs_bare, _) = route_reads_of(hubs(None)).await;
+        println!(
+            "K-04 handler [local, authority, write] (route total adds one auth read): \
+             echo item {item_echo:?} library {library_echo:?} previews {previews_echo:?} \
+             hubs {hubs_echo:?}; no echo item {item_bare:?} library {library_bare:?} \
+             previews {previews_bare:?} hubs {hubs_bare:?}"
+        );
+        for (route, counts) in [
+            ("item", item_echo),
+            ("library", library_echo),
+            ("previews", previews_echo),
+            ("hubs", hubs_echo),
+        ] {
+            assert_eq!(
+                counts[AUTHORITY], 0,
+                "{route} with a fresh echo: {counts:?} (local, authority, write)"
+            );
+            assert!(counts[LOCAL] > 0, "{route} read locally: {counts:?}");
+        }
+        assert_eq!(
+            item_bare[AUTHORITY], 1,
+            "item without an echo: {item_bare:?}"
+        );
+        assert_eq!(
+            library_bare[AUTHORITY], 1,
+            "library without an echo: {library_bare:?}"
+        );
+        assert_eq!(
+            previews_bare[AUTHORITY], 1,
+            "previews without an echo: {previews_bare:?}"
+        );
+        assert_eq!(
+            hubs_bare[AUTHORITY], 2,
+            "hubs without an echo: {hubs_bare:?}"
+        );
+        sampler.abort();
+        selected.shutdown().await.expect("drain replicated voter");
     }
 
     use super::index_refusal_summary;

@@ -18,6 +18,9 @@ use crate::state::AppState;
 use crate::state::JobManager;
 
 const BACKUP_RESOURCE: &str = "backup:cluster";
+/// The cut's anchor entry. It changes no row; the Raft log index that
+/// commits it is the point the snapshot must cover.
+const BACKUP_ANCHOR_SQL: &str = "UPDATE settings SET updated_at = updated_at WHERE 0";
 const POINTER_MAX_BYTES: u64 = 128;
 
 #[derive(Default)]
@@ -181,7 +184,7 @@ impl BackupManager {
         // One budget belongs to this already-acquired backup lease. Catch-up,
         // the one snapshot trigger and publication all consume this deadline.
         let deadline = tokio::time::Instant::now() + self.snapshot_timeout;
-        wait_for_local_backup_apply(deadline, || async {
+        let local_progress = || async {
             let metrics = client.metrics_db().await.map_err(|error| {
                 StoreError::Database(format!("reading local Raft metrics: {error}"))
             })?;
@@ -189,10 +192,30 @@ impl BackupManager {
                 metrics.last_applied.as_ref().map(|log| log.index),
                 metrics.last_log_index,
             ))
+        };
+        wait_for_local_backup_apply(deadline, 0, local_progress).await?;
+        // The lease holder is any voter, and only the leader may propose an
+        // entry itself. The anchor therefore goes through the write path that
+        // forwards to the leader and reports the committed index; this node
+        // then applies through it and cuts its own snapshot there.
+        let applied = backup_phase_before_deadline(deadline, "snapshot anchor", async {
+            client
+                .execute_acked(BACKUP_ANCHOR_SQL, hiqlite::macros::params!())
+                .await
+                .map_err(|error| {
+                    StoreError::Database(format!("anchoring the backup cut: {error}"))
+                })?
+                .log_index
+                .ok_or_else(|| {
+                    StoreError::Task(
+                        "the leader did not report the backup anchor's log index".to_owned(),
+                    )
+                })
         })
         .await?;
-        let applied = backup_phase_before_deadline(deadline, "snapshot trigger", async {
-            client.trigger_db_snapshot().await.map_err(|error| {
+        wait_for_local_backup_apply(deadline, applied, local_progress).await?;
+        backup_phase_before_deadline(deadline, "snapshot trigger", async {
+            client.trigger_local_db_snapshot().await.map_err(|error| {
                 StoreError::Database(format!("triggering database snapshot: {error}"))
             })
         })
@@ -393,8 +416,11 @@ async fn backup_phase_before_deadline<T>(
 
 /// Observe only local metrics: no write, snapshot trigger, lease acquisition
 /// or deadline refresh is allowed while the local apply queue catches up.
+/// The wait ends once this replica has applied everything it holds and at
+/// least `through`, an index a follower may not have received yet.
 async fn wait_for_local_backup_apply<F, Fut>(
     deadline: tokio::time::Instant,
+    through: u64,
     mut read_progress: F,
 ) -> Result<(), StoreError>
 where
@@ -404,7 +430,7 @@ where
     loop {
         let (applied, last_log) =
             backup_phase_before_deadline(deadline, "local Raft catch-up", read_progress()).await?;
-        if applied == last_log {
+        if applied == last_log && applied.unwrap_or(0) >= through {
             return Ok(());
         }
         tokio::time::sleep_until(
@@ -494,7 +520,7 @@ mod tests {
     async fn backup_waits_for_the_current_log_apply() {
         let mut samples = [(Some(1), Some(2)), (Some(2), Some(3)), (Some(3), Some(3))].into_iter();
         let start = tokio::time::Instant::now();
-        wait_for_local_backup_apply(start + Duration::from_secs(1), || {
+        wait_for_local_backup_apply(start + Duration::from_secs(1), 0, || {
             let sample = samples.next().expect("only three passive observations");
             async move { Ok(sample) }
         })
@@ -507,11 +533,31 @@ mod tests {
         assert!(samples.next().is_none());
     }
 
+    /// CLUSTER-DRILLS-2026-10-11 F1: on a follower the anchor is committed
+    /// by the leader before this replica has even received it, so a replica
+    /// that has applied everything it holds is not yet at the cut.
+    #[tokio::test(start_paused = true)]
+    async fn backup_waits_for_the_anchor_to_reach_this_replica() {
+        let mut samples = [(Some(5), Some(5)), (Some(5), Some(7)), (Some(7), Some(7))].into_iter();
+        let start = tokio::time::Instant::now();
+        wait_for_local_backup_apply(start + Duration::from_secs(1), 7, || {
+            let sample = samples.next().expect("only three passive observations");
+            async move { Ok(sample) }
+        })
+        .await
+        .expect("the anchor has applied here");
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            Duration::from_millis(100)
+        );
+        assert!(samples.next().is_none());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn backup_lag_cannot_refresh_the_original_deadline() {
         let start = tokio::time::Instant::now();
         let mut log = 2;
-        let error = wait_for_local_backup_apply(start + Duration::from_millis(120), || {
+        let error = wait_for_local_backup_apply(start + Duration::from_millis(120), 0, || {
             log += 1;
             let sample = (Some(log - 1), Some(log));
             async move { Ok(sample) }
@@ -528,7 +574,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn backup_stalled_metrics_read_is_bounded() {
         let start = tokio::time::Instant::now();
-        let error = wait_for_local_backup_apply(start + Duration::from_millis(120), || {
+        let error = wait_for_local_backup_apply(start + Duration::from_millis(120), 0, || {
             std::future::pending::<Result<(Option<u64>, Option<u64>), StoreError>>()
         })
         .await
@@ -544,7 +590,7 @@ mod tests {
     async fn backup_metrics_error_is_not_retried() {
         let start = tokio::time::Instant::now();
         let mut reads = 0;
-        let error = wait_for_local_backup_apply(start + Duration::from_secs(1), || {
+        let error = wait_for_local_backup_apply(start + Duration::from_secs(1), 0, || {
             reads += 1;
             async { Err(StoreError::Database("metrics unavailable".to_owned())) }
         })
@@ -575,7 +621,7 @@ mod tests {
     async fn backup_snapshot_trigger_inherits_the_spent_catchup_budget() {
         let start = tokio::time::Instant::now();
         let deadline = start + Duration::from_millis(120);
-        wait_for_local_backup_apply(deadline, || async {
+        wait_for_local_backup_apply(deadline, 0, || async {
             tokio::time::sleep(Duration::from_millis(100)).await;
             Ok((Some(3), Some(3)))
         })
