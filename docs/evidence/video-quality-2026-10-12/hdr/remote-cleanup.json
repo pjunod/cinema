@@ -1,0 +1,89 @@
+{
+  "scope": "Only exact14 owned HDR experiment roots; all GPU jobs ended and anonymous volumes removed by docker --rm / rm-fv. No broad prune or foreign resources.",
+  "roots": [
+    {
+      "owned_root": "/var/tmp/plurx-vaapi-qualification.0DC7Wj4Y",
+      "bytes_before": 15682315,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-vaapi-qualification.VasflO6b",
+      "bytes_before": 15682584,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-vaapi-qualification.NWoOT4A4",
+      "bytes_before": 15682537,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-vaapi-qualification.cduqrYWk",
+      "bytes_before": 33276,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-vaapi-qualification.wX3e18SG",
+      "bytes_before": 15682691,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-vaapi-qualification.uXMnCFZT",
+      "bytes_before": 15682587,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-vaapi-qualification.5thQ48eu",
+      "bytes_before": 15682477,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-vaapi-qualification.8qWM9Edu",
+      "bytes_before": 33272,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-hdr-pressure-oct12-p1h9668g",
+      "bytes_before": 57953347,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-hdr-real-oct12-lvtx29zt",
+      "bytes_before": 60915386,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-hdr-real-oct12-_ag0t8ls",
+      "bytes_before": 55750906,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-hdr-real-oct12-4lnu02yu",
+      "bytes_before": 55757953,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-hdr-native-oct12-3xoubpd6",
+      "bytes_before": 7569043,
+      "container_mount_conflicts": [],
+      "removed": true
+    },
+    {
+      "owned_root": "/var/tmp/plurx-hdr-edge-captures-20261012",
+      "bytes_before": 711386,
+      "container_mount_conflicts": [],
+      "removed": true
+    }
+  ]
+}

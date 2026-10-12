@@ -1,0 +1,383 @@
+{
+  "scope": "Repaired SPS primaries and transfer on analytical PQ source; compressed VCL and all frame timestamps preserved by HDR owner receipt. New Safari capture binds these exact HLS bytes.",
+  "assets": [
+    {
+      "name": "pq-baseline",
+      "streams": [
+        {
+          "index": 0,
+          "codec_name": "hevc",
+          "codec_long_name": "H.265 / HEVC (High Efficiency Video Coding)",
+          "profile": "Main 10",
+          "codec_type": "video",
+          "codec_tag_string": "hvc1",
+          "codec_tag": "0x31637668",
+          "width": 1920,
+          "height": 1080,
+          "coded_width": 1920,
+          "coded_height": 1088,
+          "has_b_frames": 0,
+          "pix_fmt": "yuv420p10le",
+          "level": 120,
+          "color_range": "tv",
+          "color_space": "bt2020nc",
+          "color_transfer": "smpte2084",
+          "color_primaries": "bt2020",
+          "chroma_location": "left",
+          "field_order": "progressive",
+          "view_ids_available": "",
+          "view_pos_available": "",
+          "id": "0x0",
+          "r_frame_rate": "24/1",
+          "avg_frame_rate": "24/1",
+          "time_base": "1/12288",
+          "start_pts": 263,
+          "start_time": "0.021403",
+          "bit_rate": "152576",
+          "extradata_size": 128,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "variant_bitrate": "0",
+            "language": "und",
+            "handler_name": "VideoHandler",
+            "minor_version": "512",
+            "compatible_brands": "iso5iso6mp41",
+            "major_brand": "iso5",
+            "encoder": "Lavf63.1.101"
+          }
+        },
+        {
+          "index": 1,
+          "codec_name": "aac",
+          "codec_long_name": "AAC (Advanced Audio Coding)",
+          "profile": "LC",
+          "codec_type": "audio",
+          "codec_tag_string": "mp4a",
+          "codec_tag": "0x6134706d",
+          "mime_codec_string": "mp4a.40.2",
+          "sample_fmt": "fltp",
+          "sample_rate": "48000",
+          "channels": 2,
+          "channel_layout": "stereo",
+          "bits_per_sample": 0,
+          "initial_padding": 0,
+          "id": "0x0",
+          "r_frame_rate": "0/0",
+          "avg_frame_rate": "0/0",
+          "time_base": "1/48000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "bit_rate": "2317",
+          "extradata_size": 5,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "variant_bitrate": "0",
+            "language": "und",
+            "handler_name": "SoundHandler"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "index.m3u8",
+          "bytes": 550,
+          "sha256": "c97b492b8dc23fe15010351545ff6f775ab843a1797c7f9cce506221dc557138"
+        },
+        {
+          "name": "init.mp4",
+          "bytes": 1456,
+          "sha256": "fcccd7636a63f5f8d46b0c5322e52506a977993da86ed9c37105ee1d1863dd75"
+        },
+        {
+          "name": "segment-000.m4s",
+          "bytes": 39619,
+          "sha256": "23efe4e16d92dd5875f50ab186be7541a18b834291925a385c6b951053585fd2"
+        },
+        {
+          "name": "segment-001.m4s",
+          "bytes": 30116,
+          "sha256": "92371fb5e09fe14c76a1066f869683e629473c17f35ed46db09c6effe161bd40"
+        },
+        {
+          "name": "segment-002.m4s",
+          "bytes": 30509,
+          "sha256": "a89a7e4dfbe32566c74576af9fe4333338d3eae6d956cdd21f764f1d1a95a002"
+        },
+        {
+          "name": "segment-003.m4s",
+          "bytes": 30110,
+          "sha256": "56c7427eda17178bfc4b61e5f9f6c73f7dc94265d5b768fd7ace6299fb4ed9e5"
+        },
+        {
+          "name": "segment-004.m4s",
+          "bytes": 15034,
+          "sha256": "4d5d01a803712f558688beae3bce62463d227325b40ef0f9ecd3b35740a15d9a"
+        },
+        {
+          "name": "segment-005.m4s",
+          "bytes": 14985,
+          "sha256": "b61bedae2efac34d181b9c88b0c0c44c978a1983266f50e66bedfc1999a6eea7"
+        },
+        {
+          "name": "segment-006.m4s",
+          "bytes": 14592,
+          "sha256": "d119e1a89f0e60d6f00e8aaa3a97dc67899807f74b240b835ed2fe286300548e"
+        },
+        {
+          "name": "segment-007.m4s",
+          "bytes": 14586,
+          "sha256": "750b788d0711cb755195b8302c88c2d14bf57b28bf03fed064a4c4ba94a11a8e"
+        },
+        {
+          "name": "segment-008.m4s",
+          "bytes": 14985,
+          "sha256": "d74e7eea5c959f0bba03e05948ca219fdf69184db0451c2ecfc80fd3fae844c0"
+        },
+        {
+          "name": "segment-009.m4s",
+          "bytes": 14592,
+          "sha256": "a9fd2380650f97ebb95de84ed5fe596a8fb97ea0295188e8b56658f5522eede3"
+        },
+        {
+          "name": "segment-010.m4s",
+          "bytes": 14985,
+          "sha256": "3e16144236bff97f3c147f57ae1910db41dde7faa1a2478b0267ed96cc3b5319"
+        },
+        {
+          "name": "segment-011.m4s",
+          "bytes": 14586,
+          "sha256": "5c424309c1ec11f922c482a933ba30dbc435097a0ff454e523181c4f42ce25ce"
+        }
+      ]
+    },
+    {
+      "name": "pq-vbaq",
+      "streams": [
+        {
+          "index": 0,
+          "codec_name": "hevc",
+          "codec_long_name": "H.265 / HEVC (High Efficiency Video Coding)",
+          "profile": "Main 10",
+          "codec_type": "video",
+          "codec_tag_string": "hvc1",
+          "codec_tag": "0x31637668",
+          "width": 1920,
+          "height": 1080,
+          "coded_width": 1920,
+          "coded_height": 1088,
+          "has_b_frames": 0,
+          "pix_fmt": "yuv420p10le",
+          "level": 120,
+          "color_range": "tv",
+          "color_space": "bt2020nc",
+          "color_transfer": "smpte2084",
+          "color_primaries": "bt2020",
+          "chroma_location": "left",
+          "field_order": "progressive",
+          "view_ids_available": "",
+          "view_pos_available": "",
+          "id": "0x0",
+          "r_frame_rate": "24/1",
+          "avg_frame_rate": "24/1",
+          "time_base": "1/12288",
+          "start_pts": 263,
+          "start_time": "0.021403",
+          "bit_rate": "111736",
+          "extradata_size": 128,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "variant_bitrate": "0",
+            "language": "und",
+            "handler_name": "VideoHandler",
+            "minor_version": "512",
+            "compatible_brands": "iso5iso6mp41",
+            "major_brand": "iso5",
+            "encoder": "Lavf63.1.101"
+          }
+        },
+        {
+          "index": 1,
+          "codec_name": "aac",
+          "codec_long_name": "AAC (Advanced Audio Coding)",
+          "profile": "LC",
+          "codec_type": "audio",
+          "codec_tag_string": "mp4a",
+          "codec_tag": "0x6134706d",
+          "mime_codec_string": "mp4a.40.2",
+          "sample_fmt": "fltp",
+          "sample_rate": "48000",
+          "channels": 2,
+          "channel_layout": "stereo",
+          "bits_per_sample": 0,
+          "initial_padding": 0,
+          "id": "0x0",
+          "r_frame_rate": "0/0",
+          "avg_frame_rate": "0/0",
+          "time_base": "1/48000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "bit_rate": "2317",
+          "extradata_size": 5,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "variant_bitrate": "0",
+            "language": "und",
+            "handler_name": "SoundHandler"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "index.m3u8",
+          "bytes": 550,
+          "sha256": "c97b492b8dc23fe15010351545ff6f775ab843a1797c7f9cce506221dc557138"
+        },
+        {
+          "name": "init.mp4",
+          "bytes": 1456,
+          "sha256": "9ac07312fb51b483cff6f28cac259909be97d6ec3761f192dc24065ef262b5ed"
+        },
+        {
+          "name": "segment-000.m4s",
+          "bytes": 29409,
+          "sha256": "30bd055cf9d10b219a8c1997b7cc2ed2a2110c9026b7b458207537350f146273"
+        },
+        {
+          "name": "segment-001.m4s",
+          "bytes": 30116,
+          "sha256": "92371fb5e09fe14c76a1066f869683e629473c17f35ed46db09c6effe161bd40"
+        },
+        {
+          "name": "segment-002.m4s",
+          "bytes": 30509,
+          "sha256": "a89a7e4dfbe32566c74576af9fe4333338d3eae6d956cdd21f764f1d1a95a002"
+        },
+        {
+          "name": "segment-003.m4s",
+          "bytes": 30110,
+          "sha256": "56c7427eda17178bfc4b61e5f9f6c73f7dc94265d5b768fd7ace6299fb4ed9e5"
+        },
+        {
+          "name": "segment-004.m4s",
+          "bytes": 16255,
+          "sha256": "2b3d43cbf160295f6a166267481e539bb92ab3f44cc9fe3f7a96220964397b74"
+        },
+        {
+          "name": "segment-005.m4s",
+          "bytes": 14985,
+          "sha256": "b61bedae2efac34d181b9c88b0c0c44c978a1983266f50e66bedfc1999a6eea7"
+        },
+        {
+          "name": "segment-006.m4s",
+          "bytes": 14592,
+          "sha256": "d119e1a89f0e60d6f00e8aaa3a97dc67899807f74b240b835ed2fe286300548e"
+        },
+        {
+          "name": "segment-007.m4s",
+          "bytes": 14586,
+          "sha256": "750b788d0711cb755195b8302c88c2d14bf57b28bf03fed064a4c4ba94a11a8e"
+        },
+        {
+          "name": "segment-008.m4s",
+          "bytes": 14985,
+          "sha256": "d74e7eea5c959f0bba03e05948ca219fdf69184db0451c2ecfc80fd3fae844c0"
+        },
+        {
+          "name": "segment-009.m4s",
+          "bytes": 14592,
+          "sha256": "a9fd2380650f97ebb95de84ed5fe596a8fb97ea0295188e8b56658f5522eede3"
+        },
+        {
+          "name": "segment-010.m4s",
+          "bytes": 14985,
+          "sha256": "3e16144236bff97f3c147f57ae1910db41dde7faa1a2478b0267ed96cc3b5319"
+        },
+        {
+          "name": "segment-011.m4s",
+          "bytes": 14586,
+          "sha256": "5c424309c1ec11f922c482a933ba30dbc435097a0ff454e523181c4f42ce25ce"
+        }
+      ]
+    }
+  ]
+}

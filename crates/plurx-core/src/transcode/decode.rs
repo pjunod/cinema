@@ -2370,6 +2370,8 @@ pub struct PresentationContract {
     output_profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sdr_avc: Option<super::QualifiedSdrAvc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vaapi_hdr_policy: Option<super::VaapiHdrPolicy>,
     output_pixel_format: String,
     output_dynamic_range: String,
     output_transfer: String,
@@ -2408,6 +2410,10 @@ impl PresentationContract {
 
     pub fn output_profile(&self) -> Option<&str> {
         self.output_profile.as_deref()
+    }
+
+    pub fn vaapi_hdr_policy(&self) -> Option<super::VaapiHdrPolicy> {
+        self.vaapi_hdr_policy
     }
 
     pub fn sdr_avc(&self) -> Option<&super::QualifiedSdrAvc> {
@@ -2650,6 +2656,21 @@ impl ResolvedTranscode {
         self.macos_processing_selection
     }
 
+    /// Freeze the loaded driver's HDR recipe in both the output contract and
+    /// cache identity. Rebinding always clears an obsolete policy.
+    pub fn with_vaapi_hdr_policy(mut self, caps: &super::EncoderCaps) -> Self {
+        self.output_contract.vaapi_hdr_policy = if caps.vaapi
+            && self.encoder == Encoder::Vaapi
+            && self.codec_contract.codec == super::VideoCodec::Hevc
+            && self.codec_contract.grade == OutputGrade::Hdr10
+        {
+            caps.vaapi_hdr_policy
+        } else {
+            None
+        };
+        self
+    }
+
     /// Bind only a completed exact-node experiment to this output plan. The
     /// caller supplies the resolved OUTPUT grid; VOD must rebind after choosing
     /// its fps-filter grid rather than reuse a source's average cadence.
@@ -2859,6 +2880,9 @@ impl ResolvedTranscode {
             },
         );
         feed("encoder", self.encoder.label().as_bytes());
+        if let Some(policy) = self.output_contract.vaapi_hdr_policy() {
+            feed("vaapi_hdr_policy", policy.recipe_value().as_bytes());
+        }
         if let Some(proof) = self.output_contract.sdr_avc() {
             // Conditional: old/unqualified plans retain their exact digest.
             // Qualified software changes level flags too, so it is not exempt
@@ -3704,6 +3728,7 @@ pub fn resolve_transcode(
             OutputGrade::Sdr => None,
         },
         sdr_avc: None,
+        vaapi_hdr_policy: None,
         output_pixel_format: output_grade.pixel_format().to_owned(),
         output_dynamic_range: output_grade.delivered_dynamic_range().to_owned(),
         output_transfer: output_grade.transfer().to_owned(),

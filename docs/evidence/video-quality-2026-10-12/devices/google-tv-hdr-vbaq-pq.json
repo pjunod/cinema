@@ -1,0 +1,2474 @@
+{
+  "schema": 1,
+  "case": "google-tv-hdr-vbaq-pq",
+  "apk_sha256": "edcd657db339363ee91cbb139a3b96d70eb8920e9ec2993236883854d27f72dc",
+  "started_utc": "2026-10-12T16:50:27Z",
+  "cleanup": {
+    "force_stop": "",
+    "uninstall_result": "Success",
+    "package_absent": true,
+    "remove_reverse": "",
+    "owned_reverse_absent": true
+  },
+  "preflight_media_states": [
+    "ERROR(7)",
+    "ERROR(7)",
+    "NONE(0)"
+  ],
+  "keyguard_not_showing": true,
+  "focus_before": [
+    "mCurrentFocus=Window{4f1577b u0 tv.plurx.app/tv.plurx.app.MainActivity}"
+  ],
+  "probe": {
+    "schema": 1,
+    "case": "google-tv-hdr-vbaq-pq",
+    "runtime": "Media3 1.10.1 isolated probe on physical Android device",
+    "os": "14",
+    "result": "pass",
+    "failure": null,
+    "phases": [
+      {
+        "phase": "start",
+        "result": "pass",
+        "initial_floor_exclusions": 0,
+        "prior_epoch_callbacks": 0,
+        "frames_observed": 62,
+        "successful_surface_copies": 35,
+        "distinct_pixel_fingerprints": 22,
+        "nonuniform_surface_copies": 35,
+        "maximum_video_to_player_clock_seconds": 0.05566599999999999
+      },
+      {
+        "phase": "forward",
+        "result": "pass",
+        "initial_floor_exclusions": 0,
+        "prior_epoch_callbacks": 0,
+        "frames_observed": 61,
+        "successful_surface_copies": 55,
+        "distinct_pixel_fingerprints": 3,
+        "nonuniform_surface_copies": 55,
+        "maximum_video_to_player_clock_seconds": 0.061332999999999416
+      },
+      {
+        "phase": "backward",
+        "result": "pass",
+        "initial_floor_exclusions": 0,
+        "prior_epoch_callbacks": 0,
+        "frames_observed": 61,
+        "successful_surface_copies": 61,
+        "distinct_pixel_fingerprints": 15,
+        "nonuniform_surface_copies": 61,
+        "maximum_video_to_player_clock_seconds": 0.031666000000000416
+      },
+      {
+        "phase": "restart",
+        "result": "pass",
+        "initial_floor_exclusions": 0,
+        "prior_epoch_callbacks": 0,
+        "frames_observed": 61,
+        "successful_surface_copies": 60,
+        "distinct_pixel_fingerprints": 8,
+        "nonuniform_surface_copies": 60,
+        "maximum_video_to_player_clock_seconds": 0.026665999999998746
+      }
+    ],
+    "observations": [
+      {
+        "phase": "start",
+        "media_seconds": 0,
+        "player_clock_seconds": 0,
+        "wall_since_phase_seconds": 1.967,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.041666,
+        "player_clock_seconds": 0.018,
+        "wall_since_phase_seconds": 2.462,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.083333,
+        "player_clock_seconds": 0.067,
+        "wall_since_phase_seconds": 2.511,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.125,
+        "player_clock_seconds": 0.104,
+        "wall_since_phase_seconds": 2.545,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.166666,
+        "player_clock_seconds": 0.136,
+        "wall_since_phase_seconds": 2.595,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.208333,
+        "player_clock_seconds": 0.216,
+        "wall_since_phase_seconds": 2.67,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.25,
+        "player_clock_seconds": 0.216,
+        "wall_since_phase_seconds": 2.679,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.291666,
+        "player_clock_seconds": 0.305,
+        "wall_since_phase_seconds": 2.745,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.333333,
+        "player_clock_seconds": 0.377,
+        "wall_since_phase_seconds": 2.813,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.375,
+        "player_clock_seconds": 0.377,
+        "wall_since_phase_seconds": 2.813,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.416666,
+        "player_clock_seconds": 0.452,
+        "wall_since_phase_seconds": 2.882,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.458333,
+        "player_clock_seconds": 0.452,
+        "wall_since_phase_seconds": 2.883,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.5,
+        "player_clock_seconds": 0.522,
+        "wall_since_phase_seconds": 2.95,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.541666,
+        "player_clock_seconds": 0.533,
+        "wall_since_phase_seconds": 2.963,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.583333,
+        "player_clock_seconds": 0.605,
+        "wall_since_phase_seconds": 3.021,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.625,
+        "player_clock_seconds": 0.605,
+        "wall_since_phase_seconds": 3.028,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.666666,
+        "player_clock_seconds": 0.68,
+        "wall_since_phase_seconds": 3.089,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.708333,
+        "player_clock_seconds": 0.75,
+        "wall_since_phase_seconds": 3.157,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.75,
+        "player_clock_seconds": 0.75,
+        "wall_since_phase_seconds": 3.157,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.791666,
+        "player_clock_seconds": 0.831,
+        "wall_since_phase_seconds": 3.229,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.833333,
+        "player_clock_seconds": 0.831,
+        "wall_since_phase_seconds": 3.233,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.875,
+        "player_clock_seconds": 0.895,
+        "wall_since_phase_seconds": 3.297,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.916666,
+        "player_clock_seconds": 0.907,
+        "wall_since_phase_seconds": 3.298,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 0.958333,
+        "player_clock_seconds": 0.97,
+        "wall_since_phase_seconds": 3.366,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1,
+        "player_clock_seconds": 0.98,
+        "wall_since_phase_seconds": 3.379,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.041666,
+        "player_clock_seconds": 1.034,
+        "wall_since_phase_seconds": 3.433,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.083333,
+        "player_clock_seconds": 1.107,
+        "wall_since_phase_seconds": 3.501,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.125,
+        "player_clock_seconds": 1.107,
+        "wall_since_phase_seconds": 3.502,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.166666,
+        "player_clock_seconds": 1.176,
+        "wall_since_phase_seconds": 3.568,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.208333,
+        "player_clock_seconds": 1.187,
+        "wall_since_phase_seconds": 3.578,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.25,
+        "player_clock_seconds": 1.238,
+        "wall_since_phase_seconds": 3.636,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.291666,
+        "player_clock_seconds": 1.312,
+        "wall_since_phase_seconds": 3.704,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.333333,
+        "player_clock_seconds": 1.312,
+        "wall_since_phase_seconds": 3.711,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.375,
+        "player_clock_seconds": 1.377,
+        "wall_since_phase_seconds": 3.772,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.416666,
+        "player_clock_seconds": 1.441,
+        "wall_since_phase_seconds": 3.839,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.458333,
+        "player_clock_seconds": 1.441,
+        "wall_since_phase_seconds": 3.84,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.5,
+        "player_clock_seconds": 1.512,
+        "wall_since_phase_seconds": 3.907,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.541666,
+        "player_clock_seconds": 1.512,
+        "wall_since_phase_seconds": 3.911,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.583333,
+        "player_clock_seconds": 1.581,
+        "wall_since_phase_seconds": 3.973,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.625,
+        "player_clock_seconds": 1.623,
+        "wall_since_phase_seconds": 4.039,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.666666,
+        "player_clock_seconds": 1.65,
+        "wall_since_phase_seconds": 4.044,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.708333,
+        "player_clock_seconds": 1.72,
+        "wall_since_phase_seconds": 4.111,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.75,
+        "player_clock_seconds": 1.774,
+        "wall_since_phase_seconds": 4.179,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.791666,
+        "player_clock_seconds": 1.774,
+        "wall_since_phase_seconds": 4.18,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.833333,
+        "player_clock_seconds": 1.852,
+        "wall_since_phase_seconds": 4.247,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.875,
+        "player_clock_seconds": 1.852,
+        "wall_since_phase_seconds": 4.248,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.916666,
+        "player_clock_seconds": 1.924,
+        "wall_since_phase_seconds": 4.319,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 1.958333,
+        "player_clock_seconds": 1.935,
+        "wall_since_phase_seconds": 4.328,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2,
+        "player_clock_seconds": 1.989,
+        "wall_since_phase_seconds": 4.386,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.041666,
+        "player_clock_seconds": 2.057,
+        "wall_since_phase_seconds": 4.453,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.083333,
+        "player_clock_seconds": 2.068,
+        "wall_since_phase_seconds": 4.462,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.125,
+        "player_clock_seconds": 2.114,
+        "wall_since_phase_seconds": 4.521,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.166666,
+        "player_clock_seconds": 2.194,
+        "wall_since_phase_seconds": 4.588,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.208333,
+        "player_clock_seconds": 2.194,
+        "wall_since_phase_seconds": 4.589,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.25,
+        "player_clock_seconds": 2.256,
+        "wall_since_phase_seconds": 4.655,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.291666,
+        "player_clock_seconds": 2.265,
+        "wall_since_phase_seconds": 4.662,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.333333,
+        "player_clock_seconds": 2.321,
+        "wall_since_phase_seconds": 4.722,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.375,
+        "player_clock_seconds": 2.361,
+        "wall_since_phase_seconds": 4.789,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.416666,
+        "player_clock_seconds": 2.361,
+        "wall_since_phase_seconds": 4.796,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.458333,
+        "player_clock_seconds": 2.456,
+        "wall_since_phase_seconds": 4.856,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.5,
+        "player_clock_seconds": 2.521,
+        "wall_since_phase_seconds": 4.922,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "start",
+        "media_seconds": 2.541666,
+        "player_clock_seconds": 2.521,
+        "wall_since_phase_seconds": 4.923,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12,
+        "player_clock_seconds": 12,
+        "wall_since_phase_seconds": 0.077,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.041666,
+        "player_clock_seconds": 12.039,
+        "wall_since_phase_seconds": 0.508,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.083333,
+        "player_clock_seconds": 12.106,
+        "wall_since_phase_seconds": 0.575,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.125,
+        "player_clock_seconds": 12.106,
+        "wall_since_phase_seconds": 0.577,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.166666,
+        "player_clock_seconds": 12.147,
+        "wall_since_phase_seconds": 0.641,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.208333,
+        "player_clock_seconds": 12.147,
+        "wall_since_phase_seconds": 0.653,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.25,
+        "player_clock_seconds": 12.259,
+        "wall_since_phase_seconds": 0.71,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.291666,
+        "player_clock_seconds": 12.326,
+        "wall_since_phase_seconds": 0.777,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.333333,
+        "player_clock_seconds": 12.326,
+        "wall_since_phase_seconds": 0.778,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.375,
+        "player_clock_seconds": 12.404,
+        "wall_since_phase_seconds": 0.843,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.416666,
+        "player_clock_seconds": 12.414,
+        "wall_since_phase_seconds": 0.854,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.458333,
+        "player_clock_seconds": 12.478,
+        "wall_since_phase_seconds": 0.909,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.5,
+        "player_clock_seconds": 12.552,
+        "wall_since_phase_seconds": 0.973,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.541666,
+        "player_clock_seconds": 12.552,
+        "wall_since_phase_seconds": 0.974,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.583333,
+        "player_clock_seconds": 12.591,
+        "wall_since_phase_seconds": 1.016,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.625,
+        "player_clock_seconds": 12.601,
+        "wall_since_phase_seconds": 1.036,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.666666,
+        "player_clock_seconds": 12.639,
+        "wall_since_phase_seconds": 1.069,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.708333,
+        "player_clock_seconds": 12.691,
+        "wall_since_phase_seconds": 1.12,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.75,
+        "player_clock_seconds": 12.691,
+        "wall_since_phase_seconds": 1.164,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.791666,
+        "player_clock_seconds": 12.775,
+        "wall_since_phase_seconds": 1.203,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.833333,
+        "player_clock_seconds": 12.806,
+        "wall_since_phase_seconds": 1.236,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.875,
+        "player_clock_seconds": 12.857,
+        "wall_since_phase_seconds": 1.286,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.916666,
+        "player_clock_seconds": 12.897,
+        "wall_since_phase_seconds": 1.319,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 12.958333,
+        "player_clock_seconds": 12.947,
+        "wall_since_phase_seconds": 1.37,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13,
+        "player_clock_seconds": 12.979,
+        "wall_since_phase_seconds": 1.403,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.041666,
+        "player_clock_seconds": 13.029,
+        "wall_since_phase_seconds": 1.453,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.083333,
+        "player_clock_seconds": 13.059,
+        "wall_since_phase_seconds": 1.486,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.125,
+        "player_clock_seconds": 13.115,
+        "wall_since_phase_seconds": 1.537,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.166666,
+        "player_clock_seconds": 13.146,
+        "wall_since_phase_seconds": 1.57,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.208333,
+        "player_clock_seconds": 13.198,
+        "wall_since_phase_seconds": 1.62,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.25,
+        "player_clock_seconds": 13.227,
+        "wall_since_phase_seconds": 1.652,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.291666,
+        "player_clock_seconds": 13.28,
+        "wall_since_phase_seconds": 1.704,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.333333,
+        "player_clock_seconds": 13.31,
+        "wall_since_phase_seconds": 1.736,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.375,
+        "player_clock_seconds": 13.362,
+        "wall_since_phase_seconds": 1.786,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.416666,
+        "player_clock_seconds": 13.393,
+        "wall_since_phase_seconds": 1.82,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.458333,
+        "player_clock_seconds": 13.444,
+        "wall_since_phase_seconds": 1.87,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.5,
+        "player_clock_seconds": 13.475,
+        "wall_since_phase_seconds": 1.902,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.541666,
+        "player_clock_seconds": 13.523,
+        "wall_since_phase_seconds": 1.953,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.583333,
+        "player_clock_seconds": 13.564,
+        "wall_since_phase_seconds": 1.986,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.625,
+        "player_clock_seconds": 13.614,
+        "wall_since_phase_seconds": 2.037,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.666666,
+        "player_clock_seconds": 13.644,
+        "wall_since_phase_seconds": 2.07,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.708333,
+        "player_clock_seconds": 13.696,
+        "wall_since_phase_seconds": 2.12,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.75,
+        "player_clock_seconds": 13.728,
+        "wall_since_phase_seconds": 2.154,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.791666,
+        "player_clock_seconds": 13.777,
+        "wall_since_phase_seconds": 2.202,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.833333,
+        "player_clock_seconds": 13.807,
+        "wall_since_phase_seconds": 2.236,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.875,
+        "player_clock_seconds": 13.858,
+        "wall_since_phase_seconds": 2.287,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.916666,
+        "player_clock_seconds": 13.889,
+        "wall_since_phase_seconds": 2.319,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 13.958333,
+        "player_clock_seconds": 13.942,
+        "wall_since_phase_seconds": 2.37,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14,
+        "player_clock_seconds": 13.974,
+        "wall_since_phase_seconds": 2.404,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14.041666,
+        "player_clock_seconds": 14.024,
+        "wall_since_phase_seconds": 2.454,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14.083333,
+        "player_clock_seconds": 14.065,
+        "wall_since_phase_seconds": 2.486,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14.125,
+        "player_clock_seconds": 14.114,
+        "wall_since_phase_seconds": 2.537,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14.166666,
+        "player_clock_seconds": 14.146,
+        "wall_since_phase_seconds": 2.57,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14.208333,
+        "player_clock_seconds": 14.198,
+        "wall_since_phase_seconds": 2.62,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14.25,
+        "player_clock_seconds": 14.228,
+        "wall_since_phase_seconds": 2.654,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14.291666,
+        "player_clock_seconds": 14.279,
+        "wall_since_phase_seconds": 2.703,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14.333333,
+        "player_clock_seconds": 14.309,
+        "wall_since_phase_seconds": 2.737,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14.375,
+        "player_clock_seconds": 14.363,
+        "wall_since_phase_seconds": 2.786,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14.416666,
+        "player_clock_seconds": 14.395,
+        "wall_since_phase_seconds": 2.82,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14.458333,
+        "player_clock_seconds": 14.446,
+        "wall_since_phase_seconds": 2.869,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "forward",
+        "media_seconds": 14.5,
+        "player_clock_seconds": 14.477,
+        "wall_since_phase_seconds": 2.903,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3,
+        "player_clock_seconds": 3,
+        "wall_since_phase_seconds": 0.336,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.041666,
+        "player_clock_seconds": 3.032,
+        "wall_since_phase_seconds": 0.767,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.083333,
+        "player_clock_seconds": 3.065,
+        "wall_since_phase_seconds": 0.798,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.125,
+        "player_clock_seconds": 3.105,
+        "wall_since_phase_seconds": 0.848,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.166666,
+        "player_clock_seconds": 3.135,
+        "wall_since_phase_seconds": 0.881,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.208333,
+        "player_clock_seconds": 3.195,
+        "wall_since_phase_seconds": 0.933,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.25,
+        "player_clock_seconds": 3.221,
+        "wall_since_phase_seconds": 0.966,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.291666,
+        "player_clock_seconds": 3.277,
+        "wall_since_phase_seconds": 1.016,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.333333,
+        "player_clock_seconds": 3.312,
+        "wall_since_phase_seconds": 1.049,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.375,
+        "player_clock_seconds": 3.364,
+        "wall_since_phase_seconds": 1.1,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.416666,
+        "player_clock_seconds": 3.394,
+        "wall_since_phase_seconds": 1.132,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.458333,
+        "player_clock_seconds": 3.451,
+        "wall_since_phase_seconds": 1.183,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.5,
+        "player_clock_seconds": 3.485,
+        "wall_since_phase_seconds": 1.215,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.541666,
+        "player_clock_seconds": 3.54,
+        "wall_since_phase_seconds": 1.265,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.583333,
+        "player_clock_seconds": 3.574,
+        "wall_since_phase_seconds": 1.299,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.625,
+        "player_clock_seconds": 3.632,
+        "wall_since_phase_seconds": 1.349,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.666666,
+        "player_clock_seconds": 3.654,
+        "wall_since_phase_seconds": 1.365,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.708333,
+        "player_clock_seconds": 3.71,
+        "wall_since_phase_seconds": 1.415,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.75,
+        "player_clock_seconds": 3.743,
+        "wall_since_phase_seconds": 1.448,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.791666,
+        "player_clock_seconds": 3.801,
+        "wall_since_phase_seconds": 1.499,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.833333,
+        "player_clock_seconds": 3.836,
+        "wall_since_phase_seconds": 1.532,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.875,
+        "player_clock_seconds": 3.847,
+        "wall_since_phase_seconds": 1.549,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.916666,
+        "player_clock_seconds": 3.906,
+        "wall_since_phase_seconds": 1.6,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 3.958333,
+        "player_clock_seconds": 3.94,
+        "wall_since_phase_seconds": 1.631,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4,
+        "player_clock_seconds": 4,
+        "wall_since_phase_seconds": 1.682,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.041666,
+        "player_clock_seconds": 4.03,
+        "wall_since_phase_seconds": 1.715,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.083333,
+        "player_clock_seconds": 4.096,
+        "wall_since_phase_seconds": 1.78,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.125,
+        "player_clock_seconds": 4.112,
+        "wall_since_phase_seconds": 1.799,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.166666,
+        "player_clock_seconds": 4.166,
+        "wall_since_phase_seconds": 1.85,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.208333,
+        "player_clock_seconds": 4.196,
+        "wall_since_phase_seconds": 1.883,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.25,
+        "player_clock_seconds": 4.246,
+        "wall_since_phase_seconds": 1.933,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.291666,
+        "player_clock_seconds": 4.276,
+        "wall_since_phase_seconds": 1.965,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.333333,
+        "player_clock_seconds": 4.328,
+        "wall_since_phase_seconds": 2.015,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.375,
+        "player_clock_seconds": 4.358,
+        "wall_since_phase_seconds": 2.049,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.416666,
+        "player_clock_seconds": 4.409,
+        "wall_since_phase_seconds": 2.099,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.458333,
+        "player_clock_seconds": 4.45,
+        "wall_since_phase_seconds": 2.132,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.5,
+        "player_clock_seconds": 4.491,
+        "wall_since_phase_seconds": 2.182,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.541666,
+        "player_clock_seconds": 4.532,
+        "wall_since_phase_seconds": 2.215,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.583333,
+        "player_clock_seconds": 4.584,
+        "wall_since_phase_seconds": 2.266,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.625,
+        "player_clock_seconds": 4.613,
+        "wall_since_phase_seconds": 2.299,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.666666,
+        "player_clock_seconds": 4.664,
+        "wall_since_phase_seconds": 2.348,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.708333,
+        "player_clock_seconds": 4.696,
+        "wall_since_phase_seconds": 2.382,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.75,
+        "player_clock_seconds": 4.746,
+        "wall_since_phase_seconds": 2.432,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.791666,
+        "player_clock_seconds": 4.778,
+        "wall_since_phase_seconds": 2.465,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.833333,
+        "player_clock_seconds": 4.828,
+        "wall_since_phase_seconds": 2.515,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.875,
+        "player_clock_seconds": 4.859,
+        "wall_since_phase_seconds": 2.549,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.916666,
+        "player_clock_seconds": 4.913,
+        "wall_since_phase_seconds": 2.599,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 4.958333,
+        "player_clock_seconds": 4.943,
+        "wall_since_phase_seconds": 2.632,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5,
+        "player_clock_seconds": 4.995,
+        "wall_since_phase_seconds": 2.683,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5.041666,
+        "player_clock_seconds": 5.027,
+        "wall_since_phase_seconds": 2.716,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5.083333,
+        "player_clock_seconds": 5.077,
+        "wall_since_phase_seconds": 2.765,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5.125,
+        "player_clock_seconds": 5.109,
+        "wall_since_phase_seconds": 2.8,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5.166666,
+        "player_clock_seconds": 5.16,
+        "wall_since_phase_seconds": 2.849,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5.208333,
+        "player_clock_seconds": 5.199,
+        "wall_since_phase_seconds": 2.882,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5.25,
+        "player_clock_seconds": 5.251,
+        "wall_since_phase_seconds": 2.933,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5.291666,
+        "player_clock_seconds": 5.282,
+        "wall_since_phase_seconds": 2.965,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5.333333,
+        "player_clock_seconds": 5.332,
+        "wall_since_phase_seconds": 3.015,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5.375,
+        "player_clock_seconds": 5.364,
+        "wall_since_phase_seconds": 3.048,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5.416666,
+        "player_clock_seconds": 5.416,
+        "wall_since_phase_seconds": 3.1,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5.458333,
+        "player_clock_seconds": 5.446,
+        "wall_since_phase_seconds": 3.133,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "backward",
+        "media_seconds": 5.5,
+        "player_clock_seconds": 5.497,
+        "wall_since_phase_seconds": 3.183,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8,
+        "player_clock_seconds": 8,
+        "wall_since_phase_seconds": 0.493,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.041666,
+        "player_clock_seconds": 8.03,
+        "wall_since_phase_seconds": 0.963,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.083333,
+        "player_clock_seconds": 8.062,
+        "wall_since_phase_seconds": 0.998,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.125,
+        "player_clock_seconds": 8.109,
+        "wall_since_phase_seconds": 1.047,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.166666,
+        "player_clock_seconds": 8.14,
+        "wall_since_phase_seconds": 1.081,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.208333,
+        "player_clock_seconds": 8.192,
+        "wall_since_phase_seconds": 1.131,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.25,
+        "player_clock_seconds": 8.225,
+        "wall_since_phase_seconds": 1.165,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.291666,
+        "player_clock_seconds": 8.278,
+        "wall_since_phase_seconds": 1.214,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.333333,
+        "player_clock_seconds": 8.307,
+        "wall_since_phase_seconds": 1.248,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.375,
+        "player_clock_seconds": 8.361,
+        "wall_since_phase_seconds": 1.297,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.416666,
+        "player_clock_seconds": 8.394,
+        "wall_since_phase_seconds": 1.33,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.458333,
+        "player_clock_seconds": 8.446,
+        "wall_since_phase_seconds": 1.381,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.5,
+        "player_clock_seconds": 8.48,
+        "wall_since_phase_seconds": 1.415,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.541666,
+        "player_clock_seconds": 8.538,
+        "wall_since_phase_seconds": 1.464,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.583333,
+        "player_clock_seconds": 8.575,
+        "wall_since_phase_seconds": 1.497,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.625,
+        "player_clock_seconds": 8.63,
+        "wall_since_phase_seconds": 1.547,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.666666,
+        "player_clock_seconds": 8.665,
+        "wall_since_phase_seconds": 1.581,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.708333,
+        "player_clock_seconds": 8.687,
+        "wall_since_phase_seconds": 1.597,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.75,
+        "player_clock_seconds": 8.737,
+        "wall_since_phase_seconds": 1.647,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.791666,
+        "player_clock_seconds": 8.782,
+        "wall_since_phase_seconds": 1.682,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.833333,
+        "player_clock_seconds": 8.826,
+        "wall_since_phase_seconds": 1.73,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.875,
+        "player_clock_seconds": 8.871,
+        "wall_since_phase_seconds": 1.764,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.916666,
+        "player_clock_seconds": 8.927,
+        "wall_since_phase_seconds": 1.814,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 8.958333,
+        "player_clock_seconds": 8.938,
+        "wall_since_phase_seconds": 1.831,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9,
+        "player_clock_seconds": 8.994,
+        "wall_since_phase_seconds": 1.88,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.041666,
+        "player_clock_seconds": 9.036,
+        "wall_since_phase_seconds": 1.915,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.083333,
+        "player_clock_seconds": 9.076,
+        "wall_since_phase_seconds": 1.964,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.125,
+        "player_clock_seconds": 9.116,
+        "wall_since_phase_seconds": 1.997,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.166666,
+        "player_clock_seconds": 9.166,
+        "wall_since_phase_seconds": 2.047,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.208333,
+        "player_clock_seconds": 9.196,
+        "wall_since_phase_seconds": 2.081,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.25,
+        "player_clock_seconds": 9.246,
+        "wall_since_phase_seconds": 2.131,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.291666,
+        "player_clock_seconds": 9.278,
+        "wall_since_phase_seconds": 2.164,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.333333,
+        "player_clock_seconds": 9.329,
+        "wall_since_phase_seconds": 2.213,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.375,
+        "player_clock_seconds": 9.36,
+        "wall_since_phase_seconds": 2.247,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.416666,
+        "player_clock_seconds": 9.415,
+        "wall_since_phase_seconds": 2.297,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.458333,
+        "player_clock_seconds": 9.446,
+        "wall_since_phase_seconds": 2.33,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.5,
+        "player_clock_seconds": 9.496,
+        "wall_since_phase_seconds": 2.381,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.541666,
+        "player_clock_seconds": 9.526,
+        "wall_since_phase_seconds": 2.413,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.583333,
+        "player_clock_seconds": 9.577,
+        "wall_since_phase_seconds": 2.465,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.625,
+        "player_clock_seconds": 9.617,
+        "wall_since_phase_seconds": 2.497,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.666666,
+        "player_clock_seconds": 9.668,
+        "wall_since_phase_seconds": 2.547,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.708333,
+        "player_clock_seconds": 9.7,
+        "wall_since_phase_seconds": 2.58,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.75,
+        "player_clock_seconds": 9.751,
+        "wall_since_phase_seconds": 2.631,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.791666,
+        "player_clock_seconds": 9.783,
+        "wall_since_phase_seconds": 2.663,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.833333,
+        "player_clock_seconds": 9.834,
+        "wall_since_phase_seconds": 2.715,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.875,
+        "player_clock_seconds": 9.865,
+        "wall_since_phase_seconds": 2.748,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.916666,
+        "player_clock_seconds": 9.91,
+        "wall_since_phase_seconds": 2.797,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 9.958333,
+        "player_clock_seconds": 9.951,
+        "wall_since_phase_seconds": 2.832,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10,
+        "player_clock_seconds": 10.001,
+        "wall_since_phase_seconds": 2.881,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10.041666,
+        "player_clock_seconds": 10.032,
+        "wall_since_phase_seconds": 2.915,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10.083333,
+        "player_clock_seconds": 10.084,
+        "wall_since_phase_seconds": 2.964,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10.125,
+        "player_clock_seconds": 10.115,
+        "wall_since_phase_seconds": 2.997,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10.166666,
+        "player_clock_seconds": 10.165,
+        "wall_since_phase_seconds": 3.046,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10.208333,
+        "player_clock_seconds": 10.196,
+        "wall_since_phase_seconds": 3.08,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10.25,
+        "player_clock_seconds": 10.246,
+        "wall_since_phase_seconds": 3.131,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10.291666,
+        "player_clock_seconds": 10.277,
+        "wall_since_phase_seconds": 3.164,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10.333333,
+        "player_clock_seconds": 10.33,
+        "wall_since_phase_seconds": 3.215,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10.375,
+        "player_clock_seconds": 10.359,
+        "wall_since_phase_seconds": 3.247,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10.416666,
+        "player_clock_seconds": 10.412,
+        "wall_since_phase_seconds": 3.298,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10.458333,
+        "player_clock_seconds": 10.443,
+        "wall_since_phase_seconds": 3.33,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "phase": "restart",
+        "media_seconds": 10.5,
+        "player_clock_seconds": 10.495,
+        "wall_since_phase_seconds": 3.38,
+        "audio_selected": true,
+        "width": 1920,
+        "height": 1080
+      }
+    ],
+    "initial_floor_exclusions": 0,
+    "decoder": "c2.mtk.hevc.decoder",
+    "formats": [
+      {
+        "phase": "start",
+        "format": "Format(null, null, video/mp4, video/hevc, hvc1.2.4.H120.B0, 74963, und, [1920, 1080, -1.0, ColorInfo(BT2020, Limited range, ST2084 PQ, false, 10bit Luma, 10bit Chroma)], [-1, -1])",
+        "codec_output_format": "{max-height=1080, crop-right=1919, sar-width=1, color-format=2130708361, mime=video/raw, hdr-static-info=java.nio.HeapByteBuffer[pos=0 lim=25 cap=25], priority=0, color-standard=6, color-transfer=6, sar-height=1, crop-bottom=1079, max-width=1920, width=1920, crop-left=0, color-range=2, crop-top=0, rotation-degrees=0, frame-rate=30, height=1080}",
+        "color_info": "ColorInfo(BT2020, Limited range, ST2084 PQ, false, 10bit Luma, 10bit Chroma)"
+      },
+      {
+        "phase": "forward",
+        "format": "Format(null, null, video/mp4, video/hevc, hvc1.2.4.H120.B0, 74963, und, [1920, 1080, -1.0, ColorInfo(BT2020, Limited range, ST2084 PQ, false, 10bit Luma, 10bit Chroma)], [-1, -1])",
+        "codec_output_format": "{max-height=1080, crop-right=1919, sar-width=1, color-format=2130708361, mime=video/raw, hdr-static-info=java.nio.HeapByteBuffer[pos=0 lim=25 cap=25], priority=0, color-standard=6, color-transfer=6, sar-height=1, crop-bottom=1079, max-width=1920, width=1920, crop-left=0, color-range=2, crop-top=0, rotation-degrees=0, frame-rate=30, height=1080}",
+        "color_info": "ColorInfo(BT2020, Limited range, ST2084 PQ, false, 10bit Luma, 10bit Chroma)"
+      },
+      {
+        "phase": "backward",
+        "format": "Format(null, null, video/mp4, video/hevc, hvc1.2.4.H120.B0, 74963, und, [1920, 1080, -1.0, ColorInfo(BT2020, Limited range, ST2084 PQ, false, 10bit Luma, 10bit Chroma)], [-1, -1])",
+        "codec_output_format": "{max-height=1080, crop-right=1919, sar-width=1, color-format=2130708361, mime=video/raw, hdr-static-info=java.nio.HeapByteBuffer[pos=0 lim=25 cap=25], priority=0, color-standard=6, color-transfer=6, sar-height=1, crop-bottom=1079, max-width=1920, width=1920, crop-left=0, color-range=2, crop-top=0, rotation-degrees=0, frame-rate=30, height=1080}",
+        "color_info": "ColorInfo(BT2020, Limited range, ST2084 PQ, false, 10bit Luma, 10bit Chroma)"
+      },
+      {
+        "phase": "restart",
+        "format": "Format(null, null, video/mp4, video/hevc, hvc1.2.4.H120.B0, 74963, und, [1920, 1080, -1.0, ColorInfo(BT2020, Limited range, ST2084 PQ, false, 10bit Luma, 10bit Chroma)], [-1, -1])",
+        "codec_output_format": "{max-height=1080, crop-right=1919, sar-width=1, color-format=2130708361, mime=video/raw, hdr-static-info=java.nio.HeapByteBuffer[pos=0 lim=25 cap=25], priority=0, color-standard=6, color-transfer=6, sar-height=1, crop-bottom=1079, max-width=1920, width=1920, crop-left=0, color-range=2, crop-top=0, rotation-degrees=0, frame-rate=30, height=1080}",
+        "color_info": "ColorInfo(BT2020, Limited range, ST2084 PQ, false, 10bit Luma, 10bit Chroma)"
+      }
+    ],
+    "muted": true,
+    "hevc_codec_capabilities": [
+      {
+        "name": "c2.mtk.hevc.decoder",
+        "mime": "video/hevc",
+        "profile_levels": [
+          {
+            "profile": 1,
+            "level": 131072
+          },
+          {
+            "profile": 4,
+            "level": 131072
+          },
+          {
+            "profile": 2,
+            "level": 131072
+          },
+          {
+            "profile": 4096,
+            "level": 131072
+          }
+        ],
+        "size_1920x1080_at24_supported": true,
+        "hardware_accelerated": true
+      },
+      {
+        "name": "OMX.MTK.VIDEO.DECODER.HEVC",
+        "mime": "video/hevc",
+        "profile_levels": [
+          {
+            "profile": 1,
+            "level": 131072
+          },
+          {
+            "profile": 4,
+            "level": 131072
+          },
+          {
+            "profile": 2,
+            "level": 131072
+          },
+          {
+            "profile": 4096,
+            "level": 131072
+          }
+        ],
+        "size_1920x1080_at24_supported": true,
+        "hardware_accelerated": true
+      },
+      {
+        "name": "c2.mtk.hevc.decoder.lowlatency",
+        "mime": "video/hevc",
+        "profile_levels": [
+          {
+            "profile": 1,
+            "level": 131072
+          },
+          {
+            "profile": 4,
+            "level": 131072
+          },
+          {
+            "profile": 2,
+            "level": 131072
+          },
+          {
+            "profile": 4096,
+            "level": 131072
+          }
+        ],
+        "size_1920x1080_at24_supported": true,
+        "hardware_accelerated": true
+      },
+      {
+        "name": "c2.mtk.hevc.decoder.secure",
+        "mime": "video/hevc",
+        "profile_levels": [
+          {
+            "profile": 1,
+            "level": 131072
+          },
+          {
+            "profile": 4,
+            "level": 131072
+          },
+          {
+            "profile": 2,
+            "level": 131072
+          },
+          {
+            "profile": 4096,
+            "level": 131072
+          }
+        ],
+        "size_1920x1080_at24_supported": true,
+        "hardware_accelerated": true
+      },
+      {
+        "name": "OMX.MTK.VIDEO.DECODER.HEVC.secure",
+        "mime": "video/hevc",
+        "profile_levels": [
+          {
+            "profile": 1,
+            "level": 131072
+          },
+          {
+            "profile": 4,
+            "level": 131072
+          },
+          {
+            "profile": 2,
+            "level": 131072
+          },
+          {
+            "profile": 4096,
+            "level": 131072
+          }
+        ],
+        "size_1920x1080_at24_supported": true,
+        "hardware_accelerated": true
+      },
+      {
+        "name": "c2.android.hevc.decoder",
+        "mime": "video/hevc",
+        "profile_levels": [
+          {
+            "profile": 1,
+            "level": 524288
+          },
+          {
+            "profile": 4,
+            "level": 524288
+          }
+        ],
+        "size_1920x1080_at24_supported": false,
+        "hardware_accelerated": false
+      },
+      {
+        "name": "OMX.google.hevc.decoder",
+        "mime": "video/hevc",
+        "profile_levels": [
+          {
+            "profile": 1,
+            "level": 524288
+          },
+          {
+            "profile": 4,
+            "level": 524288
+          }
+        ],
+        "size_1920x1080_at24_supported": false,
+        "hardware_accelerated": false
+      }
+    ],
+    "model": "Google TV Streamer",
+    "manufacturer": "Google",
+    "expect_motion": false,
+    "scope": "Native codec and actual Surface pixels, timestamp progression, seeks and fresh-player restart. Audio selection and player clock measured; physical output A/V sync is not measured."
+  },
+  "focus_after": [
+    "mCurrentFocus=Window{4f1577b u0 tv.plurx.app/tv.plurx.app.MainActivity}"
+  ],
+  "finished_utc": "2026-10-12T16:50:49Z"
+}

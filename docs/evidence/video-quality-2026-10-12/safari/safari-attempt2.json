@@ -1,0 +1,50 @@
+{
+  "owned_document_created": true,
+  "receipt": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Safari/605.1.15",
+    "nativeHls": "maybe",
+    "rvfc": true,
+    "cases": [
+      {
+        "asset": "sdr-bf0",
+        "phases": [
+          {
+            "name": "cold-mid",
+            "target": 6,
+            "frames": [],
+            "started": 80
+          }
+        ]
+      }
+    ],
+    "events": [
+      {
+        "event": "seeking",
+        "time": 6,
+        "wall": 30
+      },
+      {
+        "event": "seeked",
+        "time": 6,
+        "wall": 57
+      },
+      {
+        "event": "playing",
+        "time": 6,
+        "wall": 80,
+        "stage": "cold-mid"
+      },
+      {
+        "event": "stalled",
+        "time": 9.505474709007288,
+        "wall": 3598,
+        "stage": "cold-mid"
+      }
+    ],
+    "error": "Error: deadline",
+    "pass": false
+  },
+  "cleanup_error": "Command '['/usr/bin/osascript', '-e', 'tell application \"Safari\"\\nrepeat with d in documents\\nif URL of d starts with \"http://127.0.0.1:61701/\" then close d\\nend repeat\\nend tell']' returned non-zero exit status 1.",
+  "server_closed": true,
+  "harness_sha256": "0bdf84a4d868d9eca6ca85877316b379c3e7e1db114abbe024bbfc978258654b"
+}

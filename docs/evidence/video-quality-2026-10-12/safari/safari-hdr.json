@@ -1,0 +1,2685 @@
+{
+  "owned_document_created": true,
+  "receipt": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Safari/605.1.15",
+    "nativeHls": "maybe",
+    "rvfc": true,
+    "visibility": "visible",
+    "hdrDisplayMediaQuery": true,
+    "cases": [
+      {
+        "asset": "hdr-baseline",
+        "phases": [
+          {
+            "name": "cold-mid",
+            "target": 6,
+            "frames": [
+              {
+                "wall": 134,
+                "time": 6,
+                "clock": 6.037371042,
+                "presented": 1,
+                "pixels": 2475090727,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 151,
+                "time": 6.041666666666667,
+                "clock": 6.072957208688001,
+                "presented": 2,
+                "pixels": 427639997,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 168,
+                "time": 6.083333333333333,
+                "clock": 6.089514083682422,
+                "presented": 3,
+                "pixels": 3409479134,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 217,
+                "time": 6.125,
+                "clock": 6.139459958001395,
+                "presented": 4,
+                "pixels": 3396547711,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 267,
+                "time": 6.166666666666667,
+                "clock": 6.189527999660355,
+                "presented": 5,
+                "pixels": 1162768887,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 317,
+                "time": 6.208333333333333,
+                "clock": 6.239576166672213,
+                "presented": 6,
+                "pixels": 993164148,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 351,
+                "time": 6.25,
+                "clock": 6.272870708346181,
+                "presented": 7,
+                "pixels": 124376883,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 384,
+                "time": 6.291666666666667,
+                "clock": 6.306242291670211,
+                "presented": 8,
+                "pixels": 400302834,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 434,
+                "time": 6.333333333333333,
+                "clock": 6.356612833333353,
+                "presented": 9,
+                "pixels": 35439732,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 467,
+                "time": 6.375,
+                "clock": 6.389477666671306,
+                "presented": 10,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 517,
+                "time": 6.416666666666667,
+                "clock": 6.43873770867112,
+                "presented": 11,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 551,
+                "time": 6.458333333333333,
+                "clock": 6.472984250347231,
+                "presented": 12,
+                "pixels": 437348565,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 600,
+                "time": 6.5,
+                "clock": 6.522350124999229,
+                "presented": 13,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 634,
+                "time": 6.541666666666667,
+                "clock": 6.556218750002608,
+                "presented": 14,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 684,
+                "time": 6.583333333333333,
+                "clock": 6.608761916686963,
+                "presented": 15,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 734,
+                "time": 6.625,
+                "clock": 6.660122124995287,
+                "presented": 16,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 768,
+                "time": 6.666666666666667,
+                "clock": 6.6931790416642984,
+                "presented": 17,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 801,
+                "time": 6.708333333333333,
+                "clock": 6.726088583323072,
+                "presented": 18,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 851,
+                "time": 6.75,
+                "clock": 6.776214791664753,
+                "presented": 19,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 901,
+                "time": 6.791666666666667,
+                "clock": 6.826477416992694,
+                "presented": 20,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 918,
+                "time": 6.833333333333333,
+                "clock": 6.84351129198125,
+                "presented": 21,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 984,
+                "time": 6.875,
+                "clock": 6.909849166341252,
+                "presented": 22,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1018,
+                "time": 6.916666666666667,
+                "clock": 6.943431624672036,
+                "presented": 23,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1068,
+                "time": 6.958333333333333,
+                "clock": 6.993856166338907,
+                "presented": 24,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1101,
+                "time": 7,
+                "clock": 7.027540749663017,
+                "presented": 25,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1134,
+                "time": 7.041666666666667,
+                "clock": 7.060218541326463,
+                "presented": 26,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1184,
+                "time": 7.083333333333333,
+                "clock": 7.110094457988737,
+                "presented": 27,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1218,
+                "time": 7.125,
+                "clock": 7.143286707993241,
+                "presented": 28,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1268,
+                "time": 7.166666666666667,
+                "clock": 7.193185791322605,
+                "presented": 29,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1317,
+                "time": 7.208333333333333,
+                "clock": 7.242724916654821,
+                "presented": 30,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              }
+            ],
+            "started": 109,
+            "firstFrameMs": 25,
+            "firstError": 0,
+            "maxClockError": 0.03737104200000019,
+            "reversals": 0,
+            "uniquePixels": 11,
+            "pass": true
+          },
+          {
+            "name": "forward",
+            "target": 18,
+            "frames": [
+              {
+                "wall": 1468,
+                "time": 18.041666666666668,
+                "clock": 18.074670542329343,
+                "presented": 31,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1518,
+                "time": 18.083333333333332,
+                "clock": 18.12395166666079,
+                "presented": 32,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1568,
+                "time": 18.125,
+                "clock": 18.173913666650837,
+                "presented": 33,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1600,
+                "time": 18.166666666666668,
+                "clock": 18.20669637497463,
+                "presented": 34,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1634,
+                "time": 18.208333333333332,
+                "clock": 18.239941999996628,
+                "presented": 35,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1684,
+                "time": 18.25,
+                "clock": 18.289652124989626,
+                "presented": 36,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1734,
+                "time": 18.291666666666668,
+                "clock": 18.339561583670456,
+                "presented": 37,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1768,
+                "time": 18.333333333333332,
+                "clock": 18.373137416979898,
+                "presented": 38,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1801,
+                "time": 18.375,
+                "clock": 18.40693879199507,
+                "presented": 39,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1850,
+                "time": 18.416666666666668,
+                "clock": 18.455766750002724,
+                "presented": 40,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1884,
+                "time": 18.458333333333332,
+                "clock": 18.489468583311165,
+                "presented": 41,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1934,
+                "time": 18.5,
+                "clock": 18.53972645867608,
+                "presented": 42,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 1984,
+                "time": 18.541666666666668,
+                "clock": 18.589819291996456,
+                "presented": 43,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2018,
+                "time": 18.583333333333332,
+                "clock": 18.62322216735706,
+                "presented": 44,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2051,
+                "time": 18.625,
+                "clock": 18.65668041734975,
+                "presented": 45,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2101,
+                "time": 18.666666666666668,
+                "clock": 18.70763579233685,
+                "presented": 46,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2151,
+                "time": 18.708333333333332,
+                "clock": 18.757557417000545,
+                "presented": 47,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2184,
+                "time": 18.75,
+                "clock": 18.79031258364198,
+                "presented": 48,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2217,
+                "time": 18.791666666666668,
+                "clock": 18.822998625316846,
+                "presented": 49,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2268,
+                "time": 18.833333333333332,
+                "clock": 18.87402550032451,
+                "presented": 50,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2318,
+                "time": 18.875,
+                "clock": 18.92360591667708,
+                "presented": 51,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2351,
+                "time": 18.916666666666668,
+                "clock": 18.95677162500684,
+                "presented": 52,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2368,
+                "time": 18.958333333333332,
+                "clock": 18.97301733334203,
+                "presented": 53,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2434,
+                "time": 19,
+                "clock": 19.040313625311928,
+                "presented": 54,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2484,
+                "time": 19.041666666666668,
+                "clock": 19.090113250317035,
+                "presented": 55,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2517,
+                "time": 19.083333333333332,
+                "clock": 19.12349841732302,
+                "presented": 56,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2551,
+                "time": 19.125,
+                "clock": 19.15697387565396,
+                "presented": 57,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2601,
+                "time": 19.166666666666668,
+                "clock": 19.20694458397574,
+                "presented": 58,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2634,
+                "time": 19.208333333333332,
+                "clock": 19.240232666687564,
+                "presented": 59,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2684,
+                "time": 19.25,
+                "clock": 19.28959458335395,
+                "presented": 60,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              }
+            ],
+            "started": 1402,
+            "firstFrameMs": 66,
+            "firstError": 0.04166666666666785,
+            "maxClockError": 0.049224083667212426,
+            "reversals": 0,
+            "uniquePixels": 1,
+            "pass": true
+          },
+          {
+            "name": "backward",
+            "target": 3,
+            "frames": [
+              {
+                "wall": 2784,
+                "time": 3.0416666666666665,
+                "clock": 3.0632785686943147,
+                "presented": 61,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2834,
+                "time": 3.0833333333333335,
+                "clock": 3.1167505000115057,
+                "presented": 62,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2884,
+                "time": 3.125,
+                "clock": 3.166783041662086,
+                "presented": 63,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 2951,
+                "time": 3.2083333333333335,
+                "clock": 3.2338165833283514,
+                "presented": 65,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3001,
+                "time": 3.25,
+                "clock": 3.283995291662339,
+                "presented": 66,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3034,
+                "time": 3.2916666666666665,
+                "clock": 3.316284874340794,
+                "presented": 67,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3084,
+                "time": 3.3333333333333335,
+                "clock": 3.3667948326650494,
+                "presented": 68,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3117,
+                "time": 3.375,
+                "clock": 3.3993142076682252,
+                "presented": 69,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3167,
+                "time": 3.4166666666666665,
+                "clock": 3.447539541327724,
+                "presented": 70,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3201,
+                "time": 3.4583333333333335,
+                "clock": 3.4830461246414144,
+                "presented": 71,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3251,
+                "time": 3.5,
+                "clock": 3.5299297080131615,
+                "presented": 72,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3301,
+                "time": 3.5416666666666665,
+                "clock": 3.579944207995515,
+                "presented": 73,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3334,
+                "time": 3.5833333333333335,
+                "clock": 3.6134585000055526,
+                "presented": 74,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3367,
+                "time": 3.625,
+                "clock": 3.646516958333567,
+                "presented": 75,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3418,
+                "time": 3.6666666666666665,
+                "clock": 3.7004045833256245,
+                "presented": 76,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3467,
+                "time": 3.7083333333333335,
+                "clock": 3.7465700833487565,
+                "presented": 77,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3501,
+                "time": 3.75,
+                "clock": 3.779943833338307,
+                "presented": 78,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3534,
+                "time": 3.7916666666666665,
+                "clock": 3.8167094579949614,
+                "presented": 79,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3584,
+                "time": 3.8333333333333335,
+                "clock": 3.8675587496655632,
+                "presented": 80,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3634,
+                "time": 3.875,
+                "clock": 3.913190624666301,
+                "presented": 81,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3667,
+                "time": 3.9166666666666665,
+                "clock": 3.9474257913431092,
+                "presented": 82,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3697,
+                "time": 3.9583333333333335,
+                "clock": 3.9761947080156705,
+                "presented": 83,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3747,
+                "time": 4,
+                "clock": 4.026632832986308,
+                "presented": 84,
+                "pixels": 2475090727,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3793,
+                "time": 4.041666666666667,
+                "clock": 4.072163707996025,
+                "presented": 85,
+                "pixels": 427639997,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3842,
+                "time": 4.083333333333333,
+                "clock": 4.125163082671659,
+                "presented": 86,
+                "pixels": 3409479134,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3875,
+                "time": 4.125,
+                "clock": 4.15850579101041,
+                "presented": 87,
+                "pixels": 3396547711,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3926,
+                "time": 4.166666666666667,
+                "clock": 4.209260457658982,
+                "presented": 88,
+                "pixels": 1162768887,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 3959,
+                "time": 4.208333333333333,
+                "clock": 4.24084424998948,
+                "presented": 89,
+                "pixels": 993164148,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4009,
+                "time": 4.25,
+                "clock": 4.292477541663559,
+                "presented": 90,
+                "pixels": 124376883,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4058,
+                "time": 4.291666666666667,
+                "clock": 4.341657124687286,
+                "presented": 91,
+                "pixels": 400302834,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              }
+            ],
+            "started": 2725,
+            "firstFrameMs": 59,
+            "firstError": 0.04166666666666652,
+            "maxClockError": 0.049990458020618966,
+            "reversals": 0,
+            "uniquePixels": 9,
+            "pass": true
+          },
+          {
+            "name": "restart",
+            "target": 0,
+            "frames": [
+              {
+                "wall": 4159,
+                "time": 0,
+                "clock": 7.4709e-05,
+                "presented": 1,
+                "pixels": 291975441,
+                "pixelRange": 173,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4209,
+                "time": 0.041666666666666664,
+                "clock": 0.06594345867325795,
+                "presented": 2,
+                "pixels": 1768741021,
+                "pixelRange": 173,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4259,
+                "time": 0.08333333333333333,
+                "clock": 0.11585845834881812,
+                "presented": 3,
+                "pixels": 3026140199,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4309,
+                "time": 0.125,
+                "clock": 0.16553916667428614,
+                "presented": 4,
+                "pixels": 1868870989,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4342,
+                "time": 0.16666666666666666,
+                "clock": 0.199014833330445,
+                "presented": 5,
+                "pixels": 1646710626,
+                "pixelRange": 173,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4376,
+                "time": 0.20833333333333334,
+                "clock": 0.2329263333443217,
+                "presented": 6,
+                "pixels": 2150912960,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4426,
+                "time": 0.25,
+                "clock": 0.28242879168038626,
+                "presented": 7,
+                "pixels": 1792897022,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4459,
+                "time": 0.2916666666666667,
+                "clock": 0.31973754166803137,
+                "presented": 8,
+                "pixels": 2261578518,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4508,
+                "time": 0.3333333333333333,
+                "clock": 0.36888050000244565,
+                "presented": 9,
+                "pixels": 1906951510,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4542,
+                "time": 0.375,
+                "clock": 0.40281983334399574,
+                "presented": 10,
+                "pixels": 2799764563,
+                "pixelRange": 173,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4601,
+                "time": 0.4166666666666667,
+                "clock": 0.45758608401108275,
+                "presented": 11,
+                "pixels": 870963664,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4618,
+                "time": 0.4583333333333333,
+                "clock": 0.4742479173425373,
+                "presented": 12,
+                "pixels": 1577350576,
+                "pixelRange": 173,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4667,
+                "time": 0.5,
+                "clock": 0.524064625678572,
+                "presented": 13,
+                "pixels": 463934638,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4718,
+                "time": 0.5416666666666666,
+                "clock": 0.5747359173325702,
+                "presented": 14,
+                "pixels": 3599583343,
+                "pixelRange": 173,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4751,
+                "time": 0.5833333333333334,
+                "clock": 0.6073872923225175,
+                "presented": 15,
+                "pixels": 463934638,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4784,
+                "time": 0.625,
+                "clock": 0.6443200839930691,
+                "presented": 16,
+                "pixels": 3599583343,
+                "pixelRange": 173,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4834,
+                "time": 0.6666666666666666,
+                "clock": 0.6953601673376292,
+                "presented": 17,
+                "pixels": 463934638,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4884,
+                "time": 0.7083333333333334,
+                "clock": 0.7451028339846145,
+                "presented": 18,
+                "pixels": 463934638,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4918,
+                "time": 0.75,
+                "clock": 0.778430542325563,
+                "presented": 19,
+                "pixels": 463934638,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 4950,
+                "time": 0.7916666666666666,
+                "clock": 0.8104884583167732,
+                "presented": 20,
+                "pixels": 463934638,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5001,
+                "time": 0.8333333333333334,
+                "clock": 0.8612116249874234,
+                "presented": 21,
+                "pixels": 463934638,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5051,
+                "time": 0.875,
+                "clock": 0.9110272506808612,
+                "presented": 22,
+                "pixels": 463934638,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5084,
+                "time": 0.9166666666666666,
+                "clock": 0.9442607506793208,
+                "presented": 23,
+                "pixels": 463934638,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5117,
+                "time": 0.9583333333333334,
+                "clock": 0.9774694173396781,
+                "presented": 24,
+                "pixels": 463934638,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5168,
+                "time": 1,
+                "clock": 1.0278601250112374,
+                "presented": 25,
+                "pixels": 463934638,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5217,
+                "time": 1.0416666666666667,
+                "clock": 1.0770024166933112,
+                "presented": 26,
+                "pixels": 1179496113,
+                "pixelRange": 173,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5250,
+                "time": 1.0833333333333333,
+                "clock": 1.1100799173493583,
+                "presented": 27,
+                "pixels": 2338814704,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5284,
+                "time": 1.125,
+                "clock": 1.144366084007052,
+                "presented": 28,
+                "pixels": 167356463,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5334,
+                "time": 1.1666666666666667,
+                "clock": 1.19409008401839,
+                "presented": 29,
+                "pixels": 167356463,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5368,
+                "time": 1.2083333333333333,
+                "clock": 1.2277344173343752,
+                "presented": 30,
+                "pixels": 244765357,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              }
+            ],
+            "started": 4137,
+            "firstFrameMs": 22,
+            "firstError": 0,
+            "maxClockError": 0.040919417344416065,
+            "reversals": 0,
+            "uniquePixels": 18,
+            "pass": true
+          }
+        ]
+      },
+      {
+        "asset": "hdr-vbaq",
+        "phases": [
+          {
+            "name": "cold-mid",
+            "target": 6,
+            "frames": [
+              {
+                "wall": 5501,
+                "time": 6,
+                "clock": 6.000042125,
+                "presented": 1,
+                "pixels": 2475090727,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5551,
+                "time": 6.041666666666667,
+                "clock": 6.060305208344741,
+                "presented": 2,
+                "pixels": 427639997,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5601,
+                "time": 6.083333333333333,
+                "clock": 6.109909541986155,
+                "presented": 3,
+                "pixels": 3409479134,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5651,
+                "time": 6.125,
+                "clock": 6.1602505836575,
+                "presented": 4,
+                "pixels": 3396547711,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5684,
+                "time": 6.166666666666667,
+                "clock": 6.197221333649678,
+                "presented": 5,
+                "pixels": 1162768887,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5717,
+                "time": 6.208333333333333,
+                "clock": 6.231270083009743,
+                "presented": 6,
+                "pixels": 993164148,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5768,
+                "time": 6.25,
+                "clock": 6.281435416329199,
+                "presented": 7,
+                "pixels": 124376883,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5800,
+                "time": 6.291666666666667,
+                "clock": 6.313145458334645,
+                "presented": 8,
+                "pixels": 400302834,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5851,
+                "time": 6.333333333333333,
+                "clock": 6.3640620833177195,
+                "presented": 9,
+                "pixels": 35439732,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5884,
+                "time": 6.375,
+                "clock": 6.397756916660171,
+                "presented": 10,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5934,
+                "time": 6.416666666666667,
+                "clock": 6.4478308336463686,
+                "presented": 11,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 5967,
+                "time": 6.458333333333333,
+                "clock": 6.481796250335539,
+                "presented": 12,
+                "pixels": 437348565,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6017,
+                "time": 6.5,
+                "clock": 6.530593791985974,
+                "presented": 13,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6068,
+                "time": 6.541666666666667,
+                "clock": 6.580432958677501,
+                "presented": 14,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6101,
+                "time": 6.583333333333333,
+                "clock": 6.614052708355904,
+                "presented": 15,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6134,
+                "time": 6.625,
+                "clock": 6.647354624998717,
+                "presented": 16,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6184,
+                "time": 6.666666666666667,
+                "clock": 6.697212958337933,
+                "presented": 17,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6234,
+                "time": 6.708333333333333,
+                "clock": 6.74713558297754,
+                "presented": 18,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6267,
+                "time": 6.75,
+                "clock": 6.780691291308363,
+                "presented": 19,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6300,
+                "time": 6.791666666666667,
+                "clock": 6.813519207989588,
+                "presented": 20,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6351,
+                "time": 6.833333333333333,
+                "clock": 6.863522999654082,
+                "presented": 21,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6401,
+                "time": 6.875,
+                "clock": 6.914865249656643,
+                "presented": 22,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6434,
+                "time": 6.916666666666667,
+                "clock": 6.947141624672142,
+                "presented": 23,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6468,
+                "time": 6.958333333333333,
+                "clock": 6.980628791328556,
+                "presented": 24,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6517,
+                "time": 7,
+                "clock": 7.030987958331438,
+                "presented": 25,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6567,
+                "time": 7.041666666666667,
+                "clock": 7.081515124993943,
+                "presented": 26,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6601,
+                "time": 7.083333333333333,
+                "clock": 7.113498999656608,
+                "presented": 27,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6634,
+                "time": 7.125,
+                "clock": 7.148612374679383,
+                "presented": 28,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6684,
+                "time": 7.166666666666667,
+                "clock": 7.197463541327474,
+                "presented": 29,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6717,
+                "time": 7.208333333333333,
+                "clock": 7.2308558333371575,
+                "presented": 30,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              }
+            ],
+            "started": 5465,
+            "firstFrameMs": 36,
+            "firstError": 0,
+            "maxClockError": 0.03986524965664273,
+            "reversals": 0,
+            "uniquePixels": 11,
+            "pass": true
+          },
+          {
+            "name": "forward",
+            "target": 18,
+            "frames": [
+              {
+                "wall": 6850,
+                "time": 18.041666666666668,
+                "clock": 18.06888362531011,
+                "presented": 31,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6901,
+                "time": 18.083333333333332,
+                "clock": 18.11914541633551,
+                "presented": 32,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6951,
+                "time": 18.125,
+                "clock": 18.168739332993123,
+                "presented": 33,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 6984,
+                "time": 18.166666666666668,
+                "clock": 18.2031329163302,
+                "presented": 34,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7018,
+                "time": 18.208333333333332,
+                "clock": 18.237179874670876,
+                "presented": 35,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7068,
+                "time": 18.25,
+                "clock": 18.286496291340047,
+                "presented": 36,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7100,
+                "time": 18.291666666666668,
+                "clock": 18.319430374978236,
+                "presented": 37,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7151,
+                "time": 18.333333333333332,
+                "clock": 18.369173958316804,
+                "presented": 38,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7184,
+                "time": 18.375,
+                "clock": 18.402676458326294,
+                "presented": 39,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7234,
+                "time": 18.416666666666668,
+                "clock": 18.453670166339197,
+                "presented": 40,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7268,
+                "time": 18.458333333333332,
+                "clock": 18.487406708002727,
+                "presented": 41,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7318,
+                "time": 18.5,
+                "clock": 18.535769375342777,
+                "presented": 42,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7367,
+                "time": 18.541666666666668,
+                "clock": 18.583372125325393,
+                "presented": 43,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7400,
+                "time": 18.583333333333332,
+                "clock": 18.61825570833259,
+                "presented": 44,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7434,
+                "time": 18.625,
+                "clock": 18.649167874997666,
+                "presented": 45,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7483,
+                "time": 18.666666666666668,
+                "clock": 18.70158216665238,
+                "presented": 46,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7534,
+                "time": 18.708333333333332,
+                "clock": 18.74941204133044,
+                "presented": 47,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7567,
+                "time": 18.75,
+                "clock": 18.784294624665716,
+                "presented": 48,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7601,
+                "time": 18.791666666666668,
+                "clock": 18.815756208308812,
+                "presented": 49,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7647,
+                "time": 18.833333333333332,
+                "clock": 18.862291333311077,
+                "presented": 50,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7692,
+                "time": 18.875,
+                "clock": 18.90901129168562,
+                "presented": 51,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7726,
+                "time": 18.916666666666668,
+                "clock": 18.940834250006464,
+                "presented": 52,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7754,
+                "time": 18.958333333333332,
+                "clock": 18.96988700001022,
+                "presented": 53,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7821,
+                "time": 19,
+                "clock": 19.039677166662685,
+                "presented": 54,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7871,
+                "time": 19.041666666666668,
+                "clock": 19.08608795835501,
+                "presented": 55,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7905,
+                "time": 19.083333333333332,
+                "clock": 19.120175625004556,
+                "presented": 56,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7935,
+                "time": 19.125,
+                "clock": 19.149905791662384,
+                "presented": 57,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 7983,
+                "time": 19.166666666666668,
+                "clock": 19.19828462499914,
+                "presented": 58,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8017,
+                "time": 19.208333333333332,
+                "clock": 19.235209916329428,
+                "presented": 59,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8066,
+                "time": 19.25,
+                "clock": 19.28133099964582,
+                "presented": 60,
+                "pixels": 1073383190,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              }
+            ],
+            "started": 6789,
+            "firstFrameMs": 61,
+            "firstError": 0.04166666666666785,
+            "maxClockError": 0.04442129168834086,
+            "reversals": 0,
+            "uniquePixels": 1,
+            "pass": true
+          },
+          {
+            "name": "backward",
+            "target": 3,
+            "frames": [
+              {
+                "wall": 8184,
+                "time": 3.0416666666666665,
+                "clock": 3.070165041324229,
+                "presented": 61,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8234,
+                "time": 3.0833333333333335,
+                "clock": 3.1199487916700246,
+                "presented": 62,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8305,
+                "time": 3.125,
+                "clock": 3.191643000008183,
+                "presented": 63,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8351,
+                "time": 3.2083333333333335,
+                "clock": 3.237751707658545,
+                "presented": 65,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8402,
+                "time": 3.25,
+                "clock": 3.288074416012178,
+                "presented": 66,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8451,
+                "time": 3.2916666666666665,
+                "clock": 3.3373375833330003,
+                "presented": 67,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8484,
+                "time": 3.3333333333333335,
+                "clock": 3.370862208336338,
+                "presented": 68,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8517,
+                "time": 3.375,
+                "clock": 3.4032274583300834,
+                "presented": 69,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8568,
+                "time": 3.4166666666666665,
+                "clock": 3.454092082991018,
+                "presented": 70,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8601,
+                "time": 3.4583333333333335,
+                "clock": 3.487242249671589,
+                "presented": 71,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8650,
+                "time": 3.5,
+                "clock": 3.536599458334459,
+                "presented": 72,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8700,
+                "time": 3.5416666666666665,
+                "clock": 3.586583458346505,
+                "presented": 73,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8734,
+                "time": 3.5833333333333335,
+                "clock": 3.620801832998897,
+                "presented": 74,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8768,
+                "time": 3.625,
+                "clock": 3.656199291325667,
+                "presented": 75,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8818,
+                "time": 3.6666666666666665,
+                "clock": 3.7046122080127515,
+                "presented": 76,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8868,
+                "time": 3.7083333333333335,
+                "clock": 3.756035791000831,
+                "presented": 77,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8901,
+                "time": 3.75,
+                "clock": 3.7915891243503568,
+                "presented": 78,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8934,
+                "time": 3.7916666666666665,
+                "clock": 3.8259898326542663,
+                "presented": 79,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 8988,
+                "time": 3.8333333333333335,
+                "clock": 3.8741995409837893,
+                "presented": 80,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9034,
+                "time": 3.875,
+                "clock": 3.921021125014499,
+                "presented": 81,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9068,
+                "time": 3.9166666666666665,
+                "clock": 3.954198708347371,
+                "presented": 82,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9101,
+                "time": 3.9583333333333335,
+                "clock": 3.991107708335016,
+                "presented": 83,
+                "pixels": 2822981110,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9151,
+                "time": 4,
+                "clock": 4.040249874333643,
+                "presented": 84,
+                "pixels": 2475090727,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9200,
+                "time": 4.041666666666667,
+                "clock": 4.086721707672371,
+                "presented": 85,
+                "pixels": 427639997,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9235,
+                "time": 4.083333333333333,
+                "clock": 4.123267041014335,
+                "presented": 86,
+                "pixels": 3409479134,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9268,
+                "time": 4.125,
+                "clock": 4.154165374337756,
+                "presented": 87,
+                "pixels": 3396547711,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9317,
+                "time": 4.166666666666667,
+                "clock": 4.203645249352851,
+                "presented": 88,
+                "pixels": 1162768887,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9351,
+                "time": 4.208333333333333,
+                "clock": 4.237696999976227,
+                "presented": 89,
+                "pixels": 993164148,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9401,
+                "time": 4.25,
+                "clock": 4.28873016664996,
+                "presented": 90,
+                "pixels": 124376883,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9450,
+                "time": 4.291666666666667,
+                "clock": 4.336955166663928,
+                "presented": 91,
+                "pixels": 400302834,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              }
+            ],
+            "started": 8118,
+            "firstFrameMs": 66,
+            "firstError": 0.04166666666666652,
+            "maxClockError": 0.0666430000081828,
+            "reversals": 0,
+            "uniquePixels": 9,
+            "pass": true
+          },
+          {
+            "name": "restart",
+            "target": 0,
+            "frames": [
+              {
+                "wall": 9551,
+                "time": 0,
+                "clock": 3.8833e-05,
+                "presented": 1,
+                "pixels": 3216469694,
+                "pixelRange": 173,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9601,
+                "time": 0.041666666666666664,
+                "clock": 0.06178849966054912,
+                "presented": 2,
+                "pixels": 632468878,
+                "pixelRange": 173,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9651,
+                "time": 0.08333333333333333,
+                "clock": 0.1117201253224412,
+                "presented": 3,
+                "pixels": 396719102,
+                "pixelRange": 174,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9701,
+                "time": 0.125,
+                "clock": 0.16436350032801422,
+                "presented": 4,
+                "pixels": 2810804541,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9734,
+                "time": 0.16666666666666666,
+                "clock": 0.1952700003317805,
+                "presented": 5,
+                "pixels": 2671689613,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9768,
+                "time": 0.20833333333333334,
+                "clock": 0.22990325000148454,
+                "presented": 6,
+                "pixels": 1943344496,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9818,
+                "time": 0.25,
+                "clock": 0.2786994999916032,
+                "presented": 7,
+                "pixels": 1110635953,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9850,
+                "time": 0.2916666666666667,
+                "clock": 0.3110471669820199,
+                "presented": 8,
+                "pixels": 2881908815,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9902,
+                "time": 0.3333333333333333,
+                "clock": 0.3625756253200179,
+                "presented": 9,
+                "pixels": 3873050193,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9934,
+                "time": 0.375,
+                "clock": 0.3952353753152365,
+                "presented": 10,
+                "pixels": 1598341138,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 9984,
+                "time": 0.4166666666666667,
+                "clock": 0.4457317916691825,
+                "presented": 11,
+                "pixels": 3258982552,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10018,
+                "time": 0.4583333333333333,
+                "clock": 0.48159812501553073,
+                "presented": 12,
+                "pixels": 3258982552,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10068,
+                "time": 0.5,
+                "clock": 0.5285786246476167,
+                "presented": 13,
+                "pixels": 3130751703,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10117,
+                "time": 0.5416666666666666,
+                "clock": 0.5778439163349507,
+                "presented": 14,
+                "pixels": 3539466711,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10151,
+                "time": 0.5833333333333334,
+                "clock": 0.6164074583501163,
+                "presented": 15,
+                "pixels": 2858457720,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10185,
+                "time": 0.625,
+                "clock": 0.6489690833257585,
+                "presented": 16,
+                "pixels": 58557529,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10234,
+                "time": 0.6666666666666666,
+                "clock": 0.6951576666613649,
+                "presented": 17,
+                "pixels": 2858457720,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10284,
+                "time": 0.7083333333333334,
+                "clock": 0.7485015416764673,
+                "presented": 18,
+                "pixels": 2044399606,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10318,
+                "time": 0.75,
+                "clock": 0.7791573750160188,
+                "presented": 19,
+                "pixels": 3539466711,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10350,
+                "time": 0.7916666666666666,
+                "clock": 0.8109791246609812,
+                "presented": 20,
+                "pixels": 2044399606,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10401,
+                "time": 0.8333333333333334,
+                "clock": 0.8695288746460856,
+                "presented": 21,
+                "pixels": 2044399606,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10451,
+                "time": 0.875,
+                "clock": 0.9157580833289474,
+                "presented": 22,
+                "pixels": 2044399606,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10485,
+                "time": 0.9166666666666666,
+                "clock": 0.9490867083241399,
+                "presented": 23,
+                "pixels": 2858457720,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10517,
+                "time": 0.9583333333333334,
+                "clock": 0.9827711249982174,
+                "presented": 24,
+                "pixels": 2858457720,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10568,
+                "time": 1,
+                "clock": 1.032286875335232,
+                "presented": 25,
+                "pixels": 2858457720,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10617,
+                "time": 1.0416666666666667,
+                "clock": 1.0816160420141765,
+                "presented": 26,
+                "pixels": 3539466711,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10651,
+                "time": 1.0833333333333333,
+                "clock": 1.1120644170194498,
+                "presented": 27,
+                "pixels": 2044399606,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10684,
+                "time": 1.125,
+                "clock": 1.149468875348997,
+                "presented": 28,
+                "pixels": 3130751703,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10734,
+                "time": 1.1666666666666667,
+                "clock": 1.1956327503474529,
+                "presented": 29,
+                "pixels": 3130751703,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              },
+              {
+                "wall": 10768,
+                "time": 1.2083333333333333,
+                "clock": 1.2301245003250358,
+                "presented": 30,
+                "pixels": 3130751703,
+                "pixelRange": 172,
+                "width": 1920,
+                "height": 1080
+              }
+            ],
+            "started": 9533,
+            "firstFrameMs": 18,
+            "firstError": 0,
+            "maxClockError": 0.04075808332894737,
+            "reversals": 0,
+            "uniquePixels": 16,
+            "pass": true
+          }
+        ]
+      }
+    ],
+    "events": [
+      {
+        "event": "seeking",
+        "time": 6,
+        "wall": 59
+      },
+      {
+        "event": "seeked",
+        "time": 6,
+        "wall": 85
+      },
+      {
+        "event": "playing",
+        "time": 6.037333333333334,
+        "wall": 109,
+        "stage": "cold-mid"
+      },
+      {
+        "event": "waiting",
+        "time": 6.037334333333333,
+        "wall": 116,
+        "stage": "cold-mid"
+      },
+      {
+        "event": "playing",
+        "time": 6.037334333333333,
+        "wall": 116,
+        "stage": "cold-mid"
+      },
+      {
+        "event": "seeking",
+        "time": 18,
+        "wall": 1347
+      },
+      {
+        "event": "seeked",
+        "time": 18,
+        "wall": 1382
+      },
+      {
+        "event": "playing",
+        "time": 18,
+        "wall": 1402,
+        "stage": "forward"
+      },
+      {
+        "event": "seeking",
+        "time": 3,
+        "wall": 2698
+      },
+      {
+        "event": "seeked",
+        "time": 3,
+        "wall": 2709
+      },
+      {
+        "event": "playing",
+        "time": 3,
+        "wall": 2725,
+        "stage": "backward"
+      },
+      {
+        "event": "seeking",
+        "time": 0,
+        "wall": 4109
+      },
+      {
+        "event": "seeked",
+        "time": 0,
+        "wall": 4109
+      },
+      {
+        "event": "playing",
+        "time": 3e-06,
+        "wall": 4137,
+        "stage": "restart"
+      },
+      {
+        "event": "waiting",
+        "time": 4e-06,
+        "wall": 4144,
+        "stage": "restart"
+      },
+      {
+        "event": "playing",
+        "time": 4e-06,
+        "wall": 4144,
+        "stage": "restart"
+      },
+      {
+        "event": "seeking",
+        "time": 6,
+        "wall": 5409
+      },
+      {
+        "event": "seeked",
+        "time": 6,
+        "wall": 5443
+      },
+      {
+        "event": "playing",
+        "time": 6,
+        "wall": 5465,
+        "stage": "cold-mid"
+      },
+      {
+        "event": "seeking",
+        "time": 18,
+        "wall": 6734
+      },
+      {
+        "event": "seeked",
+        "time": 18,
+        "wall": 6767
+      },
+      {
+        "event": "playing",
+        "time": 18,
+        "wall": 6789,
+        "stage": "forward"
+      },
+      {
+        "event": "seeking",
+        "time": 3,
+        "wall": 8090
+      },
+      {
+        "event": "seeked",
+        "time": 3,
+        "wall": 8099
+      },
+      {
+        "event": "playing",
+        "time": 3,
+        "wall": 8118,
+        "stage": "backward"
+      },
+      {
+        "event": "seeking",
+        "time": 0,
+        "wall": 9506
+      },
+      {
+        "event": "seeked",
+        "time": 0,
+        "wall": 9506
+      },
+      {
+        "event": "playing",
+        "time": 3e-06,
+        "wall": 9533,
+        "stage": "restart"
+      }
+    ],
+    "callbackCount": 240,
+    "pass": true
+  },
+  "owned_document_close_requested": true,
+  "server_closed": true,
+  "harness_sha256": "c3302d6e17890ab5b33a118480d10317f13cd3eb4b8c7068780989ef8c3db976"
+}

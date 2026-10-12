@@ -1,0 +1,13 @@
+{
+  "mode": "no-opt diagnostic only",
+  "module_sha256": "36f7e0298eac14d1a664dfc083702bab812f6c83d196c651420af92f1080f21c",
+  "binary_sha256": "38c1c09d9e4e968ff5c6f4fd68aee6ace95f6395cce2176d70b700caab5709bd",
+  "source_sha256": "b530c12d655100962191516065ff694d8de84a6446b11eae4e999bab3ee1ee2d",
+  "adapter_sha256": "b2323771ed83c6c0ace00294587f7d4889a443ddf865db627ccdce6cc32b3252",
+  "fixture_sha256": "bece3d5d38cd0c8a3acf76b53929cb52ff7896487abc3fb58b3351f61add161e",
+  "timeout_seconds": 60,
+  "exit_code": 0,
+  "stdout": "compile_ms=6169.181\nversion elapsed_ms=0.475 status=0 stdout_bytes=1323 stderr_bytes=0\nmetadata elapsed_ms=8.482 status=0 stdout_bytes=4177 stderr_bytes=0\npackets elapsed_ms=13.441 status=0 stdout_bytes=89361 stderr_bytes=0\n",
+  "stderr": "",
+  "wall_seconds": 6.287718042032793
+}

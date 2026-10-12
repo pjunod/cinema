@@ -2966,7 +2966,7 @@ async fn probe_system(
             false
         },
         hdr10_passthrough_vaapi: if encoder_caps.vaapi {
-            crate::ffmpeg::has_hdr10_passthrough_vaapi().await
+            crate::ffmpeg::has_hdr10_passthrough_vaapi(encoder_caps.vaapi_hdr_policy).await
         } else {
             false
         },

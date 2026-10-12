@@ -1836,7 +1836,7 @@ impl TranscodeManager {
         let cadence = same_raster
             .then(|| transcode::Rational::new(grid.numerator, grid.denominator))
             .flatten();
-        let plan = plan.with_sdr_avc_qualification(&self.caps, cadence, options.force_idr);
+        let plan = plan.with_sdr_avc_qualification(&self.caps, cadence, options.force_idr).with_vaapi_hdr_policy(&self.caps);
         let reorder_frames = Self::vod_reorder_from_snapshot(&planning);
         if let Some(context) = req.candidate_context.as_ref() {
             // Continuous roles verify the muxed catalog plan; every other
