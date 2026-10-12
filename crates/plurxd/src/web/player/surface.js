@@ -275,7 +275,7 @@ function playbackSurfaceActionHtml(actions){
     const label=SURFACE_ACTION_LABELS[action];
     if(!label) return "";
     return `<button onclick="playbackSurfaceAction('${action}')">${esc(label)}</button>`;
-  }).join("")+`<button onclick="showDiagnostics()">Report a problem</button>`;
+  }).join("");
 }
 // A notice strip beside the picture: the picture itself is untouched.
 function renderPlaybackSurfaceNotice(on,title,detail,actions){

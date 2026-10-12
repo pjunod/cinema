@@ -477,3 +477,21 @@ Fourteen targeted failed/invalidated policy checks have applicable passes;
 the document status check required one further missing-header repair and a
 focused retry. Passing cases were not rerun. The new final fast-lane run must
 pass before merge; no Rust/Apple/Android suite was added to this local retry.
+
+
+## 18. Playback presenter contract — final integration correction
+
+Run 4874 on `f1768b381` passed the Python policy/operations checks, adopting
+358 and 1,007 attributable successes and executing only the one and ten
+previously failed methods. Its Node phase exposed an added report button in
+`playbackSurfaceActionHtml`, which made the rendered action count differ from
+the presenter's prescribed actions. The duplicate is removed; the existing
+Report a problem entry remains in player chrome and Help. No playback input,
+retry, timer or decision owner changes.
+
+The failed `node tests/playback/web-policy.test.js` gate now passes locally.
+Its function-only health harness includes the actual diagnostic observer
+helper, so borrowed health functions retain their served dependency without
+replacing it with a fake. Web types pass against the unchanged 493/80 baseline.
+The applicable policy and native compiler results remain valid; the new
+corrective web head still requires its fast-lane pass before integration.
