@@ -1,6 +1,6 @@
 # Remote diagnostics — build a report that explains a Cinema failure
 
-**Status:** B00–B08 built; composed verification active; no release acceptance claimed ·
+**Status:** open — implementation complete; release acceptance pending ·
 **Written:** 2026-10-12 · **Source baseline:** `8d7bc723e` ·
 **Executes:** Paul's request for remote diagnostics on web, Apple and Android,
 with TV phone handoff and the upload inbox in the first release ·

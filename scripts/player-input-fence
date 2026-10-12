@@ -73,6 +73,12 @@ TOKEN_FILE_ALLOWLIST = {
 WEB = Path("crates/plurxd/src/web")
 WEB_REGIONS = (
     (
+        WEB / "pages/diagnostics.js",
+        "// diagnostic-modal-keyboard-adapter:begin",
+        "// diagnostic-modal-keyboard-adapter:end",
+        "The report modal owns Tab/Shift-Tab focus containment only; it does not decode playback or remote keys.",
+    ),
+    (
         WEB / "pages/remote.js",
         "// companion-direction-key-adapter:begin",
         "// companion-direction-key-adapter:end",

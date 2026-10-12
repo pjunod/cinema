@@ -71,7 +71,9 @@ async function showDiagnostics(newIncident=false) {
   diagnosticElement(run,'cancel').addEventListener('click',()=>diagnosticAction(run,async r=>{await r.delivery.cancel(false);await CinemaDiagnostics.forgetReproduction(r.capture.id);diagnosticElement(r,'handoff').hidden=true;diagnosticMessage(r,'Staged report deleted. Your local capture remains available.');}));
   diagnosticElement(run,'history').addEventListener('change',()=>CinemaDiagnostics.disable(!diagnosticElement(run,'history').checked));
   diagnosticElement(run,'clear').addEventListener('click',()=>{CinemaDiagnostics.clear();closeDiagnostics(true);});
+  // diagnostic-modal-keyboard-adapter:begin
   root.addEventListener('keydown',event=>{if(event.key==='Tab'){const controls=Array.from(/** @type {NodeListOf<HTMLElement & {disabled?:boolean}>} */(root.querySelectorAll('button,input,textarea,select,summary'))).filter(el=>!el.disabled&&!el.closest('[hidden]')&&el.getClientRects().length);const first=controls[0],last=controls[controls.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}});
+  // diagnostic-modal-keyboard-adapter:end
   if(CinemaDiagnostics.current().reproduction){run.reproduction=CinemaDiagnostics.current().reproduction.id;diagnosticElement(run,'reproduce').hidden=true;diagnosticElement(run,'stop').hidden=false;}
   diagnosticElement(run,'close').focus();diagnosticCapabilities(run);diagnosticSnapshot(run);
   const enrollment=await CinemaDiagnosticStore.get('enrollment:'+capture.scope);if(diagnosticCurrent(run)&&enrollment&&enrollment.expires>Date.now()){run.enrollment=enrollment.enrollment;diagnosticElement(run,'origin').value=enrollment.origin;run.trustedOrigin=enrollment.origin;}

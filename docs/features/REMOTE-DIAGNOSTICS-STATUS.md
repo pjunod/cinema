@@ -1,6 +1,6 @@
 # Remote diagnostics status — ownership, implementation and release evidence
 
-**Status:** software built; final fast-lane qualification active · **Updated:** 2026-10-12 ·
+**Status:** open — implementation complete; release acceptance pending ·
 **Planning baseline:** `8d7bc723e`.
 
 The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) defines the first
@@ -453,3 +453,27 @@ metadata and test-harness repair; production source is unchanged. The failed
 preflight and affected metadata coverage must pass on the resulting candidate
 before merge. Physical native/TV/provider delivery, signed artifacts, hosting,
 TLS, enrollment and native observer overhead remain open acceptance inputs.
+
+
+## 17. Required preflight — integration repairs
+
+Run 4870 on `745a695a9` passed historical evidence, scope and mobile version,
+then exposed packaging/contracts integration gaps. The repair updates the
+Android current build claim and all four web asset-count witnesses; regenerates
+563 dependency notices from locked Cargo metadata and includes the official
+MPL-2.0 text/source links; registers both browser diagnostics test files in the
+existing web unit recipe; and registers only the report modal's existing
+Tab/Shift-Tab focus adapter in the input fence. Application behavior is
+unchanged.
+
+The Rust ownership inventory records exactly two snapshot tasks, the fixed
+retention sleep and five-second collection timeout, and one support HTTP
+`response.status()` accessor. Collection and expiry are read-only and bounded
+by their original job cancellation/deadlines; no producer, process, watchdog,
+playback retry or decision owner is added. The status/header witnesses and
+Apple fragment lifecycle headers now agree with their index rows.
+
+Fourteen targeted failed/invalidated policy checks have applicable passes;
+the document status check required one further missing-header repair and a
+focused retry. Passing cases were not rerun. The new final fast-lane run must
+pass before merge; no Rust/Apple/Android suite was added to this local retry.

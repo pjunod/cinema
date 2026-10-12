@@ -1,5 +1,7 @@
 # Private incident capture, delivery and local TV approval
 
+**Status:** open — implementation complete; physical acceptance pending.
+
 Build: 234
 Issue: #1037
 

@@ -2932,7 +2932,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # per-process `CoverageRuns` slot (one walk at a time) through a drop guard,
 # so a finished, failed or panicked walk frees it; its stats run in the
 # walk's own bounded AvailabilityCache, never item detail's.
-expected_occurrences = 948
+# Remote diagnostics: +2 read-only snapshot tasks in diagnostics.rs. The
+# collection task drops its peer futures on cancellation or a five-second
+# deadline; the expiry task removes the original job at JOB_TTL or cancellation.
+# Neither starts a producer/process nor makes a playback decision.
+expected_occurrences = 950
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4528,7 +4532,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and their joined futures; cancellation drops it. The full request-chain
 # regression keeps one real ReceiverGuard credit. No production timer,
 # detached task, process or longer input deadline is introduced.
-expected_occurrences = 1735
+# Remote diagnostics: +2, the same job's fixed JOB_TTL retention sleep and
+# five-second collection timeout. Cancellation drops each wait; these bound
+# diagnostic storage/collection and never alter playback or authorize retries.
+expected_occurrences = 1737
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -5578,7 +5585,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # child.
 # Shared-read indexing (+1, test-only): that fixture command's `.output()`,
 # awaited to completion in the test.
-expected_occurrences = 750
+# Remote diagnostics: +1 response.status() in diagnostics_delivery.rs reads
+# the dedicated support HTTP response; it is not an OS process launch.
+expected_occurrences = 751
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
