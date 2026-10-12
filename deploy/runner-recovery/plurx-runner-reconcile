@@ -36,6 +36,7 @@ def section_update(source, name, update):
 
 def configuration(source, labels, cpus):
     memory_gib = 6 if "ci-coverage" in labels else 7
+    total_gib = 10 if "ci-coverage" in labels else 14
     def runner(section):
         section = field(field(section, "capacity", "1"), "shutdown_timeout", "30m")
         section = field(section, "labels", "\n" + "".join(f"    - {label}:host\n" for label in labels).rstrip())
@@ -54,7 +55,7 @@ def configuration(source, labels, cpus):
                 section = section.replace("  envs:\n", f'  envs:\n    {key}: "{1 if key == "CARGO_BUILD_JOBS" else 2}"\n', 1)
         return section
     source = section_update(source, "runner", runner)
-    return section_update(source, "container", lambda section: field(section, "options", f"--cpus {cpus} --memory {memory_gib}g --memory-swap 10g --pids-limit 4096"))
+    return section_update(source, "container", lambda section: field(section, "options", f"--cpus {cpus} --memory {memory_gib}g --memory-swap {total_gib}g --pids-limit 4096"))
 
 
 def ensure_swap(path=Path("/var/lib/plurx-ci/runner.swap"), fstab=Path("/etc/fstab"), swaps=Path("/proc/swaps"), execute=run, disk=shutil.disk_usage):
@@ -64,8 +65,8 @@ def ensure_swap(path=Path("/var/lib/plurx-ci/runner.swap"), fstab=Path("/etc/fst
     if path.is_symlink():
         raise RuntimeError("refusing symlink swap file")
     if not path.exists():
-        if disk(path.parent).free < size + 8 * 1024 ** 3:
-            raise RuntimeError("guest swap requires 4 GiB plus 8 GiB free disk reserve")
+        if disk(path.parent).free < size + 25 * 1024 ** 3:
+            raise RuntimeError("guest swap requires 4 GiB plus 25 GiB free disk reserve")
         temporary = path.with_name(path.name + ".creating")
         # Exclusive creation prevents overwriting an interrupted or unrelated file.
         fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -102,6 +103,27 @@ def write_owned(path, content):
     return True
 
 
+def restart_when_idle(unit, pending, changed, containers, execute=run):
+    """Remember changed config across busy passes; stopping a job can cancel it."""
+    if changed:
+        write_owned(pending, "configuration changed\n")
+    if not pending.exists():
+        return False
+    if containers:
+        return False
+    main_pid = execute("systemctl", "show", unit, "-p", "MainPID", "--value").strip()
+    if not main_pid.isdigit():
+        raise RuntimeError("cannot establish runner process inactivity")
+    if int(main_pid):
+        # ps includes children created by any thread of the runner.
+        parents = execute("ps", "-eo", "ppid=").splitlines()
+        if main_pid in {parent.strip() for parent in parents}:
+            return False
+    execute("systemctl", "restart", "--no-block", unit)
+    pending.unlink()
+    return True
+
+
 def guest(spec):
     unit, labels = spec["unit"], spec["labels"]
     if not re.fullmatch(r"forgejo-runner-gha-[a-z0-9-]+\.service", unit):
@@ -129,7 +151,13 @@ def guest(spec):
     if not match:
         raise ValueError("cannot locate existing runner config")
     path = Path(match[1])
+    # Scheduled discard on shared block storage can stall Docker startup.
+    run("systemctl", "disable", "--now", "fstrim.timer")
+    run("systemctl", "stop", "--no-block", "fstrim.service")
     ensure_swap()
+    if not coverage:
+        # Add backing without replacing or disabling the active original swap.
+        ensure_swap(Path("/var/lib/plurx-ci/compiler.swap"))
     source = path.read_text()
     updated = configuration(source, labels, 2 if coverage else 3)
     backup = path.with_name(path.name + ".before-resource-budget")
@@ -141,7 +169,8 @@ def guest(spec):
     directory.mkdir(exist_ok=True)
     cpus = 2 if coverage else 3
     memory_gib = 6 if coverage else 7
-    changed |= write_owned(directory / "20-resource-budget.conf", f"[Service]\nMemoryHigh={memory_gib - 1}G\nMemoryMax={memory_gib}G\nMemorySwapMax={10 - memory_gib}G\nCPUQuota={cpus * 100}%\nRestart=always\nRestartSec=5\nTimeoutStopSec=30min\nEnvironment=CARGO_BUILD_JOBS=1\nEnvironment=RUST_TEST_THREADS=2\n")
+    total_gib = 10 if coverage else 14
+    changed |= write_owned(directory / "20-resource-budget.conf", f"[Service]\nMemoryHigh={memory_gib - 1}G\nMemoryMax={memory_gib}G\nMemorySwapMax={total_gib - memory_gib}G\nCPUQuota={cpus * 100}%\nRestart=always\nRestartSec=5\nTimeoutStopSec=30min\nEnvironment=CARGO_BUILD_JOBS=1\nEnvironment=RUST_TEST_THREADS=2\n")
     for other in set(retired):
         directory = Path("/etc/systemd/system") / (other + ".d")
         directory.mkdir(exist_ok=True)
@@ -150,11 +179,11 @@ def guest(spec):
     for other in set(retired):
         run("systemctl", "disable", "--now", other)
     run("systemctl", "enable", unit)
-    if changed:
-        run("systemctl", "restart", "--no-block", unit)
-    for name in run("docker", "ps", "--filter", "name=ACTIONS-TASK-", "--format", "{{.Names}}").splitlines():
-        run("docker", "update", "--cpus", str(cpus), "--memory", f"{memory_gib}g", "--memory-swap", "10g", name)
-    print(json.dumps({"unit": unit, "changed": changed, "retired": sorted(set(retired))}))
+    containers = run("docker", "ps", "--filter", "name=ACTIONS-TASK-", "--format", "{{.Names}}").splitlines()
+    for name in containers:
+        run("docker", "update", "--cpus", str(cpus), "--memory", f"{memory_gib}g", "--memory-swap", f"{total_gib}g", name)
+    restarted = restart_when_idle(unit, Path("/etc/systemd/system") / (unit + ".d") / "restart-pending", changed, containers)
+    print(json.dumps({"unit": unit, "changed": changed, "restarted": restarted, "restart_pending": (Path("/etc/systemd/system") / (unit + ".d") / "restart-pending").exists(), "retired": sorted(set(retired))}))
 
 
 def main():
