@@ -37,8 +37,8 @@ index/backlog rows; the builder adopts them together in a normal commit.
 | B02 | User-scoped server/worker snapshot collection | Built; compiler verified | Batched PR #1037 | Pinned daemon Clippy passed; positive attribution, accepted route receipts, account-generation fencing, bounded jobs and signed peers implemented; real HTTP acceptance pending |
 | B03 | Support auth, grants, uploads and durable storage | Built; compiler verified | Batched PR #1037 | Independent encrypted SQLite publication, separate capture authority, provisioning/revocation, resume/refresh, quotas and external deletion/revocation fences implemented; pinned final workspace Clippy and dependency policy passed; runtime acceptance pending |
 | B04 | TV handoff, mobile page, inbox and packaging | Built; compiler verified | Batched PR #1037 | Phone claim/approval protocol, responsive completion page, named passkey inbox and TLS/service packaging written; browser races/passkeys/physical acceptance pending |
-| B05 | Web/TV browser reporting | Built; compiler verification in progress | Batched PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks written; compiler/type checks and software acceptance in progress |
-| B06 | Apple mobile/TV reporting | Not started | — | Both builds, share and physical TV handoff owed |
+| B05 | Web/TV browser reporting | Built; compiler verified | Batched PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks written; normal hook and browser type checks passed; software acceptance pending |
+| B06 | Apple mobile/TV reporting | Built; final compiler/hook active | Batched PR #1037 | Recorder, protected account store, deterministic ZIP/share, fixed support transport, exact archive resume, report UI and local-only TV approval written; tests declared, no unit execution; both targets and declared XCTest sources compiled; final hook and physical acceptance owed |
 | B07 | Android mobile/TV reporting | Not started | — | Release/build, share and physical TV handoff owed |
 | B08 | Reproduction, connection checks, diagnostic adapters | Not started | — | Stop/expiry/platform-limit evidence owed |
 | B09 | Composed security/resource/device qualification | Not started | — | Matrix and overhead measurements owed |
@@ -54,16 +54,16 @@ from regressions. Record test absence as absence, not a passing check.
 
 | Surface | Implementation | Software evidence | Physical/real delivery | Remaining |
 |---|---|---|---|---|
-| Web desktop/mobile/all layouts | Missing | None | None | Entire report flow |
-| Browser TV | Missing | None | None | Remote focus + phone handoff |
-| iPhone/iPad | Missing | None | None | Capture/share/send/recovery |
-| Apple TV | Missing | None | None | Direct send + phone on separate network |
+| Web desktop/mobile/all layouts | Built B05 | Types/syntax/hook passed | None | Browser runtime and privacy/resource qualification |
+| Browser TV | Built B05 | Types/syntax/hook passed | None | Remote focus + physical phone handoff |
+| iPhone/iPad | Built B06 | Both app and test sources compiled | None | Share/send/recovery runtime acceptance |
+| Apple TV | Built B06 | Simulator app compiled | None | Direct send + phone on separate network |
 | Android phone/tablet | Missing | None | None | Capture/share/send/recovery |
 | Android/Google TV | Missing | None | None | Direct send + phone on separate network |
-| Cinema snapshots / multiple workers | Missing | None | None | Own-user evidence + unavailable peer behavior |
-| Support upload service | Missing | None | None | Durable/resumable bounded upload |
-| Phone completion page | Missing | None | None | QR/manual claim, TV approval, submission |
-| Operator inbox | Missing | None | None | Authenticated read/download/delete/retention |
+| Cinema snapshots / multiple workers | Built B02 | Pinned compiler passed | None | Real two-user/two-node HTTP and peer-failure behavior |
+| Support upload service | Built B03 | Pinned compiler/dependency policy passed | None | Durable/resume/retention runtime qualification |
+| Phone completion page | Built B04 | Syntax/compiler passed | None | Real QR/manual claim, TV approval, submission |
+| Operator inbox | Built B04 | Syntax/compiler passed | None | Passkey/inbox runtime and deployment qualification |
 | Privacy/resource/retention | Missing | None | None | Canaries, bounds, overhead and deletion |
 
 ## 4. Decisions and external inputs
@@ -261,3 +261,41 @@ The protected upload enrollment cache and sign-out revocation are bounded and
 fail without claiming immediate knowledge when Cinema/support is unavailable.
 No new type-error allowance is introduced. The latest exact-tree normal hook
 provides the remaining embedded-Rust compiler receipt before publication.
+
+## 11. B06 — Apple capture, report and delivery
+
+Apple build 233 adds an off-main protected store and exact immutable archive
+resume, scoped Keychain enrollment/upload/creator authority, a cookie-free
+redirect-refusing support transport and real chunk/submission/handoff APIs.
+Help and pre-login/server-loss paths work without an authenticated API;
+ordinary library, Live TV and channel playback have report entry points.
+The report sheet blocks Cinema companion navigation, and the TV approval
+button remains local. iOS/iPadOS use the system share sheet with temporary
+file cleanup. Missing platform evidence remains explicit: iOS not delivered,
+tvOS unsupported pending B08's supported adapter work.
+
+Reproduction has one recorder owner and a five-minute deadline; background
+ends it. Guided checks have a 15-second owner, a total 2 MiB reply ceiling,
+only the configured Cinema endpoint, URLSession DNS/connect/TLS observations
+where exposed and explicit missing phases. They do not transfer media.
+Account generation invalidates operations and playback evidence. Sign-out
+clears unsubmitted local captures and authority, with a pending-report warning;
+an account replacement cannot open another namespace.
+
+Compiler receipts: `make apple-build`, Xcode 27.0, iOS and tvOS simulator
+applications compiled. `xcodebuild ... build-for-testing` compiled iOS XCTest
+sources; no XCTest executed. Initial sandboxed Swift macro-host failures were
+host restrictions; the authorized owned-clone build passed. The tvOS form was
+split and its unavailable disclosure control replaced before the clean pass.
+Private receipt logs live in owned ignored evidence storage.
+
+Declared behavioral regressions (await final check execution):
+
+- `clients/apple/Tests/DiagnosticCaptureTests.swift::testBoundedRecorderRetainsTerminalAndExactCountersWithoutSecrets`
+- `clients/apple/Tests/DiagnosticCaptureTests.swift::testRecoveredStoreCannotOpenAnotherAccountOrResurrectClearedCapture`
+- `clients/apple/Tests/DiagnosticCaptureTests.swift::testArchiveHasStandardCRCAndTitleRequiresConsent`
+- `clients/apple/Tests/DiagnosticCaptureTests.swift::testSupportDestinationRefusesCredentialsPathsAndUnapprovedPlaintext`
+
+Runtime/physical share, support receipts, restart, D-pad focus, privacy/resource
+measurement and the final source mapping remain acceptance work. No device,
+release signature or production support deployment is claimed.

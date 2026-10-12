@@ -6247,3 +6247,11 @@ source = "crates/plurxd/src/web/core/diagnostics-wire.js"
 source_anchor = "function manifest"
 test = "tests/web/diagnostics-wire.test.js"
 test_anchor = "shared diagnostic manifests reject privacy and encoding violations"
+
+[[fixes]]
+id = "diagnostics.web-recorder"
+commits = ["9ca45b52ac9d4b4a330f20f096d3045cc5a4a933"]
+source = "crates/plurxd/src/web/core/diagnostics-recorder.js"
+source_anchor = "function createCinemaDiagnosticRecorder"
+test = "tests/web/diagnostics-recorder.test.js"
+test_anchor = "sample floods retain terminal markers within count and byte limits"

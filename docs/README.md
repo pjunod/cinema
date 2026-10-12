@@ -771,3 +771,4 @@ exist.
 DV final bounded serving evidence: [HTTP summary](evidence/dv-processing-2026-10-09/http-summary.json) and [artifact manifest](evidence/dv-processing-2026-10-09/http-manifest.json) — retained local synthetic results and failed attempts; full promotion evidence belongs to PR #968.
 
 | [Remote diagnostics Apple wire](apple-builds/remote-diagnostics-wire.md) | What is added to the Apple report format contract? | built |
+| [Remote diagnostics Apple capture](apple-builds/remote-diagnostics-capture.md) | What changes in native private report capture, share, send and TV approval? | built; acceptance open |

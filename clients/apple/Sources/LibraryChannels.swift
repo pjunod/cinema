@@ -932,6 +932,8 @@ struct LibraryChannelsView: View {
         }
         .fullScreenCover(isPresented: $fullscreen) {
             channelFullscreenSurface
+                .diagnosticReportHost(owner: "channel-player")
+                .overlay(alignment: .topTrailing) { DiagnosticReportButton(category: "playback", owner: "channel-player").buttonStyle(.bordered).padding(24) }
         }
         .task {
             await controller.load(model: model)

@@ -517,6 +517,11 @@ final class LiveTvPlayerController: ObservableObject {
             bufferedSeconds = nil
             return
         }
+        if profileToken == Session.shared.credentials.token, profileOrigin == Session.shared.credentials.origin {
+            var facts: [String: DiagnosticFact] = ["state": .text(paused ? "paused" : waiting ? "waiting" : "playing"), "playhead_ms": .number(UInt64(min(604_800_000, max(0, position * 1000))))]
+            if let event = item.accessLog()?.events.last, event.numberOfDroppedVideoFrames >= 0 { facts["dropped_frames"] = .text(String(event.numberOfDroppedVideoFrames)) }
+            DiagnosticRecorder.shared.record("playback", "sample", facts, generation: Session.shared.playbackAuthorization.generation)
+        }
         bufferedSeconds = loaded.first(where: { $0.0 <= position && position < $0.1 })
             .map { max(0, $0.1 - position) } ?? 0
     }
@@ -580,6 +585,7 @@ final class LiveTvPlayerController: ObservableObject {
     /// Remote Stop settles the visible owner synchronously; cleanup follows
     /// with the same serial ownership fence as ordinary tuning.
     func stopFromRemote() {
+        if profileToken == Session.shared.credentials.token { DiagnosticRecorder.shared.record("playback", "terminal", ["action": .text("stop"), "state": .text("stopped")]) }
         serial += 1
         let expected = serial
         detach()
@@ -2382,6 +2388,10 @@ struct LiveTvView: View {
             // targets a covered presentation and is dropped.
             fullscreenSurface
                 .background(RemoteOwnedPresentationProbe(navigation: remoteNavigation, token: remoteOwner, scope: "live-tv"))
+                .diagnosticReportHost(owner: "live-player")
+                .overlay(alignment: .topTrailing) {
+                    DiagnosticReportButton(category: "playback", owner: "live-player").buttonStyle(.bordered).padding(24)
+                }
                 .remoteScope("live-tv")
                 .overlay { liveRemoteMenu }
                 .remoteRestricted(showingSearch || showingInfo || showingMore || showingLayout || detail != nil || showingDvrActivity)
