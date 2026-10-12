@@ -145,6 +145,7 @@ impl VodServe {
         let plan_len = plan.len();
         let rendition = Arc::new(Rendition {
             ephemeral_processing: false,
+            _processed_instance_allowance: None,
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {

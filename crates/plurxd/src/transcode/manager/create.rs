@@ -1159,7 +1159,6 @@ impl TranscodeManager {
         {
             use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
             if !request.automatic
-                || !hdr10_intent
                 || request.continuous_media.is_some()
                 || request.subtitle_burn.is_some()
                 || matches!(
@@ -1175,6 +1174,12 @@ impl TranscodeManager {
             let Some(original) = request.candidate_context.as_ref() else {
                 return Ok(None);
             };
+            // Compatible HDR10 copy does not set the legacy re-encode flag.
+            // Its accepted destination still permits preference-driven DV
+            // processing, subject to the actual completed decoder contract.
+            if !hdr10_intent && original.selected_candidate.grade != OutputGrade::Hdr10 {
+                return Ok(None);
+            }
             let Some(caps) = original.canonical_caps.as_ref() else {
                 return Ok(None);
             };
@@ -1200,6 +1205,13 @@ impl TranscodeManager {
             }
             let Ok(_preparation_slot) =
                 Arc::clone(&self.processed_preparation_slot).try_acquire_owned()
+            else {
+                return Ok(None);
+            };
+            // Includes closed instances awaiting physical cleanup; even an
+            // empty failed directory cannot retain unbounded shader graphs.
+            let Ok(instance_allowance) =
+                Arc::clone(&self.processed_instance_slots).try_acquire_owned()
             else {
                 return Ok(None);
             };
@@ -1375,6 +1387,7 @@ impl TranscodeManager {
                 lease_binding,
                 deadline.into_std(),
                 crate::vodserve::PreparedRootAdmission {
+                    instance_allowance: Some(Arc::new(instance_allowance)),
                     instance_nonce: Some(*uuid::Uuid::new_v4().as_bytes()),
                     encoding,
                     permit: credit,

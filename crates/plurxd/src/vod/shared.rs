@@ -362,7 +362,7 @@ impl Shared {
         duration_ms: i64,
         settings: &VodSettings,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
-        canonical_processing_key: Option<&str>,
+        canonical_processing_key: Option<(&str, Option<Arc<tokio::sync::OwnedSemaphorePermit>>)>,
     ) -> Result<Option<RenditionAttachment>, String> {
         if let Some(storage) = private_storage.as_ref() {
             storage.bind(key)?;
@@ -378,7 +378,8 @@ impl Shared {
         let key = key.to_owned();
         let identity = identity.clone();
         let settings = settings.clone();
-        let canonical_processing_key = canonical_processing_key.map(str::to_owned);
+        let canonical_processing_key =
+            canonical_processing_key.map(|(key, allowance)| (key.to_owned(), allowance));
         let result_rx = spawn_cancellation_independent(async move {
             shared
                 .attach_rendition_owned(
@@ -410,7 +411,7 @@ impl Shared {
         settings: VodSettings,
         build_guard: tokio::sync::OwnedMutexGuard<()>,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
-        canonical_processing_key: Option<String>,
+        canonical_processing_key: Option<(String, Option<Arc<tokio::sync::OwnedSemaphorePermit>>)>,
     ) -> Result<Option<RenditionAttachment>, String> {
         let key = key.as_str();
         // Single-flight only this key. No Store, filesystem, process, manifest,
@@ -427,6 +428,11 @@ impl Shared {
                     }));
                 }
                 Some(existing) => {
+                    if existing.ephemeral_processing {
+                        return Err(
+                            "processed incarnation requires physical storage cleanup".into()
+                        );
+                    }
                     if let Some(storage) = existing.private_storage.as_ref() {
                         storage.release();
                         return Err("private incarnation requires storage cleanup".into());
@@ -480,7 +486,9 @@ impl Shared {
         let phase_started = Instant::now();
         let plan = self
             .stored_plan(
-                canonical_processing_key.as_deref().unwrap_or(key),
+                canonical_processing_key
+                    .as_ref()
+                    .map_or(key, |(canonical, _)| canonical.as_str()),
                 &identity,
                 &index,
                 &recipe,
@@ -503,6 +511,9 @@ impl Shared {
                 &settings,
                 private_storage.clone(),
                 canonical_processing_key.is_some(),
+                canonical_processing_key
+                    .as_ref()
+                    .and_then(|(_, allowance)| allowance.clone()),
             )
             .await?;
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
@@ -626,7 +637,7 @@ impl Shared {
         plan: SegmentPlan,
         settings: &VodSettings,
     ) -> Result<Arc<Rendition>, String> {
-        self.build_rendition_with_storage(key, index, recipe, plan, settings, None, false)
+        self.build_rendition_with_storage(key, index, recipe, plan, settings, None, false, None)
             .await
     }
 
@@ -640,6 +651,7 @@ impl Shared {
         settings: &VodSettings,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
         ephemeral_processing: bool,
+        processed_instance_allowance: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     ) -> Result<Arc<Rendition>, String> {
         let source = if key.starts_with("source-") {
             crate::fragment_index_cluster::open_source_playback_fence(
@@ -876,6 +888,7 @@ impl Shared {
         let plan_len = plan.len();
         let rendition = Arc::new(Rendition {
             ephemeral_processing,
+            _processed_instance_allowance: processed_instance_allowance,
             key: key.to_string(),
             dir,
             recipe,
@@ -1068,7 +1081,11 @@ impl Shared {
             if exact {
                 rendition.closed.store(true, Relaxed);
                 rendition.gen_epoch.fetch_add(1, Relaxed);
-                renditions.remove(key);
+                // A private processed instance remains discoverable and
+                // charged until its directory has physically disappeared.
+                if !rendition.ephemeral_processing {
+                    renditions.remove(key);
+                }
             }
             exact
         };
@@ -1094,6 +1111,40 @@ impl Shared {
             )
             .await;
             shared.pool.close(&rendition.key);
+            if rendition.ephemeral_processing {
+                let deletion = if shared
+                    .hooks
+                    .get()
+                    .private_cleanup_failure_for("processed_directory", &rendition.key)
+                {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "processed cleanup seam",
+                    ))
+                } else {
+                    tokio::fs::remove_dir_all(rendition.dir.path()).await
+                };
+                if let Err(error) = deletion {
+                    if error.kind() != io::ErrorKind::NotFound {
+                        tracing::warn!(target: "plurxd::vodserve", rendition = %rendition.key,
+                            %error, "processed storage cleanup retained for retry");
+                        return;
+                    }
+                }
+                let claimed = rendition.manifest.lock().await.materialized_bytes();
+                let mut registry = shared.renditions.lock().await;
+                if registry
+                    .get(&rendition.key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &rendition))
+                {
+                    registry.remove(&rendition.key);
+                    sub_saturating(&shared.working_set, claimed);
+                }
+                drop(registry);
+                rendition.kick();
+                shared.kick_all();
+                return;
+            }
             {
                 let mut manifest = rendition.manifest.lock().await;
                 let freed = rendition.dir.purge(&mut manifest).await;
@@ -1111,9 +1162,6 @@ impl Shared {
                 }
             }
             let _ = tokio::fs::remove_file(rendition.identity_path()).await;
-            if rendition.ephemeral_processing {
-                let _ = tokio::fs::remove_dir_all(rendition.dir.path()).await;
-            }
             rendition.kick();
             // Freed bytes are node-wide news (see `try_admit`).
             shared.kick_all();

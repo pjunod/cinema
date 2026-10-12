@@ -105,7 +105,16 @@ async fn retire_failed_rendition(shared: &Shared, rendition: &Arc<Rendition>) {
 fn record_performed_step(shared: &Shared, rendition: &Rendition, step: Step) {
     if let Some(encoding) = &rendition.recipe.encoding {
         match step {
-            Step::Start { .. } | Step::Restart { .. } | Step::Resume => {
+            Step::Start { .. } | Step::Restart { .. } => {
+                #[cfg(target_os = "linux")]
+                if encoding.dv_runtime.is_some() {
+                    // spawn_generation checks exact credit and contiguous
+                    // entry before continuing the logical processing episode.
+                    return record_performed_step_metrics(shared, rendition, step);
+                }
+                encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), true)
+            }
+            Step::Resume => {
                 encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), true)
             }
             Step::Stop | Step::Terminate { .. } => {
@@ -114,6 +123,10 @@ fn record_performed_step(shared: &Shared, rendition: &Rendition, step: Step) {
             _ => {}
         }
     }
+    record_performed_step_metrics(shared, rendition, step);
+}
+
+fn record_performed_step_metrics(shared: &Shared, rendition: &Rendition, step: Step) {
     match step {
         Step::Stop => rendition.ahead_hold.store(true, Release),
         Step::Resume | Step::Start { .. } | Step::Restart { .. } => {
@@ -568,6 +581,16 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             decision.action = manifest
                 .next_gap(0)
                 .map_or(Action::Idle, |next| Action::Produce { next });
+        }
+        // Between bounded helpers there may be no child to stop. Reader
+        // pacing and capacity still end the measured production episode.
+        if matches!(
+            decision.action,
+            Action::Idle | Action::Suspend { .. } | Action::MakeRoom { .. }
+        ) {
+            if let Some(encoding) = &rendition.recipe.encoding {
+                encoding.reset_active_production(epoch, false);
+            }
         }
         // Record only this pass's decision. A later non-capacity decision
         // clears the reason, so the status cannot outlive the condition that

@@ -1,6 +1,59 @@
 
 
 #[tokio::test]
+async fn processed_instance_cleanup_keeps_failed_unlink_charged_and_protects_live_parent() {
+    let base = crate::test_tempdir().expect("processed cleanup");
+    let serve = bare_serve(base.path());
+    let mut rendition = synthetic_rendition(base.path()).await;
+    Arc::get_mut(&mut rendition).expect("unpublished instance").ephemeral_processing = true;
+    let slots = Arc::new(Semaphore::new(1));
+    Arc::get_mut(&mut rendition).expect("unpublished instance")._processed_instance_allowance =
+        Some(Arc::new(Arc::clone(&slots).try_acquire_owned().expect("instance slot")));
+    insert_control_session(&serve, "processed-cleanup", Arc::clone(&rendition), Instant::now()).await;
+    {
+        let mut manifest = rendition.manifest.lock().await;
+        rendition.dir.materialize(&mut manifest, 0, b"0123456789", now_ms())
+            .await.expect("instance member");
+    }
+    serve.shared.working_set.fetch_add(10, Relaxed);
+    *rendition.dormant_since.lock().expect("dormant") = Some(Instant::now() - Duration::from_secs(1));
+    let failure = format!("processed_directory:{}", rendition.key);
+    serve.shared.test_hooks().private_failures.lock().expect("cleanup seam").insert(failure.clone());
+    serve.shared.purge_if_dormant(&rendition.key, Duration::ZERO).await;
+    assert!(!rendition.closed.load(Relaxed), "active parent survives cleanup");
+    assert!(serve.end("processed-cleanup", Terminal::Deleted).await);
+    assert!(rendition.closed.load(Relaxed));
+    assert!(serve.shared.renditions.lock().await.get(&rendition.key)
+        .is_some_and(|current| Arc::ptr_eq(current, &rendition)));
+    assert_eq!(serve.shared.working_set.load(Relaxed), 10, "failed deletion remains charged");
+    assert!(Arc::clone(&slots).try_acquire_owned().is_err(), "failed cleanup holds instance bound");
+    assert!(rendition.dir.path().exists());
+    serve.shared.test_hooks().private_failures.lock().expect("cleanup seam").remove(&failure);
+    serve.maintain().await;
+    assert!(!serve.shared.renditions.lock().await.contains_key(&rendition.key));
+    assert!(!rendition.dir.path().exists());
+    assert_eq!(serve.shared.working_set.load(Relaxed), 0);
+    serve.maintain().await;
+    assert_eq!(serve.shared.working_set.load(Relaxed), 0, "settlement charges once");
+    drop(rendition);
+    assert_eq!(slots.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn processed_instance_abandoned_before_reader_attachment_is_reaped() {
+    let base = crate::test_tempdir().expect("abandoned processed cleanup");
+    let serve = bare_serve(base.path());
+    let mut rendition = synthetic_rendition(base.path()).await;
+    Arc::get_mut(&mut rendition).expect("unpublished instance").ephemeral_processing = true;
+    *rendition.dormant_since.lock().expect("dormant") = Some(Instant::now() - Duration::from_secs(1));
+    serve.shared.renditions.lock().await.insert(rendition.key.clone(), Arc::clone(&rendition));
+    serve.maintain().await;
+    assert!(rendition.closed.load(Relaxed));
+    assert!(!rendition.dir.path().exists());
+    assert!(!serve.shared.renditions.lock().await.contains_key(&rendition.key));
+}
+
+#[tokio::test]
 async fn prepared_root_cancelled_end_keeps_capacity_through_detach_and_worker_reap() {
     let base = crate::test_tempdir().expect("root cleanup");
     let serve = bare_serve(base.path());

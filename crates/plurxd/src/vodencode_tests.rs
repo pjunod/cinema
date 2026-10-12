@@ -1931,6 +1931,34 @@ async fn encoded_vod_restarts_obey_current_capacity_policy() {
 }
 
 #[tokio::test]
+async fn absent_producer_scheduler_idle_revokes_rate_before_next_processed_window() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("logical production hold");
+    let (_, mut encoding) = encoded_fixture(base.path()).await;
+    Arc::get_mut(&mut encoding).expect("unattached encoding").candidate_recipe = Some([9; 32]);
+    let permit = encoding.try_permit().await.expect("exact reservation");
+    encoding.reset_active_production(7, true);
+    encoding.note_active_segment(7, 0, 4000);
+    encoding.note_active_segment(7, 1, 8000);
+    tokio::time::sleep(Duration::from_millis(2050)).await;
+    encoding.note_active_segment(7, 2, 12_000);
+    assert!(encoding.active_production_evidence().is_some());
+    assert!(encoding.production_proofs.get([9; 32]).is_some());
+    let serve = bare_serve(base.path());
+    let mut rendition = synthetic_rendition(base.path()).await;
+    Arc::get_mut(&mut rendition).expect("unattached rendition").recipe.encoding = Some(Arc::clone(&encoding));
+    rendition.retained_admission.bind(permit.clone());
+    assert!(matches!(rendition.slot.belief().await, Producer::Absent { .. }));
+    driver_pass(&serve.shared, &rendition).await;
+    assert!(matches!(rendition.slot.belief().await, Producer::Absent { .. }));
+    assert!(encoding.active_production_evidence().is_none(), "idle without an OS stop revokes evidence");
+    assert!(encoding.production_proofs.get([9; 32]).is_none());
+    encoding.begin_processed_window(8, 3, &permit);
+    encoding.note_active_segment(8, 3, 16_000);
+    assert!(encoding.active_production_evidence().is_none(), "contiguous next entry starts a new episode after hold");
+}
+
+#[tokio::test]
 async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_substitution() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("prepared root");
@@ -1943,7 +1971,7 @@ async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_sub
     req.kind = SessionKind::Transcode { height: encoding.options.target_height };
     let attribution = VodAttribution { user_name: "user", item_title: "prepared root", supersession_user: "user" };
     let attach = |admitted_encoding: Arc<crate::vodencode::Encoding>, permit| VodRecipeRequest {
-        root_admission: Some(PreparedRootAdmission { instance_nonce: None, encoding: admitted_encoding, permit }),
+        root_admission: Some(PreparedRootAdmission { instance_allowance: None, instance_nonce: None, encoding: admitted_encoding, permit }),
         request: &req, encoding: Some(Arc::clone(&encoding)),
         measured_candidate: None, retained_capture: RetainedOutputCapture::New,
         soundtrack: None, companion: None,

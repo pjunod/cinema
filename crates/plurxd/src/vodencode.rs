@@ -344,11 +344,37 @@ impl CandidateProductionProofs {
 pub(crate) struct ActiveProductionWindow {
     generation: u64,
     active: bool,
+    /// One uninterrupted parent-held entitlement across bounded DV helpers.
+    /// Weak ownership cannot keep cached capacity alive.
+    #[cfg(any(target_os = "linux", test))]
+    processed_reservation: std::sync::Weak<EncodeReservation>,
     points: VecDeque<(Instant, u32, i64)>,
     evidence: Option<ActiveProductionEvidence>,
 }
 
 impl ActiveProductionWindow {
+    #[cfg(any(target_os = "linux", test))]
+    fn begin_processed_window(&mut self, generation: u64, entry: u32, permit: &EncodePermit) {
+        let reservation = Arc::downgrade(&permit._reservation);
+        let contiguous = self.active
+            && self.processed_reservation.ptr_eq(&reservation)
+            && self.points.back().is_some_and(|(at, previous, _)| {
+                previous.checked_add(1) == Some(entry) && at.elapsed() <= Duration::from_secs(15)
+            });
+        if contiguous {
+            // Keep the generation fence current without erasing measured
+            // elapsed time between consecutive, physically reaped helpers.
+            self.generation = generation;
+        } else {
+            *self = Self {
+                generation,
+                active: true,
+                processed_reservation: reservation,
+                ..Self::default()
+            };
+        }
+    }
+
     fn observe(
         &mut self,
         now: Instant,
@@ -607,6 +633,12 @@ impl EncodePermit {
 }
 
 impl EncodeWorkerPermit {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn reservation(&self) -> EncodePermit {
+        EncodePermit {
+            _reservation: Arc::clone(&self.reservation),
+        }
+    }
     /// Borrow the reservation owned by this exclusive generation worker.
     pub(crate) fn retained_resources(&self) -> crate::admission::RetainedTranscodePermit<'_> {
         crate::admission::RetainedTranscodePermit {
@@ -818,6 +850,20 @@ impl Encoding {
             ..ActiveProductionWindow::default()
         };
         if self.shared_audio.is_none() {
+            self.production_proofs.remove(self.candidate_recipe);
+        }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn begin_processed_window(
+        &self,
+        generation: u64,
+        entry: u32,
+        permit: &EncodePermit,
+    ) {
+        let mut window = self.active_production.lock().expect("active production");
+        window.begin_processed_window(generation, entry, permit);
+        if window.evidence.is_none() {
             self.production_proofs.remove(self.candidate_recipe);
         }
     }
@@ -1382,6 +1428,74 @@ pub(crate) fn frame_grid(probe: Option<&str>) -> Option<VodFrameGrid> {
 #[cfg(test)]
 mod production_evidence_tests {
     use super::*;
+
+    #[test]
+    fn processed_helpers_measure_contiguous_windows_only_under_uninterrupted_exact_credit() {
+        let admissions = Admissions::new();
+        let reserve = || -> EncodePermit {
+            admissions
+                .try_admit_bundle(
+                    2,
+                    4,
+                    &TranscodeResourceEstimate {
+                        hardware_slot: true,
+                        cpu_threads: 2,
+                        decoder_threads: None,
+                    },
+                    Priority::Live,
+                )
+                .expect("bounded processing reservation")
+                .into()
+        };
+        let first_credit = reserve();
+        let other_credit = reserve();
+        let now = Instant::now();
+        let mut window = ActiveProductionWindow::default();
+        window.begin_processed_window(1, 10, &first_credit);
+        assert!(window
+            .observe(now - Duration::from_secs(2), 1, 10, 44_000)
+            .is_none());
+        window.begin_processed_window(2, 11, &first_credit);
+        assert!(
+            window
+                .observe(now - Duration::from_secs(1), 1, 11, 48_000)
+                .is_none(),
+            "old generation is fenced"
+        );
+        assert!(window
+            .observe(now - Duration::from_secs(1), 2, 11, 48_000)
+            .is_none());
+        window.begin_processed_window(3, 12, &first_credit);
+        let proof = window
+            .observe(now, 3, 12, 52_000)
+            .expect("two real contiguous intervals");
+        assert_eq!(proof.milli_realtime, 4000);
+        assert_eq!(proof.active_ms, 2000);
+        assert_eq!(proof.completed_segments, 2);
+        window.begin_processed_window(4, 13, &other_credit);
+        assert!(
+            window.evidence.is_none(),
+            "different entitlement resets proof"
+        );
+        assert!(window.points.is_empty());
+        window.observe(now, 4, 13, 56_000);
+        window.begin_processed_window(5, 80, &other_credit);
+        assert!(window.points.is_empty(), "seek resets proof");
+        window.observe(now, 5, 80, 324_000);
+        window.active = false;
+        window.begin_processed_window(6, 81, &other_credit);
+        assert!(window.points.is_empty(), "hold resets proof");
+        window.observe(now - Duration::from_secs(16), 6, 81, 328_000);
+        window.begin_processed_window(7, 82, &other_credit);
+        assert!(window.points.is_empty(), "expired episode resets proof");
+        drop(first_credit);
+        drop(other_credit);
+        assert_eq!(
+            admissions.software_in_use(),
+            0,
+            "weak continuity cannot retain capacity"
+        );
+    }
 
     #[test]
     fn active_rate_excludes_startup_and_requires_two_complete_intervals() {

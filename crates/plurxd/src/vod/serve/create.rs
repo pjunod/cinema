@@ -485,7 +485,15 @@ impl VodServe {
                 duration_ms,
                 settings,
                 private_preparation,
-                processing_instance.map(|_| canonical_key.as_str()),
+                processing_instance.map(|_| {
+                    (
+                        canonical_key.as_str(),
+                        prepared
+                            .root_admission
+                            .as_ref()
+                            .and_then(|admission| admission.instance_allowance.clone()),
+                    )
+                }),
             )
             .await?
             .ok_or_else(|| {

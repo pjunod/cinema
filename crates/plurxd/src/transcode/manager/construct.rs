@@ -84,6 +84,8 @@ impl TranscodeManager {
             ),
             #[cfg(target_os = "linux")]
             processed_preparation_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            #[cfg(target_os = "linux")]
+            processed_instance_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             pipeline,
             encoder_override: None,
             admissions: Admissions::new(),

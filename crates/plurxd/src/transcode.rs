@@ -606,6 +606,8 @@ pub struct TranscodeManager {
     candidate_production_proofs: Arc<crate::vodencode::CandidateProductionProofs>,
     #[cfg(target_os = "linux")]
     processed_preparation_slot: Arc<tokio::sync::Semaphore>,
+    #[cfg(target_os = "linux")]
+    processed_instance_slots: Arc<tokio::sync::Semaphore>,
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,

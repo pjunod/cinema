@@ -882,6 +882,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
     let plan_len = plan.len();
     Arc::new(Rendition {
         ephemeral_processing: false,
+        _processed_instance_allowance: None,
         key: "synthetic-rendition".to_string(),
         dir,
         recipe: Recipe {

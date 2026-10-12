@@ -826,6 +826,7 @@ impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
 }
 
 pub(crate) struct PreparedRootAdmission {
+    pub(crate) instance_allowance: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     pub(crate) instance_nonce: Option<[u8; 16]>,
     pub(crate) encoding: Arc<crate::vodencode::Encoding>,
     pub(crate) permit: crate::vodencode::EncodePermit,

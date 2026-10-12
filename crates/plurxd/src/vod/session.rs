@@ -15,6 +15,7 @@ pub(super) struct Rendition {
     /// A private processing actor, never a complete-output cache artifact.
     /// Its plan and public candidate remain canonical across instances.
     pub(super) ephemeral_processing: bool,
+    pub(super) _processed_instance_allowance: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     pub(super) key: String,
     pub(super) dir: RenditionDir,
     pub(super) recipe: Recipe,

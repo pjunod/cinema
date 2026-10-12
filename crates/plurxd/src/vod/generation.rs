@@ -78,7 +78,21 @@ pub(super) async fn spawn_generation(
             .bind(reservation)
             .try_claim_worker()
         {
-            Some(worker) => Some(worker),
+            Some(worker) => {
+                #[cfg(target_os = "linux")]
+                if let Some(encoding) = recipe
+                    .encoding
+                    .as_ref()
+                    .filter(|encoding| encoding.dv_runtime.is_some())
+                {
+                    encoding.begin_processed_window(
+                        rendition.gen_epoch.load(Relaxed),
+                        at,
+                        &worker.reservation(),
+                    );
+                }
+                Some(worker)
+            }
             None => {
                 record_failure(
                     shared,
@@ -1152,6 +1166,9 @@ pub(super) fn record_failure(
     decision: crate::playback_control::ProducerDecisionReason,
     cause: String,
 ) {
+    if let Some(encoding) = &rendition.recipe.encoding {
+        encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), false);
+    }
     tracing::warn!(
         target: "plurxd::vodserve",
         rendition = %rendition.key,
