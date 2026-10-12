@@ -107,3 +107,46 @@ test('paused superseding seek renews one observer even while seeking and fences 
   callbacks[0](1,{mediaTime:10});assert.equal(delivered.length,0);
   callbacks[1](2,{mediaTime:60});assert.equal(delivered.length,1);assert.equal(delivered[0].epoch,1);assert.equal(delivered[0].identity.intent,2);
 });
+test('two presented frames after playback starts are the first presentation proof, without waiting for the timer',()=>{
+  const v={currentTime:0,seeking:false,paused:false,ended:false,readyState:4,playbackRate:1};
+  const p={source:{video_codec:"h264"},started:true,wantsPlayback:true,controlSeek:null,controlHasFrameCallbacks:true,
+    controlPresentedFrames:0,mediaAttachment:{id:1},waitAt:null};
+  const steps=[];let startups=0;
+  const c=vm.createContext({PLAYER:p,performance:{now:()=>c.now},now:1000,document:{hidden:false,getElementById:()=>v},
+    PlaybackPolicy:require("../../crates/plurxd/src/web/playback-policy.js"),PERSISTENT_STALL_MS:8000,
+    playbackSurfaceStep(event){steps.push(event);},playbackSurfaceGeneration:()=>1,playbackOwnsAttachedMedia:()=>true,
+    samplePreparedSwitchFrames(){},streamHasVideo:()=>true,completeHlsStartup(){startups++;},clientLog(){},playbackContext:()=>({}),
+    endWait(){},clearStall(){},finishStallRecovery(){},bufferRunway:()=>0,persistentWait(){throw Error('no stall here');},notifyPlaybackControl(){}});
+  for(const name of ['samplePlaybackPresentationClock','settlePlaybackControlSeek','playbackProgressTick','sampleStartupPresentation'])vm.runInContext(source(name),c);
+  for(const name of ['STARTUP_EVIDENCE_WINDOW_MS','PLAYBACK_SAMPLING_PERIOD_MS'])
+    vm.runInContext(ui.match(new RegExp(`\\nconst ${name}=[^;]*;`))[0],c);
+  const frame=(media,wall)=>{c.now=wall;v.currentTime=media;p.controlPresentedFrames++;c.sampleStartupPresentation(v,p);};
+  const presenting=()=>steps.filter(step=>step.presenting===true).length;
+  frame(0.042,1000);
+  assert.equal(presenting(),0,'one frame is a baseline, not movement');
+  assert.equal(startups,0);
+  frame(0.084,1042);
+  assert.equal(presenting(),1,'the clock and the frame count both advanced between two samples');
+  assert.equal(startups,1,'HLS startup completes 42 ms after the first sample, not on a later half-second tick');
+  assert.ok(steps.every(step=>!step.tick&&step.presenting!==false),
+    'a frame sample records the proof and nothing else: it neither ages the presenter nor reports absence');
+  // The half-second timer lands 26 ms later, before the next frame exists.
+  c.now=1068;c.playbackProgressTick(v,p);
+  assert.equal(steps.filter(step=>step.presenting===false).length,0,
+    'a timer tick inside one sampling period of the frame proof is not evidence that presentation stopped');
+  frame(0.126,1084);
+  assert.equal(presenting(),1,'after the proof the frames stop driving the tick');
+  // The timer samples that third frame, then a full period passes with no new
+  // frame and no clock movement: its verdict stands.
+  c.now=1600;c.playbackProgressTick(v,p);
+  assert.equal(presenting(),2);
+  c.now=2100;c.playbackProgressTick(v,p);
+  assert.equal(steps.filter(step=>step.presenting===false).length,1,
+    'the exemption ends with the sampling period');
+});
+test('the tick\'s sampling period is the interval the sampling timers run at',()=>{
+  const period=Number(ui.match(/\nconst PLAYBACK_SAMPLING_PERIOD_MS=(\d+);/)[1]);
+  const timers=[...ui.matchAll(/setInterval\(\(\)=>playbackSamplingTick\(v,p\),(\d+)\)/g)].map(match=>Number(match[1]));
+  assert.ok(timers.length>=2,'both sampling timers are present');
+  assert.ok(timers.every(interval=>interval===period),'a timer that moves must move the period with it');
+});

@@ -54,3 +54,47 @@ test('pause without frame callbacks resets resume timing and preserves genuine f
  assert.equal(d.listeners.get('pause').size,0);
  assert.equal(d.listeners.get('play').size,0);
 });
+// The first presentation sample after an attach is taken on the frames, so the
+// startup scrim and the HLS time-to-first-frame stamp do not wait 500 to 1000 ms
+// for two timer ticks after the picture is already moving.
+function startupSampler(){
+ const d=detector();const ticks=[];
+ // The shipped tick needs two samples: the first is its baseline, the second
+ // sees the clock and the frame count advance and records the proof.
+ d.context.playbackProgressTick=(_v,p)=>{ticks.push(d.context.performance.now());
+  if(ticks.length%2===0)p.presentationAdvancedAt=d.context.performance.now();};
+ d.player.mediaAttachment={id:1};
+ return Object.assign(d,{ticks});
+}
+test('the first presentation proof is sampled on the frames, then left to the timer',()=>{
+ const d=startupSampler();
+ d.frame(0,10,1);
+ assert.equal(d.ticks.length,0,'a frame before playback has started proves nothing');
+ d.player.started=true;
+ d.frame(1/24,52,2);d.frame(2/24,94,3);
+ assert.deepEqual(d.ticks,[52,94],'baseline and proof land on consecutive frames');
+ assert.equal(d.player.startupEvidence.done,true);
+ for(let i=3;i<40;i++)d.frame(i/24,10+i*42,i+1);
+ assert.equal(d.ticks.length,2,'once presenting, the half-second tick is the only sampler');
+});
+test('a new attachment owes its own first presentation proof',()=>{
+ const d=startupSampler();d.player.started=true;
+ d.frame(1/24,52,2);d.frame(2/24,94,3);
+ d.player.mediaAttachment={id:2};
+ d.frame(0,5000,1);d.frame(1/24,5042,2);d.frame(2/24,5084,3);
+ assert.deepEqual(d.ticks,[52,94,5000,5042],'the predecessor\'s proof does not cover the successor');
+});
+test('frame sampling stands down for a paused, seeking or seek-pending player and after one second',()=>{
+ const d=startupSampler();d.player.started=true;
+ d.video.paused=true;d.frame(0,10,1);
+ d.video.paused=false;d.video.seeking=true;d.frame(0,20,2);
+ d.video.seeking=false;d.player.controlSeek={sequence:1};d.frame(0,30,3);
+ assert.equal(d.ticks.length,0);
+ d.player.controlSeek=null;
+ // A stream whose clock never advances: the tick never records proof.
+ d.context.playbackProgressTick=()=>{d.ticks.push(d.context.performance.now());};
+ for(let i=0;i<60;i++)d.frame(0,100+i*42,4+i);
+ const last=d.ticks[d.ticks.length-1];
+ assert.ok(d.ticks.length>1&&last<=100+1000,'sampling is bounded to the first second');
+ assert.equal(d.player.startupEvidence.done,true,'after that the stall detector owns the diagnosis');
+});
