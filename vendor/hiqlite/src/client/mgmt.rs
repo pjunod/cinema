@@ -263,6 +263,24 @@ impl Client {
         Ok(applied)
     }
 
+    /// Ask this embedded database node, leader or follower, to build a
+    /// snapshot of its own applied state without proposing an entry.
+    ///
+    /// [`Self::trigger_db_snapshot`] anchors its cut with an `RTT` entry, which
+    /// only the leader can propose. A caller that anchors through the
+    /// forwarding write path instead ([`Self::execute_acked`]) and waits for
+    /// this node to apply that index uses this to cut on any member. The
+    /// trigger returns after the command is accepted; callers that need
+    /// publication must observe [`Self::metrics_db`].
+    #[cfg(feature = "sqlite")]
+    pub async fn trigger_local_db_snapshot(&self) -> Result<(), Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("database snapshot trigger requires a local node client".to_owned())
+        })?;
+        state.raft_db.raft.trigger().snapshot().await?;
+        Ok(())
+    }
+
     /// Subscribe to database Raft metrics only when this client owns the local
     /// node. Remote clients return an error; this method never performs IO.
     #[cfg(feature = "sqlite")]

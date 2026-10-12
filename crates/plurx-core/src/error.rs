@@ -120,6 +120,13 @@ pub enum MetadataError {
 
     #[error("no metadata provider configured")]
     NotConfigured,
+
+    /// Not sent: an earlier call to the same provider host in this pass ended
+    /// in a transport failure after its own retries, so the pass stopped
+    /// asking (see `metadata::HostHealth`). Says nothing about the title; the
+    /// next pass asks again.
+    #[error("the provider could not be reached earlier in this pass; not asked again until the next one")]
+    Unavailable,
 }
 
 /// Errors while loading configuration.

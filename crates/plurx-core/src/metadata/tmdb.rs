@@ -8,9 +8,8 @@ use serde_json::Value;
 use std::time::{Duration, Instant};
 
 use super::{
-    bounded_json_response, provider_client, provider_outcome, record_provider_request,
-    request_error, Provider, ProviderOutcome, PROVIDER_CALL_BUDGET, PROVIDER_CONNECT_TIMEOUT,
-    PROVIDER_READ_TIMEOUT, PROVIDER_TOTAL_TIMEOUT,
+    bounded_json_response, provider_client, record_provider_result, HostHealth, Provider,
+    PROVIDER_CALL_BUDGET, PROVIDER_CONNECT_TIMEOUT, PROVIDER_READ_TIMEOUT, PROVIDER_TOTAL_TIMEOUT,
 };
 use crate::error::MetadataError;
 
@@ -21,7 +20,7 @@ const IMAGE_BASE: &str = "https://image.tmdb.org/t/p";
 /// Three because the failure being ridden out is a burst limit measured in
 /// seconds; a longer outage is the retry *sweep's* problem, not this loop's,
 /// and holding a scan open for it helps nobody.
-const MAX_ATTEMPTS: u32 = 3;
+pub(super) const MAX_ATTEMPTS: u32 = 3;
 /// First backoff step, doubling thereafter. Short enough that a scan does not
 /// visibly stall on one blip.
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
@@ -116,6 +115,10 @@ pub struct TmdbClient {
     /// failure is invisible from outside: each show still matches, still gets
     /// its poster, and just quietly has no genres.
     genre_index_failed: std::sync::atomic::AtomicBool,
+    /// The API host and the image CDN, tracked apart: they are different
+    /// hosts, and a CDN outage must not stop titles from matching.
+    api_health: HostHealth,
+    image_health: HostHealth,
 }
 
 /// TMDB genre ids to names, for one vocabulary.
@@ -168,7 +171,28 @@ impl TmdbClient {
             .into_iter()
             .collect(),
             genre_index_failed: std::sync::atomic::AtomicBool::new(false),
+            api_health: HostHealth::default(),
+            image_health: HostHealth::default(),
         }
+    }
+
+    /// Why this client stopped calling the TMDB API, if it has: the
+    /// transport failure that ended a call after its retries. The client
+    /// lives for one pass, so the next pass asks again.
+    pub fn unreachable(&self) -> Option<&str> {
+        self.api_health.cause()
+    }
+
+    /// The same for TMDB's image CDN.
+    pub fn images_unreachable(&self) -> Option<&str> {
+        self.image_health.cause()
+    }
+
+    /// Swap the transport, so a test can shorten its deadlines.
+    #[cfg(test)]
+    pub(crate) fn with_http(mut self, http: reqwest::Client) -> Self {
+        self.http = http;
+        self
     }
 
     /// Point the API and image bases elsewhere (self-hosted TMDB proxy, tests).
@@ -182,11 +206,8 @@ impl TmdbClient {
     async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value, MetadataError> {
         let url = format!("{}{path}", self.base);
         let response = self
-            .send_with_retry(|| {
-                let mut req = self
-                    .http
-                    .get(&url)
-                    .query(&[("api_key", self.api_key.as_str())]);
+            .send_with_retry(&self.api_health, || {
+                let mut req = self.authorize(self.http.get(&url));
                 for (k, v) in query {
                     req = req.query(&[(*k, v.as_str())]);
                 }
@@ -201,14 +222,25 @@ impl TmdbClient {
             },
             Err(error) => Err(error),
         };
-        record_provider_request(
-            Provider::Tmdb,
-            result
-                .as_ref()
-                .map(|_| ProviderOutcome::Ok)
-                .unwrap_or_else(provider_outcome),
-        );
+        record_provider_result(Provider::Tmdb, &result);
         result
+    }
+
+    /// Attach the configured credential.
+    ///
+    /// TMDB's API settings page issues two credentials. The v3 "API Key" is
+    /// accepted by the v3 endpoints only as the `api_key` query parameter, so
+    /// it is part of every request URL; the v4 "API Read Access Token" (a JWT)
+    /// is accepted by the same v3 endpoints as `Authorization: Bearer`, which
+    /// never appears in a URL and is marked sensitive by reqwest. Whichever
+    /// one the setting holds is sent the only way it works. A URL carrying a
+    /// v3 key still never reaches a log line: [`super::request_error`] strips it.
+    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if is_read_access_token(&self.api_key) {
+            request.bearer_auth(&self.api_key)
+        } else {
+            request.query(&[("api_key", self.api_key.as_str())])
+        }
     }
 
     /// Send a request, retrying the failures that are about TMDB's mood
@@ -222,8 +254,11 @@ impl TmdbClient {
     /// same word. So only 429 and 5xx come back here.
     async fn send_with_retry(
         &self,
+        health: &HostHealth,
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, MetadataError> {
+        // Before the allowance: a call that will not be sent costs nothing.
+        health.check()?;
         let started = Instant::now();
         let mut delay = RETRY_BASE_DELAY;
         for attempt in 1..=MAX_ATTEMPTS {
@@ -234,12 +269,15 @@ impl TmdbClient {
                     "provider call retry budget exhausted".to_owned(),
                 ));
             }
+            // Without the URL from here on: the retry line below logs this
+            // error, and the URL can carry the v3 key (see `authorize`).
             let resp = super::budget::cancellable(
                 build()
                     .timeout(remaining.min(PROVIDER_TOTAL_TIMEOUT))
                     .send(),
             )
-            .await?;
+            .await?
+            .map_err(reqwest::Error::without_url);
             if let Ok(response) = &resp {
                 super::budget::observe(&self.budget, Provider::Tmdb, response).await?;
             }
@@ -268,12 +306,12 @@ impl TmdbClient {
                 // A connection that never completed is the same kind of
                 // transient as a 503, and the request was never served, so
                 // repeating it cannot double anything.
-                Err(e) if last => return Err(request_error(e)),
+                Err(e) if last => return Err(health.failed(e)),
                 Err(e) => {
                     tracing::debug!(error = %e, attempt, "tmdb request failed; retrying");
                     let remaining = PROVIDER_CALL_BUDGET.saturating_sub(started.elapsed());
                     if delay >= remaining {
-                        return Err(request_error(e));
+                        return Err(health.failed(e));
                     }
                     super::budget::cancellable(tokio::time::sleep(delay)).await?;
                 }
@@ -530,17 +568,14 @@ impl TmdbClient {
         // Same retry as the API calls, and needed more: the image CDN is hit
         // once per poster and once per backdrop, so it absorbs the bulk of a
         // scan's requests and is where a rate limit lands first.
-        let result = match self.send_with_retry(|| self.http.get(&url)).await {
+        let result = match self
+            .send_with_retry(&self.image_health, || self.http.get(&url))
+            .await
+        {
             Ok(response) => super::bounded_artwork_response(response).await,
             Err(error) => Err(error),
         };
-        record_provider_request(
-            Provider::Tmdb,
-            result
-                .as_ref()
-                .map(|_| ProviderOutcome::Ok)
-                .unwrap_or_else(provider_outcome),
-        );
+        record_provider_result(Provider::Tmdb, &result);
         result
     }
 }
@@ -548,6 +583,13 @@ impl TmdbClient {
 /// Full image URL for a TMDB-relative path.
 pub fn image_url(tmdb_path: &str, size: &str) -> String {
     format!("{IMAGE_BASE}/{size}{tmdb_path}")
+}
+
+/// Whether a configured TMDB credential is a v4 API Read Access Token rather
+/// than a v3 API key. The token is a JWT — three dot-separated segments — and
+/// a v3 key is 32 hexadecimal characters, so a dot is never ambiguous.
+fn is_read_access_token(credential: &str) -> bool {
+    credential.split('.').count() == 3 && credential.split('.').all(|part| !part.is_empty())
 }
 
 /// Is this status worth sending the same request again?
@@ -1045,6 +1087,122 @@ mod tests {
             Err(MetadataError::Timeout(_))
         ));
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// LAB2 N1: a blackholed TMDB put
+    /// `…/search/movie?api_key=<the key>&query=…` into every ERROR line and
+    /// every enrichment problem, because reqwest's error `Display` names the
+    /// URL. The key is captured at the mock first, so the absence below is
+    /// the stripping and not a request that never carried it.
+    #[tokio::test]
+    async fn a_provider_timeout_never_names_the_api_key() {
+        use axum::extract::RawQuery;
+        use axum::routing::get;
+
+        const KEY: &str = "n1fixture0123456789abcdefabcdef0";
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mock_seen = std::sync::Arc::clone(&seen);
+        let base = serve(axum::Router::new().route(
+            "/search/movie",
+            get(move |RawQuery(query): RawQuery| {
+                let seen = std::sync::Arc::clone(&mock_seen);
+                async move {
+                    seen.lock()
+                        .expect("query log")
+                        .push(query.unwrap_or_default());
+                    std::future::pending::<String>().await
+                }
+            }),
+        ))
+        .await;
+        let mut client = TmdbClient::new(KEY).with_base(&base, &base);
+        client.http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(50))
+            .read_timeout(Duration::from_millis(50))
+            .timeout(Duration::from_millis(50))
+            .build()
+            .expect("short-timeout client");
+
+        let error = client
+            .find_movie("Clip scan2 003", Some(2001))
+            .await
+            .expect_err("the provider never answers");
+        assert!(matches!(error, MetadataError::Timeout(_)), "{error:?}");
+        assert!(
+            seen.lock()
+                .expect("query log")
+                .iter()
+                .any(|query| query.contains(&format!("api_key={KEY}"))),
+            "the v3 key is a query parameter on the wire"
+        );
+        for text in [error.to_string(), format!("{error:?}")] {
+            assert!(!text.contains(KEY), "{text}");
+            assert!(!text.contains("api_key"), "{text}");
+        }
+
+        // A refused connection takes the other transport branch.
+        let refused = TmdbClient::new(KEY).with_base("http://127.0.0.1:1", "http://127.0.0.1:1");
+        let error = refused
+            .find_movie("Refused", None)
+            .await
+            .expect_err("nothing listens on port 1");
+        for text in [error.to_string(), format!("{error:?}")] {
+            assert!(!text.contains(KEY), "{text}");
+        }
+    }
+
+    /// A v4 API Read Access Token is accepted by the v3 endpoints as a bearer
+    /// header, so it is sent that way and never appears in a URL; a v3 key
+    /// can only be a query parameter and stays one.
+    #[tokio::test]
+    async fn a_read_access_token_travels_in_a_header_and_a_v3_key_in_the_query() {
+        use axum::extract::RawQuery;
+        use axum::http::HeaderMap;
+        use axum::routing::get;
+        use axum::Json;
+
+        type Seen = std::sync::Arc<std::sync::Mutex<Vec<(Option<String>, String)>>>;
+        let seen: Seen = Default::default();
+        let mock_seen = std::sync::Arc::clone(&seen);
+        let base = serve(axum::Router::new().route(
+            "/search/movie",
+            get(move |headers: HeaderMap, RawQuery(query): RawQuery| {
+                let seen = std::sync::Arc::clone(&mock_seen);
+                async move {
+                    let auth = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    seen.lock()
+                        .expect("request log")
+                        .push((auth, query.unwrap_or_default()));
+                    Json(json!({ "results": [] }))
+                }
+            }),
+        ))
+        .await;
+
+        const TOKEN: &str = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJmaXh0dXJlIn0.c2lnbmF0dXJl";
+        const KEY: &str = "0123456789abcdef0123456789abcdef";
+        assert!(is_read_access_token(TOKEN));
+        assert!(!is_read_access_token(KEY));
+        for credential in [TOKEN, KEY] {
+            TmdbClient::new(credential)
+                .with_base(&base, &base)
+                .find_movie("Heat", None)
+                .await
+                .expect("the mock answers");
+        }
+        let seen = seen.lock().expect("request log");
+        let (auth, query) = &seen[0];
+        assert_eq!(auth.as_deref(), Some(format!("Bearer {TOKEN}").as_str()));
+        assert!(
+            !query.contains("api_key") && !query.contains(TOKEN),
+            "{query}"
+        );
+        let (auth, query) = &seen[1];
+        assert_eq!(auth, &None);
+        assert!(query.contains(&format!("api_key={KEY}")), "{query}");
     }
 
     #[tokio::test]
