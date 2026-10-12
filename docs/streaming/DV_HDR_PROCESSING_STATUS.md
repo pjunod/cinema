@@ -999,5 +999,10 @@ fidelity or physical-display acceptance.
 The operator directed that subsequent unit execution run only on the main-bound
 `effort/dv-hdr-repair` candidate. Task branches receive compile, lint and static
 checks; new regression cases are compiled and inventoried there, then executed
-with the integrated effort qualification. Earlier checkpoint test results above
+with the integrated effort qualification. The operator explicitly approved an
+optional `compile_only: true` dispatch on the task Effort gate, which leaves
+history/catalog policy, formatting, web static contracts and every affected
+compiler enabled. It creates no unit receipt and skips only Python unit
+execution and its receipt/oracle setup. The default dispatch and main
+qualification retain all their existing checks. Earlier checkpoint test results above
 remain attributable to their original trees and are not relabelled.

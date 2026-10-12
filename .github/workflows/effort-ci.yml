@@ -3,6 +3,12 @@ name: effort ci
 # Optional compiler diagnostics only; task PRs into an effort allocate no jobs.
 on:
   workflow_dispatch:
+    inputs:
+      compile_only:
+        description: "Task compile gate; reserve unit execution for the main-bound effort"
+        type: boolean
+        required: false
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -67,11 +73,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Restore attributable Python successes
+        if: ${{ !inputs.compile_only }}
         id: receipts
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -m validation.python_unit_receipts prepare
       - name: Publish Python attempt-start marker
+        if: ${{ !inputs.compile_only }}
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: ${{ steps.receipts.outputs.receipt_key }}-start-${{ github.run_id }}
@@ -87,15 +95,18 @@ jobs:
         run: |
           make validation-lint
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: ${{ !inputs.compile_only }}
         with:
           node-version: "22"
       - name: Provision checksummed public K08 oracle sources
+        if: ${{ !inputs.compile_only }}
         run: |
           set -eu
           fixture="$RUNNER_TEMP/hiqlite-public-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           timeout 90s python3 scripts/provision-hiqlite-upstream "$fixture"
           printf 'PLURX_HIQLITE_UPSTREAM_DIR=%s\n' "$fixture" >> "$GITHUB_ENV"
       - name: Check CI, deploy, and shipping contracts
+        if: ${{ !inputs.compile_only }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           # Fetch only inside the one pending test, so failure records a failed
@@ -113,6 +124,9 @@ jobs:
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only effort diff; compile surfaces are skipped."
+      - name: Record effort-only unit execution policy
+        if: inputs.compile_only
+        run: echo "Task gate compiles and checks policy; unit suites execute on the main-bound effort candidate."
 
   rust_compile:
     name: effort Rust compile

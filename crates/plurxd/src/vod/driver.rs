@@ -584,11 +584,14 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
         }
         // Between bounded helpers there may be no child to stop. Reader
         // pacing and capacity still end the measured production episode.
-        if matches!(
-            decision.action,
-            Action::Idle | Action::Suspend { .. } | Action::MakeRoom { .. }
-        ) {
-            if let Some(encoding) = &rendition.recipe.encoding {
+        if let Some(encoding) = &rendition.recipe.encoding {
+            #[cfg(target_os = "linux")]
+            let bounded_processing = encoding.dv_runtime.is_some();
+            #[cfg(not(target_os = "linux"))]
+            let bounded_processing = false;
+            if matches!(decision.action, Action::Idle | Action::Suspend { .. })
+                || (bounded_processing && matches!(decision.action, Action::MakeRoom { .. }))
+            {
                 encoding.reset_active_production(epoch, false);
             }
         }
