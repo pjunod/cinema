@@ -1,6 +1,6 @@
 # Remote diagnostic wire — closed incident manifest validation
 
-Build: 232
+Build: 233
 Issue: #1037
 
 Adds the v1 diagnostic manifest decoder and shared malformed/privacy fixtures

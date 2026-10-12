@@ -277,6 +277,7 @@ class LiveTvPlayer private constructor(context: Context) {
         )
         player = output
         val watchdog = LiveTvWatchdog()
+        val diagnosticGeneration = tv.plurx.app.data.Session.playbackAuthorization().generation
         val diagnostics = LiveTvTerminalDiagnostics(SystemClock::elapsedRealtime)
         fun reportTerminal(
             trigger: LiveTvTerminalTrigger,
@@ -290,7 +291,7 @@ class LiveTvPlayer private constructor(context: Context) {
             // A diagnostic must never prevent the existing Stop/retry action.
             runCatching {
                 diagnostics.terminal(trigger, action, observedAt, playing, playbackState, positionMs, error)
-                    ?.let { postPlaybackClientLog(scope, it) }
+                    ?.let { tv.plurx.app.diagnostics.DiagnosticRuntime.playback(it,diagnosticGeneration); postPlaybackClientLog(scope, it) }
             }
         }
         val liveEdgeRecovery = LiveEdgeRecovery().also { it.attached() }
@@ -386,6 +387,12 @@ class LiveTvPlayer private constructor(context: Context) {
                     counters?.ensureUpdated()
                     val renderedFrames = counters?.renderedOutputBufferCount ?: 0
                     diagnostics.decoderSample(renderedFrames, output.isPlaying)
+                    if (diagnosticGeneration == tv.plurx.app.data.Session.playbackAuthorization().generation) {
+                        val facts=mutableMapOf("state" to kotlinx.serialization.json.JsonPrimitive(if (output.isPlaying) "playing" else "waiting"))
+                        counters?.renderedOutputBufferCount?.takeIf { it >= 0 }?.let { facts["frame_count"]=kotlinx.serialization.json.JsonPrimitive(it.toString()) }
+                        counters?.droppedBufferCount?.takeIf { it >= 0 }?.let { facts["dropped_frames"]=kotlinx.serialization.json.JsonPrimitive(it.toString()) }
+                        tv.plurx.app.diagnostics.DiagnosticRuntime.record("playback","sample",facts,diagnosticGeneration)
+                    }
                     if (watchdog.observe(renderedFrames, output.isPlaying)) {
                         lease.touchHint()
                         api.keepalive(started.session_id)

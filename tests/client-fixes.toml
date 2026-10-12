@@ -6255,3 +6255,19 @@ source = "crates/plurxd/src/web/core/diagnostics-recorder.js"
 source_anchor = "function createCinemaDiagnosticRecorder"
 test = "tests/web/diagnostics-recorder.test.js"
 test_anchor = "sample floods retain terminal markers within count and byte limits"
+
+[[fixes]]
+id = "diagnostics.apple-capture"
+commits = ["4e523845bb7faac7ee2b1f394ae510c45f51a651"]
+source = "clients/apple/Sources/DiagnosticRecorder.swift"
+source_anchor = "final class DiagnosticRecorder"
+test = "clients/apple/Tests/DiagnosticCaptureTests.swift"
+test_anchor = "testBoundedRecorderRetainsTerminalAndExactCountersWithoutSecrets"
+
+[[fixes]]
+id = "diagnostics.apple-account-store"
+commits = ["4e523845bb7faac7ee2b1f394ae510c45f51a651"]
+source = "clients/apple/Sources/DiagnosticStore.swift"
+source_anchor = "actor DiagnosticStore"
+test = "clients/apple/Tests/DiagnosticCaptureTests.swift"
+test_anchor = "testRecoveredStoreCannotOpenAnotherAccountOrResurrectClearedCapture"

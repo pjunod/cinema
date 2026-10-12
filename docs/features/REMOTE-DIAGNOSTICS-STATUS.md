@@ -38,8 +38,8 @@ index/backlog rows; the builder adopts them together in a normal commit.
 | B03 | Support auth, grants, uploads and durable storage | Built; compiler verified | Batched PR #1037 | Independent encrypted SQLite publication, separate capture authority, provisioning/revocation, resume/refresh, quotas and external deletion/revocation fences implemented; pinned final workspace Clippy and dependency policy passed; runtime acceptance pending |
 | B04 | TV handoff, mobile page, inbox and packaging | Built; compiler verified | Batched PR #1037 | Phone claim/approval protocol, responsive completion page, named passkey inbox and TLS/service packaging written; browser races/passkeys/physical acceptance pending |
 | B05 | Web/TV browser reporting | Built; compiler verified | Batched PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks written; normal hook and browser type checks passed; software acceptance pending |
-| B06 | Apple mobile/TV reporting | Built; final compiler/hook active | Batched PR #1037 | Recorder, protected account store, deterministic ZIP/share, fixed support transport, exact archive resume, report UI and local-only TV approval written; tests declared, no unit execution; both targets and declared XCTest sources compiled; final hook and physical acceptance owed |
-| B07 | Android mobile/TV reporting | Not started | — | Release/build, share and physical TV handoff owed |
+| B06 | Apple mobile/TV reporting | Built; compiler verified | Batched PR #1037 | Recorder, protected account store, deterministic ZIP/share, fixed support transport, exact archive resume, report UI and local-only TV approval written; tests declared, no unit execution; both targets and declared XCTest sources compiled; normal hook passed; physical acceptance owed |
+| B07 | Android mobile/TV reporting | Built; final compiler/hook active | Batched PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; final hook, signed release and physical acceptance owed |
 | B08 | Reproduction, connection checks, diagnostic adapters | Not started | — | Stop/expiry/platform-limit evidence owed |
 | B09 | Composed security/resource/device qualification | Not started | — | Matrix and overhead measurements owed |
 | B10 | Operations, exact-candidate promotion and rollout | Not started | — | Runbook, gates, receipt and deployment inputs owed |
@@ -58,8 +58,8 @@ from regressions. Record test absence as absence, not a passing check.
 | Browser TV | Built B05 | Types/syntax/hook passed | None | Remote focus + physical phone handoff |
 | iPhone/iPad | Built B06 | Both app and test sources compiled | None | Share/send/recovery runtime acceptance |
 | Apple TV | Built B06 | Simulator app compiled | None | Direct send + phone on separate network |
-| Android phone/tablet | Missing | None | None | Capture/share/send/recovery |
-| Android/Google TV | Missing | None | None | Direct send + phone on separate network |
+| Android phone/tablet | Built B07 | Debug app/JVM/test APK compiled | None | Share/send/recovery runtime and signed release acceptance |
+| Android/Google TV | Built B07 | Debug app/JVM/test APK compiled | None | D-pad/send + phone on separate network |
 | Cinema snapshots / multiple workers | Built B02 | Pinned compiler passed | None | Real two-user/two-node HTTP and peer-failure behavior |
 | Support upload service | Built B03 | Pinned compiler/dependency policy passed | None | Durable/resume/retention runtime qualification |
 | Phone completion page | Built B04 | Syntax/compiler passed | None | Real QR/manual claim, TV approval, submission |
@@ -247,7 +247,7 @@ the accepted account and installation, with explicit expiry/revocation limits.
 
 Syntax and static type checks passed without increasing the existing baseline;
 the first affected Rust compiler check passed in 56.85 seconds. Sampling,
-recovery and schema refinements are undergoing the final compiler check.
+recovery and schema refinements passed the final compiler and normal hook.
 Regression fixtures are declared but not executed per packet. No browser
 interaction, TV focus, hardware or end-to-end delivery pass is claimed.
 
@@ -299,3 +299,38 @@ Declared behavioral regressions (await final check execution):
 Runtime/physical share, support receipts, restart, D-pad focus, privacy/resource
 measurement and the final source mapping remain acceptance work. No device,
 release signature or production support deployment is claimed.
+
+## 12. B07 — Android capture, report and delivery
+
+Android versionCode 167 adds a closed bounded recorder with conflated writer
+mailboxes, backup-excluded account files, encrypted Keystore/AAD authority,
+exact immutable ZIP resume, the dedicated cookie-free redirect-refusing
+support transport and the phone/TV report dialog. A narrow FileProvider
+exposes only explicitly shared report files with temporary read grants.
+Support and installation preferences are excluded from both backup and device
+transfer. Uploads require a reviewed destination and consent; foreground
+retry resumes the same capture. One-use invitation proof is persisted before
+redeem and its resulting authority is tied to the chosen origin.
+
+Help, connection/sign-in, library and Live TV playback expose reporting. Closed
+network observations exclude URLs, requests and free-form errors. Owned
+playback callbacks use their original authentication generation and retain
+frame/drop counters as decimal strings, on the existing cadence. The report
+dialog invalidates and blocks Cinema companion navigation; only a local TV
+button can approve the phone's comparison phrase. The support service checks
+that phrase and report revision again. QR generation uses pinned ZXing core
+3.5.4 from its [upstream release](https://github.com/zxing/zxing/releases/tag/zxing-3.5.4).
+
+Compiler receipts use local JBR 21.0.11, installed SDK and the independent
+owned clone. `assembleDebug compileDebugUnitTestKotlin assembleDebugAndroidTest`
+compiles the app, JVM regression sources and instrumentation APK. No JVM unit
+or instrumentation suite ran per packet. Signed release/shrinker evidence,
+connection/provider refinements, restart, sharing, real support receipts,
+D-pad focus and physical/resource acceptance remain B08–B10 work.
+
+Declared behavioral regressions (await final check execution):
+
+- `clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticCaptureTest.kt::boundedRecorderRetainsTerminalAndExactCountersWithoutSecrets`
+- `clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticCaptureTest.kt::restartStoreRefusesAnotherAccountAndCannotResurrectClearedCapture`
+- `clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticCaptureTest.kt::portableZipUsesStandardCRCAndRefusesTraversal`
+- `clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticCaptureTest.kt::supportDestinationRejectsForeignAuthorityShapesAndPlaintext`
