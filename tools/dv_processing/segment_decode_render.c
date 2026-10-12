@@ -655,6 +655,17 @@ int main(int argc, char **argv) {
   need(opened >= 0, "timestamped segment open");
   need(input->nb_streams > 0 && input->nb_streams <= 256,
        "bounded stream inventory");
+  // This helper consumes only the selected coded AU. Keep the original
+  // inventory and soundtrack metadata, but avoid returning unrelated packets.
+  // Some demuxers discover their streams while probing, so an unknown early
+  // index/codec retains bounded discovery rather than acquiring a new refusal.
+  if ((unsigned)stream_index < input->nb_streams &&
+      input->streams[stream_index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
+      input->streams[stream_index]->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+    for (unsigned i = 0; i < input->nb_streams; i++)
+      if (i != (unsigned)stream_index)
+        input->streams[i]->discard = AVDISCARD_ALL;
+  }
   AVDictionary *probe_options[256] = {0};
   char pixels[32];
   snprintf(pixels, sizeof(pixels), "%lld",
@@ -674,6 +685,9 @@ int main(int argc, char **argv) {
                AVMEDIA_TYPE_VIDEO &&
            input->streams[stream_index]->codecpar->codec_id == AV_CODEC_ID_HEVC,
        "selected absolute HEVC video stream");
+  for (unsigned i = 0; i < input->nb_streams; i++)
+    if (i != (unsigned)stream_index)
+      input->streams[i]->discard = AVDISCARD_ALL;
   AVStream *stream = input->streams[stream_index];
   source_time_base = stream->time_base;
   if (base_only) {

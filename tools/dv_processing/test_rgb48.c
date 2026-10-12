@@ -58,9 +58,26 @@ static void check_native_plane(void) {
     codes[lane] = old;
   }
 }
+static void check_rounding_bits(void) {
+  const int modes[] = {FE_UPWARD, FE_TONEAREST, FE_DOWNWARD, FE_UPWARD,
+                       FE_TOWARDZERO, FE_TONEAREST};
+  const uint16_t codes[9] = {1, 1, 1, 1, 1, 1, 1, 1, 1};
+  float actual[9];
+  for (size_t mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++) {
+    assert(fesetround(modes[mode]) == 0);
+    assert(dv_unpack_10bit_plane(codes, 9, actual));
+    uint32_t expected = modes[mode] == FE_UPWARD ? 0x3a802009U : 0x3a802008U;
+    for (size_t lane = 0; lane < 9; lane++) {
+      uint32_t bits;
+      memcpy(&bits, &actual[lane], sizeof(bits));
+      assert(bits == expected);
+    }
+  }
+}
 int main(void) {
   const int modes[]={FE_TONEAREST,FE_DOWNWARD,FE_UPWARD,FE_TOWARDZERO};
   unsigned long checked=0;
+  check_rounding_bits();
   for (unsigned mode=0;mode<4;mode++) {
     assert(fesetround(modes[mode])==0);
     check_native_plane();
