@@ -89,6 +89,9 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         .await
         .expect("idempotent encoded create");
     assert_eq!(replay.session_id, start.session_id);
+    assert_eq!(replay.encoder, start.encoder);
+    assert_eq!(replay.grade, start.grade);
+    assert_eq!(replay.processed_dv_profile, start.processed_dv_profile);
     assert_eq!(
         manager.codec_qualification_encoder_count(Encoder::Software, OutputGrade::Sdr),
         1,

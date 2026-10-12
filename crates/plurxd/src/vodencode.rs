@@ -181,6 +181,44 @@ pub(crate) fn try_admit_frozen_bundle(
         .ok_or(false)
 }
 
+/// A first processed window is foreground preparation. Register its demand
+/// before waiting so background producers actually yield their owned permits.
+/// Never discount a still-running producer or extend the caller's deadline.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) async fn admit_frozen_preparation(
+    admissions: &Admissions,
+    hardware_limit: usize,
+    software_budget: usize,
+    resources: &TranscodeResourceEstimate,
+    software_threads: Option<u32>,
+    deadline: Instant,
+) -> Result<crate::admission::TranscodePermit, bool> {
+    let _waiting = admissions.wait_for_slot();
+    loop {
+        match try_admit_frozen_bundle(
+            admissions,
+            hardware_limit,
+            software_budget,
+            resources,
+            software_threads,
+            Priority::Live,
+            None,
+        ) {
+            Ok(permit) => return Ok(permit),
+            Err(true) => return Err(true),
+            Err(false) if Instant::now() >= deadline => return Err(false),
+            Err(false) => {
+                tokio::time::sleep_until(
+                    deadline
+                        .min(Instant::now() + crate::transcode::ADMISSION_POLL)
+                        .into(),
+                )
+                .await;
+            }
+        }
+    }
+}
+
 /// Resolved once before attachment. A restart cannot silently change encoder,
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
 pub(crate) struct Encoding {
@@ -1386,6 +1424,103 @@ mod production_evidence_tests {
 mod source_copy_admission_tests {
     use super::*;
     use plurx_core::store::SettingsStore;
+
+    #[tokio::test]
+    async fn processed_preparation_requests_background_yield_and_owns_actual_capacity() {
+        let admissions = Admissions::new();
+        let resources = TranscodeResourceEstimate {
+            hardware_slot: true,
+            cpu_threads: 5,
+            decoder_threads: Some(1),
+        };
+        let background = admissions
+            .try_admit_bundle(2, 5, &resources, Priority::Background)
+            .expect("background occupies the pool");
+        let pending = {
+            let admissions = admissions.clone();
+            tokio::spawn(async move {
+                admit_frozen_preparation(
+                    &admissions,
+                    2,
+                    5,
+                    &resources,
+                    Some(1),
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !admissions.live_is_waiting() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("foreground demand reaches background owner");
+        assert!(
+            !pending.is_finished(),
+            "a running background owner is never discounted"
+        );
+        assert_eq!(admissions.software_in_use(), 5);
+        drop(background);
+        let owned = pending
+            .await
+            .expect("preparation task")
+            .expect("reaped capacity admitted");
+        assert_eq!(admissions.snapshot().live_waiting, 0);
+        assert_eq!(admissions.software_in_use(), 5);
+        assert!(admissions
+            .try_admit_bundle(2, 5, &resources, Priority::Background)
+            .is_none());
+        drop(owned);
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    #[tokio::test]
+    async fn processed_preparation_deadline_and_cancellation_release_foreground_demand() {
+        let admissions = Admissions::new();
+        let resources = TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: 5,
+            decoder_threads: Some(1),
+        };
+        let held = admissions
+            .try_admit_bundle(2, 5, &resources, Priority::Live)
+            .expect("live owner");
+        assert!(
+            admit_frozen_preparation(&admissions, 2, 5, &resources, Some(1), Instant::now())
+                .await
+                .is_err()
+        );
+        assert_eq!(admissions.snapshot().live_waiting, 0);
+        assert!(admit_frozen_preparation(
+            &admissions,
+            2,
+            4,
+            &resources,
+            Some(5),
+            Instant::now() + Duration::from_secs(60)
+        )
+        .await
+        .is_err());
+        assert_eq!(admissions.snapshot().live_waiting, 0);
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(20),
+            admit_frozen_preparation(
+                &admissions,
+                2,
+                5,
+                &resources,
+                Some(1),
+                Instant::now() + Duration::from_secs(60),
+            ),
+        )
+        .await;
+        assert!(cancelled.is_err());
+        assert_eq!(admissions.snapshot().live_waiting, 0);
+        assert_eq!(admissions.software_in_use(), 5);
+        drop(held);
+    }
 
     /// The handoff gap `admit_live` closes. A copy start waiting for CPU must
     /// stay queued across its attempts, or background work is not told to

@@ -1082,6 +1082,39 @@ fn base_piecewise_rpu_accepts_delta_pivots_and_counts_actual_segments() {
 }
 
 #[test]
+fn base_rpu_accepts_signalled_bounded_curve_extents_without_replacing_them() {
+    use dolby_vision::rpu::dovi_rpu::DoviRpu;
+    let fixture = include_bytes!("../../../tests/fixtures/dv-runtime/p8-piecewise.nal");
+    for (first, last_delta) in [(0, 509), (2, 509)] {
+        let mut rpu = DoviRpu::parse_unspec62_nalu(fixture).expect("fixture");
+        let curve = &mut rpu.rpu_data_mapping.as_mut().expect("mapping").curves[0];
+        assert_eq!(curve.pivots, [0, 512, 511]);
+        curve.pivots = vec![first, 512, last_delta];
+        rpu.modified = true;
+        let raw = rpu
+            .write_hevc_unspec62_nalu()
+            .expect("bounded curve serializes");
+        let parsed = DvBaseMetadata::from_raw_rpu(&raw, (64, 64))
+            .expect("public mapper supports bounded extents");
+        assert_eq!(parsed.polynomial_segments, 4);
+        let preserved = DoviRpu::parse_unspec62_nalu(&raw).expect("fresh RPU");
+        assert_eq!(
+            preserved.rpu_data_mapping.expect("mapping").curves[0].pivots,
+            [first, 512, last_delta]
+        );
+    }
+    for pivots in [vec![0, 0, 511], vec![0, 512, 512], vec![513, 512, 1]] {
+        let mut rpu = DoviRpu::parse_unspec62_nalu(fixture).expect("fixture");
+        rpu.rpu_data_mapping.as_mut().expect("mapping").curves[0].pivots = pivots;
+        rpu.modified = true;
+        let raw = rpu
+            .write_hevc_unspec62_nalu()
+            .expect("malformed extent control serializes");
+        assert!(DvBaseMetadata::from_raw_rpu(&raw, (64, 64)).is_err());
+    }
+}
+
+#[test]
 fn completed_window_report_binds_publication_without_pixel_checksum_authority() {
     let mut raw = dolby_vision::rpu::dovi_rpu::DoviRpu::parse_unspec62_nalu(include_bytes!(
         "../../../tests/fixtures/dv-runtime/frame-000.nal"

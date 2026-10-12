@@ -4209,6 +4209,73 @@ async fn vaapi_hdr10_cadence_contract_preserves_high_rate_sdr_and_refuses_stale_
     );
 }
 
+#[tokio::test]
+async fn profile5_hdr10_keeps_the_proved_vaapi_encoder_and_grade() {
+    for (renderer, hardware, source_proved, rate, hdr) in [
+        (true, true, true, "24000/1001", true),
+        (false, true, true, "24000/1001", false),
+        (true, false, true, "24000/1001", false),
+        (true, true, true, "60/1", false),
+        (true, true, false, "24000/1001", false),
+    ] {
+        let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mut file = profile5_file();
+        let probe = serde_json::json!({"streams":[{"index":0,"codec_type":"video",
+            "codec_name":"hevc","profile":"Main 10","width":3840,"height":2160,
+            "pix_fmt":"yuv420p10le","field_order":"progressive",
+            "avg_frame_rate":rate,"r_frame_rate":rate,"disposition":{"attached_pic":0}}]});
+        file.id = seed_file_with_probe_at(&store, "/media/p5-vaapi.mkv", plurx_core::domain::ProbeResult {
+            raw_json: Some(probe.to_string()), ..Default::default()
+        }).await;
+        let manager = TranscodeManager::new(store, work.path().to_owned(),
+            EncoderCaps { vaapi: true, ..EncoderCaps::default() }, Pipeline::Cpu)
+            .with_dovi_reshape(true).with_dovi_passthrough(renderer)
+            .with_hdr10_passthrough_vaapi(hardware);
+        manager.dovi_proofs.insert(TranscodeManager::dovi_proof_key(&file), source_proved);
+        if !source_proved {
+            assert!(manager.hdr10_grade_for_with_preference(&file, true, HDR10_HEIGHT,
+                Encoder::Vaapi, false, Encoder::Vaapi).await.is_err(), "unproved source is refused");
+            assert!(manager.encoder_and_grade_for_with_preference(&file, true, HDR10_HEIGHT,
+                false, "vaapi").await.is_err(), "the complete route cannot borrow another source's proof");
+            continue;
+        }
+        let grade = manager.hdr10_grade_for_with_preference(&file, true, HDR10_HEIGHT,
+            Encoder::Vaapi, false, Encoder::Vaapi).await.expect("grade");
+        assert_eq!(grade == OutputGrade::Hdr10, hdr, "renderer={renderer}, hardware={hardware}, rate={rate}");
+        let (encoder, grade) = manager.encoder_and_grade_for_with_preference(
+            &file, true, HDR10_HEIGHT, false, "vaapi").await.expect("route");
+        assert_eq!(grade == OutputGrade::Hdr10, hdr, "full preferred resolver");
+        if hdr {
+            assert_eq!((encoder, grade), (Encoder::Vaapi, OutputGrade::Hdr10));
+            let options = manager.options_for_tone_map(encoder, &file, HDR10_HEIGHT, 0.0,
+                None, None, None, ToneMap::None, grade);
+            assert_eq!(options.pipeline, Pipeline::DoviPassthrough);
+            assert!(options.pipeline.pairs_with(encoder));
+            assert_eq!(manager.capability_height_ceiling_for_preference(Some(&file), true, "vaapi").await, HDR10_HEIGHT);
+        }
+    }
+}
+
+#[tokio::test]
+async fn recovered_vod_copy_keeps_hdr_grade_without_a_processed_profile_marker() {
+    for hdr in [None, Some("hdr10"), Some("hlg")] {
+        let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let base = crate::test_tempdir().expect("session");
+        let file_id = seed_file_with_probe_at(&store, "/media/recovered.mkv", plurx_core::domain::ProbeResult {
+            duration_ms: Some(4000), width: Some(1920), height: Some(1080),
+            video_codec: Some("hevc".into()), hdr: hdr.map(str::to_owned),
+            ..Default::default()
+        }).await;
+        let manager = TranscodeManager::new(store, base.path().to_owned(), EncoderCaps::default(), Pipeline::Cpu);
+        manager.install_vod_http_test_session("recovered-hdr", file_id, base.path()).await;
+        let recovered = manager.recover("recovered-hdr").await.expect("attached session");
+        assert_eq!(recovered.grade, if hdr.is_some() { OutputGrade::Hdr10 } else { OutputGrade::Sdr });
+        assert_eq!(recovered.processed_dv_profile, None);
+        assert_eq!(recovered.encoder, "vod");
+    }
+}
+
 
 #[tokio::test]
 async fn macos_manager_freezes_selected_identity_and_keeps_saved_choice_on_probe_failure() {

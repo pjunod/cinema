@@ -21,24 +21,14 @@ impl TranscodeManager {
         if let Some(recovered) = self.vod.recovered_start(session_id).await {
             // An idempotent replay of a VOD create: repeat the persisted
             // answer, field for field, from the session record.
-            let processed_encoding = self
-                .vod
-                .hls_facts(&recovered.start.session_id)
-                .await
-                .and_then(|facts| facts.encoding)
-                .filter(|encoding| encoding.preserves_processed_dv());
+            let facts = self.vod.hls_facts(&recovered.start.session_id).await?;
+            let encoding = facts.encoding.as_ref();
             return Some(StartInfo {
-                processed_dv_profile: processed_encoding.as_ref().map(|_| 8),
-                retained_output: self
-                    .vod
-                    .hls_facts(&recovered.start.session_id)
-                    .await
-                    .and_then(|facts| facts.response_owner.retained_output_facts()),
-                audio_delivery: self
-                    .vod
-                    .hls_facts(&recovered.start.session_id)
-                    .await
-                    .and_then(|facts| facts.audio_delivery),
+                processed_dv_profile: encoding
+                    .filter(|encoding| encoding.preserves_processed_dv())
+                    .map(|_| 8),
+                retained_output: facts.response_owner.retained_output_facts(),
+                audio_delivery: facts.audio_delivery,
                 playlist_url: format!("/api/v1/hls/{}/index.m3u8", recovered.start.session_id),
                 session_id: recovered.start.session_id,
                 duration_ms: Some(recovered.start.duration_ms),
@@ -46,14 +36,11 @@ impl TranscodeManager {
                 media_origin_seconds: 0.0,
                 target_height: recovered.target_height,
                 kind: recovered.kind,
-                encoder: processed_encoding
-                    .as_ref()
-                    .map_or("vod", |encoding| encoding.delivered_encoder_label()),
-                grade: if processed_encoding.is_some() {
-                    OutputGrade::Hdr10
-                } else {
-                    OutputGrade::Sdr
-                },
+                encoder: encoding.map_or("vod", |encoding| encoding.delivered_encoder_label()),
+                grade: encoding.map_or_else(
+                    || super::manager_candidates::copy_candidate_grade(&facts.file),
+                    |encoding| encoding.options.pipeline.output_grade(),
+                ),
                 vod: true,
                 control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
             });
@@ -1149,6 +1136,16 @@ impl TranscodeManager {
             match (file.and_then(plurx_core::playback::hdr_route), preferred) {
                 (Some(plurx_core::playback::HdrRoute::DolbyVisionRpu), Encoder::Qsv) => {
                     self.dovi_passthrough && self.dovi_passthrough_qsv
+                }
+                (Some(plurx_core::playback::HdrRoute::DolbyVisionRpu), Encoder::Vaapi) => {
+                    self.dovi_passthrough
+                        && self.hdr10_passthrough_vaapi
+                        && self
+                            .vaapi_hdr10_source_fits(
+                                file.expect("the matched route has a file"),
+                                HDR10_HEIGHT,
+                            )
+                            .await
                 }
                 (Some(plurx_core::playback::HdrRoute::Passthrough), Encoder::Qsv) => {
                     self.hdr10_passthrough && self.hdr10_passthrough_qsv

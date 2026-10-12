@@ -960,3 +960,38 @@ The retained artifacts are on #968: the synthetic HTTP acceptance archive
 (62), the Android full-run, focused and lint evidence (63) and the late helper
 diagnostic (64). Attachment 62 records its actual source identity. It is not
 relabelled for a later commit.
+
+## 24. Fleet HDR repair — reproduced failures and acceptance still owed
+
+**Status:** claimed · 2026-10-12 · Integration: `effort/dv-hdr-repair`.
+
+The fleet acceptance at the original processing build found no HDR10-E report
+and a Profile 5 request falling back to SDR. Source-window reproduction found
+four independent causes: processing preparation never requested background
+capacity to yield; valid RPU curves ended below code 1023 and were refused;
+ordinary Profile 5 HDR negotiation excluded the proved VAAPI Main10 route;
+and the runtime's ordinary Intel Vulkan driver could not open the installed
+GPU, selecting software Vulkan instead. Auto additionally skipped processing
+whenever its ordinary candidate identity was present. Idempotent VOD recovery
+filtered encoding facts to reconstructed Profile 8.1 and reported other HDR
+routes as SDR.
+
+Astra reviewed the diagnosis and proposal. Admission, bounded signalled curves,
+composed VAAPI proof and receipt-backed logging were supported. Auto must get
+its own frozen processed recipe identity; ordinary production evidence cannot
+authorize it. The complete processing pipeline must sustain the existing
+1.15× margin rather than merely finish its first window before a deadline.
+
+| Task | Reviewable change | State / evidence |
+|---|---|---|
+| R01 | Foreground preparation admission, bounded RPU curves, ordinary Profile 5 VAAPI HDR10, recovery grade/encoder, Intel ICD registration and accepted-report logging | Local focused regressions passed; current-base compile and PR evidence in progress. |
+| R02 | Explicit export geometry/policy and bounded reconstructed VAAPI output; driver cache and software-driver CPU bounds | Native RGB48 export was below realtime. An isolated 1080p GPU-export/VAAPI experiment produced two seconds in 1.779 seconds; consecutive windows with audio remain owed. |
+| R03 | Distinct processed Auto candidates bound to verified preparation, recipe/processing identity and owner inputs | Implementation remains; ordinary candidate equality must be preserved at both validation seams. |
+| A01 | Current-main fleet build and physical Profile 5, Profile 8 and Profile 7 FEL acceptance on web, Android and Apple TV | Owed after qualification/deployment. Retain startup, stalls, seek/reopen report clearing, stats, screenshots and exact effective-processing logs; repeat with both preferences off. |
+
+Tasks integrate serially through pull requests into the effort after the
+manually dispatched Effort development gate. Freeze task merges, incorporate
+current main, and qualify the final main-bound candidate before promotion.
+Private media, real infrastructure names and screenshots remain outside the
+tracked tree. Numeric/helper tests do not establish independent mastered-film
+fidelity or physical-display acceptance.
