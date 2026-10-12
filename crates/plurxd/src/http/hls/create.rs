@@ -2884,7 +2884,7 @@ async fn create_with_purpose_inner(
     )
     .await?;
     let candidate_auto_policy = resolved.candidate_auto_policy;
-    let candidate_route = resolved.candidate_route;
+    let mut candidate_route = resolved.candidate_route;
     // Retain the actual immutable artifact through the eventual dispatch, not
     // just its public rates or digest. Dispatch revalidates the exact facts.
     let _candidate_cost_proof = resolved.candidate_cost_proof;
@@ -2895,7 +2895,7 @@ async fn create_with_purpose_inner(
     // The pre-start half reuses the source fence this create's advisory reads
     // already took (one fence per request); the post-acceptance half below
     // fences the source again, because its whole point is to see a change.
-    let link_source_binding = if candidate_auto_policy {
+    let mut link_source_binding = if candidate_auto_policy {
         if let (Some(identity), Some(source), Some(context), Some(route)) = (
             identity.as_ref(),
             source.as_ref(),
@@ -2919,7 +2919,7 @@ async fn create_with_purpose_inner(
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
     }
-    let height = resolved.height;
+    let mut height = resolved.height;
     if burn_would_discard_this_session_hdr(
         &state,
         source.as_ref(),
@@ -3176,6 +3176,228 @@ async fn create_with_purpose_inner(
         }
     }
 
+    // Every activation is a predecessor CAS, including an ordinary start.
+    // Capturing the exact route before worker placement gives a
+    // commit-unknown reconciler the identity it must terminalize; allowing an
+    // unfenced last-writer-wins activation loses that identity after the
+    // pointer moves to the successor.
+    let activation_predecessor = state
+        .store
+        .media_session_route_for_playback(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+            &request.playback_id,
+        )
+        .await
+        .map_err(|error| session_store_error("reading the predecessor route", error))?;
+    // One mint for this start, bound here rather than called twice.
+    //
+    // `recovery_epoch_for` is not a pure function: with no predecessor it
+    // draws a fresh UUID, which is the whole point of it — a deliberate new
+    // play is a new budget, and `recovery_epoch_for`'s own test asserts that
+    // two calls with `None` differ. So calling it once for the session and
+    // again for the activation would give a new play two epochs: the live
+    // session would believe in one that exists in no durable row, and the
+    // next continuation would inherit the other and find it unspent. That is
+    // one automatic recovery per attempt against a file that cannot be
+    // decoded, which is the loop the budget exists to close.
+    //
+    // Bound above placement because the session that carries it is built by
+    // the task the placement loop spawns, 268 lines before the activation
+    // literal is reached. The only input is the predecessor route, already
+    // read above, so this costs one binding and no store read.
+    let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());
+    if activation_predecessor
+        .as_ref()
+        .is_some_and(|route| route.state == "active" && route.publication_ready_at_ms != 0)
+    {
+        return Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "media_session_handoff_pending",
+            "the current session is still completing its predecessor handoff; retry shortly",
+        ));
+    }
+    // A seek storm asks for one session per destination. The control actor
+    // already knows which destination the client settled on, and the sequence
+    // on this request says where in that ordering this ask belongs -- so a
+    // restart for a target the viewer has since scrolled past can be refused
+    // before it spawns a producer.
+    //
+    // Refused, not deferred: waiting to see whether a newer exchange arrives
+    // would add latency to every honest seek, and the ordering is already
+    // decided. Only a strictly later exchange naming a different destination
+    // supersedes, so the honest seek arriving next is never the one skipped.
+    let settled_target = match activation_predecessor.as_ref() {
+        // No predecessor is a first play: there is no ordering for it to be
+        // stale against, and no session to ask.
+        Some(predecessor) => {
+            state
+                .transcode
+                .settled_target_for_session(&predecessor.session_id)
+                .await
+        }
+        None => None,
+    };
+    let admission = admit_restart(
+        settled_target,
+        request.control_sequence,
+        request.start_seconds,
+        activation_predecessor
+            .as_ref()
+            .map(|route| route.incarnation_id.as_str()),
+    )?;
+    let RestartAdmission {
+        expected_predecessor_incarnation_id,
+        fence_predecessor,
+    } = admission;
+    crate::media_pool::mark_create_phase("predecessor");
+    let pinned_owner = if let Some(previous_session_id) = request
+        .previous_session_id
+        .as_deref()
+        .filter(|value| uuid::Uuid::parse_str(value).is_ok())
+    {
+        if let Some(route) = activation_predecessor.as_ref() {
+            if route.session_id != previous_session_id
+                || route.principal.local_user_id() != Some(user.id)
+                || route.state != "active"
+                || route.lease_expires_at_ms <= unix_ms()
+            {
+                return Err(ApiError::typed(
+                    StatusCode::CONFLICT,
+                    "media_session_superseded",
+                    "the session being reopened is no longer current",
+                ));
+            }
+            Some(route.owner_node_id.clone())
+        } else if state
+            .transcode
+            .active_session_ids()
+            .await
+            .iter()
+            .any(|session_id| session_id == previous_session_id)
+        {
+            // A session created by the pre-P5 binary has no durable route.
+            // Its reopen state is nevertheless process-local, so pin that
+            // rolling-upgrade legacy predecessor to this node rather than
+            // ranking a peer that cannot possess it.
+            Some(state.node_id.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if candidate_auto_policy
+        && continuous.is_none()
+        && pinned_owner
+            .as_ref()
+            .is_none_or(|owner| owner == &state.node_id)
+    {
+        let recovery = crate::transcode::SessionRecoveryIdentity {
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
+            incarnation_id: incarnation_id.clone(),
+            recovery_epoch: recovery_epoch.clone(),
+        };
+        match state
+            .transcode
+            .qualify_processed_hdr10_auto(&request, &recovery, hdr10_requested)
+            .await
+        {
+            Ok(Some((mut processed, candidate))) => {
+                if let Some(source) = source.as_ref() {
+                    // A distinct, strict processed-recipe check stays inside
+                    // the original create deadline. Ordinary catalog/advisory
+                    // allowances are never renewed by qualification.
+                    let advisory =
+                        crate::media_pool::create_stage_deadline(Duration::from_millis(500));
+                    let recovered = super::candidate_recovery::processed_candidate_admissible(
+                        &state,
+                        identity.as_ref(),
+                        source,
+                        &request.playback_id,
+                        &candidate,
+                        activation_predecessor.as_ref(),
+                        advisory,
+                    )
+                    .await;
+                    let link_admitted = link_receipts::processed_candidate_admissible(
+                        &state,
+                        identity.as_ref(),
+                        source,
+                        &candidate,
+                        advisory,
+                    )
+                    .await;
+                    let mut admitted = if recovered && link_admitted {
+                        vec![candidate.clone()]
+                    } else {
+                        Vec::new()
+                    };
+                    admitted = link_receipts::link_starved_catalog(
+                        network_prior.as_ref(),
+                        admitted,
+                        unix_ms(),
+                    );
+                    if let Some(receipt) = link_receipts::requested_receipt(&headers) {
+                        admitted = link_receipts::positive_catalog(
+                            &state,
+                            identity.as_ref(),
+                            source,
+                            Some(receipt),
+                            Some(&request.playback_id),
+                            admitted,
+                            None,
+                            advisory,
+                        )
+                        .await;
+                    }
+                    if admitted
+                        .iter()
+                        .any(|admitted| admitted.id == candidate.id && admitted.playable())
+                    {
+                        let context = processed.candidate_context.as_ref().ok_or_else(|| {
+                            ApiError::ServiceUnavailable("qualified HDR context missing".into())
+                        })?;
+                        if let Some(catalog) = quality_catalog.as_mut() {
+                            catalog
+                                .candidates
+                                .push(crate::media_pool::WorkerQualityCandidate {
+                                    node_id: state.node_id.clone(),
+                                    candidate: candidate.clone(),
+                                    binding: context.planning_binding.clone(),
+                                    partial: false,
+                                    dispatch_supported: true,
+                                });
+                        }
+                        processed.quality_catalog = quality_catalog
+                            .as_ref()
+                            .map(|catalog| Arc::new(catalog.clone()));
+                        height = i64::from(candidate.target_height);
+                        candidate_route = Some(candidate.route);
+                        link_source_binding = if let Some(identity) = identity.as_ref() {
+                            link_receipts::request_binding_until(
+                                identity,
+                                source,
+                                candidate.recipe_digest,
+                                candidate.route,
+                                advisory,
+                            )
+                            .await
+                        } else {
+                            None
+                        };
+                        request = processed;
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(reason) => tracing::warn!(target: "plurxd::http::hls", %reason,
+                "processed Auto qualification refused; retaining ordinary candidate"),
+        }
+        crate::media_pool::mark_create_phase("processed_qualification");
+    }
+
     let advertise_control = plurx_core::store::stored_switch(
         planning_snapshot
             .as_ref()
@@ -3321,116 +3543,6 @@ async fn create_with_purpose_inner(
     }
     let placement_deadline = crate::media_pool::create_stage_deadline(START_DEADLINE);
 
-    // Every activation is a predecessor CAS, including an ordinary start.
-    // Capturing the exact route before worker placement gives a
-    // commit-unknown reconciler the identity it must terminalize; allowing an
-    // unfenced last-writer-wins activation loses that identity after the
-    // pointer moves to the successor.
-    let activation_predecessor = state
-        .store
-        .media_session_route_for_playback(
-            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
-            &request.playback_id,
-        )
-        .await
-        .map_err(|error| session_store_error("reading the predecessor route", error))?;
-    // One mint for this start, bound here rather than called twice.
-    //
-    // `recovery_epoch_for` is not a pure function: with no predecessor it
-    // draws a fresh UUID, which is the whole point of it — a deliberate new
-    // play is a new budget, and `recovery_epoch_for`'s own test asserts that
-    // two calls with `None` differ. So calling it once for the session and
-    // again for the activation would give a new play two epochs: the live
-    // session would believe in one that exists in no durable row, and the
-    // next continuation would inherit the other and find it unspent. That is
-    // one automatic recovery per attempt against a file that cannot be
-    // decoded, which is the loop the budget exists to close.
-    //
-    // Bound above placement because the session that carries it is built by
-    // the task the placement loop spawns, 268 lines before the activation
-    // literal is reached. The only input is the predecessor route, already
-    // read above, so this costs one binding and no store read.
-    let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());
-    if activation_predecessor
-        .as_ref()
-        .is_some_and(|route| route.state == "active" && route.publication_ready_at_ms != 0)
-    {
-        return Err(ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "media_session_handoff_pending",
-            "the current session is still completing its predecessor handoff; retry shortly",
-        ));
-    }
-    // A seek storm asks for one session per destination. The control actor
-    // already knows which destination the client settled on, and the sequence
-    // on this request says where in that ordering this ask belongs -- so a
-    // restart for a target the viewer has since scrolled past can be refused
-    // before it spawns a producer.
-    //
-    // Refused, not deferred: waiting to see whether a newer exchange arrives
-    // would add latency to every honest seek, and the ordering is already
-    // decided. Only a strictly later exchange naming a different destination
-    // supersedes, so the honest seek arriving next is never the one skipped.
-    let settled_target = match activation_predecessor.as_ref() {
-        // No predecessor is a first play: there is no ordering for it to be
-        // stale against, and no session to ask.
-        Some(predecessor) => {
-            state
-                .transcode
-                .settled_target_for_session(&predecessor.session_id)
-                .await
-        }
-        None => None,
-    };
-    let admission = admit_restart(
-        settled_target,
-        request.control_sequence,
-        request.start_seconds,
-        activation_predecessor
-            .as_ref()
-            .map(|route| route.incarnation_id.as_str()),
-    )?;
-    let RestartAdmission {
-        expected_predecessor_incarnation_id,
-        fence_predecessor,
-    } = admission;
-    crate::media_pool::mark_create_phase("predecessor");
-    let pinned_owner = if let Some(previous_session_id) = request
-        .previous_session_id
-        .as_deref()
-        .filter(|value| uuid::Uuid::parse_str(value).is_ok())
-    {
-        if let Some(route) = activation_predecessor.as_ref() {
-            if route.session_id != previous_session_id
-                || route.principal.local_user_id() != Some(user.id)
-                || route.state != "active"
-                || route.lease_expires_at_ms <= unix_ms()
-            {
-                return Err(ApiError::typed(
-                    StatusCode::CONFLICT,
-                    "media_session_superseded",
-                    "the session being reopened is no longer current",
-                ));
-            }
-            Some(route.owner_node_id.clone())
-        } else if state
-            .transcode
-            .active_session_ids()
-            .await
-            .iter()
-            .any(|session_id| session_id == previous_session_id)
-        {
-            // A session created by the pre-P5 binary has no durable route.
-            // Its reopen state is nevertheless process-local, so pin that
-            // rolling-upgrade legacy predecessor to this node rather than
-            // ranking a peer that cannot possess it.
-            Some(state.node_id.clone())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
     let candidate_owner = request
         .candidate_context
         .as_ref()

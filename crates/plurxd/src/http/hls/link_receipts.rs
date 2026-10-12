@@ -1232,6 +1232,42 @@ pub(crate) async fn filter_catalog(
         .collect()
 }
 
+/// A new processed recipe cannot turn a timed-out negative read into a grant.
+/// This is the caller's reserved post-qualification stage, not a renewed
+/// ordinary advisory allowance.
+pub(crate) async fn processed_candidate_admissible(
+    state: &AppState,
+    network: Option<&NetworkIdentity>,
+    file: &MediaFile,
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+    deadline: tokio::time::Instant,
+) -> bool {
+    let Some(network) = network else {
+        return true;
+    };
+    let read = async {
+        let enabled = state
+            .store
+            .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+            .await
+            .map_err(|_| ())?
+            .is_some_and(|value| value.trim() == "1");
+        if !enabled {
+            return Ok::<_, ()>(true);
+        }
+        // Qualification may outlive the ordinary request-scoped advisory
+        // snapshot. Fence the source again before granting this new recipe.
+        let source = SourceLinkIdentity::capture(network, file).await.ok_or(())?;
+        let prior = state
+            .store
+            .candidate_link_prior(&source.candidate(candidate.recipe_digest, candidate.route))
+            .await
+            .map_err(|_| ())?;
+        Ok(!prior.is_some_and(|prior| prior.negative_active(crate::media_sessions::unix_ms())))
+    };
+    matches!(tokio::time::timeout_at(deadline, read).await, Ok(Ok(true)))
+}
+
 /// Public advisory projection from the exact existing local resolver. Remote
 /// worker responses remain strict and cannot supply private measured authority.
 pub(crate) async fn measured_outputs(
@@ -3494,6 +3530,30 @@ mod tests {
             filtered.len(),
             catalog.iter().filter(|&row| !same_recipe(row)).count(),
             "every candidate without a negative stays offered"
+        );
+
+        // A slow qualification has exhausted the ordinary allowance. Its
+        // reserved post-qualification read must still reject this exact
+        // recipe, and an exhausted reserved allowance must never grant it.
+        assert!(
+            !processed_candidate_admissible(
+                &state,
+                Some(&network),
+                &file,
+                &negative,
+                tokio::time::Instant::now() + Duration::from_millis(500),
+            )
+            .await
+        );
+        assert!(
+            !processed_candidate_admissible(
+                &state,
+                Some(&network),
+                &file,
+                &negative,
+                tokio::time::Instant::now() - Duration::from_secs(2),
+            )
+            .await
         );
 
         // No requester identity is Unknown, never a refusal.

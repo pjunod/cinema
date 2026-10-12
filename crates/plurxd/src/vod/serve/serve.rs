@@ -712,6 +712,11 @@ impl VodServe {
                     }
                     if let Some(rendition) = rendition {
                         rendition.detach_reader(&shared.pool, &id).await;
+                        if rendition.ephemeral_processing {
+                            shared
+                                .purge_if_dormant(&rendition.key, Duration::ZERO)
+                                .await;
+                        }
                         rendition.kick();
                         tracing::info!(
                             target: "plurxd::vodserve",
@@ -728,7 +733,7 @@ impl VodServe {
         // Purge un-admitted renditions dormant past their TTL. The collection
         // is only a cheap pre-filter; `purge_if_dormant` takes the exact-key
         // build gate and re-checks everything before its short map commit.
-        let dormant: Vec<String> = {
+        let dormant: Vec<(String, Duration)> = {
             let renditions = self.shared.renditions.lock().await;
             renditions
                 .values()
@@ -737,15 +742,25 @@ impl VodServe {
                         .dormant_since
                         .lock()
                         .expect("dormant lock")
-                        .is_some_and(|since| now.duration_since(since) > DORMANT_RENDITION_TTL)
+                        .is_some_and(|since| {
+                            rendition.ephemeral_processing
+                                || now.duration_since(since) > DORMANT_RENDITION_TTL
+                        })
                 })
-                .map(|rendition| rendition.key.clone())
+                .map(|rendition| {
+                    (
+                        rendition.key.clone(),
+                        if rendition.ephemeral_processing {
+                            Duration::ZERO
+                        } else {
+                            DORMANT_RENDITION_TTL
+                        },
+                    )
+                })
                 .collect()
         };
-        for key in dormant {
-            self.shared
-                .purge_if_dormant(&key, DORMANT_RENDITION_TTL)
-                .await;
+        for (key, ttl) in dormant {
+            self.shared.purge_if_dormant(&key, ttl).await;
         }
 
         // Kick every driver so holds and idle reclaims are re-examined.

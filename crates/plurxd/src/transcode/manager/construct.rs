@@ -82,6 +82,8 @@ impl TranscodeManager {
             candidate_production_proofs: Arc::new(
                 crate::vodencode::CandidateProductionProofs::default(),
             ),
+            #[cfg(target_os = "linux")]
+            processed_preparation_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             pipeline,
             encoder_override: None,
             admissions: Admissions::new(),

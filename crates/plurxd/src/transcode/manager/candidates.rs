@@ -1300,7 +1300,7 @@ impl TranscodeManager {
     }
 }
 
-fn encoded_client_compatible(
+pub(super) fn encoded_client_compatible(
     caps: &plurx_core::playback::DeviceCaps,
     plan: &ResolvedTranscode,
     facts: &DecodeFacts,

@@ -220,6 +220,12 @@ impl VodServe {
                 }
             }
             drop(sessions);
+            if rendition.ephemeral_processing {
+                serve
+                    .shared
+                    .purge_if_dormant(&rendition.key, Duration::ZERO)
+                    .await;
+            }
             // `TerminalCleanupGuard` publishes completion on drop. Release
             // the task's own heavyweight captures first so a waiter that
             // observes completion cannot still race this future's teardown.

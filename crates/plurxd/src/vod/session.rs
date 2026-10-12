@@ -12,6 +12,9 @@ pub(super) struct IdentityState {
 
 /// One live rendition: a directory, a manifest, a producer, and its readers.
 pub(super) struct Rendition {
+    /// A private processing actor, never a complete-output cache artifact.
+    /// Its plan and public candidate remain canonical across instances.
+    pub(super) ephemeral_processing: bool,
     pub(super) key: String,
     pub(super) dir: RenditionDir,
     pub(super) recipe: Recipe,

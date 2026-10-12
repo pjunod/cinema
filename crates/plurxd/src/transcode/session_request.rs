@@ -558,6 +558,27 @@ impl<T> PreparedCandidateOnce<T> {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl<T: Send + 'static> PreparedCandidateOnce<T> {
+    pub(crate) fn new(binding: [u8; 32], deadline: Instant, value: T) -> Arc<Self> {
+        let prepared = Arc::new(Self {
+            binding,
+            deadline,
+            value: std::sync::Mutex::new(Some(value)),
+        });
+        let expiry = Arc::downgrade(&prepared);
+        tokio::spawn(async move {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+            if let Some(prepared) = expiry.upgrade() {
+                if let Ok(mut value) = prepared.value.lock() {
+                    value.take();
+                }
+            }
+        });
+        prepared
+    }
+}
+
 /// Current ordinary source-owner selection, private to first preparation.
 /// An unavailable descriptor permits normal production, never cached acquisition.
 #[derive(Clone)]
@@ -1299,6 +1320,25 @@ pub(crate) fn continuous_test_candidate_context(
 #[cfg(test)]
 mod prepared_candidate_tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn prepared_candidate_timer_releases_unconsumed_credit_without_replay() {
+        let slot = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&slot).try_acquire_owned().expect("root credit");
+        let prepared =
+            PreparedCandidateOnce::new([1; 32], Instant::now() + Duration::from_millis(20), permit);
+        let cloned = Arc::clone(&prepared);
+        assert_eq!(slot.available_permits(), 0);
+        let returned = tokio::time::timeout(Duration::from_secs(1), slot.acquire())
+            .await
+            .expect("unconsumed expiry returns capacity")
+            .expect("open semaphore");
+        drop(returned);
+        assert!(prepared.take([1; 32]).is_err());
+        assert!(cloned.take([1; 32]).is_err());
+        assert_eq!(slot.available_permits(), 1);
+    }
 
     #[test]
     fn prepared_candidate_clones_can_consume_only_once() {

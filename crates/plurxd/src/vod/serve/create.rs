@@ -9,6 +9,18 @@ struct PreparedVodRecipe {
     incoming_logical: Option<crate::vodserve::retained_manifest::LogicalOutput>,
 }
 
+/// Private publication/storage identity; the canonical recipe remains the
+/// source of candidate identity and the stored full-title plan.
+fn processed_instance_key(canonical_key: &str, incarnation: &str, nonce: [u8; 16]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"plurx:processed-vod-instance:v1\0");
+    hash.update(canonical_key.as_bytes());
+    hash.update(incarnation.as_bytes());
+    hash.update(crate::ffmpeg::encoded_process_identity().as_bytes());
+    hash.update(nonce);
+    hex::encode(hash.finalize())
+}
+
 impl VodServe {
     /// Finite background obligation in the existing rendition driver. This
     /// never registers a session, reader, wait-pool demand or synthetic GET.
@@ -440,16 +452,29 @@ impl VodServe {
             .prepare_recipe(prepared, file, settings, viewer)
             .await?;
         let canonical_key = rendition_key(&recipe, &identity);
-        let key = private_preparation.as_ref().map_or_else(
-            || canonical_key.clone(),
-            |nonce| {
-                let mut hash = Sha256::new();
-                hash.update(b"plurx:private-copy-preparation-incarnation:v1\0");
-                hash.update(canonical_key.as_bytes());
-                hash.update(nonce.nonce.as_bytes());
-                hex::encode(hash.finalize())
-            },
-        );
+        let processing_instance = prepared
+            .root_admission
+            .as_ref()
+            .and_then(|admission| admission.instance_nonce);
+        let key = if let Some(nonce) = processing_instance {
+            let incarnation = prepared
+                .request
+                .request_id
+                .as_deref()
+                .ok_or("processed instance requires admitted incarnation")?;
+            processed_instance_key(&canonical_key, incarnation, nonce)
+        } else {
+            private_preparation.as_ref().map_or_else(
+                || canonical_key.clone(),
+                |nonce| {
+                    let mut hash = Sha256::new();
+                    hash.update(b"plurx:private-copy-preparation-incarnation:v1\0");
+                    hash.update(canonical_key.as_bytes());
+                    hash.update(nonce.nonce.as_bytes());
+                    hex::encode(hash.finalize())
+                },
+            )
+        };
         let attachment = self
             .shared
             .attach_rendition_with_storage(
@@ -460,6 +485,7 @@ impl VodServe {
                 duration_ms,
                 settings,
                 private_preparation,
+                processing_instance.map(|_| canonical_key.as_str()),
             )
             .await?
             .ok_or_else(|| {
@@ -1250,8 +1276,10 @@ impl VodServe {
             .transpose()?;
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
-        let retained_output = self
-            .capture_retained_output(
+        let retained_output = if rendition.ephemeral_processing {
+            None
+        } else {
+            self.capture_retained_output(
                 prepared.retained_capture,
                 &rendition,
                 &incoming_logical,
@@ -1259,7 +1287,8 @@ impl VodServe {
                 file,
                 continuous,
             )
-            .await?;
+            .await?
+        };
         let marker_destinations = stored_marker_destinations(
             self.shared.store.as_ref(),
             file,
@@ -2590,6 +2619,7 @@ impl VodServe {
                 duration_ms,
                 settings,
                 None,
+                None,
             )
             .await?
             .ok_or_else(|| {
@@ -2651,6 +2681,32 @@ mod principal_demand_tests {
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
     use plurx_core::playback_principal::PlaybackPrincipal;
     use plurx_core::store::SqliteStore;
+
+    #[test]
+    fn processed_instance_storage_is_frozen_per_admission_and_separate_from_recipe() {
+        let canonical = "a".repeat(64);
+        let first = processed_instance_key(&canonical, "incarnation-a", [1; 16]);
+        assert_eq!(first.len(), 64);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(
+            first,
+            processed_instance_key(&canonical, "incarnation-a", [1; 16]),
+            "retry of one admitted preparation keeps its private storage"
+        );
+        assert_ne!(first, canonical, "canonical recipe remains separate");
+        assert_ne!(
+            first,
+            processed_instance_key(&canonical, "incarnation-a", [2; 16])
+        );
+        assert_ne!(
+            first,
+            processed_instance_key(&canonical, "incarnation-b", [1; 16])
+        );
+        assert_ne!(
+            first,
+            processed_instance_key(&"b".repeat(64), "incarnation-a", [1; 16])
+        );
+    }
 
     #[tokio::test]
     async fn shared_vod_demand_refuses_before_pool_queue_or_session_allocation() {

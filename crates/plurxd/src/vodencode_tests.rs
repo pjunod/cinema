@@ -1943,7 +1943,7 @@ async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_sub
     req.kind = SessionKind::Transcode { height: encoding.options.target_height };
     let attribution = VodAttribution { user_name: "user", item_title: "prepared root", supersession_user: "user" };
     let attach = |admitted_encoding: Arc<crate::vodencode::Encoding>, permit| VodRecipeRequest {
-        root_admission: Some(PreparedRootAdmission { encoding: admitted_encoding, permit }),
+        root_admission: Some(PreparedRootAdmission { instance_nonce: None, encoding: admitted_encoding, permit }),
         request: &req, encoding: Some(Arc::clone(&encoding)),
         measured_candidate: None, retained_capture: RetainedOutputCapture::New,
         soundtrack: None, companion: None,

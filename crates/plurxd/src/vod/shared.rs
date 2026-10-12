@@ -347,6 +347,7 @@ impl Shared {
             duration_ms,
             settings,
             None,
+            None,
         )
         .await
     }
@@ -361,6 +362,7 @@ impl Shared {
         duration_ms: i64,
         settings: &VodSettings,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+        canonical_processing_key: Option<&str>,
     ) -> Result<Option<RenditionAttachment>, String> {
         if let Some(storage) = private_storage.as_ref() {
             storage.bind(key)?;
@@ -376,6 +378,7 @@ impl Shared {
         let key = key.to_owned();
         let identity = identity.clone();
         let settings = settings.clone();
+        let canonical_processing_key = canonical_processing_key.map(str::to_owned);
         let result_rx = spawn_cancellation_independent(async move {
             shared
                 .attach_rendition_owned(
@@ -387,6 +390,7 @@ impl Shared {
                     settings,
                     build_guard,
                     private_storage,
+                    canonical_processing_key,
                 )
                 .await
         });
@@ -406,6 +410,7 @@ impl Shared {
         settings: VodSettings,
         build_guard: tokio::sync::OwnedMutexGuard<()>,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+        canonical_processing_key: Option<String>,
     ) -> Result<Option<RenditionAttachment>, String> {
         let key = key.as_str();
         // Single-flight only this key. No Store, filesystem, process, manifest,
@@ -474,7 +479,13 @@ impl Shared {
 
         let phase_started = Instant::now();
         let plan = self
-            .stored_plan(key, &identity, &index, &recipe, duration_ms)
+            .stored_plan(
+                canonical_processing_key.as_deref().unwrap_or(key),
+                &identity,
+                &index,
+                &recipe,
+                duration_ms,
+            )
             .await?;
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
             phase = "stored_plan", elapsed_ms = phase_started.elapsed().as_millis(),
@@ -491,6 +502,7 @@ impl Shared {
                 plan,
                 &settings,
                 private_storage.clone(),
+                canonical_processing_key.is_some(),
             )
             .await?;
         tracing::debug!(target: "plurxd::vodserve", rendition = %key,
@@ -511,6 +523,14 @@ impl Shared {
             }
         };
         if installed {
+            if rendition.ephemeral_processing {
+                let shared = Arc::clone(self);
+                let key = key.to_owned();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    shared.purge_if_dormant(&key, Duration::ZERO).await;
+                });
+            }
             if let Some(storage) = private_storage.as_ref() {
                 storage.installed(&rendition);
             }
@@ -606,7 +626,7 @@ impl Shared {
         plan: SegmentPlan,
         settings: &VodSettings,
     ) -> Result<Arc<Rendition>, String> {
-        self.build_rendition_with_storage(key, index, recipe, plan, settings, None)
+        self.build_rendition_with_storage(key, index, recipe, plan, settings, None, false)
             .await
     }
 
@@ -619,6 +639,7 @@ impl Shared {
         plan: SegmentPlan,
         settings: &VodSettings,
         private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+        ephemeral_processing: bool,
     ) -> Result<Arc<Rendition>, String> {
         let source = if key.starts_with("source-") {
             crate::fragment_index_cluster::open_source_playback_fence(
@@ -854,6 +875,7 @@ impl Shared {
         };
         let plan_len = plan.len();
         let rendition = Arc::new(Rendition {
+            ephemeral_processing,
             key: key.to_string(),
             dir,
             recipe,
@@ -916,7 +938,10 @@ impl Shared {
         rendition: &Rendition,
         manifest: &mut Manifest,
     ) {
-        if rendition.private_storage.is_some() || manifest.is_admitted() {
+        if rendition.ephemeral_processing
+            || rendition.private_storage.is_some()
+            || manifest.is_admitted()
+        {
             return;
         }
         let budgets = Budgets {
@@ -1017,13 +1042,15 @@ impl Shared {
         if !dormant {
             return;
         }
-        match self.store.quality_reserved_intervals(key).await {
-            Ok(intervals) if intervals.is_empty() => {}
-            Ok(_) => return,
-            Err(error) => {
-                tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+        if !rendition.ephemeral_processing {
+            match self.store.quality_reserved_intervals(key).await {
+                Ok(intervals) if intervals.is_empty() => {}
+                Ok(_) => return,
+                Err(error) => {
+                    tracing::warn!(target: "plurxd::vodserve", rendition = %key,
                     %error, "retaining dormant media with unknown continuous dependencies");
-                return;
+                    return;
+                }
             }
         }
         // Keep the manifest fence through the short exact map removal. That
@@ -1084,6 +1111,9 @@ impl Shared {
                 }
             }
             let _ = tokio::fs::remove_file(rendition.identity_path()).await;
+            if rendition.ephemeral_processing {
+                let _ = tokio::fs::remove_dir_all(rendition.dir.path()).await;
+            }
             rendition.kick();
             // Freed bytes are node-wide news (see `try_admit`).
             shared.kick_all();

@@ -841,6 +841,9 @@ impl RetainedArtifactRegistry {
     /// next maintenance tick offers it again. Only a reservation that cannot
     /// ever fit this rendition's own completed output fails its preparation.
     pub(super) fn offer(shared: &Arc<Shared>, rendition: &Arc<Rendition>) -> bool {
+        if rendition.ephemeral_processing {
+            return false;
+        }
         if rendition.private_storage.is_some() && rendition.preparation().is_none() {
             return false;
         }

@@ -881,6 +881,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
     dir.create().await.expect("create rendition dir");
     let plan_len = plan.len();
     Arc::new(Rendition {
+        ephemeral_processing: false,
         key: "synthetic-rendition".to_string(),
         dir,
         recipe: Recipe {

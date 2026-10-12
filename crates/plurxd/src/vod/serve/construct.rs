@@ -144,6 +144,7 @@ impl VodServe {
         dir.create().await.expect("create HTTP VOD test rendition");
         let plan_len = plan.len();
         let rendition = Arc::new(Rendition {
+            ephemeral_processing: false,
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {

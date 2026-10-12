@@ -631,6 +631,43 @@ impl RuntimeRecipe {
         ),
         String,
     > {
+        self.execute_until(
+            file,
+            plan,
+            options,
+            grid,
+            entry,
+            encoder,
+            admission,
+            producer,
+            cancel,
+            registration_hook,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn execute_until(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+        options: &plurx_core::transcode::TranscodeOptions,
+        grid: plurx_core::transcode::VodFrameGrid,
+        entry: &plurx_core::segplan::PlanEntry,
+        encoder: &Path,
+        admission: crate::dv_segment::SegmentAdmission,
+        producer: Arc<crate::prodrun::ProducerSlot>,
+        cancel: tokio_util::sync::CancellationToken,
+        registration_hook: Option<RegistrationHook>,
+        absolute_deadline: Option<tokio::time::Instant>,
+    ) -> Result<
+        (
+            VerifiedWindow,
+            plurx_core::transcode::dv_processing::DvProcessingPlan,
+        ),
+        String,
+    > {
         if episode_failed(&self.failure_episode) {
             return Err(
                 "DV processing previously failed for this playback/source/settings/backend".into(),
@@ -699,6 +736,7 @@ impl RuntimeRecipe {
             )
             .map_err(str::to_owned)?;
             let deadline = crate::media_pool::create_stage_deadline(self.preparation_budget);
+            let deadline = absolute_deadline.map_or(deadline, |absolute| deadline.min(absolute));
             let mut renderer_env = self.tools.renderer_env.clone();
             renderer_env.extend([
                 (
