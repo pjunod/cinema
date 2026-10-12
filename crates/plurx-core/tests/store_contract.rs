@@ -751,6 +751,8 @@ const COORDINATION_METHODS: &[&str] = &[
 const MEDIA_SESSION_METHODS: &[&str] = &[
     // `first_preparation_output_seal_is_exact_and_idempotent_on_every_backend`.
     "seal_prepared_output",
+    // Same scenario: the complete seal is confirmed by a read, not a replay.
+    "prepared_output_sealed",
     "observe_candidate_recovery",
     "candidate_recovery_memory",
     "record_desired_selection",
@@ -2525,6 +2527,41 @@ async fn first_preparation_output_seal_is_exact_and_idempotent_on_every_backend(
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: replay: {error}")),
             "{backend}: the identical seal replays"
+        );
+        let complete = plurx_core::store::PreparedOutputSeal {
+            expected_recipe_json: sealed.recipe_json.clone(),
+            expected_response_json: sealed.response_json.clone(),
+            already_complete: true,
+            ..seal.clone()
+        };
+        assert!(
+            store
+                .prepared_output_sealed(&complete)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: sealed read: {error}")),
+            "{backend}: the complete seal is confirmed by a read"
+        );
+        let mut moved = complete.clone();
+        moved.owner_epoch = 2;
+        assert!(
+            !store
+                .prepared_output_sealed(&moved)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: moved read: {error}")),
+            "{backend}: a read under another owner epoch is not sealed"
+        );
+        let mut other_predecessor = complete.clone();
+        other_predecessor.predecessor_owner_epoch = complete.predecessor_owner_epoch + 1;
+        assert!(
+            !store
+                .prepared_output_sealed(&other_predecessor)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: predecessor read: {error}")),
+            "{backend}: a read fenced on another predecessor epoch is not sealed"
+        );
+        assert!(
+            store.prepared_output_sealed(&seal).await.is_err(),
+            "{backend}: only a complete seal can be confirmed by a read"
         );
         let mut changed = seal.clone();
         changed.retained_output = Some(serde_json::json!({
@@ -19607,7 +19644,11 @@ fn contract_inventory_matches_every_store_method() {
     // `publish_transcription_job` (6fae0a350) in `BACKGROUND_JOB_METHODS` and
     // `seal_prepared_output` (265bc560a) in `MEDIA_SESSION_METHODS`.
     // No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 485, "review the Store method count");
+    // +1: `prepared_output_sealed` in `MEDIA_SESSION_METHODS`, the consistent
+    // read that confirms a complete seal under `seal_prepared_output`'s own
+    // predicate, covered by the same both-backend seal scenario.
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 486, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
