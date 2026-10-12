@@ -29,6 +29,7 @@ mod decode_facts;
 mod decoder_health;
 mod delivery;
 mod diagnostics;
+mod diagnostics_delivery;
 mod dv_disk;
 #[cfg(unix)]
 mod dv_segment;
@@ -3178,7 +3179,7 @@ fn build_state(
     system: SystemInfo,
     logs: logbuf::LogBuffers,
 ) -> AppState {
-    AppState::new_configured(
+    let state = AppState::new_configured(
         crate::state::AppConfig {
             sharing_network: config.sharing.clone(),
             server_name: config.server.name.clone(),
@@ -3207,7 +3208,10 @@ fn build_state(
         encoder_caps,
         system,
         logs,
-    )
+    );
+    crate::telemetry::diagnostics(Arc::clone(&state.store))
+        .configure_publisher(config.support.clone());
+    state
 }
 
 /// Every loop that has to keep running whether or not a request arrives.

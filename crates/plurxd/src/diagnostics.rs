@@ -25,7 +25,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -81,10 +81,12 @@ pub(crate) struct Recorder {
     dropped: AtomicU64,
     history: Mutex<History>,
     jobs: Mutex<Jobs>,
+    publisher: OnceLock<crate::diagnostics_delivery::Publisher>,
 }
 impl Default for Recorder {
     fn default() -> Self {
         Self {
+            publisher: OnceLock::new(),
             run: uuid::Uuid::new_v4().to_string(),
             started: Instant::now(),
             sequence: AtomicU64::new(0),
@@ -116,6 +118,14 @@ fn date(at: i64) -> String {
 }
 
 impl Recorder {
+    pub(crate) fn configure_publisher(&self, config: plurx_core::config::SupportConfig) {
+        let _ = self
+            .publisher
+            .set(crate::diagnostics_delivery::Publisher::new(config));
+    }
+    pub(crate) fn publisher(&self) -> Option<&crate::diagnostics_delivery::Publisher> {
+        self.publisher.get()
+    }
     pub(crate) fn observe(&self, raw: &PlaybackEvent) {
         let Some(user) = raw.user_id.filter(|id| *id > 0) else {
             return;
@@ -373,9 +383,14 @@ pub(crate) fn eligible(method: &Method, path: &str) -> bool {
             && (method == Method::GET || method == Method::DELETE))
         || (path == PEER_PATH && method == Method::POST)
 }
-async fn capabilities() -> Response {
+async fn capabilities(State(state): State<AppState>) -> Response {
+    let recorder = crate::telemetry::diagnostics(Arc::clone(&state.store));
+    let support = recorder
+        .publisher()
+        .map(|p| p.capabilities())
+        .unwrap_or_else(|| serde_json::json!({"configured":false}));
     private(Json(
-        serde_json::json!({"version":VERSION,"snapshots":true,"max_window_ms":600000,"support_delivery":"configured_separately"}),
+        serde_json::json!({"version":VERSION,"snapshots":true,"max_window_ms":600000,"support":support}),
     ))
 }
 async fn create(

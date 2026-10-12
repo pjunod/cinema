@@ -2259,6 +2259,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/v1", api)
         .merge(remote::router())
         .merge(crate::diagnostics::router())
+        .merge(crate::diagnostics_delivery::router())
         .merge(jellyfin_json)
         .merge(plex_routes)
         .merge(public_short)
@@ -2440,7 +2441,10 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
 /// admitted only through the existing serving fence, so a learner also needs
 /// a fresh quorum/apply proof before any node-local work starts.
 fn learner_route_eligible(method: &Method, path: &str) -> bool {
-    if remote::eligible(method, path) || crate::diagnostics::eligible(method, path) {
+    if remote::eligible(method, path)
+        || crate::diagnostics::eligible(method, path)
+        || crate::diagnostics_delivery::eligible(method, path)
+    {
         return true;
     }
     if method == Method::GET

@@ -639,6 +639,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [PROJECT-BACKLOG.md](features/PROJECT-BACKLOG.md) | Cross-project to-do: designed but unbuilt work, remaining acceptance, reconciliations and deferred decisions. | live |
 | [REMOTE-DIAGNOSTICS-IMPLEMENTATION.md](features/REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) | First-release build contract for web, Apple and Android diagnostic capture, user-scoped server evidence, TV phone handoff and the independent upload inbox. | open |
 | [REMOTE-DIAGNOSTICS-STATUS.md](features/REMOTE-DIAGNOSTICS-STATUS.md) | Canonical ownership, packet progress, software/device evidence and promotion ledger for remote diagnostics. | open |
+| [REMOTE-DIAGNOSTICS-OPERATIONS.md](server/REMOTE-DIAGNOSTICS-OPERATIONS.md) | Build and operate the independent support ingress, passkey inbox, private storage, quotas and restore fences; deployment/device acceptance remains open. | open |
 | [SHARED-LIBRARIES-DESIGN.md](features/SHARED-LIBRARIES-DESIGN.md) | Why Cinema shares selected libraries over private Tailscale; scope and deferred Plex/Watch Together work. | open |
 | [SHARED-LIBRARIES-IMPLEMENTATION.md](features/SHARED-LIBRARIES-IMPLEMENTATION.md) | Revised S0–S8 build contract, authority, deployment, playback integration and acceptance evidence. | open |
 | [SHARED-LIBRARIES-STATUS.md](features/SHARED-LIBRARIES-STATUS.md) | Shared-libraries integration, live promotion evidence, failed-only qualification and remaining acceptance. | open |
