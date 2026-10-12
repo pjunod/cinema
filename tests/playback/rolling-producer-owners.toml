@@ -4528,7 +4528,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and their joined futures; cancellation drops it. The full request-chain
 # regression keeps one real ReceiverGuard credit. No production timer,
 # detached task, process or longer input deadline is introduced.
-expected_occurrences = 1735
+# PR #1038 HEVC catalog parity: +2 cfg(test)-only timeout bounds in
+# transcode/manager/candidates.rs. The slow probe regression owns both
+# catalog futures directly: one checks progress before the two-second bound,
+# and one checks selected-remux restoration bypasses scan refinement.
+# No new task-spawn or detachment site is introduced. Existing collection
+# cleanup can outlive the timed-out waiter and retains child/source ownership
+# until kill-and-reap finishes. Production retains the catalog deadline
+# captured at request entry.
+expected_occurrences = 1737
+
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
