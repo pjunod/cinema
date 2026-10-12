@@ -1937,22 +1937,30 @@ impl TranscodeManager {
                     } else { plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu };
                     let preparation_budget = self.vod_settings(req).await?
                         .ok_or("DV processing requires the VOD preparation budget")?.block_budget;
-                    let worker_encoder = self.encoder_for_preference(planning.settings.get(keys::HWACCEL).map(String::as_str).unwrap_or(""));
-                    let processed_encoder = if worker_encoder == Encoder::Nvenc { Encoder::Nvenc } else { Encoder::Software };
-                    let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
-                        source_tick, native_bl, source_clock, preferences,
-                        destination, mode, encoder: processed_encoder, runtime_cache: self.runtime_cache.clone(), prepared: std::sync::Mutex::new(None), failure_episode, preparation_budget,
-                        report_revision: std::sync::atomic::AtomicU64::new(0),
-                        published_receipt: std::sync::Mutex::new(None) };
                     let mut processed_options = retained.1.clone();
                     processed_options.pipeline = self.live_lookup_options(self.rate_control_snapshot(),
                         Encoder::Software, file, target_height, 0.0, req.audio_index, None, Some(1),
                         OutputGrade::Hdr10).pipeline;
                     processed_options.software_threads = Some(1);
-                    let held = runtime.source.handle.try_clone().map(Arc::new).map_err(|e| e.to_string())?;
+                    let held = source.handle.try_clone().map(Arc::new).map_err(|e| e.to_string())?;
                     let processed_plan = self.resolve_vod_movie_plan(file, &processed_options, Encoder::Software, held).await?;
+                    let worker_encoder = self.encoder_for_preference(planning.settings.get(keys::HWACCEL).map(String::as_str).unwrap_or(""));
+                    let processed_encoder = crate::vodencode::dv_runtime::completed_window_encoder(
+                        worker_encoder, self.hdr10_passthrough_vaapi, &processed_plan, grid);
+                    let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
+                        source_tick, native_bl, source_clock, preferences,
+                        destination, mode, encoder: processed_encoder,
+                        vaapi_hdr_policy: (processed_encoder == Encoder::Vaapi).then_some(self.caps.vaapi_hdr_policy).flatten(),
+                        runtime_cache: self.runtime_cache.clone(),
+                        shader_cache: Arc::new(tempfile::Builder::new().prefix("dv-shader-cache-")
+                            .tempdir_in(&self.runtime_cache).map_err(|e| e.to_string())?),
+                        prepared: std::sync::Mutex::new(None), failure_episode, preparation_budget,
+                        report_revision: std::sync::atomic::AtomicU64::new(0),
+                        published_receipt: std::sync::Mutex::new(None) };
+                    let helper_threads = crate::dv_segment::streaming_helper_cpu_threads(mode);
                     let processed_resources = TranscodeResourceEstimate { hardware_slot: true,
-                        cpu_threads: if processed_plan.options().input_has_audio { 7 } else { 5 }, decoder_threads: Some(1) };
+                        cpu_threads: helper_threads + if processed_plan.options().input_has_audio { 5 } else { 3 },
+                        decoder_threads: Some(crate::dv_segment::STREAMING_DECODER_THREADS) };
                     let bundle = crate::vodencode::admit_frozen_preparation(&self.admissions,
                         self.max_hw_sessions().await, self.software_budget().await, &processed_resources,
                         Some(1), Instant::now() + crate::admission::QUEUE_WAIT).await

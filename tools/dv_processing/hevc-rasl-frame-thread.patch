@@ -1,0 +1,17 @@
+--- a/libavcodec/hevc/hevcdec.c
++++ b/libavcodec/hevc/hevcdec.c
+@@ -3532,0 +3533,9 @@ static int decode_slice(HEVCContext *s, unsigned nal_idx, GetBitContext *gb)
++    // Suppressed leading pictures have no current-picture PPS binding on a
++    // fresh frame worker. Skip every RASL slice before consulting that binding,
++    // preserving the decoder's existing no-output decision after a CRA seek.
++    if ((s->nal_unit_type == HEVC_NAL_RASL_R || s->nal_unit_type == HEVC_NAL_RASL_N) &&
++        s->no_rasl_output_flag) {
++        s->slice_initialized = 0;
++        return 0;
++    }
++
+@@ -3544,3 +3553 @@ static int decode_slice(HEVCContext *s, unsigned nal_idx, GetBitContext *gb)
+-        (s->avctx->skip_frame >= AVDISCARD_NONKEY && !IS_IRAP(s)) ||
+-        ((s->nal_unit_type == HEVC_NAL_RASL_R || s->nal_unit_type == HEVC_NAL_RASL_N) &&
+-         s->no_rasl_output_flag)) {
++        (s->avctx->skip_frame >= AVDISCARD_NONKEY && !IS_IRAP(s))) {

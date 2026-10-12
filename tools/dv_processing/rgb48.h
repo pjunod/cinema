@@ -10,6 +10,35 @@
 #include <emmintrin.h>
 #endif
 
+// Keep the native float upload identical to scalar division, including the
+// active rounding mode. Integer storage normalization can change FEL's exact
+// zero residual. A per-call table computes each code with the current rounding
+// mode once, then uploads those exact binary32 values without per-pixel division.
+static inline bool dv_unpack_10bit_plane(const uint16_t *input, size_t count,
+                                        float *output) {
+  float normalized[1024];
+  for (unsigned code = 0; code < 1024; code++)
+    normalized[code] = code / 1023.0f;
+  size_t at = 0;
+#if defined(__SSE2__)
+  const __m128i zero = _mm_setzero_si128();
+  const __m128i outside = _mm_set1_epi16((short)0xfc00);
+  for (; count - at >= 8; at += 8) {
+    __m128i codes = _mm_loadu_si128((const __m128i *)(input + at));
+    if (_mm_movemask_epi8(_mm_cmpeq_epi16(_mm_and_si128(codes, outside), zero)) != 0xffff)
+      return false;
+    for (size_t lane = 0; lane < 8; lane++)
+      output[at + lane] = normalized[input[at + lane]];
+  }
+#endif
+  for (; at < count; at++) {
+    if (input[at] > 1023)
+      return false;
+    output[at] = normalized[input[at]];
+  }
+  return true;
+}
+
 // The caller validates finite input before conversion. Preserve lrintf's
 // rounding mode without paying for general NaN-aware fminf/fmaxf calls.
 static inline uint16_t dv_pack_finite_rgb48(float value) {
