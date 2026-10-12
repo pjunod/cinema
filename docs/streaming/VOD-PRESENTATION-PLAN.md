@@ -1300,8 +1300,9 @@ real titles including a Dolby Vision title and one with an A/V offset.
 
 ## 13. F1/N2 copy-landing repair — source proof, not device acceptance
 
-**Status:** source committed as `925d18f93`; 22 focused passes and review
-clear; current-main integration qualification and PR gate remain required ·
+**Status:** [PR #1041](http://forge.lan:3000/noirr/plurx/pulls/1041), draft;
+source `925d18f93`, current-main composition `ba023d773`; 22 focused passes,
+sole review and current-base compiler/static/hooks clear; PR gate owed ·
 **Date:** 2026-10-12 · **Owner:**
 `none:openai:2026-10-12`,
 `codex://threads/01a0c165-d718-73a1-93e9-e81380017705` · **Branch:**
@@ -1325,8 +1326,8 @@ the newer index-demand test rather than replacing its file.
 | Source and child custody | Each probe independently reopens the held source descriptor, retains the existing 5 s / 64 KiB cancellable collector and awaited reap, and caches only a successful origin for that rendition. There is no new periodic task, setting or enablement gate. |
 
 The sole independent reviewer (`gpt-6.1-sol/high`,
-`agent:/root/anilist_retry_review_sol61`) cleared the corrected source;
-documentation and ownership counts are a subsequent explicit review step.
+`agent:/root/anilist_retry_review_sol61`) cleared the corrected source,
+formatted source/ownership/docs and actual current-main composition.
 Pinned Rust 1.97.1 was verified and the workspace/all-targets baseline passed
 before porting. The wrong `--lib` target and an obsolete `vod::tests` selector
 were command diagnostics, not test failures or passes. Actual tests use
@@ -1351,9 +1352,11 @@ source files remain byte-identical to the final reviewed manifest
 `c566bcdaf87ca2e6fb308852250e39e6778c42353887bedeec29a422693f6004`.
 The actual current-main workspace/all-targets check passed on pinned
 Rust 1.97.1 in 1 min 7 s. Twenty current-input documentation/infrastructure
-and changed module-census checks passed. Normal current-tree hooks and the
-configured PR fast lane remain required; no source pass is substituted for
-them.
+and changed module-census checks passed. Normal current-tree hooks passed
+strict workspace/all-targets Clippy in 1 min 24 s, format, catalog and all
+86 served scripts. Draft #1041 opened at 23:33 UTC; this tracking-only commit
+changes no Rust input. Current-head configured PR fast lane and landing
+remain required; no source pass is substituted for them.
 
 This repairs the two source defects; it does not qualify the physical client
 matrix, every source family, original M0 real-title corpus or fleet rollout.

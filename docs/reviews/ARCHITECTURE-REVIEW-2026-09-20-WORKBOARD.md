@@ -66,7 +66,11 @@ with its index/backlog pointers. This is not a new claim on another session's
 whole plan. Original Claude author/WIP and newer main tests are preserved.
 The actual audio-leading negative reproduced before the shared-zero fix;
 focused corrected source tests and the sole adversarial source review pass.
-Current-base compiler/static/hook/fast-lane evidence and landing remain owed.
+Draft [#1041](http://forge.lan:3000/noirr/plurx/pulls/1041) opened 23:33 UTC
+on current-main composition `ba023d773`. All 22 declared regression IDs,
+current-base pinned compiler/static/normal hooks and sole review pass;
+current-head fast lane and landing remain owed. Rust inputs are unchanged
+by the tracking-only claim commit, so applicable passes are retained.
 Four bounded closures / 45 acceptance-open remain unchanged. No deployment,
 physical-device action, sampler interruption or production fault campaign.
 
