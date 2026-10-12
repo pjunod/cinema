@@ -429,7 +429,7 @@ def main():
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(proof, sort_keys=True) + '\n')
     print('retained_units=' + json.dumps(proof, separators=(',', ':')))
-    for lane in (*sorted(LANES), 'windows_compile'):
+    for lane in sorted(LANES):
         print('retain_' + lane + '=' + str(lane in proof['lanes']).lower())
 
 

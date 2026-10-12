@@ -38,7 +38,7 @@ class ManualQualificationBindingCase(unittest.TestCase):
         self.assertEqual(receipt["binding_mode"], "authenticated-manual-promotion")
         self.assertEqual(receipt["pull_request"], 42)
         self.assertEqual(receipt["head_ref"], "integration/project-into-main")
-        self.assertIn("windows_compile", receipt["jobs"])
+        self.assertNotIn("windows_compile", receipt["jobs"])
         # Production resolver reads authenticated PR and BOTH branch tips each time.
         def fetch(_environment, path):
             if path == "/pulls/42":
@@ -81,10 +81,10 @@ class ManualQualificationBindingCase(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(q.QualificationError):
                 q.manual_binding(altered, pr, head, base, head, True)
         for outcome in ("skipped", "failure", "cancelled"):
-            altered = dict(results); altered["windows_compile"] = outcome
+            altered = dict(results); altered["rust"] = outcome
             with self.subTest(outcome=outcome), self.assertRaises(q.QualificationError):
                 q.build_receipt(environment, altered, head, "c" * 40)
-        altered = dict(results); del altered["windows_compile"]
+        altered = dict(results); del altered["rust"]
         with self.assertRaises(q.QualificationError):
             q.build_receipt(environment, altered, head, "c" * 40)
         # Final CLI refuses API drift even when all supplied job results are green.
@@ -108,7 +108,7 @@ class ManualQualificationBindingCase(unittest.TestCase):
         self.assertIn("scope_event=effort_qualification", workflow)
         self.assertIn('VALIDATION_BASE="$BOUND_BASE_SHA"', workflow)
         self.assertIn('test "$(git rev-parse "origin/$BASE_REF")" = "$BOUND_BASE_SHA"', workflow)
-        self.assertIn('"windows_compile":"${{ needs.windows_compile.result }}"', workflow)
+        self.assertNotIn("needs.windows_compile", workflow)
         publish = workflow.split("  publish:\n", 1)[1].split("  publish_main:\n", 1)[0]
         self.assertIn("startsWith(github.ref, 'refs/tags/v')", publish)
         for field in ("promotion_pr", "promotion_head_sha", "promotion_base_sha"):
