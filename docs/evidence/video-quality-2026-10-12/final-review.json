@@ -16,7 +16,13 @@
     "No physical display fidelity or audio synchronization claim.",
     "No shipping native UI, broad codec performance or general real-time throughput claim."
   ],
-  "housekeeping": "Updated completed client cleanup wording and manifests after review; no production change.",
-  "tests": "No tests executed by reviewer. Coordinator runs focused regressions and fast lane after this review; PR #1034 records per-check results and landing.",
-  "cleanup": "All owned remote/container/device/browser runtime resources closed. Client scratch removed. Coordinator clones and build/diagnostic archives are removed after landing, with final confirmation in PR #1034."
+  "housekeeping": "Documentation, cleanup wording/manifests and the two reviewed historical errata rows only; no production change after the full review.",
+  "tests": "Coordinator focused-regressions.json records all11 regressions passing on first attempts after review; fast-lane receipts and landing remain in PR #1034.",
+  "cleanup": "All owned remote/container/device/browser runtime resources closed. Client scratch removed. Coordinator clones and build/diagnostic archives are removed after landing, with final confirmation in PR #1034.",
+  "postreview_history_metadata": {
+    "failure": "Fast lane4871 stopped before test suites at history-check: corrective commits71e4f711 and a8018a6d reached main through a merge subject lacking a PR number.",
+    "repair": "Two explicit permanent errata rows; original regression anchor verified in both commits and immutable merge tree. Audit code, boundary, future fields and production code unchanged.",
+    "targeted_review": "Same independent reviewer approved only the eight-line metadata repair after verifying ancestry, messages and regression definition. No second full review or fresh historical test pass claimed.",
+    "verification": "Only failed history-check is retried; PR #1034 records the result and subsequent unrun checks."
+  }
 }

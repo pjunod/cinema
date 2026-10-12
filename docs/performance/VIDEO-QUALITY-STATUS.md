@@ -64,9 +64,14 @@ not establish which route played.
 
 The [final review receipt](../evidence/video-quality-2026-10-12/final-review.json)
 records the independent approval of `61f3229af`, including source identity and
-raw observation checks. Only documentation and cleanup wording changed afterward.
-The PR owns the subsequent per-check qualification and landing receipts so
-successful tests are not rerun merely to update this ledger.
+raw observation checks. Only documentation, cleanup wording and two reviewed historical audit errata
+changed afterward; production code remains identical. The first fast lane stopped
+before its suites because an earlier remote-playback merge lacked a PR number.
+The errata retain its existing regression reference without rewriting history.
+All [eleven focused regressions](../evidence/video-quality-2026-10-12/focused-regressions.json)
+passed once after review. Their runtime inputs remain unchanged by the metadata
+repair. The PR owns the subsequent fast-lane and landing receipts so successful
+tests are not rerun merely to update this ledger.
 
 Acceptance retains mean luma error below 4 and maximum below 32 ten-bit codes,
 the actual rung's bitrate/buffer constraints, frame/metadata correctness and
