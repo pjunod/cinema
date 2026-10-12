@@ -1630,6 +1630,27 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("APPLE_DERIVED_DATA := build/DerivedData", makefile)
         self.assertIn("path: clients/apple/build/DerivedData", workflow)
 
+    def test_validation_workflows_do_not_compile_or_gate_windows(self):
+        from validation.qualification import REQUIRED_JOBS
+
+        self.assertNotIn("windows_compile", REQUIRED_JOBS)
+        for path in (
+            ".github/workflows/ci.yml",
+            ".github/workflows/main-fast-lane.yml",
+            ".github/workflows/effort-ci.yml",
+        ):
+            with self.subTest(workflow=path):
+                workflow = read(path)
+                self.assertNotIn("windows_compile", workflow)
+                self.assertNotIn("WINDOWS_RESULT", workflow)
+                self.assertNotIn("windows-cross", workflow)
+                self.assertNotIn("cargo xwin", workflow)
+                self.assertNotIn("x86_64-pc-windows", workflow)
+                self.assertNotIn("scripts/package-windows", workflow)
+                jobs = workflow_job_blocks(path)
+                for name, block in jobs.items():
+                    self.assertTrue(set(workflow_job_needs(block)) <= jobs.keys(), name)
+
     def test_pr_ci_selects_expensive_surfaces_and_has_one_aggregate_gate(self):
         workflow = read(".github/workflows/ci.yml")
         fast_lane = read(".github/workflows/main-fast-lane.yml")
@@ -1649,7 +1670,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("scope_event=effort_qualification", workflow)
         self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
         fast_rust = workflow.split("  rust_compile:", 1)[1].split(
-            "\n  windows_compile:", 1
+            "\n  check:", 1
         )[0]
         unit_rust = workflow.split("  check:", 1)[1].split(
             "\n  cluster_store_legacy:", 1
@@ -1733,24 +1754,6 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('CARGO_BUILD_JOBS: "1"', windows_action)
         self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', windows_action)
         self.assertIn('CARGO_PROFILE_TEST_DEBUG: "0"', windows_action)
-        for workflow_path, gate_name in (
-            (".github/workflows/ci.yml", "pr_gate"),
-            (".github/workflows/main-fast-lane.yml", "promotion_gate"),
-            (".github/workflows/effort-ci.yml", "effort_gate"),
-        ):
-            jobs = workflow_job_blocks(workflow_path)
-            self.assertIn("windows_compile", jobs)
-            self.assertIn(
-                "timeout-minutes: 60" if workflow_path.endswith("main-fast-lane.yml")
-                else "timeout-minutes: 30", jobs["windows_compile"]
-            )
-            for package in ("lld", "llvm", "ninja-build", "nodejs", "pkg-config"):
-                self.assertRegex(
-                    jobs["windows_compile"], rf"(?<![-\\w]){package}(?![-\\w])"
-                )
-            self.assertIn("uses: ./.github/actions/windows-cross", jobs["windows_compile"])
-            self.assertIn("windows_compile", workflow_job_needs(jobs[gate_name]))
-            self.assertIn("WINDOWS_RESULT", jobs[gate_name])
         self.assertIn("PREFLIGHT_RESULT: ${{ needs.preflight.result }}", workflow)
         self.assertIn(
             "MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}",
@@ -2233,7 +2236,6 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertIn("subprocess.run(command, check=True)", node_phase)
         self.assertIn('record(identity, "success")', node_phase)
-        self.assertIn("needs: [scope, preflight, rust_compile]", fast_jobs["windows_compile"])
         self.assertIn("cancel-in-progress: false", fast_lane)
         self.assertEqual(
             make_dry_run_commands("hiqlite-vendor-clippy"),
@@ -3826,13 +3828,6 @@ assert.equal(context.ACT_TIMER, null);
                     expected = general
                 elif path == ".github/workflows/coverage.yml" and name == "coverage":
                     expected = local("Linux", "X64", "lab", "ci-coverage")
-                elif (
-                    path == ".github/workflows/effort-ci.yml"
-                    and name == "windows_compile"
-                ):
-                    # The high-cpu pool also includes 8 GiB Incus guests;
-                    # Windows cross-linking needs the larger bare-metal hosts.
-                    expected = local("Linux", "X64", "lab", "general", "baremetal")
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
                     expected = "    runs-on: ${{ fromJSON(matrix.runs_on) }}"
                 elif path == ".github/workflows/ci.yml" and name == "publish_main":
