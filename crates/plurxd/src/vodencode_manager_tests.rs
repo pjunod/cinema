@@ -1,6 +1,181 @@
 // Included in transcode::tests: production normalization, public create,
 // immutable serving, and the native HLS wrapper must agree about one recipe.
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires an actual HDR source, reviewed helper bundle and proved VAAPI device"]
+async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_seek() {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
+    use plurx_core::store::SqliteStore;
+    use plurx_core::transcode::dv_processing::{DvProcessingMode, DvSelection};
+    let source = PathBuf::from(std::env::var("PLURX_DV_WINDOW_SOURCE").expect("actual source"));
+    let base = crate::test_tempdir().expect("isolated runtime");
+    let probe = plurx_core::scan::probe::probe(&source)
+        .await
+        .expect("actual source probe");
+    let metadata = std::fs::metadata(&source).expect("source metadata");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("isolated store"));
+    let id = seed_file_with_probe_at(&store, source.to_str().expect("path"), probe.clone()).await;
+    let file = store.get_file(id).await.expect("file").expect("seeded");
+    store
+        .upsert_file(
+            file.item_id,
+            source.to_str().expect("path"),
+            metadata.len() as i64,
+            metadata
+                .modified()
+                .expect("mtime")
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_secs() as i64,
+            &probe,
+        )
+        .await
+        .expect("held source identity");
+    for (key, value) in [
+        (keys::DV_HDR_PROCESSING, "1"),
+        (keys::DV_FEL_REENCODE, "1"),
+        (keys::HWACCEL, "vaapi"),
+    ] {
+        store
+            .put_setting(key, value)
+            .await
+            .expect("isolated preference");
+    }
+    let file = store.get_file(id).await.expect("file").expect("attested");
+    let mut manager = TranscodeManager::new(
+        store,
+        base.path().join("runtime"),
+        EncoderCaps {
+            vaapi: true,
+            ..Default::default()
+        },
+        Pipeline::Cpu,
+    )
+    .with_decode_probe(Some(
+        crate::decode_facts::DecodeProbeIdentity::discover(&crate::ffmpeg::bound_ffprobe_bin())
+            .await
+            .expect("actual sealed source probe"),
+    ));
+    manager.dovi_reshape = crate::ffmpeg::has_dovi_reshape().await;
+    manager.decoders =
+        plurx_core::transcode::detect_video_decoders(&crate::ffmpeg::ffmpeg_bin()).await;
+    manager.dovi_passthrough = crate::ffmpeg::has_dovi_passthrough().await;
+    manager.hdr10_passthrough = crate::ffmpeg::has_hdr10_passthrough().await;
+    manager.hdr10_passthrough_vaapi = crate::ffmpeg::has_hdr10_passthrough_vaapi().await;
+    assert!(
+        manager.hdr10_passthrough_vaapi,
+        "actual P010/Main10 upload proof"
+    );
+    let request = SessionRequest {
+        request_id: Some("actual-processed-hdr-window".into()),
+        automatic: false,
+        kind: SessionKind::Transcode { height: 720 },
+        hdr10: true,
+        audio_index: Some(0),
+        start_seconds: 0.0,
+        presentation: Presentation::Vod,
+        block_budget_secs: Some(10.0),
+        ..reopen_request(id, "actual-hdr-probe", "unused", "unused")
+    };
+    let started = Instant::now();
+    let encoding = manager
+        .prepare_vod_encoding(&request, &file)
+        .await
+        .expect("actual native preparation")
+        .expect("encoded route");
+    let DvSelection::Selected(selected) = &encoding.dv_processing else {
+        panic!(
+            "actual processing preparation refused: {:?}",
+            encoding.dv_processing
+        );
+    };
+    let runtime = encoding
+        .dv_runtime
+        .as_ref()
+        .expect("owned processing runtime");
+    assert_eq!(runtime.encoder, Encoder::Vaapi);
+    let (index, verified) = runtime
+        .prepared
+        .lock()
+        .expect("first-window owner")
+        .take()
+        .expect("actual prepared window");
+    assert_eq!(index, 0);
+    assert!(verified.receipt.is_some());
+    assert_eq!(
+        verified.observed.pictures.len(),
+        usize::try_from(encoding.grid.frames_per_segment).expect("bounded frame count")
+    );
+    println!(
+        "{}",
+        serde_json::json!({"entry":0,"elapsed_ms":started.elapsed().as_millis(),
+        "bytes":verified.bytes.len(),"plan":selected.semantic_digest(),"receipt_frames":verified.receipt.as_ref().map(|receipt| receipt.served_frames().len()),
+        "fel_frames":verified.receipt.as_ref().map(|receipt| receipt.counts().el_accepted)})
+    );
+    let segment_plan = encoding.grid.plan(file.duration_ms.expect("duration"), 0);
+    for at in [1_usize, 2, 360] {
+        let entry = &segment_plan.entries[at];
+        let bundle = crate::vodencode::admit_frozen_preparation(
+            &manager.admissions,
+            manager.max_hw_sessions().await,
+            manager.software_budget().await,
+            &encoding.resources,
+            Some(1),
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .expect("actual graph resources");
+        let started = Instant::now();
+        let (verified, plan) = runtime
+            .execute(
+                &file,
+                &encoding.plan,
+                &encoding.options,
+                encoding.grid,
+                entry,
+                &encoding.executable.path,
+                crate::dv_segment::SegmentAdmission::Owned(bundle),
+                Arc::new(crate::prodrun::ProducerSlot::new()),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("actual verified window");
+        assert_eq!(
+            plan.semantic_digest(),
+            selected.semantic_digest(),
+            "adjacent/seek recipe identity"
+        );
+        assert_eq!(
+            verified.observed.pictures.len(),
+            usize::try_from(encoding.grid.frames_per_segment).expect("bounded frame count")
+        );
+        assert!(verified.receipt.is_some());
+        assert!(verified
+            .observed
+            .pictures
+            .iter()
+            .all(|picture| picture.bl_shape == runtime.native_bl));
+        if runtime.mode == DvProcessingMode::Fel {
+            assert!(verified
+                .observed
+                .pictures
+                .iter()
+                .all(|picture| picture.el_shape.0 > 0));
+        }
+        println!(
+            "{}",
+            serde_json::json!({"entry":at,"elapsed_ms":started.elapsed().as_millis(),
+            "bytes":verified.bytes.len(),"plan":plan.semantic_digest(),"receipt_frames":verified.receipt.as_ref().map(|receipt| receipt.served_frames().len()),
+        "fel_frames":verified.receipt.as_ref().map(|receipt| receipt.counts().el_accepted)})
+        );
+    }
+}
+
 #[tokio::test]
 async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     use plurx_core::store::SqliteStore;

@@ -39,11 +39,31 @@ static void check_nonfinite(void) {
       assert(!dv_pack_rgba_rgb48(input, 1, output, sizeof(output)));
     }
 }
+static void check_native_plane(void) {
+  uint16_t codes[1032];
+  float actual[1032], expected[1032];
+  for (size_t i = 0; i < 1032; i++) codes[i] = i % 1024;
+  // Unaligned loads/stores, vector body and scalar tail use the same division.
+  for (size_t count = 0; count < 1031; count++) {
+    for (size_t i = 0; i < count; i++) expected[i] = codes[i + 1] / 1023.0f;
+    assert(dv_unpack_10bit_plane(codes + 1, count, actual + 1));
+    assert(memcmp(expected, actual + 1, count * sizeof(float)) == 0);
+  }
+  for (size_t lane = 0; lane < 17; lane++) {
+    uint16_t old = codes[lane];
+    codes[lane] = 1024;
+    assert(!dv_unpack_10bit_plane(codes, 17, actual));
+    codes[lane] = 65535;
+    assert(!dv_unpack_10bit_plane(codes, 17, actual));
+    codes[lane] = old;
+  }
+}
 int main(void) {
   const int modes[]={FE_TONEAREST,FE_DOWNWARD,FE_UPWARD,FE_TOWARDZERO};
   unsigned long checked=0;
   for (unsigned mode=0;mode<4;mode++) {
     assert(fesetround(modes[mode])==0);
+    check_native_plane();
     check(-0.0f);check(0.0f);check(-1.0f);check(1.0f);check(2.0f);checked+=5;
     check_bulk(-0.0f);check_bulk(0);check_bulk(-1);check_bulk(1);check_bulk(2);
     check_nonfinite();

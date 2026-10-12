@@ -146,10 +146,10 @@ impl CompletedReconstructedOutputContract {
         self.encoder
     }
     pub fn encoder_name(self) -> &'static str {
-        if self.encoder == Encoder::Nvenc {
-            "hevc_nvenc"
-        } else {
-            "libx265"
+        match self.encoder {
+            Encoder::Nvenc => "hevc_nvenc",
+            Encoder::Vaapi => "hevc_vaapi",
+            _ => "libx265",
         }
     }
     pub fn input_contract(self) -> super::pipeline::ReconstructedPqInput {
@@ -168,7 +168,7 @@ impl CompletedReconstructedOutputContract {
         EffectiveRateControl::Vbr
     }
     pub fn pixel_format(self) -> &'static str {
-        if self.encoder == Encoder::Nvenc {
+        if matches!(self.encoder, Encoder::Nvenc | Encoder::Vaapi) {
             "p010le"
         } else {
             "yuv420p10le"
@@ -180,8 +180,17 @@ impl CompletedReconstructedOutputContract {
         force_idr: bool,
         software_threads: Option<u32>,
     ) -> Vec<String> {
+        if self.encoder == Encoder::Vaapi {
+            let mut args =
+                self.encoder
+                    .hdr10_encode_args(bitrate_kbps, force_idr, software_threads);
+            args.extend(["-async_depth".into(), "1".into(), "-bf".into(), "0".into()]);
+            return args;
+        }
         if self.encoder == Encoder::Software {
-            return Encoder::Software.hdr10_encode_args(bitrate_kbps, force_idr, software_threads);
+            return self
+                .encoder
+                .hdr10_encode_args(bitrate_kbps, force_idr, software_threads);
         }
         let mut args: Vec<String> = [
             "-c:v",

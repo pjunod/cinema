@@ -2605,6 +2605,15 @@ impl ResolvedTranscode {
             || self.output_contract.output_codec() != "hevc"
             || self.options.subtitle_burn.is_some()
             || self.options.video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50
+            || encoder == Encoder::Vaapi
+                && (self
+                    .output_contract
+                    .effective_width()
+                    .is_none_or(|width| width > 1920)
+                    || self
+                        .output_contract
+                        .effective_height()
+                        .is_none_or(|height| height > 1080))
         {
             return None;
         }

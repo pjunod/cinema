@@ -41,7 +41,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 7] = [
+    let inputs: [(&str, &[u8]); 8] = [
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -53,6 +53,10 @@ fn renderer_source_identity() -> String {
         (
             "fel_renderer.h",
             include_bytes!("../../../tools/dv_processing/fel_renderer.h"),
+        ),
+        (
+            "hevc-rasl-frame-thread.patch",
+            include_bytes!("../../../tools/dv_processing/hevc-rasl-frame-thread.patch"),
         ),
         (
             "nlq_clipping.h",
@@ -428,6 +432,29 @@ impl PrivateWindow {
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn completed_window_encoder(
+    preferred: plurx_core::transcode::Encoder,
+    vaapi_upload_proved: bool,
+    plan: &plurx_core::transcode::ResolvedTranscode,
+    grid: plurx_core::transcode::VodFrameGrid,
+) -> plurx_core::transcode::Encoder {
+    use plurx_core::transcode::Encoder;
+    if preferred == Encoder::Nvenc {
+        Encoder::Nvenc
+    } else if preferred == Encoder::Vaapi
+        && vaapi_upload_proved
+        && plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .is_some()
+        && u64::from(grid.numerator) <= 30 * u64::from(grid.denominator)
+    {
+        Encoder::Vaapi
+    } else {
+        Encoder::Software
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) struct RuntimeRecipe {
     pub(crate) tools: Arc<ToolSet>,
     pub(crate) source: Arc<crate::fragment_index_cluster::SourceFence>,
@@ -441,6 +468,7 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
     pub(crate) encoder: plurx_core::transcode::Encoder,
     pub(crate) runtime_cache: PathBuf,
+    pub(crate) shader_cache: Arc<tempfile::TempDir>,
     pub(crate) prepared: std::sync::Mutex<Option<(u32, VerifiedWindow)>>,
     pub(crate) failure_episode: DvDigest,
     pub(crate) preparation_budget: std::time::Duration,
@@ -642,6 +670,21 @@ impl RuntimeRecipe {
             let output = plan
                 .completed_reconstructed_output(self.encoder)
                 .ok_or("unsupported reconstructed output encoder")?;
+            let raster = plan
+                .output_contract()
+                .effective_width()
+                .zip(plan.output_contract().effective_height())
+                .ok_or("no immutable output raster")?;
+            let export_policy = if self.destination
+                == plurx_core::transcode::dv_processing::DvDestination::Hdr10
+            {
+                plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearRgb48V1 { raster }
+            } else {
+                plurx_core::transcode::dv_processing::DvExportPolicy::NativeRgb48V1
+            };
+            let export_raster = export_policy
+                .raster(self.native_bl)
+                .map_err(|e| e.to_string())?;
             let args = plurx_core::transcode::vod_completed_reconstructed_pipe_args(
                 file,
                 &output,
@@ -654,11 +697,24 @@ impl RuntimeRecipe {
             )
             .map_err(str::to_owned)?;
             let deadline = tokio::time::Instant::now() + self.preparation_budget;
+            let mut renderer_env = self.tools.renderer_env.clone();
+            renderer_env.extend([
+                (
+                    "MESA_SHADER_CACHE_DIR".into(),
+                    self.shader_cache.path().as_os_str().to_owned(),
+                ),
+                ("MESA_SHADER_CACHE_MAX_SIZE".into(), "64M".into()),
+            ]);
             let request = crate::dv_segment::StreamingSegmentRequest {
                 mode: self.mode,
+                export_raster: matches!(
+                    export_policy,
+                    plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearRgb48V1 { .. }
+                )
+                .then_some(export_raster),
                 request: crate::dv_segment::SegmentRequest {
                     renderer: self.tools.renderer.clone(),
-                    renderer_env: self.tools.renderer_env.clone(),
+                    renderer_env,
                     muxer: self.tools.renderer.clone(),
                     encoder: encoder.to_owned(),
                     encoder_args: args,
@@ -692,6 +748,7 @@ impl RuntimeRecipe {
                 first_frame,
                 frames,
                 self.mode,
+                export_raster,
             )?;
             if observed.source_tick != self.source_tick
                 || observed
@@ -812,6 +869,7 @@ impl RuntimeRecipe {
                 first_global_frame: first_frame,
                 encoded: &verified.bytes,
                 raster,
+                export_policy,
                 source_trace: trace,
                 observed_at: i64::try_from(
                     std::time::SystemTime::now()
@@ -1085,6 +1143,7 @@ impl PrivateWindow {
         first_frame: u64,
         frames: usize,
         mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+        export_raster: (u32, u32),
     ) -> Result<ObservedWindow, String> {
         use plurx_core::transcode::dv_processing::*;
         let events = self.evidence.renderer_events()?;
@@ -1258,7 +1317,7 @@ impl PrivateWindow {
                 || source.rpu_sha256 != pair.rpu_sha256
                 || rendered.pts != pair.pts
                 || rendered.duration != pair.duration
-                || (rendered.width, rendered.height) != (pair.bl_width, pair.bl_height)
+                || (rendered.width, rendered.height) != export_raster
                 || rendered.el_bound != (mode == DvProcessingMode::Fel)
                 || rendered.nlq_active != (mode == DvProcessingMode::Fel)
                 || rendered.render_errors != 0

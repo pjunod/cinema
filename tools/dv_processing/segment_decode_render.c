@@ -207,8 +207,8 @@ static void open_nut(const char *path) {
   p->format = AV_PIX_FMT_RGB48LE;
   p->codec_tag = avcodec_pix_fmt_to_codec_tag(AV_PIX_FMT_RGB48LE);
   need(p->codec_tag != 0, "explicit RGB48 NUT tag");
-  p->width = expected_w[0];
-  p->height = expected_h[0];
+  p->width = EXPORT_WIDTH;
+  p->height = EXPORT_HEIGHT;
   p->bits_per_coded_sample = 48;
   p->color_primaries = AVCOL_PRI_BT2020;
   p->color_trc = AVCOL_TRC_SMPTE2084;
@@ -529,13 +529,19 @@ static struct layer open_layer(AVStream *stream, int index) {
   out.decoder->pkt_timebase = out.split->time_base_out;
   out.decoder->width = expected_w[index];
   out.decoder->height = expected_h[index];
-  out.decoder->thread_count = 1;
+  // Window admission reserves four frame workers per layer, plus the helper
+  // caller and the one software-Vulkan worker. Disable nested slice threading.
+  out.decoder->thread_count = window_mode ? 4 : 1;
+  out.decoder->thread_type = FF_THREAD_FRAME;
   out.decoder->max_pixels = discover_el && index == 1
                                 ? (int64_t)expected_w[0] * expected_h[0]
                                 : (int64_t)expected_w[index] * expected_h[index];
   out.decoder->err_recognition = AV_EF_CAREFUL | AV_EF_EXPLODE;
   need(avcodec_open2(out.decoder, codec, NULL) >= 0,
        "independent decoder open");
+  need(!window_mode || (out.decoder->thread_count == 4 &&
+                           out.decoder->active_thread_type == FF_THREAD_FRAME),
+       "bounded frame-only decoder workers");
   return out;
 }
 static void send_layer(struct layer *layer, AVPacket *packet) {
@@ -560,12 +566,14 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
 }
 int main(int argc, char **argv) {
   need(argc == 11 || argc == 12 || argc == 15 ||
-           (argc == 16 && !strcmp(argv[15], "base-rpu")),
+           (argc == 16 && !strcmp(argv[15], "base-rpu")) ||
+           (argc == 19 && (!strcmp(argv[15], "base-rpu") ||
+                           !strcmp(argv[15], "fel"))),
        "usage: segment_decode_render SOURCE OUTPUT_DIR VIDEO_INDEX "
        "MAX_FRAMES BL_W BL_H EL_W EL_H DEBUG OUTPUT_POLICY [NUT_OUTPUT [START "
-       "END MAX_PREROLL [base-rpu]]]");
+       "END MAX_PREROLL [base-rpu|fel [EXPORT_W EXPORT_H EXPORT_POLICY]]]]");
   bool streaming = argc >= 12;
-  base_only = argc == 16;
+  base_only = argc >= 16 && !strcmp(argv[15], "base-rpu");
   window_mode = argc >= 15;
   if (window_mode) {
     window_start = rational(argv[12]);
@@ -586,6 +594,20 @@ int main(int argc, char **argv) {
   expected_h[0] = number(argv[6], 64, 2160);
   expected_w[1] = number(argv[7], 0, 3840);
   expected_h[1] = number(argv[8], 0, 2160);
+  EXPORT_WIDTH = expected_w[0];
+  EXPORT_HEIGHT = expected_h[0];
+  if (argc == 19) {
+    EXPORT_WIDTH = number(argv[16], 32, 3840);
+    EXPORT_HEIGHT = number(argv[17], 32, 2160);
+    need(!strcmp(argv[18], "pq-bilinear-rgb48-v1") &&
+             EXPORT_WIDTH <= expected_w[0] && EXPORT_HEIGHT <= expected_h[0] &&
+             EXPORT_WIDTH % 2 == 0 && EXPORT_HEIGHT % 2 == 0,
+         "unsupported export geometry or policy");
+  }
+  // The software Vulkan renderer has one bounded worker, accounted alongside
+  // each layer's four decoder threads. Never inherit the machine's core count.
+  need(setenv("LP_NUM_THREADS", "1", 1) == 0,
+       "bounded software Vulkan worker configuration");
   discover_el = expected_w[1] == 0 && expected_h[1] == 0;
   need((expected_w[1] == 0) == (expected_h[1] == 0),
        "enhancement discovery requires both dimensions zero");

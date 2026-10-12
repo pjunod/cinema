@@ -2,6 +2,48 @@ use super::*;
 use std::path::PathBuf;
 
 #[test]
+fn explicit_export_policy_keeps_native_shapes_and_separates_resampling_identity() {
+    let native = (3840, 2160);
+    let export = DvExportPolicy::PqBilinearRgb48V1 {
+        raster: (1280, 720),
+    };
+    assert_eq!(export.raster(native).expect("bounded export"), (1280, 720));
+    assert_eq!(
+        DvExportPolicy::NativeRgb48V1
+            .raster(native)
+            .expect("native"),
+        native
+    );
+    assert_eq!(
+        DvExportPolicy::NativeRgb48V1.target_parameters().as_str(),
+        hex::encode(Sha256::digest(b"bt2020-pq-master-clip-v1"))
+    );
+    assert_ne!(
+        export.target_parameters(),
+        DvExportPolicy::NativeRgb48V1.target_parameters()
+    );
+    assert_ne!(
+        export.target_parameters(),
+        DvExportPolicy::PqBilinearRgb48V1 {
+            raster: (1920, 1080)
+        }
+        .target_parameters()
+    );
+    for raster in [
+        (3842, 2160),
+        (3840, 2162),
+        (1281, 720),
+        (1280, 721),
+        (0, 0),
+        (16, 16),
+    ] {
+        assert!(DvExportPolicy::PqBilinearRgb48V1 { raster }
+            .raster(native)
+            .is_err());
+    }
+}
+
+#[test]
 fn completed_packet_authoring_keeps_base_and_dynamic_association() {
     use crate::fmp4::{self, Unit};
     // Three Main10 pictures encoded at 24000/1001 by the retained x265
