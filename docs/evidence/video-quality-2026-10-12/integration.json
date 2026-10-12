@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-12",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "base": "1f02b7938a2f3924de6a3969483e38ffe3e8bd6f",
+  "runtime_source": "ff1c54b8fb8c333f90cfd4ef0f0372d795f1dc3a",
+  "runtime_source_transfer": "git archive committed source only; no .git or credentials",
+  "candidate_binary_sha256": "c83948332843886702cbd143ef5da01868fe6bb640ab72dcecfec9209ebdfaa4",
+  "release_command": "CARGO_BUILD_JOBS=2 rustup run 1.97.1 cargo build --release --locked -p plurxd",
+  "release_result": "passed, 17m 52s",
+  "compile_check": "cargo check --locked -p plurx-core -p plurxd --all-targets; passed",
+  "normal_hooks": "catalog, Rust formatting, workspace all-target Clippy and embedded JavaScript syntax; passed",
+  "development_unit_tests": "none; deferred until final adversarial review by user instruction",
+  "qualification_and_landing": "PR #1034 owns the final review, focused regressions, fast-lane results and merge identity.",
+  "logs_sha256": {
+    "all_target_check": "c8790756d448d7d06f8da3afec127a134485975886cc77e72633cf9168db01dd",
+    "hdr_normal_hook": "3f9a9d9e5a723b051ee2c7ee4a90dd3a7a7ad27c0cbf8a8a437b834c75fcffe1",
+    "parser_normal_hook": "2fceb19c0bc71c93b97bc568329d4f9027e6cc02b4d428193145188a290c460c",
+    "candidate_release_build": "9480c7fdc19d7e9861dc96974ca775a4a3a76e070543f3e1ed6f5aa00415aa6c"
+  }
+}

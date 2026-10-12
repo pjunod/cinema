@@ -1,6 +1,6 @@
 # Video quality status — what is built, measured and merged
 
-**Status:** HDR sharp-edge repair and autonomous client acceptance in progress
+**Status:** HDR repair and available autonomous client acceptance complete; final review and landing pending
 · **Updated:** 2026-10-12 · **Resume base:** `1f02b7938`
 
 Companion to [the programme](VIDEO-QUALITY-PROGRAM.md), which owns scope,
@@ -18,10 +18,10 @@ the owner's checkout is not used.
 
 | Lane / exclusive ownership | Work | State |
 |---|---|---|
-| HDR: measured repair and production integration | Identify the quantization cause and preserve the bitrate envelope. | Mesa's quality value is a bitfield. Balanced preset plus VBAQ without preanalysis (`19`) reduces sharp-panel maximum error from 35 to 12, below the unchanged <32 bar. Pressure and real-window worst-frame controls improve. Root integration binds the actual successful-probe Mesa/radeonsi driver to the immutable HDR plan, cache identity and shared rolling/VOD arguments; pinned compilation is running. |
-| Safari: browser and shipping web UI | Native HLS presentation, cold start, seeks and restart. | Authored SDR B-frame-off/on timing cells pass (six initial plus two selective retries after fixing callback ownership). Correctly tagged baseline/candidate PQ HLS passes all eight phases. Shipping web UI capture awaits the isolated optimized daemon build. |
+| HDR: measured repair and production integration | Identify the quantization cause and preserve the bitrate envelope. | Mesa's quality value is a bitfield. Balanced preset plus VBAQ without preanalysis (`19`) reduces sharp-panel maximum error from 35 to 12, below the unchanged <32 bar. Pressure and real-window worst-frame controls improve. Root integration binds the actual successful-probe Mesa/radeonsi driver to the immutable HDR plan, cache identity and shared rolling/VOD arguments; pinned all-target compilation and the normal workspace Clippy hook pass. |
+| Safari: browser and shipping web UI | Browser presentation, cold start, seeks and restart. | Sixteen authored native-HLS SDR/PQ timing phases pass. The exact optimized candidate also passes four actual Plurx H264 VOD phases through Safari's shipping hls.js/MSE route: 30 moving frames each, maximum clock error 35.847 ms and first-target error 72.743 ms against unchanged 250 ms limits. Bound parser identity and actual player ownership are recorded. |
 | Devices: native frameworks on available hardware | Preserve actual decoder, frame, metadata and surface evidence. | Physical TCL tablet and Google TV streamer pass all 16 SDR timing phases. Google TV passes all eight corrected PQ baseline/candidate phases. TCL explicitly lacks Main10 capability and refuses HDR before frames. An owned tvOS simulator supplies framework evidence; locked Apple devices and a busy Apple TV remain excluded. |
-| Coordinator: integration, review, checks and cleanup | One batch PR and final adversarial review, then fast lane. | [Draft PR #1034](http://forge.lan:3000/noirr/plurx/pulls/1034) collects the work. No unit suite has run during development. Remote HDR scratch is removed; client workers are finishing owned-resource cleanup. |
+| Coordinator: integration, review, checks and cleanup | One batch PR and final adversarial review, then fast lane. | [Draft PR #1034](http://forge.lan:3000/noirr/plurx/pulls/1034) collects the work. No unit suite has run during development. Remote HDR scratch and all device probe resources are removed. All owned device/browser/runtime resources are closed. Final adversarial review and fast lane follow the frozen evidence; their receipts and landing identity belong to the PR. |
 
 Mesa's preanalysis mode caused the earlier worst-frame regression; enabling
 VBAQ without it addresses quantization instead of blurring the input or forcing
@@ -39,6 +39,27 @@ and decoded planes, and receive fresh PQ client captures. This harness defect
 is separate from the production encoder's quantization failure. Native probes
 and Safari canvas observations do not measure physical display calibration,
 speaker synchronization, or the shipping native application's UI.
+
+The Safari startup failure is separate from HDR encoding. The packaged 15.3 MB
+source-parser module was compiled serially with Cranelift's optimizing default
+inside the existing ten-second identity operation. Isolated exact-adapter
+controls spend 7.54–8.11 seconds compiling, compared with 6.17–6.59 seconds at
+`OptLevel::None`; bounded parsing takes milliseconds. Version, metadata,
+packet and [24-frame outputs](../evidence/video-quality-2026-10-12/safari/parser-frames-comparison.json) are byte-identical between configurations. The
+production change removes that optimization cost while preserving every
+identity, guest execution and output limit, sandbox capability, and single-worker
+ownership rule. These measurements explain the narrow change; the fresh shipping-app capture publishes the bound parser identity and indexes
+the fixture, resolving the earlier startup refusal on this host. Its later VOD refusal came from an underprovisioned harness pool, not parser
+execution: shared AAC requires three threads, while that attempt allowed two.
+The authority-fence event is the later retirement projection. Product admission
+and authority handling are unchanged. The next attempt's observer invoked
+nonexistent `pbNowSec` instead of shipping `pbPosSec`; that callback exception
+explains its empty frame arrays. The final corrected observer passes all four
+app phases with the valid three-thread pool. Failed attempts and exact executed
+harnesses remain in the [Safari bundle](../evidence/video-quality-2026-10-12/safari/summary.json).
+The final app route is H264 through hls.js/MSE, distinct from the separately
+qualified native-HLS SDR/PQ fixtures. A native-HLS capability query alone does
+not establish which route played.
 
 Acceptance retains mean luma error below 4 and maximum below 32 ten-bit codes,
 the actual rung's bitrate/buffer constraints, frame/metadata correctness and

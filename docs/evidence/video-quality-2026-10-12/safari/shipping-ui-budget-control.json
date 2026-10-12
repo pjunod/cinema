@@ -1,0 +1,9 @@
+{
+  "at_utc": "2026-10-12T17:52:29Z",
+  "setting": "transcode_software_pool_threads",
+  "value": 3,
+  "status": 200,
+  "scope": "Owned isolated retry daemon only; applied after setup, before browser and fragment-index preparation completed.",
+  "readback_at_utc": "2026-10-12T17:53:04Z",
+  "readback_value": 3
+}

@@ -38,4 +38,5 @@ def main():
    except Exception as e:state['cleanup_error']=str(e)
   server.shutdown();server.server_close();state['server_closed']=True
   state['harness_sha256']=hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest();a.output.write_text(json.dumps(state,indent=2));print(json.dumps({k:v for k,v in state.items() if k!='receipt'}));print('pass:',state.get('receipt',{}).get('pass'))
+ if state.get('receipt',{}).get('pass') is not True:raise SystemExit(1)
 if __name__=='__main__':main()

@@ -1,0 +1,9 @@
+{
+  "cause": "Homebrew FFprobe override omitted the required adjacent capability-bound parser. The production decoder fact contract correctly refused VOD geometry before media playback.",
+  "logs": [
+    "2026-10-12T17:05:46.338244Z  WARN plurxd: FFprobe identity is unavailable; explicit decoder facts remain unavailable error=identifying FFprobe: packaged capability-bound source parser is unavailable: No such file or directory (os error 2)",
+    "2026-10-12T17:07:11.049135Z  WARN http_request{method=POST target=/api/v1/files/1/hls/[REDACTED] version=HTTP/1.1 request_id=\"322d2303403f42548d1727e2edcf4773\"}: plurxd::http::hls: session create failed: vod presentation unavailable: vod_decoder_plan_refused: candidate_geometry_unavailable: no bound FFprobe identity file=1",
+    "2026-10-12T17:07:11.049275Z ERROR http_request{method=POST target=/api/v1/files/1/hls/[REDACTED] version=HTTP/1.1 request_id=\"322d2303403f42548d1727e2edcf4773\"}: plurxd::http::error: internal error error=vod presentation unavailable: vod_decoder_plan_refused: candidate_geometry_unavailable: no bound FFprobe identity"
+  ],
+  "repair": "Use the complete existing packaged Jellyfin FFmpeg/FFprobe/parser/ABI directory copied into owned scratch; no production changes."
+}

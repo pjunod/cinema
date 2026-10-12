@@ -1,0 +1,3751 @@
+{
+  "source": "ff1c54b8fb8c333f90cfd4ef0f0372d795f1dc3a",
+  "daemon_sha256": "c83948332843886702cbd143ef5da01868fe6bb640ab72dcecfec9209ebdfaa4",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/manifest.webmanifest",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/reader.css",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/playback-policy.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/app.css",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/theme.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/errors.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/cluster-panel.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/playback-control.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/reader.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/live-tv.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/library-channels.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/hls.min.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/app.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/api.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/file-context.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/shared-decision.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/measurements.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/auth.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/keyboard-reach.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/chrome.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/theme-menu.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/activity-indicator.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/cards.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/lightbox.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/home-helpers.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/home.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/renderers.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/header.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/library-grids.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/helpers.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/dynamic-range.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/track-facts.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/preplay-selection.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/edit.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/player.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/continuous-media.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/continuous-quality.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/session.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/prepared-replacement.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/prepared-switch-measurement.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/directed-change.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/decode-tiers.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/decode-margin.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/stall-diagnosis.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/surface.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/projection-chrome.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/transport.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/autoplay-next.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/menus.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/audio-sync.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/stats.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/watch-presentation.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/watch-browser.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/activity.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/analysis.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/activity-stream.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-panels.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/live-tv.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/live-tv-dvr.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/recordings.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/dvr-reminders.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/live-tv-controls.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-developer.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-live-tv.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-system.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/cluster.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/cluster-operations.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/cluster-database.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/cluster-troubleshooting.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-playback.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/users-admin.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/catalog.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/register-classic.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/theater.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/reader.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/library-channels-page.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/shared-artwork.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/shared-libraries.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/sharing-management.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-navigation.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-router.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-guard.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-client.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-receiver.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-controller.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/remote-pairing.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-remote.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/remote.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/router.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/server",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/me",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/features",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hubs",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/home/previews",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/coming-soon",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hubs",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/home/previews",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/coming-soon",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hubs",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/home/previews",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/coming-soon",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/files/1/decision",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/images/5578280818448548540-poster-c505533e1a608fa20.jpg",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/files/1/hls/continuous-candidates",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/files/1/hls/continuous-sessions",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-family",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/master.m3u8",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/index.m3u8",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/index.m3u8",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/init/e9780f0df8cba4f4729199bc7854d748da2968475375190f8c7dae666233c0d3.mp4",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/init/d92c91cbf62f2ccfceab0f9659a106c937cdf5df883aba9828ef1c45854f192d.mp4",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/3.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/2.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 429,
+      "error": "{\"code\":\"control_rate_limited\",\"message\":\"the control sequence advanced faster than the per-session budget\",\"generation\":\"8d7f57fd-78d0-4555-afa0-a857468e3396\",\"control_epoch\":1,\"retry_after_ms\":4}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/4.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/3.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/5.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/4.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/6.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/5.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/7.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/6.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/8.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/7.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/9.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/8.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/10.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/9.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/11.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/10.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/12.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/11.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 429,
+      "error": "{\"code\":\"control_rate_limited\",\"message\":\"the control sequence advanced faster than the per-session budget\",\"generation\":\"8d7f57fd-78d0-4555-afa0-a857468e3396\",\"control_epoch\":1,\"retry_after_ms\":1}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/1.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/1.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 429,
+      "error": "{\"code\":\"control_rate_limited\",\"message\":\"the control sequence advanced faster than the per-session budget\",\"generation\":\"8d7f57fd-78d0-4555-afa0-a857468e3396\",\"control_epoch\":1,\"retry_after_ms\":1}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/2.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/files/1/decision",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 503,
+      "error": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/2982effe-c6cd-4694-bf35-f0820a19b184/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/files/1/hls/continuous-candidates",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/files/1/hls/continuous-sessions",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-family",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/master.m3u8",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/index.m3u8",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/index.m3u8",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/init/e9780f0df8cba4f4729199bc7854d748da2968475375190f8c7dae666233c0d3.mp4",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/init/d92c91cbf62f2ccfceab0f9659a106c937cdf5df883aba9828ef1c45854f192d.mp4",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/0.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/0.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/1.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/1.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/2.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/2.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/control",
+      "status": 429,
+      "error": "{\"code\":\"control_rate_limited\",\"message\":\"the control sequence advanced faster than the per-session budget\",\"generation\":\"b19a5f6d-35bf-487b-8636-4ef44a0c0b50\",\"control_epoch\":1,\"retry_after_ms\":1}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/3.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/3.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/4.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/4.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/5.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/5.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/6.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/6.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/7.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/7.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/8.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/8.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/9.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/9.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/10.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/10.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/audio/92d7f1495e316a3a0fdfc4e1e874b85b218b976ceb88d3b2ccc58d72772937bc/segment/11.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/11.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/video/0e7392ad6b3e6c45dfefc56d32b54a465831c6042172da31a5da73e548dd4a8f/segment/12.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/control",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 503,
+      "error": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/92d76b25-16bd-4ce8-8fda-0c90e6ec8994/quality-schedule",
+      "status": 200
+    }
+  ],
+  "harness_sha256": "fc1802b836a0972a92b4ce8dd5fa07941e9d1d633fd97ef0c9367a8cdc78e606",
+  "playback_lab_sha256": "1be219589ebc733fc8849fe137fa95df8f0fb8a6df98955b0472a8026545294d",
+  "fixtures": [
+    {
+      "name": "authored-sdr.mkv",
+      "bytes": 3294614,
+      "sha256": "bece3d5d38cd0c8a3acf76b53929cb52ff7896487abc3fb58b3351f61add161e"
+    }
+  ],
+  "startup_requested_at": "2026-10-12T17:56:54.222Z",
+  "prepared_at": "2026-10-12T17:58:32.217Z",
+  "bound_tools": {
+    "ffprobe_build_digest": "d5bea12cf7b084c6b0f59982d425f2d310b90b4f6319181667a7cd06167a9ab2",
+    "ffmpeg_version": "ffmpeg version 8.1.3-Jellyfin Copyright (c) 2000-2026 the FFmpeg developers",
+    "hwaccel_pref": "software"
+  },
+  "resource_policy": "Explicit isolated software pool3, meeting shared AAC admission floor",
+  "software_pool_threads": 3,
+  "file": {
+    "id": 1,
+    "filename": "authored-sdr.mkv"
+  },
+  "embedded_document_sha256": "7c7405cb8c98bd3084931af7ac1bba17a6b54e4001219fd218eba55b0cf64a52",
+  "instrumentation": "Original top-level document with auth prelude and appended observer; original application scripts and CSP unchanged",
+  "receipt": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Safari/605.1.15",
+    "phases": [
+      {
+        "name": "cold-mid",
+        "target": 6,
+        "trigger": 265,
+        "frames": [
+          {
+            "wall": 1175,
+            "media": 6,
+            "clock": 6,
+            "absolute": 6,
+            "pixels": 1244919783,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1575,
+            "media": 6.041666666666667,
+            "clock": 6.05588546,
+            "absolute": 6.055918668,
+            "pixels": 1247468990,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1625,
+            "media": 6.083333333333333,
+            "clock": 6.105401335,
+            "absolute": 6.105440627,
+            "pixels": 1620722526,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1659,
+            "media": 6.125,
+            "clock": 6.140753543,
+            "absolute": 6.140791002,
+            "pixels": 194321280,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1694,
+            "media": 6.166666666666667,
+            "clock": 6.173824502,
+            "absolute": 6.173901835,
+            "pixels": 843926453,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1742,
+            "media": 6.208333333333333,
+            "clock": 6.221546126,
+            "absolute": 6.221580376,
+            "pixels": 1357367956,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1792,
+            "media": 6.25,
+            "clock": 6.271363876,
+            "absolute": 6.27140171,
+            "pixels": 1793192613,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1825,
+            "media": 6.291666666666667,
+            "clock": 6.305433001,
+            "absolute": 6.305466043,
+            "pixels": 925186135,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1875,
+            "media": 6.333333333333333,
+            "clock": 6.355974043,
+            "absolute": 6.356010751,
+            "pixels": 3550982845,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1909,
+            "media": 6.375,
+            "clock": 6.390556751,
+            "absolute": 6.390593126,
+            "pixels": 328169749,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1944,
+            "media": 6.416666666666667,
+            "clock": 6.423599751,
+            "absolute": 6.423630501,
+            "pixels": 1331407827,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1992,
+            "media": 6.458333333333333,
+            "clock": 6.472479585,
+            "absolute": 6.472519126,
+            "pixels": 3232332766,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2027,
+            "media": 6.5,
+            "clock": 6.506480251,
+            "absolute": 6.506511835,
+            "pixels": 2927054514,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2075,
+            "media": 6.541666666666667,
+            "clock": 6.55529746,
+            "absolute": 6.555328251,
+            "pixels": 3219744480,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2125,
+            "media": 6.583333333333333,
+            "clock": 6.605969876,
+            "absolute": 6.606006835,
+            "pixels": 1064545234,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2158,
+            "media": 6.625,
+            "clock": 6.638370709,
+            "absolute": 6.638404293,
+            "pixels": 1296642392,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2209,
+            "media": 6.666666666666667,
+            "clock": 6.689760959,
+            "absolute": 6.689846126,
+            "pixels": 2607742919,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2242,
+            "media": 6.708333333333333,
+            "clock": 6.722055918,
+            "absolute": 6.722096626,
+            "pixels": 758444196,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2276,
+            "media": 6.75,
+            "clock": 6.75528821,
+            "absolute": 6.755339626,
+            "pixels": 290106924,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2325,
+            "media": 6.791666666666667,
+            "clock": 6.805054668,
+            "absolute": 6.80508221,
+            "pixels": 3029531101,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2375,
+            "media": 6.833333333333333,
+            "clock": 6.856347418,
+            "absolute": 6.856383126,
+            "pixels": 2718242420,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2408,
+            "media": 6.875,
+            "clock": 6.88975071,
+            "absolute": 6.88978346,
+            "pixels": 3565863735,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2443,
+            "media": 6.916666666666667,
+            "clock": 6.922565627,
+            "absolute": 6.922598168,
+            "pixels": 2026600276,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2491,
+            "media": 6.958333333333333,
+            "clock": 6.971048502,
+            "absolute": 6.971093085,
+            "pixels": 4241151531,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2526,
+            "media": 7,
+            "clock": 7.005802668,
+            "absolute": 7.005838002,
+            "pixels": 3952002906,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2575,
+            "media": 7.041666666666667,
+            "clock": 7.055620876,
+            "absolute": 7.05565071,
+            "pixels": 1845883140,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2625,
+            "media": 7.083333333333333,
+            "clock": 7.104873626,
+            "absolute": 7.104900793,
+            "pixels": 2600989051,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2659,
+            "media": 7.125,
+            "clock": 7.139934668,
+            "absolute": 7.139962501,
+            "pixels": 1387996872,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2708,
+            "media": 7.166666666666667,
+            "clock": 7.189019209,
+            "absolute": 7.189046668,
+            "pixels": 3618670724,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2742,
+            "media": 7.208333333333333,
+            "clock": 7.223147626,
+            "absolute": 7.223180876,
+            "pixels": 2547509557,
+            "width": 426,
+            "height": 240
+          }
+        ],
+        "observations": [
+          {
+            "wall": 1175,
+            "media": 6,
+            "clock": 6,
+            "absolute": 6,
+            "pixels": 1244919783,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1575,
+            "media": 6.041666666666667,
+            "clock": 6.05588546,
+            "absolute": 6.055918668,
+            "pixels": 1247468990,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1625,
+            "media": 6.083333333333333,
+            "clock": 6.105401335,
+            "absolute": 6.105440627,
+            "pixels": 1620722526,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1659,
+            "media": 6.125,
+            "clock": 6.140753543,
+            "absolute": 6.140791002,
+            "pixels": 194321280,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1694,
+            "media": 6.166666666666667,
+            "clock": 6.173824502,
+            "absolute": 6.173901835,
+            "pixels": 843926453,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1742,
+            "media": 6.208333333333333,
+            "clock": 6.221546126,
+            "absolute": 6.221580376,
+            "pixels": 1357367956,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1792,
+            "media": 6.25,
+            "clock": 6.271363876,
+            "absolute": 6.27140171,
+            "pixels": 1793192613,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1825,
+            "media": 6.291666666666667,
+            "clock": 6.305433001,
+            "absolute": 6.305466043,
+            "pixels": 925186135,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1875,
+            "media": 6.333333333333333,
+            "clock": 6.355974043,
+            "absolute": 6.356010751,
+            "pixels": 3550982845,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1909,
+            "media": 6.375,
+            "clock": 6.390556751,
+            "absolute": 6.390593126,
+            "pixels": 328169749,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1944,
+            "media": 6.416666666666667,
+            "clock": 6.423599751,
+            "absolute": 6.423630501,
+            "pixels": 1331407827,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 1992,
+            "media": 6.458333333333333,
+            "clock": 6.472479585,
+            "absolute": 6.472519126,
+            "pixels": 3232332766,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2027,
+            "media": 6.5,
+            "clock": 6.506480251,
+            "absolute": 6.506511835,
+            "pixels": 2927054514,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2075,
+            "media": 6.541666666666667,
+            "clock": 6.55529746,
+            "absolute": 6.555328251,
+            "pixels": 3219744480,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2125,
+            "media": 6.583333333333333,
+            "clock": 6.605969876,
+            "absolute": 6.606006835,
+            "pixels": 1064545234,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2158,
+            "media": 6.625,
+            "clock": 6.638370709,
+            "absolute": 6.638404293,
+            "pixels": 1296642392,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2209,
+            "media": 6.666666666666667,
+            "clock": 6.689760959,
+            "absolute": 6.689846126,
+            "pixels": 2607742919,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2242,
+            "media": 6.708333333333333,
+            "clock": 6.722055918,
+            "absolute": 6.722096626,
+            "pixels": 758444196,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2276,
+            "media": 6.75,
+            "clock": 6.75528821,
+            "absolute": 6.755339626,
+            "pixels": 290106924,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2325,
+            "media": 6.791666666666667,
+            "clock": 6.805054668,
+            "absolute": 6.80508221,
+            "pixels": 3029531101,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2375,
+            "media": 6.833333333333333,
+            "clock": 6.856347418,
+            "absolute": 6.856383126,
+            "pixels": 2718242420,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2408,
+            "media": 6.875,
+            "clock": 6.88975071,
+            "absolute": 6.88978346,
+            "pixels": 3565863735,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2443,
+            "media": 6.916666666666667,
+            "clock": 6.922565627,
+            "absolute": 6.922598168,
+            "pixels": 2026600276,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2491,
+            "media": 6.958333333333333,
+            "clock": 6.971048502,
+            "absolute": 6.971093085,
+            "pixels": 4241151531,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2526,
+            "media": 7,
+            "clock": 7.005802668,
+            "absolute": 7.005838002,
+            "pixels": 3952002906,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2575,
+            "media": 7.041666666666667,
+            "clock": 7.055620876,
+            "absolute": 7.05565071,
+            "pixels": 1845883140,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2625,
+            "media": 7.083333333333333,
+            "clock": 7.104873626,
+            "absolute": 7.104900793,
+            "pixels": 2600989051,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2659,
+            "media": 7.125,
+            "clock": 7.139934668,
+            "absolute": 7.139962501,
+            "pixels": 1387996872,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2708,
+            "media": 7.166666666666667,
+            "clock": 7.189019209,
+            "absolute": 7.189046668,
+            "pixels": 3618670724,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 2742,
+            "media": 7.208333333333333,
+            "clock": 7.223147626,
+            "absolute": 7.223180876,
+            "pixels": 2547509557,
+            "width": 426,
+            "height": 240
+          }
+        ],
+        "initialPreroll": 0,
+        "admitted": true,
+        "stage": "complete",
+        "firstFrameMs": 910,
+        "firstError": 0,
+        "maxClockError": 0.023094292333333044,
+        "reversals": 0,
+        "uniquePixels": 30,
+        "player": {
+          "method": "transcode",
+          "sessionId": "2982effe-c6cd-4694-bf35-f0820a19b184",
+          "nativeHls": true,
+          "sourcePath": "http://127.0.0.1:50174/0135f1df-c202-467b-9ef2-b7e38e8a722e",
+          "owns": true,
+          "wantsPlayback": true
+        },
+        "pass": true
+      },
+      {
+        "name": "forward",
+        "target": 18,
+        "trigger": 2764,
+        "frames": [
+          {
+            "wall": 3375,
+            "media": 18.041666666666668,
+            "clock": 18.0727429,
+            "absolute": 18.0727429,
+            "pixels": 4192702668,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3408,
+            "media": 18.083333333333332,
+            "clock": 18.09710269,
+            "absolute": 18.097134398,
+            "pixels": 720591787,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3458,
+            "media": 18.125,
+            "clock": 18.146879357,
+            "absolute": 18.146933565,
+            "pixels": 495786427,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3492,
+            "media": 18.166666666666668,
+            "clock": 18.180175857,
+            "absolute": 18.180214065,
+            "pixels": 3209538357,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3542,
+            "media": 18.208333333333332,
+            "clock": 18.230773439,
+            "absolute": 18.230815481,
+            "pixels": 870193710,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3575,
+            "media": 18.25,
+            "clock": 18.26294894,
+            "absolute": 18.262973106,
+            "pixels": 3184856101,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3625,
+            "media": 18.291666666666668,
+            "clock": 18.315036231,
+            "absolute": 18.315060481,
+            "pixels": 3583803322,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3658,
+            "media": 18.333333333333332,
+            "clock": 18.347528398,
+            "absolute": 18.347564773,
+            "pixels": 867335079,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3708,
+            "media": 18.375,
+            "clock": 18.396568648,
+            "absolute": 18.39659619,
+            "pixels": 3810764647,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3742,
+            "media": 18.416666666666668,
+            "clock": 18.430291689,
+            "absolute": 18.430323398,
+            "pixels": 3889428275,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3792,
+            "media": 18.458333333333332,
+            "clock": 18.480097148,
+            "absolute": 18.480121481,
+            "pixels": 3387045845,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3825,
+            "media": 18.5,
+            "clock": 18.513649315,
+            "absolute": 18.513676023,
+            "pixels": 1608355138,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3875,
+            "media": 18.541666666666668,
+            "clock": 18.564168189,
+            "absolute": 18.564194273,
+            "pixels": 827644007,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3908,
+            "media": 18.583333333333332,
+            "clock": 18.597451481,
+            "absolute": 18.597483648,
+            "pixels": 3095617494,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3962,
+            "media": 18.625,
+            "clock": 18.649358231,
+            "absolute": 18.64938319,
+            "pixels": 466284999,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3992,
+            "media": 18.666666666666668,
+            "clock": 18.679596898,
+            "absolute": 18.679642731,
+            "pixels": 516577479,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4042,
+            "media": 18.708333333333332,
+            "clock": 18.730097897,
+            "absolute": 18.730127689,
+            "pixels": 443049636,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4075,
+            "media": 18.75,
+            "clock": 18.764175022,
+            "absolute": 18.764202106,
+            "pixels": 1336073556,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4125,
+            "media": 18.791666666666668,
+            "clock": 18.813248939,
+            "absolute": 18.813273356,
+            "pixels": 3755587367,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4158,
+            "media": 18.833333333333332,
+            "clock": 18.846651689,
+            "absolute": 18.846696064,
+            "pixels": 4171960242,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4208,
+            "media": 18.875,
+            "clock": 18.896514439,
+            "absolute": 18.896538773,
+            "pixels": 1628291987,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4242,
+            "media": 18.916666666666668,
+            "clock": 18.929523565,
+            "absolute": 18.929545398,
+            "pixels": 2479519339,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4292,
+            "media": 18.958333333333332,
+            "clock": 18.979789606,
+            "absolute": 18.979819815,
+            "pixels": 247470916,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4325,
+            "media": 19,
+            "clock": 19.01341944,
+            "absolute": 19.013450481,
+            "pixels": 842644403,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4375,
+            "media": 19.041666666666668,
+            "clock": 19.063485231,
+            "absolute": 19.063510898,
+            "pixels": 1348360389,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4408,
+            "media": 19.083333333333332,
+            "clock": 19.096714148,
+            "absolute": 19.096738439,
+            "pixels": 538473193,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4458,
+            "media": 19.125,
+            "clock": 19.146869773,
+            "absolute": 19.146899523,
+            "pixels": 2725106404,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4492,
+            "media": 19.166666666666668,
+            "clock": 19.180145148,
+            "absolute": 19.18016994,
+            "pixels": 3753371703,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4541,
+            "media": 19.208333333333332,
+            "clock": 19.230095856,
+            "absolute": 19.230122023,
+            "pixels": 1918223890,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4575,
+            "media": 19.25,
+            "clock": 19.26345144,
+            "absolute": 19.263480898,
+            "pixels": 1320843379,
+            "width": 426,
+            "height": 240
+          }
+        ],
+        "observations": [
+          {
+            "wall": 3375,
+            "media": 18.041666666666668,
+            "clock": 18.0727429,
+            "absolute": 18.0727429,
+            "pixels": 4192702668,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3408,
+            "media": 18.083333333333332,
+            "clock": 18.09710269,
+            "absolute": 18.097134398,
+            "pixels": 720591787,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3458,
+            "media": 18.125,
+            "clock": 18.146879357,
+            "absolute": 18.146933565,
+            "pixels": 495786427,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3492,
+            "media": 18.166666666666668,
+            "clock": 18.180175857,
+            "absolute": 18.180214065,
+            "pixels": 3209538357,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3542,
+            "media": 18.208333333333332,
+            "clock": 18.230773439,
+            "absolute": 18.230815481,
+            "pixels": 870193710,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3575,
+            "media": 18.25,
+            "clock": 18.26294894,
+            "absolute": 18.262973106,
+            "pixels": 3184856101,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3625,
+            "media": 18.291666666666668,
+            "clock": 18.315036231,
+            "absolute": 18.315060481,
+            "pixels": 3583803322,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3658,
+            "media": 18.333333333333332,
+            "clock": 18.347528398,
+            "absolute": 18.347564773,
+            "pixels": 867335079,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3708,
+            "media": 18.375,
+            "clock": 18.396568648,
+            "absolute": 18.39659619,
+            "pixels": 3810764647,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3742,
+            "media": 18.416666666666668,
+            "clock": 18.430291689,
+            "absolute": 18.430323398,
+            "pixels": 3889428275,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3792,
+            "media": 18.458333333333332,
+            "clock": 18.480097148,
+            "absolute": 18.480121481,
+            "pixels": 3387045845,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3825,
+            "media": 18.5,
+            "clock": 18.513649315,
+            "absolute": 18.513676023,
+            "pixels": 1608355138,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3875,
+            "media": 18.541666666666668,
+            "clock": 18.564168189,
+            "absolute": 18.564194273,
+            "pixels": 827644007,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3908,
+            "media": 18.583333333333332,
+            "clock": 18.597451481,
+            "absolute": 18.597483648,
+            "pixels": 3095617494,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3962,
+            "media": 18.625,
+            "clock": 18.649358231,
+            "absolute": 18.64938319,
+            "pixels": 466284999,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 3992,
+            "media": 18.666666666666668,
+            "clock": 18.679596898,
+            "absolute": 18.679642731,
+            "pixels": 516577479,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4042,
+            "media": 18.708333333333332,
+            "clock": 18.730097897,
+            "absolute": 18.730127689,
+            "pixels": 443049636,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4075,
+            "media": 18.75,
+            "clock": 18.764175022,
+            "absolute": 18.764202106,
+            "pixels": 1336073556,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4125,
+            "media": 18.791666666666668,
+            "clock": 18.813248939,
+            "absolute": 18.813273356,
+            "pixels": 3755587367,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4158,
+            "media": 18.833333333333332,
+            "clock": 18.846651689,
+            "absolute": 18.846696064,
+            "pixels": 4171960242,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4208,
+            "media": 18.875,
+            "clock": 18.896514439,
+            "absolute": 18.896538773,
+            "pixels": 1628291987,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4242,
+            "media": 18.916666666666668,
+            "clock": 18.929523565,
+            "absolute": 18.929545398,
+            "pixels": 2479519339,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4292,
+            "media": 18.958333333333332,
+            "clock": 18.979789606,
+            "absolute": 18.979819815,
+            "pixels": 247470916,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4325,
+            "media": 19,
+            "clock": 19.01341944,
+            "absolute": 19.013450481,
+            "pixels": 842644403,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4375,
+            "media": 19.041666666666668,
+            "clock": 19.063485231,
+            "absolute": 19.063510898,
+            "pixels": 1348360389,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4408,
+            "media": 19.083333333333332,
+            "clock": 19.096714148,
+            "absolute": 19.096738439,
+            "pixels": 538473193,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4458,
+            "media": 19.125,
+            "clock": 19.146869773,
+            "absolute": 19.146899523,
+            "pixels": 2725106404,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4492,
+            "media": 19.166666666666668,
+            "clock": 19.180145148,
+            "absolute": 19.18016994,
+            "pixels": 3753371703,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4541,
+            "media": 19.208333333333332,
+            "clock": 19.230095856,
+            "absolute": 19.230122023,
+            "pixels": 1918223890,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 4575,
+            "media": 19.25,
+            "clock": 19.26345144,
+            "absolute": 19.263480898,
+            "pixels": 1320843379,
+            "width": 426,
+            "height": 240
+          }
+        ],
+        "initialPreroll": 0,
+        "admitted": true,
+        "stage": "complete",
+        "firstFrameMs": 611,
+        "firstError": 0.0727429000000015,
+        "maxClockError": 0.031076233333333647,
+        "reversals": 0,
+        "uniquePixels": 30,
+        "player": {
+          "method": "transcode",
+          "sessionId": "2982effe-c6cd-4694-bf35-f0820a19b184",
+          "nativeHls": true,
+          "sourcePath": "http://127.0.0.1:50174/0135f1df-c202-467b-9ef2-b7e38e8a722e",
+          "owns": true,
+          "wantsPlayback": true
+        },
+        "pass": true
+      },
+      {
+        "name": "backward",
+        "target": 3,
+        "trigger": 4582,
+        "frames": [
+          {
+            "wall": 5758,
+            "media": 3,
+            "clock": 3,
+            "absolute": 3,
+            "pixels": 811627011,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6092,
+            "media": 3.0416666666666665,
+            "clock": 3.077514,
+            "absolute": 3.077514,
+            "pixels": 743021507,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6142,
+            "media": 3.0833333333333335,
+            "clock": 3.10028431,
+            "absolute": 3.100313019,
+            "pixels": 3502198758,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6175,
+            "media": 3.125,
+            "clock": 3.132998227,
+            "absolute": 3.133022019,
+            "pixels": 1795265010,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6225,
+            "media": 3.1666666666666665,
+            "clock": 3.182300519,
+            "absolute": 3.182328894,
+            "pixels": 768983565,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6259,
+            "media": 3.2083333333333335,
+            "clock": 3.215813477,
+            "absolute": 3.21584381,
+            "pixels": 679234551,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6309,
+            "media": 3.25,
+            "clock": 3.266765769,
+            "absolute": 3.266796894,
+            "pixels": 180809894,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6343,
+            "media": 3.2916666666666665,
+            "clock": 3.300169685,
+            "absolute": 3.300205227,
+            "pixels": 2746181857,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6392,
+            "media": 3.3333333333333335,
+            "clock": 3.349209102,
+            "absolute": 3.349236768,
+            "pixels": 3949805945,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6426,
+            "media": 3.375,
+            "clock": 3.383574643,
+            "absolute": 3.38360456,
+            "pixels": 3852643037,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6475,
+            "media": 3.4166666666666665,
+            "clock": 3.432283643,
+            "absolute": 3.432307685,
+            "pixels": 15658241,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6508,
+            "media": 3.4583333333333335,
+            "clock": 3.464685935,
+            "absolute": 3.464709143,
+            "pixels": 3235063956,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6558,
+            "media": 3.5,
+            "clock": 3.516402393,
+            "absolute": 3.516431018,
+            "pixels": 829672125,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6593,
+            "media": 3.5416666666666665,
+            "clock": 3.549806685,
+            "absolute": 3.54983431,
+            "pixels": 2324642832,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6642,
+            "media": 3.5833333333333335,
+            "clock": 3.600539352,
+            "absolute": 3.600564977,
+            "pixels": 1940037264,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6674,
+            "media": 3.625,
+            "clock": 3.631960227,
+            "absolute": 3.631986268,
+            "pixels": 1548502610,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6725,
+            "media": 3.6666666666666665,
+            "clock": 3.682954393,
+            "absolute": 3.682987643,
+            "pixels": 1427265281,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6759,
+            "media": 3.7083333333333335,
+            "clock": 3.715890144,
+            "absolute": 3.715920561,
+            "pixels": 2199025886,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6809,
+            "media": 3.75,
+            "clock": 3.76687552,
+            "absolute": 3.766900603,
+            "pixels": 131843335,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6843,
+            "media": 3.7916666666666665,
+            "clock": 3.800215686,
+            "absolute": 3.800241519,
+            "pixels": 2821738152,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6893,
+            "media": 3.8333333333333335,
+            "clock": 3.850468186,
+            "absolute": 3.850500019,
+            "pixels": 2160341319,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6926,
+            "media": 3.875,
+            "clock": 3.883282852,
+            "absolute": 3.883307852,
+            "pixels": 1329386475,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6975,
+            "media": 3.9166666666666665,
+            "clock": 3.932207519,
+            "absolute": 3.932231894,
+            "pixels": 89942826,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7008,
+            "media": 3.9583333333333335,
+            "clock": 3.965504519,
+            "absolute": 3.965555561,
+            "pixels": 1009817342,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7058,
+            "media": 4,
+            "clock": 4.016520603,
+            "absolute": 4.016544353,
+            "pixels": 1382336495,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7092,
+            "media": 4.041666666666667,
+            "clock": 4.049802019,
+            "absolute": 4.049826353,
+            "pixels": 2895581675,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7142,
+            "media": 4.083333333333333,
+            "clock": 4.099222603,
+            "absolute": 4.09925952,
+            "pixels": 265729846,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7175,
+            "media": 4.125,
+            "clock": 4.132460353,
+            "absolute": 4.13248702,
+            "pixels": 143594962,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7225,
+            "media": 4.166666666666667,
+            "clock": 4.183318353,
+            "absolute": 4.183349228,
+            "pixels": 2825648911,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7258,
+            "media": 4.208333333333333,
+            "clock": 4.215678645,
+            "absolute": 4.215704645,
+            "pixels": 582268116,
+            "width": 426,
+            "height": 240
+          }
+        ],
+        "observations": [
+          {
+            "wall": 5758,
+            "media": 3,
+            "clock": 3,
+            "absolute": 3,
+            "pixels": 811627011,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6092,
+            "media": 3.0416666666666665,
+            "clock": 3.077514,
+            "absolute": 3.077514,
+            "pixels": 743021507,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6142,
+            "media": 3.0833333333333335,
+            "clock": 3.10028431,
+            "absolute": 3.100313019,
+            "pixels": 3502198758,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6175,
+            "media": 3.125,
+            "clock": 3.132998227,
+            "absolute": 3.133022019,
+            "pixels": 1795265010,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6225,
+            "media": 3.1666666666666665,
+            "clock": 3.182300519,
+            "absolute": 3.182328894,
+            "pixels": 768983565,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6259,
+            "media": 3.2083333333333335,
+            "clock": 3.215813477,
+            "absolute": 3.21584381,
+            "pixels": 679234551,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6309,
+            "media": 3.25,
+            "clock": 3.266765769,
+            "absolute": 3.266796894,
+            "pixels": 180809894,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6343,
+            "media": 3.2916666666666665,
+            "clock": 3.300169685,
+            "absolute": 3.300205227,
+            "pixels": 2746181857,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6392,
+            "media": 3.3333333333333335,
+            "clock": 3.349209102,
+            "absolute": 3.349236768,
+            "pixels": 3949805945,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6426,
+            "media": 3.375,
+            "clock": 3.383574643,
+            "absolute": 3.38360456,
+            "pixels": 3852643037,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6475,
+            "media": 3.4166666666666665,
+            "clock": 3.432283643,
+            "absolute": 3.432307685,
+            "pixels": 15658241,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6508,
+            "media": 3.4583333333333335,
+            "clock": 3.464685935,
+            "absolute": 3.464709143,
+            "pixels": 3235063956,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6558,
+            "media": 3.5,
+            "clock": 3.516402393,
+            "absolute": 3.516431018,
+            "pixels": 829672125,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6593,
+            "media": 3.5416666666666665,
+            "clock": 3.549806685,
+            "absolute": 3.54983431,
+            "pixels": 2324642832,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6642,
+            "media": 3.5833333333333335,
+            "clock": 3.600539352,
+            "absolute": 3.600564977,
+            "pixels": 1940037264,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6674,
+            "media": 3.625,
+            "clock": 3.631960227,
+            "absolute": 3.631986268,
+            "pixels": 1548502610,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6725,
+            "media": 3.6666666666666665,
+            "clock": 3.682954393,
+            "absolute": 3.682987643,
+            "pixels": 1427265281,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6759,
+            "media": 3.7083333333333335,
+            "clock": 3.715890144,
+            "absolute": 3.715920561,
+            "pixels": 2199025886,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6809,
+            "media": 3.75,
+            "clock": 3.76687552,
+            "absolute": 3.766900603,
+            "pixels": 131843335,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6843,
+            "media": 3.7916666666666665,
+            "clock": 3.800215686,
+            "absolute": 3.800241519,
+            "pixels": 2821738152,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6893,
+            "media": 3.8333333333333335,
+            "clock": 3.850468186,
+            "absolute": 3.850500019,
+            "pixels": 2160341319,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6926,
+            "media": 3.875,
+            "clock": 3.883282852,
+            "absolute": 3.883307852,
+            "pixels": 1329386475,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 6975,
+            "media": 3.9166666666666665,
+            "clock": 3.932207519,
+            "absolute": 3.932231894,
+            "pixels": 89942826,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7008,
+            "media": 3.9583333333333335,
+            "clock": 3.965504519,
+            "absolute": 3.965555561,
+            "pixels": 1009817342,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7058,
+            "media": 4,
+            "clock": 4.016520603,
+            "absolute": 4.016544353,
+            "pixels": 1382336495,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7092,
+            "media": 4.041666666666667,
+            "clock": 4.049802019,
+            "absolute": 4.049826353,
+            "pixels": 2895581675,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7142,
+            "media": 4.083333333333333,
+            "clock": 4.099222603,
+            "absolute": 4.09925952,
+            "pixels": 265729846,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7175,
+            "media": 4.125,
+            "clock": 4.132460353,
+            "absolute": 4.13248702,
+            "pixels": 143594962,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7225,
+            "media": 4.166666666666667,
+            "clock": 4.183318353,
+            "absolute": 4.183349228,
+            "pixels": 2825648911,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 7258,
+            "media": 4.208333333333333,
+            "clock": 4.215678645,
+            "absolute": 4.215704645,
+            "pixels": 582268116,
+            "width": 426,
+            "height": 240
+          }
+        ],
+        "initialPreroll": 0,
+        "admitted": true,
+        "stage": "complete",
+        "firstFrameMs": 1176,
+        "firstError": 0,
+        "maxClockError": 0.03584733333333334,
+        "reversals": 0,
+        "uniquePixels": 30,
+        "player": {
+          "method": "transcode",
+          "sessionId": "2982effe-c6cd-4694-bf35-f0820a19b184",
+          "nativeHls": true,
+          "sourcePath": "http://127.0.0.1:50174/0135f1df-c202-467b-9ef2-b7e38e8a722e",
+          "owns": true,
+          "wantsPlayback": true
+        },
+        "pass": true
+      },
+      {
+        "name": "restart",
+        "target": 0,
+        "trigger": 7270,
+        "frames": [
+          {
+            "wall": 7693,
+            "media": 0,
+            "clock": 0,
+            "absolute": 0,
+            "pixels": 2147106140,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8058,
+            "media": 0.041666666666666664,
+            "clock": 0.052507068,
+            "absolute": 0.052539735,
+            "pixels": 3595375803,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8108,
+            "media": 0.08333333333333333,
+            "clock": 0.102937776,
+            "absolute": 0.102972193,
+            "pixels": 213861313,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8143,
+            "media": 0.125,
+            "clock": 0.137559901,
+            "absolute": 0.137589609,
+            "pixels": 129380007,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8192,
+            "media": 0.16666666666666666,
+            "clock": 0.186397734,
+            "absolute": 0.186427734,
+            "pixels": 3689082052,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8225,
+            "media": 0.20833333333333334,
+            "clock": 0.219328151,
+            "absolute": 0.219398192,
+            "pixels": 2217047705,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8275,
+            "media": 0.25,
+            "clock": 0.269992901,
+            "absolute": 0.270015734,
+            "pixels": 414018550,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8315,
+            "media": 0.2916666666666667,
+            "clock": 0.308707026,
+            "absolute": 0.308727984,
+            "pixels": 1800828531,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8359,
+            "media": 0.3333333333333333,
+            "clock": 0.354227193,
+            "absolute": 0.354252068,
+            "pixels": 1940253167,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8392,
+            "media": 0.375,
+            "clock": 0.386292734,
+            "absolute": 0.386336984,
+            "pixels": 49859261,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8442,
+            "media": 0.4166666666666667,
+            "clock": 0.436156276,
+            "absolute": 0.436195276,
+            "pixels": 4110714869,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8474,
+            "media": 0.4583333333333333,
+            "clock": 0.469240526,
+            "absolute": 0.469264901,
+            "pixels": 2173577897,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8525,
+            "media": 0.5,
+            "clock": 0.520070567,
+            "absolute": 0.520094276,
+            "pixels": 2228172543,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8558,
+            "media": 0.5416666666666666,
+            "clock": 0.552418609,
+            "absolute": 0.552441651,
+            "pixels": 2103127503,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8608,
+            "media": 0.5833333333333334,
+            "clock": 0.603037068,
+            "absolute": 0.603067818,
+            "pixels": 1098827933,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8641,
+            "media": 0.625,
+            "clock": 0.636064151,
+            "absolute": 0.63608961,
+            "pixels": 2112008153,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8692,
+            "media": 0.6666666666666666,
+            "clock": 0.683961776,
+            "absolute": 0.683975735,
+            "pixels": 2672166543,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8725,
+            "media": 0.7083333333333334,
+            "clock": 0.720564193,
+            "absolute": 0.720588443,
+            "pixels": 230985407,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8775,
+            "media": 0.75,
+            "clock": 0.770013609,
+            "absolute": 0.770039318,
+            "pixels": 1559421465,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8809,
+            "media": 0.7916666666666666,
+            "clock": 0.802868859,
+            "absolute": 0.802892693,
+            "pixels": 3932761273,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8858,
+            "media": 0.8333333333333334,
+            "clock": 0.853324651,
+            "absolute": 0.853349484,
+            "pixels": 1587417720,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8892,
+            "media": 0.875,
+            "clock": 0.886273609,
+            "absolute": 0.886298026,
+            "pixels": 3970390435,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8942,
+            "media": 0.9166666666666666,
+            "clock": 0.936728984,
+            "absolute": 0.936755568,
+            "pixels": 428928775,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8975,
+            "media": 0.9583333333333334,
+            "clock": 0.969853859,
+            "absolute": 0.969878359,
+            "pixels": 606136136,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 9026,
+            "media": 1,
+            "clock": 1.02045311,
+            "absolute": 1.02047886,
+            "pixels": 1069917637,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 9058,
+            "media": 1.0416666666666667,
+            "clock": 1.052784318,
+            "absolute": 1.052807901,
+            "pixels": 371119361,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 9108,
+            "media": 1.0833333333333333,
+            "clock": 1.102185068,
+            "absolute": 1.102205776,
+            "pixels": 822094852,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 9141,
+            "media": 1.125,
+            "clock": 1.135849817,
+            "absolute": 1.135875734,
+            "pixels": 680963190,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 9191,
+            "media": 1.1666666666666667,
+            "clock": 1.185820067,
+            "absolute": 1.185844234,
+            "pixels": 668196465,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 9225,
+            "media": 1.2083333333333333,
+            "clock": 1.219734192,
+            "absolute": 1.219759359,
+            "pixels": 2313298283,
+            "width": 426,
+            "height": 240
+          }
+        ],
+        "observations": [
+          {
+            "wall": 7693,
+            "media": 0,
+            "clock": 0,
+            "absolute": 0,
+            "pixels": 2147106140,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8058,
+            "media": 0.041666666666666664,
+            "clock": 0.052507068,
+            "absolute": 0.052539735,
+            "pixels": 3595375803,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8108,
+            "media": 0.08333333333333333,
+            "clock": 0.102937776,
+            "absolute": 0.102972193,
+            "pixels": 213861313,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8143,
+            "media": 0.125,
+            "clock": 0.137559901,
+            "absolute": 0.137589609,
+            "pixels": 129380007,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8192,
+            "media": 0.16666666666666666,
+            "clock": 0.186397734,
+            "absolute": 0.186427734,
+            "pixels": 3689082052,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8225,
+            "media": 0.20833333333333334,
+            "clock": 0.219328151,
+            "absolute": 0.219398192,
+            "pixels": 2217047705,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8275,
+            "media": 0.25,
+            "clock": 0.269992901,
+            "absolute": 0.270015734,
+            "pixels": 414018550,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8315,
+            "media": 0.2916666666666667,
+            "clock": 0.308707026,
+            "absolute": 0.308727984,
+            "pixels": 1800828531,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8359,
+            "media": 0.3333333333333333,
+            "clock": 0.354227193,
+            "absolute": 0.354252068,
+            "pixels": 1940253167,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8392,
+            "media": 0.375,
+            "clock": 0.386292734,
+            "absolute": 0.386336984,
+            "pixels": 49859261,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8442,
+            "media": 0.4166666666666667,
+            "clock": 0.436156276,
+            "absolute": 0.436195276,
+            "pixels": 4110714869,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8474,
+            "media": 0.4583333333333333,
+            "clock": 0.469240526,
+            "absolute": 0.469264901,
+            "pixels": 2173577897,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8525,
+            "media": 0.5,
+            "clock": 0.520070567,
+            "absolute": 0.520094276,
+            "pixels": 2228172543,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8558,
+            "media": 0.5416666666666666,
+            "clock": 0.552418609,
+            "absolute": 0.552441651,
+            "pixels": 2103127503,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8608,
+            "media": 0.5833333333333334,
+            "clock": 0.603037068,
+            "absolute": 0.603067818,
+            "pixels": 1098827933,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8641,
+            "media": 0.625,
+            "clock": 0.636064151,
+            "absolute": 0.63608961,
+            "pixels": 2112008153,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8692,
+            "media": 0.6666666666666666,
+            "clock": 0.683961776,
+            "absolute": 0.683975735,
+            "pixels": 2672166543,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8725,
+            "media": 0.7083333333333334,
+            "clock": 0.720564193,
+            "absolute": 0.720588443,
+            "pixels": 230985407,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8775,
+            "media": 0.75,
+            "clock": 0.770013609,
+            "absolute": 0.770039318,
+            "pixels": 1559421465,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8809,
+            "media": 0.7916666666666666,
+            "clock": 0.802868859,
+            "absolute": 0.802892693,
+            "pixels": 3932761273,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8858,
+            "media": 0.8333333333333334,
+            "clock": 0.853324651,
+            "absolute": 0.853349484,
+            "pixels": 1587417720,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8892,
+            "media": 0.875,
+            "clock": 0.886273609,
+            "absolute": 0.886298026,
+            "pixels": 3970390435,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8942,
+            "media": 0.9166666666666666,
+            "clock": 0.936728984,
+            "absolute": 0.936755568,
+            "pixels": 428928775,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 8975,
+            "media": 0.9583333333333334,
+            "clock": 0.969853859,
+            "absolute": 0.969878359,
+            "pixels": 606136136,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 9026,
+            "media": 1,
+            "clock": 1.02045311,
+            "absolute": 1.02047886,
+            "pixels": 1069917637,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 9058,
+            "media": 1.0416666666666667,
+            "clock": 1.052784318,
+            "absolute": 1.052807901,
+            "pixels": 371119361,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 9108,
+            "media": 1.0833333333333333,
+            "clock": 1.102185068,
+            "absolute": 1.102205776,
+            "pixels": 822094852,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 9141,
+            "media": 1.125,
+            "clock": 1.135849817,
+            "absolute": 1.135875734,
+            "pixels": 680963190,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 9191,
+            "media": 1.1666666666666667,
+            "clock": 1.185820067,
+            "absolute": 1.185844234,
+            "pixels": 668196465,
+            "width": 426,
+            "height": 240
+          },
+          {
+            "wall": 9225,
+            "media": 1.2083333333333333,
+            "clock": 1.219734192,
+            "absolute": 1.219759359,
+            "pixels": 2313298283,
+            "width": 426,
+            "height": 240
+          }
+        ],
+        "initialPreroll": 0,
+        "admitted": true,
+        "stage": "complete",
+        "firstFrameMs": 423,
+        "firstError": 0,
+        "maxClockError": 0.02089385966666668,
+        "reversals": 0,
+        "uniquePixels": 30,
+        "player": {
+          "method": "transcode",
+          "sessionId": "92d76b25-16bd-4ce8-8fda-0c90e6ec8994",
+          "nativeHls": true,
+          "sourcePath": "http://127.0.0.1:50174/4dbf65ba-e4f2-41d1-bfee-2cc496d290a8",
+          "owns": true,
+          "wantsPlayback": true
+        },
+        "pass": true
+      }
+    ],
+    "events": [],
+    "callbackErrors": [],
+    "boot": {
+      "authenticated": true,
+      "serverReady": true,
+      "route": "#/"
+    },
+    "caps": {
+      "vcodec": "h264,hevc,hevc10,av1,vp9,vp8",
+      "acodec": "aac,mp3,opus,flac,ac3,eac3",
+      "container": "mp4,webm,mov,m4a,m4b,mp3,aac,flac,ogg,opus,wav",
+      "hdr": 1,
+      "dv": 1,
+      "dvprofile": "5,8",
+      "hdrDisplay": true,
+      "maxheight": 2160,
+      "hdr10t": 1,
+      "progressiveHevcSampleEntries": [
+        "hvc1",
+        "dvh1"
+      ],
+      "hlsHevcSampleEntries": []
+    },
+    "pass": true
+  },
+  "owned_tab_closed": true,
+  "daemon_log_window": {
+    "first": "2026-10-12T17:56:54.239193Z  INFO plurxd: open files: soft 1048575 -> 1048575 (hard 9223372036854775807)",
+    "last": "2026-10-12T17:58:44.765728Z  WARN plurxd::http: http request failed route_group=\"playback\" status=503 latency_ms=0 request_id=d4eba7e5348e4d9abf87aceb3d0a1c7c path=/api/v1/hls/[REDACTED]/quality-schedule also_suppressed=0"
+  },
+  "server_diagnostics": [
+    "2026-10-12T17:58:36.111361Z  INFO plurxd::transcode: playback startup phase completed file_id=1 phase=\"vod_create\" elapsed_ms=288 outcome=\"ready\"",
+    "2026-10-12T17:58:36.111387Z  INFO plurxd::transcode: playback startup phase completed session=s-38892f0447e2a364dbd04ba05a4e6b63d1291c45af2348fbdfdb40e23fb91ee2 phase=\"create\" elapsed_ms=288",
+    "2026-10-12T17:58:42.949148Z  INFO plurxd::transcode: playback startup phase completed file_id=1 phase=\"vod_create\" elapsed_ms=131 outcome=\"ready\"",
+    "2026-10-12T17:58:42.949192Z  INFO plurxd::transcode: playback startup phase completed session=s-05cdbf809275b96891adb805437540f92b3a1961f74399ac99e018d73b0b1784 phase=\"create\" elapsed_ms=131"
+  ],
+  "resources_closed": true
+}

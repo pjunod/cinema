@@ -1,6 +1,6 @@
 {
   "date": "2026-10-12",
-  "scope": "Actual Safari 27.0.1 native-HLS framework decoder observations; shipping web player capture pending",
+  "scope": "Actual Safari27.0.1 native-HLS SDR/PQ and shipping web-player production VOD transcode qualification; bounded parser startup/frame semantics diagnostics.",
   "source": "1f02b7938a2f3924de6a3969483e38ffe3e8bd6f",
   "webdriver": {
     "status": "unavailable",
@@ -48,7 +48,7 @@
   "cleanup": {
     "owned_safari_documents_closed": true,
     "owned_http_listeners_closed": true,
-    "shared_assets": "Retained temporarily for independent device lane; integrator removes after all captures."
+    "shared_assets": "Device lane complete; scratch assets retained only until integrator copies final evidence and releases parser-diagnostic dependency."
   },
   "hdr_initial": {
     "receipt": "safari-hdr.json",
@@ -61,7 +61,7 @@
   "harness_source_binding": {
     "initial_sdr": "probe-safari-sdr-initial.py.gz decompresses to exact receipt hash bb94ce9bd75150c979c581794ddc9d04c1c27e56373b197d48207df85639bdf9",
     "selective_sdr": "probe-safari-sdr-selective.py.gz decompresses to exact receipt hash eaf7871d426bd02f89ba190b32d934e25bb7c2003c1c4f1de258d43d2d58df18",
-    "hdr": "Current probe-safari.py adds explicit static-source spatial contrast and HDR media-query observations; no changes to retained SDR outcomes."
+    "hdr": "probe-safari-hdr-capture.py.gz contains exact capture source c3302d6e17890ab5b33a118480d10317f13cd3eb4b8c7068780989ef8c3db976; current reproducer additionally exits nonzero on unsuccessful receipts."
   },
   "hdr_pq_signalled": {
     "receipt": "safari-pq.json",
@@ -90,5 +90,120 @@
     ],
     "display_media_query": true,
     "limits": "The matchMedia result is a browser capability signal, not measured display luminance or end-to-end HDR fidelity. SPS-only repair belongs to authored fixture, not a production workaround."
+  },
+  "shipping_ui": {
+    "status": "PASS: actual Safari shipping player, four production VOD transcode phases,30 RVFC samples each with moving pixels and valid media ownership.",
+    "runtime_relation": "Exact ff1c54b8fb8c333f90cfd4ef0f0372d795f1dc3a source-only release archive, including parser startup fix and Linux encoder-policy change. Later documentation-only changes do not alter this runtime.",
+    "attempts": [
+      {
+        "receipt": "shipping-ui-attempt1.json",
+        "result": "No media: iframe violates intended frame-ancestors none policy; observer moved to top-level without weakening CSP."
+      },
+      {
+        "receipt": "shipping-ui-attempt2.json",
+        "result": "No media: incomplete Homebrew tool override had no adjacent capability-bound parser; exact refusal in shipping-ui-missing-parser.json. Outer deadline closed owned resources."
+      },
+      {
+        "receipt": "shipping-ui-attempt3.json",
+        "result": "No media: complete package present, but observer ran before application boot completed. Missing server status prevents independent attribution; timing hypothesis is not proven cause."
+      },
+      {
+        "receipt": "shipping-ui-attempt4.json",
+        "result": "No media despite proper PLAY_CAPS_READY, ME/SERVER, route/render readiness: startup bound FFprobe deadline caused explicit HTTP500 no-bound-identity VOD refusal."
+      },
+      {
+        "receipt": "shipping-ui-attempt5.json",
+        "result": "Bound parser identity succeeded; no media because qualification pool2 was below shared AAC fixed floor3. VOD refusal caused rolling fallback, whose quality-family request returned503; client release followed. authority_fence is retirement projection, not originating cause.",
+        "source_evidence": [
+          "crates/plurx-core/src/transcode/vod.rs:894",
+          "crates/plurxd/src/vodencode.rs:931",
+          "crates/plurxd/src/transcode/manager/create.rs:1157",
+          "crates/plurxd/src/transcode/manager/create.rs:2119"
+        ],
+        "parser_build_digest": "d5bea12cf7b084c6b0f59982d425f2d310b90b4f6319181667a7cd06167a9ab2"
+      },
+      {
+        "receipt": "shipping-ui-attempt6.json",
+        "result": "VOD ready and production presentation observed, but qualification observer invoked nonexistent pbNowSec. Callback ReferenceError prevented evidence capture. No phase pass claimed. Exact failed source and budget3 external PUT/readback retained.",
+        "diagnosis": "shipping-ui-observer-failure.json",
+        "resource_control": "shipping-ui-budget-control.json"
+      }
+    ],
+    "tools": "shipping-tools-identity.json",
+    "product_changes": "None in this lane. No deadline change, parser bypass, fake native capability, or security-header weakening.",
+    "prior_runtime_source": "4452378414eb270c2bf2ca415f5d68b17b453254",
+    "prior_runtime_sha256": "7dc9ec99c21c1adb5b6bc7799f175141d669666e37c187faa53dfab56327da76",
+    "runtime_source": "ff1c54b8fb8c333f90cfd4ef0f0372d795f1dc3a",
+    "runtime_sha256": "c83948332843886702cbd143ef5da01868fe6bb640ab72dcecfec9209ebdfaa4",
+    "final_receipt": "shipping-ui-final.json",
+    "final_source": "probe-shipping-ui-final.cjs.gz",
+    "final_source_sha256": "fc1802b836a0972a92b4ce8dd5fa07941e9d1d633fd97ef0c9367a8cdc78e606",
+    "bound_parser_digest": "d5bea12cf7b084c6b0f59982d425f2d310b90b4f6319181667a7cd06167a9ab2",
+    "software_pool_threads": 3,
+    "stats": [
+      {
+        "name": "cold-mid",
+        "target": 6,
+        "initialPreroll": 0,
+        "firstFrameMs": 910,
+        "firstError": 0,
+        "maxClockError": 0.023094292333333044,
+        "reversals": 0,
+        "uniquePixels": 30,
+        "pass": true
+      },
+      {
+        "name": "forward",
+        "target": 18,
+        "initialPreroll": 0,
+        "firstFrameMs": 611,
+        "firstError": 0.0727429000000015,
+        "maxClockError": 0.031076233333333647,
+        "reversals": 0,
+        "uniquePixels": 30,
+        "pass": true
+      },
+      {
+        "name": "backward",
+        "target": 3,
+        "initialPreroll": 0,
+        "firstFrameMs": 1176,
+        "firstError": 0,
+        "maxClockError": 0.03584733333333334,
+        "reversals": 0,
+        "uniquePixels": 30,
+        "pass": true
+      },
+      {
+        "name": "restart",
+        "target": 0,
+        "initialPreroll": 0,
+        "firstFrameMs": 423,
+        "firstError": 0,
+        "maxClockError": 0.02089385966666668,
+        "reversals": 0,
+        "uniquePixels": 30,
+        "pass": true
+      }
+    ],
+    "limits": [
+      "The receipt nativeHls field calls a browser capability predicate. It does not prove active native transport: actual shipping H264 playback uses hls.js/MSE and a blob media source. Separate raw native-HLS SDR/PQ receipts prove that decoder route.",
+      "Authored640x360 source, selected240p software transcode, muted audio; no speaker, physical panel, remote server, or source variety claim.",
+      "Transient control429 responses (1\u20134ms retry_after) and quality-schedule503 cancellation on session teardown remain in raw receipt; successful presentation criteria were not changed.",
+      "Original startup Deadline is generic across identity stages. Isolated compilation dominates measured cost; no claim that original generic error alone identifies the exact timed-out stage."
+    ]
+  },
+  "parser_diagnostic": {
+    "default": "parser-execution-default.json",
+    "no_opt": "parser-execution-no-opt.json",
+    "comparison": "parser-guest-comparison.json",
+    "finding": "Default adapter compilation (7541.252 ms) dominates startup; guest version took 0.596 ms, metadata 8.618 ms, and packets 12.420 ms. The no-opt control compiled in 6169.181 ms and all guest output bytes matched. Single-sample evidence demonstrates narrow headroom under the 10 s admission budget, not a definitive stage tag on the earlier generic deadline.",
+    "production_change": "Owned by integrator; lane has not changed parser policy or deadlines.",
+    "frame_decode": {
+      "default": "parser-frames-default.json",
+      "no_opt": "parser-frames-no-opt.json",
+      "comparison": "parser-frames-comparison.json",
+      "finding": "24 actual decoded frame records are byte-identical: default execution 30.322 ms versus no-opt 32.367 ms, both under original 10 s guest deadline. Startup compilation 8105.796 ms versus 6587.985 ms. One bounded authored source sample; not broad codec performance certification."
+    }
   }
 }

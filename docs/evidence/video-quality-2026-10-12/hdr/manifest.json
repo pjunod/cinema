@@ -84,6 +84,14 @@
     "sharp-controls.json.gz": {
       "sha256": "79532fd7096fbd7d733de8b1564cd451b72c223aad0d75b679879345fcf4a362",
       "bytes": 10040
+    },
+    "production-args-binding.json": {
+      "sha256": "f8a11adc220ad2a232642e81eb33409ec2e912f3104bb68896bce99310c95577",
+      "bytes": 8679
+    },
+    "timing-and-firmware.json": {
+      "sha256": "fa3547ad88f1a665e61a906d9923a499c3061ba9b18f2ef19f0b23821f824c11",
+      "bytes": 3558
     }
   }
 }

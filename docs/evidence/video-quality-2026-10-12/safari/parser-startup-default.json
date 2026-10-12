@@ -1,0 +1,11 @@
+{
+  "binary_sha256": "b8d53bd98a95e4012dd8d405d19a45fa662b3dfacc2f4118caa46e05142d0eb7",
+  "source_sha256": "6d830428beb13dd371522a22a25168dbcf307b9f72fea35eaf5d35710f2657dd",
+  "module_sha256": "36f7e0298eac14d1a664dfc083702bab812f6c83d196c651420af92f1080f21c",
+  "mode": "production default optimizing Wasmtime config",
+  "timeout_seconds": 60,
+  "exit_code": 0,
+  "stdout": "module_ms=7878.105 bytes=15311140 imports=22\n",
+  "stderr": "engine_ms=0.439\n",
+  "wall_seconds": 8.152329374977853
+}

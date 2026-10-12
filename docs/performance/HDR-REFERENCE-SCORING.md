@@ -411,3 +411,32 @@ container mount conflicts. Each bounded container used automatic removal
 or exact `docker rm -fv`; no broad cleanup or production change occurred.
 Public local client fixtures remain only until the parallel client lanes
 finish, with final cleanup recorded in the programme ledger.
+
+### Production ownership and throughput limits
+
+The existing successful boot encode identifies the VAAPI driver actually
+opened by FFmpeg. Mesa `radeonsi` from the source-supported 22.3 ABI receives
+`VaapiHdrPolicy::MesaRadeonsiVbaq`; other drivers retain their existing recipe.
+No extra encode, polling loop or operator toggle is introduced. Both rolling
+and immutable VOD planning freeze that policy into `PresentationContract`.
+Its semantic revision participates in cache identity, preventing repaired
+requests from reusing older encoded bytes. The common encoder builder and
+the existing Main10 boot proof consume the same policy flags; proof caching
+keeps default and repaired argument sets separate.
+
+The [compiled exporter binding](../evidence/video-quality-2026-10-12/hdr/production-args-binding.json)
+records exact agreement with measured 2 and 8 Mbps candidate arguments and
+the scale/upload graph. `encoder-calibration-args --vaapi-driver` accepts an
+explicit driver description for offline argument export only; it does not
+manufacture a hardware capability verdict. The receipt binds its actual
+working-source hashes; subsequent regression-fixture lint edits do not change
+those production encoder arguments.
+
+The [timing and firmware record](../evidence/video-quality-2026-10-12/hdr/timing-and-firmware.json)
+retains whole-process elapsed time. Simple sharp/native charts run at about
+2.2–2.5 times real time. Pressure and film windows run below real time at
+roughly 0.5–0.6 times real time in the two-CPU container, including software
+decode and process startup. Candidate times stay close to baseline, but this
+campaign establishes neither general real-time delivery nor production
+resource headroom. The unchanged rate limit must not be mistaken for a
+throughput measurement.
