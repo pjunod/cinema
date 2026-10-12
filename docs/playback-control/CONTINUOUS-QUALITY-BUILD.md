@@ -10120,3 +10120,45 @@ The iPhone still reports passcode required. Existing production and unclaimed
 older CQ Lab TV processes remain untouched. All Android connections are wireless;
 no USB connection, ADB restart or pairing changes are required. Firefox and
 Android passes in §10.307 are retained; no unit suite was rerun.
+
+
+**Candidate binding correction and steady evidence.** The first intended
+verifier-override diagnostics still served the original script: the app's
+versioned asset URL carried a query string that the adapter's exact-path match
+missed. Reject those attempts as candidate evidence. The corrected adapter
+matches the parsed pathname, counts actual override requests and refuses to
+measure unless the served-byte SHA matches the bound candidate. Preserve all
+original-code failures and the no-media supervisor path failure separately.
+
+With the candidate actually served, a 40-second steady 1080p diagnostic passed:
+TTFF 2,618 ms, clock rate 1.002×, maximum presentation/callback gap 57 ms, zero
+wait events, stalls, hitches or dropped frames, and 59.9 seconds of runway at
+End. It started without the extra native Play action required by the slow
+verifier attempts. Real worker observations show 2 MiB video sample-fact jobs
+around 219–244 ms and full verification around 489 ms. All 45 owned processes
+retired without timeout. Raw receipt SHA-256:
+`cdff880b63183eecf777b4ba150daf21828c49da13efb170b53034ec92a8a4b6`.
+This diagnostic proves the suspected verification bottleneck, not the complete
+15-manual/5-Auto acceptance series. That series remains due on an exact built
+candidate, without the diagnostic asset override.
+
+**Source repair under qualification.** Keep native WebCrypto as the first
+choice. On LAN HTTP, use a fixed 2 MiB WebAssembly compression instance when
+available, with at most 1 MiB per synchronous batch; retain the complete
+JavaScript SHA implementation when compilation is unavailable. Hash output,
+attachment cancellation, worker retirement, byte limits and reservation proofs
+are unchanged. There is no feature gate or manual switch for this internal
+compute repair.
+
+The embedded module is built from [`scripts/continuous-sha256.c`](../../scripts/continuous-sha256.c).
+Run `scripts/generate-continuous-sha` to check it, or add `--write` to regenerate.
+The recorded compiler is Apple clang 21.0.0, with the pinned Rust 1.97.1
+`rust-lld`; the generator also accepts `--clang` and `--wasm-ld`. Compiler
+upgrades can change module bytes and require normal review. The module imports
+nothing and its memory cannot grow beyond 2 MiB. Generated object/module files
+live only in a temporary directory and are removed by the generator.
+
+New regressions cover large concurrent hashes across padding/batch boundaries,
+continued SHA availability when WebAssembly is denied, and attachment-worker
+hashing without native WebCrypto. They are added but not executed before final
+adversarial review and the designated merge chat's fast lane.

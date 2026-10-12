@@ -202,6 +202,48 @@ async function continuousSampleFacts(inspection,signal=null){
 
 // LAN HTTP playback has getRandomValues but may lack secure-context SubtleCrypto.
 // Keep payload verification available there without weakening its digest.
+// Compression batches stay bounded; the async wrapper yields and checks
+// attachment cancellation between them.
+function continuousSHA256Compress(view,words,state,constants,start,end){
+  for(let offset=start;offset<end;offset+=64){
+    for(let i=0;i<16;i++)words[i]=view.getUint32(offset+i*4);
+    for(let i=16;i<64;i++){
+      const a=words[i-15],b=words[i-2];
+      words[i]=words[i-16]+(((a>>>7)|(a<<25))^((a>>>18)|(a<<14))^(a>>>3))+words[i-7]+(((b>>>17)|(b<<15))^((b>>>19)|(b<<13))^(b>>>10));
+    }
+    let a=state[0],b=state[1],c=state[2],d=state[3],e=state[4],f=state[5],g=state[6],h=state[7];
+    for(let i=0;i<64;i++){
+      const first=(h+(((e>>>6)|(e<<26))^((e>>>11)|(e<<21))^((e>>>25)|(e<<7)))+((e&f)^(~e&g))+constants[i]+words[i])>>>0;
+      const second=((((a>>>2)|(a<<30))^((a>>>13)|(a<<19))^((a>>>22)|(a<<10)))+((a&b)^(a&c)^(b&c)))>>>0;
+      h=g;g=f;f=e;e=(d+first)>>>0;d=c;c=b;b=a;a=(first+second)>>>0;
+    }
+    state[0]=(state[0]+a)>>>0;state[1]=(state[1]+b)>>>0;state[2]=(state[2]+c)>>>0;state[3]=(state[3]+d)>>>0;
+    state[4]=(state[4]+e)>>>0;state[5]=(state[5]+f)>>>0;state[6]=(state[6]+g)>>>0;state[7]=(state[7]+h)>>>0;
+  }
+}
+// Fixed-memory acceleration for LAN HTTP; every engine retains the JS fallback.
+async function continuousSHA256Accelerator(){
+  if(continuousSHA256Accelerator.pending)return continuousSHA256Accelerator.pending;
+  return continuousSHA256Accelerator.pending=(async()=>{
+    if(typeof WebAssembly!=='object'||typeof atob!=='function')return null;
+    try{
+      const bytes=Uint8Array.from(atob('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'),value=>value.charCodeAt(0));
+      const {instance}=await WebAssembly.instantiate(bytes,{});
+      const {memory,compress,__heap_base}=instance.exports;
+      const base=Number(__heap_base.value),capacity=1024*1024;
+      if(base+capacity+32>memory.buffer.byteLength)throw Error('SHA acceleration memory bound');
+      const input=new Uint8Array(memory.buffer,base,capacity),output=new Uint32Array(memory.buffer,base+capacity,8);
+      return (view,words,state,constants,start,end)=>{
+        const length=end-start;
+        if(!(view instanceof DataView)||!(state instanceof Uint32Array)||state.length!==8
+          ||!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end>view.byteLength
+          ||start%64||length<=0||length%64||length>capacity)throw Error('SHA acceleration batch bound');
+        input.set(new Uint8Array(view.buffer,view.byteOffset+start,length));output.set(state);
+        compress(base,length,base+capacity);state.set(output);
+      };
+    }catch(_){return null;}
+  })();
+}
 async function continuousSoftwareSHA256(input,signal=null){
   const bytes=input instanceof Uint8Array?input:new Uint8Array(input);
   if(bytes.length>17*1024*1024)throw new Error('Continuous SHA payload bound');
@@ -218,22 +260,15 @@ async function continuousSoftwareSHA256(input,signal=null){
   const padded=new Uint8Array(Math.ceil((bytes.length+9)/64)*64);padded.set(bytes);padded[bytes.length]=128;
   const view=new DataView(padded.buffer);view.setUint32(padded.length-8,Math.floor(bytes.length/0x20000000));
   view.setUint32(padded.length-4,(bytes.length*8)>>>0);
-  const words=new Uint32Array(64),rotate=(n,count)=>(n>>>count)|(n<<(32-count));
-  for(let offset=0;offset<padded.length;offset+=64){
-    for(let i=0;i<16;i++)words[i]=view.getUint32(offset+i*4);
-    for(let i=16;i<64;i++){
-      const a=words[i-15],b=words[i-2];
-      words[i]=words[i-16]+(rotate(a,7)^rotate(a,18)^(a>>>3))+words[i-7]+(rotate(b,17)^rotate(b,19)^(b>>>10));
-    }
-    let [a,b,c,d,e,f,g,h]=state;
-    for(let i=0;i<64;i++){
-      const first=(h+(rotate(e,6)^rotate(e,11)^rotate(e,25))+((e&f)^(~e&g))+constants[i]+words[i])>>>0;
-      const second=((rotate(a,2)^rotate(a,13)^rotate(a,22))+((a&b)^(a&c)^(b&c)))>>>0;
-      h=g;g=f;f=e;e=(d+first)>>>0;d=c;c=b;b=a;a=(first+second)>>>0;
-    }
-    for(const [i,value] of [a,b,c,d,e,f,g,h].entries())state[i]=(state[i]+value)>>>0;
+  if(signal?.aborted)throw new Error('Continuous media verification ended');
+  const compression=await continuousSHA256Accelerator()||continuousSHA256Compress;
+  if(signal?.aborted)throw new Error('Continuous media verification ended');
+  const words=new Uint32Array(64),batchBytes=signal?131072:1024*1024;
+  for(let offset=0;offset<padded.length;offset+=batchBytes){
+    const end=Math.min(padded.length,offset+batchBytes);
+    compression(view,words,state,constants,offset,end);
     if(signal?.aborted)throw new Error('Continuous media verification ended');
-    if(offset>0&&offset%(signal?131072:1024*1024)===0)await new Promise(resolve=>setTimeout(resolve,0));
+    if(end<padded.length)await new Promise(resolve=>setTimeout(resolve,0));
   }
   const digest=new Uint8Array(32),output=new DataView(digest.buffer);for(let i=0;i<8;i++)output.setUint32(i*4,state[i]);
   return digest.buffer;
@@ -285,7 +320,7 @@ function continuousMediaVerifier(options={}){
     if(workerAttempted)return;workerAttempted=true;
     if(typeof Worker!=='function'||typeof Blob!=='function'||typeof URL.createObjectURL!=='function')return;
     try{
-      const source=[continuousSoftwareSHA256,continuousMediaDigest,continuousSampleDigest,continuousSampleFacts]
+      const source=[continuousSHA256Compress,continuousSHA256Accelerator,continuousSoftwareSHA256,continuousMediaDigest,continuousSampleDigest,continuousSampleFacts]
         .map(fn=>'const '+fn.name+'='+fn.toString()+';').join('\n')+`
         onmessage=async event=>{
           const {id,kind,bytes,inspection}=event.data;
