@@ -271,8 +271,8 @@
     },
     {
       "path": "summary.json",
-      "bytes": 11822,
-      "sha256": "8ab10d681d1d76896868c7b6bb968574cccc8478c39da7625066220cb4cb6475"
+      "bytes": 12094,
+      "sha256": "b6f248d3b8c3266513c7c850d94102fc0510e5fb1d156ee7cf32a0f4f03be91b"
     },
     {
       "path": "webdriver-diagnostic.json",

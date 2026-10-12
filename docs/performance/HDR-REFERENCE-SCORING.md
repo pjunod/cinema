@@ -409,8 +409,9 @@ The [cleanup receipt](../evidence/video-quality-2026-10-12/hdr/remote-cleanup.js
 confirms removal of all fourteen exact remote scratch roots after checking
 container mount conflicts. Each bounded container used automatic removal
 or exact `docker rm -fv`; no broad cleanup or production change occurred.
-Public local client fixtures remain only until the parallel client lanes
-finish, with final cleanup recorded in the programme ledger.
+The parallel client lanes are complete and their live resources and scratch
+are removed. Coordinator archives remain only through qualification and landing;
+[PR #1034](http://forge.lan:3000/noirr/plurx/pulls/1034) records their final removal.
 
 ### Production ownership and throughput limits
 

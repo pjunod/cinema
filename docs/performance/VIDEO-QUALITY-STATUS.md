@@ -1,6 +1,6 @@
 # Video quality status — what is built, measured and merged
 
-**Status:** HDR repair and available autonomous client acceptance complete; final review and landing pending
+**Status:** HDR repair and available autonomous client acceptance reviewed; qualification and landing receipts in PR #1034
 · **Updated:** 2026-10-12 · **Resume base:** `1f02b7938`
 
 Companion to [the programme](VIDEO-QUALITY-PROGRAM.md), which owns scope,
@@ -21,7 +21,7 @@ the owner's checkout is not used.
 | HDR: measured repair and production integration | Identify the quantization cause and preserve the bitrate envelope. | Mesa's quality value is a bitfield. Balanced preset plus VBAQ without preanalysis (`19`) reduces sharp-panel maximum error from 35 to 12, below the unchanged <32 bar. Pressure and real-window worst-frame controls improve. Root integration binds the actual successful-probe Mesa/radeonsi driver to the immutable HDR plan, cache identity and shared rolling/VOD arguments; pinned all-target compilation and the normal workspace Clippy hook pass. |
 | Safari: browser and shipping web UI | Browser presentation, cold start, seeks and restart. | Sixteen authored native-HLS SDR/PQ timing phases pass. The exact optimized candidate also passes four actual Plurx H264 VOD phases through Safari's shipping hls.js/MSE route: 30 moving frames each, maximum clock error 35.847 ms and first-target error 72.743 ms against unchanged 250 ms limits. Bound parser identity and actual player ownership are recorded. |
 | Devices: native frameworks on available hardware | Preserve actual decoder, frame, metadata and surface evidence. | Physical TCL tablet and Google TV streamer pass all 16 SDR timing phases. Google TV passes all eight corrected PQ baseline/candidate phases. TCL explicitly lacks Main10 capability and refuses HDR before frames. An owned tvOS simulator supplies framework evidence; locked Apple devices and a busy Apple TV remain excluded. |
-| Coordinator: integration, review, checks and cleanup | One batch PR and final adversarial review, then fast lane. | [Draft PR #1034](http://forge.lan:3000/noirr/plurx/pulls/1034) collects the work. No unit suite has run during development. Remote HDR scratch and all device probe resources are removed. All owned device/browser/runtime resources are closed. Final adversarial review and fast lane follow the frozen evidence; their receipts and landing identity belong to the PR. |
+| Coordinator: integration, review, checks and cleanup | One batch PR and final adversarial review, then fast lane. | [PR #1034](http://forge.lan:3000/noirr/plurx/pulls/1034) collects the work. No unit suite has run during development. Remote HDR scratch and all device probe resources are removed. All owned device/browser/runtime resources are closed. The single final adversarial review approved the frozen batch with no actionable defects. Focused regressions, fast-lane results and landing identity belong to the PR. |
 
 Mesa's preanalysis mode caused the earlier worst-frame regression; enabling
 VBAQ without it addresses quantization instead of blurring the input or forcing
@@ -48,8 +48,9 @@ controls spend 7.54–8.11 seconds compiling, compared with 6.17–6.59 seconds 
 packet and [24-frame outputs](../evidence/video-quality-2026-10-12/safari/parser-frames-comparison.json) are byte-identical between configurations. The
 production change removes that optimization cost while preserving every
 identity, guest execution and output limit, sandbox capability, and single-worker
-ownership rule. These measurements explain the narrow change; the fresh shipping-app capture publishes the bound parser identity and indexes
-the fixture, resolving the earlier startup refusal on this host. Its later VOD refusal came from an underprovisioned harness pool, not parser
+ownership rule. The fresh shipping-app capture publishes the bound parser
+identity and indexes the fixture, resolving the earlier startup refusal on this
+host. Its later VOD refusal came from an underprovisioned harness pool, not parser
 execution: shared AAC requires three threads, while that attempt allowed two.
 The authority-fence event is the later retirement projection. Product admission
 and authority handling are unchanged. The next attempt's observer invoked
@@ -60,6 +61,12 @@ harnesses remain in the [Safari bundle](../evidence/video-quality-2026-10-12/saf
 The final app route is H264 through hls.js/MSE, distinct from the separately
 qualified native-HLS SDR/PQ fixtures. A native-HLS capability query alone does
 not establish which route played.
+
+The [final review receipt](../evidence/video-quality-2026-10-12/final-review.json)
+records the independent approval of `61f3229af`, including source identity and
+raw observation checks. Only documentation and cleanup wording changed afterward.
+The PR owns the subsequent per-check qualification and landing receipts so
+successful tests are not rerun merely to update this ledger.
 
 Acceptance retains mean luma error below 4 and maximum below 32 ten-bit codes,
 the actual rung's bitrate/buffer constraints, frame/metadata correctness and

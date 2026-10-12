@@ -48,7 +48,7 @@
   "cleanup": {
     "owned_safari_documents_closed": true,
     "owned_http_listeners_closed": true,
-    "shared_assets": "Device lane complete; scratch assets retained only until integrator copies final evidence and releases parser-diagnostic dependency."
+    "shared_assets": "After the integrator hash-verified all40 follow-up files, the Safari worker removed its entire owned scratch:371 files,427269198 bytes, including tools, authored media, diagnostics and original-control daemon. All owned browser/listener/daemon resources were already closed. Coordinator build/source archives and clones remain only through qualification and landing; PR #1034 records their final removal."
   },
   "hdr_initial": {
     "receipt": "safari-hdr.json",

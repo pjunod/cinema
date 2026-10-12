@@ -295,5 +295,5 @@
     "candidate_first_raw_sha256": "1f38efef46386420c5d89640cb03a1c2a36c58c5bf187c87fdc8ad60ec441932",
     "meaning": "Native first decoded frame byte-identical to corresponding scored sharp-control frame; maximum35/12 remain measured at that exact frame."
   },
-  "cleanup": "remote-cleanup.json confirms all14 exact owned remote roots removed; public local nativeassets remain temporarily for parallel device validation"
+  "cleanup": "remote-cleanup.json confirms all14 exact owned remote roots removed. Parallel client lanes are complete and their live resources and scratch are removed. Coordinator source/build/scoring archives remain only through qualification and landing; PR #1034 records their final removal."
 }
