@@ -2928,7 +2928,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # per-process `CoverageRuns` slot (one walk at a time) through a drop guard,
 # so a finished, failed or panicked walk frees it; its stats run in the
 # walk's own bounded AvailabilityCache, never item detail's.
-expected_occurrences = 947
+# R01 HDR admission regression: +1 test-owned tokio task, aborted and
+# awaited before capacity/yield assertions; no detached production owner.
+expected_occurrences = 948
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4512,7 +4514,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and their joined futures; cancellation drops it. The full request-chain
 # regression keeps one real ReceiverGuard credit. No production timer,
 # detached task, process or longer input deadline is introduced.
-expected_occurrences = 1728
+# R01 HDR admission regression: +3 test-only bounded timeout/sleep calls
+# owned by the test and joined or cancelled before checking permit release.
+# Production reuses its existing absolute deadline and admission poll.
+expected_occurrences = 1731
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
