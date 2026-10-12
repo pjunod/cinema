@@ -70,6 +70,36 @@ Current-base compiler/static/hook/fast-lane evidence and landing remain owed.
 Four bounded closures / 45 acceptance-open remain unchanged. No deployment,
 physical-device action, sampler interruption or production fault campaign.
 
+**C-02 bounded source follow-up, 2026-10-12:** Paul's stopped-Claude handoff
+names the remaining AniList single-blip defect separately from the retained
+F1/N2 landing WIP. Root continuation
+`codex://threads/01a0c165-d718-73a1-93e9-e81380017705` published draft #1040,
+`codex/anilist-transient-retry` from `607d3577c` (#1022 landed). The runtime
+does not expose an exact root model identifier; the identity fallback is
+`none:openai:2026-10-12`, not an inferred model. This follow-up owns only
+`metadata/anilist.rs`, the stale AniList test comment in `metadata/mod.rs`,
+and this board/scan-plan/index/backlog documentation. It does not reclaim or
+rewrite the original C-02 author or open fleet acceptance. The draft claim
+was published at 22:48 UTC; its initial run4864 allocated no jobs. One
+reproduced timeout prompted a bounded
+transport retry; the sole `gpt-6.1-sol` adversarial review
+`agent:/root/anilist_retry_review_sol61` found a retry allowance wait could
+restart the call budget. The correction adds one awaited outer 60 s deadline,
+not a worker or periodic retry. Six new and two affected exact regressions
+passed on pinned Rust1.97.1; the same reviewer cleared the corrected source
+(`5e508179` AniList / `49ddf705` metadata module). Pinned workspace/all-targets
+check, strict Clippy, format, catalog, 25 static contracts and tracked commit
+hooks passed before publication. Current-head fast lane and landing remain
+unproven. No source-only closure,
+provider traffic, production deployment or change to the four/45 counts.
+**Root post-merge receipt, 23:18 UTC:** #1040 landed as `290346685` after
+run4866 scope/preflight/Rust/Main promotion passed. Current-main `0da656d3a`
+plus unchanged head `78da930a58` was locally compiled and strictly linted;
+actual landing tree matches that composition and all eight Regression-Test
+fields match the body. The unchanged unit inputs were retained, not replayed.
+This supersedes the earlier unproven-gate sentence; C-02 fleet acceptance is
+still open, with no deployment or new closure.
+
 **Fleet source boundary, 2026-09-26 00:04 UTC:** PR #533 advanced `main` to
 `0915b3ee9e62` at 21:52 UTC; PRs #528, #511, #530 and #405 then
 advanced it to `ea215603f`. All four nodes and the currently installed

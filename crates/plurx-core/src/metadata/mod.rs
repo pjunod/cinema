@@ -2598,7 +2598,7 @@ mod tests {
         );
     }
 
-    /// AniList has no retry loop: its one failed call is the definitive one.
+    /// AniList defers the pass only after its bounded transport retry fails.
     #[tokio::test]
     async fn an_unreachable_anilist_is_reported_once_and_its_shows_stay_queued() {
         let store = SqliteStore::open_in_memory().expect("open");

@@ -1300,8 +1300,9 @@ real titles including a Dolby Vision title and one with an A/V offset.
 
 ## 13. F1/N2 copy-landing repair — source proof, not device acceptance
 
-**Status:** local repair; review clear; current-base compilation and PR gate
-remain required · **Date:** 2026-10-12 · **Owner:**
+**Status:** source committed as `925d18f93`; 22 focused passes and review
+clear; current-main integration qualification and PR gate remain required ·
+**Date:** 2026-10-12 · **Owner:**
 `none:openai:2026-10-12`,
 `codex://threads/01a0c165-d718-73a1-93e9-e81380017705` · **Branch:**
 `codex/copy-landing-origin`.
@@ -1341,6 +1342,18 @@ The focused proof anchors are
 `an_unsettled_landing_names_what_the_time_said`. The parser/argv and core
 matching controls remain named in the repair's Regression-Test fields.
 Passing IDs are retained once for applicable inputs, not replayed as a suite.
+All 22 declared regression IDs passed: 14 binary cases and eight core cases
+with `hiqlite-store`. Normal pinned tracked hooks passed, including strict
+workspace/all-targets Clippy, formatting, catalog and served-script syntax.
+Main then advanced through #1038 and #1040 to `290346685`; integration
+preserves their source and both workboard follow-ups. The eleven repair
+source files remain byte-identical to the final reviewed manifest
+`c566bcdaf87ca2e6fb308852250e39e6778c42353887bedeec29a422693f6004`.
+The actual current-main workspace/all-targets check passed on pinned
+Rust 1.97.1 in 1 min 7 s. Twenty current-input documentation/infrastructure
+and changed module-census checks passed. Normal current-tree hooks and the
+configured PR fast lane remain required; no source pass is substituted for
+them.
 
 This repairs the two source defects; it does not qualify the physical client
 matrix, every source family, original M0 real-title corpus or fleet rollout.
