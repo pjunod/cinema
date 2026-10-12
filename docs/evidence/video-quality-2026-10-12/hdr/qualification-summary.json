@@ -281,12 +281,19 @@
     "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-26.0.8/src/gallium/frontends/va/va_private.h",
     "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-26.0.8/src/gallium/drivers/radeonsi/si_get.c",
     "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-24.0.0/src/gallium/frontends/va/picture.c",
-    "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-22.3.6/src/gallium/frontends/va/picture.c"
+    "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-22.3.6/src/gallium/frontends/va/picture.c",
+    "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-22.3.0/src/gallium/frontends/va/picture.c"
   ],
   "limits": [
     "Two48frame windows of one plainPQ native16:9 title and one2second synthetic pressure fixture",
     "Maximum sharp error scored first decoded frame only, not arbitraryHDRcontent universalbound",
     "No client physical colorimetry, skin/artist reference, DV/S11 closure or fleet sustainedthroughput claim",
     "EightMB output bound not used in these wrappers; individual ffmpeg60s/container240s+fixedCPU/memory and owned cancellation apply"
-  ]
+  ],
+  "native_scored_pixel_binding": {
+    "baseline_first_raw_sha256": "6c3a33672cb1e21ea7c49dbbdcbd0003c40aba9d48e84eb1db225bd05e982147",
+    "candidate_first_raw_sha256": "1f38efef46386420c5d89640cb03a1c2a36c58c5bf187c87fdc8ad60ec441932",
+    "meaning": "Native first decoded frame byte-identical to corresponding scored sharp-control frame; maximum35/12 remain measured at that exact frame."
+  },
+  "cleanup": "remote-cleanup.json confirms all14 exact owned remote roots removed; public local nativeassets remain temporarily for parallel device validation"
 }

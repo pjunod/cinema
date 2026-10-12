@@ -1,0 +1,89 @@
+{
+  "format": "gzip JSON files are sanitized derivatives of actual capture receipts; all numbers preserved, infrastructure labels and local root neutralized. Reproducer scripts likewise neutralize host paths. Historical template inputs retain their own older-source metadata and are diagnostic control recipes, not a claim of exporter execution at current source.",
+  "files": {
+    "baseline.json": {
+      "sha256": "85db823e62450e442dcdb8cfb326dc198c1c18839015c72d4205a462b4d28626",
+      "bytes": 2360
+    },
+    "collect.py": {
+      "sha256": "01c04e55e62c790bf71698a2f7b990e82a78d8279f817b2f3b3b757661dc02b4",
+      "bytes": 1842
+    },
+    "compare-real.py": {
+      "sha256": "6f466ef5e55dcd58a6cde5694328811b67f19e2fa9632648be9feb3ccb1be8f9",
+      "bytes": 4311
+    },
+    "compare.py": {
+      "sha256": "d3f8508c8caf0c90086e2c061a631e3fe0b1892cf649f2b4cbb7f28787434504",
+      "bytes": 3728
+    },
+    "control-details.json.gz": {
+      "sha256": "82dc939bbfee4988536504a81debb0de81d4010edc0dc2587d78a583fb2de427",
+      "bytes": 38920
+    },
+    "native-generation.json.gz": {
+      "sha256": "637b197aad361d21ce56fdc46ae3df4dc62e261f20ebc87357a6074f5aba7115",
+      "bytes": 12552
+    },
+    "native-metadata-repair.json.gz": {
+      "sha256": "fd35414b7e17c982528ebd4eb016fccbeb6c8a4267e0f81ee1fb86415593ce4d",
+      "bytes": 77798
+    },
+    "native.py": {
+      "sha256": "8903834a1482a574760221738d346b3bb0347a3b4895723ae5ee68c59f794a24",
+      "bytes": 3890
+    },
+    "pressure-template.json": {
+      "sha256": "ff4ddf1a4dace9f54e60ab1498f2fbadb5e8c53720553ffb48a1304abdf9850e",
+      "bytes": 29617
+    },
+    "pressure2m.json.gz": {
+      "sha256": "7e00c8a6f84a65f2acf772132878126009ffb9a15500e3b5afaf7db830126473",
+      "bytes": 13610
+    },
+    "qualification-summary.json": {
+      "sha256": "2b2c6eeb4acfc6e921d02b19919d807346be3b8ce065dfa7583192c4728ed9e4",
+      "bytes": 11651
+    },
+    "qualify-vaapi.py": {
+      "sha256": "7df472326256a68074b0a5f26621f50a7b03897c6183f5ed09d6667e8076cf5f",
+      "bytes": 12685
+    },
+    "real-template.json": {
+      "sha256": "94d002247ab35a23972bafc04c4df16553aef43e7ce2983ba2ddce1eac9ecf6b",
+      "bytes": 30799
+    },
+    "real1800.json.gz": {
+      "sha256": "b650f80990ff5a43a282ba98a4d9406f74a83b309e1c0c4f62f585e8a1ed43da",
+      "bytes": 15326
+    },
+    "real3600-invalid.json.gz": {
+      "sha256": "d89308007b8f09923679e667d776872c6617280f25d1930a98d57f5ed4f2721a",
+      "bytes": 15348
+    },
+    "real3600.json.gz": {
+      "sha256": "dbfe79d49520be3f2e080412dac3782c786dda5d0f29ac7ae219e2dccb077320",
+      "bytes": 15326
+    },
+    "remote-cleanup.json": {
+      "sha256": "f00cd4a298ea2103cbb410d3f61088c8995cedd6f225d60a83b262b97e039254",
+      "bytes": 2577
+    },
+    "repair-native-metadata.py": {
+      "sha256": "551adb2036e399e8b7cad22e86b55df43ae0dd38db02ca6c1c4220095ee429b5",
+      "bytes": 2774
+    },
+    "run-vaapi.sh": {
+      "sha256": "3a21930760fef315e25467eda3c4b96984331b41877e9aeda08900fada0b59ab",
+      "bytes": 6655
+    },
+    "select-source.py": {
+      "sha256": "1f4a0efb0172497d77bcbebd608aa7e8928adfac9b1d2f0d5f48631516acde02",
+      "bytes": 1194
+    },
+    "sharp-controls.json.gz": {
+      "sha256": "79532fd7096fbd7d733de8b1564cd451b72c223aad0d75b679879345fcf4a362",
+      "bytes": 10040
+    }
+  }
+}

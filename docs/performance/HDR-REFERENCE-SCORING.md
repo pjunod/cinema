@@ -404,3 +404,10 @@ the failing original output identities. Private title bytes remain on the
 lab host. These bounded controls do not close physical colorimetry, artistic
 grading, the whole genuine-media corpus, or the separately owned S-11/DV
 programme.
+
+The [cleanup receipt](../evidence/video-quality-2026-10-12/hdr/remote-cleanup.json)
+confirms removal of all fourteen exact remote scratch roots after checking
+container mount conflicts. Each bounded container used automatic removal
+or exact `docker rm -fv`; no broad cleanup or production change occurred.
+Public local client fixtures remain only until the parallel client lanes
+finish, with final cleanup recorded in the programme ledger.
