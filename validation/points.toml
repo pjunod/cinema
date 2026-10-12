@@ -1470,3 +1470,19 @@ profiles = ["commit", "ci", "full", "nightly"]
 requires = ["node"]
 missing = "fail"
 timeout_seconds = 30
+
+[[checks]]
+id = "diagnostics-contract"
+title = "Strict diagnostic wire/privacy/archive contracts"
+command = "make unit-diagnostics"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["cargo", "node", "make"]
+missing = "fail"
+timeout_seconds = 600
+
+[[points]]
+id = "diagnostics.reports"
+title = "Bounded private incident reports"
+contract = "Diagnostic reports use a closed schema and bounded archives without playback authority or secret fields."
+paths = ["crates/plurx-core/src/diagnostics.rs", "crates/plurx-core/examples/diagnostic-inspect.rs", "crates/plurx-core/tests/fixtures/diagnostics-v1.json", "crates/plurxd/src/web/core/diagnostics-wire.js", "tests/web/diagnostics-wire.test.js", "scripts/remote-diagnostics-status"]
+checks = ["diagnostics-contract"]

@@ -60,6 +60,7 @@ pub enum WebAsset {
 pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("app.css",                                WebAsset::HeadStyle,   include_str!("../web/app.css")),
     ("core/theme.js",                          WebAsset::HeadScript,  include_str!("../web/core/theme.js")),
+    ("core/diagnostics-wire.js",               WebAsset::HeadScript,  include_str!("../web/core/diagnostics-wire.js")),
     ("core/errors.js",                         WebAsset::HeadScript,  include_str!("../web/core/errors.js")),
     ("hls.min.js",                             WebAsset::BodyScript,  include_str!("../web/hls.min.js")),
     ("core/app.js",                            WebAsset::BodyScript,  include_str!("../web/core/app.js")),

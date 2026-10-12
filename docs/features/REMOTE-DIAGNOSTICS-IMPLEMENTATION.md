@@ -1,6 +1,6 @@
 # Remote diagnostics — build a report that explains a Cinema failure
 
-**Status:** ready for implementation; no diagnostics-release acceptance claimed ·
+**Status:** B01 built, remaining first-release packets building; no release acceptance claimed ·
 **Written:** 2026-10-12 · **Source baseline:** `8d7bc723e` ·
 **Executes:** Paul's request for remote diagnostics on web, Apple and Android,
 with TV phone handoff and the upload inbox in the first release ·
@@ -718,39 +718,47 @@ Unqualified capability cards, if present, follow
 [Developer graduation](SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates)
 and cannot block saving choices or exporting evidence.
 
-## 11. Ownership and integration — one effort with reviewable packets
+## 11. Ownership and integration — one owned clone and batched main PR
 
-Use `effort/remote-diagnostics`, with task branches
-`codex/remote-diagnostics-bNN` based on the current effort. This project
-changes shared files, so the disjoint-file main-branch exception does not
-apply. Work in an isolated managed worktree; do not switch or clean the
-user's shared checkout. Preserve unrelated untracked output.
+**Maintainer ruling, 2026-10-12:** “Use the latest workflow; replace those
+earlier requirements.” This section supersedes the original project effort
+workflow, per-push focused tests, per-task effort gates, and full promotion
+qualification for this work.
 
-The GPT-6.1 Sol chat owns implementation and the canonical ledger. It may
-execute serially; no extra agent delegation is required by this plan.
-Shared-file edits are serialized even when later packets have distinct
-functional responsibilities. Rebase/reverify a packet after its base moves.
+Use an independently owned clone, never the user's existing checkouts or a
+managed worktree sharing their Git administration. Preserve adopted planning
+files and implementation before cleaning only the builder's former workspace.
+Keep all source, canonical status, the visible status page and build outputs
+in the owned clone. Use `codex/remote-diagnostics` for normal packet commits
+batched into one larger main-bound draft PR. Keep that PR's owner/chat, scope,
+source head, review/check state, blockers and next step current. If work is
+interrupted, the last action updates its body accurately.
 
-Before any Rust edit, establish pinned Rust 1.97.1 compilation using
-[the source-only compile loop](../ci/AGENT-COMPILE-LOOP.md). Verify
-`rustc --version`; transfer committed source with git archive, never .git
-or credentials. Keep the warm target directory and recheck the exact intended
-landing source. Do not use CI to discover compiler errors.
+Verify the pinned Rust 1.97.1 toolchain and compile/type/format checks before
+pushing. Compiler checks remain local; CI is not a compiler. Normal repository
+hooks remain. Behavior changes retain corrective subjects, landing regression
+anchors and native source/test mappings; do not execute unit suites per
+packet or commit. Shared fixtures and regression tests remain deliverables.
 
-Commit normally with hooks. Behavior fixes use fix/perf subjects and real
-Regression-Test anchors, retained in landing messages. Maintain native
-corrective source/test mappings where required by current policy. Dispatch
-Effort development gate before each task merge; it does not replace the
-focused behavior regression. Main promotion follows current AGENTS and
-pipeline rules: current main merged into a frozen effort, required
-adversarial review, exact-candidate Main promotion gate and qualification
-receipt before merge. Any moved base invalidates old candidate evidence.
+Only when the main PR is ready, obtain one adversarial agent review, address
+findings, and run the fast lane. Every required check needs an applicable
+passing result. Rerun failed checks, and rerun additional checks only when a
+later fix invalidates their coverage; record the impact. Resolve review and
+required fast-lane failures before merge. Another process owns full unit
+failures in later batches. No full-suite qualification wait is imposed here.
 
-Production support DNS, TLS, operator credentials and signing/provider
-secrets are deployment inputs. Build/package/test with local fixtures first.
-Do not invent a public origin, purchase hosting, send reports to third
-parties, or publish app-store builds merely to close a ledger cell. Record
-missing real deployment/device evidence separately from unfinished code.
+No code feature gates. A meaningful enable control lives in Developer while
+unfinished, with prerequisites/readiness advisory only. Ordinary local
+privacy preferences and explicit upload consent are user choices, not release
+gates. Use existing architectural ownership and diagnose causes; do not add
+watchdogs or playback retry owners. Upload retry ownership stays separate.
+
+The GPT-6.1 Sol chat owns all packets, implementation, decisions and evidence.
+Do not spawn routine reviewers before the final PR is ready. Production
+support DNS, TLS, operator/publisher credentials and physical devices remain
+external deployment/acceptance inputs. Build with synthetic isolated fixtures
+and keep implementing independent work when those inputs are unavailable.
+Do not invent a public origin, purchase hosting or publish store builds.
 
 ## 12. Build packets — deliver all first-release surfaces
 
@@ -894,8 +902,8 @@ change. Focused Swift/XCTest and Kotlin/JVM or instrumentation commands belong
 in the ledger with actual target/destination/test IDs. Native build numbers
 and notes follow the existing release tooling.
 
-Before promotion run required full candidate qualification under current
-policy, including the new binary/routes/assets and affected native platforms.
+Before main merge, apply the 2026-10-12 maintainer fast-lane ruling in §11,
+including the new binary/routes/assets and affected native platforms.
 Windows compile jobs remain subject to the current maintainer waiver; do
 not invent Windows evidence. One hardware family passing does not qualify
 another. Use exactly the configured review/gate process, not a new gate

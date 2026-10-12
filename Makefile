@@ -52,6 +52,12 @@ unit-core: override CARGO := PLURX_EXPECT_TEST_COUNT_AT_LEAST=$${PLURX_EXPECT_TE
 unit-core: ## Run plurx-core with replicated-store tests and enforce the count floor
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib
 
+# Shared diagnostics wire, strict privacy schema and hostile-archive regressions.
+.PHONY: unit-diagnostics
+unit-diagnostics: ## Run focused diagnostics schema/archive and web wire tests
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib diagnostics::
+	node --test tests/web/diagnostics-wire.test.js
+
 .PHONY: unit-broker
 unit-broker: test-socket-permission-check ## Run focused notification broker security and provider contracts
 	$(CARGO) test --locked -p plurx-notification-broker
