@@ -5126,6 +5126,14 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         Ok(false)
     }
 
+    /// Whether an already-complete seal still holds, by a consistent read of
+    /// the same ownership predicate `seal_prepared_output` writes under.
+    /// Replaces replaying the complete seal, which changes no column but still
+    /// costs a replicated UPDATE. Backends without it report not sealed.
+    async fn prepared_output_sealed(&self, _seal: &PreparedOutputSeal) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
     /// Record what a viewer is asking for, and return the ownership that
     /// results.
     ///

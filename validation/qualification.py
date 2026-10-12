@@ -24,7 +24,6 @@ REQUIRED_JOBS = frozenset(
         "mobile_version",
         "preflight",
         "rust",
-        "windows_compile",
         "cluster_store",
         "cluster_topology",
         "cluster_transport_recovery",
@@ -278,6 +277,8 @@ def build_receipt(
             assert retained['pull_request'] == binding['pull_request']
             assert re.fullmatch(r'[0-9a-f]{64}', retained['sha256'])
             assert retained['attestation_comments']
+            # Older authenticated retention proofs may still carry their
+            # Windows waiver; Windows is no longer a required qualification job.
             assert set(retained['lanes']) <= {'rust', 'apple', 'android_jvm',
                                               'android_device', 'windows_compile'}
             assert all(row['mode'] == ('explicit-human-waiver' if lane == 'windows_compile'

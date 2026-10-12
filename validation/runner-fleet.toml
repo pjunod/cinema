@@ -148,6 +148,21 @@ os = "Linux"
 arch = "X64"
 labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
 
+# Light general/Windows slots; the heavy Rust pool remains separately bounded.
+[[runners]]
+name = "gha-lab5-general-05"
+host = "lab5"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "general", "baremetal", "ubuntu-26.04"]
+
+[[runners]]
+name = "gha-lab5-general-06"
+host = "lab5"
+os = "Linux"
+arch = "X64"
+labels = ["lab", "general", "baremetal", "ubuntu-26.04"]
+
 [[runners]]
 name = "gha-lab5-android-01"
 host = "lab5"
@@ -168,21 +183,12 @@ name = "gha-lab6-general-02"
 host = "lab6"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
+# Reserved diagnostic VM. No general/high-cpu label: coverage never occupies
+# a merge slot. One daemon per 8 GiB guest; duplicate services are disabled.
+labels = ["lab", "incus", "ubuntu-24.04", "ci-coverage", "ffmpeg-6"]
 
-[[runners]]
-name = "gha-lab3-general-01"
-host = "lab3"
-os = "Linux"
-arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
-
-[[runners]]
-name = "gha-lab3-general-02"
-host = "lab3"
-os = "Linux"
-arch = "X64"
-labels = ["lab", "incus", "ubuntu-24.04", "general", "high-cpu", "ffmpeg-6"]
+# lab3 runners are retired (2026-10-11): observability and production share
+# its disk. boot.autostart=false and no recovery allowlist entry keep them off.
 
 [[runners]]
 name = "gha-lab4-general-01"

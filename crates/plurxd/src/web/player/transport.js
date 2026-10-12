@@ -301,12 +301,20 @@ function samplePlaybackPresentationClock(v,p){
 // This clock runs independently of waiting/playing events and frame callbacks.
 // A pending destination has its own presentation deadline even if the old
 // picture or audio clock continues to move during the replacement.
-function playbackProgressTick(v,p){
+//
+// `frameSample` is the presented-frame callback asking only whether a newly
+// attached stream has started presenting (`sampleStartupPresentation`). That
+// call may record the proof and nothing else: it does not age the presenter,
+// feed the prepared-switch ring, report "not presenting" or run the stall
+// clock, all of which are written for the half-second cadence. The period
+// below is the interval `armPlaybackSampling` runs `playbackSamplingTick` at.
+const PLAYBACK_SAMPLING_PERIOD_MS=500;
+function playbackProgressTick(v,p,frameSample=false){
   // The presenter's timers run off the tick the player already has, per §4.2:
   // a timed notice expires because this ran, not because a watchdog of its own
   // woke up. It is fed before every guard below, because a surface must keep
   // ageing while the picture it is about is being replaced.
-  playbackSurfaceStep({tick:true});
+  if(!frameSample) playbackSurfaceStep({tick:true});
   if(!v||!p||PLAYER!==p) return;
   // No proof either way about a predecessor this player does not own: the
   // reducer is told nothing rather than told something false.
@@ -315,11 +323,12 @@ function playbackProgressTick(v,p){
   // M3. A getter on the attached element, on a tick that already runs: the
   // cheapest honest place to take the frame counter a prepared commit is
   // measured from.
-  samplePreparedSwitchFrames(p,v);
+  if(!frameSample) samplePreparedSwitchFrames(p,v);
   const pending=p.controlSeek;
   const active=(p.wantsPlayback??!v.paused)&&!v.ended&&!document.hidden
     &&(p.started||pending?.executed);
   if(!active){
+    if(frameSample) return;
     p.progressWatch=null;
     p.recoveryHealth=null;
     playbackSurfaceStep({presenting:false,attached:playbackSurfaceGeneration(p)});
@@ -345,6 +354,15 @@ function playbackProgressTick(v,p){
     watch=p.progressWatch={key,clock,frames,at:now,startedAt:now,fired:false};
   }
   const moved=clock>watch.clock+0.01 && (frames==null||frames>watch.frames);
+  if(frameSample){
+    if(!moved) return;
+    watch.frameAt=now;
+  }else if(!moved&&watch.frameAt!=null&&now-watch.frameAt<PLAYBACK_SAMPLING_PERIOD_MS){
+    // A timer tick that lands inside one sampling period of a frame-driven
+    // proof has not waited long enough to see the next frame. It is not
+    // evidence that presentation stopped.
+    return;
+  }
   const controlHealthy=!p.controlReporter || (!p.controlLastError
     && Date.now()-(p.controlLastExchangeAt||0)<=Number(p.controlReporter.bootstrap?.next_exchange_ms||5000)+2000);
   const health=PlaybackPolicy.recoveryHealthObservation(p.recoveryHealth,{nowMs:now,
@@ -376,6 +394,7 @@ function playbackProgressTick(v,p){
       else if(p.recoveringStall){ clearStall(); finishStallRecovery("recovered"); }
     }
   }
+  if(frameSample) return;
   // Exclude time spent paused or backgrounded. A new active watch starts a
   // fresh observation window, while an active replacement cannot reset it.
   if(p.controlSeek===pending&&pending?.localVodSeek&&pending.executed

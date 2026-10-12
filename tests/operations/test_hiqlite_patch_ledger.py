@@ -10,11 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LEDGERS = (
-    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 25),
+    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 26),
     (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 6),
 )
 
-NUMBER_WORDS = {6: "six", 25: "twenty-five"}
+NUMBER_WORDS = {6: "six", 26: "twenty-six"}
 
 # A path a row bullet names, relative to the vendored crate root, written in
 # backticks: `src/writer.rs`, `Cargo.toml`. A repository path such as
@@ -247,6 +247,45 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
         # root-lock provenance table scripts/vendor-audit-lock rewrites.
         self.assertNotIn(
             '("s3-simple", "0.8.0")', (ROOT / "scripts/vendor-audit-lock").read_text()
+        )
+
+
+class ClusterListenerNoDelayCase(unittest.TestCase):
+    """Patch 26's unit tests drive the acceptors; this pins that every
+    listener `start_node` serves is built from them. A listener reverted to a
+    bare acceptor would leave those tests green and put the 40 ms delayed-ACK
+    stall back on every consistent read."""
+
+    def test_every_cluster_listener_is_built_with_nodelay(self):
+        source = (ROOT / "vendor/hiqlite/src/start.rs").read_text(encoding="utf-8")
+        production = source.split("#[cfg(test)]\nmod nodelay_tests", 1)[0]
+
+        self.assertNotIn(
+            "from_tcp_rustls(",
+            production,
+            "the TLS listeners take their acceptor from nodelay_tls_acceptor",
+        )
+        served = re.findall(r"axum_server::from_tcp\(listener_(raft|api)\)\?\s*\.(\w+)\(([^)]*\)?)", production)
+        self.assertEqual(
+            sorted(served),
+            sorted(
+                [
+                    ("raft", "acceptor", "nodelay_tls_acceptor(config)"),
+                    ("raft", "acceptor", "NoDelayAcceptor::new()"),
+                    ("api", "acceptor", "nodelay_tls_acceptor(config)"),
+                    ("api", "acceptor", "NoDelayAcceptor::new()"),
+                ]
+            ),
+        )
+        tapped = re.findall(r"TcpListener::from_std\(listener_(raft|api)\)\?(\.tap_io\(set_accepted_nodelay\))?;", production)
+        self.assertEqual(
+            sorted(tapped),
+            [("api", ".tap_io(set_accepted_nodelay)"), ("raft", ".tap_io(set_accepted_nodelay)")],
+        )
+        self.assertEqual(
+            len(re.findall(r"axum_server::(?:from_tcp|bind)\w*\(|axum::serve\(", production)),
+            6,
+            "a new listener shape must be given NODELAY and added to this guard",
         )
 
 

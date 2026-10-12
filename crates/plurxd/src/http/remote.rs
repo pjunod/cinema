@@ -174,6 +174,8 @@ async fn enabled(state: &AppState) -> Result<(), ApiError> {
     if state.membership.local_maintenance_active() {
         return Err(fail(503, "unavailable"));
     }
+    #[cfg(test)]
+    state.remote.delay_authority_read().await;
     if state
         .store
         .get_setting(owner::FEATURE_KEY)
@@ -332,8 +334,16 @@ async fn public_inner(
         return Err(fail(413, "invalid"));
     }
     let token = bearer(headers, uri)?;
-    let user = authenticate_user_token(state, &token).await?;
-    enabled(state).await?;
+    let caller = async {
+        #[cfg(test)]
+        state.remote.delay_authority_read().await;
+        authenticate_user_token(state, &token).await
+    };
+    // Both entry checks remain fresh; preserve authentication error priority
+    // and await both before parsing or routing a command.
+    let (user, feature) = tokio::join!(caller, enabled(state));
+    let user = user?;
+    feature?;
     let path = uri
         .path()
         .strip_prefix("/api/remote/v1/")

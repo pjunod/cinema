@@ -1,8 +1,8 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twenty-five patches for clustered deployments. An
-upstream release can retire the seven generic bugs and the one dependency-only
+Apache-2.0. Plurx carries twenty-six patches for clustered deployments. An
+upstream release can retire the eight generic bugs and the one dependency-only
 constraint; it cannot retire the seventeen Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
@@ -36,6 +36,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 23 | K-06 staged startup, clock observation and membership admission | plurx policy | — | Never; Plurx's clock-skew guard must own the actual Raft membership proposal boundary and a learner-only start that waits for authenticated clock observation. |
 | 24 | Source layout guard rollback certificate | plurx policy | — | Never; rolling Source activation requires a definitive pre-application rollback without changing deployed transaction payloads. |
 | 25 | Bounded snapshot transport observations and RPC budgets | plurx policy | — | Never; Plurx owns this process-local observation surface and its configured chunk, transfer and install budgets. |
+| 26 | `TCP_NODELAY` on accepted Raft and API streams | generic bug | pending M6 | Upstream release disables Nagle on the streams its Raft and API listeners accept. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -378,6 +379,19 @@ made-up URL and prevents the fork from being declared fully tracked.
   `src/network/snapshot_executor.rs`, `src/network/management.rs`,
   `src/network/api.rs`, `src/client/mgmt.rs`, `src/start.rs`,
   `src/store/mod.rs`, `src/app_state.rs`, `src/lib.rs`.
+- The Raft and API listeners disable Nagle on every stream they accept. A node
+  answers the WebSocket upgrade and then writes its handshake challenge as a
+  second small segment; with Nagle on, that segment waits for the ACK of the
+  first, and the connecting peer, which sends nothing until it has read the
+  challenge, delays that ACK (40 ms on Linux). OpenRaft 0.9 opens a new stream
+  to every other voter for each linearizable-read leadership check, so every
+  consistent read on a TLS cluster paid the stall: a three-voter loopback
+  cluster measured 44.0 ms per `query_consistent_map` before and 1.7 ms after,
+  against 0.8 ms for a quorum write, which uses the long-lived replication
+  streams. `start::nodelay_tests` drives the acceptors over real sockets, TLS
+  included, and `tests/operations/test_hiqlite_patch_ledger.py` pins that
+  every listener is built from them. The proxy listener is not changed.
+  Files: `src/start.rs`.
 
 **Partial upstream receipt, 2026-10-03:** row 1's local-node selection by
 durable id is accepted in [upstream PR 368](https://github.com/sebadob/hiqlite/pull/368),
@@ -415,7 +429,7 @@ patch description remains the historical/local contract; row 19 stays
 `generic bug` / `pending M6`, and all kinds, counts and removal rules remain.
 
 Remove this vendor when both halves of its exit hold. First, the rows an
-upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18 and 19: the
+upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19 and 26: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
 (rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24 and 25) still needs a patch. Their

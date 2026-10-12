@@ -8,10 +8,10 @@
   <array>
     <string>/usr/local/bin/plurx-ci-janitor</string>
   </array>
-  <!-- Hourly, matching the Linux timer. In steady state a pass decides
-       "within budget" and deletes nothing. -->
+  <!-- Five-minute recovery also finds daemons a failed bootstrap left unloaded.
+       Healthy caches and busy jobs are untouched. -->
   <key>StartInterval</key>
-  <integer>3600</integer>
+  <integer>300</integer>
   <key>RunAtLoad</key>
   <false/>
   <key>StandardOutPath</key>

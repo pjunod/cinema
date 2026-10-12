@@ -29,11 +29,19 @@
 > focused change from waiting for the entire Rust suite; no periodic schedule
 > was added.
 
-> **Coverage amendment, 2026-09-30:** [coverage.yml](../.github/workflows/coverage.yml)
-> refreshes the dated unit coverage badge on pushes to `main`, independently
-> of full CI. It also accepts manual retries on `main`. Coverage runs serialize
-> and measure current `main` when they start; failed runs retain the last
-> successful badge and its UTC measurement date.
+> **Windows amendment, 2026-10-11:** Windows compilation checks are disabled
+> by the maintainer's request to remove their development latency. Effort,
+> fast-lane, and full CI allocate no Windows cross-build job, and qualification
+> receipts require no Windows result. The explicit public-release archive build
+> remains in [github-release.yml](../.github/workflows/github-release.yml).
+
+> **Coverage amendment, 2026-10-11:** [coverage.yml](../.github/workflows/coverage.yml)
+> refreshes the dated unit coverage badge only by manual dispatch on `main`.
+> Its `ci-coverage` runner is a reserved VM outside the general merge pool;
+> the job has two CPUs, 6 GiB RAM, two Cargo jobs and two test threads.
+> A new request cancels the stale measurement. Failed runs retain the last
+> successful badge and its UTC measurement date. See
+> [runner recovery and budgets](ci/RUNNER-DISK.md#runner-recovery-and-memory-budgets).
 
 
 **Status:** accepted and implemented · **Decider:** Paul · **Written:**
@@ -279,7 +287,7 @@ When the project is complete:
    `promotion_base_sha` naming that open same-repository PR and both exact tips.
    Authenticated API metadata must agree with the dispatched checkout, and
    current `main` must already be an ancestor of the head. The bound run enables
-   every surface, including Windows. It never publishes a package or fleet image;
+   every enabled validation surface. It never publishes a package or fleet image;
    leaving the three inputs empty preserves the ordinary manual workflow.
    If resolving the final merge requires a separate branch, name it
    `integration/<project>-into-main`; the workflow treats that narrowly named

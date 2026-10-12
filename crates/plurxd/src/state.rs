@@ -1699,6 +1699,12 @@ pub struct JobManager {
     /// Content jobs this node cannot currently read. These exclusions remain
     /// node-local so another voter can claim the row immediately.
     fragment_index_refusals: Mutex<HashMap<String, i64>>,
+    /// Logical fragment keys whose identity failed a shared read (§5.6):
+    /// until the mark expires that identity is built in a pass of its own,
+    /// and so is a lead that carries one. Keyed by the logical key, so a new
+    /// engine or a replaced source starts unmarked. Node-local: whether to
+    /// share a read is this node's execution choice, not a fact about the job.
+    shared_pass_marks: Mutex<HashMap<String, i64>>,
     /// Per-node maintenance cadence for node-local cache bytes. Candidate
     /// generation is cluster-singleton and cannot maintain every worker disk.
     last_pretranscode_cache_sweep_ms: AtomicI64,
@@ -1780,6 +1786,11 @@ pub struct AnalysisProgress {
     /// Bytes the ride-along has written so far.
     #[serde(default)]
     pub pgs_bytes_written: u64,
+    /// How many copy identities this row's pass builds from one read of the
+    /// source; zero for a pass that builds one. A shared read occupies one
+    /// background slot for several rows, and this is what says so.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub shared_read_identities: usize,
     pub started_at_ms: i64,
     pub updated_at_ms: i64,
     pub elapsed_ms: i64,
@@ -1824,6 +1835,29 @@ fn analysis_rate(
     (throughput_bps, eta_ms)
 }
 
+/// An outcome that is the pass's, not the identity's: the child failed, the
+/// pass ran out of budget, or something transient. A shared pass that ends
+/// this way says nothing about what each identity would do alone.
+fn failed_as_a_pass(outcome: &crate::fragindex::IndexOutcome) -> bool {
+    use plurx_core::content_analysis::IndexFailureCode;
+    matches!(outcome, crate::fragindex::IndexOutcome::Failed(failure)
+    if failure.transient_allowlisted
+        || matches!(
+            failure.code,
+            IndexFailureCode::IndexProcessFailed | IndexFailureCode::IndexBudgetExceeded
+        ))
+}
+
+/// [`failed_as_a_pass`], less the transient: those retry on their own turn.
+fn failed_as_a_shared_pass(outcome: &crate::fragindex::IndexOutcome) -> bool {
+    failed_as_a_pass(outcome)
+        && !matches!(outcome, crate::fragindex::IndexOutcome::Failed(failure) if failure.transient_allowlisted)
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
 #[cfg(test)]
 impl AnalysisProgress {
     pub(crate) fn test_row(job_id: &str, title: &str) -> Self {
@@ -1844,6 +1878,7 @@ impl AnalysisProgress {
             pgs_tracks: 0,
             text_tracks: 0,
             pgs_bytes_written: 0,
+            shared_read_identities: 0,
             started_at_ms: 1,
             updated_at_ms: 1,
             elapsed_ms: 1,
@@ -2360,6 +2395,16 @@ struct ClusterFragmentIndexWorker {
     /// enumerate one identity set and index another.
     convert_dolby_vision: bool,
     retry_policy: AnalysisRetryPolicy,
+}
+
+impl ClusterFragmentIndexWorker {
+    fn pipeline(&self) -> crate::background_jobs::FragmentPipeline<'_> {
+        crate::background_jobs::FragmentPipeline {
+            engine_sha256: &self.engine_sha256,
+            have_dovi: self.have_dovi,
+            convert_dolby_vision: self.convert_dolby_vision,
+        }
+    }
 }
 
 impl AnalysisRetryPolicy {
@@ -3458,6 +3503,7 @@ impl JobManager {
             stop_producing: std::sync::atomic::AtomicBool::new(false),
             pretranscode_refusals: Mutex::new(HashMap::new()),
             fragment_index_refusals: Mutex::new(HashMap::new()),
+            shared_pass_marks: Mutex::new(HashMap::new()),
             last_pretranscode_cache_sweep_ms: AtomicI64::new(0),
             fragment_index_sweep_cursor: Mutex::new(None),
             subtitle_source_sweep_cursor: Mutex::new(None),
@@ -4830,6 +4876,7 @@ impl JobManager {
                 pgs_tracks: 0,
                 text_tracks: 0,
                 pgs_bytes_written: 0,
+                shared_read_identities: 0,
                 started_at_ms: now,
                 updated_at_ms: now,
                 elapsed_ms: 0,
@@ -4937,6 +4984,17 @@ impl JobManager {
         if let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) {
             value.pgs_tracks = pgs_tracks;
             value.pgs_bytes_written = pgs_bytes_written;
+        }
+    }
+
+    /// Mark a running row as one of `identities` built from one source read.
+    fn set_analysis_shared_read(&self, job_id: &str, target_node_id: &str, identities: usize) {
+        let mut progress = self
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(value) = progress.get_mut(&(job_id.to_owned(), target_node_id.to_owned())) {
+            value.shared_read_identities = identities;
         }
     }
 
@@ -8145,12 +8203,10 @@ impl JobManager {
             // at the top of the file loop instead, which costs at most one
             // file's worth of overshoot per pass and buys the invariant that
             // makes the cursor safe.
+            // Which of the file's identities still need a pass. Same checks,
+            // same order as when each had a pass of its own.
+            let mut missing = Vec::with_capacity(videos.len());
             for video in videos {
-                if !transcode.pretranscode_worker_idle() {
-                    // Deliberately a return: it skips the cursor stamp, so a
-                    // preempted pass leaves the file due rather than half done.
-                    return;
-                }
                 let identity = crate::fragindex::identity_for(&file, video);
                 match self.store.fragment_index(file_id, &identity).await {
                     Ok(Some(index)) => {
@@ -8205,40 +8261,115 @@ impl JobManager {
                         break;
                     }
                 }
-                attempted += 1;
-                // Asked per pass, so the switch turning off stops the next
-                // pass from riding without a restart.
-                let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
-                    Arc::clone(&self.store),
-                    &runtime_cache,
-                )
-                .await;
-                // A progress row like the queue worker's, so Content analysis
-                // shows this pass — and what it keeps — on an install that
-                // never turns the queue on. Keyed by file and pipeline, on
-                // this node; dropped when the pass ends.
-                let progress_job = local_index_job_id(file_id, &identity);
-                let _progress = self.start_analysis_progress(
-                    (&progress_job, &node_id),
+                missing.push((video, identity));
+            }
+            if missing.is_empty() {
+                continue;
+            }
+            // One read of the source builds every missing identity (§5.4).
+            // Preemption is checked before the read, as it was before each
+            // identity's own read; a shared pass is no longer than one of
+            // those. Deliberately a return: it skips the cursor stamp, so a
+            // preempted pass leaves the file due rather than half done.
+            if !transcode.pretranscode_worker_idle() {
+                return;
+            }
+            attempted += missing.len();
+            // Asked per pass, so the switch turning off stops the next
+            // pass from riding without a restart.
+            let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
+                Arc::clone(&self.store),
+                &runtime_cache,
+            )
+            .await;
+            // A progress row per identity, like the queue worker's, so Content
+            // analysis shows this pass — what it keeps, and that its rows are
+            // one read — on an install that never turns the queue on. Keyed by
+            // file and pipeline, on this node; dropped when the pass ends.
+            let progress_jobs = missing
+                .iter()
+                .map(|(_, identity)| local_index_job_id(file_id, identity))
+                .collect::<Vec<_>>();
+            let _progress = progress_jobs
+                .iter()
+                .map(|job| {
+                    self.start_analysis_progress(
+                        (job, &node_id),
+                        file_id,
+                        "fragment_index",
+                        "fragment_index",
+                        file.size.max(0) as u64,
+                        file.duration_ms.unwrap_or(0),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if progress_jobs.len() > 1 {
+                for job in &progress_jobs {
+                    self.set_analysis_shared_read(job, &node_id, progress_jobs.len());
+                }
+            }
+            let reporters = progress_jobs
+                .iter()
+                .map(|job| self.index_pass_reporter(job, &node_id))
+                .collect::<Vec<_>>();
+            let reporter: crate::fragindex::SharedIndexProgress =
+                Arc::new(move |progress: &crate::fragindex::PassProgress| {
+                    for reporter in &reporters {
+                        reporter(progress);
+                    }
+                });
+            let mut builds = crate::fragindex::build_riding_shared(
+                &file,
+                &missing.iter().map(|(video, _)| *video).collect::<Vec<_>>(),
+                &runtime_cache,
+                index_file_budget(file.duration_ms),
+                ride_along.as_ref(),
+                Some(reporter),
+            )
+            .await;
+            // §5.6 for the local pass: a shared read that failed as a pass —
+            // the child failed or the budget ran out — says nothing about what
+            // each identity does alone, so each of those is read again on its
+            // own now rather than recorded against every identity at once.
+            if missing.len() > 1
+                && builds
+                    .iter()
+                    .any(|build| failed_as_a_shared_pass(&build.outcome))
+            {
+                tracing::info!(
                     file_id,
-                    "fragment_index",
-                    "fragment_index",
-                    file.size.max(0) as u64,
-                    file.duration_ms.unwrap_or(0),
+                    identities = missing.len(),
+                    "a shared index read failed as a pass; building its identities one at a time"
                 );
+                for (slot, (video, _)) in missing.iter().enumerate() {
+                    if !builds
+                        .get(slot)
+                        .is_some_and(|build| failed_as_a_shared_pass(&build.outcome))
+                    {
+                        continue;
+                    }
+                    if !transcode.pretranscode_worker_idle() {
+                        // As above: no cursor stamp, the file stays due.
+                        return;
+                    }
+                    attempted += 1;
+                    builds[slot] = crate::fragindex::build_riding(
+                        &file,
+                        *video,
+                        &runtime_cache,
+                        index_file_budget(file.duration_ms),
+                        None,
+                        Some(self.index_pass_reporter(&progress_jobs[slot], &node_id)),
+                    )
+                    .await;
+                }
+            }
+            for ((_, identity), build) in missing.iter().zip(builds) {
                 let crate::fragindex::IndexBuild {
                     outcome,
                     ride_along: harvest,
                     source_unchanged,
-                } = crate::fragindex::build_riding(
-                    &file,
-                    video,
-                    &runtime_cache,
-                    index_file_budget(file.duration_ms),
-                    ride_along.as_ref(),
-                    Some(self.index_pass_reporter(&progress_job, &node_id)),
-                )
-                .await;
+                } = build;
                 let refusal = match outcome {
                     crate::fragindex::IndexOutcome::Built(mut index) => {
                         if !source_unchanged {
@@ -8281,7 +8412,7 @@ impl JobManager {
                             .store
                             .record_fragment_index_typed_outcome(
                                 file_id,
-                                &identity,
+                                identity,
                                 failure.code,
                                 failure.transient_allowlisted,
                                 &failure.reason,
@@ -8310,7 +8441,7 @@ impl JobManager {
                 };
                 match self
                     .store
-                    .record_fragment_index_outcome(file_id, &identity, refusal.0, &refusal.1)
+                    .record_fragment_index_outcome(file_id, identity, refusal.0, &refusal.1)
                     .await
                 {
                     Ok(recorded) => tracing::info!(
@@ -9839,6 +9970,21 @@ impl JobManager {
                 charge_attempt: false,
             });
         }
+        // The source is attested now, so every other identity of the file can
+        // be queued beside this one, at no further read.
+        self.co_resolve_sibling_identities(
+            &job.pipeline_sha256,
+            &request.target_node_id,
+            &file,
+            node_id,
+            engine_sha256,
+            have_dovi,
+            transcode.dv_convert_enabled().await,
+            &object_version,
+            &job.source_sha256,
+            now,
+        )
+        .await;
         // Best-effort maintenance: unsettled requests remain durable and the
         // next queue pass retries the same bounded settlement.
         crate::store_result::observe(
@@ -9847,6 +9993,137 @@ impl JobManager {
             self.store.settle_analysis_requests(now).await,
         );
         Ok(())
+    }
+
+    /// Queue every other copy identity of a file whose source this node has
+    /// just attested (shared-read §5.5, "co-resolve").
+    ///
+    /// Identities are requested one at a time — discovery files one request
+    /// per identity, playback files one for the identity it asked for — and
+    /// a sibling's job used to be born only when its own request reached this
+    /// stage, which on a busy queue was days later. So the identity Safari
+    /// needed and its stripped sibling crossed the queue days apart, and each
+    /// cost its own read. Queuing the siblings here, keyed exactly as their
+    /// own requests would key them, puts them on the queue in the same second
+    /// as the requested identity, where the worker can build them from one
+    /// read. A sibling request still queued resolves later through the
+    /// attestation memo, with no read, and settles against the job this made.
+    ///
+    /// Best effort and bounded to the file's own identities: the requested
+    /// identity is already submitted, and anything that fails here is still
+    /// reached the old way. A sibling that already has an index this node can
+    /// serve is skipped; one whose job ended `failed` stays failed —
+    /// `enqueue_cluster_fragment_index` does not reopen a tombstone, and
+    /// neither does this. Siblings go in at background priority whatever the
+    /// requested identity's priority was: a viewer asked for one pipeline.
+    #[allow(clippy::too_many_arguments)]
+    async fn co_resolve_sibling_identities(
+        &self,
+        requested_pipeline: &str,
+        target_node_id: &str,
+        file: &MediaFile,
+        node_id: &str,
+        engine_sha256: &str,
+        have_dovi: bool,
+        convert: bool,
+        object_version: &str,
+        source_sha256: &str,
+        now: i64,
+    ) {
+        let options = match fragment_index_video_identity_options(
+            self.store.as_ref(),
+            file,
+            have_dovi,
+            convert,
+        )
+        .await
+        {
+            Ok(options) => options,
+            Err(error) => {
+                tracing::debug!(file_id = file.id, %error, "co-resolve could not read the file's identities");
+                return;
+            }
+        };
+        let siblings = options
+            .into_iter()
+            .map(|(video, _)| {
+                crate::fragment_index_cluster::pipeline_digest(file, engine_sha256, video)
+            })
+            .filter(|pipeline| pipeline != requested_pipeline)
+            .collect::<Vec<_>>();
+        if siblings.is_empty() {
+            return;
+        }
+        let probes = siblings
+            .iter()
+            .map(
+                |pipeline_sha256| plurx_core::store::ClusterIndexAvailabilityProbe {
+                    file_id: file.id,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    object_version: object_version.to_owned(),
+                    pipeline_sha256: pipeline_sha256.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let present = match self
+            .store
+            .cluster_fragment_index_availability(node_id, &probes)
+            .await
+        {
+            Ok(present) if present.len() == probes.len() => present,
+            _ => return,
+        };
+        let mut on_queue = 0_usize;
+        for (pipeline_sha256, present) in siblings.into_iter().zip(present) {
+            if present {
+                continue;
+            }
+            let Some(logical) = cluster_fragment_index_key(
+                file.id,
+                file.size,
+                file.mtime,
+                source_sha256,
+                &pipeline_sha256,
+            ) else {
+                continue;
+            };
+            let Ok(current) = self
+                .store
+                .cluster_fragment_index_current_generation(&logical)
+                .await
+            else {
+                continue;
+            };
+            let job = NewClusterFragmentIndexJob {
+                cache_key: current.unwrap_or(logical),
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_sha256: source_sha256.to_owned(),
+                pipeline_sha256,
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                target_node_id: target_node_id.to_owned(),
+                not_before_ms: now,
+                created_at_ms: now,
+            };
+            if self
+                .store
+                .enqueue_cluster_fragment_index(&job)
+                .await
+                .unwrap_or(false)
+            {
+                on_queue += 1;
+            }
+        }
+        if on_queue > 0 {
+            tracing::info!(
+                file_id = file.id,
+                identities = on_queue,
+                "this file's other copy identities are on the queue beside the requested one"
+            );
+        }
     }
 
     async fn drain_cluster_fragment_index_slot(
@@ -10463,7 +10740,7 @@ impl JobManager {
         );
         // Recheck after source attestation: local capabilities may change
         // after preflight. Another worker may still implement this identity.
-        let Some(video) = videos.into_iter().find(|video| {
+        let Some(video) = videos.iter().copied().find(|video| {
             crate::fragment_index_cluster::pipeline_digest(&file, &worker.engine_sha256, *video)
                 == job.pipeline_sha256
         }) else {
@@ -10478,7 +10755,24 @@ impl JobManager {
             return false;
         };
 
-        let report_progress = self.index_pass_reporter(&job.cache_key, &job.target_node_id);
+        // Shared read (§5.5, co-claim): the file's other identities whose
+        // builds are queued for this same attested source are built by this
+        // pass, from this one read, under the lead's claim and its single
+        // source reservation. Each is claimed and published under a fence of
+        // its own only once the lead has settled — a sibling claim beside a
+        // running lead would need a second source reservation, which the
+        // store keeps for live demand.
+        let siblings = self
+            .queued_sibling_builds(&job, &file, &videos, &worker, &node_id)
+            .await;
+        let mut pass_videos = vec![video];
+        pass_videos.extend(siblings.iter().map(|(_, video)| *video));
+        let reporter = self.index_pass_reporter(&job.cache_key, &job.target_node_id);
+        if pass_videos.len() > 1 {
+            // The lead's row is the pass's row: it reads once for all of them.
+            self.set_analysis_shared_read(&job.cache_key, &job.target_node_id, pass_videos.len());
+        }
+        let report_progress = move |progress: &crate::fragindex::PassProgress| reporter(progress);
         // Asked per job: the switch, the self-test and the filesystem, now.
         let ride_along = crate::subtitle_ride_along::RideAlongGate::open(
             Arc::clone(&self.store),
@@ -10486,19 +10780,19 @@ impl JobManager {
         )
         .await;
         let cancel = lost.child_token();
-        let build = crate::fragindex::build_from_attested_file_with_progress(
+        let build = crate::fragindex::build_shared_from_attested_file_with_progress(
             &file,
             &attested.handle,
             &attested.observation.object_version,
-            video,
+            &pass_videos,
             transcode.runtime_cache_dir(),
             index_file_budget(file.duration_ms),
-            move |progress: &crate::fragindex::PassProgress| report_progress(progress),
+            report_progress,
             ride_along.as_ref(),
             &cancel,
         );
         tokio::pin!(build);
-        let (outcome, preempted) = tokio::select! {
+        let (builds, preempted) = tokio::select! {
             built = &mut build => (Some(built), false),
             () = self.wait_for_fragment_worker_stop(transcode.as_ref(), admission, &lost) => {
                 cancel.cancel();
@@ -10520,22 +10814,17 @@ impl JobManager {
             .await;
             return false;
         }
-        let Some(crate::fragindex::IndexBuild {
-            outcome,
-            ride_along: harvest,
-            ..
-        }) = outcome
-        else {
+        let Some(builds) = builds else {
             // The lease was lost mid-build. The row stays `running` until a
             // sweep reclaims it; writing an outcome on a claim we no longer
             // hold is exactly what the fence forbids.
-
             return false;
         };
         // Every outcome is a statement about the held source, including a
         // failure. If those bytes changed while ffmpeg was running, record
         // source movement instead of caching or retrying a diagnosis for the
-        // retired object.
+        // retired object. The siblings were never claimed; they keep their
+        // own turn.
         if !crate::fragment_index_cluster::source_still_matches(
             &attested.handle,
             &attested.observation,
@@ -10572,15 +10861,316 @@ impl JobManager {
             .await;
             return false;
         }
+        let mut builds = builds;
         // Both freshness checks passed: the held source is the object the
         // pass read, and the catalog still describes it. The PGS tracks the
         // pass kept are a statement about exactly that source, whatever
-        // happens to the index publication below.
-        if let Some(pending) = harvest {
+        // happens to the index publications below. They travel with the
+        // pass's first built output.
+        if let Some(pending) = builds.iter_mut().find_map(|build| build.ride_along.take()) {
             // `true`: the `source_still_matches` refusal above has returned
             // already for a source that moved.
             self.settle_ride_along(&file, pending, true).await;
         }
+        let mut builds = builds.into_iter();
+        let Some(lead) = builds.next() else {
+            return false;
+        };
+        let built_siblings = siblings
+            .into_iter()
+            .zip(builds)
+            .map(|((pipeline, video), build)| (pipeline, video, build.outcome))
+            .collect::<Vec<_>>();
+        if !built_siblings.is_empty() {
+            self.mark_failed_shared_identity(
+                &file,
+                &job.source_sha256,
+                &job.pipeline_sha256,
+                &lead.outcome,
+            )
+            .await;
+            for (pipeline, _, outcome) in &built_siblings {
+                self.mark_failed_shared_identity(&file, &job.source_sha256, pipeline, outcome)
+                    .await;
+            }
+        }
+        let completed = self
+            .settle_cluster_fragment_index_outcome(
+                transcode.as_ref(),
+                &job,
+                &worker,
+                &fence,
+                admission,
+                &file,
+                video,
+                &attested,
+                published,
+                retry_ms,
+                lead.outcome,
+            )
+            .await;
+        self.publish_sibling_builds(
+            transcode.as_ref(),
+            &job,
+            &worker,
+            admission,
+            &file,
+            &attested,
+            &node_id,
+            built_siblings,
+        )
+        .await;
+        completed
+    }
+
+    /// The queued builds of the lead's other identities for this same attested
+    /// source, by pipeline, and the identity each builds (§5.5). Identities
+    /// marked by an earlier failed shared read are left to run alone, and a
+    /// marked lead shares nothing. Nothing is claimed here.
+    async fn queued_sibling_builds(
+        &self,
+        lead: &plurx_core::store::ClusterFragmentIndexJob,
+        file: &MediaFile,
+        videos: &[plurx_core::transcode::CopyVideoOptions],
+        worker: &ClusterFragmentIndexWorker,
+        node_id: &str,
+    ) -> Vec<(String, plurx_core::transcode::CopyVideoOptions)> {
+        let marked = self.shared_pass_marked(file, &lead.source_sha256).await;
+        if marked.contains(&lead.pipeline_sha256) {
+            return Vec::new();
+        }
+        let mut by_pipeline = HashMap::new();
+        for video in videos {
+            let pipeline =
+                crate::fragment_index_cluster::pipeline_digest(file, &worker.engine_sha256, *video);
+            if pipeline != lead.pipeline_sha256 && !marked.contains(&pipeline) {
+                by_pipeline.insert(pipeline, *video);
+            }
+        }
+        if by_pipeline.is_empty() {
+            return Vec::new();
+        }
+        let pipelines = by_pipeline.keys().cloned().collect::<Vec<_>>();
+        let excluded = self.excluded_fragment_keys().await;
+        match crate::background_jobs::fragment_siblings(
+            Arc::clone(&self.store),
+            Arc::clone(&self.job_authority),
+            node_id,
+            lead,
+            &pipelines,
+            &excluded,
+            &worker.pipeline(),
+            false,
+        )
+        .await
+        {
+            Ok(queued) => queued
+                .into_iter()
+                .filter_map(|(job, _)| {
+                    by_pipeline
+                        .get(&job.pipeline_sha256)
+                        .map(|video| (job.pipeline_sha256, *video))
+                })
+                .collect(),
+            Err(error) => {
+                tracing::debug!(%error, "looking for sibling fragment builds");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Publish the indexes a lead's pass built for its siblings: each sibling
+    /// job is claimed now — the lead has settled and released its source
+    /// reservation — under a fence of its own, and settled with what the pass
+    /// built for it, exactly as a pass of its own would have settled it. A
+    /// sibling another worker has taken meanwhile is left to it; one whose
+    /// pass failed for reasons of the pass (a process failure or anything
+    /// transient) is left queued and uncharged, to build on its own turn.
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_sibling_builds(
+        &self,
+        transcode: &TranscodeManager,
+        lead: &plurx_core::store::ClusterFragmentIndexJob,
+        worker: &ClusterFragmentIndexWorker,
+        admission: &crate::transcode::FragmentAdmission,
+        file: &MediaFile,
+        attested: &crate::fragment_index_cluster::AttestedSource,
+        node_id: &str,
+        built: Vec<(
+            String,
+            plurx_core::transcode::CopyVideoOptions,
+            crate::fragindex::IndexOutcome,
+        )>,
+    ) {
+        // A foreground viewer arrived: the siblings keep their own turn.
+        if !transcode.fragment_worker_idle(admission) {
+            return;
+        }
+        let built = built
+            .into_iter()
+            .filter(|(_, _, outcome)| !failed_as_a_pass(outcome))
+            .collect::<Vec<_>>();
+        let excluded = self.excluded_fragment_keys().await;
+        let mut published = 0_usize;
+        // One at a time: each claim takes the background source slot and its
+        // settlement gives it back, so a second claim beside an unsettled
+        // first would be refused and its prebuilt index wasted.
+        for (pipeline, video, outcome) in built {
+            let claimed = match crate::background_jobs::fragment_siblings(
+                Arc::clone(&self.store),
+                Arc::clone(&self.job_authority),
+                node_id,
+                lead,
+                std::slice::from_ref(&pipeline),
+                &excluded,
+                &worker.pipeline(),
+                true,
+            )
+            .await
+            {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    tracing::debug!(%error, "claiming a sibling fragment build for publication");
+                    continue;
+                }
+            };
+            let Some((job, Some(active))) = claimed.into_iter().next() else {
+                continue;
+            };
+            let fence = active.fence();
+            let retry_ms = worker.retry_policy.backoff_ms(
+                &format!("{}:{}", job.cache_key, job.target_node_id),
+                job.attempts.max(1),
+            );
+            // The same two facts the lead's publication rested on, asked
+            // again: time has passed since the pass ended.
+            let artifact = self
+                .store
+                .cluster_fragment_index_artifact(&job.cache_key)
+                .await
+                .ok()
+                .flatten();
+            let still_current = self
+                .store
+                .get_file(file.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
+            if !still_current
+                || !crate::fragment_index_cluster::source_still_matches(
+                    &attested.handle,
+                    &attested.observation,
+                )
+                .unwrap_or(false)
+            {
+                self.yield_fragment_index_job(&fence, &job, "source_changed", clock_ms())
+                    .await;
+            } else if self
+                .settle_cluster_fragment_index_outcome(
+                    transcode, &job, worker, &fence, admission, file, video, attested, artifact,
+                    retry_ms, outcome,
+                )
+                .await
+            {
+                published += 1;
+            }
+            active.finish().await;
+        }
+        if published > 0 {
+            tracing::info!(
+                file_id = file.id,
+                identities = published,
+                "published sibling fragment indexes built from the lead's read"
+            );
+        }
+    }
+
+    async fn excluded_fragment_keys(&self) -> Vec<String> {
+        let now = clock_ms();
+        let mut refusals = self.fragment_index_refusals.lock().await;
+        refusals.retain(|_, retry_at| *retry_at > now);
+        refusals.keys().cloned().collect()
+    }
+
+    /// The pipelines of this file and source whose shared read failed (§5.6).
+    async fn shared_pass_marked(
+        &self,
+        file: &MediaFile,
+        source_sha256: &str,
+    ) -> std::collections::HashSet<String> {
+        let now = clock_ms();
+        let prefix = format!("{}:{}:{}:{source_sha256}:", file.id, file.size, file.mtime);
+        let mut marks = self.shared_pass_marks.lock().await;
+        marks.retain(|_, until| *until > now);
+        marks
+            .keys()
+            .filter_map(|key| key.strip_prefix(&prefix).map(str::to_owned))
+            .collect()
+    }
+
+    /// §5.6: an identity whose shared pass ended in a process failure or ran
+    /// out of budget builds alone next time. Transient failures and the
+    /// identity's own refusals say nothing about sharing, and leave no mark. Keyed by file, source
+    /// digest and pipeline, so a replaced source or a new engine starts clean.
+    async fn mark_failed_shared_identity(
+        &self,
+        file: &MediaFile,
+        source_sha256: &str,
+        pipeline_sha256: &str,
+        outcome: &crate::fragindex::IndexOutcome,
+    ) {
+        const MARK_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+        const MAX_MARKS: usize = 4_096;
+        if !failed_as_a_shared_pass(outcome) {
+            return;
+        }
+        let now = clock_ms();
+        let mut marks = self.shared_pass_marks.lock().await;
+        marks.retain(|_, until| *until > now);
+        if marks.len() >= MAX_MARKS {
+            if let Some(oldest) = marks
+                .iter()
+                .min_by_key(|(_, until)| **until)
+                .map(|(key, _)| key.clone())
+            {
+                marks.remove(&oldest);
+            }
+        }
+        tracing::info!(
+            file_id = file.id,
+            pipeline = pipeline_sha256,
+            "this identity failed a shared read; it builds alone until the mark expires"
+        );
+        marks.insert(
+            format!(
+                "{}:{}:{}:{source_sha256}:{pipeline_sha256}",
+                file.id, file.size, file.mtime
+            ),
+            now.saturating_add(MARK_MS),
+        );
+    }
+
+    /// One identity's index from a cluster pass, settled under that job's
+    /// own fence: recorded, encoded, installed and published — or failed,
+    /// exactly as a pass of its own would have settled it.
+    #[allow(clippy::too_many_arguments)]
+    async fn settle_cluster_fragment_index_outcome(
+        &self,
+        transcode: &TranscodeManager,
+        job: &plurx_core::store::ClusterFragmentIndexJob,
+        worker: &ClusterFragmentIndexWorker,
+        fence: &crate::background_jobs::JobFence,
+        admission: &crate::transcode::FragmentAdmission,
+        file: &MediaFile,
+        video: plurx_core::transcode::CopyVideoOptions,
+        attested: &crate::fragment_index_cluster::AttestedSource,
+        published: Option<ClusterFragmentIndexArtifact>,
+        retry_ms: i64,
+        outcome: crate::fragindex::IndexOutcome,
+    ) -> bool {
+        let lost = fence.loss_token();
+        let node_id = self.coordinator.node_id().to_owned();
         let mut index = match outcome {
             crate::fragindex::IndexOutcome::Built(index) => index,
             // The node-local row is recorded here too, so a clustered node's
@@ -10590,7 +11180,7 @@ impl JobManager {
             crate::fragindex::IndexOutcome::Unsupported(reason) => {
                 tracing::warn!(file_id = file.id, %reason, "cluster fragment index unsupported");
                 self.record_local_index_refusal(
-                    &file,
+                    file,
                     video,
                     plurx_core::segplan::IndexRefusal::Unsupported,
                     &reason,
@@ -10599,8 +11189,8 @@ impl JobManager {
 
                 let now = clock_ms();
                 self.fail_fragment_index_job(
-                    &fence,
-                    &job,
+                    fence,
+                    job,
                     "unsupported",
                     false,
                     now.saturating_add(retry_ms),
@@ -10617,7 +11207,7 @@ impl JobManager {
                     "cluster fragment index failed"
                 );
                 self.record_local_index_failure(
-                    &file,
+                    file,
                     video,
                     &failure,
                     worker.retry_policy.max_attempts,
@@ -10632,7 +11222,7 @@ impl JobManager {
                         failure.diagnostic,
                     )
                     .await;
-                self.record_job_outcome(&job, "fail", &code, written);
+                self.record_job_outcome(job, "fail", &code, written);
                 return false;
             }
         };
@@ -10663,8 +11253,8 @@ impl JobManager {
 
                 let now = clock_ms();
                 self.fail_fragment_index_job(
-                    &fence,
-                    &job,
+                    fence,
+                    job,
                     "encode_failed",
                     false,
                     now.saturating_add(retry_ms),
@@ -10704,8 +11294,8 @@ impl JobManager {
         {
             let now = clock_ms();
             self.yield_fragment_index_job(
-                &fence,
-                &job,
+                fence,
+                job,
                 "foreground_preempted",
                 now.saturating_add(retry_ms),
             )
@@ -10720,8 +11310,8 @@ impl JobManager {
 
             let now = clock_ms();
             self.fail_fragment_index_job(
-                &fence,
-                &job,
+                fence,
+                job,
                 "local_publish_failed",
                 true,
                 now.saturating_add(retry_ms),
@@ -10736,8 +11326,8 @@ impl JobManager {
         {
             let now = clock_ms();
             self.yield_fragment_index_job(
-                &fence,
-                &job,
+                fence,
+                job,
                 "foreground_preempted",
                 now.saturating_add(retry_ms),
             )
@@ -10745,7 +11335,7 @@ impl JobManager {
             return false;
         }
         let settled = fence.publish_fragment(artifact).await;
-        let completed = self.record_job_outcome(&job, "complete", "", settled);
+        let completed = self.record_job_outcome(job, "complete", "", settled);
         if completed {
             if let Err(error) = self.store.put_fragment_index(file.id, &index).await {
                 tracing::warn!(file_id = file.id, %error, "installing built fragment index");
@@ -13721,6 +14311,114 @@ mod tests {
 
     fn manager(store: Arc<dyn Store>, artwork: &std::path::Path) -> Arc<JobManager> {
         Arc::new(JobManager::new(store, artwork.to_path_buf()))
+    }
+
+    /// Co-resolve (shared-read §5.5): once one identity's request has
+    /// attested the source, every other identity of the file is on the queue
+    /// beside it — keyed as its own request would key it, at background
+    /// priority, for the same target — and a second resolution adds nothing.
+    #[tokio::test]
+    async fn resolving_one_identity_queues_every_sibling_beside_it() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let jobs = manager(store.clone(), artwork.path());
+        let library = store
+            .create_library(&NewLibrary {
+                name: "co-resolve".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: vec![artwork.path().to_owned()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "co-resolve".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let probe = ProbeResult {
+            video_codec: Some("hevc".to_owned()),
+            duration_ms: Some(1_000),
+            hdr: Some("dolby_vision".to_owned()),
+            dolby_vision: DolbyVisionFacts {
+                profile: Some(7),
+                level: Some(6),
+                bl_compat_id: Some(6),
+                el_present: Some(true),
+                rpu_present: Some(true),
+            },
+            ..Default::default()
+        };
+        let id = store
+            .upsert_file(
+                item,
+                &artwork.path().join("film.mkv").to_string_lossy(),
+                4_096,
+                100,
+                &probe,
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("read").expect("file");
+        let options = fragment_index_video_identity_options(store.as_ref(), &file, true, true)
+            .await
+            .expect("identities");
+        assert_eq!(options.len(), 3, "strip, preserve, convert");
+        let source_sha256 = "ab".repeat(32);
+        let engine = "cd".repeat(32);
+        let key = |video| {
+            cluster_fragment_index_key(
+                file.id,
+                file.size,
+                file.mtime,
+                &source_sha256,
+                &crate::fragment_index_cluster::pipeline_digest(&file, &engine, video),
+            )
+            .expect("key")
+        };
+        for _ in 0..2 {
+            jobs.co_resolve_sibling_identities(
+                &crate::fragment_index_cluster::pipeline_digest(&file, &engine, options[0].0),
+                "node-a",
+                &file,
+                "node-a",
+                &engine,
+                true,
+                true,
+                "object-v1",
+                &source_sha256,
+                1_000,
+            )
+            .await;
+        }
+        assert!(
+            store
+                .cluster_fragment_index_job(&key(options[0].0), "node-a")
+                .await
+                .expect("read")
+                .is_none(),
+            "the requested identity is its own request's to submit"
+        );
+        for (video, _) in &options[1..] {
+            let job = store
+                .cluster_fragment_index_job(&key(*video), "node-a")
+                .await
+                .expect("read")
+                .expect("a sibling is on the queue");
+            assert_eq!(job.state, "queued");
+            assert_eq!(
+                (job.priority.as_str(), job.trigger.as_str()),
+                ("normal", "background")
+            );
+            assert_eq!(job.source_sha256, source_sha256);
+        }
     }
 
     async fn seed_subtitle_backfill(store: &SqliteStore, media: &Path, count: usize) -> Vec<i64> {

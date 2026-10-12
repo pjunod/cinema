@@ -1,7 +1,9 @@
 # noirr cinema for macOS
 
 This archive contains a universal `plurxd` server (Apple Silicon and Intel),
-the installer, and the launchd agent template it renders.
+the installer, the launchd agent template it renders, and
+`plurx-source-parser.wasm` — the sandboxed FFprobe build plurxd reads decoder
+facts through, which the installer puts beside the pinned FFprobe.
 
 Install it as a login agent that starts with your session and restarts if it
 crashes, from this directory:

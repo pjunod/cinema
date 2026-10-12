@@ -2898,9 +2898,12 @@ impl TranscodeManager {
                 .retained_output
                 .map(|proof| serde_json::to_value(proof).expect("private facts serialize")),
         };
+        // The capture already sealed this exact output; confirm it still
+        // holds under the same predicate with a consistent read rather than
+        // replaying the complete seal as a no-op replicated UPDATE.
         let ready = self
             .store
-            .seal_prepared_output(&seal)
+            .prepared_output_sealed(&seal)
             .await
             .is_ok_and(|sealed| sealed);
         trace_prepared_capture(&seal, None, ready);

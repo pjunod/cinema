@@ -130,21 +130,19 @@ executed with identical feature resolution.
 
 ### Windows compile, package, and native smoke
 
-Every Rust-affecting effort, fast-lane, and full workflow cross-builds every
-normal and test target for `x86_64-pc-windows-msvc` with the
-repository-pinned Rust toolchain and `cargo-xwin`. The test binaries are linked
-but not executed because the lane runs in Linux; native execution belongs to
-the smoke harness below. `plurx-cluster-check` is excluded because its fault
-injector is Linux-specific; the server and shared workspace crates are not.
-The lane pins the x86_64 SDK and CRT inputs, retries their download through
-`cargo-xwin`'s build path, and allows 30 minutes for a cold runner. It does not
-claim a persistent SDK cache: Forgejo job containers cannot mount an external
-cache volume until the runner explicitly allows one, and checkout cleaning
-removes a cache kept inside the workspace. The full CI lane also performs a
-release build and retains
-`plurxd-windows-x86_64.zip` plus its SHA-256 receipt. Cross-build success proves
-MSVC type and linkage compatibility, including the embedded long-path-aware
-manifest. It is not runtime evidence.
+Windows compilation checks are disabled as of 2026-10-11 by the maintainer's
+request: the cross-build cost slows development for a platform outside the
+current priorities. Effort, fast-lane, and full CI allocate no Windows job;
+promotion, publication, badges, and qualification receipts require no Windows
+result. Full CI also no longer builds or retains a Windows release candidate.
+The contract in
+`tests/operations/test_contracts.py::test_validation_workflows_do_not_compile_or_gate_windows`
+keeps those workflows free of Windows compilation and gate dependencies.
+
+The explicit public-release workflow still builds its Windows archive with
+`cargo-xwin`; that packaging job does not run the workspace compilation check.
+A release build proves MSVC type and linkage compatibility for the packaged
+server, including its long-path-aware manifest. It is not runtime evidence.
 
 `scripts/windows-smoke.ps1` is the native runtime harness. On a Windows x64
 host with the pinned Rust toolchain and FFmpeg 6, build the release workspace
