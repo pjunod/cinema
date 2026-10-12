@@ -193,8 +193,14 @@ pub(crate) async fn admit_frozen_preparation(
     software_threads: Option<u32>,
     deadline: Instant,
 ) -> Result<crate::admission::TranscodePermit, bool> {
+    if Instant::now() >= deadline {
+        return Err(false);
+    }
     let _waiting = admissions.wait_for_slot();
     loop {
+        if Instant::now() >= deadline {
+            return Err(false);
+        }
         match try_admit_frozen_bundle(
             admissions,
             hardware_limit,
@@ -204,7 +210,8 @@ pub(crate) async fn admit_frozen_preparation(
             Priority::Live,
             None,
         ) {
-            Ok(permit) => return Ok(permit),
+            Ok(permit) if Instant::now() < deadline => return Ok(permit),
+            Ok(_) => return Err(false),
             Err(true) => return Err(true),
             Err(false) if Instant::now() >= deadline => return Err(false),
             Err(false) => {
@@ -1484,6 +1491,14 @@ mod source_copy_admission_tests {
             cpu_threads: 5,
             decoder_threads: Some(1),
         };
+        assert!(
+            admit_frozen_preparation(&admissions, 2, 5, &resources, Some(1), Instant::now())
+                .await
+                .is_err(),
+            "an idle pool cannot admit an expired preparation"
+        );
+        assert_eq!(admissions.software_in_use(), 0);
+        assert_eq!(admissions.snapshot().live_waiting, 0);
         let held = admissions
             .try_admit_bundle(2, 5, &resources, Priority::Live)
             .expect("live owner");
