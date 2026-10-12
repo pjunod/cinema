@@ -10162,3 +10162,63 @@ New regressions cover large concurrent hashes across padding/batch boundaries,
 continued SHA availability when WebAssembly is denied, and attachment-worker
 hashing without native WebCrypto. They are added but not executed before final
 adversarial review and the designated merge chat's fast lane.
+
+
+### 10.309 Exact Safari verifier build, retained failures and focused Auto pass — October 12
+
+The source repair in §10.308 is committed as `26c172d6b341ef6f9e464f5d7dd6775fb17bd34e`.
+A source-only archive compiled on the lab with Rust 1.97.1, locked offline dependencies,
+two compiler jobs, incremental compilation disabled and the dev profile's debug
+symbols disabled. Debug assertions remain enabled. The daemon reports
+`cq-safari-lan-g26c172d6b`; binary SHA-256 is
+`2d1b297cfeb7fd5eb995b16611ff93f2df47dfad5fdfe95fea32f36d032e490b`.
+The actual versioned production asset matches committed SHA-256
+`3cc293162e46465d502ff0faf24c394999140a1d2645d89275bc734be4ec1866`.
+These campaigns serve compiled assets without the diagnostic override.
+
+**Startup receipt.** Safari reached playable 1080p media but remained paused;
+the first exact-build attempt failed before switching. All 50 owned processes
+retired. The private measurement adapter now requests an ordinary native Play
+click only when media is ready and paused. This changes neither product source
+nor scoring limits.
+
+**First complete manual receipt: failed timing.** All 15 manual changes ran
+with zero hitches, stalls or dropped frames; maximum/p95 callback gap was 69 ms.
+One switch measured 119,332 ms against the unchanged 90,000 ms limit, including
+the operator's delayed response to the native action request. Preserve the
+overall failure rather than subtract that delay after the fact. Auto did not run.
+All 69 owned processes retired. Raw receipt SHA-256:
+`d703ccc48315b16daa388282e342eec955d687d684e17173c0d6d8b599b7b2c4`.
+
+**Journaled 15-manual receipt: failed frame bound.** Native action request and
+completion times are now recorded. Every switch met the timing limit (maximum
+85,442 ms), with zero hitches, stalls or dropped frames. One 135 ms callback
+interval failed the 100 ms p95 bound. Its presented-frame count advanced by
+three, but that does not prove intermediate physical presentation; the failure
+stands. Auto did not run. All 66 owned processes retired. Raw receipt SHA-256:
+`eae4d6ad0701778ccd290bea116eba0393abde7e9bd321bb006bbb27b90057f9`.
+
+**Focused three-manual/five-Auto receipt: passed.** Three alternating manual
+changes passed with maximum/p95 gap 61 ms. All five actual Auto presentations
+then alternated 1080p/720p/1080p/720p/1080p in one attachment at the fixed
+100/10/25/10/25 Mb/s links. Auto gaps were 68, 60, 61, 58 and 72 ms; mixed p95
+was 72 ms. TTFF was 12,125 ms including native startup interaction, clock rate
+1.004×, with zero hitches, stalls or drops. All 56 owned processes retired.
+Raw receipt SHA-256:
+`4856be96884f33383092c2f9ee12a146710aa67a9327cc36ac614e5cbc59d380`.
+This is `browser_video_partial` evidence. It does not replace a qualifying
+15-manual/five-Auto series or prove independent optical/audio continuity.
+
+**Native readiness.** The paired phone is unlocked and production Apple 231
+is installed. A separate signed private frame-observation app, build 231 and
+bundle `tv.plurx.cq.frames20261012`, is installed without replacing production
+or the earlier QA apps. It has not launched playback. The observer distinguishes
+decoded frame media timestamps from callback timing; its scope is
+`AVPlayerItemVideoOutput_partial`, not optical or audio evidence. A private
+manual-intent harness is being prepared against Apple's documented prepared
+handoff contract (§7.3), rather than assuming browser session-ID invariance.
+Installed idle apps do not reserve hardware; only active use does.
+
+No unit suite has been run during this continuation. Final adversarial review,
+the requested external review checkpoint and the merge coordinator's affected
+fast lane remain ahead.
