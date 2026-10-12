@@ -63,6 +63,23 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **Consistent reads on a cluster no longer wait 40 ms each.** Every
+  linearizable read opens a stream to each other voter to confirm leadership,
+  and the accepting node wrote its handshake challenge behind Nagle, so each
+  read stalled on the peer's delayed ACK. The Raft and API listeners now
+  disable Nagle on accepted streams: a three-voter TLS cluster on loopback
+  went from 44.0 ms to 1.7 ms per consistent read. A playback start makes
+  roughly forty of them (decision, session create and their authentication),
+  so this is about 1.6 s off every clustered start, and it applies to every
+  other request as well. A node's reads speed up once the other voters run
+  the build.
+- **The web player stops covering a picture that is already moving.** The
+  first proof of presentation after a stream attaches is now taken on the
+  presented frames instead of on the next two half-second sampling ticks, so
+  the "Preparing the stream" scrim clears, and HLS time-to-first-frame is
+  stamped, about two frames after playback starts rather than 500 to
+  1000 ms later. HLS `ttff` values reported by the web client fall by that
+  amount from this build on.
 - **Removing a path from a library removes its items.** Saving a library
   without one of its paths left everything under that path in the catalog.
   The only code that deleted catalog rows was the scan's vanished-file
