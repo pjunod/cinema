@@ -39,9 +39,9 @@ index/backlog rows; the builder adopts them together in a normal commit.
 | B04 | TV handoff, mobile page, inbox and packaging | Built; compiler verified | Batched PR #1037 | Phone claim/approval protocol, responsive completion page, named passkey inbox and TLS/service packaging written; browser races/passkeys/physical acceptance pending |
 | B05 | Web/TV browser reporting | Built; compiler verified | Batched PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks written; normal hook and browser type checks passed; software acceptance pending |
 | B06 | Apple mobile/TV reporting | Built; compiler verified | Batched PR #1037 | Recorder, protected account store, deterministic ZIP/share, fixed support transport, exact archive resume, report UI and local-only TV approval written; tests declared, no unit execution; both targets and declared XCTest sources compiled; normal hook passed; physical acceptance owed |
-| B07 | Android mobile/TV reporting | Built; final compiler/hook active | Batched PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; final hook, signed release and physical acceptance owed |
-| B08 | Reproduction, connection checks, diagnostic adapters | Not started | — | Stop/expiry/platform-limit evidence owed |
-| B09 | Composed security/resource/device qualification | Not started | — | Matrix and overhead measurements owed |
+| B07 | Android mobile/TV reporting | Built; compiler verified | Batched PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; normal hook passed; signed release and physical acceptance owed |
+| B08 | Reproduction, connection checks, diagnostic adapters | Built; final compiler checks active | Batched PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 21-case shared event fixture; physical provider delivery remains open |
+| B09 | Composed security/resource/device qualification | Building | Batched PR #1037 | Global capture limits/expiry and authority cleanup tightened; real local support/browser/passkey acceptance active; physical matrix and overhead measurements remain open |
 | B10 | Operations, exact-candidate promotion and rollout | Not started | — | Runbook, gates, receipt and deployment inputs owed |
 
 Replace “Not started” with claimed/building/built/software verified/physical
@@ -334,3 +334,39 @@ Declared behavioral regressions (await final check execution):
 - `clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticCaptureTest.kt::restartStoreRefusesAnotherAccountAndCannotResurrectClearedCapture`
 - `clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticCaptureTest.kt::portableZipUsesStandardCRCAndRefusesTraversal`
 - `clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticCaptureTest.kt::supportDestinationRejectsForeignAuthorityShapesAndPlaintext`
+
+## 13. B08 and composed candidate — 2026-10-12
+
+Supported platform APIs are now wired. Apple consumes MetricKit diagnostic
+payloads on iOS/iPadOS; tvOS reports unsupported. Delayed delivery outside one
+continuous account lifetime remains unavailable with `context_unavailable`;
+raw stacks, payload JSON, paths and addresses never enter an archive. Android
+API 30+ consumes bounded ApplicationExitInfo rows tied to a private prior-run
+PID/account marker; account replacement erases that marker. Only actual crash
+exit reasons become `process_exit`; ANR and other interruptions remain distinct
+normalized observations. Each available diagnostic carries its source app/build
+when the provider or private run marker proves it. Missing provider identity and
+clock alignment remain explicit rather than being borrowed from another run.
+
+Native and browser reproduction retain the original incident and report ID
+while the form closes; completed captures persist for recovery. Sending requires
+stopping the recording. Android adds configured-endpoint checks with a 15-second
+deadline and 2 MiB total reply ceiling; OkHttp phases are observed through the
+dedicated client's EventListener. No media probe or playback retry is added.
+Administrator snapshots have an explicit collect action and include only typed
+version/build, readiness, active-producer count and hardware admission counts.
+The server continues to enforce the administrator boundary.
+
+Current development receipts: Apple build 234, iOS/tvOS applications compiled;
+iOS declared XCTest sources compiled before the last administrator projection
+change. Android versionCode 168, app/JVM regression source/test APK compiled
+before that same final projection change. Web types and static contracts passed
+after replacing a startup forward reference with an auth notification. A later
+additive build-label field briefly failed web types and was corrected; affected
+checks are rerun before commit. No native unit suite ran.
+
+Resource fixes cover global native draft bytes/count, old namespace ring expiry,
+removed-capability cleanup, Keystore key creation serialization, export abort
+cleanup and authentication-generation fencing on queued native writes. These
+are implementation claims awaiting composed evidence. No hardware or real
+production delivery receipt exists.

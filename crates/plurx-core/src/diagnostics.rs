@@ -434,13 +434,16 @@ impl Event {
         for (k, v) in &self.facts {
             let allowed = match k.as_str() {
                 "duration_ms" | "playhead_ms" | "headroom_ms" | "width" | "height"
-                | "retry_count" => v.as_u64().is_some_and(|n| n <= 604_800_000),
+                | "retry_count" | "active_producers" | "hw_slots" | "hw_max" => {
+                    v.as_u64().is_some_and(|n| n <= 604_800_000)
+                }
                 "status" => v
                     .as_u64()
                     .is_some_and(|n| n == 0 || (100..=599).contains(&n)),
                 "frame_count" | "dropped_frames" | "dropped_events" => {
                     v.as_str().is_some_and(decimal)
                 }
+                "app_version" | "build" => v.as_str().is_some_and(build_label),
                 "correlation" => v
                     .as_str()
                     .is_some_and(|s| s.strip_prefix("s-").is_some_and(digest)),
@@ -448,13 +451,15 @@ impl Event {
                     s.strip_prefix("node-")
                         .is_some_and(|s| s.parse::<u8>().is_ok_and(|n| (1..=8).contains(&n)))
                 }),
-                "source_codec" | "delivered_codec" | "audio_codec" => v.as_str().is_some_and(|s| {
-                    [
-                        "unknown", "h264", "hevc", "av1", "vp9", "aac", "ac3", "eac3", "dts",
-                        "truehd", "opus", "flac", "pcm", "other",
-                    ]
-                    .contains(&s)
-                }),
+                "source_codec" | "delivered_codec" | "render_codec" | "audio_codec" => {
+                    v.as_str().is_some_and(|s| {
+                        [
+                            "unknown", "h264", "hevc", "av1", "vp9", "aac", "ac3", "eac3", "dts",
+                            "truehd", "opus", "flac", "pcm", "other",
+                        ]
+                        .contains(&s)
+                    })
+                }
                 "source_range" | "delivered_range" | "render_range" => v
                     .as_str()
                     .is_some_and(|s| ["unknown", "sdr", "hdr10", "hlg", "dv"].contains(&s)),
@@ -837,6 +842,20 @@ pub fn export(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_event_fixtures_preserve_codec_layers_and_refuse_private_fields() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/diagnostics-events-v1.json"))
+                .expect("fixture");
+        for case in fixture["cases"].as_array().expect("cases") {
+            assert_eq!(
+                Event::decode(case["json"].as_str().expect("JSON").as_bytes()).is_ok(),
+                case["valid"].as_bool().expect("outcome"),
+                "{}",
+                case["name"]
+            );
+        }
+    }
     #[test]
     fn title_projection_requires_explicit_consent_and_frame_counters_are_strings() {
         let mut manifest = Manifest::decode(

@@ -18,11 +18,12 @@ enum DiagnosticFact: Codable, Equatable {
         switch self {
         case .number(let n):
             if key == "status" { return n == 0 || (100...599).contains(n) }
-            return ["duration_ms", "playhead_ms", "headroom_ms", "width", "height", "retry_count"].contains(key) && n <= 604_800_000
+            return ["duration_ms", "playhead_ms", "headroom_ms", "width", "height", "retry_count", "active_producers", "hw_slots", "hw_max"].contains(key) && n <= 604_800_000
         case .flag: return key == "observed"
         case .text(let s):
             if ["frame_count", "dropped_frames", "dropped_events"].contains(key) { return DiagnosticWire.decimal(s) }
             if key == "correlation" { return DiagnosticWire.matches(s, "^s-[a-f0-9]{64}$") }
+            if ["app_version", "build"].contains(key) { return DiagnosticWire.matches(s, "^[A-Za-z0-9._+-]{1,64}$") }
             if key == "node" { return DiagnosticWire.matches(s, "^node-[1-8]$") }
 
             return Self.enums[key]?.contains(s) == true
@@ -32,6 +33,7 @@ enum DiagnosticFact: Codable, Equatable {
                 "source_codec": ["unknown","h264","hevc","av1","vp9","aac","ac3","eac3","dts","truehd","opus","flac","pcm","other"],
                 "delivered_codec": ["unknown","h264","hevc","av1","vp9","aac","ac3","eac3","dts","truehd","opus","flac","pcm","other"],
                 "render_codec": ["unknown","h264","hevc","av1","vp9","aac","ac3","eac3","dts","truehd","opus","flac","pcm","other"],
+                "audio_codec": ["unknown","h264","hevc","av1","vp9","aac","ac3","eac3","dts","truehd","opus","flac","pcm","other"],
                 "source_range": ["unknown","sdr","hdr10","hlg","dv"], "delivered_range": ["unknown","sdr","hdr10","hlg","dv"], "render_range": ["unknown","sdr","hdr10","hlg","dv"],
                 "mode": ["unknown","direct","remux","transcode"],
                 "failure": DiagnosticWire.reasons + ["network","tls","dns","connect","authentication","http","decode","delivery","process_exit","browser_network"],
@@ -112,32 +114,35 @@ final class DiagnosticRecorder: @unchecked Sendable {
     private var rows: [Row] = []
     private var bytes = 0
     private var namespace = "anonymous"
-    private var generation: UInt64 = 0
+    private var generation: UInt64 = Session.shared.playbackAuthorization.generation
     private var bound = false
     private var persistence = "memory_only"
+    private var completedReproduction: DiagnosticCapture?
     private var reproduction: (capture: DiagnosticCapture, sizes: [Int], bytes: Int, deadline: TimeInterval)?
     private var reproductionTimer: DispatchWorkItem?
     var historyEnabled: Bool { UserDefaults.standard.object(forKey: "plurx.diagnosticHistory") as? Bool ?? true }
 
     func retireAuthorization(to auth: UInt64) {
         lock.lock(); generation = auth; namespace = "anonymous"; bound = false
-        rows = []; bytes = 0; dropped = 0; reproduction = nil; reproductionTimer?.cancel(); reproductionTimer = nil
+        rows = []; bytes = 0; dropped = 0; completedReproduction = nil; reproduction = nil; reproductionTimer?.cancel(); reproductionTimer = nil
         lossLock.lock(); contention = 0; lossLock.unlock(); lock.unlock()
     }
 
     func bind(namespace value: String, generation auth: UInt64, erasePrevious: Bool = false) async {
         guard Session.shared.playbackAuthorization.generation == auth else { return }
-        let (previous, changed, recover) = lock.withLock { () -> (String, Bool, Bool) in
+        let binding = lock.withLock { () -> (String, Bool, Bool)? in
+            guard Session.shared.playbackAuthorization.generation == auth else { return nil }
             let previous = namespace; let changed = value != previous
-            if bound && changed { rows.removeAll(); bytes = 0; dropped = 0; reproduction = nil; reproductionTimer?.cancel() }
+            if bound && changed { rows.removeAll(); bytes = 0; dropped = 0; completedReproduction = nil; reproduction = nil; reproductionTimer?.cancel() }
             namespace = value; generation = auth; let recover = !bound || changed; bound = true
             return (previous, changed, recover)
         }
+        guard let (previous, changed, recover) = binding else { return }
         if erasePrevious && changed { await DiagnosticStore.shared.clear(previous) }
         if recover {
             let restored = await DiagnosticStore.shared.recoverRing(value)
             lock.withLock {
-                if namespace == value && generation == auth {
+                if namespace == value && generation == auth && Session.shared.playbackAuthorization.generation == auth {
                     let current = rows; rows = []; bytes = 0
                     for event in restored.events + current.map(\.event) { append(event) }
                     dropped = dropped.addingSaturated(restored.dropped)
@@ -205,7 +210,10 @@ final class DiagnosticRecorder: @unchecked Sendable {
         }
     }
     func freeze() -> DiagnosticCapture {
-        lock.lock(); defer { lock.unlock() }; lossLock.lock(); let lost = contention; lossLock.unlock()
+        lock.lock(); defer { lock.unlock() }
+        let current = Session.shared.playbackAuthorization.generation
+        if current != generation { generation = current; namespace = "anonymous"; rows = []; bytes = 0; dropped = 0; completedReproduction = nil; reproduction = nil }
+        lossLock.lock(); let lost = contention; lossLock.unlock()
         return DiagnosticCapture(id: UUID().uuidString.lowercased(), namespace: namespace, generation: generation,
                                  capturedAt: Self.utc(), incidentMs: UInt64(max(0, Date().timeIntervalSince1970 * 1_000)),
                                  events: rows.map(\.event), dropped: dropped.addingSaturated(lost), persistence: persistence, historyEnabled: historyEnabled)
@@ -213,7 +221,7 @@ final class DiagnosticRecorder: @unchecked Sendable {
     func startReproduction(_ capture: DiagnosticCapture) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard reproduction == nil, capture.namespace == namespace, capture.generation == generation else { return false }
-        var value = capture; value.mode = "reproduction"
+        var value = capture; value.mode = "reproduction"; completedReproduction = nil
         let sizes = value.events.map { ((try? JSONEncoder().encode($0).count) ?? 0) + 1 }
         reproduction = (value, sizes, sizes.reduce(0, +), ProcessInfo.processInfo.systemUptime + 300)
         let task = DispatchWorkItem { [weak self] in _ = self?.stopReproduction(reason: "timeout") }
@@ -224,9 +232,10 @@ final class DiagnosticRecorder: @unchecked Sendable {
         lock.lock(); guard var value = reproduction?.capture else { lock.unlock(); return nil }
         reproduction = nil; reproductionTimer?.cancel(); reproductionTimer = nil
         value.windowMs = min(900_000, value.windowMs + UInt64(max(0, Date().timeIntervalSince1970 * 1_000 - Double(value.incidentMs))))
-        lock.unlock()
+        completedReproduction = value; lock.unlock()
         Task { await DiagnosticStore.shared.saveCapture(value) }; return value
     }
+    var retainedReproduction: DiagnosticCapture? { lock.withLock { reproduction?.capture ?? completedReproduction } }
     var recording: Bool { lock.lock(); defer { lock.unlock() }; return reproduction != nil }
     func background() { _ = stopReproduction(reason: "interrupted"); record("lifecycle", "state", ["state": .text("background")]); flush() }
     private func flush() {
@@ -241,3 +250,70 @@ final class DiagnosticRecorder: @unchecked Sendable {
 extension UInt64 {
     fileprivate func addingSaturated(_ other: UInt64) -> UInt64 { let (n, overflow) = addingReportingOverflow(other); return overflow ? .max : n }
 }
+
+#if os(iOS)
+import MetricKit
+
+/// MetricKit delivery windows may span several accounts. Only a window wholly
+/// inside one continuously authenticated lifetime may contribute measurements.
+/// Raw payload JSON, stacks, paths and addresses never cross this adapter.
+final class DiagnosticPlatform: NSObject, MXMetricManagerSubscriber, @unchecked Sendable {
+    static let shared = DiagnosticPlatform()
+    private let lock = NSLock()
+    private var started = false
+    private var scope = "anonymous"
+    private var generation: UInt64 = 0
+    private var began = Date()
+    private var events: [DiagnosticEvent] = []
+    private var delivered = false
+    func start() {
+        guard lock.withLock({ if started { return false }; started = true; return true }) else { return }
+        MXMetricManager.shared.add(self)
+        didReceive(MXMetricManager.shared.pastDiagnosticPayloads)
+    }
+    func bind(_ namespace: String, generation: UInt64) {
+        lock.withLock {
+            if scope != namespace || self.generation != generation { events = []; began = Date() }
+            scope = namespace; self.generation = generation
+        }
+    }
+    func retire() { lock.withLock { scope = "anonymous"; events = []; began = Date(); generation = Session.shared.playbackAuthorization.generation } }
+    func didReceive(_ payloads: [MXDiagnosticPayload]) {
+        lock.withLock {
+            if !payloads.isEmpty { delivered = true }
+            guard scope != "anonymous", generation == Session.shared.playbackAuthorization.generation else { return }
+            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            for payload in payloads.prefix(16) where payload.timeStampBegin >= began && payload.timeStampEnd <= Date() && payload.timeStampEnd >= payload.timeStampBegin {
+                let run = UUID().uuidString.lowercased()
+                func append(_ kind: String, _ facts: [String: DiagnosticFact]) {
+                    guard events.count < 16 else { return }
+                    events.append(DiagnosticEvent(run_id: run, sequence: String(events.count + 1), utc: DiagnosticRecorder.utc(), elapsed_ms: 0,
+                                                  domain: "lifecycle", kind: kind, facts: facts))
+                }
+                for crash in (payload.crashDiagnostics ?? []).prefix(8) where crash.applicationVersion == version {
+                    // UTC is delivery observation time, not an invented crash time.
+                    append("terminal", ["failure": .text("process_exit"), "observed": .flag(true), "app_version": .text(crash.applicationVersion), "build": .text(crash.metaData.applicationBuildVersion)])
+                }
+                for hang in (payload.hangDiagnostics ?? []).prefix(8) where hang.applicationVersion == version {
+                    let ms = hang.hangDuration.converted(to: .milliseconds).value
+                    if ms.isFinite && ms >= 0 { append("sample", ["duration_ms": .number(UInt64(min(ms, 604_800_000))), "state": .text("stalled"), "observed": .flag(true), "app_version": .text(hang.applicationVersion), "build": .text(hang.metaData.applicationBuildVersion)]) }
+                }
+            }
+        }
+    }
+    func projection(_ capture: DiagnosticCapture) -> (events: [DiagnosticEvent], reason: String) {
+        lock.withLock {
+            guard scope == capture.namespace, generation == capture.generation else { return ([], "context_unavailable") }
+            return (events, !events.isEmpty || delivered ? "context_unavailable" : "not_delivered")
+        }
+    }
+}
+#else
+final class DiagnosticPlatform {
+    static let shared = DiagnosticPlatform()
+    func start() {}
+    func bind(_ namespace: String, generation: UInt64) {}
+    func retire() {}
+    func projection(_ capture: DiagnosticCapture) -> (events: [DiagnosticEvent], reason: String) { ([], "unsupported") }
+}
+#endif

@@ -36,7 +36,7 @@ const CinemaDiagnosticExport = (() => {
     }
     let result;
     if(worker) {
-      try { result=await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('Report export timed out')),15000);const cancel=()=>reject(new Error('Report cancelled'));signal?.addEventListener('abort',cancel,{once:true});const finish=(value,error)=>{clearTimeout(timeout);signal?.removeEventListener('abort',cancel);error?reject(error):resolve(value);};worker.onmessage=e=>finish(e.data.value,e.data.error?new Error('Report export failed'):null);worker.onerror=()=>finish(null,new Error('Report worker unavailable'));worker.postMessage(input);}); }
+      try { result=await new Promise((resolve,reject)=>{let settled=false;const finish=(value,error)=>{if(settled)return;settled=true;clearTimeout(timeout);signal?.removeEventListener('abort',cancel);error?reject(error):resolve(value);};const timeout=setTimeout(()=>finish(null,new Error('Report export timed out')),15000);const cancel=()=>finish(null,new Error('Report cancelled'));signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted){cancel();return;}worker.onmessage=e=>finish(e.data.value,e.data.error?new Error('Report export failed'):null);worker.onerror=()=>finish(null,new Error('Report worker unavailable'));worker.postMessage(input);}); }
       finally {worker.terminate();URL.revokeObjectURL(url);}
     } else result=await build(input,signal);
     if(signal?.aborted)throw new Error('Report cancelled');CinemaDiagnosticWire.manifest(JSON.stringify(result.manifest));

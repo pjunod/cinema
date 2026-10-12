@@ -15,15 +15,27 @@ final class DiagnosticCaptureTests: XCTestCase {
     func testRecoveredStoreCannotOpenAnotherAccountOrResurrectClearedCapture() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let first = DiagnosticStore(root: root); let namespace = String(repeating: "a", count: 64)
+        let first = DiagnosticStore(root: root, authorizationGeneration: { 0 }); let namespace = String(repeating: "a", count: 64)
         var capture = DiagnosticRecorder(persistenceEnabled: false).freeze()
         capture = DiagnosticCapture(id: capture.id, namespace: namespace, generation: 0, capturedAt: capture.capturedAt, incidentMs: capture.incidentMs, events: capture.events, dropped: 0, persistence: "available", historyEnabled: true)
         let draft = DiagnosticStore.Draft(capture: capture, category: "playback", description: "user text", serverEvents: [], serverComponents: [], connection: [])
         let persistence = await first.save(draft); XCTAssertEqual(persistence, "available")
-        let restarted = DiagnosticStore(root: root); let recovered = await restarted.drafts(namespace)
+        let restarted = DiagnosticStore(root: root, authorizationGeneration: { 0 }); let recovered = await restarted.drafts(namespace)
         XCTAssertEqual(recovered.map(\.id), [draft.id]); let other = await restarted.drafts(String(repeating: "b", count: 64)); XCTAssertTrue(other.isEmpty)
         await restarted.clear(namespace); let denied = await restarted.save(draft); XCTAssertEqual(denied, "unavailable")
         await restarted.activate(namespace); let cleared = await restarted.drafts(namespace); XCTAssertTrue(cleared.isEmpty)
+    }
+    func testQueuedWriteCannotResurrectAfterSameAccountAuthenticatesAgain() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var generation: UInt64 = 0
+        let store = DiagnosticStore(root: root, authorizationGeneration: { generation })
+        let original = DiagnosticRecorder(persistenceEnabled: false).freeze()
+        let capture = DiagnosticCapture(id: original.id, namespace: "anonymous", generation: 0, capturedAt: original.capturedAt, incidentMs: original.incidentMs, events: [], dropped: 0, persistence: "available", historyEnabled: true)
+        let draft = DiagnosticStore.Draft(capture: capture, category: "other", description: "", serverEvents: [], serverComponents: [], connection: [])
+        _ = await store.save(draft); await store.clear("anonymous"); generation = 1; await store.activate("anonymous")
+        let stale = await store.save(draft); XCTAssertEqual(stale, "unavailable")
+        let pending = await store.drafts("anonymous"); XCTAssertTrue(pending.isEmpty)
     }
     @MainActor func testArchiveHasStandardCRCAndTitleRequiresConsent() throws {
         let capture = DiagnosticRecorder(persistenceEnabled: false).freeze()

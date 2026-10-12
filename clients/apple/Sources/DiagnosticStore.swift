@@ -13,6 +13,8 @@ actor DiagnosticStore {
         var serverEvents: [DiagnosticEvent]
         var serverComponents: [DiagnosticReport.Component]
         var connection: [DiagnosticEvent]
+        var platform: [DiagnosticEvent]?
+        var platformReason: String?
         var consented = false
         var origin: String?
         var state = "local"
@@ -27,7 +29,10 @@ actor DiagnosticStore {
     private var retired: Set<String> = []
     private var ringMemory: [String: Ring] = [:]
     private let rootOverride: URL?
-    init(root: URL? = nil) { rootOverride = root }
+    private let authorizationGeneration: () -> UInt64
+    init(root: URL? = nil, authorizationGeneration: @escaping () -> UInt64 = { Session.shared.playbackAuthorization.generation }) {
+        rootOverride = root; self.authorizationGeneration = authorizationGeneration
+    }
     private var root: URL? {
         if let rootOverride { return rootOverride }
         guard let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
@@ -67,18 +72,18 @@ actor DiagnosticStore {
         return value
     }
     func saveRing(_ capture: DiagnosticCapture) -> String {
-        guard !retired.contains(capture.namespace) else { return "unavailable" }
+        guard !retired.contains(capture.namespace), capture.generation == authorizationGeneration() else { return "unavailable" }
         let ring = Ring(events: capture.events, dropped: capture.dropped, persistence: "available", interrupted: true)
         ringMemory = [capture.namespace: ring]
         do { let url = try directory(capture.namespace).appendingPathComponent("ring.json"); try write(JSONEncoder().encode(ring), to: url); return "available" }
         catch { return "memory_only" }
     }
     func saveCapture(_ capture: DiagnosticCapture) {
-        let draft = memory[capture.id] ?? Draft(capture: capture, category: "other", description: "", serverEvents: [], serverComponents: [], connection: [])
+        let draft = drafts(capture.namespace).first(where: { $0.id == capture.id }) ?? Draft(capture: capture, category: "other", description: "", serverEvents: [], serverComponents: [], connection: [])
         var updated = draft; updated.capture = capture; _ = save(updated)
     }
     @discardableResult func save(_ draft: Draft) -> String {
-        guard !retired.contains(draft.capture.namespace) else { return "unavailable" }
+        guard !retired.contains(draft.capture.namespace), draft.capture.generation == authorizationGeneration() else { return "unavailable" }
         let safe = draft.capture.events.allSatisfy(\.valid) && draft.serverEvents.allSatisfy(\.valid) && draft.connection.allSatisfy(\.valid)
         guard safe, UUID(uuidString: draft.id)?.uuidString.lowercased() == draft.id, let bytes = try? JSONEncoder().encode(draft), bytes.count <= 8_388_608 else { return "unavailable" }
         memory[draft.id] = draft
@@ -93,7 +98,7 @@ actor DiagnosticStore {
             try prune(directory); return "available"
         } catch { return "memory_only" }
     }
-    private func prune(_ directory: URL) throws {
+    private func pruneLocal(_ directory: URL) throws {
         let urls = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey])
         guard urls.count <= 32 else { throw DiagnosticTransport.Failure.storage }
         var rows: [(URL, Int, Date)] = []
@@ -112,6 +117,35 @@ actor DiagnosticStore {
             DiagnosticTransport.clearSecrets(id, scope: directory.lastPathComponent)
         }
     }
+    private func prune(_ directory: URL) throws {
+        guard let root else { return }
+        let folders = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])
+        var rows: [(URL, Int, Date)] = []
+        for folder in folders where folder.lastPathComponent == "anonymous" || DiagnosticWire.matches(folder.lastPathComponent, "^[a-f0-9]{64}$") {
+            guard (try? folder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            try pruneLocal(folder)
+            for url in try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]) {
+                let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey])
+                guard values.isRegularFile == true else { continue }
+                let date = values.contentModificationDate ?? .distantPast
+                if url.lastPathComponent == "ring.json" {
+                    if date < Date().addingTimeInterval(-600) { try FileManager.default.removeItem(at: url) }
+                } else { rows.append((url, values.fileSize ?? Int.max, date)) }
+            }
+            if (try FileManager.default.contentsOfDirectory(atPath: folder.path)).isEmpty && folder != directory {
+                try FileManager.default.removeItem(at: folder); DiagnosticTransport.clearSecrets("enrollment", scope: folder.lastPathComponent)
+            }
+        }
+        rows.sort { $0.2 < $1.2 }; var total = rows.reduce(0) { $0 + $1.1 }
+        while Set(rows.map { $0.0.deletingPathExtension().lastPathComponent }).count > 10 || total > 33_554_432 {
+            let id = rows[0].0.deletingPathExtension().lastPathComponent
+            for row in rows where row.0.deletingPathExtension().lastPathComponent == id {
+                total -= row.1; try FileManager.default.removeItem(at: row.0)
+                for key in [id, id + ":invitation", id + ":invitation-proof"] { DiagnosticTransport.clearSecrets(key, scope: row.0.deletingLastPathComponent().lastPathComponent) }
+            }
+            rows.removeAll { $0.0.deletingPathExtension().lastPathComponent == id }; memory.removeValue(forKey: id); archives.removeValue(forKey: id)
+        }
+    }
     func drafts(_ scope: String) -> [Draft] {
         if let directory = try? directory(scope) {
             try? prune(directory)
@@ -123,8 +157,8 @@ actor DiagnosticStore {
         }
         return Array(memory.values.filter { $0.capture.namespace == scope && Double($0.capture.incidentMs) >= Date().addingTimeInterval(-86_400).timeIntervalSince1970 * 1_000 }.sorted { $0.capture.incidentMs > $1.capture.incidentMs }.prefix(10))
     }
-    func saveArchive(_ bytes: Data, id: String, scope: String) -> String {
-        guard bytes.count <= 8_388_608, UUID(uuidString: id)?.uuidString.lowercased() == id, !retired.contains(scope) else { return "unavailable" }
+    func saveArchive(_ bytes: Data, id: String, scope: String, generation: UInt64) -> String {
+        guard bytes.count <= 8_388_608, UUID(uuidString: id)?.uuidString.lowercased() == id, !retired.contains(scope), generation == authorizationGeneration() else { return "unavailable" }
         archives = [id: bytes]
         do { let folder = try directory(scope); try write(bytes, to: folder.appendingPathComponent(id + ".zip")); try prune(folder); return "available" }
         catch { return "memory_only" }

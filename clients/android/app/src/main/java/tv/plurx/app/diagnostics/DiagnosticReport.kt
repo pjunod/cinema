@@ -33,7 +33,7 @@ internal object DiagnosticReport {
         val components = mutableListOf(DiagnosticComponent("client", if (!draft.capture.historyEnabled || draft.capture.dropped != "0") "partial" else "complete", if (!draft.capture.historyEnabled) "history_disabled" else if (draft.capture.dropped != "0") "overflow" else null))
         components += draft.components.filter { it.name in setOf("server","workers") && it.valid() }
         if (components.none { it.name == "server" }) components += DiagnosticComponent("server","unavailable","context_unavailable")
-        components += listOf(DiagnosticComponent("connection", if (draft.connection.isEmpty()) "unavailable" else "complete", if (draft.connection.isEmpty()) "not_requested" else null), DiagnosticComponent("platform","unavailable",if (Build.VERSION.SDK_INT >= 30) "not_delivered" else "unsupported"), DiagnosticComponent("clock","unavailable","clock_unknown"))
+        components += listOf(DiagnosticComponent("connection", if (draft.connection.isEmpty()) "unavailable" else "complete", if (draft.connection.isEmpty()) "not_requested" else null), DiagnosticComponent("platform",if (draft.platform.isEmpty()) "unavailable" else "partial",draft.platformReason ?: if (Build.VERSION.SDK_INT >= 30) "not_delivered" else "unsupported"), DiagnosticComponent("clock","unavailable","clock_unknown"))
         var manifest = buildJsonObject {
             put("version", DiagnosticWire.VERSION); put("report_id",draft.id); put("captured_at",draft.capture.capturedAt); put("category",draft.category); put("scope",if (draft.capture.namespace == "anonymous") "anonymous" else "viewer")
             put("client",buildJsonObject { put("platform",if (television) "android_tv" else "android"); put("app_version",label(BuildConfig.VERSION_NAME)); put("build",BuildConfig.VERSION_CODE.toString()); put("os_version",Build.VERSION.SDK_INT.toString()); put("device_model",label(Build.MODEL)) })
@@ -44,7 +44,10 @@ internal object DiagnosticReport {
         val playback = draft.capture.events.filter { it.domain == "playback" }
         if (title != null) entries["playback.json"] = buildJsonObject { put("events",DiagnosticJson.encodeToJsonElement(playback)); put("title",title) }.toString().toByteArray()
         else if (playback.isNotEmpty()) entries["playback.json"] = DiagnosticJson.encodeToJsonElement(playback).toString().toByteArray()
+        val system=draft.serverEvents.filter { "active_producers" in it.facts }
+        if (system.isNotEmpty()) entries["server-snapshot.json"]=DiagnosticJson.encodeToJsonElement(system).toString().toByteArray()
         if (draft.serverEvents.isNotEmpty()) entries["server-events.jsonl"] = jsonl(draft.serverEvents)
+        if (draft.platform.isNotEmpty()) { require(draft.platform.size <= 16 && draft.platform.all { it.valid() }); entries["diagnostics/platform.json"] = DiagnosticJson.encodeToJsonElement(draft.platform).toString().toByteArray() }
         if (draft.connection.isNotEmpty()) entries["connection.json"] = DiagnosticJson.encodeToJsonElement(draft.connection).toString().toByteArray()
         manifest = JsonObject(manifest + ("files" to JsonArray(entries.map { (name,bytes) -> buildJsonObject { put("name",name); put("size_bytes",bytes.size); put("sha256",DiagnosticFields.hash(bytes)) } })))
         val encoded = manifest.toString().toByteArray(); DiagnosticWire.manifest(encoded); entries["manifest.json"] = encoded

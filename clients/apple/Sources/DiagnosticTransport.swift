@@ -180,7 +180,7 @@ final class DiagnosticTransport: NSObject, URLSessionTaskDelegate, @unchecked Se
         try current(); guard let saved = String(data: try JSONEncoder().encode(InvitationAuthority(origin: try Self.origin(origin), secret: value.invitation)), encoding: .utf8), Self.vault(reportID + ":invitation", scope: scope).write(saved) else { throw Failure.storage }
     }
     func snapshot(_ capture: DiagnosticCapture, includeSystem: Bool = false) async throws -> Projection {
-        guard authorization.token != nil else { throw Failure.unavailable }
+        guard authorization.token != nil, capture.namespace != "anonymous" else { throw Failure.unavailable }
         var fields: [String: Any] = ["incident_at_ms": capture.incidentMs, "window_ms": 600_000, "include_system": includeSystem]
         if let event = capture.events.last(where: { $0.facts["correlation"] != nil }), case .text(let correlation) = event.facts["correlation"] { fields["correlation"] = correlation }
         let body = try JSONSerialization.data(withJSONObject: fields)

@@ -29,6 +29,10 @@ internal object DiagnosticWire {
             }
         }
     }
+    fun event(bytes: ByteArray): DiagnosticEvent {
+        require(bytes.size <= 2048); val text=Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(bytes)).toString()
+        StrictRemoteJson.check(text); return DiagnosticJson.decodeFromString(DiagnosticEvent.serializer(),text).also { require(it.valid()) }
+    }
     fun manifest(bytes:ByteArray):JsonObject {
         require(bytes.size<=65536)
         val text=Charsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(bytes)).toString()

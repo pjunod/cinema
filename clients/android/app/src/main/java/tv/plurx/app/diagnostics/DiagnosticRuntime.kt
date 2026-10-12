@@ -24,6 +24,7 @@ internal data class DiagnosticUI(
 internal object DiagnosticRuntime {
     private lateinit var app: Context
     private lateinit var store: DiagnosticStore
+    private lateinit var platform: DiagnosticPlatform
     lateinit var recorder: DiagnosticRecorder; private set
     private val owner = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var operation: Job? = null
@@ -37,14 +38,15 @@ internal object DiagnosticRuntime {
     private val preferences get() = app.getSharedPreferences("cinema-diagnostics",Context.MODE_PRIVATE)
     fun initialize(context: Context) {
         if (::app.isInitialized) return
-        app = context.applicationContext; store = DiagnosticStore(File(app.noBackupFilesDir,"cinema-diagnostics"))
+        app = context.applicationContext; store = DiagnosticStore(File(app.noBackupFilesDir,"cinema-diagnostics"),removeSecrets={ scope,id -> for (name in listOf(id,id+":invitation",id+":invitation-proof")) DiagnosticSecrets(app,scope).delete(name) })
+        platform = DiagnosticPlatform(app)
         recorder = DiagnosticRecorder(history={ preferences.getBoolean("history",true) }, persist={ store.saveRing(it) },complete={ capture ->
             val prior = store.drafts(capture.namespace).firstOrNull { it.id == capture.id } ?: DiagnosticDraft(capture)
             store.save(prior.copy(capture=capture))
         })
         mutable.update { it.copy(history=preferences.getBoolean("history",true)) }
         Session.observeAuthorizationChanges { auth ->
-            recorder.retireAuthorization(auth)
+            recorder.retireAuthorization(auth); platform.retire()
             owner.launch { retire() }
         }
         record("lifecycle","state",mapOf("state" to JsonPrimitive("starting")))
@@ -63,6 +65,7 @@ internal object DiagnosticRuntime {
         namespace = next; store.activate(next); val recovered = store.ring(next)
         if (Session.playbackAuthorization().generation != auth.generation || namespace != next) return
         recorder.bind(next,auth.generation,recovered)
+        platform.bind(next,auth.generation)
         if (recovered?.events?.isNotEmpty() == true) record("lifecycle","state",mapOf("state" to JsonPrimitive("interrupted"),"reason" to JsonPrimitive("interrupted")))
         record("lifecycle","state",mapOf("state" to JsonPrimitive("foreground")))
         val pending = store.drafts(next)
@@ -91,13 +94,14 @@ internal object DiagnosticRuntime {
     fun open(category: String = "other", positiveTitle: String? = null) {
         if (!::recorder.isInitialized) return
         operation?.cancel(); poll?.cancel(); transport?.cancel(); title=positiveTitle
-        val capture = recorder.freeze(); val draft = DiagnosticDraft(capture,category=category)
+        val capture = recorder.retainedReproduction ?: recorder.freeze(); val draft = DiagnosticDraft(capture,category=category)
         mutable.update { it.copy(visible=true,draft=draft,busy=true,message="Capturing this incident. A description is optional.",consent=false,includeTitle=false,comparison=null,handoffState="") }
         record("ui","action",mapOf("action" to JsonPrimitive("report")))
         val client = DiagnosticTransport(app,capture.namespace); transport=client
         operation=owner.launch {
             try {
-            var result = draft
+            var result = store.drafts(capture.namespace).firstOrNull { it.id == capture.id }?.copy(capture=capture) ?: draft
+            val evidence=platform.projection(capture); result=result.copy(platform=evidence.second,platformReason=evidence.first)
             try {
                 val (events,components) = client.snapshot(capture); result=result.copy(serverEvents=events,components=components)
             } catch (cancelled: CancellationException) { throw cancelled }
@@ -145,7 +149,7 @@ internal object DiagnosticRuntime {
     }
     suspend fun revokeEnrollment() { if (!::recorder.isInitialized) return; val client=DiagnosticTransport(app,namespace); try { client.revokeEnrollment() } finally { client.cancel() } }
     private fun perform(action: suspend (DiagnosticTransport, DiagnosticDraft) -> DiagnosticDraft) {
-        val value=mutable.value; val draft=value.draft ?: return; if (value.busy) return
+        val value=mutable.value; val draft=value.draft ?: return; if (value.busy || draft.capture.generation != Session.playbackAuthorization().generation) return
         operation?.cancel(); transport?.cancel(); val client=DiagnosticTransport(app,draft.capture.namespace); transport=client
         mutable.update { it.copy(busy=true,message="Working…") }
         operation=owner.launch {
@@ -167,7 +171,7 @@ internal object DiagnosticRuntime {
         val value=runInterruptible { DiagnosticReport.archive(draft,television) }; require(value.bytes.size <= 8388608)
         if (draft.consented) {
             val frozen=draft.copy(binding=value.binding,manifest=value.manifest)
-            require(store.saveArchive(frozen.id,frozen.capture.namespace,value.bytes) != "unavailable"); store.save(frozen); frozen to value
+            require(store.saveArchive(frozen.id,frozen.capture.namespace,value.bytes,frozen.capture.generation) != "unavailable"); store.save(frozen); frozen to value
         } else draft to value
     }
     fun share() = perform { _, original ->
@@ -185,6 +189,7 @@ internal object DiagnosticRuntime {
         mutable.update { it.copy(message="Shared locally. No support upload was started.") }; draft
     }
     fun send(phone: Boolean = false) {
+        if (recorder.recording) { mutable.update { it.copy(message="Stop reproduction before sending this frozen report.") }; return }
         val selected=mutable.value
         if (!selected.consent) { mutable.update { it.copy(message="Confirm this support destination before uploading.") }; return }
         perform { client, original ->
@@ -243,5 +248,15 @@ internal object DiagnosticRuntime {
         if (recorder.startReproduction(value.capture)) mutable.update { it.copy(message="Recording for at most five minutes. Reproduce the issue, then reopen Help and stop. Background ends recording.") }
     }
     fun stopReproduction() { recorder.stopReproduction()?.let { capture -> mutable.update { it.copy(draft=it.draft?.copy(capture=capture),message="Reproduction stopped and frozen locally.") } } }
+    fun systemSnapshot() = perform { client,draft ->
+        require(!draft.consented); val (events,components)=client.snapshot(draft.capture,true)
+        mutable.update { it.copy(message="Administrator snapshot saved: typed version, readiness, producer and hardware admission facts.") }
+        draft.copy(serverEvents=events,components=components)
+    }
+    fun checks() = perform { client,draft ->
+        require(!draft.consented); val events=client.connectionChecks()
+        mutable.update { it.copy(message="Checks saved for this Cinema endpoint. No media transfer was requested.") }
+        draft.copy(connection=(draft.connection+events).takeLast(100))
+    }
     fun deleteLocal(draft: DiagnosticDraft) { owner.launch { store.delete(draft.id,namespace); withContext(Dispatchers.IO) { DiagnosticSecrets(app,namespace).delete(draft.id) }; mutable.update { it.copy(pending=it.pending.filter { pending -> pending.id != draft.id }) } } }
 }

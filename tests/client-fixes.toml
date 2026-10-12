@@ -6271,3 +6271,19 @@ source = "clients/apple/Sources/DiagnosticStore.swift"
 source_anchor = "actor DiagnosticStore"
 test = "clients/apple/Tests/DiagnosticCaptureTests.swift"
 test_anchor = "testRecoveredStoreCannotOpenAnotherAccountOrResurrectClearedCapture"
+
+[[fixes]]
+id = "diagnostics.android-capture"
+commits = ["593f745506b6bd7e7678ff7a82ea1857a730beb1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticRecorder.kt"
+source_anchor = "internal class DiagnosticRecorder"
+test = "clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticCaptureTest.kt"
+test_anchor = "boundedRecorderRetainsTerminalAndExactCountersWithoutSecrets"
+
+[[fixes]]
+id = "diagnostics.android-account-store"
+commits = ["593f745506b6bd7e7678ff7a82ea1857a730beb1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticStore.kt"
+source_anchor = "internal class DiagnosticStore"
+test = "clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticCaptureTest.kt"
+test_anchor = "restartStoreRefusesAnotherAccountAndCannotResurrectClearedCapture"

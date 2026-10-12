@@ -28,12 +28,12 @@ internal object DiagnosticFields {
     val domains = setOf("ui", "network", "playback", "producer", "lifecycle", "coverage")
     val kinds = setOf("action", "state", "sample", "error", "terminal", "request", "availability")
     private val counters = setOf("frame_count", "dropped_frames", "dropped_events")
-    private val measurements = setOf("duration_ms", "playhead_ms", "headroom_ms", "width", "height", "retry_count")
+    private val measurements = setOf("duration_ms", "playhead_ms", "headroom_ms", "width", "height", "retry_count", "active_producers", "hw_slots", "hw_max")
     private val codec = setOf("unknown","h264","hevc","av1","vp9","aac","ac3","eac3","dts","truehd","opus","flac","pcm","other")
     private val range = setOf("unknown","sdr","hdr10","hlg","dv")
     private val failures = DiagnosticWire.reasons + setOf("network","tls","dns","connect","authentication","http","decode","delivery","process_exit","browser_network")
     private val enums = mapOf(
-        "source_codec" to codec, "delivered_codec" to codec, "render_codec" to codec,
+        "source_codec" to codec, "delivered_codec" to codec, "render_codec" to codec, "audio_codec" to codec,
         "source_range" to range, "delivered_range" to range, "render_range" to range,
         "mode" to setOf("unknown","direct","remux","transcode"), "failure" to failures, "reason" to failures,
         "action" to setOf("play","pause","stop","seek","audio","subtitle","quality","navigate","report","reproduce","cancel","check"),
@@ -48,6 +48,7 @@ internal object DiagnosticFields {
             in counters -> DiagnosticWire.decimal(value.content)
             "correlation" -> correlation.matches(value.content)
             "node" -> node.matches(value.content)
+            "app_version", "build" -> Regex("[A-Za-z0-9._+-]{1,64}").matches(value.content)
             else -> value.content in enums[key].orEmpty()
         }
         if (key == "observed") return value.booleanOrNull != null
@@ -89,6 +90,7 @@ internal class DiagnosticRecorder(
     private var persistence = "memory_only"
     private val flushRequests = Channel<Unit>(Channel.CONFLATED)
     private val completedCaptures = Channel<DiagnosticCapture>(Channel.CONFLATED)
+    private var completedReproduction: DiagnosticCapture? = null
     private var reproduction: DiagnosticCapture? = null
     private val reproductionRows = mutableListOf<Row>()
     private var reproductionBytes = 0
@@ -101,7 +103,7 @@ internal class DiagnosticRecorder(
     }
     fun retireAuthorization(auth: Long) = lock.withLock {
         namespace = "anonymous"; generation = auth; bound = false; rows.clear(); bytes = 0; dropped = 0uL; contention.set(0)
-        reproduction = null; reproductionRows.clear(); reproductionBytes = 0; reproductionTimer?.cancel()
+        reproduction = null; completedReproduction = null; reproductionRows.clear(); reproductionBytes = 0; reproductionTimer?.cancel()
     }
     fun bind(scope: String, auth: Long, recovered: DiagnosticCapture?) = lock.withLock {
         if (Session.playbackAuthorization().generation != auth) return@withLock
@@ -147,13 +149,17 @@ internal class DiagnosticRecorder(
         rows += row; bytes += row.size
     }
     fun freeze(): DiagnosticCapture = lock.withLock {
+        val current=Session.playbackAuthorization().generation
+        if (generation != current) { generation=current; namespace="anonymous"; rows.clear(); bytes=0; dropped=0uL; contention.set(0) }
         DiagnosticCapture(UUID.randomUUID().toString(), namespace, generation, DiagnosticFields.utc(), System.currentTimeMillis(), rows.map { it.event },
             (dropped + contention.get().toULong()).toString(), persistence, history())
     }
+    val retainedReproduction get() = lock.withLock { reproduction ?: completedReproduction }
+    fun close() { owner.cancel(); flushRequests.close(); completedCaptures.close() }
     val recording get() = lock.withLock { reproduction != null }
     fun startReproduction(capture: DiagnosticCapture): Boolean = lock.withLock {
         if (reproduction != null || capture.namespace != namespace || capture.generation != generation) return@withLock false
-        reproduction = capture.copy(mode = "reproduction"); reproductionDropped = capture.dropped.toULong()
+        completedReproduction = null; reproduction = capture.copy(mode = "reproduction"); reproductionDropped = capture.dropped.toULong()
         reproductionRows.clear(); reproductionRows += capture.events.map { Row(it, DiagnosticJson.encodeToString(DiagnosticEvent.serializer(), it).toByteArray().size + 1) }
         reproductionBytes = reproductionRows.sumOf { it.size }
         reproductionTimer = owner.launch { delay(300000); stopReproduction("timeout") }; true
@@ -163,7 +169,7 @@ internal class DiagnosticRecorder(
         val result = lock.withLock {
             val original = reproduction ?: return@withLock null
             val stopped = original.copy(events = reproductionRows.map { it.event }, dropped = reproductionDropped.toString(), windowMs = (600000 + System.currentTimeMillis() - original.incidentMs).coerceIn(0,900000))
-            reproduction = null; reproductionRows.clear(); reproductionBytes = 0; reproductionTimer?.cancel(); reproductionTimer = null; stopped
+            reproduction = null; completedReproduction = null; reproductionRows.clear(); reproductionBytes = 0; reproductionTimer?.cancel(); reproductionTimer = null; completedReproduction = stopped; stopped
         }
         if (result != null) completedCaptures.trySend(result); return result
     }
@@ -171,3 +177,45 @@ internal class DiagnosticRecorder(
 }
 
 internal val DiagnosticJson = Json { encodeDefaults = true; explicitNulls = false; ignoreUnknownKeys = false }
+
+/** ApplicationExitInfo is normalized without opening its trace stream. The
+ * private marker proves the main process and continuously bound account. A
+ * sign-out/account replacement erases it before another marker is installed. */
+internal class DiagnosticPlatform(private val app: android.content.Context) {
+    private val preferences = app.getSharedPreferences("cinema-diagnostics", android.content.Context.MODE_PRIVATE)
+    private val prior = preferences.getString("platform_run",null)?.let { text ->
+        runCatching { require(text.length <= 512); DiagnosticJson.parseToJsonElement(text).jsonObject }.getOrNull()
+    }
+    private var namespace = "anonymous"
+    private var generation = -1L
+    fun retire() { synchronized(this) { namespace="anonymous"; generation=-1; check(preferences.edit().remove("platform_run").commit()) } }
+    suspend fun bind(scope: String, auth: Long) = withContext(Dispatchers.IO) {
+        synchronized(this@DiagnosticPlatform) {
+            if (Session.playbackAuthorization().generation != auth) return@synchronized
+            if (namespace == scope && generation == auth) return@synchronized
+            namespace=scope; generation=auth
+            val marker=buildJsonObject { put("namespace",scope); put("pid",android.os.Process.myPid()); put("began",System.currentTimeMillis()); put("run",UUID.randomUUID().toString()); put("build",tv.plurx.app.BuildConfig.VERSION_CODE.toString()); put("app_version",tv.plurx.app.BuildConfig.VERSION_NAME) }
+            check(preferences.edit().putString("platform_run",marker.toString()).commit())
+        }
+    }
+    suspend fun projection(capture: DiagnosticCapture): Pair<String,List<DiagnosticEvent>> = withContext(Dispatchers.IO) {
+        if (android.os.Build.VERSION.SDK_INT < 30) return@withContext "unsupported" to emptyList()
+        val bound=synchronized(this@DiagnosticPlatform) { namespace == capture.namespace && generation == capture.generation }
+        if (!bound || capture.namespace == "anonymous" || Session.playbackAuthorization().generation != capture.generation) return@withContext "context_unavailable" to emptyList()
+        val manager=app.getSystemService(android.app.ActivityManager::class.java)
+        val exits=runCatching { manager.getHistoricalProcessExitReasons(app.packageName,0,16) }.getOrElse { return@withContext "context_unavailable" to emptyList() }
+        val marker=prior ?: return@withContext (if (exits.isEmpty()) "not_delivered" else "context_unavailable") to emptyList()
+        val pid=marker["pid"]?.jsonPrimitive?.intOrNull; val began=marker["began"]?.jsonPrimitive?.longOrNull ?: Long.MAX_VALUE
+        val run=marker["run"]?.jsonPrimitive?.content.orEmpty()
+        if (marker["namespace"]?.jsonPrimitive?.content != capture.namespace || pid == android.os.Process.myPid() || runCatching { UUID.fromString(run).toString() != run }.getOrDefault(true)) return@withContext "context_unavailable" to emptyList()
+        val events=exits.filter { it.pid == pid && it.processName == app.packageName && it.timestamp >= began && it.timestamp >= System.currentTimeMillis()-86400000 && it.timestamp <= System.currentTimeMillis() }.take(16).mapIndexed { index, exit ->
+            val crash=exit.reason == android.app.ApplicationExitInfo.REASON_CRASH || exit.reason == android.app.ApplicationExitInfo.REASON_CRASH_NATIVE
+            val anr=exit.reason == android.app.ApplicationExitInfo.REASON_ANR
+            DiagnosticEvent(run,(index+1).toString(),Instant.ofEpochMilli(exit.timestamp).truncatedTo(ChronoUnit.SECONDS).toString(),0,"lifecycle","terminal",buildJsonObject {
+                for (key in listOf("build","app_version")) marker[key]?.jsonPrimitive?.takeIf { DiagnosticFields.allowed(key,it) }?.let { put(key,it) }
+                put("observed",true); put("state",if (anr) "stalled" else "interrupted"); put("failure",if (crash) "process_exit" else "interrupted")
+            })
+        }
+        if (Session.playbackAuthorization().generation != capture.generation) "context_unavailable" to emptyList() else "context_unavailable" to events
+    }
+}

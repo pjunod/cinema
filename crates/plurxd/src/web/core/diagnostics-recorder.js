@@ -3,11 +3,12 @@
 function createCinemaDiagnosticRecorder({ now = () => Date.now(), monotonic = () => performance.now(), store = null } = {}) {
   const attachments=new WeakMap();
   const counters = ['frame_count', 'dropped_frames', 'dropped_events'];
-  const measurements = ['duration_ms', 'playhead_ms', 'headroom_ms', 'width', 'height', 'retry_count', 'status'];
+  const measurements = ['duration_ms', 'playhead_ms', 'headroom_ms', 'width', 'height', 'retry_count','active_producers','hw_slots','hw_max', 'status'];
   const enums = {
     source_codec: ['unknown','h264','hevc','av1','vp9','aac','ac3','eac3','dts','truehd','opus','flac','pcm','other'],
     delivered_codec: ['unknown','h264','hevc','av1','vp9','aac','ac3','eac3','dts','truehd','opus','flac','pcm','other'],
     audio_codec: ['unknown','h264','hevc','av1','vp9','aac','ac3','eac3','dts','truehd','opus','flac','pcm','other'],
+    render_codec: ['unknown','h264','hevc','av1','vp9','aac','ac3','eac3','dts','truehd','opus','flac','pcm','other'],
     source_range: ['unknown','sdr','hdr10','hlg','dv'], delivered_range: ['unknown','sdr','hdr10','hlg','dv'], render_range: ['unknown','sdr','hdr10','hlg','dv'],
     mode: ['unknown','direct','remux','transcode'],
     failure: [...CinemaDiagnosticWire.reasons,'network','tls','dns','connect','authentication','http','decode','delivery','process_exit','browser_network'],
@@ -29,10 +30,11 @@ function createCinemaDiagnosticRecorder({ now = () => Date.now(), monotonic = ()
     const result = {};
     for (const [key, value] of Object.entries(input || {})) {
       if (enums[key] && enums[key].includes(value)) result[key] = value;
-      else if (measurements.includes(key) && Number.isInteger(value) && value >= 0 && value <= (['width','height'].includes(key) ? 16384 : key === 'status' ? 599 : key === 'retry_count' ? 1000 : 604800000)) result[key] = value;
+      else if (measurements.includes(key) && Number.isInteger(value) && value >= 0 && value <= (['width','height'].includes(key) ? 16384 : key === 'status' ? 599 : key === 'retry_count' ? 1000 : 604800000)) {if(key!=='status'||value===0||value>=100)result[key] = value;}
       else if (counters.includes(key) && typeof value === 'string' && CinemaDiagnosticWire.decimal(value)) result[key] = value;
       else if (key === 'observed' && typeof value === 'boolean') result[key] = value;
       else if (key === 'correlation' && typeof value === 'string' && /^s-[a-f0-9]{64}$/.test(value)) result[key] = value;
+      else if (['app_version','build'].includes(key) && typeof value==='string' && /^[A-Za-z0-9._+-]{1,64}$/.test(value)) result[key] = value;
       else if (key === 'node' && typeof value==='string' && /^node-[1-8]$/.test(value)) result[key] = value;
     }
     return Object.fromEntries(Object.entries(result).slice(0,16));
@@ -78,8 +80,9 @@ function createCinemaDiagnosticRecorder({ now = () => Date.now(), monotonic = ()
       const recovered=[];
       for (const row of value.rows) {
         const e=row.event;
-        if (!e || !CinemaDiagnosticWire.uuid(e.run_id) || !CinemaDiagnosticWire.decimal(e.sequence) || !['ui','network','playback','producer','lifecycle','coverage'].includes(e.domain) || !['action','state','sample','error','terminal','request','availability'].includes(e.kind) || typeof e.utc!=='string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(e.utc) || !Number.isInteger(e.elapsed_ms) || e.elapsed_ms<0 || e.elapsed_ms>604800000) continue;
-        const clean={run_id:e.run_id,sequence:e.sequence,utc:e.utc,elapsed_ms:e.elapsed_ms,domain:e.domain,kind:e.kind,facts:facts(e.facts)};
+        let clean;
+        try { clean=CinemaDiagnosticWire.event(JSON.stringify(e)); }
+        catch (_) { dropped++; continue; }
         const size=JSON.stringify(clean).length+1; if(size>2048)continue;
         recovered.push({at:Date.parse(clean.utc),bytes:size,event:clean});
       }
@@ -90,14 +93,14 @@ function createCinemaDiagnosticRecorder({ now = () => Date.now(), monotonic = ()
     hydrated=true; record('lifecycle','availability',{phase:'unavailable',reason:'unsupported',observed:false});
   }
   function freeze() { trim(); record('ui','action',{action:'report'}); return { id:uuid(), captured_at:new Date(now()).toISOString().slice(0,19)+'Z', events:rows.map(row=>structuredClone(row.event)), dropped:String(dropped), window_ms:600000, persistence:store && store.persistent() ? 'available' : 'memory_only', history_enabled:enabled, epoch, scope }; }
-  function startReproduction(onComplete=null) { if(reproduction)return reproduction.id; const id=uuid();reproduction={id,ends:now()+300000,rows:[],bytes:0,dropped:0n,deadline:monotonic()+300000};record('ui','action',{action:'reproduce'});reproductionTimer=setTimeout(()=>{const capture=stopReproduction();if(onComplete)onComplete(capture);},300000);return id; }
+  function startReproduction(onComplete=null,original=null) { if(reproduction)return reproduction.id;const capture=original||freeze();const id=capture.id;completedReproduction=null;reproduction={id,original:structuredClone(capture),ends:now()+300000,rows:capture.events.slice(),bytes:capture.events.reduce((n,e)=>n+JSON.stringify(e).length+1,0),dropped:BigInt(capture.dropped),deadline:monotonic()+300000};record('ui','action',{action:'reproduce'});reproductionTimer=setTimeout(()=>{const capture=stopReproduction();if(onComplete)onComplete(capture);},300000);return id; }
   function stopReproduction() { if(!reproduction)return completedReproduction;const capture=reproduction;reproduction=null;clearTimeout(reproductionTimer);reproductionTimer=null;
     const terminal={run_id:run,sequence:String(sequence++),utc:new Date(now()).toISOString().slice(0,19)+'Z',elapsed_ms:Math.min(604800000,Math.max(0,Math.floor(monotonic()-started))),domain:'ui',kind:'terminal',facts:{action:'stop',state:'stopped'}};capture.rows.push(terminal);capture.bytes+=JSON.stringify(terminal).length+1;
     while(capture.rows.length>10000||capture.bytes>2097152){let i=capture.rows.findIndex(e=>e.kind==='sample');if(i<0)i=0;capture.bytes-=JSON.stringify(capture.rows.splice(i,1)[0]).length+1;capture.dropped++;}
-    completedReproduction={id:capture.id,captured_at:new Date(now()).toISOString().slice(0,19)+'Z',events:capture.rows.slice(),dropped:String(capture.dropped),window_ms:300000,persistence:store&&store.persistent()?'available':'memory_only',mode:'reproduction',epoch,scope};if(store)store.put({key:'reproduction:'+scope,type:'capture',at:now(),expires:now()+86400000,bytes:capture.bytes,capture:completedReproduction});return completedReproduction; }
+    completedReproduction={...capture.original,events:capture.rows.slice(),dropped:String(capture.dropped>18446744073709551615n?18446744073709551615n:capture.dropped),window_ms:Math.min(900000,600000+Math.max(0,now()-Date.parse(capture.original.captured_at))),persistence:store&&store.persistent()?'available':'memory_only',mode:'reproduction',epoch,scope};if(store)store.put({key:'reproduction:'+scope,type:'capture',at:now(),expires:now()+86400000,bytes:capture.bytes,capture:completedReproduction});return completedReproduction; }
   function disable(value) { enabled=!value;try{localStorage.setItem('cinema_diagnostic_history',enabled?'on':'off');}catch(_){} if(!enabled){rows=[];bytes=0;}persist(); }
   function clear() { epoch++;rows=[];bytes=0;dropped=0n;reproduction=null;completedReproduction=null;clearTimeout(reproductionTimer);reproductionTimer=null;clearTimeout(flushTimer);flushTimer=null;if(store)store.clear(); }
-  return Object.freeze({attach:(attachment,generation)=>{if(attachment&&typeof attachment==='object')attachments.set(attachment,{generation,correlation:null,source:null});},owns:(attachment,generation)=>!!attachment&&attachments.get(attachment)?.generation===generation,correlation:(attachment,generation)=>attachments.get(attachment)?.generation===generation?attachments.get(attachment).correlation:null,correlate:async(attachment,generation,source)=>{const owner=attachments.get(attachment);if(!owner||owner.generation!==generation||typeof source!=='string'||source.length>256||owner.source===source)return;owner.source=source;owner.correlation=null;const marker=epoch;try{const bytes=new Uint8Array(await cinemaDiagnosticSHA256(new TextEncoder().encode(source)));if(marker===epoch&&attachments.get(attachment)===owner&&owner.source===source)owner.correlation='s-'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}catch(_){}}, record, freeze, persist, bind, clear, disable, startReproduction, stopReproduction, uuid, facts, current:()=>({epoch,scope,enabled,completed:completedReproduction,reproduction:reproduction ? {id:reproduction.id,ends:reproduction.ends} : null}) });
+  return Object.freeze({attach:(attachment,generation)=>{if(attachment&&typeof attachment==='object')attachments.set(attachment,{generation,correlation:null,source:null});},owns:(attachment,generation)=>!!attachment&&attachments.get(attachment)?.generation===generation,correlation:(attachment,generation)=>attachments.get(attachment)?.generation===generation?attachments.get(attachment).correlation:null,correlate:async(attachment,generation,source)=>{const owner=attachments.get(attachment);if(!owner||owner.generation!==generation||typeof source!=='string'||source.length>256||owner.source===source)return;owner.source=source;owner.correlation=null;const marker=epoch;try{const bytes=new Uint8Array(await cinemaDiagnosticSHA256(new TextEncoder().encode(source)));if(marker===epoch&&attachments.get(attachment)===owner&&owner.source===source)owner.correlation='s-'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');else if(owner.source===source)owner.source=null;}catch(_){if(owner.source===source)owner.source=null;}}, record, freeze, persist, bind, clear, disable, startReproduction, stopReproduction, uuid, facts, current:()=>({epoch,scope,enabled,completed:completedReproduction,reproduction:reproduction ? {id:reproduction.id,ends:reproduction.ends,capture:structuredClone(reproduction.original)} : null}) });
 }
 
 const CinemaDiagnostics = createCinemaDiagnosticRecorder({ store:CinemaDiagnosticStore });

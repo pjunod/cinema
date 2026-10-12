@@ -28,6 +28,16 @@ class DiagnosticCaptureTest {
             restart.clear(scope); assertEquals("unavailable",restart.save(draft)); restart.activate(scope); assertTrue(restart.drafts(scope).isEmpty())
         } finally { root.deleteRecursively() }
     }
+    @Test fun queuedWriteCannotResurrectAfterSameAccountAuthenticatesAgain() = runBlocking {
+        val root=Files.createTempDirectory("cinema-diagnostic-epoch").toFile(); val epoch=java.util.concurrent.atomic.AtomicLong(0)
+        try {
+            val store=DiagnosticStore(root,authorizationGeneration={ epoch.get() })
+            val capture=DiagnosticRecorder(monotonic={ 0 }).freeze().copy(namespace="anonymous",generation=0,events=emptyList())
+            val draft=DiagnosticDraft(capture)
+            store.save(draft); store.clear("anonymous"); epoch.set(1); store.activate("anonymous")
+            assertEquals("unavailable",store.save(draft)); assertTrue(store.drafts("anonymous").isEmpty())
+        } finally { root.deleteRecursively() }
+    }
     @Test fun portableZipUsesStandardCRCAndRefusesTraversal() {
         val value="123456789".toByteArray(); assertEquals(0xcbf43926L,CRC32().apply { update(value) }.value)
         val zip=DiagnosticReport.zip(mapOf("description.txt" to value)); assertEquals(listOf(0x26,0x39,0xf4,0xcb),zip.slice(14..17).map { it.toInt() and 255 })

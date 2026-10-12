@@ -54,6 +54,10 @@ internal fun DiagnosticReportHost() {
                     if (DiagnosticRuntime.recorder.recording) Button(onClick={ DiagnosticRuntime.stopReproduction() }) { Text("Stop reproduction recording") }
                     else Button(onClick={ DiagnosticRuntime.startReproduction() },enabled=!draft.consented && !state.busy) { Text("Record reproduction (five minutes)") }
                     Text("Recording stops within five minutes or on background. Closing keeps this draft. It does not upload until you choose Send.",style=MaterialTheme.typography.bodySmall)
+                    Button(onClick={ DiagnosticRuntime.checks() },enabled=!draft.consented && !state.busy) { Text("Check this Cinema connection (15 seconds)") }
+                    Text("Checks contact only the configured Cinema endpoint, with a total 2 MiB reply ceiling. No media transfer probe is started.",style=MaterialTheme.typography.bodySmall)
+                    TextButton(onClick={ DiagnosticRuntime.systemSnapshot() },enabled=!draft.consented && !state.busy) { Text("Collect administrator system snapshot") }
+                    Text("Requires a Cinema administrator account.",style=MaterialTheme.typography.bodySmall)
                     DiagnosticDeliveryFields(state,draft)
                 }
                 HorizontalDivider()
@@ -87,7 +91,7 @@ private fun DiagnosticIncidentFields(state: DiagnosticUI,draft: DiagnosticDraft)
     Text("No passwords, addresses, request bodies, media or raw stream identifiers are collected. A description and an optional title are private content.",style=MaterialTheme.typography.bodySmall)
     Text("Client: ${if (!draft.capture.historyEnabled) "history disabled" else if (draft.capture.dropped != "0") "partial (overflow)" else "bounded history"}; persistence: ${draft.capture.persistence}",style=MaterialTheme.typography.bodySmall)
     draft.components.forEach { Text("${it.name}: ${it.state} ${it.reason.orEmpty()}",style=MaterialTheme.typography.bodySmall) }
-    Text("Platform evidence: ${if (android.os.Build.VERSION.SDK_INT >= 30) "not delivered" else "unsupported"}. Clock alignment: unavailable.",style=MaterialTheme.typography.bodySmall)
+    Text("Platform evidence: ${draft.platformReason ?: "normalized evidence available"}. Clock alignment: unavailable.",style=MaterialTheme.typography.bodySmall)
     var preview by remember(draft.id) { mutableStateOf(false) }
     TextButton(onClick={ preview=!preview }) { Text(if (preview) "Hide safe event preview" else "Preview safe event fields") }
     if (preview) draft.capture.events.takeLast(30).forEach { event -> Text("${event.utc} ${event.domain}/${event.kind} ${event.facts}",style=MaterialTheme.typography.bodySmall) }

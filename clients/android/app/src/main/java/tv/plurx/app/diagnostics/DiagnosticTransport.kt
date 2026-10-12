@@ -38,7 +38,7 @@ internal class DiagnosticTransport(private val app: Context, private val namespa
     fun cancel() { cancelled = true; synchronized(calls) { calls.toList().forEach { it.cancel() }; calls.clear() } }
     fun current() { if (cancelled || Session.playbackAuthorization().generation != authorization.generation) throw Failure(message = "The account or report operation changed. Reopen this account's report.") }
     private fun supportOrigin(text: String) = origin(text, preferences.getBoolean("development_local",false))
-    private suspend fun request(origin: String, path: String, method: String = "POST", body: ByteArray? = null, grant: String? = null, cinema: Boolean = false, chunkHash: String? = null, limit: Int = 262144, raw: Boolean = false, cleanup: Boolean = false): ByteArray {
+    private suspend fun request(origin: String, path: String, method: String = "POST", body: ByteArray? = null, grant: String? = null, cinema: Boolean = false, chunkHash: String? = null, limit: Int = 262144, raw: Boolean = false, cleanup: Boolean = false, listener: EventListener? = null): ByteArray {
         val retiredCleanup = cleanup && cinema && method == "DELETE" && origin == authorization.origin && body == null && grant == null && Regex("/api/v1/diagnostics/snapshots/[a-f0-9-]{36}").matches(path)
         if (!retiredCleanup) current(); currentCoroutineContext().ensureActive()
         val base = if (cinema) requireNotNull(Session.canonicalOrigin(origin)) else supportOrigin(origin)
@@ -49,7 +49,7 @@ internal class DiagnosticTransport(private val app: Context, private val namespa
         if (chunkHash != null) builder.header("X-Chunk-Sha256",chunkHash)
         val contentType = (if (chunkHash == null) "application/json" else "application/octet-stream").toMediaType()
         val payload = body?.toRequestBody(contentType) ?: if (method in setOf("POST","PUT")) ByteArray(0).toRequestBody(contentType) else null
-        val call = client.newCall(builder.method(method,payload).build()); synchronized(calls) { calls += call }
+        val call = (if (listener == null) client else client.newBuilder().eventListener(listener).build()).newCall(builder.method(method,payload).build()); synchronized(calls) { calls += call }
         return try {
             suspendCancellableCoroutine { continuation ->
                 continuation.invokeOnCancellation { call.cancel() }
@@ -106,7 +106,7 @@ internal class DiagnosticTransport(private val app: Context, private val namespa
         require(hex.matches(secret)); current(); secrets.save(id + ":invitation",buildJsonObject { put("origin",destination); put("secret",secret) })
     }
     suspend fun snapshot(capture: DiagnosticCapture, includeSystem: Boolean = false): Pair<List<DiagnosticEvent>,List<DiagnosticComponent>> {
-        if (authorization.token == null) throw Failure()
+        if (authorization.token == null || capture.namespace == "anonymous") throw Failure()
         var id: String? = null
         try {
             return withTimeout(6000) {
@@ -134,6 +134,38 @@ internal class DiagnosticTransport(private val app: Context, private val namespa
                 runCatching { withTimeout(1000) { cleanup.request(authorization.origin,"/api/v1/diagnostics/snapshots/$cleanupID",method="DELETE",cinema=true,cleanup=true) } }; cleanup.cancel()
             }
         }
+    }
+    suspend fun connectionChecks(): List<DiagnosticEvent> = withContext(Dispatchers.IO) {
+        current(); val began=android.os.SystemClock.elapsedRealtime(); val run=UUID.randomUUID().toString()
+        val events=mutableListOf<DiagnosticEvent>(); var bytes=0
+        fun event(facts: JsonObject) { events += DiagnosticEvent(run,(events.size+1).toString(),DiagnosticFields.utc(),(android.os.SystemClock.elapsedRealtime()-began).coerceIn(0,15000),"network","request",facts) }
+        val phases=java.util.concurrent.ConcurrentHashMap<String,Long>(); val starts=java.util.concurrent.ConcurrentHashMap<String,Long>()
+        val listener=object: EventListener() {
+            private fun begin(phase: String) { starts[phase]=android.os.SystemClock.elapsedRealtime() }
+            private fun end(phase: String) { starts.remove(phase)?.let { phases[phase]=(android.os.SystemClock.elapsedRealtime()-it).coerceIn(0,15000) } }
+            override fun dnsStart(call: Call, domainName: String) { begin("dns") }
+            override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<java.net.InetAddress>) { end("dns") }
+            override fun connectStart(call: Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy) { begin("connect") }
+            override fun connectEnd(call: Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy, protocol: Protocol?) { end("connect") }
+            override fun secureConnectStart(call: Call) { begin("tls") }
+            override fun secureConnectEnd(call: Call, handshake: Handshake?) { end("tls") }
+        }
+        try {
+            withTimeout(15000) {
+                val paths=listOf("/healthz" to "connect","/readyz" to "readiness","/api/v1/server" to "readiness") + if (authorization.token != null) listOf("/api/v1/me" to "auth") else emptyList()
+                for ((path,phase) in paths) {
+                    current(); if (bytes >= 2097152) break
+                    val start=android.os.SystemClock.elapsedRealtime(); var status=0; var failure: String?=null
+                    try { bytes += request(authorization.origin,path,method="GET",cinema=true,limit=2097152-bytes,raw=true,listener=listener).size }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (error: Exception) { current(); status=(error as? Failure)?.status ?: 0; failure=when(error) { is java.net.UnknownHostException -> "dns"; is javax.net.ssl.SSLException -> "tls"; is java.net.ConnectException -> "connect"; is Failure -> if (status == 401 || status == 403) "authentication" else "http"; else -> "network" } }
+                    event(buildJsonObject { put("phase",phase); put("method","GET"); put("observed",failure == null); put("duration_ms",(android.os.SystemClock.elapsedRealtime()-start).coerceIn(0,15000)); if (status != 0) put("status",status); failure?.let { put("failure",it) } })
+                }
+            }
+        } catch (timeout: TimeoutCancellationException) { currentCoroutineContext().ensureActive(); event(buildJsonObject { put("phase","unavailable"); put("observed",false); put("reason","timeout") }) }
+        current()
+        for (phase in listOf("dns","connect","tls")) event(buildJsonObject { put("phase",phase); put("observed",phases.containsKey(phase)); phases[phase]?.let { put("duration_ms",it) } ?: put("reason","context_unavailable") })
+        event(buildJsonObject { put("phase","delivery"); put("observed",false); put("reason","not_requested") }); events
     }
     suspend fun stage(archive: DiagnosticArchive, original: DiagnosticDraft, remember: suspend (DiagnosticDraft) -> Unit): DiagnosticDraft = withContext(Dispatchers.IO) {
         require(original.consented && original.capture.namespace == namespace && original.id == archive.binding.report_id)

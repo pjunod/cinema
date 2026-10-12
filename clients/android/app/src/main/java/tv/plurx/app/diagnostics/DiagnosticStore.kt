@@ -24,12 +24,13 @@ internal data class DiagnosticDraft(
     val serverEvents: List<DiagnosticEvent> = emptyList(), val components: List<DiagnosticComponent> = emptyList(),
     val connection: List<DiagnosticEvent> = emptyList(), val consented: Boolean = false, val origin: String? = null,
     val state: String = "local", val reference: String? = null, val handoff: DiagnosticOffer? = null,
+    val platform: List<DiagnosticEvent> = emptyList(), val platformReason: String? = null,
     val binding: DiagnosticBinding? = null, val manifest: JsonObject? = null,
 ) { val id get() = capture.id }
 
 /** Private, backup-excluded files with a bounded in-memory fallback. Only this
  * IO owner reads/writes files. Authorities are Keystore encrypted separately. */
-internal class DiagnosticStore(private val root: File) {
+internal class DiagnosticStore(private val root: File, private val authorizationGeneration: () -> Long = { tv.plurx.app.data.Session.playbackAuthorization().generation }, private val removeSecrets: (String,String) -> Unit = { _, _ -> }) {
     private val mutex = Mutex()
     private val memory = linkedMapOf<String, DiagnosticDraft>()
     private val archives = linkedMapOf<String, ByteArray>()
@@ -53,29 +54,33 @@ internal class DiagnosticStore(private val root: File) {
         temporary.outputStream().use { it.write(bytes); it.fd.sync() }
         check(temporary.renameTo(file)); file.setReadable(false, false); file.setWritable(false, false); file.setReadable(true, true); file.setWritable(true, true)
     }
+    private fun erase(file: File) {
+        val captureID=file.name.substringBeforeLast('.')
+        file.delete(); if (captureID != "ring") { memory.remove(captureID); archives.remove(captureID); removeSecrets(file.parentFile.name,captureID) }
+    }
     private fun prune() {
         val folders = root.listFiles().orEmpty(); require(folders.size <= 32)
         val files = folders.filter { it.isDirectory && it.canonicalFile.parentFile == root.canonicalFile }.flatMap { folder -> folder.listFiles().orEmpty().also { require(it.size <= 32) }.filter { it.isFile && it.name != "ring.json" } }
-        for (file in files) if (file.length() > 8388608 || file.lastModified() < System.currentTimeMillis() - 86400000 || file.name.endsWith(".writing")) file.delete()
-        val rows = files.filter { it.exists() }.groupBy { it.parentFile.name + "/" + it.name.substringBeforeLast('.') }.toMutableMap()
+        for (file in files) if (file.length() > 8388608 || file.lastModified() < System.currentTimeMillis() - 86400000 || file.name.endsWith(".writing") || file.name == "ring.json" && file.lastModified() < System.currentTimeMillis()-600000) erase(file)
+        val rows = files.filter { it.exists() && it.name != "ring.json" }.groupBy { it.parentFile.name + "/" + it.name.substringBeforeLast('.') }.toMutableMap()
         var total = rows.values.flatten().sumOf { it.length() }
         while (rows.size > 10 || total > 33554432) {
             val oldest = rows.minByOrNull { it.value.minOf { file -> file.lastModified() } } ?: break
-            for (file in oldest.value) { total -= file.length(); file.delete() }
+            for (file in oldest.value) { total -= file.length(); erase(file) }
             rows.remove(oldest.key)
         }
     }
     suspend fun activate(scope: String) = mutex.withLock { retired.remove(scope) }
     suspend fun save(draft: DiagnosticDraft): String = withContext(Dispatchers.IO) { mutex.withLock {
-        if (draft.capture.namespace in retired) return@withLock "unavailable"
+        if (draft.capture.namespace in retired || draft.capture.generation != authorizationGeneration()) return@withLock "unavailable"
         id(draft.id); require(draft.capture.events.size <= 10000 && draft.serverEvents.size <= 10000 && draft.connection.size <= 100)
         require(draft.capture.events.all { it.valid() } && draft.serverEvents.all { it.valid() } && draft.connection.all { it.valid() })
         val bytes = DiagnosticJson.encodeToString(DiagnosticDraft.serializer(), draft).toByteArray(); require(bytes.size <= 8388608)
-        memory[draft.id] = draft; while (memory.size > 10) memory.remove(memory.keys.first())
+        memory[draft.id] = draft; while (memory.size > 10 || memory.values.sumOf { DiagnosticJson.encodeToString(DiagnosticDraft.serializer(),it).toByteArray().size.toLong() } > 33554432) { val oldest=memory.keys.first(); memory.remove(oldest); archives.remove(oldest) }
         runCatching { val folder = directory(draft.capture.namespace); prune(); write(File(folder, draft.id + ".json"), bytes); prune(); "available" }.getOrDefault("memory_only")
     } }
     suspend fun saveRing(capture: DiagnosticCapture): String = withContext(Dispatchers.IO) { mutex.withLock {
-        if (capture.namespace in retired) return@withLock "unavailable"
+        if (capture.namespace in retired || capture.generation != authorizationGeneration()) return@withLock "unavailable"
         ringMemory.clear(); ringMemory[capture.namespace] = capture
         runCatching { write(File(directory(capture.namespace), "ring.json"), DiagnosticJson.encodeToString(DiagnosticCapture.serializer(), capture).toByteArray()); "available" }.getOrDefault("memory_only")
     } }
@@ -91,8 +96,8 @@ internal class DiagnosticStore(private val root: File) {
         }
         memory.values.filter { it.capture.namespace == scope && it.capture.incidentMs >= System.currentTimeMillis() - 86400000 }.sortedByDescending { it.capture.incidentMs }.take(10)
     } }
-    suspend fun saveArchive(id: String, scope: String, bytes: ByteArray): String = withContext(Dispatchers.IO) { mutex.withLock {
-        id(id); require(bytes.size <= 8388608); if (scope in retired) return@withLock "unavailable"
+    suspend fun saveArchive(id: String, scope: String, bytes: ByteArray, generation: Long): String = withContext(Dispatchers.IO) { mutex.withLock {
+        id(id); require(bytes.size <= 8388608); if (scope in retired || generation != authorizationGeneration()) return@withLock "unavailable"
         archives.clear(); archives[id] = bytes
         runCatching { write(File(directory(scope), id + ".zip"), bytes); prune(); "available" }.getOrDefault("memory_only")
     } }
@@ -113,9 +118,10 @@ internal class DiagnosticStore(private val root: File) {
 internal class DiagnosticSecrets(context: Context, private val scope: String) {
     private val preferences = context.getSharedPreferences("cinema-diagnostic-secrets", Context.MODE_PRIVATE)
     private val alias = "cinema.diagnostics." + scope
-    private fun key(): SecretKey {
-        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }; (store.getKey(alias, null) as? SecretKey)?.let { return it }
-        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
+    companion object { private val keyLock=Any() }
+    private fun key(): SecretKey = synchronized(keyLock) {
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }; (store.getKey(alias, null) as? SecretKey)?.let { return@synchronized it }
+        KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
             init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
         }.generateKey()
     }

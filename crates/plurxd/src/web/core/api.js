@@ -189,7 +189,7 @@ function browserLabel(){
 }
 function refreshClientErrorReporterAuth(){
   if(window.PlurxErrorReporter) window.PlurxErrorReporter.setAuth(TOKEN,browserLabel());
-  if(typeof diagnosticAuthChanged==="function")diagnosticAuthChanged();
+  if(typeof window.dispatchEvent==="function")window.dispatchEvent(new Event("cinema-diagnostic-auth"));
 }
 // Forward a client-side playback problem to the server so it lands in
 // Settings → Logs. Fire-and-forget: a browser that rejects a stream produces no

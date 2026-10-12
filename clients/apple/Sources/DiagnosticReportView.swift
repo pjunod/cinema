@@ -28,9 +28,10 @@ final class DiagnosticReportModel: ObservableObject {
     var hasPendingUnsubmitted: Bool { (draft?.state != "submitted" && draft != nil) || pending.contains { $0.state != "submitted" } }
     init() {
         let installed = Session.shared.observeAuthorizationChanges { [weak self] _ in
-            Task { @MainActor in self?.retire() }
+            Task { @MainActor in self?.retire(); DiagnosticPlatform.shared.retire() }
         }
         authorizationObserver = installed.id
+        DiagnosticPlatform.shared.start()
         DiagnosticRecorder.shared.record("lifecycle", "state", ["state": .text("starting")])
     }
     private func retire() {
@@ -41,6 +42,7 @@ final class DiagnosticReportModel: ObservableObject {
     func configure(model: AppModel) async {
         guard model.phase != .loading else { return }
         let next = model.diagnosticNamespace; let auth = Session.shared.playbackAuthorization
+        DiagnosticPlatform.shared.bind(next, generation: auth.generation)
         scope = next; generation = auth.generation
         await DiagnosticStore.shared.activate(next)
         await DiagnosticRecorder.shared.bind(namespace: next, generation: auth.generation, erasePrevious: false)
@@ -54,8 +56,10 @@ final class DiagnosticReportModel: ObservableObject {
     func open(category: String = "other", title: String? = nil, owner: String = "root") {
         operation?.cancel(); polling?.cancel(); transport?.cancel(); cleanupShare()
         self.title = title; includeTitle = false; comparison = nil; handoffState = ""; uploadConsent = false
-        let capture = DiagnosticRecorder.shared.freeze()
-        let value = DiagnosticStore.Draft(capture: capture, category: category, description: "", serverEvents: [], serverComponents: [], connection: [])
+        let capture = DiagnosticRecorder.shared.retainedReproduction ?? DiagnosticRecorder.shared.freeze()
+        var value = DiagnosticStore.Draft(capture: capture, category: category, description: "", serverEvents: [], serverComponents: [], connection: [])
+        if let previous = pending.first(where: { $0.id == capture.id }) { value = previous; value.capture = capture }
+        let platform = DiagnosticPlatform.shared.projection(capture); value.platform = platform.events; value.platformReason = platform.reason
         presenter = owner; draft = value; presented = true; busy = true; message = "Capturing this incident. A description is optional."
         DiagnosticRecorder.shared.record("ui", "action", ["action": .text("report")])
         let client = DiagnosticTransport(scope: capture.namespace); transport = client
@@ -104,7 +108,7 @@ final class DiagnosticReportModel: ObservableObject {
     func cleanupShare() { if let shareURL { try? FileManager.default.removeItem(at: shareURL.deletingLastPathComponent()) }; shareURL = nil }
     func setHistory(_ enabled: Bool) { history = enabled; Task { await DiagnosticRecorder.shared.setHistory(enabled) } }
     private func perform(_ action: @escaping (DiagnosticTransport, inout DiagnosticStore.Draft) async throws -> Void) {
-        guard !busy, var value = draft else { return }; operation?.cancel(); transport?.cancel(); busy = true; message = "Working…"
+        guard !busy, var value = draft, value.capture.generation == Session.shared.playbackAuthorization.generation else { return }; operation?.cancel(); transport?.cancel(); busy = true; message = "Working…"
         let client = DiagnosticTransport(scope: value.capture.namespace); transport = client
         operation = Task {
             do { try await action(client, &value); try client.current(); guard draft?.id == value.id else { busy = false; return }; draft = value; _ = await DiagnosticStore.shared.save(value) }
@@ -125,7 +129,7 @@ final class DiagnosticReportModel: ObservableObject {
         guard result.bytes.count <= 8_388_608 else { throw DiagnosticTransport.Failure.limit }
         if value.consented {
             value.binding = result.binding; value.manifest = result.manifest
-            let persistence = await DiagnosticStore.shared.saveArchive(result.bytes, id: value.id, scope: value.capture.namespace)
+            let persistence = await DiagnosticStore.shared.saveArchive(result.bytes, id: value.id, scope: value.capture.namespace, generation: value.capture.generation)
             guard persistence != "unavailable" else { throw DiagnosticTransport.Failure.storage }
             _ = await DiagnosticStore.shared.save(value)
         }
@@ -146,6 +150,7 @@ final class DiagnosticReportModel: ObservableObject {
         }
     }
     func send(phone: Bool = false) {
+        guard !DiagnosticRecorder.shared.recording else { message = "Stop reproduction before sending this frozen report."; return }
         guard uploadConsent else { message = DiagnosticTransport.Failure.consent.errorDescription!; return }
         let origin: String
         do { origin = try DiagnosticTransport.origin(destination) } catch { message = "Choose a fixed HTTPS support destination."; return }
@@ -161,6 +166,7 @@ final class DiagnosticReportModel: ObservableObject {
     }
     func redeemInvitation() {
         let code = invitationCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(); let destination = destination
+        guard !DiagnosticRecorder.shared.recording else { message = "Stop reproduction before sending this frozen report."; return }
         guard uploadConsent else { message = DiagnosticTransport.Failure.consent.errorDescription!; return }
         perform { [weak self] client, value in
             let origin = try DiagnosticTransport.origin(destination)
@@ -202,6 +208,14 @@ final class DiagnosticReportModel: ObservableObject {
     func startReproduction() {
         guard let capture = draft?.capture, draft?.binding == nil else { return }
         if DiagnosticRecorder.shared.startReproduction(capture) { message = "Recording for up to five minutes. Reproduce the issue, then reopen Help and stop. Recording ends on background." }
+    }
+    func systemSnapshot() {
+        perform { [weak self] client, value in
+            guard value.binding == nil else { throw DiagnosticTransport.Failure.invalid }
+            let result = try await client.snapshot(value.capture, includeSystem: true)
+            value.serverEvents = result.events ?? []; value.serverComponents = result.components ?? []
+            self?.message = "Administrator snapshot saved. Only typed version, readiness, producer and hardware admission facts are included."
+        }
     }
     func checks() {
         perform { [weak self] client, value in
@@ -280,7 +294,7 @@ struct DiagnosticReportView: View {
                         Text("No passwords, addresses, request bodies, media or raw stream identifiers are collected. Your description and an optional title are private content.").font(.caption)
                         Text("Client: " + (draft.capture.historyEnabled ? (draft.capture.dropped > 0 ? "partial (overflow)" : "bounded history") : "history disabled") + "; persistence: " + draft.capture.persistence).font(.caption)
                         ForEach(draft.serverComponents, id: \.name) { component in Text("\(component.name): \(component.state) \(component.reason ?? "")").font(.caption) }
-                        Text("Platform diagnostics: not delivered. Clock alignment: unavailable.").font(.caption)
+                        Text("Platform diagnostics: " + (draft.platformReason ?? "normalized evidence available") + ". Clock alignment: unavailable.").font(.caption)
                         #if os(tvOS)
                         Text("Recent safe events").font(.headline)
                         eventPreview(draft)
@@ -303,6 +317,8 @@ struct DiagnosticReportView: View {
                         if DiagnosticRecorder.shared.recording { Button("Stop reproduction recording") { reports.stopReproduction() } }
                         else { Button("Record reproduction (five minutes)") { reports.startReproduction() }.disabled(draft.consented || reports.busy) }
                         Button("Check this Cinema connection (15 seconds)") { reports.checks() }.disabled(draft.consented || reports.busy)
+                        Button("Collect administrator system snapshot") { reports.systemSnapshot() }.disabled(draft.consented || reports.busy)
+                        Text("Requires a Cinema administrator account.").font(.caption)
                         Text("Checks contact only the configured Cinema endpoint, with a total 2 MiB reply ceiling. No media or cellular transfer probe is started.").font(.caption)
         }
     }

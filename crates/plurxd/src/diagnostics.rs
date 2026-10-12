@@ -612,6 +612,17 @@ async fn collect(
         // Deliberately typed, bounded system facts. General/cluster log text
         // stays behind the existing independent administrator export API.
         let mut facts = BTreeMap::new();
+        let (slots, maximum) = state.transcode.hardware_slots().await;
+        facts.insert(
+            "active_producers".into(),
+            (state.transcode.active_sessions().await as u64)
+                .min(604_800_000)
+                .into(),
+        );
+        facts.insert("hw_slots".into(), (slots as u64).min(604_800_000).into());
+        facts.insert("hw_max".into(), (maximum as u64).min(604_800_000).into());
+        facts.insert("app_version".into(), crate::version::SEMVER.into());
+        facts.insert("build".into(), crate::version::BUILD.into());
         facts.insert("phase".into(), "readiness".into());
         facts.insert("observed".into(), state.serving.is_ready().into());
         result.events.push(Event {

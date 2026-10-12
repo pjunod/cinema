@@ -50,8 +50,42 @@ const CinemaDiagnosticWire = (() => {
     for(const f of m.files) { keys(f,['name','size_bytes','sha256']);one(f.name,names);wireAssert(!entries.has(f.name));entries.add(f.name);integer(f.size_bytes,8388608);total+=f.size_bytes;wireAssert(typeof f.sha256==='string'&&/^[0-9a-f]{64}$/.test(f.sha256)); }
     wireAssert(total<=67108864&&['summary.txt','description.txt','client-events.jsonl'].every(n=>entries.has(n))&&m.privacy.attachments_included===entries.has('diagnostics/platform.json'));return m;
   }
+  const enums = {
+    source_codec: ['unknown','h264','hevc','av1','vp9','aac','ac3','eac3','dts','truehd','opus','flac','pcm','other'],
+    delivered_codec: ['unknown','h264','hevc','av1','vp9','aac','ac3','eac3','dts','truehd','opus','flac','pcm','other'],
+    audio_codec: ['unknown','h264','hevc','av1','vp9','aac','ac3','eac3','dts','truehd','opus','flac','pcm','other'],
+    render_codec: ['unknown','h264','hevc','av1','vp9','aac','ac3','eac3','dts','truehd','opus','flac','pcm','other'],
+    source_range: ['unknown','sdr','hdr10','hlg','dv'], delivered_range: ['unknown','sdr','hdr10','hlg','dv'], render_range: ['unknown','sdr','hdr10','hlg','dv'],
+    mode: ['unknown','direct','remux','transcode'],
+    failure: [...reasons,'network','tls','dns','connect','authentication','http','decode','delivery','process_exit','browser_network'],
+    reason: [...reasons,'network','tls','dns','connect','authentication','http','decode','delivery','process_exit','browser_network'],
+    action: ['play','pause','stop','seek','audio','subtitle','quality','navigate','report','reproduce','cancel','check'],
+    state: ['unknown','starting','playing','paused','waiting','stalled','recovered','failed','stopped','foreground','background','interrupted','clean_shutdown'],
+    route: ['auth','browse','playback','settings','diagnostics','support','other'], method: ['GET','POST','PUT','DELETE','HEAD'],
+    phase: ['dns','connect','tls','auth','readiness','delivery','unavailable'],
+  };
+  function event(text) {
+    const e=strict(text,2048);keys(e,['run_id','sequence','utc','elapsed_ms','domain','kind','facts']);
+    wireAssert(uuid(e.run_id)&&decimal(e.sequence));
+    wireAssert(typeof e.utc==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(e.utc)&&new Date(e.utc).toISOString().replace('.000Z','Z')===e.utc);
+    integer(e.elapsed_ms,604800000);one(e.domain,['ui','network','playback','producer','lifecycle','coverage']);one(e.kind,['action','state','sample','error','terminal','request','availability']);
+    wireAssert(e.facts&&typeof e.facts==='object'&&!Array.isArray(e.facts)&&Object.keys(e.facts).length<=16);
+    for(const [key,value] of Object.entries(e.facts)) {
+      if(enums[key])one(value,enums[key]);
+      else if(['duration_ms','playhead_ms','headroom_ms','width','height','retry_count','active_producers','hw_slots','hw_max'].includes(key))integer(value,604800000);
+      else if(key==='status'){integer(value,599);wireAssert(value===0||value>=100);}
+      else if(['frame_count','dropped_frames','dropped_events'].includes(key))wireAssert(decimal(value));
+      else if(key==='observed')wireAssert(typeof value==='boolean');
+      else if(['app_version','build'].includes(key))wireAssert(typeof value==='string'&&/^[A-Za-z0-9._+-]{1,64}$/.test(value));
+      else if(key==='correlation')wireAssert(typeof value==='string'&&/^s-[a-f0-9]{64}$/.test(value));
+      else if(key==='node')wireAssert(typeof value==='string'&&/^node-[1-8]$/.test(value));
+      else wireAssert(false);
+    }
+    return e;
+  }
+
   function summary(m) {
     return `Cinema diagnostic report ${m.report_id}\nCaptured: ${m.captured_at}\nCategory: ${m.category}\nClient: ${m.client.platform} ${m.client.app_version} build ${m.client.build}\nCapture: ${m.capture.mode} (${m.capture.window_ms} ms); dropped ${m.capture.dropped_events}; persistence ${m.capture.persistence}\n${m.components.map(c=>`${c.name}: ${c.state}${c.reason?` (${c.reason})`:''}`).join('\n')}\nComplete describes collection scope, not retained history.\n`;
   }
-  return Object.freeze({version,reasons,names,strict,manifest,summary,decimal,uuid});
+  return Object.freeze({version,reasons,names,strict,manifest,event,summary,decimal,uuid});
 })();

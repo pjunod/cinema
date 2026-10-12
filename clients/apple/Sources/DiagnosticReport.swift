@@ -79,7 +79,7 @@ enum DiagnosticReport {
         components += draft.serverComponents.filter { ["server","workers"].contains($0.name) && $0.valid }
         if !components.contains(where: { $0.name == "server" }) { components.append(Component(name: "server", state: "unavailable", reason: "context_unavailable")) }
         components += [Component(name: "connection", state: draft.connection.isEmpty ? "unavailable" : "complete", reason: draft.connection.isEmpty ? "not_requested" : nil),
-                       Component(name: "platform", state: "unavailable", reason: client.platform == "tvos" ? "unsupported" : "not_delivered"), Component(name: "clock", state: "unavailable", reason: "clock_unknown")]
+                       Component(name: "platform", state: draft.platform?.isEmpty == false ? "partial" : "unavailable", reason: draft.platformReason ?? (client.platform == "tvos" ? "unsupported" : "not_delivered")), Component(name: "clock", state: "unavailable", reason: "clock_unknown")]
         var manifest = Manifest(report_id: draft.id, captured_at: draft.capture.capturedAt, category: draft.category,
                                 scope: draft.capture.namespace == "anonymous" ? "anonymous" : "viewer", client: client,
                                 capture: Capture(mode: draft.capture.mode, window_ms: min(900_000, draft.capture.windowMs), dropped_events: String(draft.capture.dropped), persistence: draft.capture.persistence),
@@ -92,7 +92,10 @@ enum DiagnosticReport {
         } else if draft.capture.events.contains(where: { $0.domain == "playback" }) {
             entries.append(("playback.json", try encoder.encode(draft.capture.events.filter { $0.domain == "playback" })))
         }
+        if let platform = draft.platform, !platform.isEmpty { guard platform.allSatisfy(\.valid), platform.count <= 16 else { throw DiagnosticTransport.Failure.invalid }; entries.append(("diagnostics/platform.json", try encoder.encode(platform))) }
         if !draft.connection.isEmpty { entries.append(("connection.json", try encoder.encode(draft.connection))) }
+        let system = draft.serverEvents.filter { $0.facts["active_producers"] != nil }
+        if !system.isEmpty { entries.append(("server-snapshot.json", try encoder.encode(system))) }
         if !draft.serverEvents.isEmpty { entries.append(("server-events.jsonl", try jsonl(draft.serverEvents))) }
         manifest.files = entries.map { File(name: $0.0, size_bytes: $0.1.count, sha256: DiagnosticRecorder.digest($0.1)) }
         let bytes = try encoder.encode(manifest); _ = try DiagnosticWire.manifest(bytes)

@@ -27,6 +27,11 @@ enum DiagnosticWire {
         else if let o = v as? [String: Any] { for (k,x) in o { try check(k.utf8.count <= 128); try bounded(x,depth+1,&count) } }
         else if let a = v as? [Any] { for x in a { try bounded(x,depth+1,&count) } }
     }
+    static func event(_ data: Data) throws -> DiagnosticEvent {
+        try check(data.count <= 2048); try RemoteStrictJSON.check(data)
+        _ = try object(JSONSerialization.jsonObject(with: data), ["run_id","sequence","utc","elapsed_ms","domain","kind","facts"])
+        let value = try JSONDecoder().decode(DiagnosticEvent.self, from: data); try check(value.valid); return value
+    }
     static func manifest(_ data: Data) throws -> [String: Any] {
         try check(data.count <= 65536);try RemoteStrictJSON.check(data)
         let raw = try JSONSerialization.jsonObject(with:data); var budget=60000;try bounded(raw,0,&budget)
