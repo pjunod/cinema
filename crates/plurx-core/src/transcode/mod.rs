@@ -52,7 +52,7 @@ pub use encoder::{
     validate_quality_rate_control, validate_quality_rate_control_yielding, vbv_maxrate_bps,
     vbv_maxrate_kbps, CompletedReconstructedOutputContract, EffectiveRateControl, Encoder,
     EncoderCaps, OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc,
-    RateMode, VideoCodec,
+    RateMode, VaapiHdrPolicy, VideoCodec,
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,
@@ -2083,6 +2083,9 @@ fn hls_args_inner(
             "tv".into(),
         ]);
     }
+    if let Some(policy) = plan.and_then(|plan| plan.output_contract().vaapi_hdr_policy()) {
+        args.extend(policy.flags().map(str::to_owned));
+    }
     if let Some(proof) = plan.and_then(|plan| plan.output_contract().sdr_avc()) {
         args.extend(proof.flags());
     }
@@ -3041,6 +3044,116 @@ pub fn hls_copy_args_with_audio_delivery(
 mod tests {
     use super::*;
     use crate::domain::MediaFile;
+
+    #[test]
+    fn vaapi_hdr_policy_is_frozen_scoped_and_shared_by_rolling_and_vod() {
+        let source = file(Some("hdr10"));
+        let facts = DecodeFacts::from_ffprobe_json(
+            &serde_json::json!({"streams":[{
+                "index":0,"codec_type":"video","codec_name":"hevc","profile":"Main 10",
+                "pix_fmt":"yuv420p10le","width":1920,"height":1080,"field_order":"progressive",
+                "avg_frame_rate":"24/1","r_frame_rate":"24/1",
+                "color_transfer":"smpte2084","color_primaries":"bt2020","color_space":"bt2020nc"
+            }]}),
+            DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("source identity"),
+        )
+        .expect("bound decode facts");
+        let capabilities = DecodeCapabilities::new(
+            DecodeCapabilitySnapshotIdentity::new("b".repeat(64), "test-node".into(), None)
+                .expect("capability identity"),
+            vec![],
+            vec![SoftwareDecoder {
+                codec: "hevc".into(),
+                implementation: None,
+            }],
+        )
+        .expect("software decoder inventory");
+        let mut caps = EncoderCaps {
+            vaapi: true,
+            vaapi_hdr_policy: Some(VaapiHdrPolicy::MesaRadeonsiVbaq),
+            ..Default::default()
+        };
+        for (encoder, pipeline, applies) in [
+            (Encoder::Vaapi, Pipeline::Hdr10Passthrough, true),
+            (Encoder::Qsv, Pipeline::Hdr10Passthrough, false),
+            (Encoder::Vaapi, Pipeline::Cpu, false),
+        ] {
+            let options = TranscodeOptions {
+                pipeline,
+                target_height: 1080,
+                video_bitrate_kbps: 2000,
+                auto_quality_rate_profile: None,
+                normalized_geometry: false,
+                ..Default::default()
+            };
+            let plan = resolve_transcode(
+                &TranscodeRequest::new(
+                    encoder,
+                    TranscodeMediaOptions::from_options_with_facts(&source, &options, &facts),
+                ),
+                &facts,
+                &capabilities,
+                &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+                &AttemptRestrictions::none(),
+            )
+            .expect("resolved plan");
+            let execution =
+                TranscodeExecution::from_options(&source, &options, Pacing::unpaced(), ".")
+                    .expect("execution inputs");
+            let bound = plan.clone().with_vaapi_hdr_policy(&caps);
+            assert_eq!(
+                bound.output_contract().vaapi_hdr_policy().is_some(),
+                applies
+            );
+            assert_eq!(bound.plan_digest() != plan.plan_digest(), applies);
+            let digest = PipelineDigest {
+                ffmpeg_build: "fixture".into(),
+            };
+            assert_eq!(
+                Recipe::new(&digest, &bound, false).hash()
+                    != Recipe::new(&digest, &plan, false).hash(),
+                applies
+            );
+            for args in [
+                hls_args_for_plan(&bound, &execution),
+                vod_pipe_args(
+                    &source,
+                    &bound,
+                    &execution,
+                    VodFrameGrid::new(24, 1).expect("fixed frame grid"),
+                    12.0,
+                ),
+            ] {
+                assert_eq!(
+                    args.windows(2).any(|p| p == ["-compression_level", "19"]),
+                    applies
+                );
+                assert!(!args.iter().any(|a| a == "-qmax"));
+                if applies {
+                    for pair in [
+                        ["-b:v", "2000k"],
+                        ["-maxrate", "3000k"],
+                        ["-bufsize", "4000k"],
+                    ] {
+                        assert!(args.windows(2).any(|p| p == pair), "{args:?}");
+                    }
+                }
+            }
+            caps.vaapi_hdr_policy = None;
+            assert_eq!(
+                bound.output_contract().vaapi_hdr_policy().is_some(),
+                applies,
+                "the plan is frozen"
+            );
+            let cleared = bound.with_vaapi_hdr_policy(&caps);
+            assert_eq!(cleared.plan_digest(), plan.plan_digest());
+            assert_eq!(
+                hls_args_for_plan(&cleared, &execution),
+                hls_args_for_plan(&plan, &execution)
+            );
+            caps.vaapi_hdr_policy = Some(VaapiHdrPolicy::MesaRadeonsiVbaq);
+        }
+    }
 
     /// The Profile 5 renderer string, byte for byte. Three call sites build
     /// from this one function (the renderer graph, the CPU-pipeline arm and

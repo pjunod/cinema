@@ -1,0 +1,621 @@
+{
+  "owned_document_created": true,
+  "receipt": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Safari/605.1.15",
+    "nativeHls": "maybe",
+    "rvfc": true,
+    "visibility": "visible",
+    "cases": [
+      {
+        "asset": "sdr-bf0",
+        "phases": [
+          {
+            "name": "cold-mid",
+            "target": 6,
+            "frames": [
+              {
+                "wall": 100,
+                "time": 6,
+                "clock": 6.000049,
+                "presented": 1,
+                "pixels": 3284196022,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 150,
+                "time": 6.041666666666667,
+                "clock": 6.06118512531796,
+                "presented": 2,
+                "pixels": 4029156779,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 201,
+                "time": 6.083333333333333,
+                "clock": 6.11132883335535,
+                "presented": 3,
+                "pixels": 1314205232,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 250,
+                "time": 6.125,
+                "clock": 6.161323583332837,
+                "presented": 4,
+                "pixels": 1870794172,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 284,
+                "time": 6.166666666666667,
+                "clock": 6.194360916674618,
+                "presented": 5,
+                "pixels": 4174265033,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 317,
+                "time": 6.208333333333333,
+                "clock": 6.232229666981754,
+                "presented": 6,
+                "pixels": 2664190636,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 367,
+                "time": 6.25,
+                "clock": 6.280648250330147,
+                "presented": 7,
+                "pixels": 490987818,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 417,
+                "time": 6.291666666666667,
+                "clock": 6.329986707995038,
+                "presented": 8,
+                "pixels": 546144092,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 450,
+                "time": 6.333333333333333,
+                "clock": 6.3631321663452285,
+                "presented": 9,
+                "pixels": 2607488344,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 483,
+                "time": 6.375,
+                "clock": 6.396676416323378,
+                "presented": 10,
+                "pixels": 368180627,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 534,
+                "time": 6.416666666666667,
+                "clock": 6.446910041652968,
+                "presented": 11,
+                "pixels": 1726399336,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 567,
+                "time": 6.458333333333333,
+                "clock": 6.480859916663844,
+                "presented": 12,
+                "pixels": 2760434196,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 617,
+                "time": 6.5,
+                "clock": 6.531217291660219,
+                "presented": 13,
+                "pixels": 3684399607,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 667,
+                "time": 6.541666666666667,
+                "clock": 6.580747583328126,
+                "presented": 14,
+                "pixels": 780606274,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 684,
+                "time": 6.583333333333333,
+                "clock": 6.597318333311783,
+                "presented": 15,
+                "pixels": 3286310020,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 734,
+                "time": 6.625,
+                "clock": 6.647685042024603,
+                "presented": 16,
+                "pixels": 1083979901,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 784,
+                "time": 6.666666666666667,
+                "clock": 6.697583500349209,
+                "presented": 17,
+                "pixels": 4290745053,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 833,
+                "time": 6.708333333333333,
+                "clock": 6.747420542003398,
+                "presented": 18,
+                "pixels": 582910349,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 868,
+                "time": 6.75,
+                "clock": 6.781680958668745,
+                "presented": 19,
+                "pixels": 3850181365,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 901,
+                "time": 6.791666666666667,
+                "clock": 6.814029791345581,
+                "presented": 20,
+                "pixels": 2539411387,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 934,
+                "time": 6.833333333333333,
+                "clock": 6.847806707996403,
+                "presented": 21,
+                "pixels": 3060317761,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1000,
+                "time": 6.875,
+                "clock": 6.914169707990739,
+                "presented": 22,
+                "pixels": 3779714039,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1035,
+                "time": 6.916666666666667,
+                "clock": 6.948137874671746,
+                "presented": 23,
+                "pixels": 46365459,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1067,
+                "time": 6.958333333333333,
+                "clock": 6.9810619579951965,
+                "presented": 24,
+                "pixels": 766634610,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1118,
+                "time": 7,
+                "clock": 7.030942375005306,
+                "presented": 25,
+                "pixels": 3770275777,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1167,
+                "time": 7.041666666666667,
+                "clock": 7.08036437501627,
+                "presented": 26,
+                "pixels": 3283671048,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1201,
+                "time": 7.083333333333333,
+                "clock": 7.114316916326301,
+                "presented": 27,
+                "pixels": 1298323306,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1234,
+                "time": 7.125,
+                "clock": 7.147515666322091,
+                "presented": 28,
+                "pixels": 2016487229,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1268,
+                "time": 7.166666666666667,
+                "clock": 7.182306083006791,
+                "presented": 29,
+                "pixels": 1521296552,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1317,
+                "time": 7.208333333333333,
+                "clock": 7.232228583652188,
+                "presented": 30,
+                "pixels": 3908119315,
+                "width": 640,
+                "height": 360
+              }
+            ],
+            "started": 80,
+            "firstFrameMs": 20,
+            "firstError": 0,
+            "maxClockError": 0.039169707990739155,
+            "reversals": 0,
+            "uniquePixels": 30,
+            "pass": true
+          },
+          {
+            "name": "forward",
+            "target": 18,
+            "frames": [
+              {
+                "wall": 1417,
+                "time": 18.041666666666668,
+                "clock": 18.070785499313587,
+                "presented": 31,
+                "pixels": 1273166753,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1467,
+                "time": 18.083333333333332,
+                "clock": 18.120394082680125,
+                "presented": 32,
+                "pixels": 4181888406,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1517,
+                "time": 18.125,
+                "clock": 18.17007133268473,
+                "presented": 33,
+                "pixels": 2169135016,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1551,
+                "time": 18.166666666666668,
+                "clock": 18.204163915999946,
+                "presented": 34,
+                "pixels": 3319974365,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1584,
+                "time": 18.208333333333332,
+                "clock": 18.23783879099295,
+                "presented": 35,
+                "pixels": 2560563892,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1634,
+                "time": 18.25,
+                "clock": 18.28690887432543,
+                "presented": 36,
+                "pixels": 713497829,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1668,
+                "time": 18.291666666666668,
+                "clock": 18.321311874349767,
+                "presented": 37,
+                "pixels": 1235929243,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1717,
+                "time": 18.333333333333332,
+                "clock": 18.370633207674537,
+                "presented": 38,
+                "pixels": 3722058598,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1751,
+                "time": 18.375,
+                "clock": 18.405071499355536,
+                "presented": 39,
+                "pixels": 167779075,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1801,
+                "time": 18.416666666666668,
+                "clock": 18.454353958311458,
+                "presented": 40,
+                "pixels": 4059741855,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1834,
+                "time": 18.458333333333332,
+                "clock": 18.48732554164735,
+                "presented": 41,
+                "pixels": 2934191532,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1884,
+                "time": 18.5,
+                "clock": 18.537168124650947,
+                "presented": 42,
+                "pixels": 3569445191,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 1934,
+                "time": 18.541666666666668,
+                "clock": 18.587952124671887,
+                "presented": 43,
+                "pixels": 2930981049,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2001,
+                "time": 18.625,
+                "clock": 18.65359479167819,
+                "presented": 45,
+                "pixels": 1880383235,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2051,
+                "time": 18.666666666666668,
+                "clock": 18.703696041680818,
+                "presented": 46,
+                "pixels": 2605180951,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2100,
+                "time": 18.708333333333332,
+                "clock": 18.75352924967127,
+                "presented": 47,
+                "pixels": 161471926,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2134,
+                "time": 18.75,
+                "clock": 18.786698499675264,
+                "presented": 48,
+                "pixels": 2673310095,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2168,
+                "time": 18.791666666666668,
+                "clock": 18.82214162432791,
+                "presented": 49,
+                "pixels": 3428862458,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2217,
+                "time": 18.833333333333332,
+                "clock": 18.870943332654118,
+                "presented": 50,
+                "pixels": 3096168262,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2267,
+                "time": 18.875,
+                "clock": 18.9206034163494,
+                "presented": 51,
+                "pixels": 2544747397,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2300,
+                "time": 18.916666666666668,
+                "clock": 18.95425299966744,
+                "presented": 52,
+                "pixels": 2903444850,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2333,
+                "time": 18.958333333333332,
+                "clock": 18.987085208018904,
+                "presented": 53,
+                "pixels": 497197155,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2383,
+                "time": 19,
+                "clock": 19.037213499340044,
+                "presented": 54,
+                "pixels": 800548101,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2433,
+                "time": 19.041666666666668,
+                "clock": 19.0883472493466,
+                "presented": 55,
+                "pixels": 1277301613,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2466,
+                "time": 19.083333333333332,
+                "clock": 19.12156549999689,
+                "presented": 56,
+                "pixels": 2954747321,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2500,
+                "time": 19.125,
+                "clock": 19.15550012500806,
+                "presented": 57,
+                "pixels": 1313367295,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2534,
+                "time": 19.166666666666668,
+                "clock": 19.18710083335371,
+                "presented": 58,
+                "pixels": 1508230043,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2584,
+                "time": 19.208333333333332,
+                "clock": 19.238525957681833,
+                "presented": 59,
+                "pixels": 2863707560,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2634,
+                "time": 19.25,
+                "clock": 19.288268291010883,
+                "presented": 60,
+                "pixels": 682438630,
+                "width": 640,
+                "height": 360
+              },
+              {
+                "wall": 2667,
+                "time": 19.291666666666668,
+                "clock": 19.32169820764995,
+                "presented": 61,
+                "pixels": 221230341,
+                "width": 640,
+                "height": 360
+              }
+            ],
+            "started": 1351,
+            "firstFrameMs": 66,
+            "firstError": 0.04166666666666785,
+            "maxClockError": 0.046680582679933025,
+            "reversals": 0,
+            "uniquePixels": 30,
+            "pass": true
+          }
+        ]
+      }
+    ],
+    "events": [
+      {
+        "event": "seeking",
+        "time": 6,
+        "wall": 32
+      },
+      {
+        "event": "seeked",
+        "time": 6,
+        "wall": 56
+      },
+      {
+        "event": "playing",
+        "time": 6,
+        "wall": 80,
+        "stage": "cold-mid"
+      },
+      {
+        "event": "seeking",
+        "time": 18,
+        "wall": 1325
+      },
+      {
+        "event": "seeked",
+        "time": 18,
+        "wall": 1343
+      },
+      {
+        "event": "playing",
+        "time": 18,
+        "wall": 1351,
+        "stage": "forward"
+      }
+    ],
+    "callbackCount": 60,
+    "pass": true
+  },
+  "owned_document_close_requested": true,
+  "server_closed": true,
+  "harness_sha256": "eaf7871d426bd02f89ba190b32d934e25bb7c2003c1c4f1de258d43d2d58df18"
+}

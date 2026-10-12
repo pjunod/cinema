@@ -1,0 +1,194 @@
+{
+  "schema": 1,
+  "date": "2026-10-12",
+  "status": "Autonomous device validation complete; physical Main10 on Google TV and tvOS simulator accepted, TCL Main10 unavailable by advertised decoder profile",
+  "scope": "Finite isolated native-framework probes, not shipping-client UI or physical display photometry/audio synchronization",
+  "physical_inventory": {
+    "apple_mobile": "Five paired phones/tablets all report passcodeRequired=true; no unlock attempted",
+    "apple_tv": "Paired Apple TV 4K unlocked; existing shipping and foreign lab player processes, no reliable read-only idle/playback indication. Not interrupted.",
+    "android_pixel": "Existing Plurx PLAYING session: excluded",
+    "android_motorola": "Dozing, NotificationShade: excluded",
+    "android_tcl": "9445X, Android16, already awake/unlocked, no active media. Qualification admitted before each case.",
+    "android_tv": "Google TV Streamer, already awake/unlocked, media NONE/error only. Qualification admitted before each case."
+  },
+  "results": [
+    {
+      "receipt": "tcl-sdr-bf0.json",
+      "result": "pass",
+      "decoder": "c2.qti.avc.decoder",
+      "phases_passed": 4,
+      "observed_frames": 244,
+      "maximum_video_to_player_clock_seconds": 0.05600000000000005,
+      "focus_restored": true,
+      "cleanup": {
+        "uninstall_result": "Success",
+        "package_absent": true,
+        "owned_reverse_absent": true
+      }
+    },
+    {
+      "receipt": "tcl-sdr-bf2.json",
+      "result": "pass",
+      "decoder": "c2.qti.avc.decoder",
+      "phases_passed": 4,
+      "observed_frames": 244,
+      "maximum_video_to_player_clock_seconds": 0.04633300000000018,
+      "focus_restored": true,
+      "cleanup": {
+        "uninstall_result": "Success",
+        "package_absent": true,
+        "owned_reverse_absent": true
+      }
+    },
+    {
+      "receipt": "google-tv-sdr-bf0.json",
+      "result": "pass",
+      "decoder": "c2.mtk.avc.decoder",
+      "phases_passed": 4,
+      "observed_frames": 245,
+      "maximum_video_to_player_clock_seconds": 0.03633299999999995,
+      "focus_restored": true,
+      "cleanup": {
+        "uninstall_result": "Success",
+        "package_absent": true,
+        "owned_reverse_absent": true
+      }
+    },
+    {
+      "receipt": "google-tv-sdr-bf2.json",
+      "result": "pass",
+      "decoder": "c2.mtk.avc.decoder",
+      "phases_passed": 4,
+      "observed_frames": 244,
+      "maximum_video_to_player_clock_seconds": 0.0519999999999996,
+      "focus_restored": true,
+      "cleanup": {
+        "uninstall_result": "Success",
+        "package_absent": true,
+        "owned_reverse_absent": true
+      }
+    },
+    {
+      "receipt": "tcl-hdr-baseline-pq.json",
+      "result": "fail",
+      "failure": "ERROR_CODE_DECODING_FAILED: MediaCodecVideoRenderer error, index=0, format=Format(null, null, video/mp4, video/hevc, hvc1.2.4.H120.B0, 77959, und, [1920, 1080, -1.0, ColorInfo(BT2020, Limited range, ST2084 PQ, false, 10bit Luma, 10bit Chroma)], [-1, -1]), format_supported=NO_EXCEEDS_CAPABILITIES",
+      "decoder": "c2.qti.hevc.decoder",
+      "phases_passed": 0,
+      "observed_frames": 0,
+      "focus_restored": true,
+      "cleanup": {
+        "force_stop": "",
+        "uninstall_result": "Success",
+        "package_absent": true,
+        "remove_reverse": "",
+        "owned_reverse_absent": true
+      }
+    },
+    {
+      "receipt": "google-tv-hdr-baseline-pq.json",
+      "result": "pass",
+      "failure": null,
+      "decoder": "c2.mtk.hevc.decoder",
+      "phases_passed": 4,
+      "observed_frames": 245,
+      "maximum_video_to_player_clock_seconds": 0.058667000000000025,
+      "focus_restored": true,
+      "cleanup": {
+        "force_stop": "",
+        "uninstall_result": "Success",
+        "package_absent": true,
+        "remove_reverse": "",
+        "owned_reverse_absent": true
+      }
+    },
+    {
+      "receipt": "google-tv-hdr-vbaq-pq.json",
+      "result": "pass",
+      "failure": null,
+      "decoder": "c2.mtk.hevc.decoder",
+      "phases_passed": 4,
+      "observed_frames": 245,
+      "maximum_video_to_player_clock_seconds": 0.061332999999999416,
+      "focus_restored": true,
+      "cleanup": {
+        "force_stop": "",
+        "uninstall_result": "Success",
+        "package_absent": true,
+        "remove_reverse": "",
+        "owned_reverse_absent": true
+      }
+    },
+    {
+      "receipt": "tvos-hdr-baseline-pq.json",
+      "result": "pass",
+      "failure": null,
+      "decoder": null,
+      "phases_passed": 4,
+      "observed_frames": 244,
+      "maximum_video_to_player_clock_seconds": 0.02133333333333276
+    },
+    {
+      "receipt": "tvos-hdr-vbaq-pq.json",
+      "result": "pass",
+      "failure": null,
+      "decoder": null,
+      "phases_passed": 4,
+      "observed_frames": 244,
+      "maximum_video_to_player_clock_seconds": 0.02133333333333276
+    }
+  ],
+  "limits": [
+    "Authored SDR fixture deliberately used for decoder/timestamp/pixel control; ffprobe and Media3 show missing primaries/transfer tags, no SDR color metadata acceptance claim.",
+    "Audio track selected but own player muted; no audible output or physical A/V sync measurement.",
+    "PixelCopy proves actual composed Surface pixels, not panel photometry.",
+    "Probe activity auto-finishes; every completed case returned to the exact prior Plurx window. No shipping app was stopped or cleared."
+  ],
+  "failures_retained": [
+    "tcl-sdr-bf0-setup-attempt1.json: absent pm path returns exit1, launcher corrected; no app installed or playback started.",
+    "google-tv-sdr-bf0-setup-attempt1.json: streamed install exceeded20s; package absence verified. Bounded60s nonstreaming retry succeeded.",
+    "tcl-hdr-baseline-untagged-attempt1.json: decoder failure beforeframes on incomplete tagged fixture; static pixel contrast criterion not yet added, no pass claimed.",
+    "tcl-hdr-baseline-pq.json: corrected10bitPQ still unsupported; actual codec capability list establishes missingMain10profile."
+  ],
+  "hdr_metadata": "Initial raw-input fixture lacked primaries/transfer. SPS-only VUI repair from the known analytical BT2020/PQ source left VCL payloads, decoded raw pixels and all576 frame PTS unchanged. Corrected device format receipts show10bit BT2020 and ST2084PQ. This repair is qualification packaging, not an application runtime change.",
+  "tcl_main10_limit": "The physical c2.qti.hevc.decoder advertises profiles1(HEVCMain) and4(MainStill), no2(Main10) or4096(Main10HDR10). 1920x1080@24 size admission is true but profile is absent. Correctly tagged baseline fails beforeframes; candidate with identicalMain10 profile is not attempted. Do not route Main10 to this device based solely on HEVC support.",
+  "cleanup": {
+    "all_physical_owned_packages_and_reverse_ports_removed": true,
+    "original_foreground_restored_every_physical_case": true,
+    "owned_tvos_simulator_deleted": true,
+    "owned_sdr_and_hdr_http_servers_stopped": true,
+    "no_foreign_app_stop_clear_or_settings_mutation": true
+  },
+  "final_apple_mobile_admission_recheck": [
+    {
+      "device_class": "phone-air",
+      "query_exit": 0,
+      "passcode_required": true,
+      "unlocked_since_boot": true
+    },
+    {
+      "device_class": "phone-pro-max",
+      "query_exit": 0,
+      "passcode_required": true,
+      "unlocked_since_boot": true
+    },
+    {
+      "device_class": "phone-pro",
+      "query_exit": 0,
+      "passcode_required": true,
+      "unlocked_since_boot": true
+    },
+    {
+      "device_class": "tablet-mini",
+      "query_exit": 0,
+      "passcode_required": true,
+      "unlocked_since_boot": true
+    },
+    {
+      "device_class": "tablet-pro",
+      "query_exit": 0,
+      "passcode_required": true,
+      "unlocked_since_boot": true
+    }
+  ],
+  "apple_counter_correction": "Count static spatial contrast only after target-floor/reversal admission. Initial captures (zero floor exclusions, already nonuniform) are retained as compressed attempt1; only the two affected Apple cases recaptured with final source."
+}

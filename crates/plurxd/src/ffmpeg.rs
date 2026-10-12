@@ -2007,7 +2007,8 @@ static DOVI_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::co
 static DOVI_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static HDR10_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static HDR10_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
-static HDR10_PASSTHROUGH_VAAPI: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+static HDR10_PASSTHROUGH_VAAPI: [tokio::sync::OnceCell<bool>; 2] =
+    [const { tokio::sync::OnceCell::const_new() }; 2];
 static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
     tokio::sync::OnceCell::const_new();
 static ENCODED_PROCESS_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -4107,8 +4108,10 @@ pub async fn has_hdr10_passthrough_qsv() -> bool {
 
 /// Plain PQ/BT.2020 scale and P010 upload into the VAAPI Main10 encoder.
 /// This proof does not advertise Dolby RPU processing or 4K throughput.
-pub async fn has_hdr10_passthrough_vaapi() -> bool {
-    *HDR10_PASSTHROUGH_VAAPI
+pub async fn has_hdr10_passthrough_vaapi(
+    policy: Option<plurx_core::transcode::VaapiHdrPolicy>,
+) -> bool {
+    *HDR10_PASSTHROUGH_VAAPI[usize::from(policy.is_some())]
         .get_or_init(|| async {
             let encoder = Encoder::Vaapi;
             let (width, height) = HARDWARE_ENCODE_PROOF_RASTER;
@@ -4138,6 +4141,7 @@ pub async fn has_hdr10_passthrough_vaapi() -> bool {
                     false,
                     None,
                 ))
+                .args(policy.into_iter().flat_map(|policy| policy.flags()))
                 .args(["-bf", "0", "-f", "null", "-"]);
             tokio::time::timeout(
                 Duration::from_secs(20),

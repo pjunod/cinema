@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "case": "tcl-hdr-baseline",
+  "apk_sha256": "b1a07febb57717c7163f7d4223544a193556184b38b9c7ea3240b769937aade3",
+  "started_utc": "2026-10-12T16:46:02Z",
+  "cleanup": {
+    "force_stop": "",
+    "uninstall_result": "Success",
+    "package_absent": true,
+    "remove_reverse": "",
+    "owned_reverse_absent": true
+  },
+  "preflight_media_states": [
+    "ERROR(7)"
+  ],
+  "keyguard_not_showing": true,
+  "focus_before": [
+    "mCurrentFocus=Window{cdbd16b u0 tv.plurx.app/tv.plurx.app.MainActivity}"
+  ],
+  "probe": {
+    "schema": 1,
+    "case": "tcl-hdr-baseline",
+    "runtime": "Media3 1.10.1 isolated probe on physical Android device",
+    "os": "16",
+    "result": "fail",
+    "failure": "ERROR_CODE_DECODING_FAILED: MediaCodecVideoRenderer error, index=0, format=Format(null, null, video/mp4, video/hevc, hvc1.2.4.H120.B0, 78355, und, [1920, 1080, -1.0, ColorInfo(Unset color space, Limited range, Unset color transfer, false, 10bit Luma, 10bit Chroma)], [-1, -1]), format_supported=NO_EXCEEDS_CAPABILITIES",
+    "phases": [],
+    "observations": [],
+    "initial_floor_exclusions": 0,
+    "decoder": "c2.qti.hevc.decoder",
+    "formats": [],
+    "muted": true,
+    "model": "9445X",
+    "manufacturer": "TCL",
+    "expect_motion": false,
+    "scope": "Native codec and actual Surface pixels, timestamp progression, seeks and fresh-player restart. Audio selection and player clock measured; physical output A/V sync is not measured."
+  },
+  "focus_after": [
+    "mCurrentFocus=Window{cdbd16b u0 tv.plurx.app/tv.plurx.app.MainActivity}"
+  ],
+  "finished_utc": "2026-10-12T16:46:09Z"
+}
