@@ -629,7 +629,7 @@ impl Hub {
         self.changed.notify_waiters();
     }
     #[cfg(test)]
-    async fn delay_authority_read(&self) {
+    pub(super) async fn delay_authority_read(&self) {
         tokio::time::sleep(Duration::from_millis(
             self.authority_read_delay_ms
                 .load(std::sync::atomic::Ordering::Relaxed),

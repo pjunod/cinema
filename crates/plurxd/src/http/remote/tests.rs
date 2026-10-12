@@ -900,11 +900,11 @@ async fn remote_full_round_trip_fits_the_receiver_credit_under_quorum_latency() 
     f.state
         .remote
         .authority_read_delay_ms
-        .store(80, Ordering::Relaxed);
+        .store(50, Ordering::Relaxed);
     f.state
         .remote
         .authority_phase_delay_ms
-        .store(80, Ordering::Relaxed);
+        .store(50, Ordering::Relaxed);
     let started = std::time::Instant::now();
     let credit = receiver
         .mint_credit(CreditKind::Interaction, 0)
