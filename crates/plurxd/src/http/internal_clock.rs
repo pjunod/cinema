@@ -509,6 +509,30 @@ mod causal_tests {
                     .state_generation
             );
 
+            // The changed origin reached that round through the observer's
+            // held roster proof: the leader's applied index moved and its own
+            // replica's roster, which must agree with the consistent read,
+            // no longer matched the proof.
+            let directory = |roster: &plurx_core::cluster::membership::ClockPeerRoster| {
+                roster
+                    .peers
+                    .iter()
+                    .map(|peer| (peer.node_id.clone(), peer.raft_id, peer.http_base.clone()))
+                    .collect::<Vec<_>>()
+            };
+            let proved = leader.clock_peers().await.expect("consistent clock roster");
+            let hinted = leader
+                .clock_peers_hint()
+                .await
+                .expect("replica clock roster");
+            assert_eq!(hinted.membership, proved.membership);
+            assert_eq!(directory(&hinted), directory(&proved));
+            assert!(directory(&hinted).contains(&(
+                learner_id.clone(),
+                token.raft_id,
+                Some(alternate_origin.clone())
+            )));
+
             // 2026-10-10 incident: a stepped learner. With enforcement on,
             // the leader measures it ~10 s ahead, yet its expiry scan still
             // runs (the cluster-wide bound is over voters only), the

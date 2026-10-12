@@ -151,6 +151,18 @@ pub use scan_identity_repair::{
 
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite;
+/// The replicated auth schema (`settings`, `users`, `tokens`, ...) the cluster
+/// bootstrap installs, for tests that run production SQL against the
+/// production table definitions.
+#[cfg(all(test, feature = "hiqlite-store"))]
+pub(crate) fn replicated_auth_schema() -> &'static str {
+    hiqlite::AUTH_SCHEMA
+}
+/// The replicated `media_sessions` declaration, for the same tests.
+#[cfg(all(test, feature = "hiqlite-store"))]
+pub(crate) fn replicated_media_sessions_schema() -> &'static str {
+    hiqlite_sessions::MEDIA_SESSIONS_SCHEMA
+}
 #[cfg(feature = "hiqlite-store")]
 #[doc(hidden)]
 pub use hiqlite::validation_time_http_store_operation;
@@ -6774,6 +6786,62 @@ impl CatalogueReader {
             return Ok(result);
         }
         self.authority.get_file_probe_json(file_id).await
+    }
+
+    /// Settings that only choose how a page presents catalogue rows — the
+    /// item page's track-language defaults and its Dolby Vision conversion
+    /// badge — in one read behind the catalogue bound. Every setting that
+    /// gates work, authentication or a mutation stays an Authority read on
+    /// [`Store`] (BOUNDED-REPLICA-READS-ROLLOUT.md §4); the handler inventory
+    /// pins which handlers call this.
+    pub async fn display_settings(
+        &self,
+        keys: &[&str],
+    ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let owned: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+            if let Some(result) = self
+                .bounded(move |store| async move {
+                    let keys: Vec<&str> = owned.iter().map(String::as_str).collect();
+                    store.local_get_settings(&keys).await
+                })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority.get_settings(keys).await
+    }
+
+    /// [`ClusterFragmentIndexStore::cluster_fragment_index_availability`]
+    /// behind the catalogue bound. Item detail asks it for the identities its
+    /// node-local index projection does not hold; the answer only chooses a
+    /// badge, and playback's own source open stays authoritative, so a replica
+    /// within the lag budget is as good an answer as the leader's.
+    pub async fn cluster_fragment_index_availability(
+        &self,
+        node_id: &str,
+        probes: &[ClusterIndexAvailabilityProbe],
+    ) -> Result<Vec<bool>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        {
+            let node = node_id.to_owned();
+            let batch = probes.to_vec();
+            if let Some(result) = self
+                .bounded(move |store| async move {
+                    store
+                        .local_cluster_fragment_index_availability(&node, &batch)
+                        .await
+                })
+                .await
+            {
+                return Ok(result);
+            }
+        }
+        self.authority
+            .cluster_fragment_index_availability(node_id, probes)
+            .await
     }
 }
 

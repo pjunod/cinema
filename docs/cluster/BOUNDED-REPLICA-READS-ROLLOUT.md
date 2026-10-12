@@ -40,6 +40,31 @@ says missing or zero is off, while the effective default is on
 2026-10-04 close-out PR replaces the comment; the behaviour described in this
 plan is the `config.rs` default.
 
+**2026-10-11 correction — the item page's Authority reads (lab drill F5).**
+A three-voter drill measured `item` at 3 Authority reads per request with a
+fresh `X-Plurx-Read-After` and 4 without it, against §5.5's bar of 1. The two
+reads beyond authentication were not watch state and not the fragment-index
+status projection (that reads the node-local `telemetry.db` and is no Store
+read at all): they were `TranscodeManager::lang_prefs` (`get_settings`) and
+`dv_convert_enabled` (`get_setting`), both consistent reads of settings that
+only choose how the page presents its rows. The cluster-artefact fallback
+(`cluster_fragment_index_availability`) adds two more consistent statements
+whenever a stat-proven identity is missing from the node-local index. Both
+now go through the reader: `CatalogueReader::display_settings` (one read of
+the four item-page keys; settings that gate work stay Authority per §4) and
+`CatalogueReader::cluster_fragment_index_availability`. The handler inventory
+pins both, the bounded/Authority parity contract covers both, and
+`http::browse::tests::browse_routes_meet_the_k04_authority_bar_on_a_replicated_voter`
+measures the route accounting on a real replicated voter with its passive
+sampler running. Handler Authority reads, to which authentication adds one:
+with a fresh echo, item, library, Home previews and Home hubs make **0** each
+(route total 1); without one, item 1, library 1, previews 1 and hubs 2 (route
+totals 2, 2, 2, 3). The header-less counts are §3.3's design — every watch
+read is Authority without the echo — so for Apple and Android, and for the
+web more than 60 s after a write, `library`/`item` stay at 2 against a bar of
+1 and Home hubs at 3 against 2. Whether the native clients adopt the echo or
+the bar is restated for header-less clients is §7 Q1, Paul's ruling.
+
 **Correction to the review:** none on the facts. Two clarifications the
 plan depends on. First, `search_items` is already a local read on hiqlite
 (`query_map`, [hiqlite_media.rs:2160-2166](../../crates/plurx-core/src/store/hiqlite_media.rs));
@@ -227,7 +252,8 @@ side by side — the assessment's "store-call duration is not page latency".
 
 Add to `CatalogueReader` the reads that are catalogue facts, not per-user
 state. `item_detail`'s fragment-index summary is C14's item and is not
-moved here. What is left on `state.store` that is a pure catalogue read:
+moved here (it is node-local, not a Store read; the item page's settings and
+cluster-artefact reads did move, 2026-10-11 — see the correction at the top). What is left on `state.store` that is a pure catalogue read:
 `plex.rs:350,382,395` (`get_item(..).is_some()` existence checks before
 Plex timeline/scrobble handlers — these precede a mutation and stay
 Authority; the inventory test already pins two of them) and
