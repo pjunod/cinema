@@ -1863,6 +1863,29 @@ function queuePlaybackFrame(v,p,callback,renewingSeek=false){
   ready();
 }
 const HITCH_LIFECYCLE_BOUNDARIES=new WeakMap();
+// The first proof that a newly attached stream is presenting is taken on the
+// frames themselves, not on the next half-second sampling tick. The evidence is
+// unchanged: `playbackProgressTick` still needs the film clock and the presented
+// frame count to advance between two of its own samples. Only the cadence
+// differs: left to the timer, those two samples land 500 to 1000 ms after the
+// picture is already moving, and the "Preparing the stream" scrim and the HLS
+// time-to-first-frame stamp both wait for them. The frame call can only record
+// that proof; everything else the tick does stays on the timer. Once this
+// attachment has presented, or after one second without proof, the timer is
+// the only sampler again, so a stream that never presents is diagnosed exactly
+// as before.
+const STARTUP_EVIDENCE_WINDOW_MS=1000;
+function sampleStartupPresentation(v,p){
+  if(!p.started||v.paused||v.seeking||p.controlSeek) return;
+  const now=performance.now();
+  let owed=p.startupEvidence;
+  if(!owed||owed.attachment!==p.mediaAttachment)
+    owed=p.startupEvidence={attachment:p.mediaAttachment,since:now,done:false};
+  if(owed.done) return;
+  if(now-owed.since>STARTUP_EVIDENCE_WINDOW_MS){owed.done=true;return;}
+  playbackProgressTick(v,p,true);
+  if(p.presentationAdvancedAt!=null&&p.presentationAdvancedAt>=owed.since) owed.done=true;
+}
 function armHitchDetector(v){
   const p=PLAYER; if(!p) return;
   p.controlHasFrameCallbacks=!!v.requestVideoFrameCallback;
@@ -1979,6 +2002,7 @@ function armHitchDetector(v){
     if(epoch===(p.controlPresentationEpoch||0))
       settlePlaybackControlSeek(v,p,meta.mediaTime,p.controlPresentedFrames,observation);
     p.hitches.frames++;
+    sampleStartupPresentation(v,p);
     if(v.paused || v.seeking){
       // Clear the MEASUREMENT with the window: a rate left standing after a
       // seek is last session's number wearing this one's label, and the

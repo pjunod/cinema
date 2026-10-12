@@ -118,6 +118,10 @@ test("future callback metadata cannot seed false backward hitches or erase real 
      // The detector's per-element pause/play boundary registry is module state
      // beside it, like the constants above.
      const HITCH_LIFECYCLE_BOUNDARIES=new WeakMap();
+     // The frame-driven first presentation sample stands down for a player
+     // that has not started, which is this harness's player throughout.
+     const STARTUP_EVIDENCE_WINDOW_MS=1000;
+     ${shippedSource('sampleStartupPresentation')}
      ${shippedSource('armHitchDetector')}
      // The slice keeps the comment block that trails the declaration, so the
      // call must start on its own line or it is commented out.

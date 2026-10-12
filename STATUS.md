@@ -4,6 +4,10 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Playback startup path: the per-read stall and the web scrim
+
+**Branch `effort/startup-read-path`, in a draft pull request; not deployed.** Two fixes: consistent reads on a cluster no longer wait 40 ms each on a delayed ACK (44.0 ms to 1.7 ms per read on three-voter TLS loopback; a start makes about forty), and the web scrim clears about two frames after playback starts instead of 500 to 1000 ms later. Fleet effect unmeasured. The remaining waits, ranked with owners, are in [PLAYBACK-STARTUP-PATH-FINDINGS.md](docs/streaming/PLAYBACK-STARTUP-PATH-FINDINGS.md); its §5 client waits are unowned.
+
 ## Startup and tone-map: fewer create-path reads, a tone-map census, lab arms
 
 **Branch `effort/startup-tone-map`.** Executes

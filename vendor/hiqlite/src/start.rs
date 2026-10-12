@@ -4,6 +4,9 @@ use crate::network::{api, management};
 use crate::{CacheVariants, Client, Error, NodeConfig, init, split_brain_check, store};
 use axum::Router;
 use axum::routing::{get, post};
+use axum::serve::ListenerExt;
+use axum_server::accept::NoDelayAcceptor;
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use chrono::Utc;
 use std::collections::BTreeSet;
 use std::fmt::Debug;
@@ -19,6 +22,25 @@ use tracing::{debug, info};
 use crate::backup;
 #[cfg(feature = "dashboard")]
 use crate::dashboard;
+
+// PLURX-PATCH: accepted cluster sockets disable Nagle.
+//
+// A node answers the WebSocket upgrade and then writes its handshake challenge
+// as a second small segment. With Nagle on, that segment waits for the ACK of
+// the first, and the connecting peer, which has nothing to send until it has
+// read the challenge, delays that ACK (40 ms on Linux). OpenRaft opens a new
+// stream to every other voter for each linearizable-read leadership check, so
+// every consistent read paid the stall. Both listener shapes below are the
+// only ones `start_node` serves the Raft and API ports with.
+fn nodelay_tls_acceptor(config: RustlsConfig) -> RustlsAcceptor<NoDelayAcceptor> {
+    RustlsAcceptor::new(config).acceptor(NoDelayAcceptor::new())
+}
+
+fn set_accepted_nodelay(stream: &mut tokio::net::TcpStream) {
+    if let Err(error) = stream.set_nodelay(true) {
+        debug!("failed to set TCP_NODELAY on an accepted cluster stream: {error}");
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartupPhase {
@@ -265,7 +287,9 @@ where
     if let Some(config) = &node_config.tls_raft {
         let config = config.server_config(&node_config.listen_addr_raft).await;
         let handle = axum_server::Handle::new();
-        let server = axum_server::from_tcp_rustls(listener_raft, config)?.handle(handle.clone());
+        let server = axum_server::from_tcp(listener_raft)?
+            .acceptor(nodelay_tls_acceptor(config))
+            .handle(handle.clone());
         let task = task::spawn(Box::pin(async move {
             // TODO find a way to do a graceful shutdown with `axum_server` or to handle TLS
             //  properly with axum directly
@@ -277,7 +301,9 @@ where
         startup_tasks.track_listener(task, handle);
     } else if startup_tasks.enabled {
         let handle = axum_server::Handle::new();
-        let server = axum_server::from_tcp(listener_raft)?.handle(handle.clone());
+        let server = axum_server::from_tcp(listener_raft)?
+            .acceptor(NoDelayAcceptor::new())
+            .handle(handle.clone());
         let task = task::spawn(async move {
             server
                 .serve(router_internal.into_make_service())
@@ -286,7 +312,7 @@ where
         });
         startup_tasks.track_listener(task, handle);
     } else {
-        let listener = TcpListener::from_std(listener_raft)?;
+        let listener = TcpListener::from_std(listener_raft)?.tap_io(set_accepted_nodelay);
         let task = task::spawn(Box::pin(async move {
             axum::serve(listener, router_internal.into_make_service())
                 .with_graceful_shutdown(shutdown)
@@ -367,7 +393,9 @@ where
     if let Some(config) = &node_config.tls_api {
         let config = config.server_config(&node_config.listen_addr_api).await;
         let handle = axum_server::Handle::new();
-        let server = axum_server::from_tcp_rustls(listener_api, config)?.handle(handle.clone());
+        let server = axum_server::from_tcp(listener_api)?
+            .acceptor(nodelay_tls_acceptor(config))
+            .handle(handle.clone());
         let task = task::spawn(Box::pin(async move {
             // TODO find a way to do a graceful shutdown with `axum_server` or to handle TLS
             //  properly with axum directly
@@ -376,13 +404,15 @@ where
         startup_tasks.track_listener(task, handle);
     } else if startup_tasks.enabled {
         let handle = axum_server::Handle::new();
-        let server = axum_server::from_tcp(listener_api)?.handle(handle.clone());
+        let server = axum_server::from_tcp(listener_api)?
+            .acceptor(NoDelayAcceptor::new())
+            .handle(handle.clone());
         let task = task::spawn(async move {
             server.serve(router_api.into_make_service()).await.unwrap();
         });
         startup_tasks.track_listener(task, handle);
     } else {
-        let listener = TcpListener::from_std(listener_api)?;
+        let listener = TcpListener::from_std(listener_api)?.tap_io(set_accepted_nodelay);
         let task = task::spawn(Box::pin(async move {
             axum::serve(listener, router_api.into_make_service())
                 .with_graceful_shutdown(shutdown_signal(rx_shutdown))
@@ -516,4 +546,64 @@ fn build_listen_addr(listen_addr: &str, node_addr: &str, tls: bool) -> String {
 
 async fn shutdown_signal(mut rx: tokio::sync::watch::Receiver<bool>) {
     let _ = rx.changed().await;
+}
+
+#[cfg(test)]
+mod nodelay_tests {
+    use super::*;
+    use axum_server::accept::Accept;
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn accepted_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("listener address");
+        let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        (client.expect("connect"), accepted.expect("accept").0)
+    }
+
+    #[tokio::test]
+    async fn accepted_plain_cluster_streams_disable_nagle() {
+        let (_client, mut accepted) = accepted_pair().await;
+        assert!(
+            !accepted.nodelay().expect("read TCP_NODELAY"),
+            "an accepted stream starts with Nagle on, which is what this patch corrects"
+        );
+        set_accepted_nodelay(&mut accepted);
+        assert!(accepted.nodelay().expect("read TCP_NODELAY"));
+
+        let (_client, accepted) = accepted_pair().await;
+        let (accepted, ()) = NoDelayAcceptor::new()
+            .accept(accepted, ())
+            .await
+            .expect("plain cluster acceptor");
+        assert!(accepted.nodelay().expect("read TCP_NODELAY"));
+    }
+
+    #[tokio::test]
+    async fn accepted_tls_cluster_streams_disable_nagle() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = crate::tls::ServerTlsConfig::server_config_self_signed("127.0.0.1").await;
+        let acceptor = nodelay_tls_acceptor(config);
+        let (client, accepted) = accepted_pair().await;
+        assert!(!accepted.nodelay().expect("read TCP_NODELAY"));
+
+        let client = tokio::spawn(crate::tls::into_tls_stream(
+            "127.0.0.1",
+            client,
+            crate::tls::build_tls_config(true),
+        ));
+        let (accepted, ()) = acceptor
+            .accept(accepted, ())
+            .await
+            .expect("TLS cluster acceptor");
+        client
+            .await
+            .expect("client task")
+            .expect("client handshake");
+
+        assert!(
+            accepted.get_ref().0.nodelay().expect("read TCP_NODELAY"),
+            "the TLS acceptor the Raft and API listeners use must disable Nagle"
+        );
+    }
 }

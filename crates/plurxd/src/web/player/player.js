@@ -189,6 +189,7 @@
  * @property {any} [surfaceState]          the presenter's shared state (PLAYBACK_SURFACE)
  * @property {any} [progressWatch]         the presentation-progress watch ({key, clock, frames, at, startedAt, fired})
  * @property {number|null} [presentationAdvancedAt] performance.now() the presented position last advanced
+ * @property {{attachment:any,since:number,done:boolean}|null} [startupEvidence] frame-driven first presentation sample owed to the current attachment
  * @property {number} [stallDeferrals]     times the current wait deferred to the server's verdict
  * @property {number|null} [stallDeferralsAt] the wait began-time those deferrals count against
  *
