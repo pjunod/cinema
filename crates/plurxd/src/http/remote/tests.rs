@@ -876,3 +876,79 @@ async fn remote_parallel_authority_keeps_the_queue_expiry_limit() {
     .await;
     assert_eq!(response["outcomes"][0]["outcome"], "expired");
 }
+
+#[tokio::test]
+async fn remote_full_round_trip_fits_the_receiver_credit_under_quorum_latency() {
+    use plurx_core::remote_control::{CreditKind, Outcome, ReceiverContext, ReceiverGuard};
+    let f = fixture().await;
+    let (gid, secret, epoch) = paired(&f).await;
+    let mut input: plurx_core::remote_control::Command =
+        serde_json::from_value(command(&f, &gid, &epoch, 1)).expect("command");
+    let mut receiver = ReceiverGuard::default();
+    receiver
+        .set_context(ReceiverContext {
+            grant_id: input.grant_id,
+            target: input.target.clone(),
+            control_epoch: input.control_epoch,
+            context_revision: 1,
+            focus_revision: 1,
+            text_nonce: None,
+        })
+        .expect("receiver context");
+    // Model the same one-second local interaction credit used by Apple,
+    // Android and web. Never remint it between publication and dispatch.
+    f.state
+        .remote
+        .authority_read_delay_ms
+        .store(80, Ordering::Relaxed);
+    f.state
+        .remote
+        .authority_phase_delay_ms
+        .store(80, Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    let credit = receiver
+        .mint_credit(CreditKind::Interaction, 0)
+        .expect("credit");
+    input.credit = credit.nonce;
+    let (status, _) = call(&f.app, &f.tv, "POST", "presence", json!({"version":"cinema.remote.v1", "target":f.target,
+        "state":{"state_revision":1,"context_revision":1,"focus_revision":1,"route":"home","capabilities":["select"],
+        "focused_label":"Play","credits":[credit],"text_nonce":null,"playback":null}}),
+        Some(("x-cinema-receiver-secret", &f.receiver_secret))).await;
+    assert_eq!(status, 200);
+    let (status, state) = call(
+        &f.app,
+        &f.phone,
+        "POST",
+        "state",
+        json!({"version":"cinema.remote.v1",
+        "target":f.target,"grant_id":gid,"after_revision":0,"wait_ms":0}),
+        Some(("x-cinema-grant-secret", &secret)),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        state["state"]["credits"][0]["nonce"],
+        credit.nonce.to_string()
+    );
+    let (status, _) = call(
+        &f.app,
+        &f.phone,
+        "POST",
+        "commands",
+        serde_json::to_value(&input).expect("command wire"),
+        Some(("x-cinema-grant-secret", &secret)),
+    )
+    .await;
+    assert_eq!(status, 202);
+    let (status, batch) = poll(&f, 0, 0, 0).await;
+    assert_eq!(status, 200);
+    assert_eq!(batch["commands"].as_array().expect("commands").len(), 1);
+    let delivered =
+        serde_json::from_value(batch["commands"][0].clone()).expect("delivered command");
+    let age = u64::try_from(started.elapsed().as_millis()).expect("credit age");
+    assert_eq!(
+        receiver.apply(&delivered, age, Ok(()), || Outcome::Applied),
+        Outcome::Applied,
+        "credit expired at {age}ms"
+    );
+}

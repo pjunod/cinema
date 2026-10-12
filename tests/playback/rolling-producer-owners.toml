@@ -4507,7 +4507,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # #978: +1, test-only. The prepared-owner catalog regression in chunk_06.rs
 # bounds its own wait with one tokio::time::timeout, so a regression to the
 # 45 s prime deadline fails instead of hanging.
-expected_occurrences = 1727
+# Remote receiver-credit follow-up: +1 cfg(test)-only sleep in
+# Hub::delay_authority_read. Each delayed read is owned by perform/deliver
+# and their joined futures; cancellation drops it. The full request-chain
+# regression keeps one real ReceiverGuard credit. No production timer,
+# detached task, process or longer input deadline is introduced.
+expected_occurrences = 1728
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
