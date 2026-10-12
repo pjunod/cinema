@@ -9963,3 +9963,116 @@ Android TV as the evidence for this change.
 Evidence: `docs/evidence/continuous-browser-2026-10-11/campaign-extract.json`
 holds every manual change of the three runs, the hashes of the full receipts,
 and the `mpstat` and `pidstat` window around Firefox change 12.
+
+### 10.307 · October 12 postmerge hardware acceptance (2026-10-12)
+
+**Scope and ownership.** Resume from the operator's October 12 handoff.
+Implementation and repairs #994, #1020, #1024 and #1029 are merged; #978 is
+closed. There is no remaining implementation branch to revive. Preserve the
+Chrome and Android TV passes. Live chat, worker and process inventories found
+no other general continuous-quality owner. Independent HDR owners confirmed
+their separate scope; their Safari tab and unknown native processes were not
+interrupted. All work uses an independent clone.
+
+**Exact source.** The clone and source-only lab extraction contain
+`1f02b7938a2f3924de6a3969483e38ffe3e8bd6f`. The handed-off scripts referenced
+deleted binaries, so the lab copied the deployed server executable read-only
+into its own directory. The image revision and executable version both match
+that source. Its SHA-256 is
+`a32d4ceeb0e8a07e06bd699d4095ecd2c923389323060e3cf4426beb0a31969b`.
+No production service changed; neither `.git` nor credentials travelled with
+source. Client versions remain Android 165 and Apple 231. These campaigns do
+not require a new production client release.
+
+**Firefox: PASS.** Run the committed
+`scripts/continuous-quality-qualification` against that executable, with
+Firefox and its children on CPUs 0–3,8,9 and the daemon/encoders on
+4–7,10–15. An external 3,000-second supervisor records each owned process's
+PID, parent, start ticks and affinity, plus shared process CPU ticks and load.
+It changes affinity only for descendants of its own campaign, after checking
+birth identity.
+
+- All 15 manual changes passed; video-gap p95 and maximum were 84.04 ms.
+- All 5 actual Auto changes presented 1080/720/1080/720/1080 at fixed
+  100/10/25/10/25 Mb/s.
+- TTFF was 1,801 ms; observed clock rate was 1.000×, with zero hitches and
+  stalls. Session and player identities remained unchanged.
+- End census had 1 exiting producer immediately, then 0 at 1/3/5 seconds.
+  The final process-birth audit found none of the 75 owned processes alive.
+- No sampled owned encoder overlapped the browser CPU set. Maximum one-minute
+  host load was 3.785 on 16 logical CPUs. Two production daemons remained;
+  their peak sampled CPU use was 88.3% of one core. No foreign encoder or Rust
+  compiler appeared in the recorded census.
+
+This resolves the missing callback campaign in §10.306 without waiving a
+limit. It does not identify the cause of the earlier failures or supply an
+optical capture. The report retains `browser_video_partial` evidence scope.
+Raw result SHA-256:
+`f532bce2b3fd06f3e42e0a8c79471b6ef6e814e18ca4e634b6f9a763bb0c6c40`.
+
+**Wireless Android phone: PASS.** The operator explicitly authorized the
+existing physical ADB server on port 5037, and clarified that Android is
+wireless. A paired Pixel 11 Pro XL was awake, unlocked and stopped on an
+existing production error screen. That app and its data were preserved.
+Compile only `:app:assembleCapabilityProbe` from the exact source, then install
+its separate `tv.plurx.app.capabilityprobe` package. No unit suite runs.
+APK SHA-256:
+`ef4e598b57f7811cb742d16e76139ce3ca85c5f461ffcc69d4dd64f096053d07`.
+
+Use ordinary UI to connect to the isolated lab, log into its fabricated
+account, select initial 720p and play the deterministic MPEG4/AAC clock
+fixture. Android 17 requires local-network permission even for manual server
+entry; only the diagnostic package receives that permission. Production
+permissions and pairing remain unchanged.
+
+The bounded actor keeps all credentials on the lab node. Before each UI
+request it records the current accepted hardware probe and arms the next
+numbered target. Acceptance requires a fresh `via=continuous` outcome,
+advancing frame/film counters, the requested actual frame height and a newer
+intent revision in the same family/session. Auto requires an unsuperseded,
+current accepted transaction and unique transaction identity. Errors, stalls,
+new 100 ms frame gaps, nonprogressing frames or owner changes abort the run;
+neither selected UI labels nor retained/fallback outcomes count as delivery.
+
+- All 15 manual 720↔480 changes passed. Request-to-delivery time ranged from
+  12,054 to 14,056 ms; it is preparation latency, not a display gap.
+- Following a fresh automatic 720p presentation, all 5 applied cliffs passed:
+  480/720/480/720/480 at 3/60/3/60/3 Mb/s. This repeats the native fixed-link
+  protocol in §10.305; the browser's 100/10/25 protocol remains separate.
+- One continuous session and family remained active. The family declares
+  video rates 3,000,000 b/s at 480p and 6,000,000 b/s at 720p, plus shared AAC
+  at 160,000 b/s. The 3 Mb/s cliff therefore exercises the cheapest-lower-rung
+  recovery rule when no declared cost fits the link.
+- Observe 32,534 hardware frames: maximum gap 98 ms, zero gaps at or above
+  100 ms, zero nonprogressing frames and zero stalls.
+- Actor and external supervisor exited 0 without timeout. Birth-checked
+  cleanup found none of the 67 owned processes alive. Remove the temporary
+  diagnostic app and read back production Android 165. No pairing or global
+  ADB setting changes were made.
+
+Hardware journal SHA-256:
+`ea9138786ea1bdbc3e45e653f5c5c943a580978b9e71b1466b1a4f8edd18ef92`.
+Disposable actor source SHA-256:
+`e726a9962bb5bc383077011fefb73dd957b6b8bffb30cdce220bc6256bf0021f`.
+Hardware callbacks and client stall observations do not replace independent
+optical or audible-output measurements. After cleanup the wireless ADB list
+and mDNS advertisements were empty; no reconnect, restart or re-pairing was
+attempted, and the completed pass is retained.
+
+**Remaining hardware and installs.** Separate current-source CQ Lab iOS and
+tvOS build-231 apps compile. Both paired iPhones and the tablet with the
+larger display report passcode required. The unlocked smaller tablet has an
+existing production Plurx process. The TV has existing production and older
+CQ Lab build-216 processes, which the HDR owner confirmed were not theirs.
+Leave these processes intact pending an unlock or explicit idle/cleanup
+reply. The independent HDR Safari owner must release its tab before this
+chat uses that lane. HDR phases do not count as a continuous-quality series.
+Physical iPhone/TV and Safari campaigns, unreachable client installs, and the
+broader independent-output/source/pressure limits remain open.
+
+**Infrastructure and policy.** #995 remains open on October 12. Preserve the
+handoff's reports of compiler OOMs, checkout/auth hangs, the offline Apple
+runner, cold-build timeout and moving-main preflight ruling; they have not
+been silently waived or claimed repaired here. This continuation runs no
+unit suites and makes no new implementation merge. Any new reviewed change
+goes to the operator's designated batched-merge chat for final qualification.
