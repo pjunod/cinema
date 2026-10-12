@@ -2,6 +2,28 @@ use super::*;
 use std::path::PathBuf;
 
 #[test]
+fn completed_vaapi_policy_separates_backend_identity_without_leaking_to_other_encoders() {
+    use crate::transcode::{Encoder, VaapiHdrPolicy};
+    let plain = backend();
+    let policy = Some(VaapiHdrPolicy::MesaRadeonsiVbaq);
+    assert_ne!(
+        plain.with_completed_encoder_policy(Encoder::Vaapi, policy),
+        plain
+    );
+    assert_eq!(
+        plain.with_completed_encoder_policy(Encoder::Vaapi, policy),
+        plain.with_completed_encoder_policy(Encoder::Vaapi, policy)
+    );
+    assert_eq!(
+        plain.with_completed_encoder_policy(Encoder::Vaapi, None),
+        plain
+    );
+    for encoder in [Encoder::Software, Encoder::Nvenc] {
+        assert_eq!(plain.with_completed_encoder_policy(encoder, policy), plain);
+    }
+}
+
+#[test]
 fn explicit_export_policy_keeps_native_shapes_and_separates_resampling_identity() {
     let native = (3840, 2160);
     let export = DvExportPolicy::PqBilinearRgb48V1 {

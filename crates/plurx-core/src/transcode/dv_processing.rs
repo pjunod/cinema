@@ -640,6 +640,26 @@ pub struct DvBackendIdentity {
     environment: DvDigest,
 }
 impl DvBackendIdentity {
+    /// A driver-specific completed-output policy changes encoded bytes, while
+    /// the native reconstruction plan and its source decoder remain unchanged.
+    pub fn with_completed_encoder_policy(
+        &self,
+        encoder: super::Encoder,
+        policy: Option<super::VaapiHdrPolicy>,
+    ) -> Self {
+        let mut bound = self.clone();
+        if let (super::Encoder::Vaapi, Some(policy)) = (encoder, policy) {
+            let body = (
+                "plurx.dv.completed-vaapi-policy.v1",
+                &self.graph_patch,
+                policy.recipe_value(),
+            );
+            bound.graph_patch = DvDigest(hex::encode(Sha256::digest(
+                serde_json::to_vec(&body).expect("frozen encoder policy serializes"),
+            )));
+        }
+        bound
+    }
     pub fn parser_identity(&self) -> &DvDigest {
         &self.parser
     }

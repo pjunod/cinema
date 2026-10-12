@@ -1949,7 +1949,9 @@ impl TranscodeManager {
                         worker_encoder, self.hdr10_passthrough_vaapi, &processed_plan, grid);
                     let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
                         source_tick, native_bl, source_clock, preferences,
-                        destination, mode, encoder: processed_encoder, runtime_cache: self.runtime_cache.clone(),
+                        destination, mode, encoder: processed_encoder,
+                        vaapi_hdr_policy: (processed_encoder == Encoder::Vaapi).then_some(self.caps.vaapi_hdr_policy).flatten(),
+                        runtime_cache: self.runtime_cache.clone(),
                         shader_cache: Arc::new(tempfile::Builder::new().prefix("dv-shader-cache-")
                             .tempdir_in(&self.runtime_cache).map_err(|e| e.to_string())?),
                         prepared: std::sync::Mutex::new(None), failure_episode, preparation_budget,

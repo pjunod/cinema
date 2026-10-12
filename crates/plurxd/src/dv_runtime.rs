@@ -467,6 +467,7 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) destination: plurx_core::transcode::dv_processing::DvDestination,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
     pub(crate) encoder: plurx_core::transcode::Encoder,
+    pub(crate) vaapi_hdr_policy: Option<plurx_core::transcode::VaapiHdrPolicy>,
     pub(crate) runtime_cache: PathBuf,
     pub(crate) shader_cache: Arc<tempfile::TempDir>,
     pub(crate) prepared: std::sync::Mutex<Option<(u32, VerifiedWindow)>>,
@@ -669,7 +670,8 @@ impl RuntimeRecipe {
                     .map_err(|e| e.to_string())?;
             let output = plan
                 .completed_reconstructed_output(self.encoder)
-                .ok_or("unsupported reconstructed output encoder")?;
+                .ok_or("unsupported reconstructed output encoder")?
+                .with_vaapi_hdr_policy(self.vaapi_hdr_policy);
             let raster = plan
                 .output_contract()
                 .effective_width()
@@ -763,6 +765,7 @@ impl RuntimeRecipe {
             let backend = self
                 .tools
                 .identity
+                .with_completed_encoder_policy(self.encoder, self.vaapi_hdr_policy)
                 .with_runtime_device(&observed.runtime_device);
             let source_keys: Vec<_> = observed
                 .pictures

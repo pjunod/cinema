@@ -2086,6 +2086,68 @@ mod tests {
     }
 
     #[test]
+    fn reconstructed_vaapi_freezes_proved_driver_policy_on_software_source_plan() {
+        use crate::transcode::*;
+        let (source, plan, execution, _, _) = encoded_recipe_fixture(true);
+        assert_eq!(plan.encoder(), Encoder::Software);
+        let mut caps = EncoderCaps {
+            vaapi: true,
+            vaapi_hdr_policy: Some(VaapiHdrPolicy::MesaRadeonsiVbaq),
+            ..Default::default()
+        };
+        let output = plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .expect("completed VAAPI")
+            .with_vaapi_hdr_policy(caps.vaapi_hdr_policy);
+        let recipe = |output: &CompletedReconstructedOutputPlan<'_>| {
+            vod_completed_reconstructed_pipe_args(
+                &source,
+                output,
+                &execution,
+                VodFrameGrid::new(24, 1).expect("grid"),
+                0.25,
+                "/dev/fd/3",
+                "/dev/fd/4",
+                VodSourceClock::ReportedOrigin(0),
+            )
+            .expect("actual graph")
+        };
+        let qualified = recipe(&output);
+        assert_eq!(
+            qualified
+                .windows(2)
+                .filter(|pair| pair[0] == "-compression_level")
+                .map(|pair| pair[1].as_str())
+                .collect::<Vec<_>>(),
+            ["19"]
+        );
+        caps.vaapi_hdr_policy = None;
+        assert_eq!(recipe(&output), qualified, "frozen after caps change");
+        let ordinary = plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .expect("default VAAPI")
+            .with_vaapi_hdr_policy(caps.vaapi_hdr_policy);
+        assert!(!recipe(&ordinary)
+            .iter()
+            .any(|arg| arg == "-compression_level"));
+        assert_ne!(recipe(&ordinary), qualified, "actual argv identity changes");
+        for encoder in [Encoder::Software, Encoder::Nvenc] {
+            let output = plan
+                .completed_reconstructed_output(encoder)
+                .expect("supported encoder")
+                .with_vaapi_hdr_policy(Some(VaapiHdrPolicy::MesaRadeonsiVbaq));
+            assert!(!recipe(&output)
+                .iter()
+                .any(|arg| arg == "-compression_level"));
+        }
+        assert_eq!(
+            plan.output_contract().vaapi_hdr_policy(),
+            None,
+            "ordinary Software source policy remains scoped"
+        );
+    }
+
+    #[test]
     fn reconstructed_vaapi_keeps_p010_upload_clock_and_level4_cadence_bounds() {
         use crate::transcode::*;
         let (source, plan, execution, _, _) = encoded_recipe_fixture(true);

@@ -462,6 +462,22 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
         .windows(2)
         .filter(|p| p[0] == "-x265-params")
         .collect();
+    let policies: Vec<_> = output
+        .windows(2)
+        .filter(|pair| pair[0] == "-compression_level")
+        .collect();
+    if args
+        .iter()
+        .filter(|arg| arg.starts_with("-compression_level"))
+        .count()
+        != policies.len()
+        || policies.len() > 1
+        || policies
+            .first()
+            .is_some_and(|pair| pair[1] != "19" || codecs[0][1] != "hevc_vaapi")
+    {
+        return Err("unsupported or ambiguous completed VAAPI driver policy".into());
+    }
     if codecs[0][1] == "hevc_vaapi" {
         let filters: Vec<_> = output.windows(2).filter(|p| p[0] == "-vf").collect();
         if !params.is_empty()
@@ -1857,7 +1873,8 @@ mod tests {
             let (plan, execution, _, _) = recipe_fixture_parts(&source, &options);
             let output = plan
                 .completed_reconstructed_output(Encoder::Vaapi)
-                .expect("typed Main10 output");
+                .expect("typed Main10 output")
+                .with_vaapi_hdr_policy(Some(VaapiHdrPolicy::MesaRadeonsiVbaq));
             let args = vod_completed_reconstructed_pipe_args(
                 &source,
                 &output,
@@ -1869,6 +1886,13 @@ mod tests {
                 VodSourceClock::ReportedOrigin(0),
             )
             .expect("production graph");
+            assert_eq!(
+                args.windows(2)
+                    .filter(|pair| pair[0] == "-compression_level")
+                    .map(|pair| pair[1].as_str())
+                    .collect::<Vec<_>>(),
+                ["19"]
+            );
             for (mode, helper) in [(DvProcessingMode::BaseRpu, 6), (DvProcessingMode::Fel, 10)] {
                 assert_eq!(streaming_helper_cpu_threads(mode), helper);
                 let total = helper + if audio { 5 } else { 3 };
@@ -2056,6 +2080,20 @@ mod tests {
         .map(str::to_owned);
         assert!(check_encoder_budget(&vaapi, 3).is_ok());
         assert!(check_encoder_budget(&vaapi, 2).is_err());
+        let mut qualified = vaapi.to_vec();
+        qualified.extend(["-compression_level".into(), "19".into()]);
+        assert!(check_encoder_budget(&qualified, 3).is_ok());
+        assert!(check_encoder_budget(&qualified, 2).is_err());
+        for flag in ["-compression_level", "-compression_level:v"] {
+            let mut duplicated = qualified.clone();
+            duplicated.extend([flag.into(), "19".into()]);
+            assert!(check_encoder_budget(&duplicated, 3).is_err());
+        }
+        *qualified.last_mut().expect("policy") = "20".into();
+        assert!(check_encoder_budget(&qualified, 3).is_err());
+        let mut wrong_encoder = nvenc.to_vec();
+        wrong_encoder.extend(["-compression_level".into(), "19".into()]);
+        assert!(check_encoder_budget(&wrong_encoder, 3).is_err());
         let mut unbounded = vaapi.clone();
         *unbounded.last_mut().expect("upload") = "format=p010le,hwupload=extra_hw_frames=0".into();
         assert!(check_encoder_budget(&unbounded, 3).is_err());

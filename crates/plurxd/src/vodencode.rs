@@ -1176,7 +1176,8 @@ impl Encoding {
             let output = self
                 .plan
                 .completed_reconstructed_output(runtime.encoder)
-                .expect("verified reconstructed output encoder");
+                .expect("verified reconstructed output encoder")
+                .with_vaapi_hdr_policy(runtime.vaapi_hdr_policy);
             return plurx_core::transcode::vod_completed_reconstructed_pipe_args(
                 file,
                 &output,
