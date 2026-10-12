@@ -1630,6 +1630,7 @@ impl JobQueue {
 }
 
 struct TelemetrySink {
+    diagnostics: Arc<crate::diagnostics::Recorder>,
     queue: Arc<JobQueue>,
     /// The batch the writer is currently responsible for.
     ///
@@ -1696,6 +1697,7 @@ fn ensure_sink(store: Arc<dyn Store>) -> Arc<TelemetrySink> {
 
 fn new_sink(metrics: &'static QueueMetrics) -> Arc<TelemetrySink> {
     Arc::new(TelemetrySink {
+        diagnostics: Arc::new(crate::diagnostics::Recorder::default()),
         queue: Arc::new(JobQueue::new(metrics)),
         inflight: Mutex::new(None),
         degraded: AtomicBool::new(false),
@@ -2087,6 +2089,7 @@ pub(crate) fn emit_with_network(
     // retention, queue admission, or the node-local sidecar succeeds.
     METRICS.record_from(&event, client);
     let sink = sink_for(store);
+    sink.diagnostics.observe(&event);
     let class = classify(&event);
     if sink.draining.load(Ordering::Acquire) && class == EventClass::Sample {
         sink.metrics
@@ -2200,6 +2203,11 @@ pub fn prometheus() -> String {
     render_output_preparation_drains(&mut metrics);
     render_output_enqueue_drops(&mut metrics);
     metrics
+}
+
+/// Existing telemetry ownership also owns the node-local diagnostic projection.
+pub(crate) fn diagnostics(store: Arc<dyn Store>) -> Arc<crate::diagnostics::Recorder> {
+    Arc::clone(&sink_for(store).diagnostics)
 }
 
 #[cfg(test)]

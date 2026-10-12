@@ -3228,6 +3228,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "chrono",
  "clap",
  "crc32fast",
  "flate2",

@@ -1,6 +1,6 @@
 # Remote diagnostics status — ownership, implementation and release evidence
 
-**Status:** planned; GPT-6.1 Sol build requested · **Updated:** 2026-10-12 ·
+**Status:** building; GPT-6.1 Sol implementation active · **Updated:** 2026-10-12 ·
 **Planning baseline:** `8d7bc723e`.
 
 The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) defines the first
@@ -32,11 +32,11 @@ index/backlog rows; the builder adopts them together in a normal commit.
 
 | Packet | Scope | State | Branch/PR | Verification and remaining evidence |
 |---|---|---|---|---|
-| B00 | Isolated workspace, compile baseline, plan adoption | Software verified; task gate pending | `codex/remote-diagnostics-b00` | Pinned Rust daemon check, iOS/tvOS builds, Android app/test APKs passed on current main |
+| B00 | Isolated workspace, compile baseline, plan adoption | Software verified; old gate superseded | Batched PR #1037 | Pinned Rust daemon check, iOS/tvOS builds, Android app/test APKs passed on current main |
 | B01 | Schema/privacy fixtures and archive inspector | Built; compiler verified | Batched PR #1037 | Owned-clone workspace Clippy, iOS/tvOS and Android compilation passed; historical 35-case four-language fixtures passed before ruling; three extra timestamp fixtures await final checks |
-| B02 | User-scoped server/worker snapshot collection | Not started | — | Ownership, peer loss and cleanup evidence owed |
-| B03 | Support auth, grants, uploads and durable storage | Not started | — | Restart, quota, revocation and receipt evidence owed |
-| B04 | TV handoff, mobile page, inbox and packaging | Not started | — | Claim race, physical approval and operator flow owed |
+| B02 | User-scoped server/worker snapshot collection | Built; compiler verified | Batched PR #1037 | Pinned daemon Clippy passed; positive attribution, accepted route receipts, account-generation fencing, bounded jobs and signed peers implemented; real HTTP acceptance pending |
+| B03 | Support auth, grants, uploads and durable storage | Building | Batched PR #1037 | Passkey dependency and transactional encrypted blob-store decisions recorded before implementation; service build and runtime evidence pending |
+| B04 | TV handoff, mobile page, inbox and packaging | Building | Batched PR #1037 | Phone claim/approval state machine and passkey inbox UI written; service compilation, claim races and physical acceptance pending |
 | B05 | Web/TV browser reporting | Not started | — | Offline/boot/browser/focus evidence owed |
 | B06 | Apple mobile/TV reporting | Not started | — | Both builds, share and physical TV handoff owed |
 | B07 | Android mobile/TV reporting | Not started | — | Release/build, share and physical TV handoff owed |
@@ -166,3 +166,25 @@ Owned-clone development compiler receipts (no unit suites executed):
 Logs and historical source-only evidence are retained in the owned clone's
 ignored evidence directory. Final source SHA is recorded by the packet commit
 and PR body. Future changes invalidate only affected compiler/check coverage.
+
+## 8. B02 — attributed snapshot owner
+
+The daemon observes closed typed playback facts through the existing telemetry
+owner, including when telemetry persistence is disabled. Trusted route-cache
+publication records positive local-user ownership and participating workers.
+Client-provided session labels cannot create receipts or select peers. The
+projection retains bounded recent events, with priority for terminal/action
+facts, and reports only the requesting account’s known losses.
+
+Snapshot jobs are account- and authentication-generation-bound, limited to two
+per user, 32 per node and 2 MiB each. The owner expires/erases them after fifteen
+minutes without requiring polling. Cancellation drops bounded peer futures;
+collection has a five-second total deadline and two-second peer deadlines.
+Peer requests and responses use the existing exact signed transport and
+revalidate account generation. No general-log fallback or playback control
+operation is introduced. Administrator readiness is a typed availability fact.
+
+Pinned Rust 1.97.1 `cargo clippy -p plurxd --all-targets -- -D warnings` passed
+in two minutes after compiler/lint repairs. A separate clean corrected log is
+retained in owner evidence storage; earlier failures are also preserved. No
+unit suite or real HTTP multi-node pass is claimed for this packet.

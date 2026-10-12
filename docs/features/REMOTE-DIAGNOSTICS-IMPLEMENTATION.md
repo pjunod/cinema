@@ -955,3 +955,28 @@ the actual deployment targets during B06–B08:
   process exit facts have API and retention limits.
 - [Web Share](https://developer.mozilla.org/en-US/docs/Web/API/Navigator/share):
   feature-detect and retain download fallback; do not assume TV availability.
+
+## 16. Build decisions — recorded before dependent implementation
+
+**2026-10-12 · operator passkey verification:** Use the stable established
+`webauthn-rs` 0.5.5 server implementation, with attestation disabled. Its
+passkey ceremony checks are reused instead of implementing WebAuthn crypto.
+The existing dependency policy assumed that all native crypto meant TLS;
+this library requires OpenSSL for credential verification and has MPL-2.0
+licensed library files. Add narrowly named library-license exceptions and
+allow OpenSSL only through the WebAuthn library wrappers in the independent
+support binary. Native TLS remains forbidden; the daemon/client HTTP graph
+continues to use rustls. Retain dependency notices and verify the resolved
+graph and license policy before final merge. This is an explicit dependency
+policy decision, not an incidental transitive relaxation. References:
+[passkey API](https://docs.rs/webauthn-rs/0.5.5/webauthn_rs/),
+[wrapper policy](https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html).
+
+**2026-10-12 · support durable storage:** Store encrypted chunks, immutable
+validated report blobs and encrypted sensitive metadata inside SQLite's
+transactional blob storage. `synchronous=FULL`, WAL, byte reservations,
+secure deletion and bounded reclamation provide one publication transaction.
+This removes a filesystem/blob-metadata split where a receipt could outlive
+its blob. Keep encryption keys and the rollback/deletion fence outside the
+database. Backups still need deletion-journal replay and generation fencing.
+No Cinema operational data enters Raft.

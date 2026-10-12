@@ -28,6 +28,7 @@ mod copyseg;
 mod decode_facts;
 mod decoder_health;
 mod delivery;
+mod diagnostics;
 mod dv_disk;
 #[cfg(unix)]
 mod dv_segment;

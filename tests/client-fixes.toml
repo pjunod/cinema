@@ -6223,3 +6223,27 @@ source = "clients/apple/Sources/HLSFragmentCadence.swift"
 source_anchor = "let complete = times.filter { $0 < lastDTS }.sorted()"
 test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
 test_anchor = "func testTransportStreamSuccessorStopsAtACompletePrefix()"
+
+[[fixes]]
+id = "diagnostics.apple-wire"
+commits = ["f13a362361fbab0d7754a380f5e212cede32f429"]
+source = "clients/apple/Sources/DiagnosticWire.swift"
+source_anchor = "static func manifest"
+test = "clients/apple/Tests/DiagnosticWireTests.swift"
+test_anchor = "testSharedManifestFixturesRejectPrivacyAndEncodingViolations"
+
+[[fixes]]
+id = "diagnostics.android-wire"
+commits = ["f13a362361fbab0d7754a380f5e212cede32f429"]
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticWire.kt"
+source_anchor = "fun manifest"
+test = "clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticWireTest.kt"
+test_anchor = "sharedManifestFixturesRejectPrivacyAndEncodingViolations"
+
+[[fixes]]
+id = "diagnostics.web-wire"
+commits = ["f13a362361fbab0d7754a380f5e212cede32f429"]
+source = "crates/plurxd/src/web/core/diagnostics-wire.js"
+source_anchor = "function manifest"
+test = "tests/web/diagnostics-wire.test.js"
+test_anchor = "shared diagnostic manifests reject privacy and encoding violations"
