@@ -163,12 +163,11 @@ pub(crate) fn sealed_reservation_matches(
     expected_recipe == actual_recipe && expected_response == actual_response
 }
 
-// Both backends use the same atomic ownership predicate. Only the private artifact
-// field and capture marker change; no playback pointer, request, lease or intent moves.
-pub(crate) const SEAL: &str = "UPDATE media_sessions AS s SET
- recipe_json=CASE WHEN $1 THEN s.recipe_json ELSE json_set($2, '$.retained_output', json($3)) END,
- response_json=CASE WHEN $1 THEN s.response_json ELSE json_set(json_remove($4, '$.prepared_output_capture_pending'), '$.prepared_output_capture_complete', json('true')) END
- WHERE s.incarnation_id=$5 AND s.session_id=$6 AND s.user_id=$7 AND s.playback_id=$8
+// The ownership predicate one seal must satisfy. Shared by the conditional
+// writer and its consistent read, so the two can never drift apart.
+macro_rules! seal_predicate {
+    () => {
+        "s.incarnation_id=$5 AND s.session_id=$6 AND s.user_id=$7 AND s.playback_id=$8
  AND s.owner_node_id=$9 AND s.owner_epoch=$10 AND s.state='active'
  AND length(CAST(json_set($2, '$.retained_output', json($3)) AS BLOB))<=32768
  AND length(CAST(json_set(json_remove($4, '$.prepared_output_capture_pending'), '$.prepared_output_capture_complete', json('true')) AS BLOB))<=65536
@@ -186,4 +185,29 @@ pub(crate) const SEAL: &str = "UPDATE media_sessions AS s SET
  AND p.expected_predecessor_incarnation_id=$13 AND p.deadline_ms=$11 AND p.deadline_ms>$12
  AND ptr.current_incarnation_id=$13 AND predecessor.user_id=$7 AND predecessor.playback_id=$8
  AND predecessor.owner_node_id=$14 AND predecessor.owner_epoch=$15 AND predecessor.state='active'
- AND predecessor.lease_expires_at_ms>$12)";
+ AND predecessor.lease_expires_at_ms>$12)"
+    };
+}
+
+// Both backends use the same atomic ownership predicate. Only the private artifact
+// field and capture marker change; no playback pointer, request, lease or intent moves.
+pub(crate) const SEAL: &str = concat!(
+    "UPDATE media_sessions AS s SET
+ recipe_json=CASE WHEN $1 THEN s.recipe_json ELSE json_set($2, '$.retained_output', json($3)) END,
+ response_json=CASE WHEN $1 THEN s.response_json ELSE json_set(json_remove($4, '$.prepared_output_capture_pending'), '$.prepared_output_capture_complete', json('true')) END
+ WHERE ",
+    seal_predicate!()
+);
+
+// Whether an already-complete seal still holds, read under the same predicate
+// and bindings as `SEAL` (with `$1` true) instead of replaying it as a write:
+// the replay changes no column but still costs a replicated UPDATE. SQLite
+// numbers `$N` parameters by first appearance, not by their digits, so the
+// leading CTE names `$1`..`$4` first and the predicate then introduces
+// `$5`..`$15` in order: the positional bindings land exactly as in `SEAL`.
+pub(crate) const SEALED: &str = concat!(
+    "WITH seal_bindings(complete, recipe, proof, response) AS (SELECT $1, $2, $3, $4)
+ SELECT EXISTS(SELECT 1 FROM media_sessions AS s WHERE ",
+    seal_predicate!(),
+    ") AS sealed"
+);

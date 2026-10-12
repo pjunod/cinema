@@ -8754,6 +8754,14 @@ mod tests {
     }
 
     #[test]
+    fn complete_seal_read_uses_canonical_replicated_parameter_order() {
+        // The read reuses SEAL's predicate; its leading CTE must keep the
+        // positional bindings in SEAL's order.
+        validate_sql(crate::store::prepared_output::SEALED)
+            .expect("complete-seal read must be admitted before consistent IO");
+    }
+
+    #[test]
     fn replicated_auth_schema_and_writes_bind_every_clock_value() {
         validate_sql(AUTH_SCHEMA).expect("schema has no connection-local values");
         for sql in [

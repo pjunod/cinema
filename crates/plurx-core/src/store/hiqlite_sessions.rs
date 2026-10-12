@@ -3278,6 +3278,44 @@ impl MediaSessionStore for HiqliteAuthStore {
         Ok(applied == 1)
     }
 
+    async fn prepared_output_sealed(
+        &self,
+        seal: &crate::store::PreparedOutputSeal,
+    ) -> Result<bool, StoreError> {
+        if !seal.already_complete {
+            return Err(StoreError::Task(
+                "only a complete seal can be confirmed by a read".into(),
+            ));
+        }
+        let proof = seal.proof_json()?;
+        let rows = timeout_store(
+            self.session_client()
+                // authority: a seal's ownership predicate is confirmed on committed state.
+                .query_consistent_map::<SealedRow, _>(
+                    crate::store::prepared_output::SEALED,
+                    params!(
+                        seal.already_complete,
+                        seal.expected_recipe_json.as_str(),
+                        proof,
+                        seal.expected_response_json.as_str(),
+                        seal.incarnation_id.as_str(),
+                        seal.session_id.as_str(),
+                        seal.user_id,
+                        seal.playback_id.as_str(),
+                        seal.owner_node_id.as_str(),
+                        seal.owner_epoch,
+                        seal.deadline_ms,
+                        seal.now_ms,
+                        seal.predecessor_incarnation_id.as_str(),
+                        seal.predecessor_owner_node_id.as_str(),
+                        seal.predecessor_owner_epoch,
+                    ),
+                ),
+        )
+        .await?;
+        Ok(rows.first().is_some_and(|row| row.sealed != 0))
+    }
+
     async fn record_desired_selection(
         &self,
         principal: &crate::playback_principal::PlaybackPrincipal,
@@ -7399,4 +7437,17 @@ async fn renew_with_authority(
         .filter(|(_, rows)| rows[0..2] == [1, 1])
         .map(|(renewal, _)| renewal.incarnation_id.clone())
         .collect())
+}
+
+/// One `prepared_output::SEALED` row.
+struct SealedRow {
+    sealed: i64,
+}
+
+impl From<&mut Row<'_>> for SealedRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            sealed: row.get("sealed"),
+        }
+    }
 }

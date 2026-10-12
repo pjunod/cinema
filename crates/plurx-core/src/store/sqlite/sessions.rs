@@ -2320,6 +2320,43 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    async fn prepared_output_sealed(
+        &self,
+        seal: &crate::store::PreparedOutputSeal,
+    ) -> Result<bool, StoreError> {
+        if !seal.already_complete {
+            return Err(StoreError::Task(
+                "only a complete seal can be confirmed by a read".into(),
+            ));
+        }
+        let proof = seal.proof_json()?;
+        let seal = seal.clone();
+        self.with_conn(move |conn| {
+            Ok(conn.query_row(
+                crate::store::prepared_output::SEALED,
+                params![
+                    seal.already_complete,
+                    seal.expected_recipe_json,
+                    proof,
+                    seal.expected_response_json,
+                    seal.incarnation_id,
+                    seal.session_id,
+                    seal.user_id,
+                    seal.playback_id,
+                    seal.owner_node_id,
+                    seal.owner_epoch,
+                    seal.deadline_ms,
+                    seal.now_ms,
+                    seal.predecessor_incarnation_id,
+                    seal.predecessor_owner_node_id,
+                    seal.predecessor_owner_epoch,
+                ],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .await
+    }
+
     async fn record_desired_selection(
         &self,
         principal: &crate::playback_principal::PlaybackPrincipal,
