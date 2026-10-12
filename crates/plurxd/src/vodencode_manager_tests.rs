@@ -65,7 +65,8 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         plurx_core::transcode::detect_video_decoders(&crate::ffmpeg::ffmpeg_bin()).await;
     manager.dovi_passthrough = crate::ffmpeg::has_dovi_passthrough().await;
     manager.hdr10_passthrough = crate::ffmpeg::has_hdr10_passthrough().await;
-    manager.hdr10_passthrough_vaapi = crate::ffmpeg::has_hdr10_passthrough_vaapi().await;
+    manager.hdr10_passthrough_vaapi =
+        crate::ffmpeg::has_hdr10_passthrough_vaapi(manager.caps.vaapi_hdr_policy).await;
     assert!(
         manager.hdr10_passthrough_vaapi,
         "actual P010/Main10 upload proof"
