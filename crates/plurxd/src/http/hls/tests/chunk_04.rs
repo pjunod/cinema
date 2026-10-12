@@ -2055,10 +2055,29 @@ async fn a_peer_without_prepared_capture_is_primed_without_a_capture_reservation
         !successor_owner_captures_output(&state, "worker", Presentation::Vod, true).await,
         "retained receipts predate capture and do not imply it"
     );
+    // The same decision drives the wire: an older peer denies unknown fields,
+    // so its prime request must not carry the admitted predecessor epoch.
+    let incarnation = uuid::Uuid::new_v4().to_string();
+    let session = uuid::Uuid::new_v4().to_string();
+    let request = |captures| {
+        serde_json::to_value(remote_prepare_request(&incarnation, &session, 7, 3, captures))
+            .expect("prepare request serializes")
+    };
+    let captures = successor_owner_captures_output(&state, "worker", Presentation::Vod, true).await;
+    let to_older = request(captures);
+    assert!(
+        to_older.get("expected_predecessor_owner_epoch").is_none(),
+        "an older peer's prime request carries no capture epoch: {to_older}"
+    );
     let mut current = older;
     current.prepared_output_capture = true;
     state.media_pool.cache_snapshot_for_test(current).await;
-    assert!(successor_owner_captures_output(&state, "worker", Presentation::Vod, true).await);
+    let captures = successor_owner_captures_output(&state, "worker", Presentation::Vod, true).await;
+    assert!(captures);
+    assert_eq!(
+        request(captures)["expected_predecessor_owner_epoch"], 3,
+        "a capture receiver is fenced on the admitted predecessor epoch"
+    );
 }
 
 fn staged_predecessor_recipe(route: &MediaSessionRoute) -> RemoteStartRequest {
