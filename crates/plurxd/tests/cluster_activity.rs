@@ -1,4 +1,6 @@
-//! Real-daemon proof for clustered activity aggregation.
+//! Real-daemon proof for clustered activity aggregation, and for the one
+//! other two-voter property a single process cannot show: a portable backup
+//! built on the follower.
 //!
 //! This belongs to `make cluster-check`: the ordinary handler regressions can
 //! prove response shaping, but only separate daemons can prove that node A's
@@ -120,6 +122,14 @@ impl Daemon {
     fn diagnostics(&self) -> String {
         std::fs::read_to_string(&self.log)
             .unwrap_or_else(|error| format!("<cannot read {}: {error}>", self.log.display()))
+    }
+}
+
+impl Daemon {
+    /// SIGKILL: the node vanishes without a goodbye, as a lost machine does.
+    fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -325,15 +335,16 @@ async fn wait_ready(client: &reqwest::Client, daemon: &mut Daemon, port: u16) {
     }
 }
 
-async fn wait_for_two_voters(
+async fn wait_for_voters(
     client: &reqwest::Client,
     daemon: &mut Daemon,
     base: &str,
     token: &str,
+    count: usize,
 ) -> Value {
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
-        daemon.assert_running("waiting for two voters");
+        daemon.assert_running("waiting for voters");
         if let Ok(response) = client
             .get(format!("{base}/api/v1/cluster/nodes"))
             .bearer_auth(token)
@@ -341,15 +352,17 @@ async fn wait_for_two_voters(
             .await
         {
             if let Ok(body) = response.json::<Value>().await {
-                if body["nodes"]
-                    .as_array()
-                    .is_some_and(|nodes| nodes.len() == 2)
-                {
+                if body["nodes"].as_array().is_some_and(|nodes| {
+                    nodes.len() == count
+                        && nodes
+                            .iter()
+                            .all(|node| node["is_voter"].as_bool() == Some(true))
+                }) {
                     return body;
                 }
             }
         }
-        assert!(Instant::now() < deadline, "two-voter join timed out");
+        assert!(Instant::now() < deadline, "{count}-voter join timed out");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -683,7 +696,7 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
     b_api.release();
     let mut node_b = Daemon::spawn(&b_config, root.path().join("node-b.log"), "plurx-node-b");
     wait_ready(&client, &mut node_b, b_http_port).await;
-    let roster = wait_for_two_voters(&client, &mut node_a, &a_base, &token).await;
+    let roster = wait_for_voters(&client, &mut node_a, &a_base, &token, 2).await;
     let local_node = roster["local_node_id"].as_str().expect("local node id");
     let remote_node = roster["nodes"]
         .as_array()
@@ -1244,6 +1257,501 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
     drop(node_a);
 }
 
+fn two_voter_config(
+    http: u16,
+    data: &Path,
+    raft: u16,
+    api: u16,
+    join_token_file: Option<&Path>,
+) -> String {
+    let mut config = format!(
+        "[server]\nbind = \"127.0.0.1:{http}\"\n\
+         [storage]\ndata_dir = \"{}\"\n\
+         [cluster]\nraft_bind = \"127.0.0.1:{raft}\"\n\
+         api_bind = \"127.0.0.1:{api}\"\n\
+         advertise_host = \"127.0.0.1\"\n\
+         artwork_url = \"http://127.0.0.1:{http}\"\n",
+        toml_path(data),
+    );
+    match join_token_file {
+        Some(token_file) => config.push_str(&format!(
+            "join_token_file = \"{}\"\n",
+            toml_path(token_file)
+        )),
+        None => config.push_str(&format!("join_url = \"http://127.0.0.1:{http}\"\n")),
+    }
+    config
+}
+
+fn two_voter_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .expect("test client")
+}
+
+/// Two joined voters on loopback: node A bootstrapped with the `owner`
+/// admin, node B joined through a one-use token.
+struct TwoVoters {
+    node_a: Daemon,
+    node_b: Daemon,
+    a_base: String,
+    b_base: String,
+    token: String,
+    /// Node A's roster once both voters are listed.
+    roster: Value,
+}
+
+async fn start_two_voters(client: &reqwest::Client, root: &Path) -> TwoVoters {
+    let mut reserved = reserved_ports(6);
+    let [a_http, a_raft, a_api, b_http, b_raft, b_api] =
+        std::array::from_fn(|index| reserved[index].port);
+
+    let a_data = root.join("node-a");
+    std::fs::create_dir_all(&a_data).expect("node A data");
+    drop(SqliteStore::open(&a_data.join("plurx.db")).expect("legacy SQLite source"));
+    let a_config = root.join("node-a.toml");
+    std::fs::write(
+        &a_config,
+        two_voter_config(a_http, &a_data, a_raft, a_api, None),
+    )
+    .expect("node A config");
+    for port in &mut reserved[..3] {
+        port.release();
+    }
+    let mut node_a = Daemon::spawn(&a_config, root.join("node-a.log"), "plurx-node-a");
+    wait_ready(client, &mut node_a, a_http).await;
+    let a_base = format!("http://127.0.0.1:{a_http}");
+    let setup = client
+        .post(format!("{a_base}/api/v1/setup"))
+        .json(&json!({"username":"owner","password":"cluster-proof-password"}))
+        .send()
+        .await
+        .expect("setup request");
+    assert_eq!(setup.status(), StatusCode::OK);
+    let token = setup.json::<Value>().await.expect("setup JSON")["token"]
+        .as_str()
+        .expect("setup token")
+        .to_owned();
+    let issued = client
+        .post(format!("{a_base}/api/v1/cluster/join-tokens"))
+        .bearer_auth(&token)
+        .json(&json!({"expires_in_seconds":600}))
+        .send()
+        .await
+        .expect("issue join token");
+    assert_eq!(issued.status(), StatusCode::OK);
+    let join_token = issued.json::<Value>().await.expect("join-token JSON")["token"]
+        .as_str()
+        .expect("join token")
+        .to_owned();
+
+    let b_data = root.join("node-b");
+    std::fs::create_dir_all(&b_data).expect("node B data");
+    let join_file = root.join("node-b.join");
+    std::fs::write(&join_file, format!("{join_token}\n")).expect("write join token");
+    std::fs::set_permissions(&join_file, Permissions::from_mode(0o600))
+        .expect("protect join token");
+    let b_config = root.join("node-b.toml");
+    std::fs::write(
+        &b_config,
+        two_voter_config(b_http, &b_data, b_raft, b_api, Some(&join_file)),
+    )
+    .expect("node B config");
+    for port in &mut reserved[3..] {
+        port.release();
+    }
+    let mut node_b = Daemon::spawn(&b_config, root.join("node-b.log"), "plurx-node-b");
+    wait_ready(client, &mut node_b, b_http).await;
+    let b_base = format!("http://127.0.0.1:{b_http}");
+    let roster = wait_for_voters(client, &mut node_a, &a_base, &token, 2).await;
+    TwoVoters {
+        node_a,
+        node_b,
+        a_base,
+        b_base,
+        token,
+        roster,
+    }
+}
+
+/// CLUSTER-DRILLS-2026-10-11 F1: the `backup:cluster` lease can land on any
+/// voter, and a follower cannot propose the leader-only `RTT` entry that
+/// anchored the cut. A backup requested on the follower must build there,
+/// and its cut must cover a write the leader committed before the request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_follower_builds_the_portable_cluster_backup() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let TwoVoters {
+        mut node_a,
+        mut node_b,
+        a_base,
+        b_base,
+        token,
+        roster,
+    } = start_two_voters(&client, root.path()).await;
+    let local_node = roster["local_node_id"].as_str().expect("local node id");
+    let nodes = roster["nodes"].as_array().expect("node rows");
+    let leader = nodes
+        .iter()
+        .find(|node| node["is_leader"].as_bool() == Some(true))
+        .and_then(|node| node["node_id"].as_str())
+        .expect("a leader");
+    let follower = nodes
+        .iter()
+        .filter_map(|node| node["node_id"].as_str())
+        .find(|node_id| *node_id != leader)
+        .expect("a follower")
+        .to_owned();
+    let (leader_base, follower_base) = if leader == local_node {
+        (a_base.as_str(), b_base.as_str())
+    } else {
+        (b_base.as_str(), a_base.as_str())
+    };
+
+    // A write the leader commits before the backup is requested.
+    let media = root.path().join("media");
+    std::fs::create_dir_all(&media).expect("media directory");
+    let library = client
+        .post(format!("{leader_base}/api/v1/libraries"))
+        .bearer_auth(&token)
+        .json(&json!({"name":"Backup cut proof","kind":"movies","paths":[media.to_string_lossy()]}))
+        .send()
+        .await
+        .expect("create library on the leader");
+    assert_eq!(library.status(), StatusCode::OK);
+
+    let destination = root.path().join("backups");
+    std::fs::create_dir_all(&destination).expect("backup destination");
+    let response = client
+        .post(format!("{follower_base}/api/v1/cluster/backups"))
+        .bearer_auth(&token)
+        .json(&json!({"output": destination.to_string_lossy()}))
+        .send()
+        .await
+        .expect("request a backup on the follower");
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    node_a.assert_running("after the follower backup");
+    node_b.assert_running("after the follower backup");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the follower refused to build a backup: {body}\nnode A: {}\nnode B: {}",
+        node_a.diagnostics(),
+        node_b.diagnostics()
+    );
+    let body: Value = serde_json::from_str(&body).expect("backup JSON");
+    assert_eq!(body["status"], "ok", "{body}");
+    let manifest = &body["manifest"];
+    assert_eq!(manifest["node_id"].as_str(), Some(follower.as_str()));
+    assert!(manifest["raft_cut"]["index"]
+        .as_u64()
+        .is_some_and(|index| index > 0));
+    assert_eq!(
+        manifest["table_counts"]["libraries"].as_u64(),
+        Some(1),
+        "the follower's cut misses the library the leader committed first: {manifest}"
+    );
+    assert!(body["path"]
+        .as_str()
+        .is_some_and(|path| Path::new(path).is_dir()));
+}
+
+/// CLUSTER-DRILLS-2026-10-11 F6: two sign-outs at the same moment, one
+/// through each voter. Each passes its own node's admission queue, and the
+/// membership exclusion both need is one cluster-wide row, so one of them
+/// finds it held by the other. Both must succeed and both tokens must stop
+/// working; refusing the second used to leave its user signed in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simultaneous_sign_outs_through_both_voters_both_revoke() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let mut voters = start_two_voters(&client, root.path()).await;
+    let login = |base: String| {
+        let client = client.clone();
+        async move {
+            let response = client
+                .post(format!("{base}/api/v1/auth/login"))
+                .json(&json!({"username":"owner","password":"cluster-proof-password"}))
+                .send()
+                .await
+                .expect("login");
+            assert_eq!(response.status(), StatusCode::OK);
+            response.json::<Value>().await.expect("login JSON")["token"]
+                .as_str()
+                .expect("login token")
+                .to_owned()
+        }
+    };
+    let logout = |base: String, token: String| {
+        let client = client.clone();
+        async move {
+            let response = client
+                .post(format!("{base}/api/v1/auth/logout"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("logout");
+            let status = response.status();
+            (status, response.text().await.unwrap_or_default())
+        }
+    };
+    // The revocation capability is published by the heartbeats that follow
+    // the join; a lone sign-out proves it before the contended rounds.
+    let ready_by = Instant::now() + Duration::from_secs(60);
+    loop {
+        let token = login(voters.a_base.clone()).await;
+        let (status, body) = logout(voters.a_base.clone(), token).await;
+        if status == StatusCode::OK {
+            break;
+        }
+        assert!(
+            Instant::now() < ready_by,
+            "a lone sign-out never succeeded: {status} {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    for round in 0..5 {
+        let (a_token, b_token) =
+            tokio::join!(login(voters.a_base.clone()), login(voters.b_base.clone()));
+        let ((a_status, a_body), (b_status, b_body)) = tokio::join!(
+            logout(voters.a_base.clone(), a_token.clone()),
+            logout(voters.b_base.clone(), b_token.clone())
+        );
+        voters.node_a.assert_running("after simultaneous sign-outs");
+        voters.node_b.assert_running("after simultaneous sign-outs");
+        assert_eq!(
+            (a_status, b_status),
+            (StatusCode::OK, StatusCode::OK),
+            "round {round}: node A answered {a_body}; node B answered {b_body}"
+        );
+        for (base, token) in [(&voters.a_base, &a_token), (&voters.b_base, &b_token)] {
+            let me = client
+                .get(format!("{base}/api/v1/me"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .expect("signed-out token probe");
+            assert_eq!(
+                me.status(),
+                StatusCode::UNAUTHORIZED,
+                "round {round}: a signed-out token still works on {base}"
+            );
+        }
+    }
+}
+
+/// Join one more voter through node A, returning it and its base URL.
+async fn join_voter(
+    client: &reqwest::Client,
+    root: &Path,
+    voters: &TwoVoters,
+    name: &str,
+) -> (Daemon, String) {
+    let mut reserved = reserved_ports(3);
+    let [http, raft, api] = std::array::from_fn(|index| reserved[index].port);
+    let issued = client
+        .post(format!("{}/api/v1/cluster/join-tokens", voters.a_base))
+        .bearer_auth(&voters.token)
+        .json(&json!({"expires_in_seconds":600}))
+        .send()
+        .await
+        .expect("issue join token");
+    assert_eq!(issued.status(), StatusCode::OK);
+    let join_token = issued.json::<Value>().await.expect("join-token JSON")["token"]
+        .as_str()
+        .expect("join token")
+        .to_owned();
+    let data = root.join(name);
+    std::fs::create_dir_all(&data).expect("joiner data");
+    let join_file = root.join(format!("{name}.join"));
+    std::fs::write(&join_file, format!("{join_token}\n")).expect("write join token");
+    std::fs::set_permissions(&join_file, Permissions::from_mode(0o600))
+        .expect("protect join token");
+    let config = root.join(format!("{name}.toml"));
+    std::fs::write(
+        &config,
+        two_voter_config(http, &data, raft, api, Some(&join_file)),
+    )
+    .expect("joiner config");
+    for port in &mut reserved {
+        port.release();
+    }
+    let mut daemon = Daemon::spawn(
+        &config,
+        root.join(format!("{name}.log")),
+        &format!("plurx-{name}"),
+    );
+    wait_ready(client, &mut daemon, http).await;
+    (daemon, format!("http://127.0.0.1:{http}"))
+}
+
+/// Three joined voters: the leader, and a follower to remove.
+struct ThreeVoters {
+    voters: TwoVoters,
+    node_c: Daemon,
+    leader_base: String,
+    target: String,
+    /// Which of node A, B and C (0, 1, 2) the target is.
+    target_index: usize,
+}
+
+impl ThreeVoters {
+    async fn start(client: &reqwest::Client, root: &Path) -> Self {
+        let mut voters = start_two_voters(client, root).await;
+        let (node_c, c_base) = join_voter(client, root, &voters, "node-c").await;
+        let roster =
+            wait_for_voters(client, &mut voters.node_a, &voters.a_base, &voters.token, 3).await;
+        let mut bases = Vec::new();
+        for base in [&voters.a_base, &voters.b_base, &c_base] {
+            let own: Value = client
+                .get(format!("{base}/api/v1/cluster/nodes"))
+                .bearer_auth(&voters.token)
+                .send()
+                .await
+                .expect("own roster")
+                .json()
+                .await
+                .expect("own roster JSON");
+            let node_id = own["local_node_id"]
+                .as_str()
+                .expect("local node id")
+                .to_owned();
+            bases.push((node_id, base.clone()));
+        }
+        let leader = roster["nodes"]
+            .as_array()
+            .expect("node rows")
+            .iter()
+            .find(|node| node["is_leader"].as_bool() == Some(true))
+            .and_then(|node| node["node_id"].as_str())
+            .expect("a leader")
+            .to_owned();
+        let leader_base = bases
+            .iter()
+            .find(|(node_id, _)| *node_id == leader)
+            .map(|(_, base)| base.clone())
+            .expect("the leader's base");
+        let target_index = bases
+            .iter()
+            .position(|(node_id, _)| *node_id != leader)
+            .expect("a follower");
+        Self {
+            voters,
+            node_c,
+            leader_base,
+            target: bases[target_index].0.clone(),
+            target_index,
+        }
+    }
+
+    fn target_daemon(&mut self) -> &mut Daemon {
+        match self.target_index {
+            0 => &mut self.voters.node_a,
+            1 => &mut self.voters.node_b,
+            _ => &mut self.node_c,
+        }
+    }
+
+    fn diagnostics(&self) -> String {
+        format!(
+            "node A: {}\nnode B: {}\nnode C: {}",
+            self.voters.node_a.diagnostics(),
+            self.voters.node_b.diagnostics(),
+            self.node_c.diagnostics()
+        )
+    }
+
+    /// Remove the target through the leader's operator route. Answers that
+    /// name a condition the cluster clears on its own are retried until
+    /// `within`; anything else, the old `no such column` included, fails at
+    /// once.
+    async fn remove_target(
+        &self,
+        client: &reqwest::Client,
+        retryable: &[&str],
+        within: Duration,
+    ) -> Value {
+        let ready_by = Instant::now() + within;
+        let removed = loop {
+            let response = client
+                .delete(format!(
+                    "{}/api/v1/cluster/nodes/{}",
+                    self.leader_base, self.target
+                ))
+                .bearer_auth(&self.voters.token)
+                .send()
+                .await
+                .expect("remove a follower");
+            let status = response.status();
+            let body: Value = response.json().await.unwrap_or_default();
+            if status == StatusCode::OK {
+                break body;
+            }
+            let code = body["code"].as_str().unwrap_or_default();
+            assert!(
+                retryable.contains(&code) && Instant::now() < ready_by,
+                "voter removal answered {status} {body}\n{}",
+                self.diagnostics()
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
+        assert_eq!(
+            removed["capacity"]["voting_nodes"].as_u64(),
+            Some(2),
+            "{removed}"
+        );
+        assert!(
+            removed["nodes"]
+                .as_array()
+                .expect("node rows")
+                .iter()
+                .all(|node| node["node_id"] != self.target.as_str() || node["is_voter"] == false),
+            "the removed follower is still a voter: {removed}"
+        );
+        removed
+    }
+}
+
+/// A cluster this young may not have published every member's removal
+/// capability and clock observation yet; those answers name themselves.
+const YOUNG_CLUSTER_REFUSALS: [&str; 2] =
+    ["membership_upgrade_required", "cluster_clock_unbounded"];
+
+/// CLUSTER-DRILLS-2026-10-11 F2: an operator removes a follower from three
+/// voters, on the schema the daemon really creates. The removal proof once
+/// read `last_applied_index` from `cluster_nodes`, which has no such column,
+/// so every removal answered 503 and no lost member could be replaced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_operator_removes_a_follower_from_three_voters() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let cluster = ThreeVoters::start(&client, root.path()).await;
+    cluster
+        .remove_target(&client, &YOUNG_CLUSTER_REFUSALS, Duration::from_secs(60))
+        .await;
+}
+
+/// The drill's real case: the follower is gone (killed, not stopped), so it
+/// can never apply the removal barrier. The removal is proved instead by its
+/// heartbeat going stale on the real schema, and until then answers that the
+/// removal is pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_operator_removes_a_killed_follower_from_three_voters() {
+    let root = canonical_tempdir();
+    let client = two_voter_client();
+    let mut cluster = ThreeVoters::start(&client, root.path()).await;
+    cluster.target_daemon().kill();
+    let mut retryable = YOUNG_CLUSTER_REFUSALS.to_vec();
+    retryable.push("membership_removal_pending");
+    cluster
+        .remove_target(&client, &retryable, Duration::from_secs(150))
+        .await;
+}
+
 // ---------------------------------------------------------------------------
 // Create-path Store operation counts (startup and tone-map handoff §5.3).
 //
@@ -1527,7 +2035,7 @@ async fn create_path_store_operations_are_pinned_per_shape() {
     b_api.release();
     let mut node_b = Daemon::spawn(&b_config, root.path().join("node-b.log"), "plurx-node-b");
     wait_ready(&client, &mut node_b, b_http_port).await;
-    wait_for_two_voters(&client, &mut node_a, &a_base, &token).await;
+    wait_for_voters(&client, &mut node_a, &a_base, &token, 2).await;
     let b_base = format!("http://127.0.0.1:{b_http_port}");
 
     let library = client

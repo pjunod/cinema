@@ -108,7 +108,14 @@ Passive metrics drop expired numeric observations and departed peer series.
 `plurx_cluster_clock_authority_reads_total` counts actual consistent authority
 query attempts reached by inbound clock-route authorization, including failed
 queries, rather than all inbound requests or an inferred process-wide delta.
-The two consistent roster reads per round are separate from that route cost.
+The roster reads are separate from that route cost. As written they were two
+consistent reads per round, and the leader added one per inbound probe for its
+learner barrier. Since 2026-10-11 the observer holds the last proved roster
+(`RosterProof`) and owes a consistent read only when this replica's applied
+index has moved and its own copy of the roster (membership, UUIDs, Raft ids,
+origins) disagrees; ten idle minutes cost one read. The leader's final
+authenticated query for a learner's probe stays one consistent read per probe,
+because its directory and sender removal fence must come from one snapshot.
 Unknown rounds and local discontinuities have process-lifetime counters.
 Developer's clock card reads the same snapshot; as written for this release
 it had no switch or Save, which `main` no longer matches (note below).

@@ -1,6 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** Mac follow-ups in `main` (PR #993); AMD and Intel strict-P5 qualified; Intel fixes open on `effort/linux-p5-intel-qualification` · **Updated:** 2026-10-11 · **Owner:** Claude · **Integration:** `effort/linux-p5-intel-qualification`.
+**Status:** Mac follow-ups in `main` (PR #993); AMD and Intel strict-P5 qualified; Intel fixes open on `effort/linux-p5-intel-qualification` · **Updated:** 2026-10-12 · **Owner:** Claude · **Integration:** `effort/linux-p5-intel-qualification`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is
@@ -10,6 +10,66 @@ A plan or compiled change is not hardware qualification. The
 measurements, negative results, provenance and reproducible raw receipts.
 
 ## 1. Current position
+
+**Mac HDR hardware acceptance, 2026-10-12.** The Metal CPU-parity and
+parser-install repairs are in `main` (PRs #1013/#1025). The media mount was
+remounted with its original options; native reads and FFprobe pass. The Mac
+service reads the network volume after the user granted Full Disk Access.
+Both Mac installers deliver the bound parser and its ABI. The Air runs
+`94dee81da`; its explicit VideoToolbox boot comparison validates Metal at
+2.25× and records Vulkan unavailable. Auto selects software and skips Metal
+on this device. The temporary hardware preference and quality are restored
+to Auto, Mac processing to on, Chrome's color profile to Default, and the
+movie's resume position to zero. The service was restarted with Auto applied.
+
+Missing HEVC `field_order` originally kept real progressive HDR10 playback on
+the CPU. PR #1038 conservatively refines Unknown only from explicit progressive,
+non-interlaced, frame-only constraints in the selected stream's hvcC/VPS/SPS.
+It binds descriptor-held evidence into facts identity, protects the refined
+cache from fresh source documents, and makes catalog offers and prepared plans
+use the same evidence. Valid remux offers retain progress before collection;
+failed collection cannot advertise an unstable encoded recipe.
+
+Real playback exposed an additional peak-unit error: Metal takes tens of nits,
+whereas CPU/CUDA/OpenCL take hundreds. The 1,000-nit filter fallback masked the
+old serialization. The correction supplies Metal peak 117.9 for the 1,179-nit
+source and invalidates only affected Metal PQ rendition keys. The generated
+colored boot fixture still accepts both old and corrected graphs under its
+broad mean-channel threshold; it does not catch this regression. Absolute-unit
+and old-key regressions enforce the correction. Raw actual-source luma MAE
+falls 13.75 to 5.15 levels, with the 95th percentile falling 23 to 9. These
+numbers diagnose the transform; they are not display calibration.
+
+**Physical comparison passes on `94dee81da`.** Air Chrome plays American
+Gangster HDR10 to 1920×1080 SDR through Metal in 2.363 seconds, continuously
+through five minutes with zero interruptions and zero dropped frames out of
+7,810. Switch-off CPU starts in 4.027 seconds. Both paused 300,000 ms frames
+have independent presented-frame receipts (39 ms Metal; 36 ms CPU). The
+excess brightness and clipping observed on the preceding build are gone;
+corrected Metal remains slightly darker than CPU. Pixel-identical output and
+a calibrated display match are not claimed. Actual producer argv confirms
+Hable/max/desat 0/peak 117.9; the INFO-level VOD log does not print this argv.
+Cached playback metadata omits the renderer and encoded frame-size rows;
+the producer command and browser's intrinsic dimensions provide that proof.
+
+Astra independently reviewed the routing and peak corrections. Exact-head
+`94dee81da` passes pinned Rust 1.97.1 Mac workspace Clippy, focused regressions,
+release build, source-only Linux workspace check/Clippy and Main promotion
+(logical run 4860, actual 4886). The Python receipt records 1,376 passes.
+Main subsequently moved and conflicted only in the ownership census; the
+counts add (main 1,735 plus these two test-only bounds). PR #1038 integrates
+that main source; its landing requires the integrated compiler loop and a
+current-head promotion receipt. Windows compilation gates were
+deliberately removed from main by `ee668d0b4`; no Windows pass is claimed.
+
+Startup and seek limitations remain recorded: an abandoned preparation held
+VOD capacity and caused two 500 refusals until this test's own session was
+stopped; an earlier quality switch lost alignment and retained HDR remux;
+unbuffered paused seeks stalled; one replicated-store self-fence caused a
+transient 503 and recovered. The laptop's warmed Heretic SDR route starts,
+but earlier cold-start and metadata failures remain. This closes the physical
+HDR10 tone-map comparison on the stated candidate, not the broader Mac
+processing or playback-reliability matrix.
 
 **Checkpoint 2026-10-10.** The previous session ended on quota with the
 probe-raster correction, three documentation edits and the AMD rerun

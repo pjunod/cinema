@@ -1268,6 +1268,16 @@ pub enum MembershipError {
     QuorumLoss,
     #[error("node maintenance operation for {0} conflicts with another cluster lifecycle change")]
     MaintenanceConflict(String),
+    /// This node's Raft log still begins at the restore that installed its
+    /// image, so a joiner would replicate from that first entry and never be
+    /// sent the restored rows. It clears once a snapshot is published.
+    #[error(
+        "this cluster was restored from a backup and this node has not published a snapshot \
+         that covers the restored database, so a joining node would start with an empty \
+         database; restart the restored voter while it is the only member (it publishes the \
+         snapshot before serving), or run `plurxd cluster backup` against the leader, then retry"
+    )]
+    RestoredImageNotTransferable,
     #[error("another node already owns the cluster's planned-outage lease")]
     ClusterOperationPending,
     #[error(
@@ -1351,6 +1361,7 @@ impl MembershipError {
             Self::LocalNodeNotActive => "local_node_not_active",
             Self::QuorumLoss => "removal_would_lose_quorum",
             Self::MaintenanceConflict(_) => "maintenance_conflict",
+            Self::RestoredImageNotTransferable => "restored_image_not_transferable",
             Self::ClusterOperationPending => "cluster_operation_pending",
             Self::MaintenanceWouldLoseQuorum(_) => "maintenance_would_lose_quorum",
             Self::MaintenanceResumeUnsafe(_) => "maintenance_resume_unsafe",
@@ -2499,6 +2510,7 @@ pub struct MembershipManager {
     clock: Arc<super::clock::ClusterClockGuard>,
 }
 
+#[derive(Clone)]
 pub struct ClockPeerRoster {
     pub membership: Option<ClockMembershipIdentity>,
     pub peers: Vec<ActivityPeer>,
@@ -3033,8 +3045,9 @@ const EXACT_REDUCTION_FENCE_SQL: &str = "SELECT COUNT(*) AS count \
       AND EXISTS (SELECT 1 FROM settings AS owner WHERE owner.key = $4 AND owner.value = '1')";
 
 const READ_REDUCTION_REFERENCE_SQL: &str = "SELECT frozen.value AS reference_json, \
-    node.raft_id, node.last_seen_at, node.last_applied_index \
+    node.raft_id, node.last_seen_at, progress.last_applied_index \
     FROM settings AS frozen JOIN cluster_nodes AS node ON frozen.key = $1 AND node.node_id = $2 \
+    LEFT JOIN cluster_node_progress AS progress ON progress.node_id = node.node_id \
     JOIN cluster_node_removals AS fence ON fence.node_id = node.node_id \
     JOIN cluster_node_removal_attempts AS attempt ON attempt.node_id = node.node_id \
     WHERE attempt.attempt_id = $3 AND node.removed_at IS NULL \
@@ -4155,19 +4168,28 @@ const TOMBSTONE_CLUSTER_OPERATION_LEASE_SQL: &str =
     "INSERT INTO cluster_operation_lease_releases (claim_id) VALUES ($1) \
      ON CONFLICT(claim_id) DO NOTHING";
 
-fn acquire_cache_admin_revocation_lease_sql() -> String {
+/// The cluster-state conditions every cache-admin exclusion claim must meet,
+/// whatever its own identity. `$1` is the local node id.
+fn cache_admin_exclusion_standing_predicates() -> String {
     format!(
-        "INSERT INTO cluster_cache_admin_revocation_leases \
-       (singleton, node_id, claim_id, expires_at, retain_release_receipt) \
-     SELECT 1, $1, $2, $3, $4 \
-     WHERE EXISTS (SELECT 1 FROM cluster_nodes node \
+        "EXISTS (SELECT 1 FROM cluster_nodes node \
          WHERE node.node_id = $1 AND node.removed_at IS NULL) \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
        AND {} \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions) \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging) \
        AND NOT EXISTS (SELECT 1 FROM cluster_join_tokens WHERE state = 'redeeming') \
-       AND NOT EXISTS (SELECT 1 FROM cluster_operation_leases) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_operation_leases)",
+        no_removal_in_flight_predicates()
+    )
+}
+
+fn acquire_cache_admin_revocation_lease_sql() -> String {
+    format!(
+        "INSERT INTO cluster_cache_admin_revocation_leases \
+       (singleton, node_id, claim_id, expires_at, retain_release_receipt) \
+     SELECT 1, $1, $2, $3, $4 \
+     WHERE {} \
        AND NOT EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_lease_releases released \
          WHERE released.claim_id = $2) \
        AND NOT EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_release_watermark released \
@@ -4180,9 +4202,25 @@ fn acquire_cache_admin_revocation_lease_sql() -> String {
          excluded.retain_release_receipt) \
      WHERE cluster_cache_admin_revocation_leases.node_id = $1 \
        AND cluster_cache_admin_revocation_leases.claim_id = $2",
-        no_removal_in_flight_predicates()
+        cache_admin_exclusion_standing_predicates()
     )
 }
+
+/// Why a definitive acquire refused claim `$2` on local node `$1`, read from
+/// a replica that has applied through the refusal: whether a standing
+/// condition refuses every claim, and which other claim holds the row.
+fn cache_admin_refusal_sql() -> String {
+    format!(
+        "SELECT CASE WHEN {} THEN 0 ELSE 1 END AS fenced, \
+           (SELECT claim_id FROM cluster_cache_admin_revocation_leases \
+             WHERE singleton = 1 AND claim_id <> $2) AS holder",
+        cache_admin_exclusion_standing_predicates()
+    )
+}
+
+/// The claim holding the cluster-wide cache-admin exclusion, if any.
+const CACHE_ADMIN_EXCLUSION_HOLDER_SQL: &str =
+    "SELECT claim_id FROM cluster_cache_admin_revocation_leases WHERE singleton = 1";
 
 const RELEASE_CACHE_ADMIN_REVOCATION_LEASE_SQL: &str =
     "DELETE FROM cluster_cache_admin_revocation_leases \
@@ -4214,6 +4252,224 @@ fn retry_ambiguous_cluster_operation_acquire(
 
 fn cache_admin_rejection_requires_release_receipt(saw_ambiguous_response: bool) -> bool {
     saw_ambiguous_response
+}
+
+/// How one cache-admin exclusion fared inside its caller's admission deadline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheAdminExclusionAdmission {
+    /// This exact claim holds the cluster-wide exclusion.
+    Acquired,
+    /// Another claim (another node's sign-out) held the exclusion until the
+    /// deadline; nothing of this caller's claims landed.
+    DeadlinePassed,
+}
+
+/// One definitive offer of a cache-admin exclusion claim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CacheAdminOffer {
+    Acquired,
+    /// Another claim holds the singleton row and nothing else refuses.
+    HeldBy(String),
+    /// Nothing but this claim's own identity refused it: its release receipt
+    /// or the release watermark, or a holder that released meanwhile.
+    ThisClaim,
+    /// A maintenance row, a planned-outage lease, a lifecycle operation or an
+    /// inactive local node refuses every claim, so waiting cannot help.
+    Fenced,
+    /// The deadline passed before the refusal's cause could be read.
+    DeadlinePassed,
+}
+
+fn cache_admin_offer_refusal(fenced: bool, holder: Option<String>) -> CacheAdminOffer {
+    match (fenced, holder) {
+        (true, _) => CacheAdminOffer::Fenced,
+        (false, Some(holder)) => CacheAdminOffer::HeldBy(holder),
+        (false, None) => CacheAdminOffer::ThisClaim,
+    }
+}
+
+/// One cache-admin exclusion as [`admit_cache_admin_exclusion`] drives it.
+trait CacheAdminExclusionSlot {
+    /// Offer the current claim once and, if it is definitively refused, say
+    /// why. An ambiguous result is an error: that claim may still land.
+    async fn offer(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> Result<CacheAdminOffer, MembershipError>;
+
+    /// Wait until this replica shows the exclusion row no longer held by
+    /// `holder`. `Ok(false)` once `deadline` passes first.
+    async fn holder_changed_by(
+        &mut self,
+        holder: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool, MembershipError>;
+
+    /// Replace a definitively refused claim, which left nothing behind, with
+    /// a freshly prepared one for the same node and duration.
+    fn fresh_claim(&mut self) -> Result<(), MembershipError>;
+}
+
+/// Offer, and wait only while another claim holds the singleton row. Every
+/// other refusal answers at once, exactly as a single offer did: a fence such
+/// as maintenance or a planned-outage lease outlives any admission window,
+/// and re-offering into it would only append Raft entries. A refusal of this
+/// claim alone gets one fresh claim, never a loop.
+async fn admit_cache_admin_exclusion(
+    slot: &mut impl CacheAdminExclusionSlot,
+    deadline: tokio::time::Instant,
+) -> Result<CacheAdminExclusionAdmission, MembershipError> {
+    let mut fresh_claim_spent = false;
+    loop {
+        match slot.offer(deadline).await? {
+            CacheAdminOffer::Acquired => return Ok(CacheAdminExclusionAdmission::Acquired),
+            CacheAdminOffer::DeadlinePassed => {
+                return Ok(CacheAdminExclusionAdmission::DeadlinePassed)
+            }
+            CacheAdminOffer::Fenced => return Err(MembershipError::ClusterOperationPending),
+            CacheAdminOffer::HeldBy(holder) => {
+                if !slot.holder_changed_by(&holder, deadline).await? {
+                    return Ok(CacheAdminExclusionAdmission::DeadlinePassed);
+                }
+            }
+            CacheAdminOffer::ThisClaim => {
+                if fresh_claim_spent {
+                    return Err(MembershipError::ClusterOperationPending);
+                }
+                fresh_claim_spent = true;
+            }
+        }
+        slot.fresh_claim()?;
+    }
+}
+
+struct ReplicatedCacheAdminSlot<'a> {
+    manager: &'a MembershipManager,
+    client: &'a Client,
+    metrics: hiqlite::LocalDbRaftMetrics,
+    lease: &'a mut CacheAdminRevocationLease,
+}
+
+impl ReplicatedCacheAdminSlot<'_> {
+    /// Wait for this replica's applied index to differ from `observed`.
+    /// `Ok(false)` once `deadline` passes first.
+    async fn applied_changed(
+        &mut self,
+        observed: Option<u64>,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool, MembershipError> {
+        let metrics = &mut self.metrics;
+        match tokio::time::timeout_at(deadline, async move {
+            while metrics.snapshot().last_applied_index == observed {
+                if !metrics.wait_for_change().await {
+                    return false;
+                }
+            }
+            true
+        })
+        .await
+        {
+            Err(_) => Ok(false),
+            Ok(true) => Ok(true),
+            Ok(false) => Err(MembershipError::Internal(
+                "the local Raft watch closed while the cache-admin exclusion was held".into(),
+            )),
+        }
+    }
+}
+
+impl CacheAdminExclusionSlot for ReplicatedCacheAdminSlot<'_> {
+    async fn offer(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> Result<CacheAdminOffer, MembershipError> {
+        match self
+            .manager
+            .commit_cache_admin_revocation_lease(self.lease)
+            .await
+        {
+            Ok(()) => return Ok(CacheAdminOffer::Acquired),
+            Err(MembershipError::ClusterOperationPending) if !self.lease.retain_release_receipt => {
+            }
+            Err(error) => return Err(error),
+        }
+        // Read the cause from this replica once it has applied through the
+        // refusal, so its rows are at least as new as the ones that refused.
+        let through = self.client.db_quorum_watermark().await?.committed_index;
+        while self
+            .metrics
+            .snapshot()
+            .last_applied_index
+            .is_none_or(|applied| applied < through)
+        {
+            let observed = self.metrics.snapshot().last_applied_index;
+            if !self.applied_changed(observed, deadline).await? {
+                return Ok(CacheAdminOffer::DeadlinePassed);
+            }
+        }
+        let rows = self
+            .client
+            .query_map::<CacheAdminRefusalRow, _>(
+                cache_admin_refusal_sql(),
+                params!(self.lease.node_id.as_str(), self.lease.claim.as_str()),
+            )
+            .await?;
+        let row = rows.into_iter().next().ok_or_else(|| {
+            MembershipError::Internal("the cache-admin refusal read returned no row".into())
+        })?;
+        Ok(cache_admin_offer_refusal(row.fenced, row.holder))
+    }
+
+    async fn holder_changed_by(
+        &mut self,
+        holder: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool, MembershipError> {
+        loop {
+            let observed = self.metrics.snapshot().last_applied_index;
+            let current = self
+                .client
+                .query_map::<CacheAdminHolderRow, _>(CACHE_ADMIN_EXCLUSION_HOLDER_SQL, params!())
+                .await?;
+            if current.first().map(|row| row.claim_id.as_str()) != Some(holder) {
+                return Ok(true);
+            }
+            if !self.applied_changed(observed, deadline).await? {
+                return Ok(false);
+            }
+        }
+    }
+
+    fn fresh_claim(&mut self) -> Result<(), MembershipError> {
+        *self.lease = self.lease.successor()?;
+        Ok(())
+    }
+}
+
+struct CacheAdminRefusalRow {
+    fenced: bool,
+    holder: Option<String>,
+}
+
+impl From<&mut Row<'_>> for CacheAdminRefusalRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            fenced: row.get::<i64>("fenced") != 0,
+            holder: row.get("holder"),
+        }
+    }
+}
+
+struct CacheAdminHolderRow {
+    claim_id: String,
+}
+
+impl From<&mut Row<'_>> for CacheAdminHolderRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            claim_id: row.get("claim_id"),
+        }
+    }
 }
 
 const CLUSTER_OPERATION_RETRY_INITIAL: Duration = Duration::from_millis(50);
@@ -4358,6 +4614,8 @@ pub struct CacheAdminRevocationLease {
     node_id: String,
     claim: CacheAdminMutationClaim,
     expires_at_unix_ms: i64,
+    /// The requested exclusion duration, so a refused claim can be replaced.
+    duration: Duration,
     // Starts conservative so cancellation while the first acquire is awaiting
     // a response retains a receipt. Only a definitive first response can
     // prove that no older acquire request remains capable of arriving later.
@@ -4365,6 +4623,13 @@ pub struct CacheAdminRevocationLease {
 }
 
 impl CacheAdminRevocationLease {
+    /// A new exact claim for the same node and duration. Only a claim that a
+    /// definitive refusal left nowhere in the replicated state may be
+    /// replaced; its successor carries a new id and a new expiry.
+    fn successor(&self) -> Result<Self, MembershipError> {
+        MembershipManager::prepare_cache_admin_revocation_claim(&self.node_id, self.duration)
+    }
+
     #[must_use]
     pub fn mutation_claim(&self) -> &CacheAdminMutationClaim {
         &self.claim
@@ -5582,6 +5847,10 @@ impl MembershipManager {
         if role.is_learner() && !(active_min..=active_max).contains(&AUTH_LEARNER_PROTOCOL) {
             return Err(MembershipError::LearnerProtocolInactive);
         }
+        // A token is only worth minting for a node this cluster can seed.
+        if restored_image_lacks_join_snapshot(&inner.client).await? {
+            return Err(MembershipError::RestoredImageNotTransferable);
+        }
         let now = unix_ms()?;
         let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
         let expires_at = now.saturating_add(ttl_ms.clamp(1_000, 86_400_000));
@@ -5739,6 +6008,11 @@ impl MembershipManager {
             return Err(MembershipError::MaintenanceConflict(
                 request.node_id.clone(),
             ));
+        }
+        // Issuance refuses too; this covers a token minted before the
+        // condition arose and a coordinator other than the issuer.
+        if restored_image_lacks_join_snapshot(&inner.client).await? {
+            return Err(MembershipError::RestoredImageNotTransferable);
         }
         // The same rule the boot-time guard applies, from the coordinator's
         // side: the joiner has to implement every protocol this cluster is
@@ -7381,6 +7655,7 @@ impl MembershipManager {
             node_id: node_id.to_owned(),
             claim: CacheAdminMutationClaim::new(uuid::Uuid::new_v4().to_string()),
             expires_at_unix_ms: now.saturating_add(duration_ms),
+            duration,
             retain_release_receipt: true,
         })
     }
@@ -7477,6 +7752,10 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let mut retry_delay = CLUSTER_OPERATION_RETRY_INITIAL;
         let mut saw_ambiguous_response = false;
+        // Every offer starts as conservative as a freshly prepared claim: a
+        // claim offered again after a definitive refusal may meet an
+        // ambiguous response this time, and that must keep its receipt.
+        lease.retain_release_receipt = true;
         loop {
             let now = unix_ms()?;
             let result = inner
@@ -7573,6 +7852,37 @@ impl MembershipManager {
                 Err(error) => return Err(error.into()),
             }
         }
+    }
+
+    /// Acquire one prepared cache-admin exclusion, waiting inside the
+    /// caller's admission `deadline` while another claim holds it.
+    ///
+    /// The exclusion is one cluster-wide row, so while a sign-out on another
+    /// node holds it (about a second) this node's acquire changes zero rows.
+    /// After a definitive refusal this replica catches up through it and
+    /// reads why. Only when another claim holds the row, and no standing
+    /// condition refuses every claim, does it wait: until the row stops
+    /// naming that claim (its release, or the heartbeat expiry of a holder
+    /// that crashed), then it offers a fresh claim. Maintenance, a
+    /// planned-outage lease, a lifecycle operation or an inactive local node
+    /// answer `ClusterOperationPending` at once, after exactly one offer, as
+    /// before. A refusal of this claim alone (receipt or watermark) gets one
+    /// fresh claim. The fence is the offer itself, unchanged. An ambiguous
+    /// refusal is still an error, because that claim may yet land and needs
+    /// its receipt-bearing cleanup.
+    pub async fn admit_cache_admin_revocation_lease(
+        &self,
+        lease: &mut CacheAdminRevocationLease,
+        deadline: tokio::time::Instant,
+    ) -> Result<CacheAdminExclusionAdmission, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let mut slot = ReplicatedCacheAdminSlot {
+            manager: self,
+            client: &inner.client,
+            metrics: inner.local_metrics.clone(),
+            lease,
+        };
+        admit_cache_admin_exclusion(&mut slot, deadline).await
     }
 
     /// Release one exact failed claim. A successor claim, even for the same
@@ -8292,7 +8602,24 @@ impl MembershipManager {
     /// Missing identity or endpoint invalidates the whole round; reachability
     /// never shortens clock coverage. No credential-guard mutation is involved.
     pub async fn clock_peers(&self) -> Result<ClockPeerRoster, MembershipError> {
-        self.clock_peers_for_request(None).await
+        self.clock_peers_for_request(None, true).await
+    }
+
+    /// The same roster as this node's own replica holds it: the same applied
+    /// member set, query and fail-closed directory as [`Self::clock_peers`],
+    /// read locally with no consensus. A hint that says whether a held
+    /// `clock_peers` proof is still current, never a proof itself.
+    pub async fn clock_peers_hint(&self) -> Result<ClockPeerRoster, MembershipError> {
+        self.clock_peers_for_request(None, false).await
+    }
+
+    /// This node's in-process applied-index watch, the signal that a held
+    /// replicated read may have changed; `None` without a replicated store.
+    #[must_use]
+    pub fn local_db_raft_metrics(&self) -> Option<hiqlite::LocalDbRaftMetrics> {
+        self.inner
+            .as_deref()
+            .map(|inner| inner.local_metrics.clone())
     }
 
     /// Last awaited response check after ordinary exact-request authorization.
@@ -8305,7 +8632,9 @@ impl MembershipManager {
         if !self.authenticated_clock_request_still_fresh(auth)? {
             return Err(MembershipError::Internal("clock request expired".into()));
         }
-        let roster = self.clock_peers_for_request(Some(&auth.node_id)).await?;
+        let roster = self
+            .clock_peers_for_request(Some(&auth.node_id), true)
+            .await?;
         if !self.authenticated_clock_request_still_fresh(auth)? {
             return Err(MembershipError::Internal("clock request expired".into()));
         }
@@ -8315,6 +8644,7 @@ impl MembershipManager {
     async fn clock_peers_for_request(
         &self,
         sender: Option<&str>,
+        consistent: bool,
     ) -> Result<ClockPeerRoster, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(ClockPeerRoster {
@@ -8349,10 +8679,18 @@ impl MembershipManager {
                 ));
             }
             rows.into_iter().map(|row| row.peer).collect()
-        } else {
+        } else if consistent {
             inner
                 .client
                 .query_consistent_map::<ActivityPeerRow, _>(
+                    CACHE_ADMIN_REVOCATION_PEERS_SQL,
+                    params!(inner.identity.node_id.as_str(), members_json),
+                )
+                .await?
+        } else {
+            inner
+                .client
+                .query_map::<ActivityPeerRow, _>(
                     CACHE_ADMIN_REVOCATION_PEERS_SQL,
                     params!(inner.identity.node_id.as_str(), members_json),
                 )
@@ -12952,6 +13290,44 @@ impl From<&mut Row<'_>> for MembershipSchemaRow {
     }
 }
 
+/// Whether a node joining now would be replicated an empty database.
+///
+/// `restore` installs the archive's image beneath a brand-new, empty Raft log
+/// and binds `cluster.restore_generation` into that image. OpenRaft sends a
+/// joiner a snapshot only once the entries it would otherwise replicate from
+/// are purged, so until this node's log is purged a joiner applies the
+/// post-restore entries to a database that has none of the restored schema or
+/// rows. Every snapshot purges the log beneath it (Hiqlite keeps one entry),
+/// and a node that installed one starts purged, so this is true only between
+/// a restore and its first snapshot. A cluster that was never restored has no
+/// restore generation and is never refused.
+pub(crate) async fn restored_image_lacks_join_snapshot(
+    client: &Client,
+) -> Result<bool, hiqlite::Error> {
+    if client.metrics_db().await?.purged.is_some() {
+        return Ok(false);
+    }
+    let rows = client
+        .query_map::<SettingValueRow, _>(
+            "SELECT value FROM settings WHERE key = $1",
+            params!(crate::store::keys::CLUSTER_RESTORE_GENERATION),
+        )
+        .await?;
+    Ok(!rows.is_empty())
+}
+
+struct SettingValueRow {
+    _value: Option<String>,
+}
+
+impl From<&mut Row<'_>> for SettingValueRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            _value: row.get("value"),
+        }
+    }
+}
+
 struct MaxRaftIdRow {
     max_raft_id: Option<i64>,
 }
@@ -14257,20 +14633,27 @@ mod tests {
         let node = "00000000-0000-0000-0000-000000000002";
         let attempt = "00000000-0000-0000-0000-000000000010";
         let other = "00000000-0000-0000-0000-000000000011";
-        let db = rusqlite::Connection::open_in_memory().expect("sqlite");
-        db.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER);
-            CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER, last_seen_at INTEGER,
-                last_applied_index INTEGER, removed_at INTEGER);
-            CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY);
-            CREATE TABLE cluster_node_removal_attempts (node_id TEXT, attempt_id TEXT,
-                PRIMARY KEY(node_id, attempt_id));").expect("fixture tables");
+        let db = production_membership_tables();
         db.execute(
-            "INSERT INTO cluster_nodes VALUES (?1, 2, 100, 42, NULL)",
+            "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, last_seen_at) \
+             VALUES (?1, 2, 'node-2:32401', 'node-2:32402', 100)",
             [node],
         )
         .expect("target");
-        db.execute("INSERT INTO cluster_node_removals VALUES (?1)", [node])
-            .expect("route fence");
+        // The applied index is the target's own heartbeat progress, which
+        // lives beside its roster row, not in it.
+        db.execute(
+            "INSERT INTO cluster_node_progress (node_id, current_term, last_applied_index, \
+               bounded_read_ready, voter_storage_ready, voter_role_persisted, observed_at) \
+             VALUES (?1, 1, 42, 1, 1, 1, 100)",
+            [node],
+        )
+        .expect("target progress");
+        db.execute(
+            "INSERT INTO cluster_node_removals (node_id, started_at) VALUES (?1, 100)",
+            [node],
+        )
+        .expect("route fence");
         db.execute(
             "INSERT INTO settings VALUES (?1, '1', 100)",
             [removed_job_owner_key(node)],
@@ -14642,14 +15025,14 @@ mod tests {
 
     #[test]
     fn snapshot_floor_requires_current_process_heartbeat_proof() {
-        let database = rusqlite::Connection::open_in_memory().expect("floor SQL fixture");
+        let database = production_membership_tables();
         database.execute_batch(
-            "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER, role TEXT, last_seen_at INTEGER, removed_at INTEGER); \
-             CREATE TABLE cluster_node_removals (node_id TEXT); \
-             CREATE TABLE cluster_node_capabilities (node_id TEXT, capability TEXT, last_seen_at INTEGER, PRIMARY KEY(node_id,capability)); \
-             CREATE TABLE cluster_node_progress (node_id TEXT, last_applied_index INTEGER, apply_lag_entries INTEGER, bounded_read_ready INTEGER, voter_storage_ready INTEGER, storage_headroom_bytes INTEGER, storage_probe_observed_at INTEGER, voter_role_persisted INTEGER, observed_at INTEGER); \
-             INSERT INTO cluster_nodes VALUES ('target',1,'learner',50,NULL); \
-             INSERT INTO cluster_node_progress VALUES ('target',10,0,1,1,536870912,50,0,50);"
+            "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, last_seen_at, role) \
+               VALUES ('target', 1, 'target:32401', 'target:32402', 50, 'learner'); \
+             INSERT INTO cluster_node_progress (node_id, current_term, last_applied_index, \
+               apply_lag_entries, bounded_read_ready, voter_storage_ready, storage_headroom_bytes, \
+               storage_probe_observed_at, voter_role_persisted, observed_at) \
+               VALUES ('target', 1, 10, 0, 1, 1, 536870912, 50, 0, 50);"
         ).expect("seed legacy readiness rows");
         let proven = || {
             database
@@ -18765,17 +19148,18 @@ mod tests {
 
     #[test]
     fn maintenance_exit_is_one_atomic_current_process_and_drain_proof() {
-        let mut connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+        let mut connection = production_membership_tables();
+        // `media_sessions` belongs to the store schema, not this module's;
+        // the stand-in carries the three columns the statement reads.
         connection
             .execute_batch(
-                "CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY, requested_at INTEGER NOT NULL, acknowledged_at INTEGER); \
-                 CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, last_seen_at INTEGER NOT NULL, removed_at INTEGER); \
-                 CREATE TABLE cluster_node_progress (node_id TEXT PRIMARY KEY, observed_at INTEGER NOT NULL, apply_lag_entries INTEGER); \
-                 CREATE TABLE cluster_node_capabilities (node_id TEXT, capability TEXT, last_seen_at INTEGER, PRIMARY KEY(node_id, capability)); \
-                 CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, lease_expires_at_ms INTEGER); \
+                "CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, lease_expires_at_ms INTEGER); \
                  INSERT INTO cluster_node_maintenance VALUES ('node-a', 90, NULL); \
-                 INSERT INTO cluster_nodes VALUES ('node-a', 100, NULL); \
-                 INSERT INTO cluster_node_progress VALUES ('node-a', 100, 0); \
+                 INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, last_seen_at) \
+                   VALUES ('node-a', 1, 'node-a:32401', 'node-a:32402', 100); \
+                 INSERT INTO cluster_node_progress (node_id, current_term, apply_lag_entries, \
+                   bounded_read_ready, voter_storage_ready, voter_role_persisted, observed_at) \
+                   VALUES ('node-a', 1, 0, 1, 1, 1, 100); \
                  INSERT INTO cluster_node_capabilities VALUES ('node-a', 'node_maintenance_v1', 100);",
             )
             .expect("maintenance exit fixture");
@@ -21411,6 +21795,598 @@ mod tests {
             .expect("the test module")
             .0
             .to_owned()
+    }
+
+    /// An in-memory database holding the production declarations of the
+    /// replicated auth tables (`settings`, `users`, `tokens`) and of every
+    /// replicated membership table:
+    /// `MEMBERSHIP_SCHEMA`'s table statements plus its additive columns. A
+    /// SQL fixture built on it fails the way the deployed cluster does when a
+    /// statement names a column production does not have. Triggers are left
+    /// out because they need the coordinator's intent rows; a test that
+    /// exercises one installs it itself.
+    fn production_membership_tables() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+        connection
+            .execute_batch(crate::store::replicated_auth_schema())
+            .expect("replicated auth tables");
+        for statement in MEMBERSHIP_SCHEMA
+            .iter()
+            .filter(|statement| statement.starts_with("CREATE TABLE"))
+        {
+            connection.execute(statement, []).expect("membership table");
+        }
+        for column in MEMBERSHIP_ADDITIVE_COLUMNS {
+            connection
+                .execute(column.statement, [])
+                .expect("additive column");
+        }
+        connection
+    }
+
+    fn production_columns(connection: &rusqlite::Connection, table: &str) -> BTreeSet<String> {
+        connection
+            .prepare("SELECT name FROM pragma_table_info(?1)")
+            .expect("table info")
+            .query_map([table], |row| row.get(0))
+            .expect("table columns")
+            .collect::<Result<_, _>>()
+            .expect("table column names")
+    }
+
+    /// A Rust string literal's value, from its opening quote: escapes and
+    /// `\`-newline continuations resolved the way rustc resolves them.
+    fn rust_string_literal(source: &str) -> Option<String> {
+        let mut characters = source.strip_prefix('"')?.chars().peekable();
+        let mut value = String::new();
+        while let Some(character) = characters.next() {
+            match character {
+                '"' => return Some(value),
+                '\\' => match characters.next()? {
+                    '\n' => {
+                        while characters.peek().is_some_and(|next| next.is_whitespace()) {
+                            characters.next();
+                        }
+                    }
+                    'n' => value.push('\n'),
+                    't' => value.push('\t'),
+                    other => value.push(other),
+                },
+                other => value.push(other),
+            }
+        }
+        None
+    }
+
+    /// The statement that fires `trigger`, for preparing it: SQLite compiles
+    /// a trigger's `WHEN` clause and body into each statement that fires it,
+    /// and resolves their names then, never when the trigger is created.
+    fn trigger_firing_statement(trigger: &str, connection: &rusqlite::Connection) -> String {
+        let tokens = trigger
+            .split_whitespace()
+            .map(|token| token.trim_end_matches(','))
+            .collect::<Vec<_>>();
+        let event = tokens
+            .iter()
+            .position(|token| {
+                ["INSERT", "UPDATE", "DELETE"].contains(&token.to_ascii_uppercase().as_str())
+            })
+            .unwrap_or_else(|| panic!("trigger without an event: {trigger}"));
+        let on = event
+            + tokens[event..]
+                .iter()
+                .position(|token| token.eq_ignore_ascii_case("ON"))
+                .unwrap_or_else(|| panic!("trigger without a table: {trigger}"));
+        let table = tokens[on + 1];
+        match tokens[event].to_ascii_uppercase().as_str() {
+            "INSERT" => format!("INSERT INTO {table} DEFAULT VALUES"),
+            "DELETE" => format!("DELETE FROM {table}"),
+            _ => {
+                let column = if tokens[event + 1].eq_ignore_ascii_case("OF") {
+                    tokens[event + 2].to_owned()
+                } else {
+                    production_columns(connection, table)
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| panic!("trigger on an unknown table: {trigger}"))
+                };
+                format!("UPDATE {table} SET {column} = {column}")
+            }
+        }
+    }
+
+    /// CLUSTER-DRILLS-2026-10-11 F2: every SQL constant this module defines
+    /// must compile against the production schema: the membership tables,
+    /// the replicated auth tables and `media_sessions`, all from their
+    /// production declarations. A reference read that selected
+    /// `node.last_applied_index` from `cluster_nodes` passed its unit test
+    /// (whose hand-built table had that column) while every voter removal on
+    /// the deployed schema answered `no such column`. A trigger is installed
+    /// on its own and the statement that fires it is prepared, because only
+    /// that resolves the trigger's `WHEN` clause and body.
+    #[test]
+    fn membership_sql_constants_compile_against_the_production_schema() {
+        let connection = production_membership_tables();
+        connection
+            .execute_batch(crate::store::replicated_media_sessions_schema())
+            .expect("replicated media sessions table");
+        let source = production_source();
+        let mut compiled = 0;
+        let mut triggers = 0;
+        for (offset, _) in source.match_indices("_SQL: &str =") {
+            let line_start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
+            let name = source[line_start..offset]
+                .rsplit(' ')
+                .next()
+                .expect("constant name")
+                .to_owned()
+                + "_SQL";
+            let initializer = source[offset + "_SQL: &str =".len()..].trim_start();
+            let Some(sql) = rust_string_literal(initializer) else {
+                continue;
+            };
+            if sql.trim_start().starts_with("CREATE TRIGGER") {
+                connection
+                    .execute_batch("SAVEPOINT trigger_check")
+                    .expect("savepoint");
+                let fired = connection.execute_batch(&sql).and_then(|()| {
+                    connection
+                        .prepare(&trigger_firing_statement(&sql, &connection))
+                        .map(drop)
+                });
+                connection
+                    .execute_batch("ROLLBACK TO trigger_check; RELEASE trigger_check")
+                    .expect("roll back the trigger");
+                if let Err(error) = fired {
+                    panic!("{name} does not compile on the production schema: {error}");
+                }
+                triggers += 1;
+                continue;
+            }
+            if let Err(error) = connection.prepare(&sql) {
+                panic!("{name} does not compile on the production schema: {error}");
+            }
+            compiled += 1;
+        }
+        assert!(
+            compiled >= 30,
+            "the constant scan found only {compiled} statements"
+        );
+        assert!(
+            triggers >= 20,
+            "the constant scan found only {triggers} triggers"
+        );
+    }
+
+    /// The hand-built fixtures in this module may declare a subset of a
+    /// membership table's production columns, never a column production
+    /// does not have (the F2 fixture invented `cluster_nodes.last_applied_index`).
+    #[test]
+    fn membership_fixtures_declare_only_production_columns() {
+        let production = production_membership_tables();
+        let tests = include_str!("membership.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module")
+            .1;
+        let needle = concat!("CREATE TABLE ", "cluster_");
+        let mut checked = 0;
+        let mut rest = tests;
+        while let Some(at) = rest.find(needle) {
+            let declaration = &rest[at + "CREATE TABLE ".len()..];
+            let open = declaration.find('(').expect("fixture column list");
+            let table = declaration[..open].trim();
+            let mut depth = 0usize;
+            let mut close = None;
+            for (index, character) in declaration[open..].char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(open + index);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let close = close.expect("closed fixture column list");
+            rest = &declaration[close..];
+            let columns = production_columns(&production, table);
+            if columns.is_empty() {
+                // Another module's table (the sharing schema's, say).
+                continue;
+            }
+            let body = declaration[open + 1..close].replace('\\', " ");
+            let mut depth = 0usize;
+            let mut definitions = vec![String::new()];
+            for character in body.chars() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    ',' if depth == 0 => {
+                        definitions.push(String::new());
+                        continue;
+                    }
+                    _ => {}
+                }
+                definitions.last_mut().expect("definition").push(character);
+            }
+            for definition in definitions {
+                let Some(name) = definition.split_whitespace().next() else {
+                    continue;
+                };
+                if ["PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT"]
+                    .contains(&name.to_ascii_uppercase().as_str())
+                {
+                    continue;
+                }
+                assert!(
+                    columns.contains(name),
+                    "a fixture declares {table}.{name}, which production does not have"
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 20, "the fixture scan found only {checked}");
+    }
+
+    /// CLUSTER-DRILLS-2026-10-11 F2: the applied index a removal proof waits
+    /// on is the target's heartbeat progress, joined from
+    /// `cluster_node_progress`. A target that has not published progress yet
+    /// is still bound but reads as unknown, never as applied.
+    #[test]
+    fn reduction_reference_reads_applied_index_from_heartbeat_progress() {
+        use rusqlite::OptionalExtension;
+        let node = "00000000-0000-0000-0000-000000000002";
+        let attempt = "00000000-0000-0000-0000-000000000010";
+        let reference = hiqlite::ReductionFenceReference {
+            version: 1,
+            target_node_id: node.into(),
+            target_raft_id: 2,
+            attempt_id: attempt.into(),
+            barrier_index: 41,
+        };
+        let key = reduction_reference_key(&reference);
+        let db = production_membership_tables();
+        db.execute(
+            "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, last_seen_at) \
+             VALUES (?1, 2, 'node-2:32401', 'node-2:32402', 100)",
+            [node],
+        )
+        .expect("target");
+        db.execute(
+            "INSERT INTO cluster_node_removals (node_id, started_at) VALUES (?1, 100)",
+            [node],
+        )
+        .expect("route fence");
+        db.execute(
+            "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) VALUES (?1, ?2)",
+            [node, attempt],
+        )
+        .expect("owned reference");
+        db.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, '1', 100)",
+            [removed_job_owner_key(node)],
+        )
+        .expect("owner fence");
+        db.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, 100)",
+            [
+                key.clone(),
+                serde_json::to_string(&reference).expect("json"),
+            ],
+        )
+        .expect("frozen reference");
+        let read = || {
+            db.query_row(
+                READ_REDUCTION_REFERENCE_SQL,
+                rusqlite::params![key, node, attempt, removed_job_owner_key(node)],
+                |row| row.get::<_, Option<i64>>("last_applied_index"),
+            )
+            .optional()
+            .expect("the production read runs on the production schema")
+        };
+        assert_eq!(
+            read(),
+            Some(None),
+            "a target without published progress is bound but not applied"
+        );
+        db.execute(
+            "INSERT INTO cluster_node_progress (node_id, current_term, last_applied_index, \
+               bounded_read_ready, voter_storage_ready, voter_role_persisted, observed_at) \
+             VALUES (?1, 1, 41, 1, 1, 1, 100)",
+            [node],
+        )
+        .expect("target progress");
+        assert_eq!(read(), Some(Some(41)));
+    }
+
+    /// The cluster-wide exclusion row and two members, on the production
+    /// tables, with a counter standing in for this replica's applied index:
+    /// every write below is one applied entry. One database is every replica
+    /// at once, so the catch-up before the refusal read is immediate.
+    struct SqlCacheAdminSlot {
+        db: Arc<Mutex<rusqlite::Connection>>,
+        applied: Arc<tokio::sync::watch::Sender<u64>>,
+        seen: tokio::sync::watch::Receiver<u64>,
+        node: &'static str,
+        claim: String,
+        expires_at: i64,
+        offers: usize,
+    }
+
+    type SqlCacheAdminFixture = (
+        Arc<Mutex<rusqlite::Connection>>,
+        Arc<tokio::sync::watch::Sender<u64>>,
+    );
+
+    impl SqlCacheAdminSlot {
+        fn fixture() -> SqlCacheAdminFixture {
+            let db = production_membership_tables();
+            db.execute_batch(
+                "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, last_seen_at) \
+                   VALUES ('node-a', 1, 'node-a:32401', 'node-a:32402', 100), \
+                          ('node-b', 2, 'node-b:32401', 'node-b:32402', 100);",
+            )
+            .expect("two members");
+            (
+                Arc::new(Mutex::new(db)),
+                Arc::new(tokio::sync::watch::channel(0).0),
+            )
+        }
+
+        fn new(fixture: &SqlCacheAdminFixture, node: &'static str) -> Self {
+            Self {
+                db: Arc::clone(&fixture.0),
+                applied: Arc::clone(&fixture.1),
+                seen: fixture.1.subscribe(),
+                node,
+                claim: uuid::Uuid::new_v4().to_string(),
+                expires_at: 4_000_000_000_000,
+                offers: 0,
+            }
+        }
+
+        fn write(fixture: &SqlCacheAdminFixture, sql: &str) {
+            fixture
+                .0
+                .lock()
+                .expect("fixture database")
+                .execute_batch(sql)
+                .expect("fixture write");
+            fixture.1.send_modify(|index| *index += 1);
+        }
+
+        fn release(&self) {
+            self.db
+                .lock()
+                .expect("fixture database")
+                .execute(
+                    RELEASE_CACHE_ADMIN_REVOCATION_LEASE_SQL,
+                    rusqlite::params![self.node, self.claim],
+                )
+                .expect("exact release");
+            self.applied.send_modify(|index| *index += 1);
+        }
+
+        fn holder(&self) -> Option<String> {
+            use rusqlite::OptionalExtension;
+            self.db
+                .lock()
+                .expect("fixture database")
+                .query_row(
+                    "SELECT node_id FROM cluster_cache_admin_revocation_leases",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .expect("exclusion row")
+        }
+    }
+
+    impl CacheAdminExclusionSlot for SqlCacheAdminSlot {
+        async fn offer(
+            &mut self,
+            _deadline: tokio::time::Instant,
+        ) -> Result<CacheAdminOffer, MembershipError> {
+            self.offers += 1;
+            let db = self.db.lock().expect("fixture database");
+            let changed = db
+                .execute(
+                    &acquire_cache_admin_revocation_lease_sql(),
+                    rusqlite::params![self.node, self.claim, self.expires_at, 1_i64],
+                )
+                .expect("production acquire");
+            self.applied.send_modify(|index| *index += 1);
+            if changed == 1 {
+                return Ok(CacheAdminOffer::Acquired);
+            }
+            let (fenced, holder) = db
+                .query_row(
+                    &cache_admin_refusal_sql()
+                        .replace("$1", "?1")
+                        .replace("$2", "?2"),
+                    rusqlite::params![self.node, self.claim],
+                    |row| Ok((row.get::<_, i64>("fenced")? != 0, row.get("holder")?)),
+                )
+                .expect("production refusal read");
+            Ok(cache_admin_offer_refusal(fenced, holder))
+        }
+
+        async fn holder_changed_by(
+            &mut self,
+            holder: &str,
+            deadline: tokio::time::Instant,
+        ) -> Result<bool, MembershipError> {
+            use rusqlite::OptionalExtension;
+            loop {
+                let observed = *self.seen.borrow();
+                let current: Option<String> = self
+                    .db
+                    .lock()
+                    .expect("fixture database")
+                    .query_row(CACHE_ADMIN_EXCLUSION_HOLDER_SQL, [], |row| row.get(0))
+                    .optional()
+                    .expect("exclusion hint");
+                if current.as_deref() != Some(holder) {
+                    return Ok(true);
+                }
+                match tokio::time::timeout_at(
+                    deadline,
+                    self.seen.wait_for(|index| *index != observed),
+                )
+                .await
+                {
+                    Err(_) => return Ok(false),
+                    Ok(Err(_)) => return Err(MembershipError::Internal("watch closed".into())),
+                    Ok(Ok(_)) => {}
+                }
+            }
+        }
+
+        fn fresh_claim(&mut self) -> Result<(), MembershipError> {
+            self.claim = uuid::Uuid::new_v4().to_string();
+            self.expires_at += 20_000;
+            Ok(())
+        }
+    }
+
+    /// CLUSTER-DRILLS-2026-10-11 F6: two users sign out at the same moment
+    /// through two different nodes. The exclusion is one cluster-wide row,
+    /// so the second node's acquire changes zero rows; it waits inside its
+    /// own admission deadline for the first to release and then offers once
+    /// more, rather than answering 503 with its user's token still valid.
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_sign_outs_on_two_nodes_both_take_the_exclusion_inside_the_deadline() {
+        let fixture = SqlCacheAdminSlot::fixture();
+        let start = tokio::time::Instant::now();
+        let deadline = start + Duration::from_millis(2_500);
+        let sign_out = |node| {
+            let mut slot = SqlCacheAdminSlot::new(&fixture, node);
+            async move {
+                let admitted = admit_cache_admin_exclusion(&mut slot, deadline)
+                    .await
+                    .expect("admission");
+                let held_from = tokio::time::Instant::now();
+                assert_eq!(slot.holder().as_deref(), Some(node), "exclusion holder");
+                // The revocation's own two fanouts and Store mutation.
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                slot.release();
+                (admitted, held_from - start, slot.offers)
+            }
+        };
+        let ((first, first_at, first_offers), (second, second_at, second_offers)) =
+            tokio::join!(sign_out("node-a"), sign_out("node-b"));
+        assert_eq!(first, CacheAdminExclusionAdmission::Acquired);
+        assert_eq!(second, CacheAdminExclusionAdmission::Acquired);
+        assert_eq!(first_at, Duration::ZERO);
+        assert_eq!(second_at, Duration::from_millis(600));
+        assert_eq!((first_offers, second_offers), (1, 2));
+    }
+
+    /// A holder that never releases still ends a waiter at its deadline,
+    /// with nothing of the waiter's claim in the replicated state. The
+    /// entries this replica applies meanwhile (heartbeats) do not change the
+    /// row, so they cause no further offer.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_exclusion_still_refuses_at_the_admission_deadline() {
+        let fixture = SqlCacheAdminSlot::fixture();
+        let mut holder = SqlCacheAdminSlot::new(&fixture, "node-a");
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            holder.offer(start).await.expect("holder offer"),
+            CacheAdminOffer::Acquired
+        );
+        let heartbeats = {
+            let applied = Arc::clone(&fixture.1);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    applied.send_modify(|index| *index += 1);
+                }
+            })
+        };
+        let mut waiter = SqlCacheAdminSlot::new(&fixture, "node-b");
+        let deadline = start + Duration::from_millis(2_500);
+        assert_eq!(
+            admit_cache_admin_exclusion(&mut waiter, deadline)
+                .await
+                .expect("admission"),
+            CacheAdminExclusionAdmission::DeadlinePassed
+        );
+        assert_eq!(tokio::time::Instant::now(), deadline);
+        assert_eq!(waiter.offers, 1, "heartbeats must not re-offer");
+        assert_eq!(waiter.holder().as_deref(), Some("node-a"));
+        heartbeats.abort();
+    }
+
+    /// A standing condition refuses every claim and outlives any admission
+    /// window, so the refusal answers at once after exactly one offer, as a
+    /// single offer always did: a maintenance row, a planned-outage lease
+    /// (rolling deploys hold one), or either of them while another claim
+    /// also holds the row.
+    #[tokio::test(start_paused = true)]
+    async fn a_fenced_exclusion_refuses_at_once_after_one_offer() {
+        for (fence, also_held) in [
+            (
+                "INSERT INTO cluster_node_maintenance (node_id, requested_at) VALUES ('node-b', 1)",
+                false,
+            ),
+            (
+                "INSERT INTO cluster_operation_leases (singleton, node_id, operation, claim_id, \
+                 expires_at) VALUES (1, 'node-b', 'restart', 'outage-claim', 4000000000000)",
+                false,
+            ),
+            (
+                "INSERT INTO cluster_node_maintenance (node_id, requested_at) VALUES ('node-b', 1)",
+                true,
+            ),
+        ] {
+            let fixture = SqlCacheAdminSlot::fixture();
+            if also_held {
+                let mut holder = SqlCacheAdminSlot::new(&fixture, "node-b");
+                let now = tokio::time::Instant::now();
+                assert_eq!(
+                    holder.offer(now).await.expect("holder offer"),
+                    CacheAdminOffer::Acquired
+                );
+            }
+            SqlCacheAdminSlot::write(&fixture, fence);
+            let mut slot = SqlCacheAdminSlot::new(&fixture, "node-a");
+            let start = tokio::time::Instant::now();
+            let refused =
+                admit_cache_admin_exclusion(&mut slot, start + Duration::from_millis(2_500)).await;
+            assert!(
+                matches!(refused, Err(MembershipError::ClusterOperationPending)),
+                "{fence}: {refused:?}"
+            );
+            assert_eq!(slot.offers, 1, "{fence}");
+            assert_eq!(tokio::time::Instant::now(), start, "{fence}");
+        }
+    }
+
+    /// A refusal of this claim alone, here the release watermark parked past
+    /// its expiry, is answered by one fresh claim with its own expiry, which
+    /// the same offer then admits.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_of_this_claim_alone_is_retried_once_with_a_fresh_claim() {
+        let fixture = SqlCacheAdminSlot::fixture();
+        SqlCacheAdminSlot::write(
+            &fixture,
+            "INSERT INTO cluster_cache_admin_revocation_release_watermark \
+             (singleton, expires_through) VALUES (1, 4000000010000)",
+        );
+        let mut slot = SqlCacheAdminSlot::new(&fixture, "node-a");
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            admit_cache_admin_exclusion(&mut slot, start + Duration::from_millis(2_500))
+                .await
+                .expect("admission"),
+            CacheAdminExclusionAdmission::Acquired
+        );
+        assert_eq!(slot.offers, 2);
+        assert_eq!(slot.holder().as_deref(), Some("node-a"));
     }
 
     /// One method's body, ending where the method does.

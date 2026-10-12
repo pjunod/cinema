@@ -54,7 +54,15 @@ vendored `backup` feature are not what the tree does.
    `verify_state_machine_snapshot_identity` (`:1371-1402`) checks
    `settings.instance.id`. The single-voter readdress path builds a one-voter
    Raft around exactly such an image. Restore reuses that path rather than
-   writing a second one.
+   writing a second one. *(Corrected 2026-10-11, drill F4: restore reused the
+   directory build but not the readdress path's join snapshot, so a restored
+   voter's new Raft log — which cannot replay the image — was all a joiner was
+   sent, and joiners became voters with an empty database. The first boot of
+   a restored sole voter now publishes a snapshot covering the image, with
+   the log beneath it purged, before it serves (`materialize_join_snapshot`
+   in migration.rs, shared with readdress), and join-token issue and redeem
+   answer `restored_image_not_transferable` while a node with a restore
+   generation still has an unpurged log.)*
 
 ## 1. Objective
 
@@ -208,9 +216,15 @@ Build sequence, run by the node holding the `backup:cluster` job lease:
 1. Refuse unless `may_run_cluster_jobs()` and this node's
    `apply_lag_entries == 0` from the passive Raft metrics (a lagging image
    is a worse RPO than waiting one tick).
-2. `applied = local_client.trigger_db_snapshot().await?`.
-3. Poll `metrics_db().snapshot` until `last_log_id.index >= applied`
-   (bounded by `snapshot_transfer_timeout` + `SNAPSHOT_CATCHUP_GRACE`).
+2. Anchor the cut: `applied` is the log index of one no-op write sent
+   through the forwarding write path (`execute_acked`), which the leader
+   commits whichever voter holds the lease. `trigger_db_snapshot`'s `RTT`
+   anchor is leader-only, so a follower holding the lease could not build
+   (CLUSTER-DRILLS-2026-10-11 F1).
+3. Wait until this replica has applied through `applied`, trigger only its
+   own snapshot (`trigger_local_db_snapshot`), and poll
+   `metrics_db().snapshot` until `last_log_id.index >= applied`. Every step
+   spends the one original budget.
 4. Read `snapshots/current`, **open the named file immediately** and copy
    from the open descriptor — `snapshots_cleanup` may unlink a superseded
    snapshot while the copy runs; an open fd survives that on Linux.
@@ -269,9 +283,19 @@ can replicate with it or be admitted by it, and every old `membership.json`
 names peers that no longer answer with the same secret. That is the
 mechanical fence. The procedural fence is written into the runbook and
 enforced by the restore command's output: before clients are pointed at the
-restored instance, every surviving old node's `hiqlite/` is renamed to
-`hiqlite.retired-<UTC>` with the daemon stopped, and rejoins through a fresh
-join token like any new node. `restore` additionally binds one parameter,
+restored instance, every surviving old node is stopped and rejoins like any
+new node from a new data directory: one created empty and owned by the
+service user, holding only a copy of `plurx.toml`, put at the configured path
+while the old directory is moved aside as a retired copy, with a fresh join
+token where `join_token_file` points (docs/OPERATIONS.md "Backing up and
+restoring an activated cluster" has the six steps). *(Corrected 2026-10-11,
+drill F3: this said to rename only `hiqlite/` to `hiqlite.retired-<UTC>`.
+Startup refuses that directory — `hiqlite-activated.json` without `hiqlite/`
+is the "already activated, refusing to re-import" case — before it reads
+`join_token_file`, and a join refuses a directory that still holds
+`plurx.db`. Moving the whole directory aside without carrying `plurx.toml`
+over does not work either: production keeps the configuration inside the
+data directory, and Docker recreates a missing bind source owned by root.)* `restore` additionally binds one parameter,
 `settings.cluster.restore_generation = <built_at_unix_ms>`, into the image
 before activation so the Cluster page can say "restored from
 2026-09-20T02:30Z artefact" and a support bundle can prove which lineage a
@@ -424,8 +448,10 @@ rejoins without any restore step; (2) stop lab1 and lab2, on lab4 with an
 empty /srv/plurx run `plurxd restore --archive <latest> --data-dir
 /srv/plurx --advertise-host 10.42.0.14`, start it, log in with a token that
 existed before the loss, open Home and one title, report DVR schedule count
-and Trakt link status; then stop lab3, rename its hiqlite/ to
-hiqlite.retired-<UTC>, issue a join token on lab4 and rejoin lab3. Report:
+and Trakt link status; then rejoin lab3 with the six steps in
+docs/OPERATIONS.md (a new empty directory owned by the service user holding
+only a copy of `plurx.toml`, the old one moved aside, a fresh join token from
+lab4). Report:
 DB size, artefact bytes, minutes from restore start to /readyz 200, minutes
 to lab3 voter again, and anything the restore command told you to do that
 you did not expect.
@@ -583,8 +609,11 @@ without Paul's explicit go-ahead in chat for that step):
 D. Production majority loss (DESTRUCTIVE; only with Paul's explicit go-ahead). Stop two
    voters, restore the latest artefact onto the designated first voter's EMPTY data dir
    with its production --advertise-host, start it, `/readyz` 200, then on every other
-   node stop plurxd, rename hiqlite/ to hiqlite.retired-<UTC>, and rejoin with a fresh
-   join token (docs/OPERATIONS.md "Backing up and restoring an activated cluster").
+   node rejoin with the six steps in docs/OPERATIONS.md "Backing up and restoring an
+   activated cluster": stop plurxd, create a new empty data directory owned by the
+   service user, copy plurx.toml and nothing else into it, move the old directory aside
+   as a retired copy and put the new one at the configured path, write a fresh join
+   token where join_token_file points, and start.
    RTO = restore start to /readyz 200 plus last rejoin as voter. Writes newer than the
    artefact on the survivors are discarded by design (§7 Q4).
 ```
