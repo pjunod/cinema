@@ -142,7 +142,7 @@ class RunnerReconcileCase(unittest.TestCase):
         source = "runner:\n  envs: {}\ncontainer:\n  options: old\n"
         general = module.configuration(source, ["self-hosted", "general", "high-cpu"], 3)
         coverage = module.configuration(source, ["self-hosted", "ci-coverage"], 2)
-        self.assertIn('--cpus 3 --memory 7g --memory-swap 10g', general)
+        self.assertIn('--cpus 3 --memory 7g --memory-swap 14g', general)
         self.assertIn('--cpus 2 --memory 6g --memory-swap 10g', coverage)
         self.assertIn('CARGO_BUILD_JOBS: "1"', general)
         self.assertIn('CARGO_BUILD_JOBS: "1"', coverage)
@@ -159,7 +159,7 @@ class RunnerReconcileCase(unittest.TestCase):
             root = Path(directory)
             commands = []
             with self.assertRaisesRegex(RuntimeError, "disk reserve"):
-                self.swap_module().ensure_swap(root / "runner.swap", execute=lambda *args: commands.append(args), disk=lambda path: SimpleNamespace(free=11 * 1024 ** 3))
+                self.swap_module().ensure_swap(root / "runner.swap", execute=lambda *args: commands.append(args), disk=lambda path: SimpleNamespace(free=28 * 1024 ** 3))
             self.assertEqual(commands, [])
             self.assertFalse((root / "runner.swap").exists())
 
@@ -184,6 +184,62 @@ class RunnerReconcileCase(unittest.TestCase):
             self.assertEqual(fstab.read_text().count(f"{swap} none swap sw 0 0"), 1)
             self.assertIn("/dev/root / ext4", fstab.read_text())
             self.assertEqual(swap.stat().st_mode & 0o777, 0o600)
+
+    def test_busy_job_defers_restart_until_next_idle_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pending = Path(directory) / "restart-pending"
+            module = self.swap_module()
+            commands = []
+            def execute(*args):
+                commands.append(args)
+                return "123\n" if args[0] == "systemctl" and args[1] == "show" else ""
+            self.assertFalse(module.restart_when_idle("runner.service", pending, True,
+                                                     ["ACTIONS-TASK-1"], execute))
+            self.assertTrue(pending.exists())
+            self.assertEqual(commands, [])
+            self.assertTrue(module.restart_when_idle("runner.service", pending, False, [], execute))
+            self.assertFalse(pending.exists())
+            self.assertIn(("systemctl", "restart", "--no-block", "runner.service"), commands)
+
+    def test_host_job_children_defer_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pending = Path(directory) / "restart-pending"
+            commands = []
+            def execute(*args):
+                commands.append(args)
+                return "123\n" if args[0] == "systemctl" else "123\n456\n789\n"
+            self.assertFalse(self.swap_module().restart_when_idle("runner.service", pending, True, [], execute))
+            self.assertTrue(pending.exists())
+            self.assertFalse(any(command[1] == "restart" for command in commands))
+
+    def test_supplemental_swap_preserves_active_original(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original, supplemental = root / "runner.swap", root / "compiler.swap"
+            fstab, swaps = root / "fstab", root / "swaps"
+            with original.open("wb") as file:
+                file.truncate(4 * 1024 ** 3)
+            fstab.write_text(f"{original} none swap sw 0 0\n")
+            swaps.write_text(f"Filename Type Size Used Priority\n{original} file 4194304 1024 -2\n")
+            commands = []
+            def execute(*args):
+                commands.append(args)
+                if args[0] == "fallocate":
+                    with Path(args[-1]).open("r+b") as file:
+                        file.truncate(int(args[2]))
+                if args[0] == "swapon":
+                    with swaps.open("a") as file:
+                        file.write(f"{supplemental} file 4194304 0 -3\n")
+            module = self.swap_module()
+            for _ in range(2):
+                module.ensure_swap(original, fstab, swaps, execute=execute)
+                module.ensure_swap(supplemental, fstab, swaps, execute=execute,
+                                   disk=lambda path: SimpleNamespace(free=30 * 1024 ** 3))
+            self.assertEqual([command[0] for command in commands], ["fallocate", "mkswap", "swapon"])
+            self.assertEqual(original.stat().st_size, 4 * 1024 ** 3)
+            self.assertEqual(fstab.read_text().count(f"{original} none swap"), 1)
+            self.assertEqual(fstab.read_text().count(f"{supplemental} none swap"), 1)
+            self.assertEqual(supplemental.stat().st_mode & 0o777, 0o600)
 
     def test_swap_does_not_overwrite_existing_file(self):
         with tempfile.TemporaryDirectory() as directory:
