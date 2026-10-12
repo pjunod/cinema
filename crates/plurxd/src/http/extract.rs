@@ -91,6 +91,20 @@ impl Default for CacheOnlyAdminProofCache {
 /// waiting, leaving a queue seven deep behind a contract that says eight.
 pub(crate) struct RevocationAdmission {
     _operation: tokio::sync::OwnedMutexGuard<()>,
+    deadline: tokio::time::Instant,
+}
+
+impl RevocationAdmission {
+    /// The end of this caller's admission window. In a cluster the window
+    /// also covers waiting for the replicated membership exclusion that a
+    /// sign-out on another node may hold, so one budget bounds both queues.
+    pub(crate) fn deadline(&self) -> tokio::time::Instant {
+        self.deadline
+    }
+}
+
+pub(crate) fn record_revocation_admission_timeout() {
+    REVOCATION_ADMISSION_TIMEOUT.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn record_revocation_complete() {
@@ -283,13 +297,14 @@ impl CacheOnlyAdminProofCache {
                 REVOCATION_QUEUE_FULL.fetch_add(1, Ordering::Relaxed);
                 "cache-admin revocation queue is full"
             })?;
-        let operation = tokio::time::timeout(
-            REVOCATION_ADMISSION_WAIT,
+        let deadline = tokio::time::Instant::now() + REVOCATION_ADMISSION_WAIT;
+        let operation = tokio::time::timeout_at(
+            deadline,
             self.revocation_operation_gate.clone().lock_owned(),
         )
         .await
         .map_err(|_| {
-            REVOCATION_ADMISSION_TIMEOUT.fetch_add(1, Ordering::Relaxed);
+            record_revocation_admission_timeout();
             "cache-admin revocation admission timed out"
         })?;
         // Admitted: this caller now owns the one active slot and has left the
@@ -300,6 +315,7 @@ impl CacheOnlyAdminProofCache {
         drop(waiting);
         Ok(RevocationAdmission {
             _operation: operation,
+            deadline,
         })
     }
 

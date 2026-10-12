@@ -496,6 +496,9 @@ impl TranscodeManager {
         progress: Option<&std::sync::Mutex<Vec<QualityCandidate>>>,
         selected: Option<&QualityCandidate>,
     ) -> ResolvedQualityCatalog {
+        let scan_deadline = crate::media_pool::create_stage_deadline(
+            crate::media_pool::QUALITY_CATALOG_DEADLINE.min(DECODE_PLAN_PROBE_BUDGET),
+        );
         #[cfg(any(target_os = "linux", test))]
         let processed_hint_key = self.processed_hint_key(
             snapshot,
@@ -531,7 +534,7 @@ impl TranscodeManager {
             },
             None => Self::catalog_plan_probe(file),
         };
-        let source_facts = Self::quality_facts_from_probe(file, &probe);
+        let mut source_facts = Self::quality_facts_from_probe(file, &probe);
         let Ok(audio_claim) = plurx_core::playback::audio::AudioClaim::from_caps(caps) else {
             return ResolvedQualityCatalog {
                 selected_unavailable: None,
@@ -560,10 +563,6 @@ impl TranscodeManager {
             requested_quality,
             quality_rc: self.rate_control_snapshot().quality_rc,
         };
-        let coded_rate = source_facts
-            .as_ref()
-            .and_then(|facts| facts.frame_rate().value())
-            .map(|rate| (rate.numerator(), rate.denominator()));
         let mut result = Vec::new();
         let mut profile = plurx_core::playback::DeviceProfile::from_caps_v2(caps);
         profile.retain_applicable_learned_limits(crate::media_sessions::unix_ms());
@@ -620,6 +619,10 @@ impl TranscodeManager {
                 None
             }
         };
+        let coded_rate = source_facts
+            .as_ref()
+            .and_then(|facts| facts.frame_rate().value())
+            .map(|rate| (rate.numerator(), rate.denominator()));
         if let (Some(width), Some(height)) = (
             file.width.and_then(|value| u32::try_from(value).ok()),
             file.height.and_then(|value| u32::try_from(value).ok()),
@@ -688,6 +691,22 @@ impl TranscodeManager {
                         .push(candidate.clone());
                 }
                 result.push(candidate);
+            }
+        }
+
+        if !selected_copy {
+            source_facts = self
+                .quality_catalog_source_facts(
+                    file,
+                    copy_source.as_ref(),
+                    source_facts,
+                    scan_deadline,
+                )
+                .await;
+            if source_facts.is_none()
+                && selected.is_some_and(|candidate| candidate.route == CandidateRoute::Encode)
+            {
+                selected_unavailable = Some("selected source scan evidence unavailable".to_owned());
             }
         }
 
@@ -1062,6 +1081,50 @@ impl TranscodeManager {
             .normalization_transform_known()
             .then(|| facts.displayed_aspect())
             .flatten()
+    }
+
+    /// Missing HEVC scan metadata can change the execution graph after a
+    /// bounded binary refinement. Advertise that same graph, never a legacy
+    /// CPU recipe that a later successful probe would silently replace.
+    async fn quality_catalog_source_facts(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        source: Option<&crate::fragment_index_cluster::SourceFence>,
+        stored: Option<DecodeFacts>,
+        deadline: tokio::time::Instant,
+    ) -> Option<DecodeFacts> {
+        let facts = stored?;
+        if facts.codec() != Some("hevc")
+            || facts.scan_type() != plurx_core::domain::ScanType::Unknown
+            || facts.field_order().is_some_and(|order| order != "unknown")
+        {
+            return Some(facts);
+        }
+        let Some(probe) = self.decode_probe_identity.as_ref() else {
+            return Some(facts);
+        };
+        // Reopen against the already held object version and scanner identity;
+        // this demuxer then owns an independent offset lane.
+        let source = source?.reopen(file).await.ok()?;
+        let catalog = DecodeCatalogMetadata::from_media_file(file).ok()?;
+        let handle = Arc::new(source.handle.try_clone().ok()?);
+        let fact_source = self.hooks.get().decode_fact_source(
+            BoundPlanCaller::Vod
+                .decode_fact_source(handle, Arc::new(tokio::sync::Semaphore::new(1))),
+        );
+        let collected = self
+            .decode_facts
+            .get_or_probe(
+                probe,
+                fact_source,
+                Some(&catalog),
+                crate::decode_facts::ProbeStreamSelection::LegacyVideoOrdinal(0),
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                None,
+            )
+            .await
+            .ok()?;
+        source.unchanged().then_some(collected)
     }
 
     pub(crate) async fn quality_source_facts(
@@ -1956,6 +2019,302 @@ mod snapshot_catalog_regression {
         )
         .expect("facts");
         (file, facts)
+    }
+
+    /// Hardware acceptance: stored Unknown must not advertise CPU while the
+    /// fresh held-source plan proves progressive and selects Metal.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hevc_catalog_and_prepared_source_share_refined_scan_recipe() {
+        use plurx_core::{
+            domain::{ItemKind, LibraryKind, NewItem, NewLibrary},
+            transcode::{
+                MacosProcessingAvailability, MacosProcessingContext, MacosProcessingIdentity,
+            },
+        };
+        use std::os::unix::fs::MetadataExt;
+        for case in [
+            "progressive",
+            "off",
+            "missing",
+            "contradictory",
+            "collection_error",
+            "slow_copy",
+        ] {
+            let root = crate::test_tempdir().expect("fixture root");
+            let media = root.path().join("source.mkv");
+            std::fs::write(&media, b"bounded HEVC fixture").expect("source");
+            let metadata = std::fs::metadata(&media).expect("metadata");
+            let mut document = macos_test_sdr_document();
+            let video = &mut document["streams"][0];
+            video.as_object_mut().expect("stream").remove("field_order");
+            video["width"] = serde_json::json!(3840);
+            video["height"] = serde_json::json!(2160);
+            video["profile"] = serde_json::json!("Main 10");
+            video["pix_fmt"] = serde_json::json!("yuv420p10le");
+            video["color_transfer"] = serde_json::json!("smpte2084");
+            video["color_primaries"] = serde_json::json!("bt2020");
+            video["color_space"] = serde_json::json!("bt2020nc");
+            let store: Arc<dyn Store> =
+                Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+            let library = store
+                .create_library(&NewLibrary {
+                    name: "scan".into(),
+                    kind: LibraryKind::Movies,
+                    paths: vec![],
+                    anime: false,
+                })
+                .await
+                .expect("library");
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: "fixture".into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            let id = store
+                .upsert_file(
+                    item,
+                    media.to_str().expect("path"),
+                    i64::try_from(metadata.len()).expect("size"),
+                    metadata.mtime(),
+                    &plurx_core::scan::probe::parse_probe_json(&document),
+                )
+                .await
+                .expect("file");
+            store
+                .put_setting(keys::HWACCEL, "videotoolbox")
+                .await
+                .expect("backend");
+            let snapshot = store
+                .playback_planning_snapshot(id, &QUALITY_PLANNING_KEYS)
+                .await
+                .expect("snapshot")
+                .expect("source");
+            let mut configuration: serde_json::Value = serde_json::from_str(include_str!("../../../../../crates/plurx-core/tests/fixtures/hevc-progressive-configuration.json")).expect("captured PTL");
+            if case == "missing" {
+                configuration["streams"][0]
+                    .as_object_mut()
+                    .expect("stream")
+                    .remove("extradata");
+            }
+            if case == "contradictory" {
+                let data = configuration["streams"][0]["extradata"]
+                    .as_str()
+                    .expect("data")
+                    .replace("b000", "f000");
+                configuration["streams"][0]["extradata"] = serde_json::json!(data);
+            }
+            std::fs::write(root.path().join("document.json"), document.to_string())
+                .expect("document");
+            std::fs::write(
+                root.path().join("configuration.json"),
+                configuration.to_string(),
+            )
+            .expect("configuration");
+            let probe_path = root.path().join("ffprobe-scan");
+            crate::write_test_executable(
+                &probe_path,
+                r#"#!/bin/sh
+if test "$1" = "-version"; then printf '%s\n' 'ffprobe version hevc-catalog'; exit 0; fi
+test ! -e "$PLURX_TEST_PROBE_PATH.blocked" || exit 71
+test ! -e "$PLURX_TEST_PROBE_PATH.slow" || sleep 5
+case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuration.json";;
+*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/document.json";; esac
+"#,
+                0o755,
+            );
+            let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
+                probe_path.to_str().expect("probe path"),
+            )
+            .await
+            .expect("bound parser");
+            let manager = TranscodeManager::new(
+                Arc::clone(&store),
+                root.path().join("work"),
+                EncoderCaps {
+                    videotoolbox: true,
+                    ..Default::default()
+                },
+                Pipeline::Cpu,
+            )
+            .with_cache(
+                root.path().join("cache"),
+                "fixture-ffmpeg".into(),
+                "fixture".into(),
+            )
+            .with_decoders(vec!["hevc".into()])
+            .with_decode_probe(Some(probe));
+            let identity = MacosProcessingIdentity::new(
+                "1".repeat(64),
+                "2".repeat(64),
+                "3".repeat(64),
+                "4".repeat(64),
+                "fixture".into(),
+                "arm64".into(),
+                "fixture".into(),
+            )
+            .expect("identity");
+            manager
+                .macos_video_probe
+                .publish_context_for_test(&MacosProcessingContext::new(
+                    true,
+                    identity,
+                    MacosProcessingAvailability::Available,
+                    MacosProcessingAvailability::Available,
+                ));
+            manager.set_macos_video_processing_enabled(case != "off");
+            let caps = serde_json::from_value(serde_json::json!({"v":2,"containers":["mp4"],"transports":["hls"],"video":[{"codec":"h264","present":["sdr"]}]})).expect("caps");
+            if case == "slow_copy" {
+                let copy_caps = serde_json::from_value(serde_json::json!({"v":2,"containers":["mp4"],"transports":["hls"],"video":[{"codec":"hevc","present":["pq"]},{"codec":"h264","present":["sdr"]}]})).expect("HDR copy caps");
+                std::fs::write(probe_path.with_extension("slow"), b"").expect("slow collection");
+                let progress = std::sync::Mutex::new(Vec::new());
+                let timed = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    manager.quality_candidates_from_snapshot_progress(
+                        &snapshot,
+                        &copy_caps,
+                        None,
+                        0,
+                        None,
+                        Presentation::Vod,
+                        None,
+                        Some(&progress),
+                        None,
+                    ),
+                )
+                .await;
+                if let Ok(rows) = timed {
+                    assert!(
+                        rows.iter().any(|row| row.route == CandidateRoute::Remux),
+                        "an inner deadline may finish first, preserving the remux offer"
+                    );
+                }
+                let copied = progress
+                    .lock()
+                    .expect("progress")
+                    .iter()
+                    .find(|row| row.route == CandidateRoute::Remux)
+                    .cloned()
+                    .expect("valid remux is emitted before the slow encode probe");
+                let restored = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    manager.quality_candidates_from_snapshot_progress(
+                        &snapshot,
+                        &copy_caps,
+                        None,
+                        0,
+                        None,
+                        Presentation::Vod,
+                        None,
+                        None,
+                        Some(&copied),
+                    ),
+                )
+                .await
+                .expect("restoring remux skips the scan probe");
+                assert!(restored
+                    .iter()
+                    .any(|row| row.recipe_digest == copied.recipe_digest));
+                continue;
+            }
+            if case == "collection_error" {
+                std::fs::write(probe_path.with_extension("blocked"), b"").expect("fail collection");
+                let failed = manager
+                    .quality_candidates_from_snapshot_progress(
+                        &snapshot,
+                        &caps,
+                        None,
+                        0,
+                        None,
+                        Presentation::Vod,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(
+                    failed.iter().all(|row| row.route != CandidateRoute::Encode),
+                    "a failed collection cannot offer an unstable CPU recipe"
+                );
+                std::fs::remove_file(probe_path.with_extension("blocked"))
+                    .expect("restore collection");
+            }
+            let rows = manager
+                .quality_candidates_from_snapshot_progress(
+                    &snapshot,
+                    &caps,
+                    None,
+                    0,
+                    None,
+                    Presentation::Vod,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            let row = rows
+                .iter()
+                .find(|row| {
+                    row.route == CandidateRoute::Encode
+                        && row.target_height == 1080
+                        && row.grade == OutputGrade::Sdr
+                        && row.normalized_geometry
+                })
+                .unwrap_or_else(|| panic!("1080 SDR offer for {case}: {rows:?}"));
+            let context = TranscodeManager::candidate_context(row);
+            let mut options = manager.live_lookup_options(
+                manager.rate_control_snapshot(),
+                Encoder::VideoToolbox,
+                &snapshot.file,
+                1080,
+                0.0,
+                None,
+                None,
+                None,
+                OutputGrade::Sdr,
+            );
+            options.normalized_geometry = row.normalized_geometry;
+            options.output_codec =
+                TranscodeManager::selected_output_codec(Some(&context), Encoder::VideoToolbox);
+            let handle = Arc::new(std::fs::File::open(&media).expect("held source"));
+            let fresh = manager
+                .probe_vod_source_once(&snapshot.file, Arc::clone(&handle))
+                .await
+                .expect("fresh verification")
+                .expect("bound parser");
+            let plan = manager
+                .resolve_vod_prepared_source(
+                    &snapshot.file,
+                    &options,
+                    Encoder::VideoToolbox,
+                    handle,
+                    fresh,
+                    None,
+                )
+                .await
+                .expect("canonical prepared-source plan");
+            manager
+                .validate_prepared_candidate_recipe(
+                    &plan,
+                    Presentation::Vod,
+                    TranscodeManager::vod_reorder_from_snapshot(&snapshot),
+                    &context,
+                )
+                .unwrap_or_else(|error| panic!("catalog/preparation equality for {case}: {error}"));
+            let expected = if matches!(case, "progressive" | "collection_error") {
+                Pipeline::VtToneMapMetal
+            } else {
+                Pipeline::Cpu
+            };
+            assert_eq!(plan.options().pipeline, expected, "{case}");
+        }
     }
 
     #[tokio::test]

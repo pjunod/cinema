@@ -192,6 +192,16 @@ impl PacketTimelineBounds {
 }
 
 fn parse_positive_decimal(value: &str) -> Option<(u64, u64)> {
+    let (numerator, denominator) = parse_decimal(value)?;
+    // `reduce_rational` refuses a zero numerator: a duration must be positive.
+    reduce_rational(numerator, denominator)
+}
+
+/// A plain non-negative decimal as an unreduced `numerator / 10^digits`.
+/// Zero is a value here; whether zero is acceptable is the caller's question,
+/// because a component of a larger value (the seconds of `00:01:00.000`) may
+/// be zero when the whole is not.
+fn parse_decimal(value: &str) -> Option<(u128, u128)> {
     let value = value.trim();
     if value.is_empty() || value.len() > 64 || value.starts_with(['-', '+']) {
         return None;
@@ -210,11 +220,10 @@ fn parse_positive_decimal(value: &str) -> Option<(u64, u64)> {
     } else {
         fraction.parse::<u128>().ok()?
     };
-    let numerator = whole.checked_mul(denominator)?.checked_add(fraction)?;
-    if numerator == 0 {
-        return None;
-    }
-    reduce_rational(numerator, denominator)
+    Some((
+        whole.checked_mul(denominator)?.checked_add(fraction)?,
+        denominator,
+    ))
 }
 
 fn reduce_rational(mut numerator: u128, mut denominator: u128) -> Option<(u64, u64)> {
@@ -260,17 +269,20 @@ fn parse_matroska_duration(value: &str) -> Option<(u64, u64)> {
     if parts.next().is_some() || minutes >= 60 {
         return None;
     }
-    let (seconds_num, seconds_den) = parse_positive_decimal(seconds)?;
-    if u128::from(seconds_num) >= 60 * u128::from(seconds_den) {
+    // The seconds field alone may be zero — an exactly-N-minute title is
+    // `00:01:00.000` — so it is parsed as a non-negative decimal and only the
+    // whole duration has to be positive (`reduce_rational` refuses zero).
+    let (seconds_num, seconds_den) = parse_decimal(seconds)?;
+    if seconds_num >= 60 * seconds_den {
         return None;
     }
     let whole_seconds = hours
         .checked_mul(3_600)?
         .checked_add(minutes.checked_mul(60)?)?;
     let numerator = whole_seconds
-        .checked_mul(u128::from(seconds_den))?
-        .checked_add(u128::from(seconds_num))?;
-    reduce_rational(numerator, u128::from(seconds_den))
+        .checked_mul(seconds_den)?
+        .checked_add(seconds_num)?;
+    reduce_rational(numerator, seconds_den)
 }
 
 fn rational_diff_exceeds_two_seconds(left: (u64, u64), right: (u64, u64)) -> bool {
@@ -3310,6 +3322,94 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// A Matroska DURATION whose seconds field is zero is a duration, not a
+    /// refusal: an exactly-N-minute title used to fail its metadata
+    /// expectation and fall back to a packet probe.
+    #[test]
+    fn a_matroska_duration_whose_seconds_field_is_zero_parses() {
+        assert_eq!(parse_matroska_duration("00:01:00.000"), Some((60, 1)));
+        assert_eq!(parse_matroska_duration("01:00:00.000"), Some((3_600, 1)));
+        assert_eq!(
+            parse_matroska_duration("00:41:00.000000000"),
+            Some((2_460, 1))
+        );
+        assert_eq!(parse_matroska_duration("00:00:59.500"), Some((119, 2)));
+        assert_eq!(
+            parse_matroska_duration("00:00:12.021000000"),
+            Some((12_021, 1_000))
+        );
+        for refused in [
+            "00:00:00.000",
+            "00:00:00",
+            "-00:01:00.000",
+            "00:-1:00.000",
+            "00:01:-1.000",
+            "00:60:00.000",
+            "00:00:60.000",
+            "00:01",
+            "00:01:00:00",
+            "aa:01:00.000",
+            "00:01:0x.000",
+            "",
+        ] {
+            assert_eq!(parse_matroska_duration(refused), None, "{refused:?}");
+        }
+        // The plain decimal keeps refusing zero for whole values.
+        assert_eq!(parse_positive_decimal("0.000"), None);
+        assert_eq!(parse_positive_decimal("60.000"), Some((60, 1)));
+    }
+
+    /// The packet fallback, on a real file that gives it nothing else: the
+    /// fixture's DURATION tags are renamed, so its selected video has no
+    /// trustworthy duration and the index must prove its end from packets.
+    /// The tail probe used an open-ended `-read_intervals "<start>%"`, which
+    /// this ffprobe answers with no packets at all depending on unrelated
+    /// arguments, so the fallback could never prove an end.
+    #[tokio::test]
+    async fn the_packet_fallback_proves_an_end_on_a_file_without_duration_tags() {
+        testfixtures::require_ffmpeg();
+        let temp = crate::test_tempdir().expect("tempdir");
+        let source_path = temp.path().join("no-duration-tag.mkv");
+        let bytes = std::fs::read(testfixtures::source("h264")).expect("fixture bytes");
+        let renamed = bytes
+            .windows(8)
+            .filter(|window| *window == b"DURATION")
+            .count();
+        assert!(
+            renamed > 0,
+            "the fixture must carry DURATION tags to rename"
+        );
+        let mut patched = bytes.clone();
+        let mut at = 0;
+        while let Some(found) = patched[at..]
+            .windows(8)
+            .position(|window| window == b"DURATION")
+        {
+            patched[at + found + 7] = b'X';
+            at += found + 8;
+        }
+        std::fs::write(&source_path, &patched).expect("patched fixture");
+
+        let source = std::fs::File::open(&source_path).expect("fixture source");
+        let raw =
+            crate::ffmpeg::held_source_index_probe_json(&source, Duration::from_secs(30), None)
+                .await
+                .expect("metadata probe");
+        assert!(
+            matches!(
+                completion_expectation_from_probe(&raw, "fixture-object-v1"),
+                Err(CompletionExpectationError::Unverified(_))
+            ),
+            "the fixture must reach the packet fallback"
+        );
+        let context = packet_probe_context_from_metadata(&raw).expect("a format seek hint");
+        let bounds = held_source_video_packet_bounds(&source, context, Duration::from_secs(30))
+            .await
+            .expect("the packet fallback proves the selected video's end");
+        assert!(bounds.packet_count > 0);
+        assert!(bounds.end_ticks > bounds.origin_ticks);
+    }
+
     #[tokio::test]
     async fn content_analysis_ffmpeg_accepts_complete_video_with_a_longer_audio_tail() {
         testfixtures::require_ffmpeg();

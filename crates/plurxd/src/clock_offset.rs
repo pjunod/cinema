@@ -4,7 +4,8 @@ use crate::state::AppState;
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::clock::{ClockDecisionTicket, PeerClockOffset, CLOCK_OBSERVATION_MAX_AGE};
 use plurx_core::cluster::membership::{
-    normalize_internal_http_base, ClockLeadershipIdentity, ClockPeerRoster, MembershipManager,
+    normalize_internal_http_base, ClockLeadershipIdentity, ClockPeerRoster, MembershipError,
+    MembershipManager,
 };
 use plurx_core::error::StoreError;
 use plurx_core::store::Store;
@@ -37,6 +38,117 @@ fn peer_directory(roster: &ClockPeerRoster) -> Option<PeerDirectory> {
     Some(directory)
 }
 
+/// The two reads a clock roster proof is made of: the exact committed roster
+/// as a consistent read proves it, and as this node's own replica holds it,
+/// which only says whether that consistent read is owed.
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
+pub(crate) trait ClockRosterSource: Send + Sync {
+    async fn clock_roster(&self) -> Result<ClockPeerRoster, MembershipError>;
+    async fn clock_roster_hint(&self) -> Result<ClockPeerRoster, MembershipError>;
+}
+
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
+impl ClockRosterSource for MembershipManager {
+    async fn clock_roster(&self) -> Result<ClockPeerRoster, MembershipError> {
+        self.clock_peers().await
+    }
+
+    async fn clock_roster_hint(&self) -> Result<ClockPeerRoster, MembershipError> {
+        self.clock_peers_hint().await
+    }
+}
+
+/// A roster compared on what a round binds: the applied membership and each
+/// member's UUID, Raft id and origin, in the query's Raft-id order.
+/// `reachable` is heartbeat age; it changes with every heartbeat and no clock
+/// decision reads it.
+struct HeldRoster(ClockPeerRoster);
+
+impl PartialEq for HeldRoster {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.membership == other.0.membership
+            && self.0.peers.len() == other.0.peers.len()
+            && self.0.peers.iter().zip(&other.0.peers).all(|(held, seen)| {
+                held.node_id == seen.node_id
+                    && held.raft_id == seen.raft_id
+                    && held.http_base == seen.http_base
+            })
+    }
+}
+
+/// The last exact committed roster a consistent read proved, held across
+/// observation rounds and shared with the leader's learner barrier.
+///
+/// Each round used to prove the roster by consistent read twice (before and
+/// after its fan-out), 17,280 reads a day per node, and the leader read it
+/// once more for every inbound probe's learner barrier, for a roster that
+/// changes only when a node joins, leaves or moves its origin. A proof is now
+/// held while this replica's applied index has not moved, and while its own
+/// copy of the roster agrees after the index moves
+/// (`SettingsChangeSource::confirms`); only a disagreement costs the
+/// consistent read.
+///
+/// The guard's coverage is unchanged. The member set a round must cover is
+/// this node's applied Raft membership, which the read brackets but does not
+/// supply, so a held proof names every member a fresh read would. A
+/// membership change is a Raft entry: it moves the applied index and changes
+/// the replica's roster, so it is proved before any round binds it. A row this
+/// replica has not applied yet (an origin, a UUID, a removal mark) can make a
+/// probe fail as `Unknown` or keep a member a fresh read would refuse the
+/// round over, never omit one or measure it under another identity: every
+/// response is signed by, and names, its member. A failed or cancelled read
+/// holds nothing, and its round fails closed as before. Without an
+/// applied-index watch every call reads.
+struct RosterProof {
+    changes: SettingsChangeSource,
+    held: tokio::sync::Mutex<Option<Proved<HeldRoster>>>,
+}
+
+impl RosterProof {
+    fn new(changes: SettingsChangeSource) -> Self {
+        Self {
+            changes,
+            held: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    fn for_membership(membership: &MembershipManager) -> Self {
+        Self::new(match membership.local_db_raft_metrics() {
+            Some(applied) => SettingsChangeSource::Applied(applied),
+            // Without a replicated store the roster is empty and read from
+            // nothing; no other process can change it.
+            None => SettingsChangeSource::LocalOnly,
+        })
+    }
+
+    /// The held roster while it stands, otherwise one consistent read, held
+    /// on success. Callers queue on the proof, so concurrent callers that find
+    /// it stale share one read.
+    async fn roster<S: ClockRosterSource + ?Sized>(
+        &self,
+        source: &S,
+    ) -> Result<ClockPeerRoster, MembershipError> {
+        let mut held = self.held.lock().await;
+        if let Some(proof) = held.as_mut() {
+            let hint = || async {
+                source
+                    .clock_roster_hint()
+                    .await
+                    .map(HeldRoster)
+                    .map_err(|error| StoreError::Database(error.to_string()))
+            };
+            if self.changes.confirms(proof, hint).await {
+                return Ok(proof.value.0.clone());
+            }
+        }
+        *held = None;
+        let mark = self.changes.mark();
+        let roster = source.clock_roster().await?;
+        *held = Some(mark.proved(HeldRoster(roster.clone())));
+        Ok(roster)
+    }
+}
+
 #[derive(Clone)]
 struct CompletedRound {
     leadership: Option<ClockLeadershipIdentity>,
@@ -57,6 +169,7 @@ struct OwnerControl {
 
 struct ObserverInner {
     membership: MembershipManager,
+    roster: RosterProof,
     transport: crate::http::peer_transport::PeerTransport,
     requests: mpsc::Sender<()>,
     completion: watch::Sender<Completion>,
@@ -149,6 +262,7 @@ impl ClockObserver {
         let (completion, _) = watch::channel(Completion::default());
         Self(Arc::new(ObserverInner {
             transport: crate::http::peer_transport::PeerTransport::new(membership.clone()),
+            roster: RosterProof::for_membership(&membership),
             membership,
             requests,
             completion,
@@ -314,7 +428,12 @@ impl ClockObserver {
         }
         let guard = self.0.membership.clock_guard();
         let clock_generation = guard.ticket().clock_generation;
-        let roster = self.0.membership.clock_peers().await.map_err(|_| ())?;
+        let roster = self
+            .0
+            .roster
+            .roster(&self.0.membership)
+            .await
+            .map_err(|_| ())?;
         if roster.membership.as_ref() != Some(&leadership.membership)
             || self.0.membership.clock_leadership_identity().as_ref() != Some(&leadership)
             || guard.ticket().clock_generation != clock_generation
@@ -473,6 +592,7 @@ impl ClockObserver {
                 () = shutdown.cancelled() => break,
                 round = observation_round(
                     &self.0.membership,
+                    &self.0.roster,
                     &self.0.transport,
                     &mut filters,
                     &mut previous_directory,
@@ -706,6 +826,7 @@ pub(crate) async fn run(state: AppState, shutdown: tokio_util::sync::Cancellatio
 
 async fn observation_round(
     membership_manager: &MembershipManager,
+    roster: &RosterProof,
     transport: &crate::http::peer_transport::PeerTransport,
     filters: &mut BTreeMap<String, Filter>,
     previous_directory: &mut PeerDirectory,
@@ -715,7 +836,7 @@ async fn observation_round(
     let guard = membership_manager.clock_guard();
     let leadership = membership_manager.clock_leadership_identity();
     let peer_roster =
-        match tokio::time::timeout(CLOCK_ROSTER_BUDGET, membership_manager.clock_peers()).await {
+        match tokio::time::timeout(CLOCK_ROSTER_BUDGET, roster.roster(membership_manager)).await {
             Ok(Ok(peers)) => peers,
             _ => {
                 guard.roster_failed();
@@ -791,9 +912,11 @@ async fn observation_round(
         .buffer_unordered(8)
         .collect::<Vec<_>>()
         .await;
-    // Bind all UUID/Raft/origin facts, not merely an unchanged UUID set.
+    // Bind all UUID/Raft/origin facts, not merely an unchanged UUID set. A
+    // proof still standing costs no read; a roster changed during the fan-out
+    // is proved again and fails the round.
     let final_peers =
-        tokio::time::timeout(CLOCK_ROSTER_BUDGET, membership_manager.clock_peers()).await;
+        tokio::time::timeout(CLOCK_ROSTER_BUDGET, roster.roster(membership_manager)).await;
     let same_roster = match final_peers {
         Ok(Ok(final_roster)) => {
             peer_directory(&final_roster).as_ref() == Some(&directory)
@@ -1024,6 +1147,198 @@ mod tests {
             shutdown.cancel();
         };
         tokio::join!(follower, driver);
+    }
+
+    /// The exact committed roster as a consistent read returns it
+    /// (`committed`) and as this node's replica holds it (`replica`).
+    struct Roster {
+        committed: std::sync::Mutex<ClockPeerRoster>,
+        replica: std::sync::Mutex<ClockPeerRoster>,
+        failing: std::sync::atomic::AtomicBool,
+        reads: std::sync::atomic::AtomicU64,
+    }
+
+    impl Roster {
+        fn new(roster: &ClockPeerRoster) -> Self {
+            Self {
+                committed: std::sync::Mutex::new(roster.clone()),
+                replica: std::sync::Mutex::new(roster.clone()),
+                failing: std::sync::atomic::AtomicBool::new(false),
+                reads: std::sync::atomic::AtomicU64::new(0),
+            }
+        }
+
+        fn commit(&self, roster: &ClockPeerRoster) {
+            *self.committed.lock().expect("committed roster") = roster.clone();
+            *self.replica.lock().expect("replica roster") = roster.clone();
+        }
+
+        fn reads(&self) -> u64 {
+            self.reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[plurx_core::cluster::coordination::cluster_job_async_trait]
+    impl ClockRosterSource for Roster {
+        async fn clock_roster(&self) -> Result<ClockPeerRoster, MembershipError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.reads.fetch_add(1, SeqCst);
+            if self.failing.load(SeqCst) {
+                return Err(MembershipError::Internal("quorum unavailable".into()));
+            }
+            Ok(self.committed.lock().expect("committed roster").clone())
+        }
+
+        async fn clock_roster_hint(&self) -> Result<ClockPeerRoster, MembershipError> {
+            Ok(self.replica.lock().expect("replica roster").clone())
+        }
+    }
+
+    fn roster_of(members: &[u64], log: u64) -> ClockPeerRoster {
+        use plurx_core::cluster::clock::ClockMembershipIdentity;
+        use plurx_core::cluster::membership::ActivityPeer;
+        ClockPeerRoster {
+            membership: Some(ClockMembershipIdentity {
+                local_node: 1,
+                log: (1, 1, log),
+                members: members.iter().copied().collect(),
+                voters: members.iter().copied().filter(|id| *id <= 3).collect(),
+            }),
+            peers: members
+                .iter()
+                .filter(|id| **id != 1)
+                .map(|id| ActivityPeer {
+                    node_id: format!("00000000-0000-0000-0000-00000000000{id}"),
+                    raft_id: *id,
+                    http_base: Some(format!("http://10.0.0.{id}:8096")),
+                    reachable: true,
+                })
+                .collect(),
+        }
+    }
+
+    fn directory_of(roster: &ClockPeerRoster) -> Vec<(String, u64, Option<String>)> {
+        roster
+            .peers
+            .iter()
+            .map(|peer| (peer.node_id.clone(), peer.raft_id, peer.http_base.clone()))
+            .collect()
+    }
+
+    /// One observation round's roster calls: before the fan-out and after it.
+    async fn round_rosters(proof: &RosterProof, source: &Roster) -> Vec<ClockPeerRoster> {
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            seen.push(proof.roster(source).await.expect("proved roster"));
+        }
+        seen
+    }
+
+    /// K-03 regression: ten idle minutes of observation rounds, each with the
+    /// heartbeat entries that move the applied index and the heartbeat ages
+    /// that change `reachable`, cost the first proof and nothing else (each
+    /// round used to make two consistent reads: 120). A membership change
+    /// costs exactly one consistent read and reaches the next round whole.
+    #[tokio::test(start_paused = true)]
+    async fn the_clock_roster_is_proved_on_membership_change_not_every_round() {
+        let three = roster_of(&[1, 2, 3, 4], 7);
+        let source = Roster::new(&three);
+        let (applied, changes) = watch::channel(1u64);
+        let proof = RosterProof::new(SettingsChangeSource::Test(changes));
+        for round in 0..60u32 {
+            for roster in round_rosters(&proof, &source).await {
+                assert_eq!(directory_of(&roster), directory_of(&three));
+                assert_eq!(roster.membership, three.membership);
+            }
+            for _ in 0..2 {
+                tokio::time::sleep(CLOCK_PROBE_INTERVAL / 2).await;
+                applied.send_modify(|index| *index += 1);
+            }
+            source.replica.lock().expect("replica roster").peers[0].reachable = round % 2 == 0;
+        }
+        assert_eq!(source.reads(), 1, "ten idle minutes cost the first proof");
+
+        let five = roster_of(&[1, 2, 3, 4, 5], 8);
+        source.commit(&five);
+        applied.send_modify(|index| *index += 1);
+        let rosters = round_rosters(&proof, &source).await;
+        assert_eq!(source.reads(), 2, "a membership change costs one read");
+        for roster in &rosters {
+            assert_eq!(roster.membership, five.membership);
+            assert_eq!(
+                directory_of(roster),
+                directory_of(&five),
+                "no member omitted"
+            );
+        }
+        for _ in 0..30 {
+            tokio::time::sleep(CLOCK_PROBE_INTERVAL).await;
+            applied.send_modify(|index| *index += 1);
+            round_rosters(&proof, &source).await;
+        }
+        assert_eq!(source.reads(), 2, "and is then held");
+
+        let mut moved = five.clone();
+        moved.peers[3].http_base = Some("http://10.0.1.5:8096".into());
+        source.commit(&moved);
+        applied.send_modify(|index| *index += 1);
+        let roster = proof.roster(&source).await.expect("proved roster");
+        assert_eq!(source.reads(), 3, "a moved origin costs one read");
+        assert_eq!(directory_of(&roster), directory_of(&moved));
+    }
+
+    /// A failed read holds nothing and fails the caller closed, so the next
+    /// round reads again; a replica that disagrees with the proof (here it has
+    /// not applied a change the consistent read saw) costs a read per look
+    /// until it agrees, never a stale roster. Without a change source every
+    /// call reads, as before.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_or_disputed_clock_roster_is_read_again_never_held() {
+        let roster = roster_of(&[1, 2, 3], 3);
+        let source = Roster::new(&roster);
+        let (applied, changes) = watch::channel(1u64);
+        let proof = RosterProof::new(SettingsChangeSource::Test(changes));
+        source
+            .failing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        for reads in 1..=3 {
+            assert!(proof.roster(&source).await.is_err(), "fails closed");
+            assert_eq!(source.reads(), reads, "nothing held, read again");
+            tokio::time::sleep(CLOCK_PROBE_INTERVAL).await;
+        }
+        source
+            .failing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        proof.roster(&source).await.expect("proved roster");
+        proof.roster(&source).await.expect("held roster");
+        assert_eq!(source.reads(), 4, "the first success is held");
+
+        let four = roster_of(&[1, 2, 3, 4], 4);
+        *source.committed.lock().expect("committed roster") = four.clone();
+        applied.send_modify(|index| *index += 1);
+        let proved = proof.roster(&source).await.expect("proved roster");
+        assert_eq!(directory_of(&proved), directory_of(&roster), "still held");
+        assert_eq!(source.reads(), 4);
+        // The leader's committed roster is ahead of this replica's: the read
+        // that proves it disagrees with the replica until it applies.
+        *source.replica.lock().expect("replica roster") = roster_of(&[1, 2, 3, 5], 9);
+        applied.send_modify(|index| *index += 1);
+        let proved = proof.roster(&source).await.expect("proved roster");
+        assert_eq!(directory_of(&proved), directory_of(&four));
+        assert_eq!(source.reads(), 5);
+        applied.send_modify(|index| *index += 1);
+        proof.roster(&source).await.expect("proved roster");
+        assert_eq!(source.reads(), 6, "a disagreeing replica re-reads");
+        *source.replica.lock().expect("replica roster") = four.clone();
+        applied.send_modify(|index| *index += 1);
+        proof.roster(&source).await.expect("held roster");
+        assert_eq!(source.reads(), 6, "an agreeing replica carries the proof");
+
+        let unwatched = RosterProof::new(SettingsChangeSource::Polled);
+        for _ in 0..3 {
+            unwatched.roster(&source).await.expect("read roster");
+        }
+        assert_eq!(source.reads(), 9, "an unwatched roster is read every call");
     }
 
     #[test]

@@ -462,6 +462,16 @@ impl TranscodeManager {
     }
 
     /// Narrow process-metrics handle with no session map or Store access.
+    /// See [`crate::vodserve::VodServe::local_index_demand`].
+    pub(crate) fn local_index_demand(&self) -> Vec<i64> {
+        self.vod.local_index_demand()
+    }
+
+    /// See [`crate::vodserve::VodServe::settle_local_index_demand`].
+    pub(crate) fn settle_local_index_demand(&self, file_id: i64) {
+        self.vod.settle_local_index_demand(file_id);
+    }
+
     pub(crate) fn metrics_handle(&self) -> TranscodeMetrics {
         TranscodeMetrics {
             active_sessions: Arc::clone(&self.active_session_count),

@@ -1,3 +1,8 @@
+# R03 task on main-synchronized effort 2b7fd17fc: compose the existing
+# 949 task/1740 timer sites with R03's reviewed +7 task/+8 timer sites.
+# The scan deadline stays captured at catalogue entry alongside the metadata
+# description key; no extra timer or ownership scope is introduced here.
+
 # R03 processed Auto/reopen ownership reconciliation (b647b151f):
 # +7 namespaced task sites: the weak one-shot expiry timer, the weak finite
 # probe expiry timer, cancellation-independent exact probe-reader detach, the
@@ -16,6 +21,11 @@
 # instances plus the unlink/retry fixture; failed physical unlink stays charged.
 # +2 broad lifecycle-method matches are joined test-only Barrier.wait calls;
 # they launch no process. Scan scopes, patterns and equality bars are unchanged.
+# HDR effort main synchronization (main 0da656d3a + effort 998083c85):
+# Preserve R01's joined/cancelled admission owner and three test-only deadline
+# observations alongside main's cluster and HEVC catalog owner changes.
+# Static recount yields 949 namespaced tasks and 1740 timer constructors;
+# no scope, pattern or equality requirement changes. No units executed here.
 
 # Subtitle batch census, base0c4ae0aa5 -> reviewed worker/owner delivery:
 # +2 publication_ready_at_ms fields belong only to cached_owner_delivery's
@@ -2941,6 +2951,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # node-local cursor, runs its bounded frame reads through the scanner's
 # owned child and releases the lease before it returns; it owns no producer
 # and no timer.
+# K-04 browse authority bar (50ffc340e): +1 test-only, in
+# http::browse::tests::browse_routes_k04_bar. It spawns the replication
+# monitor's passive metrics sampler, the daemon's own bounded-read proof
+# source, and aborts it before the fixture returns. No production task.
 # +8 from effort/startup-tone-map (tone-map census and the create-path regressions; reviewed in its commits).
 # Index coverage (+1 production): `POST /analysis/coverage` spawns one walk
 # of the catalogue that owns no producer, process or timer. It holds the
@@ -2949,7 +2963,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # walk's own bounded AvailabilityCache, never item detail's.
 # R01 HDR admission regression: +1 test-owned tokio task, aborted and
 # awaited before capacity/yield assertions; no detached production owner.
-expected_occurrences = 955
+expected_occurrences = 956
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4518,6 +4532,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # the cap, one across it and one long hold, then the shutdown token. Production
 # adds no timer: the follower's existing 10 s interval reads the held answer's
 # age.
+# K-04 browse authority bar (50ffc340e): +2, test-only, in
+# http::browse::tests::browse_routes_k04_bar: one 10 s timeout around a 50 ms
+# poll for the bounded-read proof, both awaited in place. No production timer.
+# K-03 clock roster held on change signals: +3, test-only, in clock_offset::
+# tests: two paused-time sleeps pacing the heartbeat entries of simulated
+# observation rounds and one pacing the failed-read retries, each awaited in
+# place (no spawn). Production adds no timer: both roster reads keep their
+# existing two-second bounds around the held proof.
 # PR #1021 remote-expiry regression: +2 cfg(test)-only sleeps in remote/owner.rs.
 # authorize_session and refresh_authority await their injected finite latency
 # within the same test-owned perform future. tokio::join! owns both futures;
@@ -4528,6 +4550,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # #978: +1, test-only. The prepared-owner catalog regression in chunk_06.rs
 # bounds its own wait with one tokio::time::timeout, so a regression to the
 # 45 s prime deadline fails instead of hanging.
+# Scan reports an unreachable provider (bcf68266f): +2, test-only, in
+# state::tests::a_scan_with_tmdb_unreachable_reports_it_once_in_its_problems:
+# one 30 s timeout around a 10 ms poll for the scan status to stop running,
+# both awaited in place. No production timer.
 # Remote receiver-credit follow-up: +1 cfg(test)-only sleep in
 # Hub::delay_authority_read. Each delayed read is owned by perform/deliver
 # and their joined futures; cancellation drops it. The full request-chain
@@ -4536,7 +4562,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # R01 HDR admission regression: +3 test-only bounded timeout/sleep calls
 # owned by the test and joined or cancelled before checking permit release.
 # Production reuses its existing absolute deadline and admission poll.
-expected_occurrences = 1739
+# PR #1038 HEVC catalog parity: +2 cfg(test)-only timeout bounds in
+# transcode/manager/candidates.rs. The slow probe regression owns both
+# catalog futures directly: one checks progress before the two-second bound,
+# and one checks selected-remux restoration bypasses scan refinement.
+# No new task-spawn or detachment site is introduced. Existing collection
+# cleanup can outlive the timed-out waiter and retains child/source ownership
+# until kill-and-reap finishes. Production retains the catalog deadline
+# captured at request entry.
+
+expected_occurrences = 1748
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.

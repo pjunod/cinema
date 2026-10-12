@@ -68,7 +68,8 @@ const MAX_VERSION_BYTES: usize = 64 * 1024;
 /// S-07 drafted its luminance side-data projection as v2 against the older
 /// main; merged, the projection is a superset of v3, so it takes the next
 /// number rather than either branch's.
-const PROBE_SCHEMA_VERSION: u32 = 4;
+// v5 adds independently collected HEVC progressive/frame-only PTL evidence.
+const PROBE_SCHEMA_VERSION: u32 = 5;
 const IDENTITY_DEADLINE: Duration = Duration::from_secs(10);
 /// How long a bound probe identity is trusted on its `fstat` tuples alone
 /// (DECODE-FACTS-GATE-AND-FALLBACK §3.3, M3).
@@ -4180,6 +4181,12 @@ impl DecodeFactCache {
             // parse refusal for its existing, separately bounded fallback.
             return Ok((collected, DecodeFactLookupResult::MissCollected));
         };
+        // A fresh catalogue document carries no binary scan proof. Do not
+        // replace the refined decoder cache with its still-unknown HEVC facts.
+        if source.projection == ProbeProjection::SourceDocument && needs_hevc_scan_refinement(facts)
+        {
+            return Ok((collected, DecodeFactLookupResult::MissCollected));
+        }
         let pending_refinement = source.projection == ProbeProjection::SourceDocument
             && matches!(facts.scan_type(), ScanType::Interlaced(_));
         if pending_refinement {
@@ -4592,9 +4599,6 @@ async fn collect_idet_verdict(
     cancelled: Option<&tokio_util::sync::CancellationToken>,
     work: crate::process_control::ChildWork,
 ) -> Result<InterlaceVerdict, DecodeFactError> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::process::CommandExt;
-
     let filter =
         format!("movie=/dev/fd/3:si={input_video_stream},trim=duration={IDET_MEDIA_SECONDS},idet");
     let arguments = vec![
@@ -4610,6 +4614,37 @@ async fn collect_idet_verdict(
         OsString::from("-of"),
         OsString::from("compact=p=0:nk=1"),
     ];
+    Ok(collect_refinement_output(
+        probe,
+        source_fd,
+        arguments,
+        launch_deadline,
+        cancelled,
+        work,
+    )
+    .await?
+    .and_then(|(_, stderr)| parse_idet_verdict(&stderr))
+    .unwrap_or(InterlaceVerdict::IdetUnavailable))
+}
+
+fn needs_hevc_scan_refinement(facts: &DecodeFacts) -> bool {
+    facts.codec() == Some("hevc")
+        && facts.scan_type() == ScanType::Unknown
+        && facts.field_order().is_none_or(|order| order == "unknown")
+}
+
+#[cfg(unix)]
+async fn collect_refinement_output(
+    probe: &DecodeProbeIdentity,
+    source_fd: std::os::fd::RawFd,
+    arguments: Vec<OsString>,
+    launch_deadline: std::time::Instant,
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
+    work: crate::process_control::ChildWork,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, DecodeFactError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
     #[cfg(target_os = "macos")]
     if probe.launch_mode.is_production() {
         let source = duplicate_macos_source(source_fd)?;
@@ -4626,9 +4661,9 @@ async fn collect_idet_verdict(
         )
         .await?;
         if output.status != 0 {
-            return Ok(InterlaceVerdict::IdetUnavailable);
+            return Ok(None);
         }
-        return Ok(parse_idet_verdict(&output.stderr).unwrap_or(InterlaceVerdict::IdetUnavailable));
+        return Ok(Some((output.stdout, output.stderr)));
     }
     let executable_fd = probe.executable_snapshot.as_file().as_raw_fd();
     let mut command = tokio::process::Command::new(probe_launch_path(
@@ -4663,7 +4698,7 @@ async fn collect_idet_verdict(
         Err(error) => {
             terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
             return Err(DecodeFactError::Spawn(format!(
-                "opening idet FFprobe exit anchor: {error}"
+                "opening refinement FFprobe exit anchor: {error}"
             )));
         }
     };
@@ -4738,13 +4773,13 @@ async fn collect_idet_verdict(
     let stderr = stderr?;
     let status = status.map_err(|error| DecodeFactError::Read(error.to_string()))?;
     if stdout.1 || stderr.1 || !status.success() {
-        return Ok(InterlaceVerdict::IdetUnavailable);
+        return Ok(None);
     }
-    Ok(parse_idet_verdict(&stderr.0).unwrap_or(InterlaceVerdict::IdetUnavailable))
+    Ok(Some((stdout.0, stderr.0)))
 }
 
 #[cfg(unix)]
-async fn refine_interlace(
+async fn refine_scan_type(
     probe: &DecodeProbeIdentity,
     source_fd: std::os::fd::RawFd,
     mut facts: DecodeFacts,
@@ -4752,6 +4787,36 @@ async fn refine_interlace(
     cancelled: Option<&tokio_util::sync::CancellationToken>,
     work: crate::process_control::ChildWork,
 ) -> Result<DecodeFacts, DecodeFactError> {
+    if needs_hevc_scan_refinement(&facts) {
+        // Select only this video stream: a full show_data document also dumps
+        // attached fonts and pictures and needlessly consumes the probe bound.
+        let arguments = [
+            "-v",
+            "error",
+            "-select_streams",
+            &facts.input_video_stream().to_string(),
+            "-show_entries",
+            "stream=index,codec_type,codec_name,extradata",
+            "-show_data",
+            "-of",
+            "json",
+            "/dev/fd/3",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        match collect_refinement_output(probe, source_fd, arguments, deadline, cancelled, work)
+            .await
+        {
+            Ok(Some((stdout, _))) => {
+                if let Ok(document) = serde_json::from_slice(&stdout) {
+                    facts = facts.with_hevc_scan_metadata(&document);
+                }
+            }
+            Err(DecodeFactError::Cancelled) => return Err(DecodeFactError::Cancelled),
+            _ => {} // Missing evidence preserves Unknown and the CPU route.
+        }
+    }
     if matches!(facts.scan_type(), ScanType::Interlaced(_)) {
         let verdict = match collect_idet_verdict(
             probe,
@@ -4826,7 +4891,7 @@ async fn collect(
         offset: source_offset,
     };
     if let Some(seed) = seed {
-        let facts = refine_interlace(
+        let facts = refine_scan_type(
             probe,
             source_fd,
             seed.facts?,
@@ -4873,7 +4938,7 @@ async fn collect(
         );
         let facts = if projection == ProbeProjection::Decoder {
             Ok(
-                refine_interlace(probe, source_fd, facts?, launch_deadline, cancelled, work)
+                refine_scan_type(probe, source_fd, facts?, launch_deadline, cancelled, work)
                     .await?,
             )
         } else {
@@ -5033,7 +5098,7 @@ async fn collect(
     }
     let mut facts = facts?;
     if projection == ProbeProjection::Decoder {
-        facts = refine_interlace(probe, source_fd, facts, launch_deadline, cancelled, work).await?;
+        facts = refine_scan_type(probe, source_fd, facts, launch_deadline, cancelled, work).await?;
     }
     // Every descriptor-reading child has now been reaped. Restore the shared
     // open-file offset and release the producer lane before the authoritative
@@ -5392,6 +5457,105 @@ mod tests {
             assert_eq!(facts.interlace_verdict(), expected_verdict, "{name}");
             assert_eq!(facts.scan_type(), expected_scan, "{name}");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unknown_hevc_scan_is_refined_once_without_fresh_document_cache_downgrade() {
+        use std::io::{Seek, SeekFrom};
+        let root = crate::test_tempdir().expect("HEVC scan fixture setup and refinement");
+        let probe = root.path().join("ffprobe-hevc-scan");
+        let mut header: serde_json::Value = serde_json::from_str(include_str!(
+            "../../plurx-core/tests/fixtures/hevc-progressive-configuration.json"
+        ))
+        .expect("HEVC scan fixture setup and refinement");
+        header["streams"][0]["index"] = serde_json::json!(4);
+        let document = serde_json::json!({"streams":[{"index":4,"codec_type":"video","codec_name":"hevc",
+            "profile":"Main 10","pix_fmt":"yuv420p10le","width":3840,"height":2160,
+            "avg_frame_rate":"24000/1001","r_frame_rate":"24000/1001"}],"format":{"format_name":"matroska"}});
+        executable(
+            &probe,
+            &format!(
+                r###"#!/bin/sh
+if test "$1" = "-version"; then echo 'ffprobe version hevc-scan-fixture'; exit 0; fi
+case " $* " in
+  *" -show_data "*)
+    test "$4" = "4" || exit 91
+    echo scan >> "$PLURX_TEST_PROBE_PATH.calls"
+    cat /dev/fd/3 >/dev/null || exit 92
+    printf '%s\n' '{header}'
+    ;;
+  *)
+    cat /dev/fd/3 >/dev/null || exit 93
+    printf '%s\n' '{document}'
+    ;;
+esac
+"###
+            ),
+        );
+        let identity = DecodeProbeIdentity::discover_fixture(
+            probe
+                .to_str()
+                .expect("HEVC scan fixture setup and refinement"),
+        )
+        .await
+        .expect("HEVC scan fixture setup and refinement");
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"held HEVC source")
+            .expect("HEVC scan fixture setup and refinement");
+        let handle =
+            Arc::new(std::fs::File::open(&media).expect("HEVC scan fixture setup and refinement"));
+        let mut offset = handle
+            .try_clone()
+            .expect("HEVC scan fixture setup and refinement");
+        offset
+            .seek(SeekFrom::Start(3))
+            .expect("HEVC scan fixture setup and refinement");
+        let cache = DecodeFactCache::new();
+        let mut digest = None;
+        for _ in 0..2 {
+            let prepared = cache
+                .probe_source_document(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::clone(&handle)),
+                    None,
+                    ProbeStreamSelection::Absolute(4),
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await
+                .expect("HEVC scan fixture setup and refinement");
+            let facts = cache
+                .refine_source_document(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::clone(&handle)),
+                    None,
+                    prepared,
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await
+                .expect("HEVC scan fixture setup and refinement");
+            assert_eq!(facts.scan_type(), ScanType::Progressive);
+            assert_eq!(facts.field_order(), None);
+            assert_eq!(
+                offset
+                    .stream_position()
+                    .expect("HEVC scan fixture setup and refinement"),
+                3
+            );
+            if let Some(previous) = &digest {
+                assert_eq!(facts.facts_digest(), previous);
+            }
+            digest = Some(facts.facts_digest().to_owned());
+        }
+        assert_eq!(
+            std::fs::read_to_string(probe.with_extension("calls"))
+                .expect("HEVC scan fixture setup and refinement")
+                .lines()
+                .count(),
+            1
+        );
     }
 
     /// One rule for both planning routes, including the case that used to

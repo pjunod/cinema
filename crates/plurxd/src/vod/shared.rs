@@ -1,6 +1,23 @@
 use super::*;
 
+/// How many refused titles the local index pass is asked to put first.
+/// More than one pass's worth on purpose, and small, because a viewer whose
+/// start was refused asks again on the next start.
+const LOCAL_INDEX_DEMAND_CAP: usize = 64;
+
 impl Shared {
+    /// A start for `file_id` was refused for want of a local fragment index:
+    /// ask the node-local pass to examine it before its backlog.
+    pub(super) fn demand_local_index(&self, file_id: i64) {
+        let mut demand = self
+            .local_index_demand
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        demand.retain(|demanded| *demanded != file_id);
+        demand.push_front(file_id);
+        demand.truncate(LOCAL_INDEX_DEMAND_CAP);
+    }
+
     pub(super) async fn reconcile_obsolete_encoded_generations(&self) -> usize {
         // This lock belongs only to the cleanup loop. Holding it across the
         // exact Store delete and filesystem removal makes cancellation safe:

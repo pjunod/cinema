@@ -1171,6 +1171,11 @@ struct Shared {
     base: PathBuf,
     runtime_cache: PathBuf,
     store: Arc<dyn Store>,
+    /// Files a start was refused `vod_index_pending` for, newest first, for
+    /// the node-local fragment-index pass to examine before its round-robin
+    /// backlog ([`VodServe::local_index_demand`]). Bounded: it is a priority
+    /// hint, and a refused start asks again.
+    local_index_demand: StdMutex<VecDeque<i64>>,
     /// Startup-discovered obsolete encoded generations. The directory remains
     /// present until its exact plan row is deleted, so cancellation or Store
     /// failure remains rediscoverable after either a later tick or restart.
@@ -1434,6 +1439,29 @@ impl Shared {
 
 pub struct VodServe {
     shared: Arc<Shared>,
+}
+
+impl VodServe {
+    /// Files whose start was refused `vod_index_pending`, newest first.
+    pub(crate) fn local_index_demand(&self) -> Vec<i64> {
+        self.shared
+            .local_index_demand
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    /// The local index pass has examined `file_id`; it no longer jumps the
+    /// queue unless another start is refused for it.
+    pub(crate) fn settle_local_index_demand(&self, file_id: i64) {
+        self.shared
+            .local_index_demand
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|demanded| *demanded != file_id);
+    }
 }
 
 fn repair_job_for_artifact(

@@ -1571,6 +1571,110 @@ fn valid_request(request: &NewAnalysisRequest) -> bool {
             || (request.component == "fragment_index" && !request.target_node_id.is_empty()))
 }
 
+/// The source attestations a batch of availability probes names, by node.
+const AVAILABILITY_SOURCES_SQL: &str =
+    "SELECT node_id, file_id, object_version, source_size, source_mtime,
+            source_sha256, observed_at_ms
+       FROM cluster_fragment_index_sources
+      WHERE node_id = $1
+        AND file_id IN (SELECT CAST(value AS INTEGER) FROM json_each($2))
+        AND object_version IN (SELECT value FROM json_each($3))";
+
+/// The current artefact generation behind each logical cache key.
+const AVAILABILITY_ARTIFACTS_SQL: &str =
+    "SELECT k.value AS logical_cache_key, a.cache_key, a.file_id, a.source_size,
+            a.source_mtime, a.source_sha256, a.pipeline_sha256, a.blob_sha256,
+            a.bytes, a.built_by_node_id, a.built_at_ms
+       FROM json_each($1) k
+       JOIN cluster_fragment_index_artifacts a
+         ON a.cache_key = COALESCE((
+              SELECT h.generation_cache_key
+                FROM cluster_fragment_index_heads h
+               WHERE h.logical_cache_key = k.value
+            ), k.value)";
+
+impl HiqliteAuthStore {
+    /// [`ClusterFragmentIndexStore::cluster_fragment_index_availability`]
+    /// answered from this node's replica, for [`super::CatalogueReader`]'s
+    /// bounded path only. Item detail's artefact fallback is an advisory badge
+    /// (playback's source open stays authoritative), so it is a catalogue
+    /// fact under the reader's lag bound rather than two leader round trips
+    /// per page.
+    pub(super) async fn local_cluster_fragment_index_availability(
+        &self,
+        node_id: &str,
+        probes: &[crate::store::ClusterIndexAvailabilityProbe],
+    ) -> Result<Vec<bool>, StoreError> {
+        self.cluster_index_availability_read(node_id, probes, false)
+            .await
+    }
+
+    async fn cluster_index_availability_read(
+        &self,
+        node_id: &str,
+        probes: &[crate::store::ClusterIndexAvailabilityProbe],
+        consistent: bool,
+    ) -> Result<Vec<bool>, StoreError> {
+        use crate::store::fragment_index_cluster::{
+            check_cluster_index_availability_batch, cluster_index_availability_answers,
+            cluster_index_availability_keys,
+        };
+        check_cluster_index_availability_batch(probes)?;
+        if probes.is_empty() {
+            return Ok(Vec::new());
+        }
+        crate::store::record_http_cluster_index_availability_call();
+        let file_ids: Vec<i64> = probes.iter().map(|probe| probe.file_id).collect();
+        let versions: Vec<&str> = probes
+            .iter()
+            .map(|probe| probe.object_version.as_str())
+            .collect();
+        let file_ids = serde_json::to_string(&file_ids).map_err(database_error)?;
+        let versions = serde_json::to_string(&versions).map_err(database_error)?;
+        let params = params!(node_id, file_ids, versions);
+        let sources = if consistent {
+            self.client()
+                // authority: the reader's fallback when no bounded proof holds.
+                .query_consistent_map::<SourceRow, _>(AVAILABILITY_SOURCES_SQL, params)
+                .await?
+        } else {
+            self.client()
+                .query_map::<SourceRow, _>(AVAILABILITY_SOURCES_SQL, params)
+                .await?
+        };
+        let attested: Vec<FragmentIndexSourceObservation> =
+            sources.into_iter().map(|row| row.0).collect();
+        let keyed = cluster_index_availability_keys(probes, &attested);
+        let keys: Vec<&str> = keyed
+            .iter()
+            .flatten()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        if keys.is_empty() {
+            return Ok(vec![false; probes.len()]);
+        }
+        let keys = serde_json::to_string(&keys).map_err(database_error)?;
+        let rows = if consistent {
+            self.client()
+                // authority: the reader's fallback when no bounded proof holds.
+                .query_consistent_map::<LogicalArtifactRow, _>(
+                    AVAILABILITY_ARTIFACTS_SQL,
+                    params!(keys),
+                )
+                .await?
+        } else {
+            self.client()
+                .query_map::<LogicalArtifactRow, _>(AVAILABILITY_ARTIFACTS_SQL, params!(keys))
+                .await?
+        };
+        let artifacts: Vec<(String, ClusterFragmentIndexArtifact)> =
+            rows.into_iter().map(|row| (row.0, row.1)).collect();
+        Ok(cluster_index_availability_answers(
+            probes, &keyed, &artifacts,
+        ))
+    }
+}
+
 #[async_trait]
 impl ClusterFragmentIndexStore for HiqliteAuthStore {
     async fn subtitle_backfill_diagnostics(
@@ -3561,69 +3665,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         node_id: &str,
         probes: &[crate::store::ClusterIndexAvailabilityProbe],
     ) -> Result<Vec<bool>, StoreError> {
-        use crate::store::fragment_index_cluster::{
-            check_cluster_index_availability_batch, cluster_index_availability_answers,
-            cluster_index_availability_keys,
-        };
-        check_cluster_index_availability_batch(probes)?;
-        if probes.is_empty() {
-            return Ok(Vec::new());
-        }
-        crate::store::record_http_cluster_index_availability_call();
-        let file_ids: Vec<i64> = probes.iter().map(|probe| probe.file_id).collect();
-        let versions: Vec<&str> = probes
-            .iter()
-            .map(|probe| probe.object_version.as_str())
-            .collect();
-        let file_ids = serde_json::to_string(&file_ids).map_err(database_error)?;
-        let versions = serde_json::to_string(&versions).map_err(database_error)?;
-        let attested: Vec<FragmentIndexSourceObservation> = self
-            .client()
-            .query_consistent_map::<SourceRow, _>(
-                "SELECT node_id, file_id, object_version, source_size, source_mtime,
-                        source_sha256, observed_at_ms
-                   FROM cluster_fragment_index_sources
-                  WHERE node_id = $1
-                    AND file_id IN (SELECT CAST(value AS INTEGER) FROM json_each($2))
-                    AND object_version IN (SELECT value FROM json_each($3))",
-                params!(node_id, file_ids, versions),
-            )
-            .await?
-            .into_iter()
-            .map(|row| row.0)
-            .collect();
-        let keyed = cluster_index_availability_keys(probes, &attested);
-        let keys: Vec<&str> = keyed
-            .iter()
-            .flatten()
-            .map(|(key, _)| key.as_str())
-            .collect();
-        if keys.is_empty() {
-            return Ok(vec![false; probes.len()]);
-        }
-        let keys = serde_json::to_string(&keys).map_err(database_error)?;
-        let artifacts: Vec<(String, ClusterFragmentIndexArtifact)> = self
-            .client()
-            .query_consistent_map::<LogicalArtifactRow, _>(
-                "SELECT k.value AS logical_cache_key, a.cache_key, a.file_id, a.source_size,
-                        a.source_mtime, a.source_sha256, a.pipeline_sha256, a.blob_sha256,
-                        a.bytes, a.built_by_node_id, a.built_at_ms
-                   FROM json_each($1) k
-                   JOIN cluster_fragment_index_artifacts a
-                     ON a.cache_key = COALESCE((
-                          SELECT h.generation_cache_key
-                            FROM cluster_fragment_index_heads h
-                           WHERE h.logical_cache_key = k.value
-                        ), k.value)",
-                params!(keys),
-            )
-            .await?
-            .into_iter()
-            .map(|row| (row.0, row.1))
-            .collect();
-        Ok(cluster_index_availability_answers(
-            probes, &keyed, &artifacts,
-        ))
+        self.cluster_index_availability_read(node_id, probes, true)
+            .await
     }
 
     async fn enqueue_cluster_fragment_index(

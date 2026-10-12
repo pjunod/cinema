@@ -21,6 +21,7 @@ pub mod dvconvert;
 mod encoder;
 pub mod health;
 pub mod hevc_census;
+mod hevc_scan;
 mod macos;
 pub mod manifest;
 mod pipeline;

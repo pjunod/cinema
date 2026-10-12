@@ -479,14 +479,48 @@ schedules and Trakt link status, and run `restore --verify` again. Record the
 archive age at failure as RPO and time from restore start to readiness plus
 rejoin completion as RTO.
 
-Before directing production clients at the restored voter, stop every
-surviving old voter and rename its `hiqlite/` directory to
-`hiqlite.retired-<UTC>`. The restore keeps `instance.id` for clients but mints a
-new node id and new Raft/API/signing secrets; retiring the old directories is
-the procedural half of that fence. Start the restored voter, check `/readyz`,
-then issue fresh join tokens and rejoin the other machines. Never start an old
-directory beside the restored lineage and never restore over a live or
-existing `hiqlite/` target.
+Before directing production clients at the restored voter, retire every
+surviving old member's data directory and rejoin it, one member at a time.
+In production the data directory also holds the configuration
+(`PLURX_CONFIG=/var/lib/plurx/plurx.toml`) and `backups/`, and the container
+runs as `1000:1000`. With the host directory `/srv/plurx` bound at
+`/var/lib/plurx`:
+
+1. Stop the member.
+2. Create a new, empty data directory owned by the service user:
+   `install -d -o 1000 -g 1000 -m 0700 /srv/plurx.new`.
+3. Copy `plurx.toml`, and nothing else, into it:
+   `install -o 1000 -g 1000 -m 0600 /srv/plurx/plurx.toml /srv/plurx.new/`.
+   Not `hiqlite/`, not `plurx.db`, not `backups/`.
+4. Move the old directory aside as a retired copy and put the new one at
+   the configured path:
+   `mv /srv/plurx /srv/plurx.retired-<UTC> && mv /srv/plurx.new /srv/plurx`.
+   Keep the retired copy as evidence; its `backups/` stays with it.
+5. Issue a fresh join token on the restored voter (the joins below) and write
+   it where the configuration's `join_token_file` points, owned by
+   `1000:1000` with mode `0600`.
+6. Start the member.
+
+Moving the old directory aside without steps 2 and 3 leaves the member with
+no configuration, and Docker recreates a missing bind source owned by root,
+which the `1000:1000` process cannot write. Renaming only `hiqlite/` does not
+work either: the directory still holds `hiqlite-activated.json`, so the daemon
+refuses to start rather than re-import the stale `plurx.db` beside it, and a
+join refuses any directory that still holds a `plurx.db`. The restore keeps
+`instance.id` for clients but mints a new node id and new Raft/API/signing
+secrets; retiring the old directories is the procedural half of that fence.
+
+Start the restored voter and wait for `/readyz` 200. On its first boot it
+publishes a state-machine snapshot that covers the restored image before it
+serves, because its Raft log begins at the restore and cannot replay the
+restored rows to anyone; a joining member is sent that snapshot. Then rejoin
+each other machine with the six steps above, each with its own fresh join
+token issued by the restored voter. Join admission answers `restored_image_not_transferable`
+(503) while a restored node has not published that snapshot, which a cluster
+that is joined the way this section says never reaches; if it appears, run
+`plurxd cluster backup` against the leader (it publishes one) and retry. Never
+start an old directory beside the restored lineage and never restore over a
+live or existing `hiqlite/` target.
 
 ### Upgrading an activated v5, v6, v7, or v8 cluster to v9
 
