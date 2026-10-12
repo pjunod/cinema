@@ -46,12 +46,17 @@ test('finished reproduction relinquishes its identity for a new incident',async(
 });
 function reportingFunction(name) {
   const source=fs.readFileSync('crates/plurxd/src/web/pages/diagnostics.js','utf8');
-  const program=require('acorn').parse(source,{ecmaVersion:'latest'});const fn=program.body.find(node=>node.type==='FunctionDeclaration'&&node.id.name===name);assert(fn);return source.slice(fn.start,fn.end);
+  // The served classic script keeps each top-level function at column zero.
+  // Slice at its next declaration so this focused harness needs only Node.
+  const declarations=[...source.matchAll(/^(?:async )?function ([\w$]+)\(/gm)];
+  const index=declarations.findIndex(match=>match[1]===name);assert(index>=0&&index+1<declarations.length);
+  return source.slice(declarations[index].index,declarations[index+1].index);
 }
-test('account replacement during IndexedDB report recovery cannot adopt old evidence',async()=>{
-  let recover,appended=0;let current={epoch:1,scope:'a'.repeat(64),completed:null,reproduction:null};
-  const context=vm.createContext({AUTH_GENERATION:1,TOKEN:'account-a',DIAGNOSTIC_REPORT:null,DIAGNOSTIC_AUTH_READY:Promise.resolve(),document:{createElement:()=>({setAttribute(){}}),body:{append(){appended++}}},CinemaDiagnostics:{current:()=>({...current})},CinemaDiagnosticStore:{get:()=>new Promise(resolve=>{recover=resolve})}});
-  vm.runInContext(reportingFunction('showDiagnostics'),context);const opening=context.showDiagnostics();await Promise.resolve();assert(recover);
+test('account replacement during IndexedDB report recovery cannot adopt old evidence',{timeout:1000},async()=>{
+  let recover,entered,appended=0;let current={epoch:1,scope:'a'.repeat(64),completed:null,reproduction:null};
+  const recovering=new Promise(resolve=>{entered=resolve});
+  const context=vm.createContext({AUTH_GENERATION:1,TOKEN:'account-a',DIAGNOSTIC_REPORT:null,DIAGNOSTIC_AUTH_READY:Promise.resolve(),document:{createElement:()=>({setAttribute(){}}),body:{append(){appended++}}},CinemaDiagnostics:{current:()=>({...current})},CinemaDiagnosticStore:{get:()=>new Promise(resolve=>{recover=resolve;entered()})}});
+  vm.runInContext(reportingFunction('showDiagnostics'),context);const opening=context.showDiagnostics();await recovering;assert(recover);
   context.AUTH_GENERATION=2;context.TOKEN='account-b';current={...current,epoch:2,scope:'b'.repeat(64)};
   recover({expires:Date.now()+60000,capture:{scope:'a'.repeat(64),id:'old-account-report',events:[{private:'old evidence'}]}});await opening;
   assert.equal(context.DIAGNOSTIC_REPORT,null);assert.equal(appended,0);

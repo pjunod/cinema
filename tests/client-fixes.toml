@@ -6233,22 +6233,6 @@ test = "clients/apple/Tests/DiagnosticWireTests.swift"
 test_anchor = "testSharedManifestFixturesRejectPrivacyAndEncodingViolations"
 
 [[fixes]]
-id = "diagnostics.android-wire"
-commits = ["f13a362361fbab0d7754a380f5e212cede32f429"]
-source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticWire.kt"
-source_anchor = "fun manifest"
-test = "clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticWireTest.kt"
-test_anchor = "sharedManifestFixturesRejectPrivacyAndEncodingViolations"
-
-[[fixes]]
-id = "diagnostics.web-wire"
-commits = ["f13a362361fbab0d7754a380f5e212cede32f429"]
-source = "crates/plurxd/src/web/core/diagnostics-wire.js"
-source_anchor = "function manifest"
-test = "tests/web/diagnostics-wire.test.js"
-test_anchor = "shared diagnostic manifests reject privacy and encoding violations"
-
-[[fixes]]
 id = "diagnostics.web-recorder"
 commits = ["9ca45b52ac9d4b4a330f20f096d3045cc5a4a933"]
 source = "crates/plurxd/src/web/core/diagnostics-recorder.js"
@@ -6265,14 +6249,6 @@ test = "clients/apple/Tests/DiagnosticCaptureTests.swift"
 test_anchor = "testBoundedRecorderRetainsTerminalAndExactCountersWithoutSecrets"
 
 [[fixes]]
-id = "diagnostics.apple-account-store"
-commits = ["4e523845bb7faac7ee2b1f394ae510c45f51a651"]
-source = "clients/apple/Sources/DiagnosticStore.swift"
-source_anchor = "actor DiagnosticStore"
-test = "clients/apple/Tests/DiagnosticCaptureTests.swift"
-test_anchor = "testRecoveredStoreCannotOpenAnotherAccountOrResurrectClearedCapture"
-
-[[fixes]]
 id = "diagnostics.android-capture"
 commits = ["593f745506b6bd7e7678ff7a82ea1857a730beb1"]
 source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticRecorder.kt"
@@ -6280,10 +6256,28 @@ source_anchor = "internal class DiagnosticRecorder"
 test = "clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticCaptureTest.kt"
 test_anchor = "boundedRecorderRetainsTerminalAndExactCountersWithoutSecrets"
 
+
+# One historical witness per corrective commit; additional regressions are in PR #1037.
 [[fixes]]
-id = "diagnostics.android-account-store"
-commits = ["593f745506b6bd7e7678ff7a82ea1857a730beb1"]
-source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticStore.kt"
-source_anchor = "internal class DiagnosticStore"
-test = "clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticCaptureTest.kt"
-test_anchor = "restartStoreRefusesAnotherAccountAndCannotResurrectClearedCapture"
+id = "diagnostics.platform-event-wire"
+commits = ["ff49684d3b907921ddfc8f5f256835cbe8637910"]
+source = "clients/apple/Sources/DiagnosticWire.swift"
+source_anchor = "static func event"
+test = "clients/apple/Tests/DiagnosticWireTests.swift"
+test_anchor = "testSharedEventFixturesPreserveCodecLayersAndRefusePrivateFields"
+
+[[fixes]]
+id = "diagnostics.immutable-support-consent"
+commits = ["707d8bb1b89fa9d690d5ff74e6c12532a75c927e"]
+source = "crates/plurxd/src/web/pages/diagnostics.js"
+source_anchor = "const destination=run.deliveryState?.origin||run.frozenOrigin"
+test = "tests/web/diagnostics-recorder.test.js"
+test_anchor = "resumed delivery confirms and displays its immutable destination"
+
+[[fixes]]
+id = "diagnostics.account-recovery-fence"
+commits = ["f25cfce318975461042dedc37220e607a57fd57e"]
+source = "crates/plurxd/src/web/pages/diagnostics.js"
+source_anchor = "const authGeneration=AUTH_GENERATION,token=TOKEN"
+test = "tests/web/diagnostics-recorder.test.js"
+test_anchor = "account replacement during IndexedDB report recovery cannot adopt old evidence"

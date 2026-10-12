@@ -1,6 +1,6 @@
 # Remote diagnostics status — ownership, implementation and release evidence
 
-**Status:** building; GPT-6.1 Sol implementation active · **Updated:** 2026-10-12 ·
+**Status:** software built; final fast-lane qualification active · **Updated:** 2026-10-12 ·
 **Planning baseline:** `8d7bc723e`.
 
 The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) defines the first
@@ -35,13 +35,13 @@ index/backlog rows; the builder adopts them together in a normal commit.
 | B00 | Isolated workspace, compile baseline, plan adoption | Software verified; old gate superseded | Batched PR #1037 | Pinned Rust daemon check, iOS/tvOS builds, Android app/test APKs passed on current main |
 | B01 | Schema/privacy fixtures and archive inspector | Built; compiler verified | Batched PR #1037 | Owned-clone workspace Clippy, iOS/tvOS and Android compilation passed; historical 35-case four-language fixtures passed before ruling; three extra timestamp fixtures await final checks |
 | B02 | User-scoped server/worker snapshot collection | Built; compiler verified | Batched PR #1037 | Pinned daemon Clippy passed; positive attribution, accepted route receipts, account-generation fencing, bounded jobs and signed peers implemented; real HTTP acceptance pending |
-| B03 | Support auth, grants, uploads and durable storage | Built; compiler verified | Batched PR #1037 | Independent encrypted SQLite publication, separate capture authority, provisioning/revocation, resume/refresh, quotas and external deletion/revocation fences implemented; pinned final workspace Clippy and dependency policy passed; runtime acceptance pending |
-| B04 | TV handoff, mobile page, inbox and packaging | Built; compiler verified | Batched PR #1037 | Phone claim/approval protocol, responsive completion page, named passkey inbox and TLS/service packaging written; browser races/passkeys/physical acceptance pending |
-| B05 | Web/TV browser reporting | Built; compiler verified | Batched PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks written; normal hook and browser type checks passed; software acceptance pending |
+| B03 | Support auth, grants, uploads and durable storage | Built; compiler verified | Batched PR #1037 | Independent encrypted SQLite publication, separate capture authority, provisioning/revocation, resume/refresh, quotas and external deletion/revocation fences implemented; final Clippy and composed upload/delete/missing-fence runtime checks passed; broader failure matrix remains open |
+| B04 | TV handoff, mobile page, inbox and packaging | Built; compiler verified | Batched PR #1037 | Phone claim/approval protocol, responsive completion page, named passkey inbox and TLS/service packaging built; composed browser races/passkeys passed; physical acceptance pending |
+| B05 | Web/TV browser reporting | Built; compiler verified | Batched PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks built; hook/types, focused privacy/wire/recovery/consent and composed upload passed; hardware focus remains open |
 | B06 | Apple mobile/TV reporting | Built; compiler verified | Batched PR #1037 | Recorder, protected account store, deterministic ZIP/share, fixed support transport, exact archive resume, report UI and local-only TV approval written; tests declared, no unit execution; both targets and declared XCTest sources compiled; normal hook passed; physical acceptance owed |
 | B07 | Android mobile/TV reporting | Built; compiler verified | Batched PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; normal hook passed; signed release and physical acceptance owed |
-| B08 | Reproduction, connection checks, diagnostic adapters | Built; final compiler checks active | Batched PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 22-case shared event fixture; physical provider delivery remains open |
-| B09 | Composed security/resource/device qualification | Building | Batched PR #1037 | Global capture limits/expiry and authority cleanup tightened; real local support/browser/passkey acceptance active; physical matrix and overhead measurements remain open |
+| B08 | Reproduction, connection checks, diagnostic adapters | Built; compiler verified | Batched PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 22-case shared event fixture; physical provider delivery remains open |
+| B09 | Composed security/resource/device qualification | Browser software verified; physical open | Batched PR #1037 | Global capture limits/expiry and authority cleanup tightened; real local support/browser/passkey acceptance passed; physical matrix and native overhead measurements remain open |
 | B10 | Operations, exact-candidate promotion and rollout | Final candidate | Batched PR #1037 | Operations/runbook built; one adversarial review complete, findings corrected; fast lane pending; production/device inputs remain external |
 
 Replace “Not started” with claimed/building/built/software verified/physical
@@ -54,16 +54,16 @@ from regressions. Record test absence as absence, not a passing check.
 
 | Surface | Implementation | Software evidence | Physical/real delivery | Remaining |
 |---|---|---|---|---|
-| Web desktop/mobile/all layouts | Built B05 | Types/syntax/hook passed | None | Browser runtime and privacy/resource qualification |
+| Web desktop/mobile/all layouts | Built B05 | Types/syntax/hook, focused wire/recorder and composed browser flow passed | None | Remaining browser failure matrix and real-device qualification |
 | Browser TV | Built B05 | Types/syntax/hook passed | None | Remote focus + physical phone handoff |
 | iPhone/iPad | Built B06 | Both app and test sources compiled | None | Share/send/recovery runtime acceptance |
 | Apple TV | Built B06 | Simulator app compiled | None | Direct send + phone on separate network |
 | Android phone/tablet | Built B07 | Debug app/JVM/test APK compiled | None | Share/send/recovery runtime and signed release acceptance |
 | Android/Google TV | Built B07 | Debug app/JVM/test APK compiled | None | D-pad/send + phone on separate network |
 | Cinema snapshots / multiple workers | Built B02 | Pinned compiler passed | None | Real two-user/two-node HTTP and peer-failure behavior |
-| Support upload service | Built B03 | Pinned compiler/dependency policy passed | None | Durable/resume/retention runtime qualification |
-| Phone completion page | Built B04 | Syntax/compiler passed | None | Real QR/manual claim, TV approval, submission |
-| Operator inbox | Built B04 | Syntax/compiler passed | None | Passkey/inbox runtime and deployment qualification |
+| Support upload service | Built B03 | Compiler, composed upload/delete/restore-fence checks passed | None | Durable/resume/retention runtime qualification |
+| Phone completion page | Built B04 | Real browser claim, approval, disconnected-TV submission passed | None | Real QR/manual claim, TV approval, submission |
+| Operator inbox | Built B04 | Real browser passkey login, escaped description, final ZIP and deletion passed | None | Passkey/inbox runtime and deployment qualification |
 | Privacy/resource/retention | Built | Browser canaries, ZIP/inbox, deletion and observer bounds passed; restore fixes rechecked | None | Native/device overhead and remaining failure matrix |
 
 ## 4. Decisions and external inputs
@@ -426,3 +426,30 @@ Final fast-lane receipts must identify the published corrected head; earlier
 source checks are not silently reused when their coverage changes. Physical
 mobile/TV delivery, focus, real provider delivery, signed releases, production
 TLS/hosting and native device overhead remain explicitly unqualified.
+
+
+## 16. Published candidate and final fast lane
+
+Published candidate `f25cfce318975461042dedc37220e607a57fd57e` includes
+all twelve findings from the one final review. Corrected iOS/tvOS application
+builds, iOS XCTest source compilation, Android app/JVM test-source/test-APK
+compilation, final workspace Clippy/format/catalog/93-script syntax hook and
+web type/static checks passed. The final support/browser fixture passed with
+receipt `C-52730cd5a155`, including edited ZIP content, creator receipt and
+both missing external fences. These are local software receipts.
+
+The final focused `make unit-diagnostics` run passed all six core diagnostics
+tests (with `hiqlite-store`) and eight browser tests. Two new browser test
+harnesses exposed an undeclared parser dependency; the corrected harness uses
+only Node and waits for the actual recovery boundary. Both failed cases then
+passed on their focused retries. No passing unit case was rerun, and no native
+unit/instrumentation suite was executed.
+
+PR #1037 is ready. Fast-lane run 4868 passed scope/mobile-version checks but
+failed historical evidence: duplicate rows for earlier packet commits and
+missing rows for the final three corrective commits. The ledger repair keeps
+one witness per commit and adds those missing anchors. This is validation
+metadata and test-harness repair; production source is unchanged. The failed
+preflight and affected metadata coverage must pass on the resulting candidate
+before merge. Physical native/TV/provider delivery, signed artifacts, hosting,
+TLS, enrollment and native observer overhead remain open acceptance inputs.
