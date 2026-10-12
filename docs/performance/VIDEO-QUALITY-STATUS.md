@@ -1,11 +1,35 @@
 # Video quality status — what is built, measured and merged
 
-**Status:** implementation merged; autonomous follow-up measurements complete
-· **Updated:** 2026-10-08 · **Resume base:** `1088d7529`
+**Status:** HDR sharp-edge repair and autonomous client acceptance in progress
+· **Updated:** 2026-10-12 · **Resume base:** `1f02b7938`
 
 Companion to [the programme](VIDEO-QUALITY-PROGRAM.md), which owns scope,
 acceptance and order. This ledger records actual execution. Empty evidence is
 unverified, not a pass. Dates use America/New_York unless a receipt states UTC.
+
+## October 12 continuation — repair the edge and validate available clients
+
+Paul requested a root-cause fix for the retained sharp-edge failure and all
+Safari and device validation possible without his involvement. The October 8
+follow-up landed in [PR #956](http://forge.lan:3000/noirr/plurx/pulls/956) as
+`0c4ae0aa5`; its failed image criterion remains a failure until new evidence
+meets the unchanged bar. Independent clones use the October 12 base above;
+the owner's checkout is not used.
+
+| Lane / exclusive ownership | Work | State |
+|---|---|---|
+| HDR: encoder implementation, focused regressions and HDR receipts | Reproduce the sharp-panel maximum error of 35 ten-bit codes, then correct rate allocation without exceeding bitrate limits or trading away real-window quality. | Current GPU encoder/tool identity matches the earlier failure. Finite isolated rate-control and effort comparisons are being prepared. No production policy changed. |
+| Safari: browser harness and Safari receipts | Diagnose automation startup, then measure actual native HLS presentation, seeking and restart on Safari. | Safari and its driver are installed. The previous session timeout is not decoder evidence; an isolated session is being investigated. |
+| Devices: native harnesses and physical-device receipts | Use idle, reachable paired devices for actual playback; identify framework, application and physical-output evidence separately. | Paired Apple TV, iOS and Android TV/phone devices are visible. Lock, foreground and playback state must establish an available target before an isolated probe starts. |
+| Coordinator: integration, this ledger, index and backlog | Preserve exact-source evidence, obtain one final adversarial review, address findings, run each required fast-lane check once, merge and remove owned scratch. | Rust 1.97.1 is available; the explicit pinned compiler loop is running. Unit suites remain deferred until the batch is ready. |
+
+Acceptance retains mean luma error below 4 and maximum below 32 ten-bit codes,
+the actual rung's bitrate/buffer constraints, frame/metadata correctness and
+matched real-window controls. No fixture-specific exception, blurred reference,
+relaxed threshold, new watchdog or feature gate closes a failure. Existing
+production services, viewer sessions and foreign test resources remain with
+their owners. An unavailable physical display measurement cannot become a
+simulator pass.
 
 ## Remaining acceptance — resumed on October 8
 
