@@ -722,6 +722,9 @@ pub(super) struct Session {
     /// Private video/audio readers share this parent's authority and cleanup.
     /// They never allocate additional public playback sessions or captions.
     pub(super) children: Vec<ParentMediaReader>,
+    /// Keeps a prepared root admitted without adding a stale private reader.
+    /// A running worker retains its own clone until physical reap.
+    pub(super) root_admission: Option<crate::vodencode::EncodePermit>,
     pub(super) rendition: Option<Arc<Rendition>>,
     pub(super) passive_grant: Option<Arc<passive_grant::Grant>>,
     pub(super) retained_output: Option<Arc<retained::RetainedVodArtifact>>,

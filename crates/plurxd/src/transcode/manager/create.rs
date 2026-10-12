@@ -2163,6 +2163,7 @@ impl TranscodeManager {
         self.vod
             .preview_recipe(
                 crate::vodserve::VodRecipeRequest {
+                    root_admission: None,
                     measured_candidate: None,
                     retained_capture: crate::vodserve::RetainedOutputCapture::New,
                     request: req,
@@ -2422,6 +2423,7 @@ impl TranscodeManager {
             )
         });
         let prepared = crate::vodserve::VodRecipeRequest {
+            root_admission: None,
             companion,
             measured_candidate,
             retained_capture: match retained_capture {
@@ -3306,6 +3308,7 @@ impl TranscodeManager {
                 .vod
                 .try_create_before_release(
                     crate::vodserve::VodRecipeRequest {
+                        root_admission: None,
                         companion,
                         measured_candidate,
                         retained_capture: if fresh_reuse {

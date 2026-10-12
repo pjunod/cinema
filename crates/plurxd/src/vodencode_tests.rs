@@ -545,7 +545,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         family_generation: uuid::Uuid::new_v4().to_string(),
         role: crate::transcode::ContinuousMediaRole::Video,
     }));
-    let attach = || VodRecipeRequest {
+    let attach = || VodRecipeRequest { root_admission: None,
         measured_candidate: None,
         retained_capture: RetainedOutputCapture::New,
         companion: None,
@@ -707,7 +707,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     let media = parent_request.continuous_media.as_mut().expect("role");
     media.autonomous_companion = Some(companion_id);
     let family_budget = budget + companion.resources().cpu_threads;
-    let autonomous = || VodRecipeRequest {
+    let autonomous = || VodRecipeRequest { root_admission: None,
         measured_candidate: None,
         retained_capture: RetainedOutputCapture::New,
         request: &parent_request,
@@ -1731,7 +1731,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     let mut req = request("source-replacement", 0.0);
     req.kind = SessionKind::Transcode { height: 64 };
     old.try_create(
-        VodRecipeRequest {
+        VodRecipeRequest { root_admission: None,
             measured_candidate: None,
             retained_capture: RetainedOutputCapture::New,
             companion: None,
@@ -1782,7 +1782,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     let new = bare_serve(&cache);
     let refused = new
         .try_create(
-            VodRecipeRequest {
+            VodRecipeRequest { root_admission: None,
                 measured_candidate: None,
                 retained_capture: RetainedOutputCapture::New,
                 companion: None,
@@ -1842,7 +1842,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         hooks: Box::new(crate::vodencode::EncodingAdmissionPause::default()),
     });
     new.try_create(
-        VodRecipeRequest {
+        VodRecipeRequest { root_admission: None,
             measured_candidate: None,
             retained_capture: RetainedOutputCapture::New,
             companion: None,
@@ -1928,6 +1928,57 @@ async fn encoded_vod_restarts_obey_current_capacity_policy() {
         .expect("pool restored");
     assert!(encoding.try_permit().await.is_some());
     assert!(!encoding.is_waiting());
+}
+
+#[tokio::test]
+async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_substitution() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("prepared root");
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2")
+        .await.expect("exact pool");
+    let permit = encoding.try_permit().await.expect("one complete admission");
+    let serve = local_serve(base.path().join("vod"), Arc::clone(&encoding.store));
+    let mut req = request("prepared-root", 0.0);
+    req.kind = SessionKind::Transcode { height: encoding.options.target_height };
+    let attribution = VodAttribution { user_name: "user", item_title: "prepared root", supersession_user: "user" };
+    let attach = |admitted_encoding: Arc<crate::vodencode::Encoding>, permit| VodRecipeRequest {
+        root_admission: Some(PreparedRootAdmission { encoding: admitted_encoding, permit }),
+        request: &req, encoding: Some(Arc::clone(&encoding)),
+        measured_candidate: None, retained_capture: RetainedOutputCapture::New,
+        soundtrack: None, companion: None,
+    };
+    serve.try_create(attach(Arc::clone(&encoding), permit), &file, &settings(), attribution,
+        "prepared-root-first".into()).await.expect("transfer prepared root");
+    let rendition = rendition_of(&serve, "prepared-root-first").await;
+    {
+        let sessions = serve.shared.sessions.lock().await;
+        let parent = &sessions["prepared-root-first"];
+        assert!(parent.root_admission.is_some());
+        assert!(parent.children.is_empty(), "the root has no stale private demand");
+    }
+    assert_eq!(rendition.readers.lock().await.len(), 1);
+    let reopen = rendition.retained_admission.current().expect("exact live credit");
+    serve.try_create(attach(Arc::clone(&encoding), reopen), &file, &settings(), attribution,
+        "prepared-root-reopen".into()).await.expect("saturated same-rendition attachment");
+    assert_eq!(encoding.admissions.software_in_use(), 2);
+    assert_eq!(rendition.readers.lock().await.len(), 2);
+    let substitute = encoding.clone_with_admissions_for_test(encoding.admissions.clone()).await;
+    let borrowed = rendition.retained_admission.current().expect("existing exact credit");
+    let refused = serve.try_create(attach(substitute, borrowed), &file, &settings(), attribution,
+        "prepared-root-substitute".into()).await.expect_err("same-key substitution refused");
+    assert!(refused.contains("vod_preparation_changed"));
+    assert!(!serve.shared.sessions.lock().await.contains_key("prepared-root-substitute"));
+    assert_eq!(encoding.admissions.software_in_use(), 2);
+    assert!(serve.end("prepared-root-first", Terminal::Deleted).await);
+    assert_eq!(encoding.admissions.software_in_use(), 2, "second parent retains capacity");
+    assert!(serve.end("prepared-root-reopen", Terminal::Deleted).await);
+    rendition.gen_epoch.fetch_add(1, Relaxed);
+    let _ = rendition.slot.perform(Step::Terminate { why: Termination::Idle }, || {}).await;
+    wait_until("prepared root physically reaped", Duration::from_secs(5), async ||
+        encoding.admissions.software_in_use() == 0).await;
+    assert!(rendition.readers.lock().await.is_empty());
+    assert!(rendition.retained_admission.current().is_none(), "cache owns no credit");
 }
 
 #[tokio::test]
@@ -2600,7 +2651,7 @@ async fn encoded_pair(
     req.kind = SessionKind::Transcode { height: 144 };
     serve
         .try_create(
-            VodRecipeRequest {
+            VodRecipeRequest { root_admission: None,
                 measured_candidate: None,
                 retained_capture: RetainedOutputCapture::New,
                 companion: None,
@@ -3032,7 +3083,7 @@ async fn assert_encoded_restarts(
         req.audio_offset_ms = file.audio_offset_ms;
         let started = serve
             .try_create(
-                VodRecipeRequest {
+                VodRecipeRequest { root_admission: None,
                     measured_candidate: None,
                     retained_capture: RetainedOutputCapture::New,
                     companion: None,
@@ -3533,7 +3584,7 @@ async fn copy_and_encoded_vod_refuse_missing_or_nonpositive_duration_without_att
             }
             let refusal = serve
                 .try_create(
-                    VodRecipeRequest {
+                    VodRecipeRequest { root_admission: None,
                         measured_candidate: None,
                         retained_capture: crate::vodserve::RetainedOutputCapture::New,
                         companion: None,

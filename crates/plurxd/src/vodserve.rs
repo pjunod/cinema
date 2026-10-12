@@ -797,6 +797,9 @@ impl VerifiedContinuousFamily {
 /// The durable request plus already resolved encoder recipes. Plain copy
 /// callers need no encoder preparation and convert from their request alone.
 pub(crate) struct VodRecipeRequest<'a> {
+    /// One admitted preparation transferred to its exact executable recipe.
+    /// The attached parent owns this credit; the cached Encoding never does.
+    pub(crate) root_admission: Option<PreparedRootAdmission>,
     pub(crate) measured_candidate: Option<RetainedCandidateBinding>,
     pub(crate) retained_capture: RetainedOutputCapture,
     pub request: &'a SessionRequest,
@@ -811,6 +814,7 @@ pub(crate) struct VodRecipeRequest<'a> {
 impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
     fn from(request: &'a SessionRequest) -> Self {
         Self {
+            root_admission: None,
             measured_candidate: None,
             request,
             retained_capture: RetainedOutputCapture::New,
@@ -819,6 +823,11 @@ impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
             companion: None,
         }
     }
+}
+
+pub(crate) struct PreparedRootAdmission {
+    pub(crate) encoding: Arc<crate::vodencode::Encoding>,
+    pub(crate) permit: crate::vodencode::EncodePermit,
 }
 
 /// Private dispatch-attested identity, never a client proof or catalog budget.

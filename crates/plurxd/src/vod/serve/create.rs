@@ -107,6 +107,11 @@ impl VodServe {
     ) -> Result<super::copy_preparation::PreparedCopyOutput, crate::background_jobs::PreparationError>
     {
         use crate::background_jobs::PreparationError;
+        if prepared.root_admission.is_some() {
+            return Err(PreparationError::Fail(
+                "foreground_preparation_not_persistable",
+            ));
+        }
         let expected_encoded_plan = prepared
             .encoding
             .as_ref()
@@ -991,6 +996,12 @@ impl VodServe {
             .continuous_media
             .as_ref()
             .is_some_and(|media| media.role == crate::transcode::ContinuousMediaRole::Video);
+        if prepared.root_admission.is_some() && continuous {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "a root preparation cannot substitute for continuous family admission",
+            ));
+        }
         if prepared.soundtrack.is_some() && !continuous {
             return Err(crate::transcode::vod_refusal_error(
                 "vod_family_invalid",
@@ -1075,6 +1086,7 @@ impl VodServe {
                 let attachment = self
                     .resolve_rendition(
                         &mut VodRecipeRequest {
+                            root_admission: None,
                             measured_candidate: None,
                             retained_capture: RetainedOutputCapture::New,
                             request,
@@ -1111,6 +1123,7 @@ impl VodServe {
                 let attachment = self
                     .resolve_rendition(
                         &mut VodRecipeRequest {
+                            root_admission: None,
                             measured_candidate: None,
                             retained_capture: RetainedOutputCapture::New,
                             companion: None,
@@ -1215,6 +1228,27 @@ impl VodServe {
             Vec::new()
         };
 
+        // The sorted build gates still pin the exact cached rendition here.
+        // Same-key substitution cannot spend another recipe's prepared credit.
+        let root_admission = prepared
+            .root_admission
+            .take()
+            .map(|prepared| {
+                if !rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .is_some_and(|encoding| Arc::ptr_eq(encoding, &prepared.encoding))
+                {
+                    return Err(crate::transcode::vod_refusal_error(
+                        "vod_preparation_changed",
+                        "the admitted executable changed before attachment",
+                    ));
+                }
+                Ok(rendition.retained_admission.bind(prepared.permit))
+            })
+            .transpose()?;
+
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
         let retained_output = self
             .capture_retained_output(
@@ -1261,6 +1295,7 @@ impl VodServe {
         }
         let mut replacement = Session {
             children: Vec::new(),
+            root_admission,
             passive_grant: passive_grant.clone(),
             retained_output,
             rendition: Some(Arc::clone(&rendition)),
@@ -2008,6 +2043,7 @@ impl VodServe {
         };
         let prepared = Box::pin(self.prepare_source_rendition(
             VodRecipeRequest {
+                root_admission: None,
                 request: source.request(),
                 encoding,
                 ..source.request().into()
@@ -2061,6 +2097,7 @@ impl VodServe {
         let duration_ms = plan_duration_ms(&rendition.plan);
         let replacement = Session {
             children: Vec::new(),
+            root_admission: None,
             passive_grant: None,
             retained_output: None,
             sdr_master_codecs: false,

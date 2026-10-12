@@ -520,7 +520,7 @@ async fn prepared_copy_consumer(control: u8) {
         serve.end("incumbent", Terminal::Deleted).await; active.finish().await;
         return;
     }
-    serve.try_create(VodRecipeRequest { soundtrack: None, companion: None,
+    serve.try_create(VodRecipeRequest { root_admission: None, soundtrack: None, companion: None,
         request: &incoming, encoding: None, measured_candidate: None,
         retained_capture: RetainedOutputCapture::Restore(Some(facts.clone())),
     }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "fixture", supersession_user: "user" },
