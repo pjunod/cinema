@@ -6,6 +6,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.graphics.Bitmap;
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
 import android.view.PixelCopy;
 import android.view.SurfaceView;
 import android.view.WindowManager;
@@ -37,7 +39,7 @@ public final class ProbeActivity extends Activity {
     String decoderName = "unreported";
     boolean expectMotion = true;
     final JSONArray formats = new JSONArray();
-    int phase = -1, observed = 0, successfulCopies = 0;
+    int phase = -1, observed = 0, successfulCopies = 0, nonUniformCopies = 0;
     volatile int epoch = 0;
     int priorEpochCallbacks = 0;
     int initialFloorExclusions = 0, totalInitialFloorExclusions = 0;
@@ -117,7 +119,7 @@ public final class ProbeActivity extends Activity {
         if (player != null) player.pause();
         phaseStarted = SystemClock.elapsedRealtime();
         firstPts = lastPts = -1;
-        observed = successfulCopies = priorEpochCallbacks = 0;
+        observed = successfulCopies = priorEpochCallbacks = nonUniformCopies = 0;
         initialFloorExclusions = 0;
         fingerprints.clear(); maximumClockDelta = 0;
         if (phase == 0 || names[phase].equals("restart")) attach();
@@ -162,27 +164,60 @@ public final class ProbeActivity extends Activity {
                 if (result == PixelCopy.SUCCESS) {
                     successfulCopies++;
                     long hash = 0xcbf29ce484222325L;
+                    int low = 255, high = 0;
                     for (int y = 0; y < 36; y++) for (int x = 0; x < 64; x++) {
-                        hash = (hash ^ bitmap.getPixel(x, y)) * 0x100000001b3L;
+                        int pixel = bitmap.getPixel(x, y);
+                        hash = (hash ^ pixel) * 0x100000001b3L;
+                        for (int shift : new int[]{0, 8, 16}) {
+                            int channel = (pixel >> shift) & 255;
+                            low = Math.min(low, channel); high = Math.max(high, channel);
+                        }
                     }
                     fingerprints.add(Long.toUnsignedString(hash, 16));
+                    if (high - low >= 16) nonUniformCopies++;
                 }
                 bitmap.recycle();
                 if (lastPts - firstPts >= 2500000 && observed >= 30 && successfulCopies >= 5) {
-                    if (!audioSelected || (expectMotion && fingerprints.size() < 2) || maximumClockDelta >= .25) {
+                    if (!audioSelected || (expectMotion && fingerprints.size() < 2) || (!expectMotion && nonUniformCopies < 5) || maximumClockDelta >= .25) {
                         finishProbe("audio/clock/visible-moving-surface contract failed"); return;
                     }
                     try {
                         phases.put(new JSONObject().put("phase", names[phase]).put("result", "pass")
                             .put("initial_floor_exclusions", initialFloorExclusions)
                             .put("prior_epoch_callbacks", priorEpochCallbacks).put("frames_observed", observed).put("successful_surface_copies", successfulCopies)
-                            .put("distinct_pixel_fingerprints", fingerprints.size())
+                            .put("distinct_pixel_fingerprints", fingerprints.size()).put("nonuniform_surface_copies", nonUniformCopies)
                             .put("maximum_video_to_player_clock_seconds", maximumClockDelta));
                     } catch (Exception error) { finishProbe(error.toString()); return; }
                     advance();
                 }
             }, main);
         }
+    }
+
+    JSONArray codecCapabilities() {
+        JSONArray result = new JSONArray();
+        for (MediaCodecInfo codec : new MediaCodecList(MediaCodecList.ALL_CODECS).getCodecInfos()) {
+            if (codec.isEncoder()) continue;
+            for (String type : codec.getSupportedTypes()) {
+                if (!type.equals("video/hevc")) continue;
+                try {
+                    MediaCodecInfo.CodecCapabilities caps = codec.getCapabilitiesForType(type);
+                    JSONArray profiles = new JSONArray();
+                    for (MediaCodecInfo.CodecProfileLevel level : caps.profileLevels) {
+                        profiles.put(new JSONObject().put("profile", level.profile).put("level", level.level));
+                    }
+                    JSONObject row = new JSONObject().put("name", codec.getName()).put("mime", type)
+                        .put("profile_levels", profiles)
+                        .put("size_1920x1080_at24_supported", caps.getVideoCapabilities().areSizeAndRateSupported(1920, 1080, 24));
+                    if (android.os.Build.VERSION.SDK_INT >= 29) row.put("hardware_accelerated", codec.isHardwareAccelerated());
+                    result.put(row);
+                } catch (Exception error) {
+                    try { result.put(new JSONObject().put("name", codec.getName()).put("error", error.toString())); }
+                    catch (Exception ignored) { }
+                }
+            }
+        }
+        return result;
     }
 
     void finishProbe(String failure) {
@@ -197,6 +232,7 @@ public final class ProbeActivity extends Activity {
                 .put("failure", failure == null ? JSONObject.NULL : failure).put("phases", phases).put("observations", frames)
                 .put("initial_floor_exclusions", totalInitialFloorExclusions)
                 .put("decoder", decoderName).put("formats", formats).put("muted", true)
+                .put("hevc_codec_capabilities", codecCapabilities())
                 .put("model", android.os.Build.MODEL).put("manufacturer", android.os.Build.MANUFACTURER)
                 .put("expect_motion", expectMotion)
                 .put("scope", "Native codec and actual Surface pixels, timestamp progression, seeks and fresh-player restart. Audio selection and player clock measured; physical output A/V sync is not measured.");

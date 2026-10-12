@@ -23,6 +23,14 @@ def call(*args, check=True):
         raise RuntimeError('adb command failed: ' + str(args[:3]) + ': ' + r.stderr[-500:])
     return r.stdout
 
+def package_path():
+    r = subprocess.run(base + ['shell', 'pm', 'path', package], capture_output=True, text=True, timeout=20)
+    # Android returns1 for a genuinely absent package. A transport error is
+    # not absence, even though it also produces no stdout.
+    if r.returncode not in (0, 1) or r.stderr.strip():
+        raise RuntimeError('Could not inspect owned package: ' + r.stderr[-500:])
+    return r.stdout.strip()
+
 def focus():
     return [x.strip() for x in call('shell', 'dumpsys', 'window').splitlines() if 'mCurrentFocus=' in x]
 
@@ -41,7 +49,7 @@ try:
     if not unlocked:
         raise RuntimeError('Device keyguard is not verifiably absent; no modification made')
     receipt['focus_before'] = focus()
-    if call('shell', 'pm', 'path', package, check=False).strip():
+    if package_path():
         raise RuntimeError('Probe package already exists; ownership cannot be inferred')
     reverse = call('reverse', '--list')
     if f'tcp:{a.port}' in reverse:
@@ -72,15 +80,24 @@ try:
 except Exception as error:
     receipt['launcher_error'] = str(error)
 finally:
+    def cleanup(name, operation):
+        try:
+            receipt['cleanup'][name] = operation()
+        except Exception as error:
+            receipt['cleanup'][name + '_error'] = str(error)
     if installed or install_attempted:
-        call('shell', 'am', 'force-stop', package, check=False)
-        receipt['cleanup']['uninstall_result'] = call('uninstall', package, check=False).strip()
-        receipt['cleanup']['package_absent'] = not call('shell', 'pm', 'path', package, check=False).strip()
+        cleanup('force_stop', lambda: call('shell', 'am', 'force-stop', package, check=False).strip())
+        cleanup('uninstall_result', lambda: call('uninstall', package, check=False).strip())
+        cleanup('package_absent', lambda: not package_path())
     if reversed_port:
-        call('reverse', '--remove', f'tcp:{a.port}', check=False)
-        receipt['cleanup']['owned_reverse_absent'] = f'tcp:{a.port}' not in call('reverse', '--list', check=False)
-    receipt['focus_after'] = focus()
+        cleanup('remove_reverse', lambda: call('reverse', '--remove', f'tcp:{a.port}', check=False).strip())
+        cleanup('owned_reverse_absent', lambda: f'tcp:{a.port}' not in call('reverse', '--list'))
+    try:
+        receipt['focus_after'] = focus()
+    except Exception as error:
+        receipt['focus_after_error'] = str(error)
     receipt['finished_utc'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
     pathlib.Path(a.out).write_text(json.dumps(receipt, indent=2) + '\n')
 print(json.dumps({'case': a.case, 'result': receipt.get('probe', {}).get('result'), 'launcher_error': receipt.get('launcher_error'), 'cleanup': receipt['cleanup']}))
-raise SystemExit(0 if receipt.get('probe', {}).get('result') == 'pass' and not receipt.get('launcher_error') else 1)
+cleanup_ok = receipt['cleanup'].get('package_absent') is True and receipt['cleanup'].get('owned_reverse_absent') is True and not any(k.endswith('_error') for k in receipt['cleanup'])
+raise SystemExit(0 if receipt.get('probe', {}).get('result') == 'pass' and not receipt.get('launcher_error') and cleanup_ok else 1)

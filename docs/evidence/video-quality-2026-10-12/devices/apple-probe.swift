@@ -30,6 +30,7 @@ final class ProbeView: UIViewController {
     var phaseStart = 0.0
     var firstTime: Double?
     var lastTime: Double?
+    var nonUniformFrames = 0
     var phaseFrames = 0
     var initialFloorExclusions = 0
     var totalInitialFloorExclusions = 0
@@ -81,6 +82,7 @@ final class ProbeView: UIViewController {
         firstTime = nil
         lastTime = nil
         phaseFrames = 0
+        nonUniformFrames = 0
         initialFloorExclusions = 0
         if phase == 0 || targets[phase].0 == "restart" { attach() }
         let seek = CMTime(seconds: targets[phase].1, preferredTimescale: 600)
@@ -112,6 +114,25 @@ final class ProbeView: UIViewController {
         return String(hash, radix: 16)
     }
 
+    func spatialRange(_ buffer: CVPixelBuffer) -> Int {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return 0 }
+        let bytes = base.assumingMemoryBound(to: UInt8.self)
+        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        var low = 255, high = 0
+        for y in Swift.stride(from: 0, to: height, by: max(1, height / 32)) {
+            for x in Swift.stride(from: 0, to: width, by: max(1, width / 32)) {
+                for c in 0..<3 {
+                    let value = Int(bytes[y * stride + x * 4 + c])
+                    low = min(low, value); high = max(high, value)
+                }
+            }
+        }
+        return high - low
+    }
+
     func poll() {
         guard !done, phase >= 0, phase < targets.count else { return }
         let now = CACurrentMediaTime()
@@ -127,6 +148,7 @@ final class ProbeView: UIViewController {
         guard sink.hasNewPixelBuffer(forItemTime: requested) else { return }
         var actual = CMTime.invalid
         guard let buffer = sink.copyPixelBuffer(forItemTime: requested, itemTimeForDisplay: &actual) else { return }
+        let pixelRange = spatialRange(buffer)
         let media = actual.seconds
         guard media.isFinite else { finish("nonfinite frame timestamp"); return }
         // A ready layer alone may retain an old picture across a seek. The
@@ -140,6 +162,7 @@ final class ProbeView: UIViewController {
             finish("presentation timestamp reversed within a phase")
             return
         }
+        if pixelRange >= 16 { nonUniformFrames += 1 }
         let clock = player.currentTime().seconds
         let audioTracks = item.tracks.filter { $0.assetTrack?.mediaType == .audio }.count
         observations.append([
@@ -147,7 +170,7 @@ final class ProbeView: UIViewController {
             "player_clock_seconds": clock, "wall_since_phase_seconds": now - phaseStart,
             "visible_ready_layer": true, "audio_tracks": audioTracks,
             "width": CVPixelBufferGetWidth(buffer), "height": CVPixelBufferGetHeight(buffer),
-            "sampled_pixel_fingerprint": fingerprint(buffer),
+            "sampled_pixel_fingerprint": fingerprint(buffer), "sampled_rgb_range": pixelRange,
             "pixel_buffer_attachments": String(describing: CVBufferCopyAttachments(buffer, .shouldPropagate)),
             "asset_format_descriptions": item.tracks.compactMap { $0.assetTrack }.filter { $0.mediaType == .video }.map { track in track.formatDescriptions.map { String(describing: CMFormatDescriptionGetExtensions($0 as! CMFormatDescription)) } }
         ])
@@ -163,7 +186,7 @@ final class ProbeView: UIViewController {
             }
             let maximum = deltas.max() ?? .infinity
             let distinct = Set(rows.compactMap { $0["sampled_pixel_fingerprint"] as? String }).count
-            guard audioTracks > 0, maximum < 0.25, (!expectMotion || distinct > 1) else {
+            guard audioTracks > 0, maximum < 0.25, (expectMotion ? distinct > 1 : nonUniformFrames >= 30) else {
                 finish("audio-track/clock/moving-picture contract failed")
                 return
             }
@@ -172,7 +195,7 @@ final class ProbeView: UIViewController {
                 "initial_floor_exclusions": initialFloorExclusions,
                 "first_frame_seconds": rows.first?["wall_since_phase_seconds"] ?? 0,
                 "maximum_video_to_player_clock_seconds": maximum,
-                "distinct_pixel_fingerprints": distinct, "result": "pass"
+                "distinct_pixel_fingerprints": distinct, "nonuniform_frames": nonUniformFrames, "result": "pass"
             ])
             advance()
         }
