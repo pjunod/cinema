@@ -26,8 +26,13 @@ profile constraints. The acceptance repair collects only the selected
 video stream's configuration through the existing descriptor-bound probe,
 retains Unknown when evidence is absent or contradictory, binds successful
 refinement into facts identity, and protects the refined decoder cache from
-fresh source documents. Core selection regressions pass and the independent
-Astra review found no blockers. Real Metal/CPU sessions and matching paused
+fresh source documents. The first installed repair exposed a catalog/held-plan
+recipe mismatch: catalog selection must collect the same bounded scan facts
+before advertising an encoded recipe. Valid remux offers are published first;
+a failed collection cannot advertise a CPU recipe that later promotes to Metal.
+Core selection and catalog-to-prepared-source regressions pass; Astra review
+findings about remux progress and test timing have been addressed. Real
+Metal/CPU sessions and matching paused
 five-minute frames remain open; boot parity alone does not qualify them.
 
 **Checkpoint 2026-10-10.** The previous session ended on quota with the
