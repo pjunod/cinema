@@ -18,7 +18,7 @@ function options(challenge) {
 function credential(value) {
   const response = { clientDataJSON: b64(value.response.clientDataJSON) };
   if (value.response.attestationObject) { response.attestationObject = b64(value.response.attestationObject); response.transports = value.response.getTransports ? value.response.getTransports() : []; }
-  else { response.authenticatorData = b64(value.response.authenticatorData); response.signature = b64(value.response.signature); response.userHandle = value.response.userHandle ? b64(value.response.userHandle) : null; }
+  else { response.authenticatorData = b64(value.response.authenticatorData); response.signature = b64(value.response.signature); if (value.response.userHandle) response.userHandle = b64(value.response.userHandle); }
   return { id: value.id, rawId: b64(value.rawId), type: value.type, response, extensions: value.getClientExtensionResults() };
 }
 async function ceremony(event, enrolling) {

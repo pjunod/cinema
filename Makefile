@@ -56,7 +56,7 @@ unit-core: ## Run plurx-core with replicated-store tests and enforce the count f
 .PHONY: unit-diagnostics
 unit-diagnostics: ## Run focused diagnostics schema/archive and web wire tests
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib diagnostics::
-	node --test tests/web/diagnostics-wire.test.js
+	node --test tests/web/diagnostics-wire.test.js tests/web/diagnostics-recorder.test.js
 
 .PHONY: unit-broker
 unit-broker: test-socket-permission-check ## Run focused notification broker security and provider contracts

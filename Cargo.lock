@@ -3348,6 +3348,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "plurx-core",
+ "qrcode",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

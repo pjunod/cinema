@@ -19,6 +19,12 @@
   "files": [
     "types/globals.d.ts",
     "core/theme.js",
+    "core/diagnostics-wire.js",
+    "core/diagnostics-hash.js",
+    "core/diagnostics-store.js",
+    "core/diagnostics-recorder.js",
+    "core/diagnostics-export.js",
+    "core/diagnostics-delivery.js",
     "core/errors.js",
     "core/app.js",
     "core/api.js",
@@ -97,6 +103,7 @@
     "pages/remote-pairing.js",
     "pages/settings-remote.js",
     "pages/remote.js",
+    "pages/diagnostics.js",
     "router.js"
   ]
 }

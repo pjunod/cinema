@@ -37,7 +37,7 @@ index/backlog rows; the builder adopts them together in a normal commit.
 | B02 | User-scoped server/worker snapshot collection | Built; compiler verified | Batched PR #1037 | Pinned daemon Clippy passed; positive attribution, accepted route receipts, account-generation fencing, bounded jobs and signed peers implemented; real HTTP acceptance pending |
 | B03 | Support auth, grants, uploads and durable storage | Built; compiler verified | Batched PR #1037 | Independent encrypted SQLite publication, separate capture authority, provisioning/revocation, resume/refresh, quotas and external deletion/revocation fences implemented; pinned final workspace Clippy and dependency policy passed; runtime acceptance pending |
 | B04 | TV handoff, mobile page, inbox and packaging | Built; compiler verified | Batched PR #1037 | Phone claim/approval protocol, responsive completion page, named passkey inbox and TLS/service packaging written; browser races/passkeys/physical acceptance pending |
-| B05 | Web/TV browser reporting | Not started | — | Offline/boot/browser/focus evidence owed |
+| B05 | Web/TV browser reporting | Built; compiler verification in progress | Batched PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks written; compiler/type checks and software acceptance in progress |
 | B06 | Apple mobile/TV reporting | Not started | — | Both builds, share and physical TV handoff owed |
 | B07 | Android mobile/TV reporting | Not started | — | Release/build, share and physical TV handoff owed |
 | B08 | Reproduction, connection checks, diagnostic adapters | Not started | — | Stop/expiry/platform-limit evidence owed |
@@ -141,7 +141,8 @@ The v1 manifest is closed: unknown keys, duplicate keys, nulls, noncanonical
 integer/counter/UUID encodings, invalid coverage reasons and unsupported
 versions are refused. Counters are unsigned 64-bit decimal strings;
 measurements are bounded JSON integers. Structured event facts have a closed
-enum/measurement vocabulary. User-authored description is the only free text.
+enum/measurement vocabulary. User-authored description is explicit free text. A selected title is allowed
+only in the closed playback projection after positive consent.
 Archive projections contain normalized typed events, never general log dumps.
 
 The archive inspector checks the central directory count/names/extent before
@@ -225,3 +226,38 @@ WebAuthn MPL/OpenSSL exceptions. Both support scripts passed Node syntax checks.
 Declared restart/receipt/privacy, claim/approval/restore and real HTTP boundary
 regressions have not been executed under the latest workflow. No physical,
 TLS deployment or real passkey/browser acceptance is claimed.
+
+## 10. B05 — browser integration in progress
+
+Early recorder/storage/hash/export assets are registered before the existing
+bootstrap reporter. Raw error strings, URLs, headers, titles and credentials
+never enter the event recorder. Playback samples use the existing observer
+tick, with no playback retry or timer owner. Frame/drop counters retain decimal
+string precision. Optional title projection requires explicit consent and
+closed archive fields. Render range and browser crash/DNS/TLS visibility remain
+truthfully unknown/unsupported.
+
+The report dialog freezes before typing and is available from Help, sign-in,
+boot failures and player errors. It provides portable ZIP export, local storage
+fallback, account-fenced recovery, consented bounded upload/resume and a
+physically approved phone flow. Network remote actions are refused in this
+local reporting scope. Reproduction and checks have five-minute/fifteen-second
+owners; checks cap body consumption at 2 MiB. Local enrollment is scoped to
+the accepted account and installation, with explicit expiry/revocation limits.
+
+Syntax and static type checks passed without increasing the existing baseline;
+the first affected Rust compiler check passed in 56.85 seconds. Sampling,
+recovery and schema refinements are undergoing the final compiler check.
+Regression fixtures are declared but not executed per packet. No browser
+interaction, TV focus, hardware or end-to-end delivery pass is claimed.
+
+Final B05 refinements preserve the selected account on reload, erase foreign
+local namespaces, persist the meaningful history preference, end reproduction
+on a monotonic five-minute deadline, preserve terminal events during merges
+and attribute playback facts to current media attachments/authentication.
+Correlations hash accepted session labels in bounded asynchronous work; raw
+labels never enter reports and cannot establish server receipt authority.
+The protected upload enrollment cache and sign-out revocation are bounded and
+fail without claiming immediate knowledge when Cinema/support is unavailable.
+No new type-error allowance is introduced. The latest exact-tree normal hook
+provides the remaining embedded-Rust compiler receipt before publication.

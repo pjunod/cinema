@@ -1,5 +1,6 @@
 "use strict";
 // ---- api helpers ----------------------------------------------------------
+function observeDiagnosticRequest(domain,kind,facts){try{window.CinemaDiagnostics?.record(domain,kind,facts);}catch(_){} }
 // Session-scoped watch-write floor. Keep the decimal string intact: Raft
 // indexes may exceed JavaScript's exact Number range. Expiry is monotonic.
 let READ_AFTER={generation:-1,epoch:0,index:"",expires:0};
@@ -45,6 +46,8 @@ async function api(path, {method="GET", body=null, raw=false, signal=null, keepS
   if(typeof body==="string"||body instanceof String)
     throw new TypeError(`api(${path}): pass the body value, not a JSON string; api() serializes it`);
   const authGeneration=AUTH_GENERATION;
+  const diagnosticStarted=performance.now();
+  const diagnosticRoute=path.startsWith("/auth")||path==="/me"?"auth":path.startsWith("/diagnostics")?"diagnostics":path.startsWith("/sessions")||path.startsWith("/stream")?"playback":path.startsWith("/settings")?"settings":"browse";
   const readAfter=readAfterRequest();
   const headers={};
   if(typeof linkReceipt==="string"&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(linkReceipt))
@@ -56,6 +59,7 @@ async function api(path, {method="GET", body=null, raw=false, signal=null, keepS
   try{
     res=await fetch(API+path,{method,headers,body:body?JSON.stringify(body):null,signal});
   }catch(error){
+    if(authGeneration===AUTH_GENERATION)observeDiagnosticRequest("network","error",{route:diagnosticRoute,method,duration_ms:Math.round(performance.now()-diagnosticStarted),failure:signal?.aborted?"cancelled":"browser_network"});
     if(method!=="GET"&&method!=="HEAD") forgetReadAfter(readAfter);
     throw error;
   }
@@ -63,6 +67,7 @@ async function api(path, {method="GET", body=null, raw=false, signal=null, keepS
     const error=new Error("stale authorization"); error.status=401; error.staleAuth=true;
     throw error;
   }
+  observeDiagnosticRequest("network","request",{route:diagnosticRoute,method,status:res.status,duration_ms:Math.round(performance.now()-diagnosticStarted)});
   const commitIndex=res.headers?.get("x-plurx-commit-index")??null;
   // Older peers may acknowledge a write without an indexed receipt.
   if(commitIndex==null&&method!=="GET"&&method!=="HEAD") forgetReadAfter(readAfter);
@@ -184,6 +189,7 @@ function browserLabel(){
 }
 function refreshClientErrorReporterAuth(){
   if(window.PlurxErrorReporter) window.PlurxErrorReporter.setAuth(TOKEN,browserLabel());
+  if(typeof diagnosticAuthChanged==="function")diagnosticAuthChanged();
 }
 // Forward a client-side playback problem to the server so it lands in
 // Settings → Logs. Fire-and-forget: a browser that rejects a stream produces no
@@ -192,6 +198,8 @@ function refreshClientErrorReporterAuth(){
 // throws, never blocks playback; auto-fills context from the active PLAYER.
 function clientLog(ev){
   try{
+    const state=ev?.event==="stall"?"stalled":ev?.event==="stall_end"||ev?.event==="stall_recovery"?"recovered":ev?.level==="error"?"failed":"unknown";
+    if(TOKEN&&ME&&window.CinemaDiagnostics?.owns(PLAYER?.mediaAttachment,AUTH_GENERATION))observeDiagnosticRequest("playback",ev?.level==="error"?"error":"state",{state,mode:PLAYER?.method||"unknown",...(state==="failed"?{failure:"delivery"}:{})});
     const p=/** @type {Player} */(PLAYER||{}), s=p.source||{};
     const body=Object.assign({
       ua:browserLabel(),

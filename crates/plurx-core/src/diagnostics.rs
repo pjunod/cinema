@@ -433,12 +433,14 @@ impl Event {
         valid(self.facts.len() <= 16, "fact count")?;
         for (k, v) in &self.facts {
             let allowed = match k.as_str() {
-                "duration_ms" | "playhead_ms" | "headroom_ms" | "dropped_frames" | "width"
-                | "height" | "retry_count" => v.as_u64().is_some_and(|n| n <= 604_800_000),
+                "duration_ms" | "playhead_ms" | "headroom_ms" | "width" | "height"
+                | "retry_count" => v.as_u64().is_some_and(|n| n <= 604_800_000),
                 "status" => v
                     .as_u64()
                     .is_some_and(|n| n == 0 || (100..=599).contains(&n)),
-                "frame_count" | "dropped_events" => v.as_str().is_some_and(decimal),
+                "frame_count" | "dropped_frames" | "dropped_events" => {
+                    v.as_str().is_some_and(decimal)
+                }
                 "correlation" => v
                     .as_str()
                     .is_some_and(|s| s.strip_prefix("s-").is_some_and(digest)),
@@ -604,7 +606,28 @@ fn verify_contents(
                 // Optional projections are an array of the same typed events;
                 // platform adapters may add only this normalized vocabulary.
                 let value = strict_json(bytes, ENTRY_BYTES)?;
-                let values = value.as_array().ok_or(Invalid("projection array"))?;
+                let values = if file.name == "playback.json" && value.is_object() {
+                    let object = value.as_object().ok_or(Invalid("playback projection"))?;
+                    valid(
+                        object.keys().all(|k| k == "events" || k == "title"),
+                        "playback fields",
+                    )?;
+                    if let Some(title) = object.get("title") {
+                        let title = title.as_str().ok_or(Invalid("title encoding"))?;
+                        valid(
+                            m.privacy.titles_included
+                                && title.chars().count() <= 256
+                                && !title.chars().any(char::is_control),
+                            "title consent/bound",
+                        )?;
+                    }
+                    object
+                        .get("events")
+                        .and_then(Value::as_array)
+                        .ok_or(Invalid("playback events"))?
+                } else {
+                    value.as_array().ok_or(Invalid("projection array"))?
+                };
                 valid(values.len() <= 10_000, "projection count")?;
                 for value in values {
                     let e: Event = serde_json::from_value(value.clone())
@@ -814,6 +837,38 @@ pub fn export(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn title_projection_requires_explicit_consent_and_frame_counters_are_strings() {
+        let mut manifest = Manifest::decode(
+            fixture()["cases"][0]["json"]
+                .as_str()
+                .expect("fixture")
+                .as_bytes(),
+        )
+        .expect("manifest");
+        let mut entries = std::collections::BTreeMap::from([
+            ("description.txt".into(), Vec::new()),
+            ("client-events.jsonl".into(), Vec::new()),
+            (
+                "playback.json".into(),
+                br#"{"events":[],"title":"Explicitly selected title"}"#.to_vec(),
+            ),
+        ]);
+        assert!(export(manifest.clone(), entries.clone()).is_err());
+        manifest.privacy.titles_included = true;
+        let archive = export(manifest, entries.clone()).expect("consented archive");
+        assert!(inspect(&archive).is_ok());
+        entries.insert(
+            "playback.json".into(),
+            br#"{"events":[],"title":"Selected","url":"CANARY_SECRET"}"#.to_vec(),
+        );
+        assert!(export(inspect(&archive).expect("inspect").manifest, entries).is_err());
+        let base = serde_json::json!({"run_id":"00000000-0000-4000-8000-000000000001","sequence":"0","utc":"2026-10-12T16:00:00Z","elapsed_ms":0,"domain":"playback","kind":"sample","facts":{"frame_count":"18446744073709551615","dropped_frames":"9007199254740993"}});
+        assert!(Event::decode(serde_json::to_string(&base).expect("JSON").as_bytes()).is_ok());
+        let mut invalid = base;
+        invalid["facts"]["dropped_frames"] = 1.into();
+        assert!(Event::decode(serde_json::to_string(&invalid).expect("JSON").as_bytes()).is_err());
+    }
     fn fixture() -> Value {
         serde_json::from_str(include_str!("../tests/fixtures/diagnostics-v1.json"))
             .expect("fixture")

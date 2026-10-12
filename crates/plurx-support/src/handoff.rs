@@ -133,6 +133,13 @@ pub fn execute(
     Ok(json!({"id":id,"state":"claim_pending","comparison":phrase,"expires_at":expires}))
    })
         }
+        ("POST", ["handoffs", id, "qr"]) => {
+            let authorization = secret(headers)?;
+            db.with(|c|{let report:String=c.query_row("SELECT report FROM handoffs WHERE id=?1 AND expires>?2 AND state IN ('offered','claim_pending')",params![id,now()],|r|r.get(0)).optional()?.ok_or(Fault::Expired)?;Database::report_auth(c,&authorization,&report,&["creator"])?;
+                let sealed:Vec<u8>=c.query_row("SELECT blob FROM offers WHERE id=?1",[*id],|r|r.get(0))?;let offer:Value=serde_json::from_slice(&db.unseal(&format!("handoff/{id}/offer"),&sealed)?).map_err(|_|Fault::Invalid)?;let url=offer["url"].as_str().ok_or(Fault::Invalid)?;
+                let code=qrcode::QrCode::new(url.as_bytes()).map_err(|_|Fault::Invalid)?;let svg=code.render::<qrcode::render::svg::Color>().min_dimensions(256,256).build();Ok(json!({"svg":svg}))
+            })
+        }
         ("GET", ["handoffs", id, "status"]) => {
             let authorization = secret(headers)?;
             db.with(|c|{let (report,state,proof,phrase,expires):(String,String,String,String,i64)=c.query_row("SELECT report,state,proof,phrase,expires FROM handoffs WHERE id=?1",[*id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or(Fault::NotFound)?;Database::report_auth(c,&authorization,&report,&["creator"])?;Ok(json!({"id":id,"state":if expires<=now(){"expired"}else{&state},"claim_present":!proof.is_empty(),"comparison":phrase,"expires_at":expires}))})

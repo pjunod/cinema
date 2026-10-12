@@ -336,6 +336,7 @@ async function saveCinemaRemoteInvitations(button){
   }catch(error){if(err)err.textContent=error.message;if(button)button.disabled=false;}
 }
 
+function diagnosticDeveloperCard(){return setCard(`${cardHead("Remote diagnostics","Bounded local capture and an independent support inbox.",'<span class="pill">Qualification pending</span>')}<p>Help → Report a problem provides local export and explicit upload consent. Support hosting is configured through a protected operator file. Browser/native/device and durable delivery evidence remain in progress.</p>${devGraduation("all first-release client, privacy, handoff and delivery checks have applicable receipts.","this advisory card is removed; reporting remains in Help and the player.")}<button type="button" onclick="showDiagnostics()">Open reporting</button>`);}
 function developerPanel(settings,readiness){
   // Only features that are not yet fully active or fully tested wait here,
   // each saying what it waits on (devGraduation). Everything that graduated
@@ -347,7 +348,7 @@ function developerPanel(settings,readiness){
     ${clustered?`<a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health, placement, clocks and backups</span></a>`:""}
   </nav>`;
   return `${setHead("Developer","Features still waiting on qualification. Each card says what it waits on; none of them is gated by it.")}
-      ${destinations}
+      ${destinations}${diagnosticDeveloperCard()}
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection"><h2>Shared libraries and remotes</h2><p>Private sharing between separate Cinemas, and companion remotes.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}

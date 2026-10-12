@@ -1484,5 +1484,5 @@ timeout_seconds = 600
 id = "diagnostics.reports"
 title = "Bounded private incident reports"
 contract = "Diagnostic reports use a closed schema and bounded archives without playback authority or secret fields."
-paths = ["crates/plurx-core/src/diagnostics.rs", "crates/plurx-core/examples/diagnostic-inspect.rs", "crates/plurx-core/tests/fixtures/diagnostics-v1.json", "crates/plurxd/src/web/core/diagnostics-wire.js", "tests/web/diagnostics-wire.test.js", "scripts/remote-diagnostics-status", "crates/plurxd/src/diagnostics.rs", "crates/plurxd/src/diagnostics_delivery.rs", "crates/plurx-support/**"]
+paths = ["crates/plurx-core/src/diagnostics.rs", "crates/plurx-core/examples/diagnostic-inspect.rs", "crates/plurx-core/tests/fixtures/diagnostics-v1.json", "crates/plurxd/src/web/core/diagnostics-wire.js", "tests/web/diagnostics-wire.test.js", "tests/web/diagnostics-recorder.test.js", "crates/plurxd/src/web/core/diagnostics-*.js", "crates/plurxd/src/web/pages/diagnostics.js", "scripts/remote-diagnostics-status", "crates/plurxd/src/diagnostics.rs", "crates/plurxd/src/diagnostics_delivery.rs", "crates/plurx-support/**"]
 checks = ["diagnostics-contract", "rust-gate"]

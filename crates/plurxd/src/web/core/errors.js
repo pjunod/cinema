@@ -114,6 +114,7 @@ function createEarlyErrorReporter({
 
   function capture(kind, event = {}) {
     if (reporting) return false;
+    try{window.CinemaDiagnostics?.record("lifecycle","error",{state:"failed"});}catch(_){}
     reporting = true;
     try {
       const reason = kind === "unhandledrejection" ? event.reason : event.error;
@@ -193,6 +194,7 @@ function createEarlyErrorReporter({
       button.textContent = "Reload";
       button.addEventListener("click", () => location.reload());
       banner.appendChild(button);
+      const reportButton=document.createElement("button");reportButton.type="button";reportButton.textContent="Report a problem";reportButton.addEventListener("click",()=>{if(window.CinemaOpenDiagnostics)window.CinemaOpenDiagnostics();else CinemaDiagnosticExport.emergency();});banner.appendChild(reportButton);
     }
   }
 
