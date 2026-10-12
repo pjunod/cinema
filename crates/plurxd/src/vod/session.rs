@@ -409,7 +409,7 @@ impl Rendition {
         let readers = self.readers.lock().await;
         readers
             .values()
-            .filter(|reader| !reader.authority_only)
+            .filter(|reader| !reader.authority_only && reader.processing_probe.is_none())
             .map(|reader| reader_window(reader, self.seconds_per_segment))
             .collect()
     }
@@ -730,6 +730,7 @@ pub(super) struct Session {
     /// A running worker retains its own clone until physical reap.
     pub(super) root_admission: Option<crate::vodencode::EncodePermit>,
     pub(super) processed_reuse_scope: Option<[u8; 32]>,
+    pub(super) processed_probes: Vec<Weak<ProcessedRootProbe>>,
     pub(super) rendition: Option<Arc<Rendition>>,
     pub(super) passive_grant: Option<Arc<passive_grant::Grant>>,
     pub(super) retained_output: Option<Arc<retained::RetainedVodArtifact>>,
@@ -809,6 +810,9 @@ impl Session {
     }
 
     pub(super) fn invalidate_observational_attachment(&self) {
+        for probe in self.processed_probes.iter().filter_map(Weak::upgrade) {
+            probe.revoke();
+        }
         self.control
             .lock()
             .expect("control lock")
@@ -844,6 +848,9 @@ impl Session {
     /// holding a successor. What this does buy is that nothing afterwards
     /// believes the successor is still wanted.
     pub(super) fn abort_staged_preparation(&self) {
+        for probe in self.processed_probes.iter().filter_map(Weak::upgrade) {
+            probe.revoke();
+        }
         {
             let mut control = self.control.lock().expect("control lock");
             control.invalidate_observational_attachment();

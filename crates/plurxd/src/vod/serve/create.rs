@@ -1401,6 +1401,7 @@ impl VodServe {
             children: Vec::new(),
             root_admission,
             processed_reuse_scope,
+            processed_probes: Vec::new(),
             passive_grant: passive_grant.clone(),
             retained_output,
             rendition: Some(Arc::clone(&rendition)),
@@ -1533,7 +1534,7 @@ impl VodServe {
                     .recipe
                     .encoding
                     .as_ref()
-                    .and_then(|encoding| encoding.processed_production_for(permit))
+                    .and_then(|encoding| reuse.production_evidence(encoding, permit))
                     .is_some_and(|proof| {
                         proof.milli_realtime >= 1150
                             && proof.active_ms >= 2000
@@ -1547,6 +1548,9 @@ impl VodServe {
                     "vod_preparation_changed",
                     "the exact processing predecessor ended or changed",
                 ));
+            }
+            if let Some(lease) = reuse.probe.as_ref() {
+                lease.probe.revoke();
             }
         }
         if let Some(previous_readers) = previous_readers.as_mut() {
@@ -2233,6 +2237,7 @@ impl VodServe {
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
+            processed_probes: Vec::new(),
             passive_grant: None,
             retained_output: None,
             sdr_master_codecs: false,

@@ -841,13 +841,82 @@ pub(crate) struct ProcessedRootReuse {
     owner: ResponseOwner,
     rendition: Arc<Rendition>,
     deadline: Instant,
+    probe: Option<ProcessedProbeLease>,
+}
+
+struct ProcessedRootProbe {
+    active: AtomicBool,
+    deadline: Instant,
+    from: u32,
+    through: u32,
+    reader_id: String,
+    rendition_key: String,
+    shared: Weak<Shared>,
+    rendition: Weak<Rendition>,
+    sampler: Arc<crate::vodencode::ProcessedProductionSampler>,
+}
+
+impl std::fmt::Debug for ProcessedRootProbe {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProcessedRootProbe")
+            .field("reader_id", &self.reader_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProcessedRootProbe {
+    fn revoke(&self) {
+        self.active.store(false, Release);
+        // Retire synchronously before any reader removal. An orphaned wait
+        // must never regain ordinary foreground authority during cleanup.
+        if let Some(shared) = self.shared.upgrade() {
+            shared
+                .pool
+                .retire_session(&self.rendition_key, &self.reader_id);
+        }
+        if let Some(rendition) = self.rendition.upgrade() {
+            rendition.kick();
+        }
+    }
+
+    fn live(&self) -> bool {
+        if Instant::now() >= self.deadline {
+            self.revoke();
+        }
+        self.active.load(Acquire) && self.sampler.bounds() == (self.from, self.through)
+    }
+}
+
+struct ProcessedProbeLease {
+    probe: Arc<ProcessedRootProbe>,
+    rendition: Arc<Rendition>,
+}
+
+impl Drop for ProcessedProbeLease {
+    fn drop(&mut self) {
+        self.probe.revoke();
+        if let Some(shared) = self.probe.shared.upgrade() {
+            let rendition = Arc::clone(&self.rendition);
+            let reader_id = self.probe.reader_id.clone();
+            tokio::spawn(async move {
+                rendition
+                    .detach_media_reader(&shared.pool, &reader_id)
+                    .await;
+                rendition.kick();
+            });
+        }
+    }
 }
 
 impl PreparedRootAdmission {
     pub(crate) fn production_evidence(&self) -> Option<crate::vodencode::ActiveProductionEvidence> {
         if self.reused_parent.is_some() {
             #[cfg(any(target_os = "linux", test))]
-            return self.encoding.processed_production_for(&self.permit);
+            return self
+                .reused_parent
+                .as_ref()?
+                .production_evidence(&self.encoding, &self.permit);
             #[cfg(not(any(target_os = "linux", test)))]
             return None;
         }
@@ -856,8 +925,22 @@ impl PreparedRootAdmission {
 }
 
 impl ProcessedRootReuse {
+    #[cfg(any(target_os = "linux", test))]
+    fn production_evidence(
+        &self,
+        encoding: &crate::vodencode::Encoding,
+        permit: &crate::vodencode::EncodePermit,
+    ) -> Option<crate::vodencode::ActiveProductionEvidence> {
+        match self.probe.as_ref() {
+            Some(lease) if lease.probe.live() => lease.probe.sampler.proof(permit),
+            Some(_) => None,
+            None => encoding.processed_production_for(permit),
+        }
+    }
+
     fn matches(&self, session: &Session, permit: &crate::vodencode::EncodePermit) -> bool {
         Instant::now() < self.deadline
+            && self.probe.as_ref().is_none_or(|lease| lease.probe.live())
             && session.renewable()
             && session.processed_reuse_scope == Some(self.scope)
             && Arc::ptr_eq(&session.lifecycle, &self.owner.lifecycle)

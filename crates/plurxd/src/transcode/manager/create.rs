@@ -1299,6 +1299,15 @@ impl TranscodeManager {
                     }
                 }
             };
+            if root.reused_parent.is_some() {
+                tokio::time::timeout_at(
+                    deadline,
+                    self.vod
+                        .refresh_processed_root(&mut root, request.start_seconds),
+                )
+                .await
+                .map_err(|_| "processed owner refresh exceeded its admitted deadline")??;
+            }
             let encoding = &mut root.encoding;
             let Some(runtime) = encoding.dv_runtime.as_ref().cloned() else {
                 return Ok(None);
@@ -2364,6 +2373,7 @@ impl TranscodeManager {
             active_production: std::sync::Mutex::new(
                 crate::vodencode::ActiveProductionWindow::default(),
             ),
+            processed_samplers: std::sync::Mutex::new(Vec::new()),
             speculative: std::sync::atomic::AtomicBool::new(false),
             queued: std::sync::Mutex::new(None),
             policy_retry: std::sync::atomic::AtomicBool::new(false),

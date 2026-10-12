@@ -296,6 +296,7 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         candidate_recipe: None,
         production_proofs: Arc::new(crate::vodencode::CandidateProductionProofs::default()),
         active_production: StdMutex::new(crate::vodencode::ActiveProductionWindow::default()),
+        processed_samplers: StdMutex::new(Vec::new()),
         nonpreemptive_trial: false,
         source_object_version: crate::fragment_index_cluster::open_source_fence(&file, None)
             .await
@@ -1808,6 +1809,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         candidate_recipe: None,
         production_proofs: Arc::new(crate::vodencode::CandidateProductionProofs::default()),
         active_production: StdMutex::new(crate::vodencode::ActiveProductionWindow::default()),
+        processed_samplers: StdMutex::new(Vec::new()),
         nonpreemptive_trial: false,
         source_object_version: crate::fragment_index_cluster::open_source_fence(&file, None)
             .await
@@ -2009,6 +2011,72 @@ async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_sub
     assert!(rendition.retained_admission.current().is_none(), "cache owns no credit");
 }
 
+fn seal_processed_reuse_fixture(serve: &VodServe, root: &mut PreparedRootAdmission) {
+    let reuse = root.reused_parent.as_mut().expect("captured predecessor");
+    let sampler = root.encoding.processed_sampler(&root.permit, 0, 6, reuse.deadline);
+    let at = Instant::now() - Duration::from_secs(3);
+    for (entry, elapsed) in [(0, 0), (1, 1500), (2, 3000)] {
+        sampler.observe_for_test(&root.permit, entry as u64 + 1, entry, (entry as i64 + 1) * 4000, at + Duration::from_millis(elapsed));
+    }
+    assert!(sampler.proof(&root.permit).is_some());
+    let probe = Arc::new(ProcessedRootProbe {
+        active: AtomicBool::new(true), deadline: reuse.deadline, from: 0, through: 6,
+        reader_id: uuid::Uuid::new_v4().to_string(), rendition_key: reuse.rendition.key.clone(),
+        shared: Arc::downgrade(&serve.shared), rendition: Arc::downgrade(&reuse.rendition), sampler,
+    });
+    reuse.probe = Some(ProcessedProbeLease { probe, rendition: Arc::clone(&reuse.rendition) });
+}
+
+#[tokio::test]
+async fn processed_probe_eviction_and_revocation_leave_no_repeated_work_or_parked_wait() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("finite probe custody");
+    let (_, encoding) = encoded_fixture(base.path()).await;
+    let permit = encoding.try_permit().await.expect("capacity");
+    let serve = bare_serve(base.path());
+    let rendition = synthetic_rendition(base.path()).await;
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let sampler = encoding.processed_sampler(&permit, 0, 2, deadline);
+    let probe = Arc::new(ProcessedRootProbe {
+        active: AtomicBool::new(true), deadline, from: 0, through: 2,
+        reader_id: "finite-probe".into(), rendition_key: rendition.key.clone(),
+        shared: Arc::downgrade(&serve.shared), rendition: Arc::downgrade(&rendition), sampler,
+    });
+    let mut reader = Reader::new(0);
+    reader.processing_probe = Some(Arc::clone(&probe));
+    rendition.readers.lock().await.insert(probe.reader_id.clone(), reader);
+    assert!(rendition.reader_windows().await.is_empty(), "no ordinary eviction window");
+    probe.sampler.observe_for_test(&permit, 1, 0, 4000, Instant::now());
+    {
+        let readers = rendition.readers.lock().await;
+        let mut manifest = rendition.manifest.lock().await;
+        manifest.materialize(0, 100, 0);
+        assert!(manifest.evict(0));
+        assert_eq!(manifest.next_gap(0), Some(0));
+        let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+        assert_eq!(demands.len(), 1);
+        assert_eq!(demands[0].blocked_on, Some(1), "eviction cannot repeat privately completed entry zero");
+    }
+    let wait = serve.shared.pool.register_reader(WaitKey { rendition: rendition.key.clone(), index: 1 }, &probe.reader_id, "real-parent").expect("parent allowance");
+    assert_eq!(serve.shared.pool.demands(&rendition.key).len(), 1);
+    // Represents revocation after owner validation but before the next wait's
+    // registration. Registration's synchronous recheck must reject that wait.
+    probe.revoke();
+    assert!(serve.shared.pool.demands(&rendition.key).is_empty());
+    drop(wait);
+    let refused = serve.blocked_wait_for_with_probe(&rendition, (&probe.reader_id, "real-parent"), 1, Duration::from_secs(8), Arc::new(crate::meter::Meter::new()), None, Some(&probe)).await;
+    assert!(matches!(refused, Err(VodError::Gone(_))));
+    assert!(serve.shared.pool.demands(&rendition.key).is_empty());
+    {
+        let readers = rendition.readers.lock().await;
+        let manifest = rendition.manifest.lock().await;
+        assert!(playback_demands(&serve.shared.pool, &rendition, &readers, &manifest).is_empty());
+    }
+    let lease = ProcessedProbeLease { probe, rendition: Arc::clone(&rendition) };
+    drop(lease);
+    wait_until("cancelled private reader detached", Duration::from_secs(2), async || rendition.readers.lock().await.is_empty()).await;
+}
+
 #[tokio::test]
 async fn processed_root_reuse_rejects_expiry_scope_and_ended_exact_owner() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
@@ -2037,6 +2105,7 @@ async fn processed_root_reuse_rejects_expiry_scope_and_ended_exact_owner() {
     let mut token = ProcessedRootReuse {
         session_id: "original".into(), scope, owner, rendition: Arc::clone(&rendition),
         deadline: Instant::now() + Duration::from_secs(10),
+        probe: None,
     };
     {
         let sessions = serve.shared.sessions.lock().await;
@@ -2054,18 +2123,37 @@ async fn processed_root_reuse_rejects_expiry_scope_and_ended_exact_owner() {
     successor.request_id = Some("successor-incarnation".into());
     assert!(serve.capture_processed_root(&successor, "another-user", scope, token.deadline).await.is_none());
     assert!(serve.capture_processed_root(&successor, "user", [43; 32], token.deadline).await.is_none());
+    let mut wrong_owner = serve.capture_processed_root(&successor, "user", scope, token.deadline).await.expect("capture before replacement");
+    seal_processed_reuse_fixture(&serve, &mut wrong_owner);
+    wrong_owner.reused_parent.as_mut().expect("token").owner.incarnation = Arc::new(());
+    assert!(wrong_owner.production_evidence().is_some(), "healthy receipt isolates the owner check");
+    let refusal = serve.try_create(VodRecipeRequest { root_admission: Some(wrong_owner), request: &successor, encoding: Some(Arc::clone(&encoding)), ..(&successor).into() },
+        &file, &settings(), attribution, "wrong-incarnation".into()).await.expect_err("replacement incarnation");
+    assert!(refusal.contains("vod_preparation_changed"));
+    let mut qualified = serve.capture_processed_root(&successor, "user", scope, token.deadline).await.expect("exact parent capture");
+    seal_processed_reuse_fixture(&serve, &mut qualified);
+    assert!(qualified.production_evidence().is_some());
+    // Deliberate pacing after a completed private qualification does not
+    // publish this one-shot receipt into live catalogue production evidence.
+    encoding.reset_active_production(100, false);
+    assert!(qualified.production_evidence().is_some());
+    serve.refresh_processed_root(&mut qualified, successor.start_seconds).await.expect("sealed qualification fast path");
+    serve.try_create(VodRecipeRequest { root_admission: Some(qualified), request: &successor, encoding: Some(Arc::clone(&encoding)), ..(&successor).into() },
+        &file, &settings(), attribution, "positive-successor".into()).await.expect("exact saturated reuse");
+    assert_eq!(encoding.admissions.software_in_use(), 2, "one physical credit for both parents");
+    let mut qualified = serve.capture_processed_root(&successor, "user", scope, token.deadline).await.expect("still exact predecessor");
+    seal_processed_reuse_fixture(&serve, &mut qualified);
+    assert!(qualified.production_evidence().is_some());
     assert!(serve.end("original", Terminal::Deleted).await);
     // The retained graph and capacity remain accessible through local Arcs,
     // but no longer confer the exact parent's live authority.
     let refused = serve.try_create(VodRecipeRequest {
-        root_admission: Some(PreparedRootAdmission {
-            reuse_scope: Some(scope), reused_parent: Some(token), instance_allowance: None,
-            instance_nonce: None, encoding: Arc::clone(&encoding), permit,
-        }), request: &successor, encoding: Some(Arc::clone(&encoding)),
+        root_admission: Some(qualified), request: &successor, encoding: Some(Arc::clone(&encoding)),
         ..(&successor).into()
     }, &file, &settings(), attribution, "refused-successor".into()).await.expect_err("ended predecessor");
     assert!(refused.contains("vod_preparation_changed"));
     assert!(!serve.shared.sessions.lock().await.contains_key("refused-successor"));
+    assert!(serve.end("positive-successor", Terminal::Deleted).await);
 }
 
 #[tokio::test]
