@@ -1,0 +1,66 @@
+{
+  "source": "f142d586f38e8467723f295fcf6c79847fa34ab3",
+  "checks": [
+    {
+      "name": "hdr",
+      "command": [
+        "rustup",
+        "run",
+        "1.97.1",
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "plurx-core",
+        "--lib",
+        "vaapi_hdr_policy"
+      ],
+      "started_at": "2026-10-12T18:10:05.723393+00:00",
+      "exit_code": 0,
+      "finished_at": "2026-10-12T18:11:39.121400+00:00",
+      "log_sha256": "63285444a60f93de8f0e314060179b2addca9fb39318f1421612c268f6c8540d",
+      "passed": 3,
+      "failed": 0
+    },
+    {
+      "name": "parser",
+      "command": [
+        "rustup",
+        "run",
+        "1.97.1",
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "plurxd",
+        "--bin",
+        "plurxd",
+        "--",
+        "decode_facts::macos_wasm::tests",
+        "cancelled_identity_hash_keeps_the_single_worker_admission",
+        "blocked_source_identity_returns_deadline_without_releasing_probe_ownership"
+      ],
+      "started_at": "2026-10-12T18:11:39.121909+00:00",
+      "exit_code": 0,
+      "finished_at": "2026-10-12T18:17:53.098784+00:00",
+      "log_sha256": "94a5af0a06b04bcc3eb098975618e8fc06188f0d1efd72907e8f3fbf39e468cf",
+      "passed": 8,
+      "failed": 0
+    }
+  ],
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "sequence": "Executed only after final adversarial review approval; first attempts, no repeats.",
+  "changed_runtime_inputs_sha256": {
+    "crates/plurx-core/examples/encoder-calibration-args.rs": "9f1d0df0c8e0a78a52e3e4fb558c1f614d663fb58df25a40dc08f3fbd7a40f3d",
+    "crates/plurx-core/src/transcode/decode.rs": "d3227118a22209aca34869455023b4b13076eaf6e2d7f1a03276458cdfd1b168",
+    "crates/plurx-core/src/transcode/encoder.rs": "d00d85db80cd8910ed38e1663c048a930aece3d520b3774e1ae76d32de185cf8",
+    "crates/plurx-core/src/transcode/fixtures/ffmpeg-vaapi-driver-policy": "7b0a3abd3c9e133076c8359c60c6875ee24742d1549d0c213ecb149eb35dc6fc",
+    "crates/plurx-core/src/transcode/mod.rs": "a8713c3830573da696bcee3b05962be59af53e51b856f9b22b9ed8eae22660cc",
+    "crates/plurxd/src/decode_facts/macos_wasm.rs": "b23addb10d6a6e9a9e70ad0fb644a6196f0f0b3a19831f434cd2518aa1fb4685",
+    "crates/plurxd/src/ffmpeg.rs": "96ca9b905132677610316a68b76e2105927975a49c5d1b6648b73bb7158b20e2",
+    "crates/plurxd/src/main.rs": "7285f937233d7b6770668b27d618a5bf793c875ed19a613f2fa8c2b4548f1eb4",
+    "crates/plurxd/src/transcode/manager/create.rs": "e54b59c0896210f22040470d39ebb6092b2c2f2ad67dea70add6cfc75040a563",
+    "crates/plurxd/src/transcode/manager/plan.rs": "2536299e646fcbb624f834dbfd286afe696a08df4b905b88cb9d1f45002408bd"
+  },
+  "later_changes": "Historical errata and documentation only; runtime inputs unchanged. Final fast-lane compile and merge head recorded in PR #1034."
+}

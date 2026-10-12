@@ -1,0 +1,28 @@
+{
+  "scope": "Same source, parser image, adapter and capability policy; only diagnostic compiler optimization differs. Single finite sample per mode, not a fleet benchmark.",
+  "pairs": [
+    {
+      "case": "version",
+      "bytes_equal": true,
+      "default_sha256": "50f02c890c57d19ef1e9de0cc7c0d2be52330eea056e13bc4cd53516dc20dc93",
+      "no_opt_sha256": "50f02c890c57d19ef1e9de0cc7c0d2be52330eea056e13bc4cd53516dc20dc93",
+      "bytes": 1323
+    },
+    {
+      "case": "metadata",
+      "bytes_equal": true,
+      "default_sha256": "8f9e9b655704ace783641ffb9a9dd5baf6951da1618cc1d1a2e9e1421395de9a",
+      "no_opt_sha256": "8f9e9b655704ace783641ffb9a9dd5baf6951da1618cc1d1a2e9e1421395de9a",
+      "bytes": 4177
+    },
+    {
+      "case": "packets",
+      "bytes_equal": true,
+      "default_sha256": "8cdfedb94fbf78a0ecb0566e199ffc1d3b840da191379f7f7ac2d820a2b51275",
+      "no_opt_sha256": "8cdfedb94fbf78a0ecb0566e199ffc1d3b840da191379f7f7ac2d820a2b51275",
+      "bytes": 89361
+    }
+  ],
+  "adapter_sha256": "b2323771ed83c6c0ace00294587f7d4889a443ddf865db627ccdce6cc32b3252",
+  "signing_sha256": "3cccbaad68b197c951585be45f3a86131b62809bd024325545afd0cb1194453d"
+}

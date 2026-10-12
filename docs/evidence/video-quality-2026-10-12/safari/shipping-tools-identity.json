@@ -1,0 +1,26 @@
+{
+  "ffmpeg_version": "8.1.3-Jellyfin",
+  "parser_abi": "plurx-source-wasi-p1-v1-wasmtime-49.0.2 8ca6117501c00f762022e737a4720152598ddd6e450ba80993496f5d47a24c85",
+  "files": [
+    {
+      "name": "ffmpeg",
+      "bytes": 57289880,
+      "sha256": "f043b55df439a90743faf539ce88b723c84eb8baa0ae3323a894c87b459b85ef"
+    },
+    {
+      "name": "ffprobe",
+      "bytes": 57098488,
+      "sha256": "6e5f60f7387917b33e3c4dfdf1e2d13cc63a1e928c0ac75c4f0dcd89f1c2a90d"
+    },
+    {
+      "name": "plurx-source-parser.wasm",
+      "bytes": 15311140,
+      "sha256": "36f7e0298eac14d1a664dfc083702bab812f6c83d196c651420af92f1080f21c"
+    },
+    {
+      "name": "plurx-source-parser.wasm.abi",
+      "bytes": 105,
+      "sha256": "80a4141d10c1f4b034715a172b48851bd85829b6817f0673831c6201bbc537be"
+    }
+  ]
+}

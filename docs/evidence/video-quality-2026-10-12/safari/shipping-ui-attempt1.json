@@ -1,0 +1,36 @@
+{
+  "source": "445237841",
+  "daemon_sha256": "7dc9ec99c21c1adb5b6bc7799f175141d669666e37c187faa53dfab56327da76",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/"
+    },
+    {
+      "method": "GET",
+      "path": "/favicon.ico"
+    }
+  ],
+  "harness_sha256": "64dcedafba64955bd16e688a9275ff351ef265b6561ec3f7a398d57658580143",
+  "playback_lab_sha256": "1be219589ebc733fc8849fe137fa95df8f0fb8a6df98955b0472a8026545294d",
+  "fixtures": [
+    {
+      "name": "authored-sdr.mkv",
+      "bytes": 3294614,
+      "sha256": "bece3d5d38cd0c8a3acf76b53929cb52ff7896487abc3fb58b3351f61add161e"
+    }
+  ],
+  "file": {
+    "id": 1,
+    "filename": "authored-sdr.mkv"
+  },
+  "receipt": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Safari/605.1.15",
+    "phases": [],
+    "events": [],
+    "error": "SecurityError: Sandbox access violation: Blocked a frame at \"http://127.0.0.1:50331\" from accessing a cross-origin frame.  The frame being accessed is sandboxed and lacks the \"allow-same-origin\" flag.",
+    "pass": false
+  },
+  "owned_tab_closed": true,
+  "resources_closed": true
+}
