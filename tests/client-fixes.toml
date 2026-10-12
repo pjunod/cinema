@@ -6171,7 +6171,7 @@ test_anchor = "aContinuousMemberKeepsThePresentedRungOverTheSessionCandidate"
 id = "android.display-upgrade-largest-affordable-rung"
 commits = ["115bf7de65e42a75ea057d810cc32a64f6b298d3"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
-source_anchor = "}.minByOrNull { it.width.toLong() * it.height } ?: candidates.maxByOrNull { it.width.toLong() * it.height }"
+source_anchor = "}.minByOrNull { it.width.toLong() * it.height } ?: preferred.maxByOrNull { it.width.toLong() * it.height }"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "aLadderBelowTheDisplayClimbsToItsLargestAffordableRung"
 
@@ -6223,3 +6223,29 @@ source = "clients/apple/Sources/HLSFragmentCadence.swift"
 source_anchor = "let complete = times.filter { $0 < lastDTS }.sorted()"
 test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
 test_anchor = "func testTransportStreamSuccessorStopsAtACompletePrefix()"
+
+# Qualified HDR Auto source/test mappings; execution receipts remain separate.
+
+[[fixes]]
+id = "android.processed-hdr10-qualified-auto"
+commits = ["8d6008c903bf644c223c7abcbd7c766d64e736fa"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "val processed = candidates.filter { it.processed_hdr10 && it.hasValidIdentity &&"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "processedHdr10PreferenceRequiresQualifiedProductionAndCodec"
+
+[[fixes]]
+id = "apple.processed-hdr10-qualified-auto"
+commits = ["8d6008c903bf644c223c7abcbd7c766d64e736fa"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let processed = candidates.filter { $0.processedHdr10 == true && $0.hasValidIdentity &&"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testProcessedHdr10PreferenceRequiresQualifiedProductionAndCodec"
+
+[[fixes]]
+id = "web.processed-hdr10-qualified-auto"
+commits = ["8d6008c903bf644c223c7abcbd7c766d64e736fa"]
+source = "crates/plurxd/src/web/playback-policy.js"
+source_anchor = "const processed = eligible.filter(candidate => candidate.processed_hdr10 === true"
+test = "tests/web/continuous-adapter.test.js"
+test_anchor = "processed HDR10 Auto preference requires production proof, decoder and link admission"
