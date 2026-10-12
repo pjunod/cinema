@@ -1953,9 +1953,9 @@ impl TranscodeManager {
                     let processed_plan = self.resolve_vod_movie_plan(file, &processed_options, Encoder::Software, held).await?;
                     let processed_resources = TranscodeResourceEstimate { hardware_slot: true,
                         cpu_threads: if processed_plan.options().input_has_audio { 7 } else { 5 }, decoder_threads: Some(1) };
-                    let bundle = crate::vodencode::try_admit_frozen_bundle(&self.admissions,
+                    let bundle = crate::vodencode::admit_frozen_preparation(&self.admissions,
                         self.max_hw_sessions().await, self.software_budget().await, &processed_resources,
-                        Some(1), crate::admission::Priority::Live, None)
+                        Some(1), Instant::now() + crate::admission::QUEUE_WAIT).await
                         .map_err(|_| "DV graph resource admission unavailable")?;
                     let segment_plan = grid.plan(file.duration_ms.ok_or("held source duration unavailable")?, 0);
                     let at = ((req.start_seconds.max(0.0) * f64::from(grid.numerator)) as u64

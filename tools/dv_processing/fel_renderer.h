@@ -441,15 +441,9 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
   }
   uint8_t *packed = malloc((size_t)WIDTH * HEIGHT * 6);
   require(packed != NULL, "RGB output allocation");
-  for (size_t pixel = 0; pixel < (size_t)WIDTH * HEIGHT; pixel++) {
-    for (int c = 0; c < 4; c++)
-      require(isfinite(output[4 * pixel + c]), "finite rendered RGBA");
-    for (int c = 0; c < 3; c++) {
-      uint16_t code = dv_pack_finite_rgb48(output[4 * pixel + c]);
-      packed[6 * pixel + 2 * c] = (uint8_t)code;
-      packed[6 * pixel + 2 * c + 1] = (uint8_t)(code >> 8);
-    }
-  }
+  require(dv_pack_rgba_rgb48(output, (size_t)WIDTH * HEIGHT, packed,
+                            (size_t)WIDTH * HEIGHT * 6),
+          "finite rendered RGBA");
   write_rgb(packed, (size_t)WIDTH * HEIGHT * 6, rgb_output);
   char rgb_field[84] = "";
   if (debug || dv_frame_hashes()) {

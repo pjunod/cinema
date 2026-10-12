@@ -476,7 +476,7 @@ impl RuntimeRecipe {
         let generation = owners.authorize(physical_owner, session_id)?;
         let mut receipt = receipt.clone();
         receipt.bind_publication(&generation, shape.clone()).ok()?;
-        receipt
+        let report = receipt
             .hdr10_effective_report(
                 &plurx_core::transcode::dv_processing::DvProductionRegistry,
                 plan,
@@ -484,7 +484,13 @@ impl RuntimeRecipe {
                 shape,
             )
             .ok()
-            .flatten()
+            .flatten()?;
+        if owners.mark_report_logged(physical_owner, &generation) {
+            tracing::info!(target: "plurxd::vodserve",
+                effective_processing = %serde_json::to_string(&report).expect("bounded processing report"),
+                "accepted HDR10 processing report");
+        }
+        Some(report)
     }
 
     pub(crate) fn published_window(

@@ -117,9 +117,9 @@ static void base_metadata(const AVFrame *frame, const uint8_t *nal, size_t size,
   for (int c = 0; c < 3; c++) {
     const AVDOVIReshapingCurve *curve = &m->curves[c];
     require(curve->num_pivots >= 2 && curve->num_pivots <= 9 &&
-                curve->pivots[0] == 0 &&
-                curve->pivots[curve->num_pivots - 1] == 1023,
-            "bounded complete base curve");
+                curve->pivots[0] <= 1023 &&
+                curve->pivots[curve->num_pivots - 1] <= 1023,
+            "bounded base curve extent");
     for (int i = 0; i < curve->num_pivots - 1; i++) {
       require(curve->pivots[i] < curve->pivots[i + 1],
               "strict base curve pivots");
@@ -136,7 +136,9 @@ static void base_metadata(const AVFrame *frame, const uint8_t *nal, size_t size,
     }
   }
   // This public mapper carries arbitrary signalled polynomial/MMR/color
-  // coefficients. No identity-curve or fixed-matrix substitution occurs.
+  // coefficients, including its signalled lower/upper output clamp. Real
+  // profiles need not span the entire ten-bit range. Preserve those endpoints;
+  // do not widen them to an identity curve or substitute a fixed matrix.
   pl_map_dovi_metadata(&out->dovi, data);
   out->dovi.nlq_active = false; // Explicitly omitted EL: never compose residuals.
   dovi_rpu_free_vdr_dm_data(dm);
@@ -214,15 +216,8 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   size_t pixels = (size_t)frame->width * frame->height;
   uint8_t *packed = malloc(pixels * 6);
   require(packed != NULL, "base packed RGB buffer");
-  for (size_t i = 0; i < pixels; i++) {
-    for (int c = 0; c < 4; c++)
-      require(isfinite(base_context.rgba[4 * i + c]), "finite base RGBA");
-    for (int c = 0; c < 3; c++) {
-      uint16_t code = dv_pack_finite_rgb48(base_context.rgba[4 * i + c]);
-      packed[6 * i + 2 * c] = (uint8_t)code;
-      packed[6 * i + 2 * c + 1] = (uint8_t)(code >> 8);
-    }
-  }
+  require(dv_pack_rgba_rgb48(base_context.rgba, pixels, packed, pixels * 6),
+          "finite base RGBA");
   sink(packed, pixels * 6, NULL);
   char rgb_hash[65];
   if (diagnostic_hashes) {

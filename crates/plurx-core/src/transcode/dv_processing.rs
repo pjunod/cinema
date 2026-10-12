@@ -1556,10 +1556,16 @@ impl DvBaseMetadata {
         for curve in &mapping.curves {
             // libdovi stores the first absolute pivot followed by positive
             // deltas; FFmpeg's public metadata exposes cumulative pivots.
-            if !(2..=9).contains(&curve.pivots.len()) || curve.pivots.first() != Some(&0) {
+            if !(2..=9).contains(&curve.pivots.len()) {
                 return Err(invalid());
             }
-            let mut last = 0_u64;
+            // Endpoints are signalled output clamps, not a promise that the
+            // curve spans every ten-bit code. Preserve the public mapper's
+            // bounded extent (real P5 RPUs can finish at 1021).
+            let mut last = u64::from(curve.pivots[0]);
+            if last > 1023 {
+                return Err(invalid());
+            }
             for delta in curve.pivots.iter().skip(1) {
                 if *delta == 0 {
                     return Err(invalid());
@@ -1568,9 +1574,6 @@ impl DvBaseMetadata {
                 if last > 1023 {
                     return Err(invalid());
                 }
-            }
-            if last != 1023 {
-                return Err(invalid());
             }
             let segments = curve.pivots.len() - 1;
             match curve.mapping_idc {

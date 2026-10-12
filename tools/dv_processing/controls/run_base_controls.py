@@ -16,7 +16,7 @@ import subprocess
 import shutil
 import tempfile
 
-FAMILIES = ('p5', 'p5-mmr1', 'p5-mmr3', 'p8-affine', 'p8-piecewise')
+FAMILIES = ('p5', 'p5-bounded', 'p5-mmr1', 'p5-mmr3', 'p8-affine', 'p8-piecewise')
 TIMES = ('42/1000', '83/1000', '125/1000')
 COMPLETION = {'window_complete', 'segment_complete', 'base_processing_complete'}
 
