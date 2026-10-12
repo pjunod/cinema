@@ -31,6 +31,12 @@ final class DiagnosticTransport: NSObject, URLSessionTaskDelegate, @unchecked Se
     struct Projection: Decodable { let version: String; let state: String; let events: [DiagnosticEvent]?; let components: [DiagnosticReport.Component]?; let dropped_events: String? }
     private struct Created: Decodable { let id: String }
     private let metricsLock = NSLock()
+    private final class CheckProgress: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [DiagnosticEvent] = []
+        func append(_ value: DiagnosticEvent) { lock.withLock { if events.count < 100 { events.append(value) } } }
+        func snapshot() -> [DiagnosticEvent] { lock.withLock { events } }
+    }
     private var collectingMetrics = false
     private var phaseMetrics: [(String, UInt64)] = []
     let scope: String
@@ -98,7 +104,7 @@ final class DiagnosticTransport: NSObject, URLSessionTaskDelegate, @unchecked Se
         if validateJSON && !bytes.isEmpty { try RemoteStrictJSON.check(bytes) }; return bytes
     }
     func connectionChecks() async throws -> [DiagnosticEvent] {
-        try current(); metricsLock.withLock { phaseMetrics = []; collectingMetrics = true }
+        try current(); let progress = CheckProgress(); metricsLock.withLock { phaseMetrics = []; collectingMetrics = true }
         defer { metricsLock.withLock { collectingMetrics = false; phaseMetrics = [] } }
         return try await withThrowingTaskGroup(of: [DiagnosticEvent].self) { group in
             group.addTask { [self] in
@@ -108,16 +114,17 @@ final class DiagnosticTransport: NSObject, URLSessionTaskDelegate, @unchecked Se
                     sequence += 1
                     events.append(DiagnosticEvent(run_id: run, sequence: String(sequence), utc: DiagnosticRecorder.utc(),
                         elapsed_ms: UInt64(min(15_000, max(0, (ProcessInfo.processInfo.systemUptime - started) * 1_000))), domain: "network", kind: "request", facts: facts))
+                    if let last = events.last { progress.append(last) }
                 }
                 let paths = [("/healthz", "connect"), ("/readyz", "readiness"), ("/api/v1/server", "readiness")] + (authorization.token == nil ? [] : [("/api/v1/me", "auth")])
                 for (path, phase) in paths {
-                    try current(); let before = ProcessInfo.processInfo.systemUptime
+                    try Task.checkCancellation(); try current(); let before = ProcessInfo.processInfo.systemUptime
                     var facts: [String: DiagnosticFact] = ["phase": .text(phase), "method": .text("GET"), "route": .text(phase == "auth" ? "auth" : "other")]
                     do {
                         let data = try await request(authorization.origin, path: path, method: "GET", cinema: true, limit: max(1, 2_097_152 - bytes), validateJSON: false)
                         bytes += data.count; facts["observed"] = .flag(true)
                     } catch {
-                        try current(); facts["observed"] = .flag(false)
+                        try Task.checkCancellation(); try current(); facts["observed"] = .flag(false)
                         if case Failure.http(let status) = error { facts["status"] = .number(UInt64(status)); facts["failure"] = .text(status == 401 || status == 403 ? "authentication" : "http") }
                         else if let url = error as? URLError {
                             facts["failure"] = .text([.cannotFindHost, .dnsLookupFailed].contains(url.code) ? "dns" : [.secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateNotYetValid, .serverCertificateHasUnknownRoot].contains(url.code) ? "tls" : url.code == .cannotConnectToHost ? "connect" : "network")
@@ -142,7 +149,13 @@ final class DiagnosticTransport: NSObject, URLSessionTaskDelegate, @unchecked Se
                 event(["phase": .text("delivery"), "observed": .flag(false), "reason": .text("not_requested")])
                 return events
             }
-            group.addTask { try await Task.sleep(for: .seconds(15)); throw Failure.unavailable }
+            group.addTask { [self] in
+                try await Task.sleep(for: .seconds(15)); try current()
+                var partial = progress.snapshot()
+                partial.append(DiagnosticEvent(run_id: UUID().uuidString.lowercased(), sequence: "1", utc: DiagnosticRecorder.utc(), elapsed_ms: 15_000,
+                    domain: "network", kind: "availability", facts: ["phase": .text("unavailable"), "observed": .flag(false), "reason": .text("timeout")]))
+                return partial
+            }
             defer { group.cancelAll() }; guard let events = try await group.next() else { throw Failure.unavailable }; return events
         }
     }

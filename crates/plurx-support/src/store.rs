@@ -157,6 +157,10 @@ impl Database {
    CREATE TABLE IF NOT EXISTS operators(id TEXT PRIMARY KEY,name TEXT UNIQUE NOT NULL,active INTEGER NOT NULL,key BLOB);
    CREATE TABLE IF NOT EXISTS operator_tokens(digest TEXT PRIMARY KEY,operator TEXT NOT NULL,kind TEXT NOT NULL,expires INTEGER NOT NULL);")?;
         let guard = dir.join("generation.guard");
+        let journals = [
+            dir.join("deletions.journal"),
+            dir.join("revocations.journal"),
+        ];
         let control: Option<(String, String)> = db
             .query_row(
                 "SELECT generation,key_id FROM control WHERE id=1",
@@ -165,6 +169,15 @@ impl Database {
             )
             .optional()?;
         if let Some((generation, stored_key)) = control {
+            for path in &journals {
+                let meta = fs::symlink_metadata(path).map_err(|_| Fault::Conflict)?;
+                if !meta.is_file()
+                    || meta.uid() != fs::metadata(dir)?.uid()
+                    || meta.permissions().mode() & 0o077 != 0
+                {
+                    return Err(Fault::Conflict);
+                }
+            }
             if stored_key != key_id
                 || fs::read_to_string(&guard)
                     .map(|s| s.trim() != generation)
@@ -173,10 +186,13 @@ impl Database {
                 return Err(Fault::Conflict);
             }
         } else {
-            if guard.exists() {
+            if guard.exists() || journals.iter().any(|path| path.exists()) {
                 return Err(Fault::Conflict);
             }
             let generation = random()?;
+            for path in &journals {
+                atomic_secret(path, b"")?;
+            }
             atomic_secret(&guard, generation.as_bytes())?;
             db.execute(
                 "INSERT INTO control VALUES(1,?1,?2)",
@@ -198,6 +214,15 @@ impl Database {
         self.limits = Arc::new(limits);
     }
     pub fn with<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let owner = fs::metadata(&self.dir)?.uid();
+        for name in ["deletions.journal", "revocations.journal"] {
+            let meta = fs::symlink_metadata(self.dir.join(name)).map_err(|_| Fault::Unavailable)?;
+            if !meta.is_file() || meta.uid() != owner || meta.permissions().mode() & 0o077 != 0 {
+                return Err(Fault::Unavailable);
+            }
+        }
+
         let mut db = self.inner.lock().map_err(|_| Fault::Unavailable)?;
         f(&mut db)
     }
@@ -634,10 +659,21 @@ impl Database {
     if state!="staged"{return Err(Fault::Conflict);}
     let count:i64=tx.query_row("SELECT COUNT(*) FROM submissions WHERE publisher=?1 AND at>?2",params![cap.publisher,now()-86400],|r|r.get(0))?;if count>=i64::from(self.limits.submissions_per_publisher_day){return Err(Fault::Quota);}
     let source:String=tx.query_row("SELECT source FROM reports WHERE id=?1",[id],|r|r.get(0))?;let own_count:i64=tx.query_row("SELECT COUNT(*) FROM submissions WHERE source=?1 AND publisher=?2 AND at>?3",params![source,cap.publisher,now()-86400],|r|r.get(0))?;if !source.is_empty() && own_count>=i64::from(self.limits.submissions_per_enrollment_day){return Err(Fault::Quota);}
+    let blob:Vec<u8>=tx.query_row("SELECT blob FROM reports WHERE id=?1",[id],|r|r.get(0))?;
+    let original=self.unseal(&format!("{id}/{}/archive",cap.publisher),&blob)?;
+    let mut inspected=diagnostics::inspect(&original).map_err(|_|Fault::Invalid)?;
+    inspected.entries.insert("description.txt".into(),description.as_bytes().to_vec());
+    let archive=diagnostics::export(inspected.manifest,inspected.entries).map_err(|_|Fault::Invalid)?;
+    let checked=diagnostics::inspect(&archive).map_err(|_|Fault::Invalid)?;
+    let growth=archive.len().saturating_sub(original.len()) as i64;
+    let(global,publisher_bytes):(i64,i64)=tx.query_row("SELECT COALESCE(SUM(length),0),COALESCE(SUM(CASE WHEN publisher=?1 THEN length ELSE 0 END),0) FROM reports WHERE state NOT IN ('deleted','expired')",[&cap.publisher],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    if global+growth>self.limits.bytes_global as i64 || publisher_bytes+growth>self.limits.bytes_per_publisher as i64 {return Err(Fault::Quota);}
+    let metadata=self.seal(&format!("{id}/{}/metadata",cap.publisher),&serde_json::to_vec(&checked.manifest).map_err(|_|Fault::Invalid)?)?;
+    let sealed=self.seal(&format!("{id}/{}/archive",cap.publisher),&archive)?;
     let encrypted=self.seal(&format!("{id}/{}/description",cap.publisher),description.as_bytes())?;
-    tx.execute("UPDATE reports SET state='submitted',description=?2,touched=?3,expires=?4 WHERE id=?1",params![id,encrypted,now(),now()+30*86400])?;
+    tx.execute("UPDATE reports SET state='submitted',description=?2,touched=?3,expires=?4,blob=?5,metadata=?6,sha256=?7,length=?8,revision=revision+1 WHERE id=?1",params![id,encrypted,now(),now()+30*86400,sealed,metadata,hash(&archive),archive.len() as i64])?;
     tx.execute("INSERT INTO submissions SELECT source,publisher,?2 FROM reports WHERE id=?1",params![id,now()])?;
-    tx.execute("UPDATE handoffs SET state='submitted' WHERE report=?1 AND state='approved'",[id])?;
+    tx.execute("UPDATE handoffs SET state='submitted',revision=revision+1 WHERE report=?1 AND state='approved'",[id])?;
    }
    let reference:String=tx.query_row("SELECT reference FROM reports WHERE id=?1",[id],|r|r.get(0))?;tx.commit()?;Ok(json!({"state":"submitted","reference":reference,"report_id":id}))
   })
@@ -675,11 +711,7 @@ impl Database {
         if fs::metadata(&path).is_ok_and(|m| m.len() >= 8 * 1024 * 1024) {
             return Err(Fault::Quota);
         }
-        let mut journal = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&path)?;
+        let mut journal = OpenOptions::new().append(true).mode(0o600).open(&path)?;
         writeln!(journal, "{id}")?;
         journal.sync_all()?;
         fs::File::open(&self.dir)?.sync_all()?;
@@ -700,11 +732,7 @@ impl Database {
         if fs::metadata(&path).is_ok_and(|m| m.len() >= 8 * 1024 * 1024) {
             return Err(Fault::Quota);
         }
-        let mut f = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(path)?;
+        let mut f = OpenOptions::new().append(true).mode(0o600).open(path)?;
         writeln!(f, "{kind}|{id}")?;
         f.sync_all()?;
         fs::File::open(&self.dir)?.sync_all()?;
@@ -717,7 +745,6 @@ impl Database {
                 file.take(8 * 1024 * 1024 + 1)
                     .read_to_string(&mut deleted)?;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(Fault::Unavailable),
         }
         if deleted.len() > 8 * 1024 * 1024 {
@@ -728,7 +755,6 @@ impl Database {
             Ok(f) => {
                 f.take(8 * 1024 * 1024 + 1).read_to_string(&mut revoked)?;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(Fault::Unavailable),
         }
         if revoked.len() > 8 * 1024 * 1024 {

@@ -26,7 +26,6 @@ function clearLocalSession(expectedGeneration,notice){
   LOGS_RUN=null; CLUSTER_LOGS_RUN=null;
   CLUSTER_LOADED=false; CLUSTER_LEAVING=false; forgetJoinToken();
   const protectedMain=document.getElementById("main"); if(protectedMain) protectedMain.innerHTML="";
-  if(typeof diagnosticRevokeEnrollment==="function")diagnosticRevokeEnrollment(TOKEN);
   window.CinemaDiagnostics?.clear();
   TOKEN=null; AUTH_GENERATION++; ME=null;
   refreshClientErrorReporterAuth();
@@ -42,6 +41,7 @@ function clearLocalSession(expectedGeneration,notice){
 async function logout({revoke=true,notice=""}={}){
   const token=TOKEN, authGeneration=AUTH_GENERATION;
   if(SIGN_OUT_RUN&&SIGN_OUT_RUN.generation===authGeneration) return SIGN_OUT_RUN.promise;
+  const enrollmentRevocation=typeof diagnosticRevokeEnrollment==="function"?diagnosticRevokeEnrollment(token):Promise.resolve();
   if(!revoke||!token){
     clearLocalSession(authGeneration,notice);
     return false;
@@ -54,6 +54,7 @@ async function logout({revoke=true,notice=""}={}){
   const run=(async()=>{
     let confirmed=false;
     try{
+      await enrollmentRevocation;
       const response=await fetch(location.origin+API+"/auth/logout",{
         method:"POST",headers:{authorization:"Bearer "+token},signal:controller.signal
       });

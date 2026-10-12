@@ -141,8 +141,10 @@ The fsynced journals record report deletion and authority revocation before
 the database mutation, so startup replays them against a restored snapshot.
 They contain opaque IDs/digests, never report contents or bearer credentials.
 
-A missing/mismatched generation guard or storage-key fingerprint refuses
-startup. Do not restore an old guard/journal just to make an old database
+A missing/mismatched generation guard, either missing external journal, or a
+storage-key fingerprint mismatch refuses startup. Journals are created only
+with a fresh namespace; a live namespace also refuses database operations while
+either protected journal is unavailable. Do not restore an old guard/journal just to make an old database
 serve. Preserve the failed state for offline recovery, stop its ingress and
 start a fresh private namespace with a fresh key, publisher credentials and
 operator enrollment if the current fencing records cannot be recovered.

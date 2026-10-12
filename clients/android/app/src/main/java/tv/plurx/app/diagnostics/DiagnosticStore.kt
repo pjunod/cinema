@@ -38,7 +38,7 @@ internal class DiagnosticStore(private val root: File, private val authorization
     private val retired = mutableSetOf<String>()
     private fun directory(scope: String): File {
         require(scope == "anonymous" || Regex("[a-f0-9]{64}").matches(scope)); require(scope !in retired)
-        val directory = File(root, scope); check(directory.mkdirs() || directory.isDirectory); return directory
+        val directory = File(root, scope); if (!directory.exists() && root.listFiles().orEmpty().size >= 32) { prune(); require(root.listFiles().orEmpty().size < 32) }; check(directory.mkdirs() || directory.isDirectory); return directory
     }
     private fun id(id: String) { require(UUID.fromString(id).toString() == id) }
     private fun read(file: File, limit: Int): ByteArray {
@@ -58,9 +58,9 @@ internal class DiagnosticStore(private val root: File, private val authorization
         val captureID=file.name.substringBeforeLast('.')
         file.delete(); if (captureID != "ring") { memory.remove(captureID); archives.remove(captureID); removeSecrets(file.parentFile.name,captureID) }
     }
-    private fun prune() {
-        val folders = root.listFiles().orEmpty(); require(folders.size <= 32)
-        val files = folders.filter { it.isDirectory && it.canonicalFile.parentFile == root.canonicalFile }.flatMap { folder -> folder.listFiles().orEmpty().also { require(it.size <= 32) }.filter { it.isFile && it.name != "ring.json" } }
+    private fun prune(activeScope: String? = null) {
+        val folders = root.listFiles().orEmpty(); require(folders.size <= 128)
+        val files = folders.filter { it.isDirectory && it.canonicalFile.parentFile == root.canonicalFile }.flatMap { folder -> folder.listFiles().orEmpty().also { require(it.size <= 32) }.filter { it.isFile } }
         for (file in files) if (file.length() > 8388608 || file.lastModified() < System.currentTimeMillis() - 86400000 || file.name.endsWith(".writing") || file.name == "ring.json" && file.lastModified() < System.currentTimeMillis()-600000) erase(file)
         val rows = files.filter { it.exists() && it.name != "ring.json" }.groupBy { it.parentFile.name + "/" + it.name.substringBeforeLast('.') }.toMutableMap()
         var total = rows.values.flatten().sumOf { it.length() }
@@ -69,6 +69,8 @@ internal class DiagnosticStore(private val root: File, private val authorization
             for (file in oldest.value) { total -= file.length(); erase(file) }
             rows.remove(oldest.key)
         }
+        folders.filter { it.isDirectory && it.name != activeScope && it.listFiles()?.isEmpty() == true }.forEach { it.delete() }
+        require(root.listFiles().orEmpty().size <= 32)
     }
     suspend fun activate(scope: String) = mutex.withLock { retired.remove(scope) }
     suspend fun save(draft: DiagnosticDraft): String = withContext(Dispatchers.IO) { mutex.withLock {
@@ -77,12 +79,12 @@ internal class DiagnosticStore(private val root: File, private val authorization
         require(draft.capture.events.all { it.valid() } && draft.serverEvents.all { it.valid() } && draft.connection.all { it.valid() })
         val bytes = DiagnosticJson.encodeToString(DiagnosticDraft.serializer(), draft).toByteArray(); require(bytes.size <= 8388608)
         memory[draft.id] = draft; while (memory.size > 10 || memory.values.sumOf { DiagnosticJson.encodeToString(DiagnosticDraft.serializer(),it).toByteArray().size.toLong() } > 33554432) { val oldest=memory.keys.first(); memory.remove(oldest); archives.remove(oldest) }
-        runCatching { val folder = directory(draft.capture.namespace); prune(); write(File(folder, draft.id + ".json"), bytes); prune(); "available" }.getOrDefault("memory_only")
+        runCatching { val folder = directory(draft.capture.namespace); prune(draft.capture.namespace); write(File(folder, draft.id + ".json"), bytes); prune(); "available" }.getOrDefault("memory_only")
     } }
     suspend fun saveRing(capture: DiagnosticCapture): String = withContext(Dispatchers.IO) { mutex.withLock {
         if (capture.namespace in retired || capture.generation != authorizationGeneration()) return@withLock "unavailable"
         ringMemory.clear(); ringMemory[capture.namespace] = capture
-        runCatching { write(File(directory(capture.namespace), "ring.json"), DiagnosticJson.encodeToString(DiagnosticCapture.serializer(), capture).toByteArray()); "available" }.getOrDefault("memory_only")
+        runCatching { prune(capture.namespace); write(File(directory(capture.namespace), "ring.json"), DiagnosticJson.encodeToString(DiagnosticCapture.serializer(), capture).toByteArray()); "available" }.getOrDefault("memory_only")
     } }
     suspend fun ring(scope: String): DiagnosticCapture? = withContext(Dispatchers.IO) { mutex.withLock {
         runCatching { DiagnosticJson.decodeFromString(DiagnosticCapture.serializer(), read(File(directory(scope), "ring.json"), 2500000).toString(Charsets.UTF_8)).also { require(it.namespace == scope && it.events.size <= 10000 && it.events.all { event -> event.valid() }) }.copy(persistence = "available") }.getOrNull() ?: ringMemory[scope]

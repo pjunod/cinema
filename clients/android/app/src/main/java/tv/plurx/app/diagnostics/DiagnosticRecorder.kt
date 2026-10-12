@@ -154,6 +154,7 @@ internal class DiagnosticRecorder(
         DiagnosticCapture(UUID.randomUUID().toString(), namespace, generation, DiagnosticFields.utc(), System.currentTimeMillis(), rows.map { it.event },
             (dropped + contention.get().toULong()).toString(), persistence, history())
     }
+    fun forgetReproduction(id: String? = null) = lock.withLock { if (id == null || completedReproduction?.id == id) completedReproduction=null }
     val retainedReproduction get() = lock.withLock { reproduction ?: completedReproduction }
     fun close() { owner.cancel(); flushRequests.close(); completedCaptures.close() }
     val recording get() = lock.withLock { reproduction != null }

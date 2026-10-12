@@ -20,7 +20,7 @@ duplicating its evidence.
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
 | Implementation workspace/base | Independent clone in temporary owner storage; base includes current main `607d3577c`; B00 committed source `3f92afc9d`. Former managed worktree archived after verified preservation. |
 | Compiler loop | Local Rust/cargo 1.97.1 verified via rustup toolchain bin; isolated warm target in temporary storage; daemon baseline passed |
-| Plan review | No independent review claimed |
+| Plan review | One final adversarial implementation review complete; 12 findings corrected before fast lane |
 | Promotion/deployment | Not started |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
@@ -42,7 +42,7 @@ index/backlog rows; the builder adopts them together in a normal commit.
 | B07 | Android mobile/TV reporting | Built; compiler verified | Batched PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; normal hook passed; signed release and physical acceptance owed |
 | B08 | Reproduction, connection checks, diagnostic adapters | Built; final compiler checks active | Batched PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 22-case shared event fixture; physical provider delivery remains open |
 | B09 | Composed security/resource/device qualification | Building | Batched PR #1037 | Global capture limits/expiry and authority cleanup tightened; real local support/browser/passkey acceptance active; physical matrix and overhead measurements remain open |
-| B10 | Operations, exact-candidate promotion and rollout | Not started | — | Runbook, gates, receipt and deployment inputs owed |
+| B10 | Operations, exact-candidate promotion and rollout | Final candidate | Batched PR #1037 | Operations/runbook built; one adversarial review complete, findings corrected; fast lane pending; production/device inputs remain external |
 
 Replace “Not started” with claimed/building/built/software verified/physical
 verified/promoted as evidence warrants. “Built” never means deployed.
@@ -64,7 +64,7 @@ from regressions. Record test absence as absence, not a passing check.
 | Support upload service | Built B03 | Pinned compiler/dependency policy passed | None | Durable/resume/retention runtime qualification |
 | Phone completion page | Built B04 | Syntax/compiler passed | None | Real QR/manual claim, TV approval, submission |
 | Operator inbox | Built B04 | Syntax/compiler passed | None | Passkey/inbox runtime and deployment qualification |
-| Privacy/resource/retention | Missing | None | None | Canaries, bounds, overhead and deletion |
+| Privacy/resource/retention | Built | Browser canaries, ZIP/inbox, deletion and observer bounds passed; restore fixes rechecked | None | Native/device overhead and remaining failure matrix |
 
 ## 4. Decisions and external inputs
 
@@ -389,3 +389,40 @@ The fixture loads the shipped browser recorder/export/delivery scripts into an
 isolated TV context, while phone and inbox retain their actual content security
 policy. This verifies browser software, never native hardware or physical TV
 approval. Final passkey/inbox, review and fast-lane receipts remain pending.
+
+## 15. Single final review — corrected findings
+
+Exactly one adversarial agent reviewed candidate `707d8bb1b` against
+`607d3577c`; no second review or routine subagents were used. It requested
+changes for five P1 and seven P2 defects. The corrected candidate includes:
+
+- Mandatory protected deletion/revocation journals at startup and database
+  operations; missing fences are not silently recreated.
+- Browser recovery fenced across asynchronous account transitions; destination
+  and confirmation use the immutable consented origin.
+- Final edited description transactionally replaces archive content, inventory,
+  hash, metadata and revision before publication; growth obeys storage quotas.
+- Finished reproduction ownership is released and every client has a deliberate
+  new-incident action.
+- Android expired rings/empty namespaces and all invitation keys are cleaned;
+  the active destination folder survives pruning. Browser scans retain only
+  metadata and enforce budgets across every allowed row, including rings.
+- Enrollment revocation precedes bearer logout; concurrent browser snapshots
+  own separate cleanup IDs/results. Apple deadline preserves partial observed
+  checks with explicit timeout coverage. Creator TV status carries the submitted
+  receipt reference.
+
+The composed browser fixture is extended to assert the final ZIP description,
+TV creator receipt and refusal of either missing fence journal. The actual
+report functions have declared regression cases for account recovery and
+destination consent races; no per-packet unit execution was added.
+
+A synthetic Node observer measurement recorded 50,000 callbacks: p50 2.67 µs,
+p95 3.38 µs, p99 4.50 µs; 7,651 events / 1,677,690 encoded bytes, with the
+terminal marker retained and 42,351 samples dropped. This is a checkout-host
+Node measurement, not native or hardware playback-overhead acceptance.
+
+Final fast-lane receipts must identify the published corrected head; earlier
+source checks are not silently reused when their coverage changes. Physical
+mobile/TV delivery, focus, real provider delivery, signed releases, production
+TLS/hosting and native device overhead remain explicitly unqualified.

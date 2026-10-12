@@ -141,6 +141,9 @@ pub fn operator_router(service: &Service) -> Router {
         .with_state(service.clone())
 }
 async fn health(State(service): State<Service>) -> Response {
+    if service.db.with(|_| Ok(())).is_err() {
+        return response(Err(Fault::Unavailable));
+    }
     response(Ok(
         json!({"state":"ready","version":"cinema.diagnostics.v1","limits":&*service.db.limits,"chunk_bytes":CHUNK,"archive_bytes":crate::store::ARCHIVE,"draft_lifetime_ms":86400000,"enrollment_revocation_delay_ms":86400000,"trusted_loopback_ingress":service.trust_loopback_ingress}),
     ))
@@ -322,15 +325,18 @@ async fn api(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let _inspection =
-        if path.ends_with("/complete") || path.ends_with("/preview") || path.ends_with("/redact") {
-            match service.inspections.clone().try_acquire_owned() {
-                Ok(p) => Some(p),
-                Err(_) => return response(Err(Fault::Quota)),
-            }
-        } else {
-            None
-        };
+    let _inspection = if path.ends_with("/submit")
+        || path.ends_with("/complete")
+        || path.ends_with("/preview")
+        || path.ends_with("/redact")
+    {
+        match service.inspections.clone().try_acquire_owned() {
+            Ok(p) => Some(p),
+            Err(_) => return response(Err(Fault::Quota)),
+        }
+    } else {
+        None
+    };
     let db = service.db.clone();
     let service_clone = service.clone();
     let result = tokio::task::spawn_blocking(move || {

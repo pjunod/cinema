@@ -30,14 +30,22 @@ const CinemaDiagnosticStore = (() => {
     if(actual>8388608 || !Number.isFinite(record.expires))return null;record={...record,bytes:actual};
     return operation('readwrite', (store, done) => {
       store.put(record);
-      // An indexed scan with a fixed row cap bounds storage before new captures.
-      const count = store.count(); count.onsuccess = () => { if(count.result > 32) { store.clear(); store.put(record); } };
-      const request = store.getAll(null, 17); request.onsuccess = () => {
-        const rows = request.result || [], now = Date.now(); let bytes = 0, captures = 0;
-        rows.sort((a, b) => (b.at || 0) - (a.at || 0));
-        for (const row of rows) {
-          const size = Number(row.bytes || 0);
-          if (row.expires <= now || rows.indexOf(row) >= 16 || (row.type === 'capture' && (++captures > 10 || (bytes += size) > 33554432))) store.delete(row.key);
+      // Walk rows one at a time; retain only metadata, never every archive.
+      const rows=[],now=Date.now(),request=store.openCursor();let scanned=0;
+      request.onsuccess=()=>{
+        const cursor=request.result;
+        if(cursor){
+          if(++scanned>128){store.transaction.abort();return;}
+          const row=cursor.value;let size;
+          try{size=new TextEncoder().encode(JSON.stringify(row)).length+(row.delivery?.archive instanceof Blob?row.delivery.archive.size:0);}catch(_){cursor.delete();cursor.continue();return;}
+          if(size>8388608||!Number.isFinite(row.expires)||row.expires<=now)cursor.delete();
+          else rows.push({key:row.key,at:row.at||0,type:row.type,bytes:size});
+          cursor.continue();return;
+        }
+        rows.sort((a,b)=>b.at-a.at);let bytes=0,captures=0;
+        for(let index=0;index<rows.length;index++){
+          const row=rows[index];bytes+=row.bytes;if(row.type==='capture')captures++;
+          if(index>=32||bytes>33554432||captures>10)store.delete(row.key);
         }
         done(true);
       };

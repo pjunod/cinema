@@ -142,7 +142,7 @@ pub fn execute(
         }
         ("GET", ["handoffs", id, "status"]) => {
             let authorization = secret(headers)?;
-            db.with(|c|{let (report,state,proof,phrase,expires):(String,String,String,String,i64)=c.query_row("SELECT report,state,proof,phrase,expires FROM handoffs WHERE id=?1",[*id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or(Fault::NotFound)?;Database::report_auth(c,&authorization,&report,&["creator"])?;Ok(json!({"id":id,"state":if expires<=now(){"expired"}else{&state},"claim_present":!proof.is_empty(),"comparison":phrase,"expires_at":expires}))})
+            db.with(|c|{let (report,state,proof,phrase,expires):(String,String,String,String,i64)=c.query_row("SELECT report,state,proof,phrase,expires FROM handoffs WHERE id=?1",[*id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or(Fault::NotFound)?;Database::report_auth(c,&authorization,&report,&["creator"])?;let mut value=json!({"id":id,"state":if state=="submitted"{"submitted"}else if expires<=now(){"expired"}else{&state},"claim_present":!proof.is_empty(),"comparison":phrase,"expires_at":expires});if state=="submitted" {let reference:String=c.query_row("SELECT reference FROM reports WHERE id=?1 AND state='submitted'",[&report],|r|r.get(0))?;value["reference"]=reference.into();}Ok(value)})
         }
         ("GET", ["handoffs", id, "phone-status"]) => {
             let proof = secret(headers)?;

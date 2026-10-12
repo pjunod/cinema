@@ -91,9 +91,10 @@ internal object DiagnosticRuntime {
         if (state != null) facts["state"]=JsonPrimitive(state)
         record("playback",if (state == "stopped") "terminal" else if (state != null) "state" else "sample",facts,generation)
     }
-    fun open(category: String = "other", positiveTitle: String? = null) {
+    fun open(category: String = "other", positiveTitle: String? = null, newIncident: Boolean = false) {
         if (!::recorder.isInitialized) return
         operation?.cancel(); poll?.cancel(); transport?.cancel(); title=positiveTitle
+        if (newIncident) recorder.forgetReproduction()
         val capture = recorder.retainedReproduction ?: recorder.freeze(); val draft = DiagnosticDraft(capture,category=category)
         mutable.update { it.copy(visible=true,draft=draft,busy=true,message="Capturing this incident. A description is optional.",consent=false,includeTitle=false,includePlatform=false,comparison=null,handoffState="") }
         record("ui","action",mapOf("action" to JsonPrimitive("report")))
@@ -200,6 +201,7 @@ internal object DiagnosticRuntime {
             var value=client.stage(archive,frozen) { progress -> client.current(); store.save(progress); withContext(Dispatchers.Main.immediate) { mutable.update { if (it.draft?.id == progress.id) it.copy(draft=progress) else it } } }
             value=if (phone && value.state != "submitted") client.offer(value) else client.submit(value)
             mutable.update { it.copy(draft=value,message=if (value.state == "submitted") "Submitted. Reference: ${value.reference}" else "Scan on the phone, then compare the phrase here before approving.") }
+            if (value.state == "submitted") recorder.forgetReproduction(value.id)
             if (value.handoff != null) pollHandoff(); value
         }
     }
@@ -223,6 +225,7 @@ internal object DiagnosticRuntime {
                     mutable.update { it.copy(handoffState=state,comparison=if (state == "claim_pending") reply["comparison"]?.jsonPrimitive?.content else null) }
                     if (state == "approved" && !approved) { approved=true; deadline=android.os.SystemClock.elapsedRealtime()+1800000; mutable.update { it.copy(message="Phone approved. It can finish this report even if the TV closes.") } }
                     if (state == "submitted") {
+                        recorder.forgetReproduction(value.id)
                         val reference=reply["reference"]?.jsonPrimitive?.content; val finished=mutable.value.draft?.copy(state="submitted",reference=reference)
                         if (finished != null) store.save(finished); mutable.update { it.copy(draft=finished,message="Submitted. Reference: $reference") }; return@launch
                     }
@@ -240,7 +243,7 @@ internal object DiagnosticRuntime {
     }
     fun discard(keep: Boolean = false) = perform { client,draft ->
         client.delete(draft,keep)
-        if (!keep) { store.delete(draft.id,draft.capture.namespace); withContext(Dispatchers.IO) { val secrets=DiagnosticSecrets(app,draft.capture.namespace); listOf(draft.id,draft.id+":invitation",draft.id+":invitation-proof").forEach { secrets.delete(it) } }; mutable.update { it.copy(draft=null,visible=false,busy=false) } }
+        if (!keep) { recorder.forgetReproduction(draft.id); store.delete(draft.id,draft.capture.namespace); withContext(Dispatchers.IO) { val secrets=DiagnosticSecrets(app,draft.capture.namespace); listOf(draft.id,draft.id+":invitation",draft.id+":invitation-proof").forEach { secrets.delete(it) } }; mutable.update { it.copy(draft=null,visible=false,busy=false) } }
         else mutable.update { it.copy(message="Phone handoff cancelled; staged draft retained.") }
         draft.copy(handoff=null)
     }
@@ -259,5 +262,5 @@ internal object DiagnosticRuntime {
         mutable.update { it.copy(message="Checks saved for this Cinema endpoint. No media transfer was requested.") }
         draft.copy(connection=(draft.connection+events).takeLast(100))
     }
-    fun deleteLocal(draft: DiagnosticDraft) { owner.launch { store.delete(draft.id,namespace); withContext(Dispatchers.IO) { DiagnosticSecrets(app,namespace).delete(draft.id) }; mutable.update { it.copy(pending=it.pending.filter { pending -> pending.id != draft.id }) } } }
+    fun deleteLocal(draft: DiagnosticDraft) { recorder.forgetReproduction(draft.id); owner.launch { store.delete(draft.id,draft.capture.namespace); withContext(Dispatchers.IO) { val secrets=DiagnosticSecrets(app,draft.capture.namespace);for (name in listOf(draft.id,draft.id+":invitation",draft.id+":invitation-proof")) secrets.delete(name) }; mutable.update { it.copy(pending=it.pending.filter { pending -> pending.id != draft.id }) } } }
 }

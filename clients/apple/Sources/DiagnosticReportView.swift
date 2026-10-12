@@ -54,8 +54,9 @@ final class DiagnosticReportModel: ObservableObject {
         let provisioning = DiagnosticTransport(scope: next, authorization: auth)
         if next != "anonymous" { try? await provisioning.provision() }; provisioning.cancel()
     }
-    func open(category: String = "other", title: String? = nil, owner: String = "root") {
+    func open(category: String = "other", title: String? = nil, owner: String = "root", newIncident: Bool = false) {
         operation?.cancel(); polling?.cancel(); transport?.cancel(); cleanupShare()
+        if newIncident { DiagnosticRecorder.shared.forgetReproduction() }
         self.title = title; includeTitle = false; includePlatform = false; comparison = nil; handoffState = ""; uploadConsent = false
         let capture = DiagnosticRecorder.shared.retainedReproduction ?? DiagnosticRecorder.shared.freeze()
         var value = DiagnosticStore.Draft(capture: capture, category: category, description: "", serverEvents: [], serverComponents: [], connection: [])
@@ -161,7 +162,7 @@ final class DiagnosticReportModel: ObservableObject {
             value.origin = origin; value.consented = true
             let report = try await self.archive(&value); try await client.stage(report, draft: &value)
             if phone && value.state != "submitted" { try await client.offer(&value); self.message = "Scan on the phone, then compare its phrase here before approving." }
-            else { try await client.submit(&value); self.message = "Submitted. Reference: " + (value.reference ?? "unavailable") }
+            else { try await client.submit(&value); DiagnosticRecorder.shared.forgetReproduction(value.id); self.message = "Submitted. Reference: " + (value.reference ?? "unavailable") }
             self.draft = value; if value.handoff != nil { self.pollHandoff() }
         }
     }
@@ -186,7 +187,7 @@ final class DiagnosticReportModel: ObservableObject {
                     guard draft?.id == id else { return }; handoffState = status.state
                     comparison = status.state == "claim_pending" ? status.comparison : nil
                     if status.state == "approved", !approved { approved = true; deadline = ContinuousClock.now.advanced(by: .seconds(1800)); message = "Phone approved. It can finish this report even if the TV closes." }
-                    if status.state == "submitted" { draft?.state = "submitted"; draft?.reference = status.reference; message = "Submitted. Reference: " + (status.reference ?? "unavailable"); if let draft { await DiagnosticStore.shared.save(draft) }; return }
+                    if status.state == "submitted" { DiagnosticRecorder.shared.forgetReproduction(id); draft?.state = "submitted"; draft?.reference = status.reference; message = "Submitted. Reference: " + (status.reference ?? "unavailable"); if let draft { await DiagnosticStore.shared.save(draft) }; return }
                     if ["expired","cancelled","rejected","deleted"].contains(status.state) { message = "Phone handoff ended. The local report is still available."; return }
                 } catch { if !Task.isCancelled { message = "Handoff status unavailable. Retry when foreground." }; return }
                 try? await Task.sleep(for: .seconds(2))
@@ -202,7 +203,7 @@ final class DiagnosticReportModel: ObservableObject {
     func discard(keep: Bool = false) {
         perform { [weak self] client, value in
             try await client.delete(value, keep: keep)
-            if !keep { await DiagnosticStore.shared.delete(value.id, scope: value.capture.namespace); self?.draft = nil; self?.presented = false; self?.message = "Draft deleted." }
+            if !keep { DiagnosticRecorder.shared.forgetReproduction(value.id); await DiagnosticStore.shared.delete(value.id, scope: value.capture.namespace); self?.draft = nil; self?.presented = false; self?.message = "Draft deleted." }
             else { value.handoff = nil; self?.message = "Phone handoff cancelled; staged draft retained." }
         }
     }
@@ -229,7 +230,7 @@ final class DiagnosticReportModel: ObservableObject {
     func stopReproduction() {
         if let capture = DiagnosticRecorder.shared.stopReproduction() { draft?.capture = capture; message = "Reproduction stopped and frozen locally." }
     }
-    func deleteLocal(_ value: DiagnosticStore.Draft) { Task { await DiagnosticStore.shared.delete(value.id, scope: scope); pending = await DiagnosticStore.shared.drafts(scope) } }
+    func deleteLocal(_ value: DiagnosticStore.Draft) { DiagnosticRecorder.shared.forgetReproduction(value.id); Task { await DiagnosticStore.shared.delete(value.id, scope: scope); pending = await DiagnosticStore.shared.drafts(scope) } }
 }
 
 struct DiagnosticReportButton: View {
@@ -266,6 +267,7 @@ struct DiagnosticReportView: View {
     }
     private var incidentSection: some View {
         Section("Incident report") {
+                    Button("Capture a new incident") { reports.open(owner: reports.presenter, newIncident: true) }.disabled(reports.busy || DiagnosticRecorder.shared.recording)
                     Text(reports.message).accessibilityIdentifier("diagnostics-status")
                     if reports.busy { ProgressView() }
                     if let draft = reports.draft {

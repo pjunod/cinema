@@ -235,6 +235,7 @@ final class DiagnosticRecorder: @unchecked Sendable {
         completedReproduction = value; lock.unlock()
         Task { await DiagnosticStore.shared.saveCapture(value) }; return value
     }
+    func forgetReproduction(_ id: String? = nil) { lock.withLock { if id == nil || completedReproduction?.id == id { completedReproduction = nil } } }
     var retainedReproduction: DiagnosticCapture? { lock.withLock { reproduction?.capture ?? completedReproduction } }
     var recording: Bool { lock.lock(); defer { lock.unlock() }; return reproduction != nil }
     func background() { _ = stopReproduction(reason: "interrupted"); record("lifecycle", "state", ["state": .text("background")]); flush() }

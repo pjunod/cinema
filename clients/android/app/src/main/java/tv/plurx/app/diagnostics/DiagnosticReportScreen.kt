@@ -46,6 +46,7 @@ internal fun DiagnosticReportHost() {
                     Text("Report a problem",style=MaterialTheme.typography.headlineSmall)
                     TextButton(onClick={ DiagnosticRuntime.close() }) { Text("Close") }
                 }
+                TextButton(onClick={ DiagnosticRuntime.open(newIncident=true) },enabled=!state.busy && !DiagnosticRuntime.recorder.recording) { Text("Capture a new incident") }
                 Text(state.message,modifier=Modifier.testTag("diagnostics-status"))
                 if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 state.draft?.let { draft ->

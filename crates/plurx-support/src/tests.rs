@@ -348,3 +348,39 @@ async fn real_http_upload_and_separate_operator_listener_refuse_unapproved_and_f
     task.abort();
     let _ = task.await;
 }
+
+#[test]
+fn missing_external_fence_journal_refuses_existing_namespace() {
+    for name in ["deletions.journal", "revocations.journal"] {
+        let (root, db, _) = storage();
+        assert!(root.path().join("state").join(name).is_file());
+        std::fs::remove_file(root.path().join("state").join(name)).expect("lose external fence");
+        assert!(db.reconcile().is_err());
+        assert!(db.with(|_| Ok(())).is_err());
+        drop(db);
+        assert!(Database::open(&root.path().join("state"), &root.path().join("key")).is_err());
+    }
+}
+
+#[test]
+fn submitted_archive_replaces_the_original_private_description() {
+    let (_root, db, publisher) = storage();
+    let (request, _, creator) = staged(&db, &publisher);
+    db.submit(&creator, &request.report_id, "Final user description")
+        .expect("submit edited description");
+    let bytes = db
+        .with(|c| {
+            let blob: Vec<u8> = c.query_row(
+                "SELECT blob FROM reports WHERE id=?1",
+                [&request.report_id],
+                |r| r.get(0),
+            )?;
+            db.unseal(&format!("{}/fixture/archive", request.report_id), &blob)
+        })
+        .expect("published archive");
+    let report = diagnostics::inspect(&bytes).expect("final checked archive");
+    assert_eq!(report.entries["description.txt"], b"Final user description");
+    assert!(!bytes
+        .windows(b"Fixture report".len())
+        .any(|w| w == b"Fixture report"));
+}
