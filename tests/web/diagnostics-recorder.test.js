@@ -27,7 +27,7 @@ test('matching account reload recovers its own ring while account transition era
   const scope='a'.repeat(64),nextScope='b'.repeat(64),clock=Date.parse('2026-10-12T16:00:00Z');
   const first=create({now:()=>clock,monotonic:()=>0,store});await first.bind(scope);first.record('playback','terminal',{failure:'decode',state:'failed'});await first.persist();
   const reloaded=create({now:()=>clock,monotonic:()=>0,store});await reloaded.bind(scope);assert(reloaded.freeze().events.some(e=>e.facts.failure==='decode'));
-  await reloaded.bind(nextScope);assert(!reloaded.freeze().events.some(e=>e.facts.failure==='decode'));assert(!rows.has('ring:'+scope));
+  await reloaded.bind(nextScope);assert(!reloaded.freeze().events.some(e=>e.facts.failure==='decode'));assert(rows.has('ring:'+scope));await reloaded.bind(scope);assert(reloaded.freeze().events.some(e=>e.facts.failure==='decode'));
 });
 test('LAN HTTP hashing and portable ZIP preserve standard checksums',async()=>{
   const {context,exporter}=environment();context.crypto=undefined;

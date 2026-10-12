@@ -433,10 +433,18 @@ impl Event {
         valid(self.facts.len() <= 16, "fact count")?;
         for (k, v) in &self.facts {
             let allowed = match k.as_str() {
-                "duration_ms" | "playhead_ms" | "headroom_ms" | "width" | "height"
-                | "retry_count" | "active_producers" | "hw_slots" | "hw_max" => {
-                    v.as_u64().is_some_and(|n| n <= 604_800_000)
-                }
+                "duration_ms"
+                | "playhead_ms"
+                | "headroom_ms"
+                | "width"
+                | "height"
+                | "retry_count"
+                | "clock_ahead_ms"
+                | "clock_behind_ms"
+                | "clock_uncertainty_ms"
+                | "active_producers"
+                | "hw_slots"
+                | "hw_max" => v.as_u64().is_some_and(|n| n <= 604_800_000),
                 "status" => v
                     .as_u64()
                     .is_some_and(|n| n == 0 || (100..=599).contains(&n)),

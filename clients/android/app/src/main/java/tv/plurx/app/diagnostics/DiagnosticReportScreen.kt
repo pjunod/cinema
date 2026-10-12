@@ -88,6 +88,10 @@ private fun DiagnosticIncidentFields(state: DiagnosticUI,draft: DiagnosticDraft)
         Text("Include the current title",Modifier.weight(1f))
         Switch(checked=state.includeTitle,onCheckedChange={ DiagnosticRuntime.includeTitle(it) },enabled=!draft.consented)
     }
+    Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
+        Text("Include available platform diagnostics",Modifier.weight(1f))
+        Switch(checked=state.includePlatform,onCheckedChange={ DiagnosticRuntime.includePlatform(it) },enabled=!draft.consented && draft.platform.isNotEmpty())
+    }
     Text("No passwords, addresses, request bodies, media or raw stream identifiers are collected. A description and an optional title are private content.",style=MaterialTheme.typography.bodySmall)
     Text("Client: ${if (!draft.capture.historyEnabled) "history disabled" else if (draft.capture.dropped != "0") "partial (overflow)" else "bounded history"}; persistence: ${draft.capture.persistence}",style=MaterialTheme.typography.bodySmall)
     draft.components.forEach { Text("${it.name}: ${it.state} ${it.reason.orEmpty()}",style=MaterialTheme.typography.bodySmall) }

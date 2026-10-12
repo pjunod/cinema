@@ -15,6 +15,7 @@ actor DiagnosticStore {
         var connection: [DiagnosticEvent]
         var platform: [DiagnosticEvent]?
         var platformReason: String?
+        var includePlatform: Bool?
         var consented = false
         var origin: String?
         var state = "local"

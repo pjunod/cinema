@@ -18,7 +18,7 @@ duplicating its evidence.
 | Intended effort | Superseded by `codex/remote-diagnostics`, targeting `main` |
 | Task branch convention | Normal packet commits on `codex/remote-diagnostics` |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent clone in temporary owner storage; base includes current main `15d78f208`; B00 committed source `3f92afc9d`. Former managed worktree archived after verified preservation. |
+| Implementation workspace/base | Independent clone in temporary owner storage; base includes current main `607d3577c`; B00 committed source `3f92afc9d`. Former managed worktree archived after verified preservation. |
 | Compiler loop | Local Rust/cargo 1.97.1 verified via rustup toolchain bin; isolated warm target in temporary storage; daemon baseline passed |
 | Plan review | No independent review claimed |
 | Promotion/deployment | Not started |
@@ -40,7 +40,7 @@ index/backlog rows; the builder adopts them together in a normal commit.
 | B05 | Web/TV browser reporting | Built; compiler verified | Batched PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks written; normal hook and browser type checks passed; software acceptance pending |
 | B06 | Apple mobile/TV reporting | Built; compiler verified | Batched PR #1037 | Recorder, protected account store, deterministic ZIP/share, fixed support transport, exact archive resume, report UI and local-only TV approval written; tests declared, no unit execution; both targets and declared XCTest sources compiled; normal hook passed; physical acceptance owed |
 | B07 | Android mobile/TV reporting | Built; compiler verified | Batched PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; normal hook passed; signed release and physical acceptance owed |
-| B08 | Reproduction, connection checks, diagnostic adapters | Built; final compiler checks active | Batched PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 21-case shared event fixture; physical provider delivery remains open |
+| B08 | Reproduction, connection checks, diagnostic adapters | Built; final compiler checks active | Batched PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 22-case shared event fixture; physical provider delivery remains open |
 | B09 | Composed security/resource/device qualification | Building | Batched PR #1037 | Global capture limits/expiry and authority cleanup tightened; real local support/browser/passkey acceptance active; physical matrix and overhead measurements remain open |
 | B10 | Operations, exact-candidate promotion and rollout | Not started | — | Runbook, gates, receipt and deployment inputs owed |
 
@@ -357,7 +357,7 @@ Administrator snapshots have an explicit collect action and include only typed
 version/build, readiness, active-producer count and hardware admission counts.
 The server continues to enforce the administrator boundary.
 
-Current development receipts: Apple build 234, iOS/tvOS applications compiled;
+Development receipts before exact-main merge: Apple build 234, iOS/tvOS applications compiled;
 iOS declared XCTest sources compiled before the last administrator projection
 change. Android versionCode 168, app/JVM regression source/test APK compiled
 before that same final projection change. Web types and static contracts passed
@@ -370,3 +370,22 @@ removed-capability cleanup, Keystore key creation serialization, export abort
 cleanup and authentication-generation fencing on queued native writes. These
 are implementation claims awaiting composed evidence. No hardware or real
 production delivery receipt exists.
+
+## 14. Exact-main candidate and integration findings
+
+Current main `607d3577c` is merged in `9560f443e`. Pinned workspace
+`cargo check --workspace --all-targets --locked` passed on that merged base
+in 2 minutes 42 seconds. Final native/type checks are repeated only for the
+changed consent, clock and explicit reproduction code. Diagnostic attachments
+require a per-report selection; the manifest flag exactly matches the archive
+entry. Bounded round-trip clock estimates now carry ahead/behind milliseconds
+and uncertainty; no global event ordering is claimed.
+
+The real composed browser fixture reached staged upload, single phone claim,
+creator approval and phone submission after the TV context closed. It exposed
+a real 429 on operator sign-in because code claims and WebAuthn ceremonies
+shared an IP bucket. The namespaces are now separate, preserving each limit.
+The fixture loads the shipped browser recorder/export/delivery scripts into an
+isolated TV context, while phone and inbox retain their actual content security
+policy. This verifies browser software, never native hardware or physical TV
+approval. Final passkey/inbox, review and fast-lane receipts remain pending.

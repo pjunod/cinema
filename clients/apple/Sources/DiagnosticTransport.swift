@@ -126,6 +126,16 @@ final class DiagnosticTransport: NSObject, URLSessionTaskDelegate, @unchecked Se
                     facts["duration_ms"] = .number(UInt64(min(15_000, max(0, (ProcessInfo.processInfo.systemUptime - before) * 1_000)))); event(facts)
                     if bytes >= 2_097_152 { break }
                 }
+                if bytes < 2_097_152 {
+                    let wall = Date().timeIntervalSince1970 * 1_000; let before = ProcessInfo.processInfo.systemUptime
+                    if let data = try? await request(authorization.origin, path: "/api/v1/diagnostics/capabilities", method: "GET", cinema: true, limit: 2_097_152 - bytes),
+                       let reply = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let server = reply["server_time_ms"] as? NSNumber {
+                        let duration = (ProcessInfo.processInfo.systemUptime - before) * 1_000; let offset = server.doubleValue - wall - duration / 2
+                        if offset.isFinite && abs(offset) <= 604_800_000 && duration <= 15_000 {
+                            event(["observed": .flag(true), "clock_ahead_ms": .number(UInt64(max(0, offset))), "clock_behind_ms": .number(UInt64(max(0, -offset))), "clock_uncertainty_ms": .number(UInt64(max(0, duration)) + 1)])
+                        }
+                    }
+                }
                 let phases = metricsLock.withLock { phaseMetrics }
                 for (phase, duration) in phases { event(["phase": .text(phase), "duration_ms": .number(duration), "observed": .flag(true)]) }
                 for phase in ["dns","connect","tls"] where !phases.contains(where: { $0.0 == phase }) { event(["phase": .text(phase), "observed": .flag(false), "reason": .text("context_unavailable")]) }

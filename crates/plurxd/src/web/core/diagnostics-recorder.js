@@ -3,7 +3,7 @@
 function createCinemaDiagnosticRecorder({ now = () => Date.now(), monotonic = () => performance.now(), store = null } = {}) {
   const attachments=new WeakMap();
   const counters = ['frame_count', 'dropped_frames', 'dropped_events'];
-  const measurements = ['duration_ms', 'playhead_ms', 'headroom_ms', 'width', 'height', 'retry_count','active_producers','hw_slots','hw_max', 'status'];
+  const measurements = ['duration_ms', 'playhead_ms', 'headroom_ms', 'width', 'height', 'retry_count','clock_ahead_ms','clock_behind_ms','clock_uncertainty_ms','active_producers','hw_slots','hw_max', 'status'];
   const enums = {
     source_codec: ['unknown','h264','hevc','av1','vp9','aac','ac3','eac3','dts','truehd','opus','flac','pcm','other'],
     delivered_codec: ['unknown','h264','hevc','av1','vp9','aac','ac3','eac3','dts','truehd','opus','flac','pcm','other'],
@@ -72,7 +72,8 @@ function createCinemaDiagnosticRecorder({ now = () => Date.now(), monotonic = ()
     const previous = scope, fresh = !hydrated && scope==='anonymous' ? rows.slice() : []; const owner = ++epoch; clearTimeout(flushTimer); flushTimer = null;
     scope = /^[a-f0-9]{64}$/.test(nextScope) ? nextScope : 'anonymous'; rows=fresh; bytes=fresh.reduce((n,r)=>n+r.bytes,0); dropped=0n; reproduction=null; completedReproduction=null; clearTimeout(reproductionTimer); reproductionTimer=null; hydrated=false;
     const marker=store ? await store.get('owner') : null;if(owner!==epoch)return;
-    if(store && marker && marker.scope!==scope)await store.clear();if(owner!==epoch)return;
+    // Other namespaces stay locked until that account authenticates again.
+    if(owner!==epoch)return;
     if(store)await store.put({key:'owner',type:'owner',at:now(),expires:now()+86400000,bytes:64,scope});if(owner!==epoch)return;
     const value=store ? await store.get('ring:' + scope) : null;
     if (owner !== epoch) return;

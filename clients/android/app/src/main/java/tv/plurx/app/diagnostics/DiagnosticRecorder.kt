@@ -28,7 +28,7 @@ internal object DiagnosticFields {
     val domains = setOf("ui", "network", "playback", "producer", "lifecycle", "coverage")
     val kinds = setOf("action", "state", "sample", "error", "terminal", "request", "availability")
     private val counters = setOf("frame_count", "dropped_frames", "dropped_events")
-    private val measurements = setOf("duration_ms", "playhead_ms", "headroom_ms", "width", "height", "retry_count", "active_producers", "hw_slots", "hw_max")
+    private val measurements = setOf("duration_ms", "playhead_ms", "headroom_ms", "width", "height", "retry_count", "clock_ahead_ms", "clock_behind_ms", "clock_uncertainty_ms", "active_producers", "hw_slots", "hw_max")
     private val codec = setOf("unknown","h264","hevc","av1","vp9","aac","ac3","eac3","dts","truehd","opus","flac","pcm","other")
     private val range = setOf("unknown","sdr","hdr10","hlg","dv")
     private val failures = DiagnosticWire.reasons + setOf("network","tls","dns","connect","authentication","http","decode","delivery","process_exit","browser_network")
@@ -115,10 +115,10 @@ internal class DiagnosticRecorder(
         persistence = recovered?.persistence ?: "memory_only"
     }
     fun record(domain: String, kind: String, facts: Map<String, JsonPrimitive> = emptyMap(), auth: Long? = null): Boolean {
-        if (!history() || domain !in DiagnosticFields.domains || kind !in DiagnosticFields.kinds || facts.size > 16) return false
+        if (domain !in DiagnosticFields.domains || kind !in DiagnosticFields.kinds || facts.size > 16) return false
         if (!lock.tryLock()) { contention.updateAndGet { if (it == Long.MAX_VALUE) it else it + 1 }; return false }
         try {
-            if (auth != null && auth != generation || sequence == ULong.MAX_VALUE) return false
+            if (!history() && reproduction == null || auth != null && auth != generation || sequence == ULong.MAX_VALUE) return false
             val event = DiagnosticEvent(run, (++sequence).toString(), DiagnosticFields.utc(), (monotonic() - started).coerceIn(0,604800000), domain, kind,
                 JsonObject(facts.filter { (key, value) -> DiagnosticFields.allowed(key, value) }))
             append(event)

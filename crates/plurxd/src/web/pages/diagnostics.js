@@ -1,10 +1,11 @@
 "use strict";
 
 let DIAGNOSTIC_ENROLLMENT_CONTROLLER=null, DIAGNOSTIC_INSTALLATION=null;
+let DIAGNOSTIC_VERIFIED_TOKEN=null;
 let DIAGNOSTIC_REPORT=null, DIAGNOSTIC_AUTH_SERIAL=0, DIAGNOSTIC_AUTH_READY=Promise.resolve();
 async function diagnosticBindAccount() {
   const serial=++DIAGNOSTIC_AUTH_SERIAL,token=TOKEN;
-  const identity=token&&ME&&SERVER?.instance_id?location.origin+'\n'+SERVER.instance_id+'\n'+String(ME.id):null;
+  const identity=token&&token===DIAGNOSTIC_VERIFIED_TOKEN&&ME&&SERVER?.instance_id?location.origin+'\n'+SERVER.instance_id+'\n'+String(ME.id):null;
   const bytes=new TextEncoder().encode(identity||'anonymous');
   const scope=identity?Array.from(new Uint8Array(await cinemaDiagnosticSHA256(bytes)),v=>v.toString(16).padStart(2,'0')).join(''):'anonymous';
   if(serial!==DIAGNOSTIC_AUTH_SERIAL||token!==TOKEN)return;
@@ -14,7 +15,7 @@ async function diagnosticBindAccount() {
 function diagnosticAuthChanged(){DIAGNOSTIC_ENROLLMENT_CONTROLLER?.abort();DIAGNOSTIC_ENROLLMENT_CONTROLLER=null;DIAGNOSTIC_AUTH_READY=diagnosticBindAccount().catch(()=>{});}
 function diagnosticInstallation(){if(DIAGNOSTIC_INSTALLATION)return DIAGNOSTIC_INSTALLATION;try{const saved=localStorage.getItem('cinema_diagnostic_installation');if(CinemaDiagnosticWire.uuid(saved))return DIAGNOSTIC_INSTALLATION=saved;}catch(_){}DIAGNOSTIC_INSTALLATION=CinemaDiagnostics.uuid();try{localStorage.setItem('cinema_diagnostic_installation',DIAGNOSTIC_INSTALLATION);}catch(_){}return DIAGNOSTIC_INSTALLATION;}
 async function diagnosticProvisionForCurrentAccount(){
-  if(!TOKEN||!ME)return;const token=TOKEN,generation=AUTH_GENERATION;diagnosticAuthChanged();await DIAGNOSTIC_AUTH_READY;if(token!==TOKEN||generation!==AUTH_GENERATION)return;
+  if(!TOKEN||!ME)return;const token=TOKEN,generation=AUTH_GENERATION;DIAGNOSTIC_VERIFIED_TOKEN=token;diagnosticAuthChanged();await DIAGNOSTIC_AUTH_READY;if(token!==TOKEN||generation!==AUTH_GENERATION)return;
   const scope=CinemaDiagnostics.current().scope,key='enrollment:'+scope;const cached=await CinemaDiagnosticStore.get(key);if(cached&&cached.expires>Date.now()+60000)return;
   const controller=new AbortController();DIAGNOSTIC_ENROLLMENT_CONTROLLER?.abort();DIAGNOSTIC_ENROLLMENT_CONTROLLER=controller;const timer=setTimeout(()=>controller.abort(),10000);
   try{const caps=await api('/diagnostics/capabilities',{signal:controller.signal});if(!caps.support?.configured)return;const value=await api('/diagnostics/enrollments',{method:'POST',body:{installation_id:diagnosticInstallation()},signal:controller.signal});if(token!==TOKEN||generation!==AUTH_GENERATION||controller.signal.aborted)return;
@@ -76,7 +77,7 @@ async function diagnosticAction(run,fn) {
   if(!diagnosticCurrent(run)||run.busy)return;run.busy=true;run.root.setAttribute('aria-busy','true');
   try{await fn(run);}catch(error){if(diagnosticCurrent(run))diagnosticMessage(run,error.code==='quota_exceeded'?'Support storage or rate quota reached. Save locally or retry later.':error.code==='expired'?'Support authority expired. Your local capture remains available.':'The operation could not finish. Your local capture remains available; retry explicitly.');}finally{run.busy=false;if(diagnosticCurrent(run))run.root.removeAttribute('aria-busy');}
 }
-async function diagnosticCapabilities(run) {try{const value=await api('/diagnostics/capabilities',{signal:run.controller.signal});if(!diagnosticCurrent(run))return;if(value.support?.configured){diagnosticElement(run,'origin').value=value.support.origin;run.trustedOrigin=value.support.origin;}}catch(_){}diagnosticCoverage(run);}
+async function diagnosticCapabilities(run) {try{const wall=Date.now(),began=performance.now();const value=await api('/diagnostics/capabilities',{signal:run.controller.signal});if(!diagnosticCurrent(run))return;const duration=Math.round(performance.now()-began),offset=Math.round(value.server_time_ms-(wall+duration/2));if(Number.isSafeInteger(offset)&&Math.abs(offset)<=604800000&&duration<=15000){run.clock={run_id:CinemaDiagnostics.uuid(),sequence:'0',utc:new Date().toISOString().slice(0,19)+'Z',elapsed_ms:0,domain:'coverage',kind:'availability',facts:{observed:true,clock_ahead_ms:Math.max(0,offset),clock_behind_ms:Math.max(0,-offset),clock_uncertainty_ms:duration+1}};}if(value.support?.configured){diagnosticElement(run,'origin').value=value.support.origin;run.trustedOrigin=value.support.origin;}}catch(_){}diagnosticCoverage(run);}
 function diagnosticCoverage(run) {if(!diagnosticCurrent(run))return;diagnosticElement(run,'coverage').textContent='Client: '+run.capture.events.length+' events; dropped '+run.capture.dropped+'. Persistence: '+run.capture.persistence+'. Server: '+(run.server?.state||'not available')+'. Render range: unknown. Browser platform crash evidence: unsupported.';}
 async function diagnosticSnapshot(run,includeSystem=false) {
   if(!run.token)return;
@@ -86,9 +87,10 @@ async function diagnosticSnapshot(run,includeSystem=false) {
 }
 async function diagnosticBundle(run) {
   const category=diagnosticElement(run,'category').value,description=diagnosticElement(run,'description').value;
-  const title=diagnosticElement(run,'titles').checked&&run.playback.title;const components=[{name:'client',state:'complete'},{name:'platform',state:'unavailable',reason:'unsupported'},{name:'clock',state:'unavailable',reason:'clock_unknown'}];
+  const title=diagnosticElement(run,'titles').checked&&run.playback.title;const components=[{name:'client',state:'complete'},{name:'platform',state:'unavailable',reason:'unsupported'},run.clock?{name:'clock',state:'complete'}:{name:'clock',state:'unavailable',reason:'clock_unknown'}];
   if(!run.capture.history_enabled&&run.capture.mode!=='reproduction')components[0]={name:'client',state:'partial',reason:'history_disabled'};else if(run.capture.dropped!=='0')components[0]={name:'client',state:'partial',reason:'overflow'};
   const events=run.capture.events.filter(e=>e.run_id&&e.facts).map(e=>({...e,facts:CinemaDiagnostics.facts(e.facts)}));
+  if(run.clock)events.push(run.clock);
   const files={'description.txt':description,'client-events.jsonl':events.map(e=>JSON.stringify(e)).join('\n')+(events.length?'\n':'')};
   if(title)files['playback.json']=JSON.stringify({events:events.filter(e=>e.domain==='playback'),title});
   if(run.server?.events?.some(e=>e.facts.active_producers!==undefined))files['server-snapshot.json']=JSON.stringify(run.server.events.filter(e=>e.facts.active_producers!==undefined));

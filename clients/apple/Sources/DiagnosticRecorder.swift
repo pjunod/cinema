@@ -18,7 +18,7 @@ enum DiagnosticFact: Codable, Equatable {
         switch self {
         case .number(let n):
             if key == "status" { return n == 0 || (100...599).contains(n) }
-            return ["duration_ms", "playhead_ms", "headroom_ms", "width", "height", "retry_count", "active_producers", "hw_slots", "hw_max"].contains(key) && n <= 604_800_000
+            return ["duration_ms", "playhead_ms", "headroom_ms", "width", "height", "retry_count", "clock_ahead_ms", "clock_behind_ms", "clock_uncertainty_ms", "active_producers", "hw_slots", "hw_max"].contains(key) && n <= 604_800_000
         case .flag: return key == "observed"
         case .text(let s):
             if ["frame_count", "dropped_frames", "dropped_events"].contains(key) { return DiagnosticWire.decimal(s) }
@@ -159,14 +159,14 @@ final class DiagnosticRecorder: @unchecked Sendable {
         await DiagnosticStore.shared.clearRing(scope)
     }
     func record(_ domain: String, _ kind: String, _ facts: [String: DiagnosticFact] = [:], generation expected: UInt64? = nil) {
-        guard historyEnabled, facts.count <= 16,
+        guard facts.count <= 16,
               ["ui","network","playback","producer","lifecycle","coverage"].contains(domain),
               ["action","state","sample","error","terminal","request","availability"].contains(kind) else { return }
         guard lock.try() else {
             lossLock.lock(); contention = contention.addingSaturated(1); lossLock.unlock(); return
         }
         defer { lock.unlock() }
-        guard expected == nil || expected == generation else { return }
+        guard (historyEnabled || reproduction != nil), expected == nil || expected == generation else { return }
         sequence = sequence.addingSaturated(1)
         let event = DiagnosticEvent(run_id: run, sequence: String(sequence), utc: timestampFormat.string(from: Date()),
                                     elapsed_ms: min(604_800_000, UInt64(max(0, (ProcessInfo.processInfo.systemUptime - started) * 1_000))),
@@ -292,11 +292,11 @@ final class DiagnosticPlatform: NSObject, MXMetricManagerSubscriber, @unchecked 
                 }
                 for crash in (payload.crashDiagnostics ?? []).prefix(8) where crash.applicationVersion == version {
                     // UTC is delivery observation time, not an invented crash time.
-                    append("terminal", ["failure": .text("process_exit"), "observed": .flag(true), "app_version": .text(crash.applicationVersion), "build": .text(crash.metaData.applicationBuildVersion)])
+                    append("terminal", ["failure": .text("process_exit"), "observed": .flag(true), "app_version": .text(DiagnosticReport.label(crash.applicationVersion)), "build": .text(DiagnosticReport.label(crash.metaData.applicationBuildVersion))])
                 }
                 for hang in (payload.hangDiagnostics ?? []).prefix(8) where hang.applicationVersion == version {
                     let ms = hang.hangDuration.converted(to: .milliseconds).value
-                    if ms.isFinite && ms >= 0 { append("sample", ["duration_ms": .number(UInt64(min(ms, 604_800_000))), "state": .text("stalled"), "observed": .flag(true), "app_version": .text(hang.applicationVersion), "build": .text(hang.metaData.applicationBuildVersion)]) }
+                    if ms.isFinite && ms >= 0 { append("sample", ["duration_ms": .number(UInt64(min(ms, 604_800_000))), "state": .text("stalled"), "observed": .flag(true), "app_version": .text(DiagnosticReport.label(hang.applicationVersion)), "build": .text(DiagnosticReport.label(hang.metaData.applicationBuildVersion))]) }
                 }
             }
         }

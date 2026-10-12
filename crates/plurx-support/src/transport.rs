@@ -275,7 +275,14 @@ async fn bounded(
         if service
             .rates
             .admit(
-                &format!("tcp:{peer}"),
+                &format!(
+                    "{}:{peer}",
+                    if request.uri().path().starts_with("/operator/v1/auth/") {
+                        "operator-auth"
+                    } else {
+                        "handoff-code"
+                    }
+                ),
                 service.db.limits.code_attempts_per_minute,
             )
             .is_err()

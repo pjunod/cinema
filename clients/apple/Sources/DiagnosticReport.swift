@@ -72,14 +72,15 @@ enum DiagnosticReport {
               draft.description.utf8.count <= 16_384, draft.description.unicodeScalars.allSatisfy({ $0.value >= 32 || [9,10,13].contains($0.value) }),
               draft.capture.events.count <= 10_000, draft.serverEvents.count <= 10_000 else { throw DiagnosticTransport.Failure.invalid }
         let title = draft.title.map { String($0.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(256)) }
-        let privacy = Privacy(titles_included: title != nil, attachments_included: false)
-        let clientState = !draft.capture.historyEnabled ? Component(name: "client", state: "partial", reason: "history_disabled")
+        let platform = draft.includePlatform == true ? (draft.platform ?? []) : []
+        let privacy = Privacy(titles_included: title != nil, attachments_included: !platform.isEmpty)
+        let clientState = !draft.capture.historyEnabled && draft.capture.mode != "reproduction" ? Component(name: "client", state: "partial", reason: "history_disabled")
             : draft.capture.dropped > 0 ? Component(name: "client", state: "partial", reason: "overflow") : Component(name: "client", state: "complete")
         var components = [clientState]
         components += draft.serverComponents.filter { ["server","workers"].contains($0.name) && $0.valid }
         if !components.contains(where: { $0.name == "server" }) { components.append(Component(name: "server", state: "unavailable", reason: "context_unavailable")) }
         components += [Component(name: "connection", state: draft.connection.isEmpty ? "unavailable" : "complete", reason: draft.connection.isEmpty ? "not_requested" : nil),
-                       Component(name: "platform", state: draft.platform?.isEmpty == false ? "partial" : "unavailable", reason: draft.platformReason ?? (client.platform == "tvos" ? "unsupported" : "not_delivered")), Component(name: "clock", state: "unavailable", reason: "clock_unknown")]
+                       Component(name: "platform", state: !platform.isEmpty ? "partial" : "unavailable", reason: (platform.isEmpty && draft.platform?.isEmpty == false ? "not_requested" : draft.platformReason) ?? (client.platform == "tvos" ? "unsupported" : "not_delivered")), Component(name: "clock", state: draft.connection.contains { $0.facts["clock_uncertainty_ms"] != nil } ? "complete" : "unavailable", reason: draft.connection.contains { $0.facts["clock_uncertainty_ms"] != nil } ? nil : "clock_unknown")]
         var manifest = Manifest(report_id: draft.id, captured_at: draft.capture.capturedAt, category: draft.category,
                                 scope: draft.capture.namespace == "anonymous" ? "anonymous" : "viewer", client: client,
                                 capture: Capture(mode: draft.capture.mode, window_ms: min(900_000, draft.capture.windowMs), dropped_events: String(draft.capture.dropped), persistence: draft.capture.persistence),
@@ -92,7 +93,7 @@ enum DiagnosticReport {
         } else if draft.capture.events.contains(where: { $0.domain == "playback" }) {
             entries.append(("playback.json", try encoder.encode(draft.capture.events.filter { $0.domain == "playback" })))
         }
-        if let platform = draft.platform, !platform.isEmpty { guard platform.allSatisfy(\.valid), platform.count <= 16 else { throw DiagnosticTransport.Failure.invalid }; entries.append(("diagnostics/platform.json", try encoder.encode(platform))) }
+        if !platform.isEmpty { guard platform.allSatisfy(\.valid), platform.count <= 16 else { throw DiagnosticTransport.Failure.invalid }; entries.append(("diagnostics/platform.json", try encoder.encode(platform))) }
         if !draft.connection.isEmpty { entries.append(("connection.json", try encoder.encode(draft.connection))) }
         let system = draft.serverEvents.filter { $0.facts["active_producers"] != nil }
         if !system.isEmpty { entries.append(("server-snapshot.json", try encoder.encode(system))) }

@@ -72,7 +72,7 @@ const CinemaDiagnosticWire = (() => {
     wireAssert(e.facts&&typeof e.facts==='object'&&!Array.isArray(e.facts)&&Object.keys(e.facts).length<=16);
     for(const [key,value] of Object.entries(e.facts)) {
       if(enums[key])one(value,enums[key]);
-      else if(['duration_ms','playhead_ms','headroom_ms','width','height','retry_count','active_producers','hw_slots','hw_max'].includes(key))integer(value,604800000);
+      else if(['duration_ms','playhead_ms','headroom_ms','width','height','retry_count','clock_ahead_ms','clock_behind_ms','clock_uncertainty_ms','active_producers','hw_slots','hw_max'].includes(key))integer(value,604800000);
       else if(key==='status'){integer(value,599);wireAssert(value===0||value>=100);}
       else if(['frame_count','dropped_frames','dropped_events'].includes(key))wireAssert(decimal(value));
       else if(key==='observed')wireAssert(typeof value==='boolean');

@@ -16,7 +16,7 @@ import java.util.UUID
 internal data class DiagnosticUI(
     val visible: Boolean = false, val draft: DiagnosticDraft? = null, val pending: List<DiagnosticDraft> = emptyList(),
     val busy: Boolean = false, val message: String = "", val destination: String = "", val consent: Boolean = false,
-    val includeTitle: Boolean = false, val invitation: String = "", val comparison: String? = null, val handoffState: String = "", val history: Boolean = true,
+    val includePlatform: Boolean = false, val includeTitle: Boolean = false, val invitation: String = "", val comparison: String? = null, val handoffState: String = "", val history: Boolean = true,
 )
 
 /** One report owner, independent of player retries, with one foreground task
@@ -95,7 +95,7 @@ internal object DiagnosticRuntime {
         if (!::recorder.isInitialized) return
         operation?.cancel(); poll?.cancel(); transport?.cancel(); title=positiveTitle
         val capture = recorder.retainedReproduction ?: recorder.freeze(); val draft = DiagnosticDraft(capture,category=category)
-        mutable.update { it.copy(visible=true,draft=draft,busy=true,message="Capturing this incident. A description is optional.",consent=false,includeTitle=false,comparison=null,handoffState="") }
+        mutable.update { it.copy(visible=true,draft=draft,busy=true,message="Capturing this incident. A description is optional.",consent=false,includeTitle=false,includePlatform=false,comparison=null,handoffState="") }
         record("ui","action",mapOf("action" to JsonPrimitive("report")))
         val client = DiagnosticTransport(app,capture.namespace); transport=client
         operation=owner.launch {
@@ -119,7 +119,7 @@ internal object DiagnosticRuntime {
         if (draft.capture.namespace != namespace) return
         retire(); title=draft.title
         val value=draft.copy(capture=draft.capture.copy(generation=Session.playbackAuthorization().generation))
-        mutable.update { it.copy(visible=true,draft=value,destination=value.origin.orEmpty(),consent=value.consented,includeTitle=value.title != null,message="Recovered local report. Sending resumes the same immutable archive.") }
+        mutable.update { it.copy(visible=true,draft=value,destination=value.origin.orEmpty(),consent=value.consented,includeTitle=value.title != null,includePlatform=value.includePlatform,message="Recovered local report. Sending resumes the same immutable archive.") }
         if (value.handoff != null) pollHandoff()
     }
     fun edit(description: String? = null, category: String? = null) {
@@ -128,6 +128,7 @@ internal object DiagnosticRuntime {
     fun destination(value: String) { mutable.update { if (it.draft?.consented == true) it else it.copy(destination=value.take(1024)) } }
     fun consent(value: Boolean) { mutable.update { it.copy(consent=value) } }
     fun includeTitle(value: Boolean) { mutable.update { if (it.draft?.consented == true) it else it.copy(includeTitle=value) } }
+    fun includePlatform(value: Boolean) { mutable.update { if (it.draft?.consented == true) it else it.copy(includePlatform=value) } }
     fun invitation(value: String) { mutable.update { it.copy(invitation=value.take(10)) } }
     fun history(value: Boolean) {
         preferences.edit().putBoolean("history",value).apply(); mutable.update { it.copy(history=value) }
@@ -167,7 +168,7 @@ internal object DiagnosticRuntime {
             val bytes=requireNotNull(store.archive(original.id,original.capture.namespace)); require(bytes.size == prior.length && DiagnosticFields.hash(bytes) == prior.sha256)
             return@withContext original to DiagnosticArchive(bytes,prior,manifest)
         }
-        require(prior == null); val draft=original.copy(title=if (mutable.value.includeTitle) title else null)
+        require(prior == null); val draft=original.copy(title=if (mutable.value.includeTitle) title else null,includePlatform=mutable.value.includePlatform)
         val value=runInterruptible { DiagnosticReport.archive(draft,television) }; require(value.bytes.size <= 8388608)
         if (draft.consented) {
             val frozen=draft.copy(binding=value.binding,manifest=value.manifest)

@@ -27,6 +27,7 @@ function clearLocalSession(expectedGeneration,notice){
   CLUSTER_LOADED=false; CLUSTER_LEAVING=false; forgetJoinToken();
   const protectedMain=document.getElementById("main"); if(protectedMain) protectedMain.innerHTML="";
   if(typeof diagnosticRevokeEnrollment==="function")diagnosticRevokeEnrollment(TOKEN);
+  window.CinemaDiagnostics?.clear();
   TOKEN=null; AUTH_GENERATION++; ME=null;
   refreshClientErrorReporterAuth();
   AUTH_NOTICE=notice||"";

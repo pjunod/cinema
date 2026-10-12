@@ -24,7 +24,7 @@ internal data class DiagnosticDraft(
     val serverEvents: List<DiagnosticEvent> = emptyList(), val components: List<DiagnosticComponent> = emptyList(),
     val connection: List<DiagnosticEvent> = emptyList(), val consented: Boolean = false, val origin: String? = null,
     val state: String = "local", val reference: String? = null, val handoff: DiagnosticOffer? = null,
-    val platform: List<DiagnosticEvent> = emptyList(), val platformReason: String? = null,
+    val platform: List<DiagnosticEvent> = emptyList(), val platformReason: String? = null, val includePlatform: Boolean = false,
     val binding: DiagnosticBinding? = null, val manifest: JsonObject? = null,
 ) { val id get() = capture.id }
 

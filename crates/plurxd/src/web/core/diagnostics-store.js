@@ -25,6 +25,9 @@ const CinemaDiagnosticStore = (() => {
   }
   async function get(key) { return operation('readonly', (store, done) => { const request = store.get(key); request.onsuccess = () => done(request.result || null); }); }
   async function put(record) {
+    if(!record || typeof record.key!=='string' || record.key.length>160)return null;
+    let actual;try{actual=new TextEncoder().encode(JSON.stringify(record)).length+(record.delivery?.archive instanceof Blob?record.delivery.archive.size:0);}catch(_){return null;}
+    if(actual>8388608 || !Number.isFinite(record.expires))return null;record={...record,bytes:actual};
     return operation('readwrite', (store, done) => {
       store.put(record);
       // An indexed scan with a fixed row cap bounds storage before new captures.

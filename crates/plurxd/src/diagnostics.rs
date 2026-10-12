@@ -390,7 +390,7 @@ async fn capabilities(State(state): State<AppState>) -> Response {
         .map(|p| p.capabilities())
         .unwrap_or_else(|| serde_json::json!({"configured":false}));
     private(Json(
-        serde_json::json!({"version":VERSION,"snapshots":true,"max_window_ms":600000,"support":support}),
+        serde_json::json!({"version":VERSION,"snapshots":true,"server_time_ms":unix_ms(),"max_window_ms":600000,"support":support}),
     ))
 }
 async fn create(

@@ -164,6 +164,13 @@ internal class DiagnosticTransport(private val app: Context, private val namespa
             }
         } catch (timeout: TimeoutCancellationException) { currentCoroutineContext().ensureActive(); event(buildJsonObject { put("phase","unavailable"); put("observed",false); put("reason","timeout") }) }
         current()
+        if (bytes < 2097152 && android.os.SystemClock.elapsedRealtime()-began < 15000) {
+            val wall=System.currentTimeMillis(); val before=android.os.SystemClock.elapsedRealtime()
+            val reply=runCatching { withTimeout((15000-(before-began)).coerceAtLeast(1)) { json(authorization.origin,"/api/v1/diagnostics/capabilities",method="GET",cinema=true,limit=2097152-bytes) } }.getOrNull()
+            val duration=android.os.SystemClock.elapsedRealtime()-before; val server=reply?.get("server_time_ms")?.jsonPrimitive?.longOrNull
+            if (server != null) { val offset=server-wall-duration/2; if (offset in -604800000..604800000 && duration <= 15000) event(buildJsonObject { put("observed",true); put("clock_ahead_ms",offset.coerceAtLeast(0)); put("clock_behind_ms",(-offset).coerceAtLeast(0)); put("clock_uncertainty_ms",duration+1) }) }
+        }
+        current()
         for (phase in listOf("dns","connect","tls")) event(buildJsonObject { put("phase",phase); put("observed",phases.containsKey(phase)); phases[phase]?.let { put("duration_ms",it) } ?: put("reason","context_unavailable") })
         event(buildJsonObject { put("phase","delivery"); put("observed",false); put("reason","not_requested") }); events
     }

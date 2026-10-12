@@ -14,6 +14,7 @@ final class DiagnosticReportModel: ObservableObject {
     @Published var invitationCode = ""
     @Published var uploadConsent = false
     @Published var includeTitle = false
+    @Published var includePlatform = false
     @Published var comparison: String?
     @Published var handoffState = ""
     @Published var shareURL: URL?
@@ -55,7 +56,7 @@ final class DiagnosticReportModel: ObservableObject {
     }
     func open(category: String = "other", title: String? = nil, owner: String = "root") {
         operation?.cancel(); polling?.cancel(); transport?.cancel(); cleanupShare()
-        self.title = title; includeTitle = false; comparison = nil; handoffState = ""; uploadConsent = false
+        self.title = title; includeTitle = false; includePlatform = false; comparison = nil; handoffState = ""; uploadConsent = false
         let capture = DiagnosticRecorder.shared.retainedReproduction ?? DiagnosticRecorder.shared.freeze()
         var value = DiagnosticStore.Draft(capture: capture, category: category, description: "", serverEvents: [], serverComponents: [], connection: [])
         if let previous = pending.first(where: { $0.id == capture.id }) { value = previous; value.capture = capture }
@@ -87,7 +88,7 @@ final class DiagnosticReportModel: ObservableObject {
             capturedAt: value.capture.capturedAt, incidentMs: value.capture.incidentMs, events: value.capture.events, dropped: value.capture.dropped,
             persistence: value.capture.persistence, historyEnabled: value.capture.historyEnabled, mode: value.capture.mode, windowMs: value.capture.windowMs)
         draft = resumed; destination = resumed.origin ?? ""; uploadConsent = resumed.consented; includeTitle = resumed.title != nil
-        title = resumed.title; presented = true; transport = DiagnosticTransport(scope: scope)
+        title = resumed.title; includePlatform = resumed.includePlatform == true; presented = true; transport = DiagnosticTransport(scope: scope)
         message = "Recovered local report. Sending resumes this same frozen archive."
         if resumed.handoff != nil { pollHandoff() }
     }
@@ -122,7 +123,7 @@ final class DiagnosticReportModel: ObservableObject {
             return DiagnosticReport.Archive(bytes: bytes, binding: binding, manifest: manifest)
         }
         guard value.binding == nil else { throw DiagnosticTransport.Failure.storage }
-        value.title = includeTitle ? title : nil
+        value.title = includeTitle ? title : nil; value.includePlatform = includePlatform
         let snapshot = value; let client = DiagnosticReport.client
         let worker = Task.detached(priority: .utility) { try DiagnosticReport.archive(snapshot, client: client) }
         let result = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
@@ -291,6 +292,7 @@ struct DiagnosticReportView: View {
     private func incidentPrivacy(_ draft: DiagnosticStore.Draft) -> some View {
         Group {
             Toggle("Include the current title", isOn: $reports.includeTitle).disabled(draft.consented)
+                        Toggle("Include available platform diagnostics", isOn: $reports.includePlatform).disabled(draft.consented || draft.platform?.isEmpty != false)
                         Text("No passwords, addresses, request bodies, media or raw stream identifiers are collected. Your description and an optional title are private content.").font(.caption)
                         Text("Client: " + (draft.capture.historyEnabled ? (draft.capture.dropped > 0 ? "partial (overflow)" : "bounded history") : "history disabled") + "; persistence: " + draft.capture.persistence).font(.caption)
                         ForEach(draft.serverComponents, id: \.name) { component in Text("\(component.name): \(component.state) \(component.reason ?? "")").font(.caption) }
