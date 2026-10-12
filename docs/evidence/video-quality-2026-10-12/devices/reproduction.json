@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "purpose": "Reproduce finite native framework decoding on explicitly admitted idle physical Android devices and a new task-owned tvOS simulator.",
+  "android": {
+    "build": "JAVA_HOME=$(/usr/libexec/java_home) ANDROID_HOME=$HOME/Library/Android/sdk clients/android/gradlew -p docs/evidence/video-quality-2026-10-12/devices/android-probe --no-daemon --max-workers=2 :app:assembleDebug",
+    "bundle": "org.plurx.qualification.video.oct12",
+    "run": "python3 docs/evidence/video-quality-2026-10-12/devices/run-android.py --adb $ADB --transport $EXPLICIT_IDLE_TRANSPORT --apk $PROBE_APK --port $OWNED_PORT --case $CASE --asset $RELATIVE_PLAYLIST --out $RECEIPT",
+    "admission": "Read media sessions, wakefulness, keyguard and foreground immediately before install. Refuse active foreign playback, non-awake or unverifiably unlocked devices, a pre-existing probe package, or an already-owned reverse port. Never force-stop or clear the shipping application.",
+    "playback": "Own player volume is zero. start0s, forward12s, backward3s and fresh-player restart8s; require30 decoded frames and2.5s progression per phase, selected audio, video-to-player clock delta strictly below250ms, five successful Surface copies and changing sampled pixels. --static relaxes only changing-pixel count for intentionally static HDR charts; all timing/decode/copy requirements remain. Static charts additionally require five copies with sampled RGB channel range at least16/255.",
+    "cleanup": "Probe finishes back to the prior task. Launcher stops/uninstalls only the unique owned package and removes only its own adb reverse. Each receipt includes before/after foreground and cleanup observations."
+  },
+  "apple": {
+    "compile": "xcrun --sdk appletvsimulator swiftc -parse-as-library -swift-version 5 -target arm64-apple-tvos26.0-simulator -sdk $TVOS_SIM_SDK -module-cache-path $OWNED_CACHE docs/evidence/video-quality-2026-10-12/devices/apple-probe.swift -o $OWNED_APP/VideoProbe -framework UIKit -framework AVFoundation -framework CoreVideo -framework QuartzCore",
+    "bundle": "org.plurx.qualification.video.oct12",
+    "setup": "Create a new simctl tvOS26.5 Apple-TV-4K-3rd-generation-1080p device, store its returned UUID and boot only that device. The app Info.plist names VideoProbe executable, bundle version1, UIDeviceFamily3, MinimumOSVersion26.0, and NSAllowsArbitraryLoads=true. Ad-hoc sign the simulator bundle.",
+    "run": "python3 docs/evidence/video-quality-2026-10-12/devices/run-apple.py --device $OWNED_UUID --bundle $OWNED_APP --port $OWNED_PORT --case $CASE --asset $RELATIVE_PLAYLIST --out $RECEIPT",
+    "playback": "Muted AVPlayer, same four seek phases, actual CVPixelBuffers and visible-ready layer,30 frames and2.5s progression, audio-track presence and250ms clock criterion. --static relaxes only changing-pixel count. Attachments and compressed-track format descriptions are recorded separately: converted BGRA output does not prove HDR panel behavior. Static charts additionally require30 buffers with sampled RGB channel range at least16/255.",
+    "cleanup": "Each launch deletes only the owned app's previous receipt and requires fresh matching case identity. Terminate only that app. At campaign end shutdown/delete only the created UUID."
+  },
+  "limits": "Neither probe is the shipping app UI. Surface pixels/native decoded buffers are not panel colorimeter measurements. Audio is muted and clock correspondence does not prove speaker synchronization. Do not interpret missing physical Apple admission as a codec failure."
+}

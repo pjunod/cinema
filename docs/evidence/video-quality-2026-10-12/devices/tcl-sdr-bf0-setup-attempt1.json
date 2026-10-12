@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "case": "tcl-sdr-bf0",
+  "apk_sha256": "b1a07febb57717c7163f7d4223544a193556184b38b9c7ea3240b769937aade3",
+  "started_utc": "2026-10-12T16:37:36Z",
+  "cleanup": {},
+  "preflight_media_states": [
+    "ERROR(7)"
+  ],
+  "keyguard_not_showing": true,
+  "focus_before": [
+    "mCurrentFocus=Window{cdbd16b u0 tv.plurx.app/tv.plurx.app.MainActivity}"
+  ],
+  "launcher_error": "adb command failed: ('shell', 'pm', 'path'): ",
+  "focus_after": [
+    "mCurrentFocus=Window{cdbd16b u0 tv.plurx.app/tv.plurx.app.MainActivity}"
+  ],
+  "finished_utc": "2026-10-12T16:37:37Z"
+}

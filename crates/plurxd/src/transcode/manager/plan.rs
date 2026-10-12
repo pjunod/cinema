@@ -437,6 +437,7 @@ impl TranscodeManager {
                     .then(|| frame_rate.value())
                     .flatten();
                 plan.with_sdr_avc_qualification(&self.caps, cadence, options.force_idr)
+                    .with_vaapi_hdr_policy(&self.caps)
             })
             .map_err(|error| format!("decoder plan refused: {error}"))
     }

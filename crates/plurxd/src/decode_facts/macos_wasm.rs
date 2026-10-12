@@ -61,6 +61,12 @@ impl Parser {
         signing::require_execution_policy()?;
         let mut config = Config::default();
         config
+            // This parser does bounded metadata/packet work, not long-lived
+            // compute. Optimizing the entire packaged FFmpeg image serially
+            // consumed most of the cold identity budget before any guest ran.
+            // Keep the deadline and capability boundary; avoid that startup
+            // optimization cost instead. Measured guest outputs are unchanged.
+            .cranelift_opt_level(wasmtime::OptLevel::None)
             .epoch_interruption(true)
             .wasm_memory64(false)
             .wasm_multi_memory(false)

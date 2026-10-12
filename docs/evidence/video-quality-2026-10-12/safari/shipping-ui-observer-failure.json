@@ -1,0 +1,9 @@
+{
+  "receipt": "shipping-ui-attempt6.json",
+  "cause": "Observer invoked nonexistent pbNowSec instead of shipped pbPosSec. Callback threw before storing or rearming observations; not proof of decoder or ownership failure.",
+  "logs": [
+    "2026-10-12T17:53:27.367358Z ERROR http_request{method=POST target=/api/v1/client-log version=HTTP/1.1 request_id=\"7ef15e78db83465eb84767fa6031dcd9\"}: plurxd::client: client[Safari] client_error: ReferenceError: Can't find variable: pbNowSec src=undefined line=1 col=9 stack=eval code@eval@[native code]evaluate@http://127.0.0.1:49608/qualifier:133:221callback@http://127.0.0.1:49608/qualifier:135:247 [error]",
+    "2026-10-12T17:53:27.769325Z  WARN http_request{method=POST target=/api/v1/client-log version=HTTP/1.1 request_id=\"abba3c186eb64e1f87b8d0b9fe6fb88c\"}: plurxd::client: client[Safari] hls_startup_presenting method=transcode vcodec=h264 height=240 encoder=software (x264) decode_supported_prediction=true decode_smooth_prediction=true decode_power_efficient_prediction=true: HLS startup presented after 876ms runway=18.0s bw=12123kbps \u2014 Authored qualification file=1 [manifest=parsed;level=loaded;media=yes] attempt=a1/resume",
+    "2026-10-12T17:53:27.769502Z  WARN http_request{method=POST target=/api/v1/client-log version=HTTP/1.1 request_id=\"3a7c9c37c4fb462ca95bb22af6066f00\"}: plurxd::client: client[Safari] ttff method=transcode vcodec=h264 height=240 encoder=software (x264) decode_supported_prediction=true decode_smooth_prediction=true decode_power_efficient_prediction=true: first frame after 1.3s ttff_ms=1310 runway=18.0s bw=12123kbps \u2014 Authored qualification file=1 attempt=a1/resume"
+  ]
+}

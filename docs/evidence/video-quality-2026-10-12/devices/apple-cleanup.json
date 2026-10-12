@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "owned_simulator_deleted": true,
+  "runtime": "tvOS26.5",
+  "bundle": "org.plurx.qualification.video.oct12",
+  "scope": "Only the simulator UUID created by this task was shutdown/deleted; paired Apple devices and pre-existing simulators were untouched.",
+  "final_counter_admission_simulator_deleted": true,
+  "final_owned_http_server_stopped": true
+}

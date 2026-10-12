@@ -1158,6 +1158,61 @@ impl QualityRc {
     }
 }
 
+/// Driver-specific Main10 quantization policy, discovered from the driver
+/// actually opened by the successful boot probe, then frozen into each plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaapiHdrPolicy {
+    /// Mesa encodes quality as a bitfield: balanced preset + VBAQ, without
+    /// preanalysis. Preanalysis regressed worst-frame quality in the controls.
+    MesaRadeonsiVbaq,
+}
+
+impl VaapiHdrPolicy {
+    pub fn from_driver_description(driver: &str) -> Option<Self> {
+        let rest = driver.trim().strip_prefix("Mesa Gallium driver ")?;
+        let (version, device) = rest.split_once(" for ")?;
+        let mut parts = version.split('.');
+        let major = parts.next()?.parse::<u32>().ok()?;
+        let minor = parts.next()?.parse::<u32>().ok()?;
+        let patch = parts.next()?.split('-').next()?.parse::<u32>().ok()?;
+
+        if parts.next().is_some()
+            || (major, minor, patch) < (22, 3, 0)
+            || !device.starts_with("AMD ")
+        {
+            return None;
+        }
+        device
+            .contains("(radeonsi,")
+            .then_some(Self::MesaRadeonsiVbaq)
+    }
+
+    fn from_probe_stderr(stderr: &str) -> Option<Self> {
+        let mut drivers = stderr.lines().filter_map(|line| {
+            line.split_once("VAAPI driver: ")
+                .map(|(_, driver)| driver.trim())
+        });
+        let first = drivers.next()?;
+        if drivers.any(|driver| driver != first) {
+            return None;
+        }
+        Self::from_driver_description(first)
+    }
+
+    pub fn flags(self) -> [&'static str; 2] {
+        match self {
+            Self::MesaRadeonsiVbaq => ["-compression_level", "19"],
+        }
+    }
+
+    pub fn recipe_value(self) -> &'static str {
+        match self {
+            Self::MesaRadeonsiVbaq => "mesa-radeonsi-balanced-vbaq-no-preanalysis-v1",
+        }
+    }
+}
+
 /// Which encoders this ffmpeg build exposes.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EncoderCaps {
@@ -1172,6 +1227,8 @@ pub struct EncoderCaps {
     /// Completed exact-node experiments; absent cells retain legacy flags.
     #[serde(default)]
     pub sdr_avc: Vec<super::QualifiedSdrAvc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vaapi_hdr_policy: Option<VaapiHdrPolicy>,
 }
 
 impl EncoderCaps {
@@ -1235,6 +1292,7 @@ pub fn parse_encoder_list(output: &str) -> EncoderCaps {
         forced_idr: ForcedIdr::default(),
         quality_rc: QualityRc::default(),
         sdr_avc: Vec::new(),
+        vaapi_hdr_policy: None,
     }
 }
 
@@ -1414,6 +1472,7 @@ fn benchmark_completed(output: &[u8]) -> bool {
 /// What one family's probe concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Verdict {
+    vaapi_hdr_policy: Option<VaapiHdrPolicy>,
     usable: bool,
     /// The build accepted [`Encoder::forced_idr_flag`]. Meaningless for the
     /// families that do not need one.
@@ -1429,6 +1488,14 @@ struct Verdict {
 /// "Operation not permitted" — a missing device — or "Invalid argument", which
 /// is what an operator can act on.
 fn first_cause(stderr: &str) -> &str {
+    // VAAPI boot discovery needs verbose initialization. Prefer the tagged
+    // fault over the driver's successful informational startup lines.
+    if let Some(fault) = stderr.lines().map(str::trim).find(|line| {
+        (line.contains("[error]") || line.contains("[fatal]"))
+            && !line.contains("Nothing was written into output file")
+    }) {
+        return fault;
+    }
     stderr
         .lines()
         .map(str::trim)
@@ -1436,24 +1503,32 @@ fn first_cause(stderr: &str) -> &str {
         .unwrap_or("no error output")
 }
 
-/// One probe run. `Ok(())` on success, `Err(stderr)` otherwise.
+/// One probe run. The observed driver policy on success, `Err(stderr)` otherwise.
 async fn try_encode(
     ffmpeg_bin: &str,
     encoder: Encoder,
     rate_control: EffectiveRateControl,
     force_idr: bool,
-) -> Result<(), String> {
+) -> Result<Option<VaapiHdrPolicy>, String> {
+    let mut args = validation_args(encoder, rate_control, force_idr);
+    if encoder == Encoder::Vaapi {
+        // Reuse the existing encode; verbose initialization identifies the
+        // loaded driver rather than guessing from installed packages.
+        args[2] = "level+verbose".into();
+    }
     let mut command = tokio::process::Command::new(ffmpeg_bin);
-    command
-        .args(validation_args(encoder, rate_control, force_idr))
-        .stdin(std::process::Stdio::null());
+    command.args(args).stdin(std::process::Stdio::null());
     match crate::process::output_job_owned(
         &mut command,
         crate::process::ChildWork::background("encoder test encode"),
     )
     .await
     {
-        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) if out.status.success() => Ok(if encoder == Encoder::Vaapi {
+            VaapiHdrPolicy::from_probe_stderr(&String::from_utf8_lossy(&out.stderr))
+        } else {
+            None
+        }),
         Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
         Err(e) => Err(e.to_string()),
     }
@@ -1584,13 +1659,14 @@ where
 async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
     let wants_idr = encoder.forced_idr_flag().is_some();
     match try_encode(ffmpeg_bin, encoder, EffectiveRateControl::Vbr, wants_idr).await {
-        Ok(()) => {
+        Ok(vaapi_hdr_policy) => {
             tracing::info!(
                 encoder = encoder.label(),
                 forced_idr = wants_idr,
                 "hardware encoder validated"
             );
             Verdict {
+                vaapi_hdr_policy,
                 usable: true,
                 forced_idr: wants_idr,
             }
@@ -1601,7 +1677,7 @@ async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
             // recognised would be a far worse trade than the long segments the
             // option exists to prevent.
             match try_encode(ffmpeg_bin, encoder, EffectiveRateControl::Vbr, false).await {
-                Ok(()) => {
+                Ok(vaapi_hdr_policy) => {
                     tracing::warn!(
                         encoder = encoder.label(),
                         flag = encoder.forced_idr_flag().unwrap_or("?"),
@@ -1611,6 +1687,7 @@ async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
                          playback will start slower than it should"
                     );
                     Verdict {
+                        vaapi_hdr_policy,
                         usable: true,
                         forced_idr: false,
                     }
@@ -1622,6 +1699,7 @@ async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
                         "hardware encoder present but failed validation — not using it"
                     );
                     Verdict {
+                        vaapi_hdr_policy: None,
                         usable: false,
                         forced_idr: false,
                     }
@@ -1639,6 +1717,7 @@ async fn validate(ffmpeg_bin: &str, encoder: Encoder) -> Verdict {
                 "hardware encoder present but failed validation — not using it"
             );
             Verdict {
+                vaapi_hdr_policy: None,
                 usable: false,
                 forced_idr: false,
             }
@@ -1663,7 +1742,7 @@ pub async fn validate_quality_rate_control(
     )
     .await
     {
-        Ok(()) => {
+        Ok(_) => {
             tracing::info!(
                 encoder = encoder.label(),
                 quality,
@@ -1773,11 +1852,15 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
             validate(ffmpeg_bin, encoder).await
         } else {
             Verdict {
+                vaapi_hdr_policy: None,
                 usable: false,
                 forced_idr: false,
             }
         };
         caps.set(encoder, verdict.usable);
+        if encoder == Encoder::Vaapi {
+            caps.vaapi_hdr_policy = verdict.vaapi_hdr_policy;
+        }
         if verdict.forced_idr {
             caps.forced_idr.set(encoder);
         }
@@ -1815,6 +1898,67 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vaapi_hdr_policy_requires_the_actual_mesa_radeonsi_driver() {
+        assert_eq!(
+            first_cause("[verbose] driver opened\n[error] encode refused\n"),
+            "[error] encode refused"
+        );
+        let driver = "Mesa Gallium driver 26.0.8 for AMD Radeon 760M Graphics (radeonsi, phoenix, ACO, DRM 3.64, 7.0.0-31-generic)";
+        assert_eq!(
+            VaapiHdrPolicy::from_driver_description(driver),
+            Some(VaapiHdrPolicy::MesaRadeonsiVbaq)
+        );
+        assert_eq!(
+            VaapiHdrPolicy::from_driver_description(&driver.replace("26.0.8", "22.3.0")),
+            Some(VaapiHdrPolicy::MesaRadeonsiVbaq)
+        );
+        for refused in [
+            driver.replace("26.0.8", "22.2.9"),
+            driver.replace("26.0.8", "bad"),
+            driver.replace("radeonsi,", "nouveau,"),
+            driver.replace("AMD ", "Intel "),
+            "Intel iHD driver 26.1".into(),
+        ] {
+            assert_eq!(VaapiHdrPolicy::from_driver_description(&refused), None);
+        }
+        let line = format!("[VAAPI @ 0x1] VAAPI driver: {driver}\n");
+        assert_eq!(
+            VaapiHdrPolicy::from_probe_stderr(&line),
+            Some(VaapiHdrPolicy::MesaRadeonsiVbaq)
+        );
+        assert_eq!(
+            VaapiHdrPolicy::from_probe_stderr(&format!(
+                "{line}[VAAPI @ 0x2] VAAPI driver: Intel iHD\n"
+            )),
+            None
+        );
+        assert_eq!(VaapiHdrPolicy::from_probe_stderr(""), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn vaapi_hdr_policy_is_published_only_by_a_successful_probe() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/transcode/fixtures/ffmpeg-vaapi-driver-policy"
+        );
+        assert_eq!(
+            try_encode(fixture, Encoder::Vaapi, EffectiveRateControl::Vbr, false)
+                .await
+                .expect("successful encode"),
+            Some(VaapiHdrPolicy::MesaRadeonsiVbaq)
+        );
+        assert!(try_encode(
+            fixture,
+            Encoder::Vaapi,
+            EffectiveRateControl::Qvbr { quality: 23 },
+            false
+        )
+        .await
+        .is_err());
+    }
 
     #[test]
     fn benchmark_uses_the_production_software_thread_allocation() {

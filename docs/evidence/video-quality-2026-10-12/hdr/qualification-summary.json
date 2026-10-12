@@ -1,0 +1,299 @@
+{
+  "scope": "Bounded HDR10 HEVC VAAPI sharp-edge calibration. PQ-code diagnostic, not HDR perceptual or physical-display grade.",
+  "source_base": "1f02b7938a2f3924de6a3969483e38ffe3e8bd6f",
+  "image": "sha256:495d871c5ad70f9dd7b0316c59cb682216c360d0c0e4966895503d2ce7657673",
+  "ffmpeg_sha256": "90004301255382e1beb441a294fa8b75ac7fbb54678837f224d3458032e38787",
+  "loaded_driver": "Mesa Gallium driver26.0.8/radeonsi AMD Radeon760M",
+  "loaded_driver_sha256": "25db1db73bf158f1dbeda86e5be0cbfd87cef214c497af35889e3a9f4965e78c",
+  "driver_identity_correction": "System mesa-va-drivers22.3.6 is not loaded; bundled26.0.8 identified by actual FFmpeg verbose and vainfo output.",
+  "root_cause": "Default Mesa quality disables variance-based adaptive quantization. Sharp-edge reconstruction error is removed by VBAQ; preanalysis in bundled quality1 causes its separate worst-frame regression.",
+  "sharp_controls": {
+    "baseline": {
+      "max_error": 35,
+      "mean_error": 0.3680150462962963,
+      "output_sha256": "8f8abdd85b525537e35efcfa8b7b41e3b5dae12ade95682084feeea650de6b45",
+      "outcome": "failed"
+    },
+    "level3": {
+      "max_error": 35,
+      "mean_error": 0.3680150462962963,
+      "output_sha256": "8f8abdd85b525537e35efcfa8b7b41e3b5dae12ade95682084feeea650de6b45",
+      "outcome": "failed"
+    },
+    "balanced": {
+      "max_error": 35,
+      "mean_error": 0.3680150462962963,
+      "output_sha256": "8f8abdd85b525537e35efcfa8b7b41e3b5dae12ade95682084feeea650de6b45",
+      "outcome": "failed"
+    },
+    "level27": {
+      "max_error": 12,
+      "mean_error": 0.28457899305555556,
+      "output_sha256": "5b8ec3e8f2da180bf5ebac35cd2a39539095a993171395385e8b1b2280f4eb34",
+      "outcome": "pass"
+    },
+    "balanced-block": {
+      "max_error": 35,
+      "mean_error": 0.3680150462962963,
+      "output_sha256": "8f8abdd85b525537e35efcfa8b7b41e3b5dae12ade95682084feeea650de6b45",
+      "outcome": "failed"
+    },
+    "level9": {
+      "max_error": 35,
+      "mean_error": 0.3680150462962963,
+      "output_sha256": "8f8abdd85b525537e35efcfa8b7b41e3b5dae12ade95682084feeea650de6b45",
+      "outcome": "failed"
+    },
+    "block": {
+      "max_error": 35,
+      "mean_error": 0.3680150462962963,
+      "output_sha256": "8f8abdd85b525537e35efcfa8b7b41e3b5dae12ade95682084feeea650de6b45",
+      "outcome": "failed"
+    },
+    "level19": {
+      "max_error": 12,
+      "mean_error": 0.28457899305555556,
+      "output_sha256": "5b8ec3e8f2da180bf5ebac35cd2a39539095a993171395385e8b1b2280f4eb34",
+      "outcome": "pass"
+    }
+  },
+  "candidate_bits": {
+    "quality19": "valid1 | balanced2 | VBAQ16; no preanalysis8",
+    "quality27": "valid1 | balanced2 | preanalysis8 | VBAQ16",
+    "quality3": "valid1 | balanced2",
+    "quality9": "valid1 | preanalysis8; speed preset",
+    "quality2_label_correction": "Original file label balanced was an incorrect assumption before reading driver ABI; it is not a valid driver customquality setting. Retained as failed diagnostic only."
+  },
+  "comparisons": {
+    "pressure2m": {
+      "baseline": {
+        "sha256": "3dcc7d12716b7ce4325103ea5ae43fe63983ff2dc9a5bb3898c287812b17a637",
+        "bytes": 456218,
+        "metrics": {
+          "psnr": {
+            "mean": 47.79541666666666,
+            "min": 47.53,
+            "frames": 48
+          },
+          "ssim": {
+            "mean": 0.9885187916666666,
+            "min": 0.987774,
+            "frames": 48
+          }
+        },
+        "packet_bits": 3639520,
+        "peak_1s_bits": 1831040
+      },
+      "vbaq": {
+        "sha256": "3bc51bdc96f48faf056bfbca5db78fa9d6f55b763ae127a0c6d344ee0e7885f2",
+        "bytes": 460372,
+        "metrics": {
+          "psnr": {
+            "mean": 47.86145833333333,
+            "min": 47.62,
+            "frames": 48
+          },
+          "ssim": {
+            "mean": 0.9889948958333333,
+            "min": 0.988351,
+            "frames": 48
+          }
+        },
+        "packet_bits": 3672752,
+        "peak_1s_bits": 1917160
+      },
+      "full": {
+        "sha256": "0ded51eebeac5017987fb7854707ff461ee5acf4b62837192b5054904e2a0f69",
+        "bytes": 516220,
+        "metrics": {
+          "psnr": {
+            "mean": 48.10333333333333,
+            "min": 45.98,
+            "frames": 48
+          },
+          "ssim": {
+            "mean": 0.9894728958333333,
+            "min": 0.985479,
+            "frames": 48
+          }
+        },
+        "packet_bits": 4119536,
+        "peak_1s_bits": 2246528
+      }
+    },
+    "real1800": {
+      "baseline": {
+        "sha256": "6425eb1567fb4363b6c4e3b36eeeae55db579b4c05baccbfcacdb1f01c07bac2",
+        "bytes": 1758560,
+        "metrics": {
+          "psnr": {
+            "mean": 48.58208333333334,
+            "min": 47.75,
+            "frames": 48
+          },
+          "ssim": {
+            "mean": 0.987048625,
+            "min": 0.984222,
+            "frames": 48
+          }
+        },
+        "packet_bits": 14047240,
+        "peak_1s_bits": 7285968
+      },
+      "vbaq": {
+        "sha256": "203e2177a3f94f32750c57da716a7d5ea34833460af78d7b82be1e5ea86ad13e",
+        "bytes": 1808878,
+        "metrics": {
+          "psnr": {
+            "mean": 48.59041666666667,
+            "min": 47.79,
+            "frames": 48
+          },
+          "ssim": {
+            "mean": 0.9873019375,
+            "min": 0.984588,
+            "frames": 48
+          }
+        },
+        "packet_bits": 14449784,
+        "peak_1s_bits": 7532280
+      },
+      "full": {
+        "sha256": "8987324343665db1b6db5177ee8984d19e8d90d430bbd594aeea9f18ce768487",
+        "bytes": 1825724,
+        "metrics": {
+          "psnr": {
+            "mean": 48.57583333333333,
+            "min": 47.64,
+            "frames": 48
+          },
+          "ssim": {
+            "mean": 0.9872836875000001,
+            "min": 0.984227,
+            "frames": 48
+          }
+        },
+        "packet_bits": 14584552,
+        "peak_1s_bits": 7468272
+      }
+    },
+    "real3600-corrected": {
+      "baseline": {
+        "sha256": "e4ad9613527471fb52630847ab178144ac6fdab06fdff43a9e12625d2df052f3",
+        "bytes": 1880311,
+        "metrics": {
+          "psnr": {
+            "mean": 50.954791666666665,
+            "min": 49.64,
+            "frames": 48
+          },
+          "ssim": {
+            "mean": 0.9922352916666667,
+            "min": 0.990236,
+            "frames": 48
+          }
+        },
+        "packet_bits": 15022376,
+        "peak_1s_bits": 7804464
+      },
+      "vbaq": {
+        "sha256": "8a4b0732eb23253549a3b56c4837778daa0fea60d3aea431adf28e67bc4e4fdf",
+        "bytes": 1720368,
+        "metrics": {
+          "psnr": {
+            "mean": 50.778333333333336,
+            "min": 49.89,
+            "frames": 48
+          },
+          "ssim": {
+            "mean": 0.9922399166666667,
+            "min": 0.990719,
+            "frames": 48
+          }
+        },
+        "packet_bits": 13742832,
+        "peak_1s_bits": 7241864
+      },
+      "full": {
+        "sha256": "bf634bf5f42a1c55c2611f10f33312727f75476e24f2fed3d56d281f84a76fce",
+        "bytes": 1800995,
+        "metrics": {
+          "psnr": {
+            "mean": 50.82208333333333,
+            "min": 49.46,
+            "frames": 48
+          },
+          "ssim": {
+            "mean": 0.99228825,
+            "min": 0.989828,
+            "frames": 48
+          }
+        },
+        "packet_bits": 14387848,
+        "peak_1s_bits": 7385288
+      }
+    }
+  },
+  "alignment": {
+    "pressure2m": {
+      "reference_time_base": "1/1000",
+      "output_time_base": "1/24000",
+      "frames": 48,
+      "max_reference_timestamp_rounding_seconds": 0.0005,
+      "metric_pairing": "Explicit frame index N with settb1/24000,setpts=N*1001. MKV timestamps quantized to1ms; no dropped/duplicated frames, not literal timestamp equality.",
+      "invalid_source_pair": false
+    },
+    "real1800": {
+      "reference_time_base": "1/1000",
+      "output_time_base": "1/24000",
+      "frames": 48,
+      "max_reference_timestamp_rounding_seconds": 0.0005,
+      "metric_pairing": "Explicit frame index N with settb1/24000,setpts=N*1001. MKV timestamps quantized to1ms; no dropped/duplicated frames, not literal timestamp equality.",
+      "invalid_source_pair": false
+    },
+    "real3600-invalid": {
+      "reference_time_base": "1/1000",
+      "output_time_base": "1/24000",
+      "frames": 48,
+      "max_reference_timestamp_rounding_seconds": 0.0005,
+      "metric_pairing": "Explicit frame index N with settb1/24000,setpts=N*1001. MKV timestamps quantized to1ms; no dropped/duplicated frames, not literal timestamp equality.",
+      "invalid_source_pair": true
+    },
+    "real3600-corrected": {
+      "reference_time_base": "1/1000",
+      "output_time_base": "1/24000",
+      "frames": 48,
+      "max_reference_timestamp_rounding_seconds": 0.0005,
+      "metric_pairing": "Explicit frame index N with settb1/24000,setpts=N*1001. MKV timestamps quantized to1ms; no dropped/duplicated frames, not literal timestamp equality.",
+      "invalid_source_pair": false
+    }
+  },
+  "decision": "Use driver-bound Mesa/radeonsi quality19 under existing VBR target/maxrate/buffer; no qmax cap, blur, fixture exception, extra watchdog or feature gate. Root integration records final source revision separately.",
+  "accepted_tradeoff": "Second real window mean PQ-codePSNR decreases0.17646dB with8.506% fewer bytes; worst-framePSNR and mean/worstSSIM improve. Not all-metric dominance.",
+  "failures_retained": [
+    "baseline and four nonVBAQ sharp controls fail existing max<32 bar",
+    "second real-window first attempt encodes1800 reference3600; wholly rejected, only corrected window repeated",
+    "first referenceinspection defaultimageUID denied taskprivate path; corrected to ownedUID, no encode repeated",
+    "native directraw fixture omitted setparams and emitted unspecifiedPQ VUI; SPS metadata repaired from knownanalytical source without recoding; VCL/firstdecodedframe/grid hashes unchanged"
+  ],
+  "source_references": [
+    "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-26.0.8/src/gallium/frontends/va/encode.c",
+    "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-26.0.8/src/gallium/frontends/va/va_private.h",
+    "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-26.0.8/src/gallium/drivers/radeonsi/si_get.c",
+    "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-24.0.0/src/gallium/frontends/va/picture.c",
+    "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-22.3.6/src/gallium/frontends/va/picture.c",
+    "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-22.3.0/src/gallium/frontends/va/picture.c"
+  ],
+  "limits": [
+    "Two48frame windows of one plainPQ native16:9 title and one2second synthetic pressure fixture",
+    "Maximum sharp error scored first decoded frame only, not arbitraryHDRcontent universalbound",
+    "No client physical colorimetry, skin/artist reference, DV/S11 closure or fleet sustainedthroughput claim",
+    "EightMB output bound not used in these wrappers; individual ffmpeg60s/container240s+fixedCPU/memory and owned cancellation apply"
+  ],
+  "native_scored_pixel_binding": {
+    "baseline_first_raw_sha256": "6c3a33672cb1e21ea7c49dbbdcbd0003c40aba9d48e84eb1db225bd05e982147",
+    "candidate_first_raw_sha256": "1f38efef46386420c5d89640cb03a1c2a36c58c5bf187c87fdc8ad60ec441932",
+    "meaning": "Native first decoded frame byte-identical to corresponding scored sharp-control frame; maximum35/12 remain measured at that exact frame."
+  },
+  "cleanup": "remote-cleanup.json confirms all14 exact owned remote roots removed. Parallel client lanes are complete and their live resources and scratch are removed. Coordinator source/build/scoring archives remain only through qualification and landing; PR #1034 records their final removal."
+}
