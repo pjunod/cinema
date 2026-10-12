@@ -1205,6 +1205,37 @@ impl TranscodeManager {
         Ok(Self::lang_prefs_from(&settings))
     }
 
+    /// The settings item detail needs, read once through
+    /// [`plurx_core::store::CatalogueReader::display_settings`].
+    pub(crate) const DETAIL_DISPLAY_SETTING_KEYS: [&'static str; 4] = [
+        keys::AUDIO_LANG,
+        keys::SUB_LANG,
+        keys::SUB_MODE,
+        keys::DV_CONVERT,
+    ];
+
+    /// Item detail's track-language defaults and Dolby Vision conversion
+    /// choice from that one read, degrading exactly as [`Self::lang_prefs`]
+    /// and [`Self::dv_convert_enabled`] do when it fails.
+    pub(crate) fn detail_display_from(
+        &self,
+        settings: Result<std::collections::BTreeMap<String, String>, plurx_core::error::StoreError>,
+    ) -> (plurx_core::tracks::LangPrefs, bool) {
+        match settings {
+            Ok(settings) => (
+                Self::lang_prefs_from(&settings),
+                plurx_core::store::stored_switch(
+                    settings.get(keys::DV_CONVERT).map(String::as_str),
+                    true,
+                ),
+            ),
+            Err(_) => (
+                plurx_core::tracks::LangPrefs::default(),
+                self.dv_convertible,
+            ),
+        }
+    }
+
     /// The server-wide language preferences from settings a caller holds.
     pub(super) fn lang_prefs_from(
         settings: &std::collections::BTreeMap<String, String>,

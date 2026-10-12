@@ -4720,3 +4720,40 @@
         tokio::time::timeout(Duration::from_secs(2), proof).await.expect("completion resumes");
         assert!(rendition.output_measurement.lock().expect("measurement").complete_rates().is_some(), "retirement did not discard a verified complete trailer");
     }
+
+    /// Lab N4 (2026-10-11): a title whose start was refused for want of a
+    /// local fragment index waited for the round-robin indexing cursor to
+    /// reach it — about 56 hours behind 900 other files — and played only
+    /// through live recovery meanwhile. The refusal is now demand that the
+    /// next local pass examines first.
+    #[tokio::test]
+    async fn a_start_refused_for_a_missing_local_index_is_index_demand() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let mut file = media_file_at(testfixtures::source("h264"), 12_000);
+        file.video_codec = Some("h264".into());
+        file.video_profile = Some("High".into());
+        let error = serve
+            .try_create(
+                &request("refused", 0.0),
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
+                "refused".into(),
+            )
+            .await
+            .expect_err("a file with no index cannot start VOD");
+        assert_eq!(
+            crate::transcode::vod_refusal(&error)
+                .expect("a typed refusal")
+                .0,
+            "vod_index_pending"
+        );
+        assert_eq!(serve.local_index_demand(), vec![file.id]);
+        serve.settle_local_index_demand(file.id);
+        assert!(serve.local_index_demand().is_empty());
+    }

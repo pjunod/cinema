@@ -763,6 +763,9 @@ impl VodServe {
                     None => "this process has no cluster index identity".to_owned(),
                 }
             } else {
+                // The node-local pass builds this index; a viewer asking for
+                // it is the strongest reason to build it next.
+                self.shared.demand_local_index(file.id);
                 unavailable_reason.unwrap_or_else(|| {
                     "shared preparation is disabled; no matching local index exists".to_owned()
                 })
@@ -2499,6 +2502,9 @@ impl VodServe {
                     None => "this process has no cluster index identity".to_owned(),
                 }
             } else {
+                // The node-local pass builds this index; a viewer asking for
+                // it is the strongest reason to build it next.
+                self.shared.demand_local_index(file.id);
                 unavailable_reason.unwrap_or_else(|| {
                     "shared preparation is disabled; no matching local index exists".to_owned()
                 })

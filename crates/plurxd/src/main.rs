@@ -673,7 +673,12 @@ async fn dispatch(
                 .await?;
                 println!("{}", serde_json::to_string_pretty(&report)?);
                 eprintln!(
-                    "restore created a fenced first voter; stop every surviving old voter and rename its hiqlite directory before directing clients here"
+                    "restore created a fenced first voter; before directing clients here, \
+                     rejoin every surviving old member with a join token issued by this voter: \
+                     stop the node, create a new empty data directory owned by the service user, \
+                     copy plurx.toml and nothing else into it, move the old directory aside as \
+                     a retired copy and put the new one at the configured path, write a fresh \
+                     join token where join_token_file points, and start the node"
                 );
                 Ok(())
             }
