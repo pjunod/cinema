@@ -332,3 +332,11 @@ reason = "Batch03 PR917 was merged by explicit user direction after 10114 applic
 [[errata]]
 commit = "1088d7529401297bddced74bfa11c166457468d8"
 reason = "Batch03 PR917 landing1088d752 preserves all663 original regression fields. Three immutable Python references incorrectly include unittest class qualifiers: tests/operations/test_macos_p5_terminal_nals.py::P5TerminalNalCase::test_terminal_positives_preserve_every_original_sample_and_timing_table, tests/validation/test_python_zero_failure_recovery.py::ZeroFailureRecoveryCase::test_exact_zero_unit_history_and_prepare_refusal_import_no_passes, tests/validation/test_python_zero_failure_recovery.py::ZeroFailureRecoveryCase::test_corrupt_or_contradictory_evidence_refuses. Their canonical references are tests/operations/test_macos_p5_terminal_nals.py::test_terminal_positives_preserve_every_original_sample_and_timing_table, tests/validation/test_python_zero_failure_recovery.py::test_exact_zero_unit_history_and_prepare_refusal_import_no_passes, tests/validation/test_python_zero_failure_recovery.py::test_corrupt_or_contradictory_evidence_refuses. The exact classes and methods exist in the immutable landing tree; the completed audit resolved the other660 references. This permanent row records those three malformed historical trailers, retains the verified merge identity and leaves the boundary and all future regression checks unchanged. It does not claim the failed promotion gate passed."
+
+[[landings]]
+commit = "a9758d4d4d038326fce27a369dd528428055d5a3"
+tree = "6230ec84f4ed59ce8bfe165f45abbc7f527dc0ce"
+parents = ["85d98cd6c844262d55025b530442965460079ba5", "d86f0da06c35777165127c3291dd3cd6798bb88d"]
+title = "fix(remote): preserve receiver credits across quorum reads"
+pull = "1031"
+reason = "Verified PR1031 main API landing; custom MergeTitleField kept the raw corrective title without the PR number, so every later preflight refused 71e4f711 and a8018a6d as reaching main outside a landing. Its own message carries their shared Regression-Test line; this row recognizes identity only and waives no checks."
