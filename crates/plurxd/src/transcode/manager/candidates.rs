@@ -476,6 +476,7 @@ impl TranscodeManager {
                     (width, height),
                 );
                 let candidate = QualityCandidate {
+                    processed_hdr10: false,
                     id: CandidateId::for_recipe_digest(recipe_digest),
                     recipe_digest,
                     route: CandidateRoute::Remux,
@@ -683,6 +684,7 @@ impl TranscodeManager {
                 plurx_core::transcode::vbv_maxrate_bps(plan.options().video_bitrate_kbps)
                     + u64::from(audio_budget) * 1000;
             let candidate = QualityCandidate {
+                processed_hdr10: false,
                 id: CandidateId::for_recipe_digest(recipe_digest),
                 recipe_digest,
                 route: CandidateRoute::Encode,
@@ -1153,6 +1155,7 @@ impl TranscodeManager {
                     candidate.id == id
                         && candidate.decoder_compatible
                         && candidate.recipe_digest == selected.recipe_digest
+                        && candidate.processed_hdr10 == selected.processed_hdr10
                         && candidate.route == selected.route
                         && candidate.grade == selected.grade
                         && candidate.width == selected.width
@@ -1234,6 +1237,7 @@ impl TranscodeManager {
             || selected.recipe_digest != actual.recipe_digest
             || selected.route != actual.route
             || selected.planned_codec != actual.planned_codec
+            || selected.processed_hdr10 != actual.processed_hdr10
             || selected.grade != actual.grade
             || selected.width != actual.width
             || selected.height != actual.height
@@ -1779,6 +1783,7 @@ mod snapshot_catalog_regression {
             .candidate_recipe_digest(&exact, Presentation::Vod, false)
             .expect("digest");
         let candidate = QualityCandidate {
+            processed_hdr10: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Encode,

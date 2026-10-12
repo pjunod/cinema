@@ -2186,6 +2186,9 @@
       && ["original", "remux", "encode"].includes(candidate.route)
       && Number.isInteger(candidate.width) && candidate.width > 0 && candidate.width <= 16384
       && Number.isInteger(candidate.height) && candidate.height > 0 && candidate.height <= 16384
+      && (candidate.processed_hdr10 === undefined || typeof candidate.processed_hdr10 === "boolean")
+      && (candidate.processed_hdr10 !== true || candidate.route === "encode"
+        && candidate.grade === "hdr10" && candidate.planned_codec === "hevc")
       && candidate.decoder_compatible === true);
   }
   function playableQualityCandidates(candidates) {
@@ -2238,10 +2241,13 @@
     const eligible = (allowTrial ? compatibleQualityCandidates(candidates) : playableQualityCandidates(candidates)).filter(candidate =>
       !(link > 0 && qualityPressureCostBps(candidate) > link));
     const area = candidate => candidate.width * candidate.height;
-    const copied = eligible.filter(candidate => candidate.route !== "encode")
+    const processed = eligible.filter(candidate => candidate.processed_hdr10 === true
+      && (candidate.sustainable === true || candidate.complete_cache === true));
+    const preferred = processed.length ? processed : eligible;
+    const copied = preferred.filter(candidate => candidate.route !== "encode")
       .sort((a, b) => area(b) - area(a));
     if (copied.length) return copied[0];
-    const encodes = eligible.filter(candidate => candidate.route === "encode")
+    const encodes = preferred.filter(candidate => candidate.route === "encode")
       .sort((a, b) => area(a) - area(b) || (a.peak_bps || 0) - (b.peak_bps || 0));
     if (target && target.width_px > 0 && target.height_px > 0 && aspect > 0) {
       const width = Math.min(target.width_px, target.height_px * aspect);

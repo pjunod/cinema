@@ -1783,6 +1783,25 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
             completeCache: false, sustainable: false)
     }
 
+    func testProcessedHdr10PreferenceRequiresQualifiedProductionAndCodec() {
+        let original = candidate(2160, route: "remux")
+        func processed(sustainable: Bool = true, compatible: Bool = true, codec: String = "hevc", grade: String = "hdr10") -> QualityCandidate {
+            QualityCandidate(id: "0a7ba9bab6fbdd31bab5e5e362a3fac7", recipeDigest: Array(repeating: 0, count: 32),
+                route: "encode", width: 1280, height: 720, targetHeight: 720,
+                averageBps: 8_000_000, peakBps: 3_000_000, grade: grade,
+                decoderCompatible: compatible, completeCache: false, sustainable: sustainable,
+                plannedCodec: codec, processedHdr10: true)
+        }
+        func pick(_ row: QualityCandidate) -> Int? {
+            autoPreferredDisplayCandidate([original, row], neededWidth: 3840, neededHeight: 2160)?.height
+        }
+        XCTAssertEqual(pick(processed()), 720)
+        XCTAssertEqual(pick(processed(sustainable: false)), 2160)
+        XCTAssertEqual(pick(processed(compatible: false)), 2160)
+        XCTAssertEqual(pick(processed(codec: "h264")), 2160)
+        XCTAssertEqual(pick(processed(grade: "sdr")), 2160)
+    }
+
     func testRuntimeDecoderSnapshotUsesStrictServerVocabulary() throws {
         let video = VideoCaps(codec: "hevc", profiles: ["main10"], maxHeight: 1_440, maxWidth: 2_560,
             maxFrameRate: DecoderFrameRate(numerator: 30, denominator: 1), present: ["pq", "sdr"], dvProfiles: [8])

@@ -5434,6 +5434,7 @@ mod quorum_candidate_tests {
             "encode_route_unavailable"
         );
         let row = QualityCandidate {
+            processed_hdr10: false,
             id: requested,
             recipe_digest: [0; 32],
             route: CandidateRoute::Encode,

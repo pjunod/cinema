@@ -1481,6 +1481,7 @@ mod tests {
         // The incumbent's published response names its candidate: the
         // measured-Link verdict records that candidate's rung.
         let incumbent = QualityCandidate {
+            processed_hdr10: false,
             id: CandidateId::for_recipe_digest([4; 32]),
             recipe_digest: [4; 32],
             route: CandidateRoute::Encode,
@@ -2548,6 +2549,7 @@ mod tests {
         let row = |height: u32| {
             let digest = [height as u8; 32];
             QualityCandidate {
+                processed_hdr10: false,
                 id: CandidateId::for_recipe_digest(digest),
                 recipe_digest: digest,
                 route: CandidateRoute::Encode,
@@ -2906,6 +2908,7 @@ mod tests {
         use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
         let digest = [12; 32];
         let original = QualityCandidate {
+            processed_hdr10: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Remux,
@@ -2978,6 +2981,7 @@ mod tests {
         use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
         let digest = [4; 32];
         let candidate = QualityCandidate {
+            processed_hdr10: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Encode,

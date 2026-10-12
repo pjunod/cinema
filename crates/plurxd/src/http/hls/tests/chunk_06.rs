@@ -503,6 +503,7 @@ fn d6_unknown_aspect_fallback_lands_below_the_starved_rung_instead_of_refusing()
     let row = |height: u32, route: CandidateRoute| {
         let digest = [(height / 8) as u8 ^ route as u8; 32];
         QualityCandidate {
+            processed_hdr10: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route,
@@ -2288,6 +2289,7 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
             dispatch_supported: true,
             partial: false,
             candidate: QualityCandidate {
+                processed_hdr10: false,
                 id: CandidateId::for_recipe_digest([seed; 32]),
                 recipe_digest: [seed; 32],
                 route: CandidateRoute::Encode,
@@ -4318,6 +4320,7 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
     );
     let digest = [12; 32];
     let candidate = QualityCandidate {
+        processed_hdr10: false,
         id: CandidateId::for_recipe_digest(digest),
         recipe_digest: digest,
         route: CandidateRoute::Encode,
@@ -4385,6 +4388,7 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
     };
     for route in [CandidateRoute::Original, CandidateRoute::Remux] {
         let copy_candidate = QualityCandidate {
+            processed_hdr10: false,
             route,
             ..candidate.clone()
         };
@@ -4629,6 +4633,7 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
     // link receipts are bound to below.
     let incumbent_digest = [7; 32];
     let incumbent = QualityCandidate {
+        processed_hdr10: false,
         id: CandidateId::for_recipe_digest(incumbent_digest),
         recipe_digest: incumbent_digest,
         route: CandidateRoute::Encode,
@@ -4752,6 +4757,7 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
     .expect("accepted actor");
     let digest = [12; 32];
     let candidate = QualityCandidate {
+        processed_hdr10: false,
         id: CandidateId::for_recipe_digest(digest),
         recipe_digest: digest,
         route: CandidateRoute::Remux,
@@ -5454,6 +5460,7 @@ async fn prepared_owner_catalog_is_bounded_by_the_create_stage_not_the_prime() {
     state.serving.validation_set_ready(true).await;
     let digest = [0x5a; 32];
     let candidate = QualityCandidate {
+        processed_hdr10: false,
         id: CandidateId::for_recipe_digest(digest),
         recipe_digest: digest,
         route: CandidateRoute::Encode,
@@ -5732,6 +5739,7 @@ fn sharing_resource_validator_accepts_actual_master_and_subtitle_generators() {
 fn finite_auto_hevc_preference_preserves_shape_evidence_and_explicit_choice() {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
     let avc = QualityCandidate {
+        processed_hdr10: false,
         id: CandidateId::for_recipe_digest([1; 32]),
         recipe_digest: [1; 32],
         route: CandidateRoute::Encode,

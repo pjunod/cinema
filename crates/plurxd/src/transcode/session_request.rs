@@ -1203,6 +1203,7 @@ pub(crate) fn continuous_test_candidate_context(
     height: u32,
 ) -> CandidateExecutionContext {
     super::TranscodeManager::candidate_context(&plurx_core::playback::candidate::QualityCandidate {
+        processed_hdr10: false,
         id,
         recipe_digest: digest,
         route: plurx_core::playback::candidate::CandidateRoute::Encode,

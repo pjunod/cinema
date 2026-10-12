@@ -3818,6 +3818,7 @@ mod retained_recovery_tests {
             .expect("actual bounded enqueue receiver");
         let digest = [42; 32];
         let candidate = QualityCandidate {
+            processed_hdr10: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Remux,

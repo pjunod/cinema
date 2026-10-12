@@ -357,9 +357,12 @@ func autoRecoveryCandidate(_ candidates: [QualityCandidate], current: QualityCan
 /// to climb back after any downgrade.
 func autoPreferredDisplayCandidate(_ candidates: [QualityCandidate], neededWidth: Double, neededHeight: Double) -> QualityCandidate? {
     let area = { (candidate: QualityCandidate) in Int64(candidate.width) * Int64(candidate.height) }
-    return candidates.first { $0.route != "encode" } ?? candidates.filter {
+    let processed = candidates.filter { $0.processedHdr10 == true && $0.hasValidIdentity &&
+        $0.decoderCompatible && ($0.sustainable || $0.completeCache) }
+    let preferred = processed.isEmpty ? candidates : processed
+    return preferred.first { $0.route != "encode" } ?? preferred.filter {
         autoDisplayFits(width: $0.width, height: $0.height, neededWidth: neededWidth, neededHeight: neededHeight)
-    }.min { area($0) < area($1) } ?? candidates.max { area($0) < area($1) }
+    }.min { area($0) < area($1) } ?? preferred.max { area($0) < area($1) }
 }
 
 func autoDisplayFits(width: Int, height: Int, neededWidth: Double, neededHeight: Double) -> Bool {
