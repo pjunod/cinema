@@ -68,7 +68,7 @@ impl TranscodeManager {
         self.hooks.get().before_quality_catalog_ordinary().await;
     }
     #[cfg(any(target_os = "linux", test))]
-    fn processed_hint_key(
+    pub(super) fn processed_hint_key(
         &self,
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
         query: &crate::media_pool::QualityCatalogRequest,

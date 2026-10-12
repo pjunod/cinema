@@ -162,6 +162,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
             Session {
                 children: Vec::new(),
                 root_admission: None,
+                processed_reuse_scope: None,
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
@@ -214,6 +215,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
             Session {
                 children: Vec::new(),
                 root_admission: None,
+                processed_reuse_scope: None,
                 passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key: replacement_key,
@@ -3433,6 +3435,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
             Session {
                 children: Vec::new(),
                 root_admission: None,
+                processed_reuse_scope: None,
                 passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key,

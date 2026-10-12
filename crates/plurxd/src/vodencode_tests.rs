@@ -1971,7 +1971,7 @@ async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_sub
     req.kind = SessionKind::Transcode { height: encoding.options.target_height };
     let attribution = VodAttribution { user_name: "user", item_title: "prepared root", supersession_user: "user" };
     let attach = |admitted_encoding: Arc<crate::vodencode::Encoding>, permit| VodRecipeRequest {
-        root_admission: Some(PreparedRootAdmission { instance_allowance: None, instance_nonce: None, encoding: admitted_encoding, permit }),
+        root_admission: Some(PreparedRootAdmission { reuse_scope: None, reused_parent: None, instance_allowance: None, instance_nonce: None, encoding: admitted_encoding, permit }),
         request: &req, encoding: Some(Arc::clone(&encoding)),
         measured_candidate: None, retained_capture: RetainedOutputCapture::New,
         soundtrack: None, companion: None,
@@ -2007,6 +2007,65 @@ async fn prepared_root_reuses_one_credit_without_private_readers_and_refuses_sub
         encoding.admissions.software_in_use() == 0).await;
     assert!(rendition.readers.lock().await.is_empty());
     assert!(rendition.retained_admission.current().is_none(), "cache owns no credit");
+}
+
+#[tokio::test]
+async fn processed_root_reuse_rejects_expiry_scope_and_ended_exact_owner() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("exact processed reuse");
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "2").await.expect("pool");
+    let permit = encoding.try_permit().await.expect("root capacity");
+    let serve = local_serve(base.path().join("vod"), Arc::clone(&encoding.store));
+    let mut req = request("exact-root", 0.0);
+    req.request_id = Some("original-incarnation".into());
+    req.kind = SessionKind::Transcode { height: encoding.options.target_height };
+    let scope = [42; 32];
+    let attribution = VodAttribution { user_name: "user", item_title: "processed", supersession_user: "user" };
+    serve.try_create(VodRecipeRequest {
+        root_admission: Some(PreparedRootAdmission {
+            reuse_scope: Some(scope), reused_parent: None, instance_allowance: None,
+            instance_nonce: Some([7; 16]), encoding: Arc::clone(&encoding), permit,
+        }), request: &req, encoding: Some(Arc::clone(&encoding)),
+        ..(&req).into()
+    }, &file, &settings(), attribution, "original".into()).await.expect("original");
+    let (rendition, permit, owner) = {
+        let sessions = serve.shared.sessions.lock().await;
+        let session = &sessions["original"];
+        (Arc::clone(session.live_rendition().expect("live")), session.root_admission.clone().expect("credit"), session.response_owner())
+    };
+    let mut token = ProcessedRootReuse {
+        session_id: "original".into(), scope, owner, rendition: Arc::clone(&rendition),
+        deadline: Instant::now() + Duration::from_secs(10),
+    };
+    {
+        let sessions = serve.shared.sessions.lock().await;
+        let session = &sessions["original"];
+        assert!(token.matches(session, &permit));
+        token.scope = [43; 32];
+        assert!(!token.matches(session, &permit), "different immutable query scope");
+        token.scope = scope;
+        token.deadline = Instant::now() - Duration::from_millis(1);
+        assert!(!token.matches(session, &permit), "fixed expiry cannot renew");
+        token.deadline = Instant::now() + Duration::from_secs(10);
+    }
+    let mut successor = req.clone();
+    successor.previous_session_id = Some("original".into());
+    successor.request_id = Some("successor-incarnation".into());
+    assert!(serve.capture_processed_root(&successor, "another-user", scope, token.deadline).await.is_none());
+    assert!(serve.capture_processed_root(&successor, "user", [43; 32], token.deadline).await.is_none());
+    assert!(serve.end("original", Terminal::Deleted).await);
+    // The retained graph and capacity remain accessible through local Arcs,
+    // but no longer confer the exact parent's live authority.
+    let refused = serve.try_create(VodRecipeRequest {
+        root_admission: Some(PreparedRootAdmission {
+            reuse_scope: Some(scope), reused_parent: Some(token), instance_allowance: None,
+            instance_nonce: None, encoding: Arc::clone(&encoding), permit,
+        }), request: &successor, encoding: Some(Arc::clone(&encoding)),
+        ..(&successor).into()
+    }, &file, &settings(), attribution, "refused-successor".into()).await.expect_err("ended predecessor");
+    assert!(refused.contains("vod_preparation_changed"));
+    assert!(!serve.shared.sessions.lock().await.contains_key("refused-successor"));
 }
 
 #[tokio::test]

@@ -826,10 +826,63 @@ impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
 }
 
 pub(crate) struct PreparedRootAdmission {
+    pub(crate) reuse_scope: Option<[u8; 32]>,
+    pub(crate) reused_parent: Option<ProcessedRootReuse>,
     pub(crate) instance_allowance: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     pub(crate) instance_nonce: Option<[u8; 16]>,
     pub(crate) encoding: Arc<crate::vodencode::Encoding>,
     pub(crate) permit: crate::vodencode::EncodePermit,
+}
+
+/// Exact process-private predecessor, never a recipe-key lookup capability.
+pub(crate) struct ProcessedRootReuse {
+    session_id: String,
+    scope: [u8; 32],
+    owner: ResponseOwner,
+    rendition: Arc<Rendition>,
+    deadline: Instant,
+}
+
+impl PreparedRootAdmission {
+    pub(crate) fn production_evidence(&self) -> Option<crate::vodencode::ActiveProductionEvidence> {
+        if self.reused_parent.is_some() {
+            #[cfg(any(target_os = "linux", test))]
+            return self.encoding.processed_production_for(&self.permit);
+            #[cfg(not(any(target_os = "linux", test)))]
+            return None;
+        }
+        self.encoding.active_production_evidence()
+    }
+}
+
+impl ProcessedRootReuse {
+    fn matches(&self, session: &Session, permit: &crate::vodencode::EncodePermit) -> bool {
+        Instant::now() < self.deadline
+            && session.renewable()
+            && session.processed_reuse_scope == Some(self.scope)
+            && Arc::ptr_eq(&session.lifecycle, &self.owner.lifecycle)
+            && Arc::ptr_eq(&session.incarnation, &self.owner.incarnation)
+            && session
+                .rendition
+                .as_ref()
+                .is_some_and(|rendition| Arc::ptr_eq(rendition, &self.rendition))
+            && session
+                .root_admission
+                .as_ref()
+                .is_some_and(|current| current.same_reservation(permit))
+            && self
+                .rendition
+                .retained_admission
+                .current()
+                .is_some_and(|current| current.same_reservation(permit))
+            && !self.rendition.closed.load(Acquire)
+            && self.rendition.failure().is_none()
+            && self
+                .rendition
+                .source
+                .as_ref()
+                .is_none_or(|source| source.unchanged())
+    }
 }
 
 /// Private dispatch-attested identity, never a client proof or catalog budget.

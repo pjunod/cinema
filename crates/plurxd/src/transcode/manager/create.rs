@@ -1208,13 +1208,6 @@ impl TranscodeManager {
             else {
                 return Ok(None);
             };
-            // Includes closed instances awaiting physical cleanup; even an
-            // empty failed directory cannot retain unbounded shader graphs.
-            let Ok(instance_allowance) =
-                Arc::clone(&self.processed_instance_slots).try_acquire_owned()
-            else {
-                return Ok(None);
-            };
             let deadline = crate::media_pool::create_stage_deadline(Duration::from_secs(8))
                 - Duration::from_millis(750);
             if tokio::time::Instant::now() >= deadline {
@@ -1254,22 +1247,59 @@ impl TranscodeManager {
             context.normalized_geometry = false;
             context.profile = None;
             context.planning_snapshot = Some(Arc::new(planning.clone()));
-            let mut credit = None;
-            let Some(mut encoding) = self
-                .prepare_vod_encoding_with_source(
-                    &trial,
-                    &file,
-                    None,
-                    Some(super::planning_hwaccel_preference(&planning)),
-                    Some((&mut credit, deadline)),
-                )
-                .await?
-            else {
-                return Ok(None);
+            let reuse_scope = original
+                .catalog_query
+                .as_ref()
+                .and_then(|query| self.processed_hint_key(&planning, query));
+            let reused = if let Some(scope) = reuse_scope {
+                self.vod
+                    .capture_processed_root(
+                        request,
+                        &recovery.supersession_scope(),
+                        scope,
+                        deadline.into_std(),
+                    )
+                    .await
+                    .filter(|root| root.encoding.options.target_height == height)
+            } else {
+                None
             };
-            let Some(credit) = credit else {
-                return Ok(None);
+            let mut root = match reused {
+                Some(root) => root,
+                None => {
+                    // Closed graphs retain this bounded allowance until physical cleanup.
+                    let Ok(instance_allowance) =
+                        Arc::clone(&self.processed_instance_slots).try_acquire_owned()
+                    else {
+                        return Ok(None);
+                    };
+                    let mut credit = None;
+                    let Some(encoding) = self
+                        .prepare_vod_encoding_with_source(
+                            &trial,
+                            &file,
+                            None,
+                            Some(super::planning_hwaccel_preference(&planning)),
+                            Some((&mut credit, deadline)),
+                        )
+                        .await?
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(permit) = credit else {
+                        return Ok(None);
+                    };
+                    crate::vodserve::PreparedRootAdmission {
+                        reuse_scope,
+                        reused_parent: None,
+                        instance_allowance: Some(Arc::new(instance_allowance)),
+                        instance_nonce: Some(*uuid::Uuid::new_v4().as_bytes()),
+                        encoding,
+                        permit,
+                    }
+                }
             };
+            let encoding = &mut root.encoding;
             let Some(runtime) = encoding.dv_runtime.as_ref().cloned() else {
                 return Ok(None);
             };
@@ -1281,72 +1311,86 @@ impl TranscodeManager {
                     "processed candidate inputs changed during qualification",
                 ));
             }
-            Arc::get_mut(&mut encoding)
-                .ok_or("processed trial executable escaped before qualification")?
-                .candidate_recipe = Some(digest);
-            let grid = encoding.grid;
-            let plan = grid.plan(file.duration_ms.ok_or("processed duration missing")?, 0);
-            let first = runtime
-                .prepared
-                .lock()
-                .map_err(|_| "processed first window lock poisoned")?
-                .as_ref()
-                .map(|(index, _)| *index)
-                .ok_or("processed first window missing")?;
-            let first_entry = plan.entry(first).ok_or("processed first entry missing")?;
-            let end_ms = |entry: &plurx_core::segplan::PlanEntry| {
-                ((entry.start_ticks + entry.duration_ticks) * 1000 / u64::from(grid.numerator))
-                    as i64
-            };
-            encoding.reset_active_production(0, true);
-            encoding.note_active_segment(0, first, end_ms(first_entry));
-            let semantic = match &encoding.dv_processing {
-                plurx_core::transcode::dv_processing::DvSelection::Selected(selected) => {
-                    selected.semantic_digest()
-                }
-                _ => return Ok(None),
-            };
-            for entry in plan.entries.iter().skip(first as usize + 1).take(6) {
-                if tokio::time::Instant::now() >= deadline {
-                    break;
-                }
-                let worker = credit
-                    .clone()
-                    .try_claim_worker()
-                    .ok_or("processed qualification credit still busy")?;
-                let (_, selected) = runtime
-                    .execute_until(
-                        &file,
-                        &encoding.plan,
-                        &encoding.options,
-                        grid,
-                        entry,
-                        &encoding.executable.path,
-                        crate::dv_segment::SegmentAdmission::Retained(worker),
-                        Arc::new(crate::prodrun::ProducerSlot::new()),
-                        tokio_util::sync::CancellationToken::new(),
-                        None,
-                        Some(deadline),
-                    )
-                    .await?;
-                if selected.semantic_digest() != semantic {
-                    return Err("processed qualification recipe changed".into());
-                }
-                encoding.note_active_segment(0, entry.index, end_ms(entry));
-                if encoding.active_production_evidence().is_some_and(|proof| {
-                    proof.milli_realtime >= 1150
-                        && proof.active_ms >= 2000
-                        && proof.completed_segments >= 2
-                }) {
-                    break;
+            if root.reused_parent.is_none() {
+                Arc::get_mut(encoding)
+                    .ok_or("processed trial executable escaped before qualification")?
+                    .candidate_recipe = Some(digest);
+            }
+            if root.reused_parent.is_none() {
+                let grid = encoding.grid;
+                let plan = grid.plan(file.duration_ms.ok_or("processed duration missing")?, 0);
+                let first = runtime
+                    .prepared
+                    .lock()
+                    .map_err(|_| "processed first window lock poisoned")?
+                    .as_ref()
+                    .map(|(index, _)| *index)
+                    .ok_or("processed first window missing")?;
+                let first_entry = plan.entry(first).ok_or("processed first entry missing")?;
+                let end_ms = |entry: &plurx_core::segplan::PlanEntry| {
+                    ((entry.start_ticks + entry.duration_ticks) * 1000 / u64::from(grid.numerator))
+                        as i64
+                };
+                encoding.reset_active_production(0, true);
+                encoding.note_active_segment(0, first, end_ms(first_entry));
+                let semantic = match &encoding.dv_processing {
+                    plurx_core::transcode::dv_processing::DvSelection::Selected(selected) => {
+                        selected.semantic_digest()
+                    }
+                    _ => return Ok(None),
+                };
+                for entry in plan.entries.iter().skip(first as usize + 1).take(6) {
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    let worker = root
+                        .permit
+                        .clone()
+                        .try_claim_worker()
+                        .ok_or("processed qualification credit still busy")?;
+                    let (_, selected) = runtime
+                        .execute_until(
+                            &file,
+                            &encoding.plan,
+                            &encoding.options,
+                            grid,
+                            entry,
+                            &encoding.executable.path,
+                            crate::dv_segment::SegmentAdmission::Retained(worker),
+                            Arc::new(crate::prodrun::ProducerSlot::new()),
+                            tokio_util::sync::CancellationToken::new(),
+                            None,
+                            Some(deadline),
+                        )
+                        .await?;
+                    if selected.semantic_digest() != semantic {
+                        return Err("processed qualification recipe changed".into());
+                    }
+                    encoding.note_active_segment(0, entry.index, end_ms(entry));
+                    if encoding.active_production_evidence().is_some_and(|proof| {
+                        proof.milli_realtime >= 1150
+                            && proof.active_ms >= 2000
+                            && proof.completed_segments >= 2
+                    }) {
+                        break;
+                    }
                 }
             }
             if tokio::time::Instant::now() >= deadline
-                || encoding.active_production_evidence().is_none_or(|proof| {
+                || root.production_evidence().is_none_or(|proof| {
                     proof.milli_realtime < 1150
                         || proof.active_ms < 2000
                         || proof.completed_segments < 2
                 })
+            {
+                return Ok(None);
+            }
+            let encoding = &root.encoding;
+            if !encoding
+                .engine
+                .is_current_with_executable(&encoding.executable)
+                .await
+                || !runtime.source.unchanged()
             {
                 return Ok(None);
             }
@@ -1399,12 +1443,7 @@ impl TranscodeManager {
                 .prepared_processing = Some(PreparedCandidateOnce::new(
                 lease_binding,
                 deadline.into_std(),
-                crate::vodserve::PreparedRootAdmission {
-                    instance_allowance: Some(Arc::new(instance_allowance)),
-                    instance_nonce: Some(*uuid::Uuid::new_v4().as_bytes()),
-                    encoding,
-                    permit: credit,
-                },
+                root,
             ));
             Ok(Some((trial, candidate)))
         }
@@ -2705,14 +2744,11 @@ impl TranscodeManager {
                 || context.selected_candidate.recipe_digest != actual
                 || i64::from(context.selected_candidate.target_height)
                     != prepared.encoding.options.target_height
-                || prepared
-                    .encoding
-                    .active_production_evidence()
-                    .is_none_or(|proof| {
-                        proof.milli_realtime < 1150
-                            || proof.active_ms < 2000
-                            || proof.completed_segments < 2
-                    })
+                || prepared.production_evidence().is_none_or(|proof| {
+                    proof.milli_realtime < 1150
+                        || proof.active_ms < 2000
+                        || proof.completed_segments < 2
+                })
                 || !prepared
                     .encoding
                     .engine

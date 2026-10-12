@@ -752,6 +752,7 @@ async fn insert_control_session(
         Session {
             children: Vec::new(),
                 root_admission: None,
+                processed_reuse_scope: None,
             passive_grant: None,
             rendition: Some(rendition),
             retained_output: None,
@@ -806,6 +807,7 @@ async fn insert_terminal_session(
         Session {
             children: Vec::new(),
                 root_admission: None,
+                processed_reuse_scope: None,
             passive_grant: None,
             rendition: None,
             retained_output: None,

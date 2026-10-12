@@ -452,6 +452,39 @@ impl VodServe {
             .prepare_recipe(prepared, file, settings, viewer)
             .await?;
         let canonical_key = rendition_key(&recipe, &identity);
+        if let Some(reuse) = prepared
+            .root_admission
+            .as_ref()
+            .and_then(|root| root.reused_parent.as_ref())
+        {
+            // Resolve only the captured physical graph. Even a same-key
+            // cache replacement must never spend its predecessor's credit.
+            let rendition = Arc::clone(&reuse.rendition);
+            let gate = self
+                .shared
+                .rendition_build_gate(&rendition.key)
+                .lock_owned()
+                .await;
+            let cached = self.shared.renditions.lock().await;
+            if canonical_key != rendition_key(&rendition.recipe, &identity)
+                || !cached
+                    .get(&rendition.key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &rendition))
+                || rendition.closed.load(Acquire)
+            {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_preparation_changed",
+                    "the captured processing graph changed",
+                ));
+            }
+            return Ok((
+                RenditionAttachment {
+                    rendition,
+                    _build_guard: gate,
+                },
+                incoming_logical,
+            ));
+        }
         let processing_instance = prepared
             .root_admission
             .as_ref()
@@ -1264,6 +1297,11 @@ impl VodServe {
 
         // The sorted build gates still pin the exact cached rendition here.
         // Same-key substitution cannot spend another recipe's prepared credit.
+        let processed_reuse_scope = prepared
+            .root_admission
+            .as_ref()
+            .and_then(|root| root.reuse_scope);
+        let mut reused_parent = None;
         let root_admission = prepared
             .root_admission
             .take()
@@ -1279,6 +1317,18 @@ impl VodServe {
                         "the admitted executable changed before attachment",
                     ));
                 }
+                if prepared.reused_parent.is_some()
+                    && !rendition
+                        .retained_admission
+                        .current()
+                        .is_some_and(|current| current.same_reservation(&prepared.permit))
+                {
+                    return Err(crate::transcode::vod_refusal_error(
+                        "vod_preparation_changed",
+                        "the captured processing reservation changed",
+                    ));
+                }
+                reused_parent = prepared.reused_parent;
                 Ok(rendition.retained_admission.bind(prepared.permit))
             })
             .transpose()?;
@@ -1304,6 +1354,23 @@ impl VodServe {
             rendition.seconds_per_segment,
         )
         .await;
+        if reused_parent.is_some() {
+            let encoding = rendition
+                .recipe
+                .encoding
+                .as_ref()
+                .ok_or("processed executable missing")?;
+            if !encoding
+                .engine
+                .is_current_with_executable(&encoding.executable)
+                .await
+            {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_preparation_changed",
+                    "processed executable changed during attachment",
+                ));
+            }
+        }
         let _release_transition = if let Some(release_fence) = fences.release_fence {
             let guard = release_fence.transition.lock_owned().await;
             if release_fence.released.load(Acquire) {
@@ -1333,6 +1400,7 @@ impl VodServe {
         let mut replacement = Session {
             children: Vec::new(),
             root_admission,
+            processed_reuse_scope,
             passive_grant: passive_grant.clone(),
             retained_output,
             rendition: Some(Arc::clone(&rendition)),
@@ -1451,6 +1519,35 @@ impl VodServe {
                 "vod_passive_route_expired",
                 "passive route expired during preparation",
             ));
+        }
+        if let Some(reuse) = reused_parent.as_ref() {
+            let valid = sessions.get(&reuse.session_id).is_some_and(|previous| {
+                replacement
+                    .root_admission
+                    .as_ref()
+                    .is_some_and(|permit| reuse.matches(previous, permit))
+            });
+            #[cfg(any(target_os = "linux", test))]
+            let production_current = replacement.root_admission.as_ref().is_some_and(|permit| {
+                rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .and_then(|encoding| encoding.processed_production_for(permit))
+                    .is_some_and(|proof| {
+                        proof.milli_realtime >= 1150
+                            && proof.active_ms >= 2000
+                            && proof.completed_segments >= 2
+                    })
+            });
+            #[cfg(not(any(target_os = "linux", test)))]
+            let production_current = false;
+            if !valid || !production_current {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_preparation_changed",
+                    "the exact processing predecessor ended or changed",
+                ));
+            }
         }
         if let Some(previous_readers) = previous_readers.as_mut() {
             previous_readers.remove(&session_id);
@@ -2135,6 +2232,7 @@ impl VodServe {
         let replacement = Session {
             children: Vec::new(),
             root_admission: None,
+            processed_reuse_scope: None,
             passive_grant: None,
             retained_output: None,
             sdr_master_codecs: false,

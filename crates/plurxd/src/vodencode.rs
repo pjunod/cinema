@@ -605,6 +605,9 @@ pub(crate) struct EncodeWorkerPermit {
 }
 
 impl EncodePermit {
+    pub(crate) fn same_reservation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self._reservation, &other._reservation)
+    }
     pub(crate) fn retained_resources(&self) -> crate::admission::RetainedTranscodePermit<'_> {
         crate::admission::RetainedTranscodePermit {
             hardware: self._reservation._hardware.as_ref(),
@@ -890,6 +893,21 @@ impl Encoding {
             .expect("active production")
             .evidence
             .filter(|proof| proof.observed_at.elapsed() <= Duration::from_secs(15))
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn processed_production_for(
+        &self,
+        permit: &EncodePermit,
+    ) -> Option<ActiveProductionEvidence> {
+        let window = self.active_production.lock().expect("active production");
+        (window.active
+            && window
+                .processed_reservation
+                .ptr_eq(&Arc::downgrade(&permit._reservation)))
+        .then_some(window.evidence)
+        .flatten()
+        .filter(|proof| proof.observed_at.elapsed() <= Duration::from_secs(15))
     }
 
     pub(crate) fn promote(&self) {

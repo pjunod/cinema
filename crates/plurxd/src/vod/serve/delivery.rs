@@ -1,6 +1,60 @@
 use super::*;
 
 impl VodServe {
+    /// Capture one exact admitted predecessor under one registry read. Recipe
+    /// descriptions alone cannot mint this executable or its capacity.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) async fn capture_processed_root(
+        &self,
+        request: &SessionRequest,
+        supersession_user: &str,
+        scope: [u8; 32],
+        deadline: Instant,
+    ) -> Option<PreparedRootAdmission> {
+        let sessions = self.shared.sessions.lock().await;
+        let id = request.previous_session_id.as_deref()?;
+        let session = sessions.get(id)?;
+        if !session.renewable()
+            || session.supersession_user != supersession_user
+            || session.playback_id != request.playback_id
+            || session.file.id != request.file_id
+            || session.processed_reuse_scope != Some(scope)
+            || Instant::now() >= deadline
+        {
+            return None;
+        }
+        let rendition = Arc::clone(session.live_rendition()?);
+        let encoding = Arc::clone(rendition.recipe.encoding.as_ref()?);
+        let permit = session.root_admission.clone()?;
+        let reused_parent = ProcessedRootReuse {
+            session_id: id.to_owned(),
+            scope,
+            owner: session.response_owner(),
+            rendition: Arc::clone(&rendition),
+            deadline,
+        };
+        if !rendition.ephemeral_processing
+            || !reused_parent.matches(session, &permit)
+            || encoding
+                .processed_production_for(&permit)
+                .is_none_or(|proof| {
+                    proof.milli_realtime < 1150
+                        || proof.active_ms < 2000
+                        || proof.completed_segments < 2
+                })
+        {
+            return None;
+        }
+        Some(PreparedRootAdmission {
+            reuse_scope: Some(scope),
+            reused_parent: Some(reused_parent),
+            instance_allowance: rendition._processed_instance_allowance.clone(),
+            instance_nonce: None,
+            encoding,
+            permit,
+        })
+    }
+
     /// Every active VOD handle for the operator activity/session inventory.
     /// Tombstones remain addressable long enough to return their typed 410,
     /// but they are no longer deliveries and therefore stay out of this list.

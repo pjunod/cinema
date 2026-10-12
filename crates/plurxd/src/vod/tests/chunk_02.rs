@@ -2664,6 +2664,7 @@
             Session {
                 children: Vec::new(),
                 root_admission: None,
+                processed_reuse_scope: None,
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
@@ -2804,6 +2805,7 @@
             Session {
                 children: Vec::new(),
                 root_admission: None,
+                processed_reuse_scope: None,
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
