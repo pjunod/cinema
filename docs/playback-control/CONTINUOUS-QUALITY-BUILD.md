@@ -10065,8 +10065,8 @@ larger display report passcode required. The unlocked smaller tablet has an
 existing production Plurx process. The TV has existing production and older
 CQ Lab build-216 processes, which the HDR owner confirmed were not theirs.
 Leave these processes intact pending an unlock or explicit idle/cleanup
-reply. The independent HDR Safari owner must release its tab before this
-chat uses that lane. HDR phases do not count as a continuous-quality series.
+reply. The independent HDR Safari owner released its lane before the campaign in
+§10.308. HDR phases do not count as a continuous-quality series.
 Physical iPhone/TV and Safari campaigns, unreachable client installs, and the
 broader independent-output/source/pressure limits remain open.
 
@@ -10076,3 +10076,47 @@ runner, cold-build timeout and moving-main preflight ruling; they have not
 been silently waived or claimed repaired here. This continuation runs no
 unit suites and makes no new implementation merge. Any new reviewed change
 goes to the operator's designated batched-merge chat for final qualification.
+
+
+### 10.308 Safari LAN HTTP qualification and verifier diagnosis — October 12
+
+**Status: failed acceptance; diagnosis in progress.** After the independent
+HDR worker released Safari, use a separate owned native Safari window against
+an isolated Linux daemon from the same `1f02b7938` deployment. Native controls
+perform every playback, quality and close action. The adapter only installs
+measurement observers and reads the lab page. The committed `runOneCase` and
+`mixedCase` scoring limits remain unchanged.
+
+One adapter-only preparation attempt started no media. Two subsequent attempts
+timed out at the 30-second first-frame deadline. Preserve both failures: the
+first had one decoded 1080p frame while paused; the second had no advancing
+frame. Each actor retired every owned process (46, 48 and 45 respectively).
+A read-only observer then confirmed valid 0–2-second video/audio buffers and
+paused transport. A native Play click after preparation started the fixture.
+
+That run presented all 15 requested 1080p/720p manual changes in the same
+session and player, but **failed**: transition video-gap p95 and maximum were
+2,000 ms, with 53 wait events, 10 stalls and 52 hitches. Auto was not run because
+the manual series failed. The long 116,566 ms handoff field includes the
+operator's delay opening a hidden quality menu; it is not a measured 116-second
+backend switch latency. Supply stalls also occurred independently at successive
+two-second media boundaries. No limit was relaxed and no partial pass was
+promoted. End retired the producers and all 55 owned processes exited.
+Raw receipt SHA-256:
+`971d90e540fa8d965b96a48b67179baa63b55617604bc91507cad60e1233dc36`.
+
+A separate deterministic 4 MiB timing diagnostic found that Safari LAN HTTP
+has no secure-context WebCrypto: the shipped attachment worker took 2,289 and
+2,329 ms to compute the correct SHA-256. A secure localhost control took 9 and
+2 ms with the same digest. Allocation, synchronous-batch and unrolled JavaScript
+experiments were insufficient; preserve their results rather than ship them.
+A fixed 2 MiB WebAssembly compression candidate, with the full JavaScript
+fallback retained, took 493 and 487 ms over LAN HTTP and returned the same
+standard digest. This is timing evidence, not playback acceptance. A focused
+three-manual-change diagnostic explicitly overrides that one verifier asset
+to check the suspected supply bottleneck before any production edit.
+
+The iPhone still reports passcode required. Existing production and unclaimed
+older CQ Lab TV processes remain untouched. All Android connections are wireless;
+no USB connection, ADB restart or pairing changes are required. Firefox and
+Android passes in §10.307 are retained; no unit suite was rerun.
