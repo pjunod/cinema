@@ -1,0 +1,8 @@
+#!/bin/sh
+# Driver stdout is irrelevant: FFmpeg reports initialization on stderr.
+[ "$3" = level+verbose ] || exit 2
+printf '%s\n' '[VAAPI @ 0x1] VAAPI driver: Mesa Gallium driver 26.0.8 for AMD Radeon 760M Graphics (radeonsi, phoenix, ACO)' >&2
+for arg in "$@"; do
+    [ "$arg" != QVBR ] || exit 1
+done
+exit 0

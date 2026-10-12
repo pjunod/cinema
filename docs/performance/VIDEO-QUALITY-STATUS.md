@@ -18,10 +18,27 @@ the owner's checkout is not used.
 
 | Lane / exclusive ownership | Work | State |
 |---|---|---|
-| HDR: encoder implementation, focused regressions and HDR receipts | Reproduce the sharp-panel maximum error of 35 ten-bit codes, then correct rate allocation without exceeding bitrate limits or trading away real-window quality. | Current GPU encoder/tool identity matches the earlier failure. Finite isolated rate-control and effort comparisons are being prepared. No production policy changed. |
-| Safari: browser harness and Safari receipts | Diagnose automation startup, then measure actual native HLS presentation, seeking and restart on Safari. | Safari and its driver are installed. The previous session timeout is not decoder evidence; an isolated session is being investigated. |
-| Devices: native harnesses and physical-device receipts | Use idle, reachable paired devices for actual playback; identify framework, application and physical-output evidence separately. | Paired Apple TV, iOS and Android TV/phone devices are visible. Lock, foreground and playback state must establish an available target before an isolated probe starts. |
-| Coordinator: integration, this ledger, index and backlog | Preserve exact-source evidence, obtain one final adversarial review, address findings, run each required fast-lane check once, merge and remove owned scratch. | Rust 1.97.1 is available; the explicit pinned compiler loop is running. Unit suites remain deferred until the batch is ready. |
+| HDR: measured repair and production integration | Identify the quantization cause and preserve the bitrate envelope. | Mesa's quality value is a bitfield. Balanced preset plus VBAQ without preanalysis (`19`) reduces sharp-panel maximum error from 35 to 12, below the unchanged <32 bar. Pressure and real-window worst-frame controls improve. Root integration binds the actual successful-probe Mesa/radeonsi driver to the immutable HDR plan, cache identity and shared rolling/VOD arguments; pinned compilation is running. |
+| Safari: browser and shipping web UI | Native HLS presentation, cold start, seeks and restart. | Authored SDR B-frame-off/on timing cells pass (six initial plus two selective retries after fixing callback ownership). Correctly tagged baseline/candidate PQ HLS passes all eight phases. Shipping web UI capture awaits the isolated optimized daemon build. |
+| Devices: native frameworks on available hardware | Preserve actual decoder, frame, metadata and surface evidence. | Physical TCL tablet and Google TV streamer pass all 16 SDR timing phases. Google TV passes all eight corrected PQ baseline/candidate phases. TCL explicitly lacks Main10 capability and refuses HDR before frames. An owned tvOS simulator supplies framework evidence; locked Apple devices and a busy Apple TV remain excluded. |
+| Coordinator: integration, review, checks and cleanup | One batch PR and final adversarial review, then fast lane. | [Draft PR #1034](http://forge.lan:3000/noirr/plurx/pulls/1034) collects the work. No unit suite has run during development. Remote HDR scratch is removed; client workers are finishing owned-resource cleanup. |
+
+Mesa's preanalysis mode caused the earlier worst-frame regression; enabling
+VBAQ without it addresses quantization instead of blurring the input or forcing
+a quantizer ceiling. At the 2 Mbps pressure rung the repaired output peaks at
+1.917 Mbps. In the second real-title window, mean code-domain PSNR falls
+0.176 dB while worst-frame PSNR improves 0.25 dB, mean and worst-frame SSIM
+improve, and bytes fall 8.51%. This is an explicit accepted tradeoff, not a
+claim that every metric improves. The image threshold and bitrate limits did
+not change.
+
+Client fixtures initially lacked HEVC VUI primaries/transfer despite container
+flags. Those attempts remain decode/timing evidence only. The corrected
+analytical PQ fixtures repair SPS metadata, preserve compressed picture data
+and decoded planes, and receive fresh PQ client captures. This harness defect
+is separate from the production encoder's quantization failure. Native probes
+and Safari canvas observations do not measure physical display calibration,
+speaker synchronization, or the shipping native application's UI.
 
 Acceptance retains mean luma error below 4 and maximum below 32 ten-bit codes,
 the actual rung's bitrate/buffer constraints, frame/metadata correctness and
