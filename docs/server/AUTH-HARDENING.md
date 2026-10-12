@@ -204,6 +204,35 @@ deep. The implementation drops the permit as soon as the mutex is acquired —
 the mutex is the single active slot — so the depth is the eight waiters this
 section promises. Nothing else in the sketch changed.
 
+**Correction (2026-10-11, CLUSTER-DRILLS-2026-10-11 F6).** The queue above
+is per process, but the membership exclusion each admitted operation takes is
+one cluster-wide row. Two users signing out at once through two different
+nodes both pass their local queues, and the second node's acquire changes
+zero rows; that used to answer 503 at once with its user's token still valid.
+The admission window now also covers that row:
+`RevocationAdmission` carries the deadline taken when the caller arrived
+(arrival + `REVOCATION_ADMISSION_WAIT`). After a definitive zero-row acquire,
+which leaves nothing of the claim behind, the node catches its replica up
+through the refusal and reads why
+(`MembershipManager::admit_cache_admin_revocation_lease`):
+
+- another claim holds the row and nothing else refuses: wait until the row
+  stops naming that claim (the holder's release, or its heartbeat expiry),
+  then offer a freshly prepared claim. Only the deadline passing refuses,
+  with the same 503, counted as `admission_timeout`;
+- a standing condition refuses every claim (a maintenance row, a
+  planned-outage lease such as a rolling deploy holds, a promotion, join or
+  removal in flight, or an inactive local node): answer at once after that
+  one offer, as before, counted as `propagation_failed`;
+- only this claim's own identity refuses it (its release receipt, or the
+  release watermark at or past its expiry): one freshly prepared claim, then
+  the same immediate answer.
+
+Waiting re-offers only when the row actually changes, never on unrelated
+applied entries. An ambiguous acquire still fails as before. The acquire SQL,
+the singleton row, `MEMBERSHIP_EXCLUSION_DURATION` and every later phase are
+unchanged.
+
 Both failures still map to `propagation_error()` — the 503 code and the
 client behaviour on it are unchanged; what changes is how often it
 happens. The three call sites (`:253, 266, 277`) become `.await`s. The

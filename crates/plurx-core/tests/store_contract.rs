@@ -19302,6 +19302,18 @@ async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
         error.contains(&breadcrumb.display().to_string()),
         "refusal must name the file to delete to accept the rollback: {error}"
     );
+    // Drill F3 (2026-10-11): the restore runbook renamed only `hiqlite/`,
+    // which lands exactly here. Rejoining a cluster takes a new directory
+    // owned by the service user that carries only the configuration (which
+    // production keeps inside the data directory), and the refusal has to
+    // say so.
+    assert!(
+        error.contains("create a new empty data directory owned by the service user")
+            && error.contains("copy plurx.toml and nothing else into it")
+            && error.contains("move the old directory aside as a retired copy")
+            && error.contains("fresh join token where join_token_file points"),
+        "refusal must name the rejoin procedure: {error}"
+    );
     assert!(
         !fixture.path().join("hiqlite.incoming").exists(),
         "the refusal must not stage an import"
@@ -27403,6 +27415,24 @@ async fn bounded_catalogue_reader_matches_authority_and_falls_back_exactly_once(
     assert_catalogue_parity!("item media facts", item_media_facts(&[10, 20]));
     assert_catalogue_parity!("media shape", media_shape());
     assert_catalogue_parity!("probe JSON", get_file_probe_json(30));
+    // Item detail's cluster-artefact fallback (drill F5). Unattested here, so
+    // only its first statement runs; both paths must agree on the answer.
+    let availability_probes = [plurx_core::store::ClusterIndexAvailabilityProbe {
+        file_id: 30,
+        source_size: 1,
+        source_mtime: 1,
+        object_version: "s1:1:2:1:1:0:1:0".to_owned(),
+        pipeline_sha256: "0".repeat(64),
+    }];
+    assert_catalogue_parity!(
+        "cluster index availability",
+        cluster_fragment_index_availability("detail-node", &availability_probes)
+    );
+    // Item detail's display settings (drill F5): one bounded read.
+    assert_catalogue_parity!(
+        "display settings",
+        display_settings(&["instance.id", "absent.display.key"])
+    );
 
     let expected = authority
         .get_item(20)

@@ -72,6 +72,9 @@ const FIXTURE_FPS: u32 = 24;
 /// Rung the probe encodes to — the Auto rung on hardware, so the probe
 /// measures the work a real session does.
 const PROBE_HEIGHT: i64 = 1080;
+/// A non-round real-title peak. Exactly 1,000 nits activates Jellyfin Metal's
+/// low-peak fallback and hid a factor-of-ten explicit-option unit error.
+const PROBE_PEAK_NITS: u32 = 1_179;
 
 /// What one candidate's run produced.
 #[derive(Debug, Clone, Copy)]
@@ -891,19 +894,19 @@ fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder)
     args.push("-i".into());
     args.push(fixture.to_string_lossy().into_owned());
 
-    // At the CPU reference's 1,000-nit policy peak, as production passes the
-    // source's peak to both.
-    let mut vf = match candidate.filters_at_peak(None, PROBE_HEIGHT, Some("hdr10"), Some(1_000)) {
-        Some(g) => g,
-        // The CPU reference: the tone map `video_filters` builds for an
-        // HDR10 source at the 1,000-nit policy peak, taken from the one
-        // function that spells it, because a probe that measured a
-        // *different* CPU chain would be comparing against a fiction.
-        None => format!(
-            "{},scale=-2:'min({PROBE_HEIGHT},ih)'",
-            zscale_tone_map_filter("smpte2084", 1_000)
-        ),
-    };
+    // The same absolute source peak, translated into each filter's own unit.
+    let mut vf =
+        match candidate.filters_at_peak(None, PROBE_HEIGHT, Some("hdr10"), Some(PROBE_PEAK_NITS)) {
+            Some(g) => g,
+            // The CPU reference: the tone map `video_filters` builds for an
+            // HDR10 source at this fixture's peak, taken from the one
+            // function that spells it, because a probe that measured a
+            // *different* CPU chain would be comparing against a fiction.
+            None => format!(
+                "{},scale=-2:'min({PROBE_HEIGHT},ih)'",
+                zscale_tone_map_filter("smpte2084", PROBE_PEAK_NITS)
+            ),
+        };
     // The CPU path uploads for a hardware encoder; the vendor graphs already
     // hand over surfaces of the right family. Same rule the real builder uses.
     let vendor_gpu = candidate.keeps_frames_off_the_cpu();
@@ -1105,9 +1108,11 @@ fn fixture_args(path: &Path) -> Vec<String> {
         // filter — losing it is what turns a PQ signal into flat gray, and
         // a fixture without it could never have caught that.
         "-x265-params",
-        "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:\
-         master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):\
-         max-cll=1000,400",
+        &format!(
+            "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:\
+             master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(11790000,1):\
+             max-cll={PROBE_PEAK_NITS},400"
+        ),
         "-pix_fmt",
         "yuv420p10le",
         &path.to_string_lossy(),
@@ -1636,7 +1641,7 @@ mod tests {
         assert_eq!(
             Some(vf.as_str()),
             Pipeline::VtToneMapMetal
-                .filters_at_peak(None, PROBE_HEIGHT, Some("hdr10"), Some(1_000))
+                .filters_at_peak(None, PROBE_HEIGHT, Some("hdr10"), Some(PROBE_PEAK_NITS))
                 .as_deref()
         );
         assert!(
@@ -2435,7 +2440,7 @@ mod tests {
             vf.contains(":t=linear:p=bt709:npl=100,format=gbrpf32le,tonemap="),
             "gamut conversion on the linearising zscale, ahead of the curve: {vf}"
         );
-        assert!(vf.contains("peak=10"), "{vf}");
+        assert!(vf.contains("peak=11.79"), "{vf}");
         assert!(vf.contains("dither=error_diffusion"), "{vf}");
         assert!(vf.contains("tin=smpte2084"), "{vf}");
         assert!(
@@ -2575,6 +2580,10 @@ mod tests {
         assert!(joined.contains("colorprim=bt2020"), "{joined}");
         assert!(joined.contains("colormatrix=bt2020nc"), "{joined}");
         assert!(joined.contains("master-display="), "{joined}");
+        assert!(
+            joined.contains(&format!("max-cll={PROBE_PEAK_NITS},400")),
+            "{joined}"
+        );
         assert!(
             joined.contains("yuv420p10le"),
             "10-bit is not HDR on its own"

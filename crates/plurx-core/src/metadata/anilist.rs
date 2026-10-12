@@ -7,15 +7,21 @@
 //! look right.
 
 use serde_json::Value;
+use std::time::Instant;
 
 use super::{
-    bounded_json_response, provider_client, provider_outcome, record_provider_request,
-    request_error, Provider, ProviderOutcome, PROVIDER_CONNECT_TIMEOUT, PROVIDER_READ_TIMEOUT,
-    PROVIDER_TOTAL_TIMEOUT,
+    bounded_json_response, provider_client, provider_outcome, record_provider_request, HostHealth,
+    Provider, ProviderOutcome, PROVIDER_CALL_BUDGET, PROVIDER_CONNECT_TIMEOUT,
+    PROVIDER_READ_TIMEOUT, PROVIDER_TOTAL_TIMEOUT,
 };
 use crate::error::MetadataError;
 
 const API: &str = "https://graphql.anilist.co";
+
+/// One transient transport failure must not disable a whole enrichment pass.
+/// One retry is enough to distinguish that blip from an outage; subsequent
+/// titles wait for the next pass instead of each spending another call budget.
+const TRANSPORT_ATTEMPTS: u32 = 2;
 
 const SEARCH_QUERY: &str = r#"
 query ($search: String) {
@@ -57,6 +63,10 @@ pub struct AniListClient {
     http: reqwest::Client,
     /// GraphQL endpoint (defaults to [`API`]); overridable for tests.
     base: String,
+    /// The GraphQL host and the image CDN, as in `TmdbClient`. A transient
+    /// send failure is retried once before it can trip either host.
+    api_health: HostHealth,
+    image_health: HostHealth,
 }
 
 impl AniListClient {
@@ -78,7 +88,19 @@ impl AniListClient {
                     .redirect(reqwest::redirect::Policy::limited(3)),
             ),
             base: API.to_owned(),
+            api_health: HostHealth::default(),
+            image_health: HostHealth::default(),
         }
+    }
+
+    /// Why this client stopped calling AniList in this pass, if it has.
+    pub fn unreachable(&self) -> Option<&str> {
+        self.api_health.cause()
+    }
+
+    /// The same for AniList's image CDN.
+    pub fn images_unreachable(&self) -> Option<&str> {
+        self.image_health.cause()
     }
 
     /// Point the GraphQL endpoint elsewhere (mock server in tests).
@@ -87,23 +109,75 @@ impl AniListClient {
         self
     }
 
+    /// Retry only connect failures/timeouts before receiving a response.
+    /// GraphQL here is a read-only search and artwork uses GET, so repeating
+    /// either does not repeat a mutation. Every send charges the shared
+    /// allowance and obeys cancellation; no periodic timer or retry task exists.
+    /// A response (including 429/5xx), parse error or body failure retains its
+    /// existing handling rather than being mistaken for a dead provider.
+    async fn send_with_transport_retry(
+        &self,
+        health: &HostHealth,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, MetadataError> {
+        // Allowance acquisition has its own wait budget. Cap the *whole*
+        // operation too, so a cooldown during the retry cannot restart this
+        // call's clock. Dropping these futures owns no subprocess or task.
+        tokio::time::timeout(
+            PROVIDER_CALL_BUDGET,
+            self.send_transport_attempts(health, build),
+        )
+        .await
+        .map_err(|_| MetadataError::Timeout("provider call retry budget exhausted".to_owned()))?
+    }
+
+    async fn send_transport_attempts(
+        &self,
+        health: &HostHealth,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, MetadataError> {
+        let started = Instant::now();
+        for attempt in 1..=TRANSPORT_ATTEMPTS {
+            health.check()?;
+            super::budget::acquire(&self.budget, Provider::AniList).await?;
+            // Another call can have tripped the host while allowance waited.
+            health.check()?;
+            let remaining = PROVIDER_CALL_BUDGET.saturating_sub(started.elapsed());
+            if remaining < PROVIDER_CONNECT_TIMEOUT {
+                return Err(MetadataError::Timeout(
+                    "provider call retry budget exhausted".to_owned(),
+                ));
+            }
+            let response = super::budget::cancellable(
+                build()
+                    .timeout(remaining.min(PROVIDER_TOTAL_TIMEOUT))
+                    .send(),
+            )
+            .await?;
+            match response {
+                Ok(response) => return Ok(response),
+                Err(error)
+                    if attempt < TRANSPORT_ATTEMPTS
+                        && (error.is_connect() || error.is_timeout()) => {}
+                Err(error) => {
+                    let error = health.failed(error);
+                    record_provider_request(Provider::AniList, provider_outcome(&error));
+                    return Err(error);
+                }
+            }
+        }
+        unreachable!("the last transport attempt always returns")
+    }
+
     /// Search anime by title and return the best (first) match.
     pub async fn find_anime(&self, title: &str) -> Result<Option<AniMatch>, MetadataError> {
         let body = serde_json::json!({
             "query": SEARCH_QUERY,
             "variables": { "search": title },
         });
-        super::budget::acquire(&self.budget, Provider::AniList).await?;
-        let response =
-            super::budget::cancellable(self.http.post(&self.base).json(&body).send()).await?;
-        let resp = match response {
-            Ok(response) => response,
-            Err(error) => {
-                let error = request_error(error);
-                record_provider_request(Provider::AniList, provider_outcome(&error));
-                return Err(error);
-            }
-        };
+        let resp = self
+            .send_with_transport_retry(&self.api_health, || self.http.post(&self.base).json(&body))
+            .await?;
         super::budget::observe(&self.budget, Provider::AniList, &resp).await?;
         // AniList returns 404 with a GraphQL error when nothing matches.
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -132,16 +206,9 @@ impl AniListClient {
 
     /// Download an image from an absolute URL (AniList serves full URLs).
     pub async fn download_image(&self, url: &str) -> Result<Vec<u8>, MetadataError> {
-        super::budget::acquire(&self.budget, Provider::AniList).await?;
-        let response = super::budget::cancellable(self.http.get(url).send()).await?;
-        let resp = match response {
-            Ok(response) => response,
-            Err(error) => {
-                let error = request_error(error);
-                record_provider_request(Provider::AniList, provider_outcome(&error));
-                return Err(error);
-            }
-        };
+        let resp = self
+            .send_with_transport_retry(&self.image_health, || self.http.get(url))
+            .await?;
         super::budget::observe(&self.budget, Provider::AniList, &resp).await?;
         if !resp.status().is_success() {
             record_provider_request(Provider::AniList, ProviderOutcome::Status);
@@ -340,5 +407,325 @@ mod tests {
                 .await;
         let c = AniListClient::new().with_base(&boom);
         assert!(c.find_anime("x").await.is_err());
+    }
+
+    fn short_read_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .read_timeout(std::time::Duration::from_millis(100))
+            .build()
+            .expect("client")
+    }
+
+    fn matched_anime() -> Value {
+        json!({ "data": { "Media": {
+            "id": 21, "title": { "english": "One Piece" }
+        }}})
+    }
+
+    #[tokio::test]
+    async fn one_anilist_timeout_is_retried_without_disabling_the_pass() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let hits = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let base = serve(axum::Router::new().fallback({
+            let hits = hits.clone();
+            let release = release.clone();
+            move || {
+                let hits = hits.clone();
+                let release = release.clone();
+                async move {
+                    if hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                        release.notified().await;
+                    } else {
+                        release.notify_waiters();
+                    }
+                    axum::Json(matched_anime())
+                }
+            }
+        }))
+        .await;
+        let mut client = AniListClient::new().with_base(&base);
+        client.http = short_read_client();
+        assert!(client
+            .find_anime("first")
+            .await
+            .expect("retry recovers")
+            .is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(client.unreachable().is_none());
+        assert!(client
+            .find_anime("next")
+            .await
+            .expect("pass continues")
+            .is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn two_anilist_timeouts_defer_this_pass_but_the_next_pass_retries() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let hits = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let base = serve(axum::Router::new().fallback({
+            let hits = hits.clone();
+            let release = release.clone();
+            move || {
+                let hits = hits.clone();
+                let release = release.clone();
+                async move {
+                    if hits.fetch_add(1, Ordering::SeqCst) < 2 {
+                        release.notified().await;
+                    } else {
+                        release.notify_waiters();
+                    }
+                    axum::Json(matched_anime())
+                }
+            }
+        }))
+        .await;
+        let mut client = AniListClient::new().with_base(&base);
+        client.http = short_read_client();
+        assert!(matches!(
+            client.find_anime("first").await,
+            Err(MetadataError::Timeout(_))
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(client.unreachable().is_some());
+        assert!(matches!(
+            client.find_anime("deferred").await,
+            Err(MetadataError::Unavailable)
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "no per-title outage replay");
+        let mut next = AniListClient::new().with_base(&base);
+        next.http = short_read_client();
+        assert!(next
+            .find_anime("next pass")
+            .await
+            .expect("fresh pass")
+            .is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn one_anilist_image_timeout_is_retried_without_disabling_matching() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let hits = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let base = serve(
+            axum::Router::new()
+                .route(
+                    "/",
+                    axum::routing::post(|| async { axum::Json(matched_anime()) }),
+                )
+                .route(
+                    "/image",
+                    axum::routing::get({
+                        let hits = hits.clone();
+                        let release = release.clone();
+                        move || {
+                            let hits = hits.clone();
+                            let release = release.clone();
+                            async move {
+                                if hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                                    release.notified().await;
+                                } else {
+                                    release.notify_waiters();
+                                }
+                                vec![9_u8, 8, 7]
+                            }
+                        }
+                    }),
+                ),
+        )
+        .await;
+        let mut client = AniListClient::new().with_base(&base);
+        client.http = short_read_client();
+        assert_eq!(
+            client
+                .download_image(&format!("{base}/image"))
+                .await
+                .expect("image retry"),
+            vec![9, 8, 7]
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(client.images_unreachable().is_none());
+        assert!(client
+            .find_anime("matching still works")
+            .await
+            .expect("match")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn anilist_http_and_parse_failures_never_retry_or_trip_host_health() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        for status in [404_u16, 429, 500, 200] {
+            let hits = Arc::new(AtomicUsize::new(0));
+            let base = serve(axum::Router::new().fallback({
+                let hits = hits.clone();
+                move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (
+                            axum::http::StatusCode::from_u16(status).expect("status"),
+                            "not JSON",
+                        )
+                    }
+                }
+            }))
+            .await;
+            let client = AniListClient::new().with_base(&base);
+            let result = client.find_anime("first").await;
+            match status {
+                404 => assert!(result.expect("not found").is_none()),
+                200 => assert!(matches!(result, Err(MetadataError::Parse(_)))),
+                _ => assert!(matches!(result, Err(MetadataError::Status(s)) if s == status)),
+            }
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                1,
+                "HTTP {status} is not retried"
+            );
+            assert!(client.unreachable().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_anilist_retry_reacquires_authority_before_sending() {
+        use crate::store::background_jobs_provider::{ProviderBudgetAction, ProviderBudgetOutcome};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        struct LostOnRetry(AtomicUsize);
+        #[async_trait::async_trait]
+        impl super::super::budget::ProviderBudget for LostOnRetry {
+            async fn update(
+                &self,
+                _: Provider,
+                action: ProviderBudgetAction,
+            ) -> Result<ProviderBudgetOutcome, crate::error::StoreError> {
+                assert!(matches!(action, ProviderBudgetAction::Charge));
+                Ok(if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ProviderBudgetOutcome::Charged
+                } else {
+                    ProviderBudgetOutcome::LostAuthority
+                })
+            }
+        }
+        let hits = Arc::new(AtomicUsize::new(0));
+        let base = serve(axum::Router::new().fallback({
+            let hits = hits.clone();
+            move || {
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    std::future::pending::<axum::Json<Value>>().await
+                }
+            }
+        }))
+        .await;
+        let budget = Arc::new(LostOnRetry(AtomicUsize::new(0)));
+        let mut client = AniListClient::new()
+            .with_base(&base)
+            .with_budget(Some(budget.clone()));
+        client.http = short_read_client();
+        let error = client
+            .find_anime("first")
+            .await
+            .expect_err("authority lost before retry");
+        assert!(
+            error.to_string().contains("provider ownership lost"),
+            "{error}"
+        );
+        assert_eq!(
+            budget.0.load(Ordering::SeqCst),
+            2,
+            "each attempt charges authority"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "refused retry never reaches the wire"
+        );
+        assert!(
+            client.unreachable().is_none(),
+            "authority loss is not a dead host"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_anilist_retry_cooldown_cannot_restart_the_call_budget() {
+        use crate::store::background_jobs_provider::{ProviderBudgetAction, ProviderBudgetOutcome};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        struct CooldownAfterFirst(AtomicUsize);
+        #[async_trait::async_trait]
+        impl super::super::budget::ProviderBudget for CooldownAfterFirst {
+            async fn update(
+                &self,
+                _: Provider,
+                action: ProviderBudgetAction,
+            ) -> Result<ProviderBudgetOutcome, crate::error::StoreError> {
+                assert!(matches!(action, ProviderBudgetAction::Charge));
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // Spend part of the call before its first transport error.
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    Ok(ProviderBudgetOutcome::Charged)
+                } else {
+                    Ok(ProviderBudgetOutcome::Wait {
+                        until_ms: crate::cluster::coordination::unix_ms().expect("clock") + 61_000,
+                    })
+                }
+            }
+        }
+        let budget = Arc::new(CooldownAfterFirst(AtomicUsize::new(0)));
+        let client = AniListClient::new().with_budget(Some(budget.clone()));
+        let builds = AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let error = client
+            .send_with_transport_retry(&client.api_health, || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                client.http.get("http://127.0.0.1:1")
+            })
+            .await
+            .expect_err("retry allowance exceeds the original call deadline");
+        assert_eq!(started.elapsed(), PROVIDER_CALL_BUDGET);
+        assert!(
+            error
+                .to_string()
+                .contains("provider call retry budget exhausted"),
+            "{error}"
+        );
+        assert!(
+            budget.0.load(Ordering::SeqCst) >= 2,
+            "retry tried to reacquire"
+        );
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            1,
+            "no request after the retry cooldown"
+        );
+        assert!(
+            client.unreachable().is_none(),
+            "cooldown is not a dead host"
+        );
     }
 }

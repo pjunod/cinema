@@ -57,6 +57,7 @@ impl TranscodeManager {
     /// catalog answers "not present", as the single lookup does.
     pub(crate) async fn cluster_index_availability(
         &self,
+        catalogue: &plurx_core::store::CatalogueReader,
         lookups: &[(
             &plurx_core::domain::MediaFile,
             plurx_core::transcode::CopyVideoOptions,
@@ -64,7 +65,7 @@ impl TranscodeManager {
         )],
     ) -> Vec<bool> {
         self.vod
-            .cluster_index_availability(lookups)
+            .cluster_index_availability(catalogue, lookups)
             .await
             .unwrap_or_else(|_| vec![false; lookups.len()])
     }

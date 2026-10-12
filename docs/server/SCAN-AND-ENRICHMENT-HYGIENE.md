@@ -317,6 +317,48 @@ Why a per-item deadline and not only per-call: the item is the unit whose
 partial result is safe to abandon (nothing is written until the patch is
 complete), and it is the unit the operator sees in the problems list.
 
+**Provider health across a pass** (added 2026-10-11 from the second
+2026-10-11 lab run, C-02 section). The call and item deadlines bound one
+title; they do not bound an outage. With TMDB blackholed, each title spent
+three 5 s connect timeouts plus backoff (about 16.5 s) inside its 60 s call
+budget, so the item deadline never fired, and enrichment is serial: a
+2,000-title library would sit in "enriching" for about nine hours. Each provider client is built per pass and carries a
+`HostHealth` per host (API, image CDN; `metadata/mod.rs`). The first call
+whose *transport* failed — refused, connect or read timeout — after its own
+retries trips that host, and every later call in the pass returns
+`MetadataError::Unavailable` without being sent, charged to the allowance or
+counted in `plurx_provider_requests_total`. A status, a parse failure or a
+rate-limit wait never trips it. The titles not asked are left untouched
+(`EnrichReport::deferred`), a download that was never sent records no
+artwork attempt, and the pass reports one problem line per unreachable host;
+the scan copies that line into its own `ScanReport::problems`, which is what
+the durable library status shows. The retry is the next pass — the
+scheduled scan, the artwork sweep — which builds a new client; there is no
+timer.
+
+**AniList transient retry follow-up, 2026-10-12.** #1022's per-pass health
+repair initially treated AniList's first connect/header timeout as the final
+outage verdict. `AniListClient` now retries that read-only GraphQL POST or
+artwork GET once before tripping the corresponding host. Every attempt
+reacquires the shared allowance and observes lease cancellation. A single
+60 s outer deadline includes both allowance waits and sends; per-request
+connect/read/30 s total deadlines and response-body bounds remain unchanged.
+This outer deadline matters because the allowance's own wait clock must not
+restart the call's budget after its first timeout. It is one awaited timer,
+not a spawned worker, periodic retry or new setting. HTTP statuses (including
+404/429/5xx), parse failures and response-body failures retain their existing
+handling, not the new transport retry. Unsent deferred/unauthorized calls do
+not increment provider-call counters. A persistent outage still stops that
+host for this pass, and a fresh pass starts healthy.
+
+The focused controls in `metadata::anilist::tests` cover one-blip recovery,
+two-failure deferral and next-pass recovery, artwork recovery, no HTTP/parse
+retry, lost retry authority, and the original 60 s deadline across a long
+retry cooldown. The existing queued-show and stale-owner controls are also
+affected. These loopback/controlled-clock tests are not fleet provider-drop
+or NAS acceptance. The continuation's ownership and landing status are on
+the [workboard](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md).
+
 **A timed-out read is not proof it did not happen.** Every provider call
 here is a `GET` or a read-only GraphQL `POST`; repeating one cannot double
 anything, which is why the existing comment at `tmdb.rs:218-220` is
@@ -446,11 +488,18 @@ stays under 50 ms (the §6.3 measurement).
 
 Acceptance: `cargo test -p plurx-core metadata::` and
 `cargo test -p plurxd enrich` green; on `lab1`, with `iptables -I OUTPUT
--d api.themoviedb.org -j DROP` for one scan, the Films scan finishes with
-`plurx_enrich_item_deadlines_total{provider="tmdb"}` equal to the number
-of titles attempted and `Settings → System` shows the scan as done with
-problems, not running; after the rule is removed the next scan enriches
-them.
+-d api.themoviedb.org -j DROP` for one scan, the Films scan finishes
+within one call budget of its walk, with
+`plurx_provider_requests_total{provider="tmdb",outcome="timeout"}` up by
+at most 3 (one call's attempts, however many titles the library holds) and
+`plurx_enrich_item_deadlines_total{provider="tmdb"}` unchanged — a DROP
+ends each call on its connect timeouts, well inside the 120 s item
+deadline, so the deadline counter is not the one that moves. `Settings →
+System` shows the scan as done with problems, not running, with one
+"TMDB could not be reached … N titles stay queued" line; after the rule
+is removed the next scan enriches them. (Corrected 2026-10-11: the
+original bar expected the deadline counter to equal the titles attempted,
+which a DROP never produces; LAB2 measured 0.)
 
 ### 5.3 M3 — bounded join request (`core/join-request-deadline`)
 
@@ -511,9 +560,11 @@ On lab1 (10.42.1.11), with the build carrying PR <M2 number>:
    "enriching" (Settings → System). It must finish; report the elapsed time
    and the problems count.
 4. curl -s http://10.42.1.11:32400/metrics | grep -E 'plurx_enrich_item_deadlines_total|plurx_provider_requests_total'
-   and paste the lines.
+   and paste the lines. Expect provider_requests_total{tmdb,timeout} up
+   by at most 3 for the whole scan, the deadline counter unchanged, and
+   one "TMDB could not be reached" problem on the scan.
 5. Remove both rules (iptables -D …) and trigger the scan again; confirm
-   the deadline counter stops rising and posters appear.
+   the timeout counter stops rising and posters appear.
 Report exact values; if the scan is still "enriching" after 30 minutes,
 stop, paste the last 50 lines of journalctl -u plurxd, and do not restart.
 ```
@@ -558,3 +609,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M2 | #400 | Commits `4995d5f6f611`, `fb98dc611a54`, and `9d766cf9169d`: bounded TMDB/AniList connect, read, total-call, retry-wall, JSON-body, and item deadlines with fixed-cardinality metrics; retryable continuation and independent lease renewal pinned. `cargo test -p plurx-core metadata::` (66 passed), `cargo test -p plurxd enrich` (6 passed), the focused lease-renewal test, pinned 1.97.1 checks and scoped Clippy passed. Fleet provider-drop acceptance remains post-merge evidence. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M3 | #400 | Commit `407683cc91b1`: shared bounded no-redirect join client, capped error body, distinct ambiguous-timeout recovery, and repeated same-node redemption contract. `cargo test -p plurx-core --features hiqlite-store cluster::migration` (80 passed), both focused new contract tests, pinned 1.97.1 checks and scoped Clippy passed. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | Review #3104 | #400 | Commits `8b7c20f5c92e`, `e49591fd52eb`, and `67269a7cf766`: cancellation is observed for every walked entry even when no media page is emitted; a partially enriched multi-season show remains in the ordinary queue until every local season succeeds; replicated join state now proves expired same-identity redemption and repeated finalization after an ambiguous response. The three focused regressions and the existing ambiguous-response test passed on pinned Rust 1.97.1. PR remains draft until P-01 #401 repairs and lands the shared fast lane; fleet NAS timing and provider-drop acceptance remain post-merge evidence. |
+| 2026-10-12 | none:openai:2026-10-12 (root runtime exposes no exact model ID) | codex://threads/01a0c165-d718-73a1-93e9-e81380017705 | AniList transient retry follow-up | #1040, draft opened 22:48 UTC on `codex/anilist-transient-retry` | Base `607d3577c` includes #1022; source commit `50b7f8953`. Reproduced the first-timeout defect with one exact loopback test; a separate sandbox socket refusal is not behavior evidence. Sole adversarial reviewer `agent:/root/anilist_retry_review_sol61`, dispatched as `gpt-6.1-sol`, found a retry-allowance budget overrun; an outer 60 s deadline and controlled-clock regression address it. All eight exact regressions passed on pinned Rust 1.97.1; the same reviewer cleared the correction and final comment clarification at source hashes `5e508179` (AniList) / `49ddf705` (metadata module). Workspace/all-targets check, strict Clippy, format, catalog, 25 static contracts and normal tracked hooks passed. Draft run4864 allocated no jobs; current-head fast lane/landing remain unproven. Original C-02 fleet NAS/provider-drop acceptance remains open; no deployment. |

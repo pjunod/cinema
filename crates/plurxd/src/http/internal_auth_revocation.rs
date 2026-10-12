@@ -8,16 +8,16 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Response, StatusCode};
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{
-    ActivityPeer, CacheAdminRevocationCleanupOutcome, CacheAdminRevocationLease, MembershipManager,
-    MAX_CACHE_ADMIN_REVOCATION_PEERS,
+    ActivityPeer, CacheAdminExclusionAdmission, CacheAdminRevocationCleanupOutcome,
+    CacheAdminRevocationLease, MembershipManager, MAX_CACHE_ADMIN_REVOCATION_PEERS,
 };
 use plurx_core::store::CacheAdminMutationClaim;
 use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
 use super::extract::{
-    record_revocation_complete, record_revocation_propagation_failed, CacheOnlyAdminRevocation,
-    RevocationAdmission,
+    record_revocation_admission_timeout, record_revocation_complete,
+    record_revocation_propagation_failed, CacheOnlyAdminRevocation, RevocationAdmission,
 };
 use super::peer_transport::{deadline_after, exact_auth_from_headers, PeerAuthMode, PeerTransport};
 use crate::state::AppState;
@@ -102,10 +102,26 @@ impl CacheAdminMembershipExclusion {
         let Some(lease) = self.lease.as_mut() else {
             return Ok(());
         };
-        self.membership
-            .commit_cache_admin_revocation_lease(lease)
+        // The exclusion is one cluster-wide row: a sign-out on another node
+        // holds it for its own operation. Waiting for it spends the same
+        // admission window the local queue does, and only its expiry refuses.
+        let deadline = self
+            .operation_guard
+            .as_ref()
+            .map(RevocationAdmission::deadline)
+            .ok_or_else(propagation_error)?;
+        match self
+            .membership
+            .admit_cache_admin_revocation_lease(lease, deadline)
             .await
-            .map_err(|_| propagation_error())
+        {
+            Ok(CacheAdminExclusionAdmission::Acquired) => Ok(()),
+            Ok(CacheAdminExclusionAdmission::DeadlinePassed) => {
+                record_revocation_admission_timeout();
+                Err(admission_error())
+            }
+            Err(_) => Err(propagation_error()),
+        }
     }
 
     fn mutation_claim(&self) -> Option<&CacheAdminMutationClaim> {
