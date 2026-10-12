@@ -747,6 +747,7 @@ impl TranscodeManager {
                     serving_admission,
                     retained_capture,
                     revalidated.as_ref(),
+                    recovery,
                 )
                 .await;
             tracing::info!(
@@ -1026,6 +1027,12 @@ impl TranscodeManager {
         reorder_frames: bool,
         context: &CandidateExecutionContext,
     ) -> Result<[u8; 32], String> {
+        if context.selected_candidate.processed_hdr10 {
+            return Err(vod_refusal_error(
+                "candidate_recipe_changed",
+                "processed HDR10 requires its admitted executable, not ordinary plan equality",
+            ));
+        }
         let actual = self
             .candidate_recipe_digest(plan, presentation, reorder_frames)
             .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
@@ -1963,7 +1970,7 @@ impl TranscodeManager {
                         decoder_threads: Some(crate::dv_segment::STREAMING_DECODER_THREADS) };
                     let bundle = crate::vodencode::admit_frozen_preparation(&self.admissions,
                         self.max_hw_sessions().await, self.software_budget().await, &processed_resources,
-                        Some(1), Instant::now() + crate::admission::QUEUE_WAIT).await
+                        Some(1), crate::media_pool::create_stage_deadline(crate::admission::QUEUE_WAIT).into_std()).await
                         .map_err(|_| "DV graph resource admission unavailable")?;
                     let segment_plan = grid.plan(file.duration_ms.ok_or("held source duration unavailable")?, 0);
                     let at = ((req.start_seconds.max(0.0) * f64::from(grid.numerator)) as u64
@@ -2206,11 +2213,21 @@ impl TranscodeManager {
                 );
                 let (actual, route) = if let Some(encoding) = encoding {
                     (
-                        self.candidate_recipe_digest(
-                            &encoding.plan,
-                            req.presentation,
-                            encoding.reorder_frames,
-                        )?,
+                        if context.selected_candidate.processed_hdr10 {
+                            encoding.processed_candidate_digest(
+                                file,
+                                context
+                                    .planning_binding
+                                    .as_ref()
+                                    .ok_or("processed planning binding missing")?,
+                            )?
+                        } else {
+                            self.candidate_recipe_digest(
+                                &encoding.plan,
+                                req.presentation,
+                                encoding.reorder_frames,
+                            )?
+                        },
                         CandidateRoute::Encode,
                     )
                 } else if let SessionKind::Copy {
@@ -2306,6 +2323,7 @@ impl TranscodeManager {
         // source row and HWACCEL preference come from it: it was taken in
         // this task, moments ago, and a second read would answer the same.
         revalidated: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
+        recovery: Option<&SessionRecoveryIdentity>,
     ) -> Result<StartInfo, String> {
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
@@ -2353,13 +2371,91 @@ impl TranscodeManager {
         } else {
             req.audio_offset_ms.clamp(-15_000, 15_000)
         };
-        let encoding = self
-            .prepare_vod_encoding_with_preference(
-                req,
-                &file,
-                revalidated.map(super::planning_hwaccel_preference),
-            )
-            .await?;
+        let root_admission = if let Some(context) = req
+            .candidate_context
+            .as_ref()
+            .filter(|context| context.selected_candidate.processed_hdr10)
+        {
+            let recovery =
+                recovery.ok_or("processed candidate requires typed recovery identity")?;
+            let prepared = context
+                .prepared_processing
+                .as_ref()
+                .ok_or_else(|| {
+                    vod_refusal_error(
+                        "candidate_recipe_unavailable",
+                        "processed candidate requires fresh admitted owner qualification",
+                    )
+                })?
+                .take(
+                    req.processed_preparation_binding(recovery)
+                        .map_err(|error| vod_refusal_error("candidate_recipe_changed", error))?,
+                )
+                .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
+            let binding = context
+                .planning_binding
+                .as_ref()
+                .ok_or("processed planning binding missing")?;
+            let actual = prepared
+                .encoding
+                .processed_candidate_digest(&file, binding)
+                .map_err(|error| vod_refusal_error("candidate_recipe_changed", error))?;
+            if actual != context.recipe_digest
+                || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
+                    != context.candidate_id
+                || context.owner_node_id.as_deref() != self.cache_location().map(|(_, node)| node)
+                || req.continuous_media.is_some()
+                || !context.selected_candidate.playable()
+                || context.selected_candidate.id != context.candidate_id
+                || context.selected_candidate.recipe_digest != actual
+                || i64::from(context.selected_candidate.target_height)
+                    != prepared.encoding.options.target_height
+                || prepared
+                    .encoding
+                    .active_production_evidence()
+                    .is_none_or(|proof| {
+                        proof.milli_realtime < 1150
+                            || proof.active_ms < 2000
+                            || proof.completed_segments < 2
+                    })
+                || !prepared
+                    .encoding
+                    .engine
+                    .is_current_with_executable(&prepared.encoding.executable)
+                    .await
+            {
+                return Err(vod_refusal_error(
+                    "candidate_recipe_changed",
+                    "admitted processed executable changed",
+                ));
+            }
+            #[cfg(target_os = "linux")]
+            if prepared
+                .encoding
+                .dv_runtime
+                .as_ref()
+                .is_none_or(|runtime| !runtime.source.unchanged())
+            {
+                return Err(vod_refusal_error(
+                    "candidate_recipe_changed",
+                    "processed source changed",
+                ));
+            }
+            Some(prepared)
+        } else {
+            None
+        };
+        let encoding = match root_admission.as_ref() {
+            Some(prepared) => Some(Arc::clone(&prepared.encoding)),
+            None => {
+                self.prepare_vod_encoding_with_preference(
+                    req,
+                    &file,
+                    revalidated.map(super::planning_hwaccel_preference),
+                )
+                .await?
+            }
+        };
         let processed_dv_profile = encoding
             .as_ref()
             .filter(|encoding| encoding.preserves_processed_dv())
@@ -2405,6 +2501,7 @@ impl TranscodeManager {
         // Only when the Developer switch admits this kind: a play must not
         // queue a whole-title background job the operator never turned on.
         let output_enqueue = (complete_candidate_output
+            && root_admission.is_none()
             && settings.output_preparation.admits(encoding.is_some())
             && matches!(
                 &retained_capture,
@@ -2423,7 +2520,7 @@ impl TranscodeManager {
             )
         });
         let prepared = crate::vodserve::VodRecipeRequest {
-            root_admission: None,
+            root_admission,
             companion,
             measured_candidate,
             retained_capture: match retained_capture {

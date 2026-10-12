@@ -501,6 +501,10 @@ impl SessionRecoveryIdentity {
 /// Never emitted inside the strict legacy request envelope.
 #[derive(Debug, Clone)]
 pub struct CandidateExecutionContext {
+    /// One exact admitted executable; request clones share consumption state.
+    /// Durable/remote reconstruction never carries this process-local credit.
+    pub(crate) prepared_processing:
+        Option<Arc<PreparedCandidateOnce<crate::vodserve::PreparedRootAdmission>>>,
     /// Private exact artifact chosen using a live measured-cost proof. The
     /// actual dispatch reacquires it; this is never client-supplied authority.
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
@@ -518,6 +522,40 @@ pub struct CandidateExecutionContext {
     pub normalized_geometry: bool,
     pub grade: plurx_core::transcode::OutputGrade,
     pub profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
+}
+
+pub(crate) struct PreparedCandidateOnce<T> {
+    pub(crate) binding: [u8; 32],
+    pub(crate) deadline: Instant,
+    pub(crate) value: std::sync::Mutex<Option<T>>,
+}
+
+impl<T> std::fmt::Debug for PreparedCandidateOnce<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedCandidateOnce")
+            .field("deadline", &self.deadline)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> PreparedCandidateOnce<T> {
+    pub(crate) fn take(&self, binding: [u8; 32]) -> Result<T, String> {
+        let mut value = self
+            .value
+            .lock()
+            .map_err(|_| "prepared candidate lock poisoned")?;
+        if Instant::now() >= self.deadline {
+            value.take();
+            return Err("prepared candidate deadline expired".into());
+        }
+        if binding != self.binding {
+            return Err("prepared candidate owner/request changed".into());
+        }
+        value
+            .take()
+            .ok_or_else(|| "prepared candidate already consumed".into())
+    }
 }
 
 /// Current ordinary source-owner selection, private to first preparation.
@@ -1150,6 +1188,43 @@ impl SessionRequest {
         };
         hex::encode(Sha256::digest(durable.to_string().as_bytes()))
     }
+
+    /// Exact dispatch identity, unlike the stable Auto idempotency intent.
+    /// Includes the actual rung, start, tracks, principal and private inputs.
+    pub(crate) fn processed_preparation_binding(
+        &self,
+        recovery: &SessionRecoveryIdentity,
+    ) -> Result<[u8; 32], String> {
+        let context = self
+            .candidate_context
+            .as_ref()
+            .ok_or("processed candidate context missing")?;
+        if self.request_id.as_deref() != Some(recovery.incarnation_id.as_str())
+            || context.canonical_caps.is_none()
+            || context.planning_binding.is_none()
+            || context.owner_node_id.is_none()
+        {
+            return Err("processed preparation authority is incomplete".into());
+        }
+        let bytes = serde_json::to_vec(&(
+            "plurx:admitted-processed-request:v1",
+            &recovery.principal,
+            &recovery.incarnation_id,
+            &recovery.recovery_epoch,
+            self,
+            &context.canonical_caps,
+            &context.planning_binding,
+            &context.owner_node_id,
+            &context.selected_candidate,
+            context.candidate_id,
+            context.recipe_digest,
+            context.normalized_geometry,
+            context.grade,
+            context.profile,
+        ))
+        .map_err(|error| error.to_string())?;
+        Ok(Sha256::digest(bytes).into())
+    }
 }
 
 pub struct StartInfo {
@@ -1219,4 +1294,189 @@ pub(crate) fn continuous_test_candidate_context(
         complete_cache: false,
         sustainable: true,
     })
+}
+
+#[cfg(test)]
+mod prepared_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn prepared_candidate_clones_can_consume_only_once() {
+        let prepared = Arc::new(PreparedCandidateOnce {
+            binding: [1; 32],
+            deadline: Instant::now() + Duration::from_secs(10),
+            value: std::sync::Mutex::new(Some(7)),
+        });
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let prepared = Arc::clone(&prepared);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    prepared.take([1; 32])
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("consumer thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| **result == Ok(7)).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    }
+
+    #[test]
+    fn prepared_candidate_wrong_binding_cannot_consume_and_expiry_releases_value() {
+        struct Owned(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut prepared = PreparedCandidateOnce {
+            binding: [1; 32],
+            deadline: Instant::now() + Duration::from_secs(10),
+            value: std::sync::Mutex::new(Some(Owned(Arc::clone(&drops)))),
+        };
+        assert!(prepared.take([2; 32]).is_err());
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        prepared.deadline = Instant::now() - Duration::from_secs(1);
+        assert!(prepared.take([1; 32]).is_err());
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(prepared.take([1; 32]).is_err());
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn processed_preparation_binds_owner_start_tracks_caps_and_planning_and_cannot_serialize_credit(
+    ) {
+        let recovery = SessionRecoveryIdentity {
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+            incarnation_id: "incarnation-a".into(),
+            recovery_epoch: "epoch-a".into(),
+        };
+        let mut request: SessionRequest = serde_json::from_value(serde_json::json!({
+            "file_id": 1, "playback_id": "processed-binding", "request_id": "incarnation-a",
+            "automatic": true, "kind": {"kind": "transcode", "height": 720},
+            "start_seconds": 0.0, "audio_offset_ms": 0, "hdr10": true, "presentation": "vod"
+        }))
+        .expect("exact request fixture");
+        let mut context = continuous_test_candidate_context(
+            plurx_core::playback::candidate::CandidateId::for_recipe_digest([3; 32]),
+            [3; 32],
+            720,
+        );
+        context.owner_node_id = Some("node-a".into());
+        context.canonical_caps =
+            Some(serde_json::from_value(serde_json::json!({"v": 2})).expect("caps"));
+        context.planning_binding = Some(crate::media_pool::PlanningBinding {
+            generation: 1,
+            source_digest: "source-a".into(),
+        });
+        request.candidate_context = Some(Box::new(context));
+        let baseline = request
+            .processed_preparation_binding(&recovery)
+            .expect("complete binding");
+        let mut changed = request.clone();
+        changed.start_seconds = 360.0;
+        assert_ne!(
+            changed
+                .processed_preparation_binding(&recovery)
+                .expect("start"),
+            baseline
+        );
+        let mut changed = request.clone();
+        changed.audio_index = Some(2);
+        assert_ne!(
+            changed
+                .processed_preparation_binding(&recovery)
+                .expect("track"),
+            baseline
+        );
+        let mut changed = request.clone();
+        changed.kind = SessionKind::Transcode { height: 1080 };
+        assert_ne!(
+            changed
+                .processed_preparation_binding(&recovery)
+                .expect("rung"),
+            baseline
+        );
+        let mut changed = request.clone();
+        changed
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .selected_candidate
+            .planned_codec = Some("hevc".into());
+        assert_ne!(
+            changed
+                .processed_preparation_binding(&recovery)
+                .expect("descriptor codec"),
+            baseline
+        );
+        let mut changed = request.clone();
+        changed
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .selected_candidate
+            .processed_hdr10 = true;
+        assert_ne!(
+            changed
+                .processed_preparation_binding(&recovery)
+                .expect("descriptor processing"),
+            baseline
+        );
+        let mut changed = request.clone();
+        changed
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .canonical_caps
+            .as_mut()
+            .expect("caps")
+            .audio
+            .push("aac".into());
+        assert_ne!(
+            changed
+                .processed_preparation_binding(&recovery)
+                .expect("caps"),
+            baseline
+        );
+        let mut changed = request.clone();
+        changed
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .planning_binding
+            .as_mut()
+            .expect("planning")
+            .generation += 1;
+        assert_ne!(
+            changed
+                .processed_preparation_binding(&recovery)
+                .expect("planning"),
+            baseline
+        );
+        let mut changed = recovery.clone();
+        changed.principal =
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 2 };
+        assert_ne!(
+            request
+                .processed_preparation_binding(&changed)
+                .expect("principal"),
+            baseline
+        );
+        let mut changed = recovery.clone();
+        changed.incarnation_id = "incarnation-b".into();
+        assert!(request.processed_preparation_binding(&changed).is_err());
+        let restored: SessionRequest =
+            serde_json::from_slice(&serde_json::to_vec(&request).expect("durable recipe"))
+                .expect("restored request");
+        assert!(restored.candidate_context.is_none());
+        assert!(restored.processed_preparation_binding(&recovery).is_err());
+    }
 }

@@ -1056,6 +1056,11 @@ impl TranscodeManager {
         decoder: Option<&crate::playback_control::DecoderCapsSnapshot>,
         deadline: tokio::time::Instant,
     ) -> Result<CandidateExecutionContext, CandidateRestoreError> {
+        if catalog.candidate.processed_hdr10 {
+            return Err(CandidateRestoreError::Unavailable(
+                "processed candidate requires fresh admitted owner qualification".into(),
+            ));
+        }
         if tokio::time::Instant::now() >= deadline {
             return Err(CandidateRestoreError::Unavailable(
                 "candidate restoration deadline".into(),
@@ -1265,6 +1270,7 @@ impl TranscodeManager {
 
     pub(crate) fn candidate_context(candidate: &QualityCandidate) -> CandidateExecutionContext {
         CandidateExecutionContext {
+            prepared_processing: None,
             retained_output: None,
             canonical_caps: None,
             selected_candidate: candidate.clone(),
@@ -1447,6 +1453,64 @@ mod tests {
 #[cfg(test)]
 mod snapshot_catalog_regression {
     use super::*;
+
+    #[tokio::test]
+    async fn serialized_processed_candidate_requires_new_admitted_qualification() {
+        let base = crate::test_tempdir().expect("processed restore");
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            base.path().join("work"),
+            plurx_core::transcode::EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let request: SessionRequest = serde_json::from_value(serde_json::json!({
+            "file_id": 1, "playback_id": "processed-restore", "automatic": true,
+            "kind": {"kind": "transcode", "height": 720}, "start_seconds": 0.0,
+            "audio_offset_ms": 0, "hdr10": true, "presentation": "vod"
+        }))
+        .expect("bounded request");
+        let mut candidate = crate::transcode::continuous_test_candidate_context(
+            CandidateId::for_recipe_digest([4; 32]),
+            [4; 32],
+            720,
+        )
+        .selected_candidate;
+        candidate.processed_hdr10 = true;
+        candidate.planned_codec = Some("hevc".into());
+        candidate.grade = OutputGrade::Hdr10;
+        let catalog = crate::media_sessions::CandidateCatalogContext {
+            caps: serde_json::from_value(serde_json::json!({"v": 2})).expect("caps"),
+            candidate,
+            binding: crate::media_pool::PlanningBinding {
+                generation: 1,
+                source_digest: "source".into(),
+            },
+        };
+        let restored =
+            serde_json::from_slice(&serde_json::to_vec(&catalog).expect("durable descriptor"))
+                .expect("restored descriptor");
+        let error = manager
+            .restore_catalog_context(
+                &request,
+                &restored,
+                catalog.candidate.id,
+                1,
+                1,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("description cannot restore an executable credit");
+        assert!(
+            !error.is_incompatible(),
+            "absence of live owner qualification is unavailable"
+        );
+        assert!(error
+            .to_string()
+            .contains("fresh admitted owner qualification"));
+    }
     fn macos_test_sdr_document() -> serde_json::Value {
         serde_json::json!({"format":{"duration":"1.0"}, "streams":[{"index":0,"codec_type":"video","codec_name":"hevc","profile":"Main","width":320,"height":180,"pix_fmt":"yuv420p","field_order":"progressive","sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","color_primaries":"bt709","color_space":"bt709","color_range":"tv","side_data_list":[{"side_data_type":"Display Matrix","rotation":0,"displaymatrix":"00000000: 65536 0 0\n00000001: 0 65536 0\n00000002: 0 0 1073741824\n"}]}]})
     }

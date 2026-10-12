@@ -1248,6 +1248,34 @@ impl Encoding {
             .map(|level| format!("dvhe.08.{level:02}"))
     }
 
+    pub(crate) fn processed_candidate_digest(
+        &self,
+        file: &MediaFile,
+        planning: &crate::media_pool::PlanningBinding,
+    ) -> Result<[u8; 32], String> {
+        use plurx_core::transcode::dv_processing::{DvDestination, DvSelection};
+        if !matches!(&self.dv_processing, DvSelection::Selected(plan) if plan.destination() == DvDestination::Hdr10)
+            || self.options.pipeline.output_grade() != plurx_core::transcode::OutputGrade::Hdr10
+            || self.shared_audio.is_some()
+        {
+            return Err("candidate is not a completed processed HDR10 recipe".into());
+        }
+        let duration = file
+            .duration_ms
+            .filter(|duration| *duration > 0)
+            .ok_or("processed candidate requires the full source duration")?;
+        let identity = self.identity(file, duration as f64 / 1000.0);
+        let bytes = serde_json::to_vec(&(
+            "plurx:processed-hdr10-candidate:v1",
+            planning,
+            identity.size,
+            identity.mtime_ms,
+            identity.argv_fingerprint,
+        ))
+        .map_err(|error| error.to_string())?;
+        Ok(Sha256::digest(bytes).into())
+    }
+
     pub fn identity(&self, file: &MediaFile, duration_seconds: f64) -> SourceIdentity {
         let mut hash = Sha256::new();
         hash.update(if self.shared_audio.is_some() {

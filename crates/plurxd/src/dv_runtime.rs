@@ -698,7 +698,7 @@ impl RuntimeRecipe {
                 self.source_clock,
             )
             .map_err(str::to_owned)?;
-            let deadline = tokio::time::Instant::now() + self.preparation_budget;
+            let deadline = crate::media_pool::create_stage_deadline(self.preparation_budget);
             let mut renderer_env = self.tools.renderer_env.clone();
             renderer_env.extend([
                 (
