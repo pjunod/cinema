@@ -5452,3 +5452,92 @@ fn macos_text_font_binding_changes_only_text_output_identity() {
     assert_eq!(bitmap_digests[0], bitmap_digests[1]);
     assert_eq!(plain_digests[0], plain_digests[1]);
 }
+
+#[test]
+fn hevc_scan_evidence_unlocks_metal_without_defaulting_missing_field_order() {
+    let mut stream = macos_stream(true);
+    stream
+        .as_object_mut()
+        .expect("video stream object")
+        .remove("field_order");
+    let unknown = facts(stream);
+    let caps = unqualified_software_capabilities("hevc");
+    let policy = macos_policy(macos_context(true, MacosProcessingAvailability::Available));
+    let before = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &unknown,
+        &caps,
+        policy.clone(),
+    )
+    .expect("resolved scan-evidence plan");
+    assert_eq!(unknown.scan_type(), ScanType::Unknown);
+    assert_eq!(before.options().pipeline, Pipeline::Cpu);
+    let document: Value =
+        serde_json::from_str(include_str!("fixtures/hevc-progressive-configuration.json"))
+            .expect("captured HEVC document");
+    let proved = unknown.clone().with_hevc_scan_metadata(&document);
+    assert_eq!(
+        proved.field_order(),
+        None,
+        "do not pretend FFprobe printed a field_order"
+    );
+    assert_eq!(proved.scan_type(), ScanType::Progressive);
+    assert_ne!(proved.facts_digest(), unknown.facts_digest());
+    assert_eq!(
+        proved
+            .clone()
+            .with_hevc_scan_metadata(&document)
+            .facts_digest(),
+        proved.facts_digest()
+    );
+    let on = resolve(Encoder::VideoToolbox, Pipeline::Cpu, &proved, &caps, policy)
+        .expect("resolved scan-evidence plan");
+    assert_eq!(on.options().pipeline, Pipeline::VtToneMapMetal);
+    let off = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &proved,
+        &caps,
+        macos_policy(macos_context(false, MacosProcessingAvailability::Available)),
+    )
+    .expect("resolved scan-evidence plan");
+    assert_eq!(off.options().pipeline, Pipeline::Cpu);
+    assert_ne!(on.plan_digest(), off.plan_digest());
+}
+
+#[test]
+fn hevc_scan_refinement_preserves_explicit_orders_and_stream_ownership() {
+    let document: Value =
+        serde_json::from_str(include_str!("fixtures/hevc-progressive-configuration.json"))
+            .expect("captured HEVC document");
+    for order in ["tt", "progressive", "future-order"] {
+        let mut stream = macos_stream(true);
+        stream["field_order"] = json!(order);
+        let before = facts(stream);
+        let after = before.clone().with_hevc_scan_metadata(&document);
+        assert_eq!(before, after, "preserve explicit {order}");
+    }
+    let mut stream = macos_stream(true);
+    stream
+        .as_object_mut()
+        .expect("video stream object")
+        .remove("field_order");
+    let unknown = facts(stream);
+    let mut wrong = document.clone();
+    wrong["streams"][0]["index"] = json!(1);
+    assert_eq!(unknown.clone().with_hevc_scan_metadata(&wrong), unknown);
+    let mut duplicate = document.clone();
+    duplicate["streams"]
+        .as_array_mut()
+        .expect("captured stream array")
+        .push(document["streams"][0].clone());
+    assert_eq!(unknown.clone().with_hevc_scan_metadata(&duplicate), unknown);
+    let mut other_codec = document;
+    other_codec["streams"][0]["codec_name"] = json!("h264");
+    assert_eq!(
+        unknown.clone().with_hevc_scan_metadata(&other_codec),
+        unknown
+    );
+    assert_eq!(unknown.clone().with_hevc_scan_metadata(&json!({})), unknown);
+}

@@ -1,6 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** Mac follow-ups in `main` (PR #993); AMD and Intel strict-P5 qualified; Intel fixes open on `effort/linux-p5-intel-qualification` · **Updated:** 2026-10-11 · **Owner:** Claude · **Integration:** `effort/linux-p5-intel-qualification`.
+**Status:** Mac follow-ups in `main` (PR #993); AMD and Intel strict-P5 qualified; Intel fixes open on `effort/linux-p5-intel-qualification` · **Updated:** 2026-10-12 · **Owner:** Claude · **Integration:** `effort/linux-p5-intel-qualification`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is
@@ -10,6 +10,25 @@ A plan or compiled change is not hardware qualification. The
 measurements, negative results, provenance and reproducible raw receipts.
 
 ## 1. Current position
+
+**Mac HDR acceptance checkpoint, 2026-10-12.** The Metal CPU-parity and
+parser-install repairs are in `main` (PRs #1013/#1025). The Mac service can
+read the network volume after the required Full Disk Access grant. On the
+Air, an explicitly selected VideoToolbox backend passes the Metal boot
+comparison at 2.25×. Auto selects software on this device and skips that
+probe; the temporary backend override is user-authorized and must be
+restored after the comparison.
+
+Real forced-1080p SDR playback still selected CPU processing because the
+bound source facts omitted HEVC scan type. The ordinary HDR10 control's
+hvcC, VPS and SPS carry explicit progressive, non-interlaced, frame-only
+profile constraints. The acceptance repair collects only the selected
+video stream's configuration through the existing descriptor-bound probe,
+retains Unknown when evidence is absent or contradictory, binds successful
+refinement into facts identity, and protects the refined decoder cache from
+fresh source documents. Core selection regressions pass and the independent
+Astra review found no blockers. Real Metal/CPU sessions and matching paused
+five-minute frames remain open; boot parity alone does not qualify them.
 
 **Checkpoint 2026-10-10.** The previous session ended on quota with the
 probe-raster correction, three documentation edits and the AMD rerun
