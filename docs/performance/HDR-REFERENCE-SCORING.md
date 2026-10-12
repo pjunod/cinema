@@ -312,3 +312,95 @@ volumes from these controls, matched by creation time to the reserved experiment
 windows. Each was empty and unreferenced before exact deletion. Other owners’
 volumes were excluded; no broad prune was used. Future isolated Docker captures
 must remove their anonymous volumes with `docker rm -fv`.
+
+## October 12 — enable adaptive quantization without preanalysis
+
+**Decision: the sharp-edge candidate now passes the unchanged image bar.**
+The [retained comparison summary](../evidence/video-quality-2026-10-12/hdr/qualification-summary.json)
+is the source of the numbers below. Production integration and final validation
+are tracked in [the programme ledger](VIDEO-QUALITY-STATUS.md).
+
+The earlier description of `compression_level 1` as merely more encoder
+"effort" concealed two independent controls. On the actual loaded Mesa
+26.0.8 `radeonsi` driver, its value combines a balanced preset, preanalysis,
+and variance-based adaptive quantization (VBAQ). The default disables both
+preanalysis and VBAQ. The
+[upstream quality mapping](https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-26.0.8/src/gallium/frontends/va/encode.c)
+and [bitfield layout](https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-26.0.8/src/gallium/frontends/va/va_private.h)
+make these controls separable. This is driver-specific semantics: `19`
+must never be applied indiscriminately to every VAAPI implementation.
+
+The actual FFmpeg verbose driver line and the loaded shared-library hash
+identify bundled Mesa **26.0.8**. The system package inventory says 22.3.6,
+but that is a different library. Driver selection, rather than an installed
+package's version, is the relevant evidence.
+
+| Sharp-panel control | Maximum / mean error, ten-bit codes | Outcome |
+|---|---:|---|
+| Production baseline | 35 / 0.368015 | Existing maximum bar fails |
+| Block rate control | 35 / 0.368015 | No improvement |
+| Balanced preset alone, quality 3 | 35 / 0.368015 | No improvement |
+| Preanalysis alone, quality 9 | 35 / 0.368015 | No improvement |
+| Balanced preset + VBAQ, quality 19 | 12 / 0.284579 | Mean below 4, maximum below 32 |
+| Balanced + preanalysis + VBAQ, quality 27 | 12 / 0.284579 | Same sharp output as quality 19 |
+
+Two early files named `balanced` used value 2 before inspecting the driver
+ABI. That name was incorrect; the failed diagnostics remain in the bundle
+and are explicitly excluded as proof of a balanced preset. Their output is
+identical to the baseline. No failed result was deleted or relabeled.
+
+These ablations isolate the sharp improvement to VBAQ. The separate
+pressure experiment isolates the previous worst-frame degradation to the
+preanalysis combination. Quality 19 keeps VBR, its target, its 1.5× maximum,
+and its 2× buffer. It imposes no upper quantizer bound and does not preprocess
+or recognize the test image.
+
+At the same 2 Mbps pressure condition, the candidate emits 3,672,752 packet
+bits in 2.002 seconds; the maximum-rate-plus-full-buffer allowance remains
+10,006,000 bits. Its one-second peak is 1.917 Mbps. Mean/worst-frame PSNR
+improves from 47.795/47.53 to 47.861/47.62 dB, and mean/worst SSIM also
+improves. Quality 1 reproduces the older worst-frame PSNR regression to
+45.98 dB; removing preanalysis avoids it.
+
+Two source-local, disjoint 48-frame plain-PQ title windows retain native
+16:9 geometry and the 8 Mbps rung. At 1800 seconds, candidate mean/worst
+PSNR improves from 48.582/47.75 to 48.590/47.79 dB; mean/worst SSIM also
+improves, for 2.86% more bytes. At 3600 seconds, worst PSNR improves from
+49.64 to 49.89 dB and both SSIM measures improve. **Mean PSNR falls by
+0.17646 dB while bytes fall by 8.51%.** This tradeoff is accepted explicitly;
+it is not all-metric dominance or a claim that a code-domain score measures
+HDR perception. Both windows stay inside the same bitrate envelope.
+
+The first 3600-second attempt mistakenly retained the encoder's 1800-second
+seek while moving the reference. Identical output hashes exposed the
+mismatch. Its entire comparison is rejected and retained; only that invalid
+window was repeated after aligning both seeks. Frame counts, color grades
+and original timestamp grids are retained. The FFV1 Matroska reference has
+a 1 ms clock; MP4 uses 1/24000. Metrics pair the same 48 decoded frame indices
+at the declared 24000/1001 cadence; the Matroska rounding is at most 0.5 ms.
+This is explicit index correspondence, not literal timestamp equality or
+admission by the stricter standalone HDR scoring tool.
+
+### Native fixtures retain their metadata repair provenance
+
+A separate 24-second sharp-panel source supplies HEVC Main10 plus silent AAC
+and two-second independent fMP4 HLS objects to the client lanes. The initial
+direct-raw harness omitted source frame color properties. FFmpeg output
+flags alone left its HEVC SPS primaries and transfer unspecified. This was
+a fixture defect, not a production-graph defect: the earlier comparison
+controls read fully tagged FFV1 sources and retain their decoded grades.
+
+The repaired native fixture changes only SPS color metadata to the known
+analytical source's BT.2020/PQ limited-range grade. The
+[repair receipt](../evidence/video-quality-2026-10-12/hdr/native-metadata-repair.json.gz)
+proves every coded-picture payload hash, the first decoded frame hash, and
+all 576 frame timestamps are unchanged. Every repaired decoded frame then
+reports BT.2020/PQ. Tier, level, quantization and bitrate are untouched.
+Initial client decoding observations remain attached to their original
+untagged assets; they do not become PQ-display acceptance retroactively.
+
+The generator and the explicit metadata repair are both retained, including
+the failing original output identities. Private title bytes remain on the
+lab host. These bounded controls do not close physical colorimetry, artistic
+grading, the whole genuine-media corpus, or the separately owned S-11/DV
+programme.
