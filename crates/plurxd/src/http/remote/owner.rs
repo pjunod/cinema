@@ -38,6 +38,8 @@ pub(crate) struct Hub {
     pub(crate) delivery_pause: TestPause,
     #[cfg(test)]
     pub(crate) authority_phase_delay_ms: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    pub(crate) authority_read_delay_ms: std::sync::atomic::AtomicU64,
 }
 impl Default for Hub {
     fn default() -> Self {
@@ -52,6 +54,8 @@ impl Default for Hub {
             delivery_pause: TestPause::default(),
             #[cfg(test)]
             authority_phase_delay_ms: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            authority_read_delay_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -624,6 +628,14 @@ impl Hub {
         }
         self.changed.notify_waiters();
     }
+    #[cfg(test)]
+    pub(super) async fn delay_authority_read(&self) {
+        tokio::time::sleep(Duration::from_millis(
+            self.authority_read_delay_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ))
+        .await;
+    }
     pub async fn perform(
         &self,
         state: &AppState,
@@ -637,47 +649,57 @@ impl Hub {
             tokio::pin!(notified);
             notified.as_mut().enable();
             self.expire()?;
-            // Every loop includes authority reads; the caller's User cannot
-            // remain cached through a20s poll while logout/revocation commits.
-            let user_id = if matches!(dispatch.request, Request::InvitationSessions { .. }) {
-                state
-                    .store
-                    .invitation_login(&dispatch.token_digest, now_seconds()?)
-                    .await?
-                    .ok_or_else(|| fail(401, "unauthorized"))?
-                    .user_id
-            } else {
-                authenticate_token_digest(
-                    state,
-                    dispatch.token_digest.clone(),
-                    TokenAudience::Native,
-                )
-                .await?
-                .id
+            // Fresh caller, setting and target checks are independent. Await
+            // every result before dispatch, rather than spending the receiver's
+            // one-second credit on serial quorum round trips.
+            let caller = async {
+                #[cfg(test)]
+                self.delay_authority_read().await;
+                if matches!(dispatch.request, Request::InvitationSessions { .. }) {
+                    Ok(state
+                        .store
+                        .invitation_login(&dispatch.token_digest, now_seconds()?)
+                        .await?
+                        .ok_or_else(|| fail(401, "unauthorized"))?
+                        .user_id)
+                } else {
+                    Ok::<_, ApiError>(
+                        authenticate_token_digest(
+                            state,
+                            dispatch.token_digest.clone(),
+                            TokenAudience::Native,
+                        )
+                        .await?
+                        .id,
+                    )
+                }
             };
-            if user_id != dispatch.user_id {
+            let setting = async {
+                #[cfg(test)]
+                self.delay_authority_read().await;
+                state.store.get_setting(FEATURE_KEY).await
+            };
+            let target_authority = async {
+                if let Some(target) = dispatch.request.target() {
+                    let (session, lease) = tokio::join!(
+                        self.authorize_session(state, &dispatch),
+                        self.refresh_authority(state, target),
+                    );
+                    session?;
+                    lease?;
+                }
+                Ok::<_, ApiError>(())
+            };
+            let (user_id, setting, target_authority) =
+                tokio::join!(caller, setting, target_authority);
+            if user_id? != dispatch.user_id {
                 return Err(fail(403, "unauthorized"));
             }
-            if state.store.get_setting(FEATURE_KEY).await?.as_deref() != Some("1") {
+            if setting?.as_deref() != Some("1") {
                 self.disable();
                 return Err(fail(503, "unavailable"));
             }
-            if dispatch.request.target().is_some() {
-                // Both phases read current authority independently. Await both
-                // before delivery, without serializing their quorum latency.
-                let (session, lease) = tokio::join!(
-                    self.authorize_session(state, &dispatch),
-                    self.refresh_authority(
-                        state,
-                        dispatch
-                            .request
-                            .target()
-                            .ok_or_else(|| fail(400, "invalid"))?,
-                    ),
-                );
-                session?;
-                lease?;
-            }
+            target_authority?;
             self.deliver(state, &dispatch).await?;
             self.expire()?;
             let reply = self.once(state, &dispatch).await?;
@@ -1248,26 +1270,33 @@ impl Hub {
             .collect::<HashSet<_>>();
         let mut valid = Vec::new();
         for q in candidates {
-            let user =
+            let receiver_id = self.receiver_id(target)?;
+            let login = async {
+                #[cfg(test)]
+                self.delay_authority_read().await;
                 authenticate_token_digest(state, q.token_digest.clone(), TokenAudience::Native)
-                    .await;
-            if let Ok(user) = user {
-                if user.id == d.user_id
-                    && state
-                        .store
-                        .remote_authority(
-                            &self.receiver_id(target)?,
-                            user.id,
-                            RemoteProof::Grant {
-                                grant_id: q.command.grant_id.to_string(),
-                                secret_hash: q.grant_hash.clone(),
-                            },
-                        )
-                        .await?
-                        .is_some()
-                {
-                    valid.push((q.command.control_epoch, q.command.sequence));
-                }
+                    .await
+            };
+            let authority = async {
+                #[cfg(test)]
+                self.delay_authority_read().await;
+                state
+                    .store
+                    .remote_authority(
+                        &receiver_id,
+                        d.user_id,
+                        RemoteProof::Grant {
+                            grant_id: q.command.grant_id.to_string(),
+                            secret_hash: q.grant_hash.clone(),
+                        },
+                    )
+                    .await
+            };
+            // Keep both proofs fresh even for a retained retry. The grant is
+            // accepted only after the current login matches the dispatch user.
+            let (login, authority) = tokio::join!(login, authority);
+            if matches!(login, Ok(user) if user.id == d.user_id) && authority?.is_some() {
+                valid.push((q.command.control_epoch, q.command.sequence));
             }
         }
         let mut sessions = self.lock()?;
