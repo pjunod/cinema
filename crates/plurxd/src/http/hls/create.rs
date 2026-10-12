@@ -48,6 +48,7 @@ pub(super) fn auto_encode_fallback<'a>(
     fn encode(candidate: &plurx_core::playback::candidate::QualityCandidate) -> bool {
         candidate.decoder_compatible
             && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
+            && (!candidate.processed_hdr10 || candidate.playable())
     }
     fn at_height(
         list: &[plurx_core::playback::candidate::QualityCandidate],
@@ -69,6 +70,48 @@ pub(super) fn auto_encode_fallback<'a>(
     at_or_below(catalog).or_else(|| at_or_below(unnarrowed))
 }
 
+/// Replace one local descriptive row with its admitted executable facts.
+/// A shortened-ID collision is never an implicit recipe substitution.
+pub(super) fn upsert_processed_worker_candidate(
+    catalog: &mut crate::media_pool::QualityCatalogResult,
+    qualified: crate::media_pool::WorkerQualityCandidate,
+) -> Result<(), &'static str> {
+    if catalog.candidates.iter().any(|entry| {
+        entry.candidate.id == qualified.candidate.id
+            && entry.candidate.recipe_digest != qualified.candidate.recipe_digest
+    }) {
+        return Err("processed candidate ID collides with another full recipe");
+    }
+    catalog.candidates.retain(|entry| {
+        !(entry.node_id == qualified.node_id
+            && entry.candidate.recipe_digest == qualified.candidate.recipe_digest)
+    });
+    catalog.candidates.push(qualified);
+    Ok(())
+}
+
+pub(super) fn eligible_quality_workers(
+    workers: &[crate::media_pool::WorkerQualityCandidate],
+    initial_auto: bool,
+    local_node: &str,
+) -> Vec<crate::media_pool::WorkerQualityCandidate> {
+    let has_complete_rows = workers.iter().any(|entry| {
+        entry.dispatch_supported
+            && !entry.partial
+            && entry.candidate.decoder_compatible
+            && (!entry.candidate.processed_hdr10 || entry.candidate.playable())
+    });
+    workers
+        .iter()
+        .filter(|entry| {
+            entry.dispatch_supported
+                && (!entry.partial
+                    || (!has_complete_rows && initial_auto && entry.node_id == local_node))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Codec preference only breaks a tie after the existing finite selection
 /// policy chose its route, grade, canvas and evidence. Explicit identities and
 /// AVC continuous families never reach this preference.
@@ -88,6 +131,7 @@ pub(super) fn prefer_equivalent_hevc<'a>(
                 other.identity_matches()
                     && other.decoder_compatible
                     && other.planned_codec.as_deref() == Some("hevc")
+                    && other.processed_hdr10 == chosen.processed_hdr10
                     && other.route == chosen.route
                     && other.grade == chosen.grade
                     && other.normalized_geometry == chosen.normalized_geometry
@@ -1734,22 +1778,10 @@ async fn resolve_plan_for_principal_with_local_evidence(
             }
             let authority_refused = catalogue_result.authority_refused;
             let worker_catalog = &catalogue_result.candidates;
-            let has_complete_rows = worker_catalog.iter().any(|entry| {
-                entry.dispatch_supported && !entry.partial && entry.candidate.decoder_compatible
-            });
             let initial_auto =
                 requested.is_none() && body.quality_auto == Some(true) && body.height != Some(1440);
-            let eligible_workers: Vec<_> = worker_catalog
-                .iter()
-                .filter(|entry| {
-                    entry.dispatch_supported
-                        && (!entry.partial
-                            || (!has_complete_rows
-                                && initial_auto
-                                && entry.node_id == state.node_id))
-                })
-                .cloned()
-                .collect();
+            let eligible_workers =
+                eligible_quality_workers(worker_catalog, initial_auto, &state.node_id);
             let mut catalog: Vec<_> = eligible_workers
                 .iter()
                 .map(|entry| entry.candidate.clone())
@@ -1887,6 +1919,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
                 candidate.route != plurx_core::playback::candidate::CandidateRoute::Encode;
             height = i64::from(candidate.target_height);
             let mut context = crate::transcode::TranscodeManager::candidate_context(candidate);
+            context.catalog_query = Some(catalog_request.clone());
             context.owner_node_id = eligible_workers
                 .iter()
                 .find(|entry| entry.candidate.id == candidate.id)
@@ -3360,19 +3393,22 @@ async fn create_with_purpose_inner(
                             ApiError::ServiceUnavailable("qualified HDR context missing".into())
                         })?;
                         if let Some(catalog) = quality_catalog.as_mut() {
-                            catalog
-                                .candidates
-                                .push(crate::media_pool::WorkerQualityCandidate {
+                            upsert_processed_worker_candidate(
+                                catalog,
+                                crate::media_pool::WorkerQualityCandidate {
                                     node_id: state.node_id.clone(),
                                     candidate: candidate.clone(),
                                     binding: context.planning_binding.clone(),
                                     partial: false,
                                     dispatch_supported: true,
-                                });
+                                },
+                            )
+                            .map_err(|reason| ApiError::Conflict(reason.into()))?;
                         }
                         processed.quality_catalog = quality_catalog
                             .as_ref()
                             .map(|catalog| Arc::new(catalog.clone()));
+                        state.transcode.remember_processed_candidate(&processed);
                         height = i64::from(candidate.target_height);
                         candidate_route = Some(candidate.route);
                         link_source_binding = if let Some(identity) = identity.as_ref() {

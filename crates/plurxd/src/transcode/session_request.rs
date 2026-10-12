@@ -501,6 +501,9 @@ impl SessionRecoveryIdentity {
 /// Never emitted inside the strict legacy request envelope.
 #[derive(Debug, Clone)]
 pub struct CandidateExecutionContext {
+    /// Accepted descriptive query before delivery-route resolution. This
+    /// contains no executable, principal, admission or source descriptor.
+    pub(crate) catalog_query: Option<crate::media_pool::QualityCatalogRequest>,
     /// One exact admitted executable; request clones share consumption state.
     /// Durable/remote reconstruction never carries this process-local credit.
     pub(crate) prepared_processing:
@@ -1234,6 +1237,7 @@ impl SessionRequest {
             &recovery.recovery_epoch,
             self,
             &context.canonical_caps,
+            &context.catalog_query,
             &context.planning_binding,
             &context.owner_node_id,
             &context.selected_candidate,

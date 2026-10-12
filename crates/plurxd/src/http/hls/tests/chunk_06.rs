@@ -526,6 +526,15 @@ fn d6_unknown_aspect_fallback_lands_below_the_starved_rung_instead_of_refusing()
         row(720, CandidateRoute::Encode),
         row(480, CandidateRoute::Encode),
     ];
+    let mut stale_processed = row(1080, CandidateRoute::Encode);
+    stale_processed.processed_hdr10 = true;
+    stale_processed.planned_codec = Some("hevc".into());
+    stale_processed.grade = plurx_core::transcode::OutputGrade::Hdr10;
+    stale_processed.sustainable = false;
+    let mut with_description = vec![stale_processed];
+    with_description.extend(offered.clone());
+    assert!(auto_encode_fallback(&with_description, None, 1080)
+        .is_some_and(|row| !row.processed_hdr10), "stale descriptive identity cannot become ordinary Auto fallback");
     let now = 10 * NETWORK_PRIOR_STARVED_TTL_MS;
     let prior = NetworkPrior {
         link_worst_rung_height: Some(1080),
@@ -577,6 +586,49 @@ fn d6_unknown_aspect_fallback_lands_below_the_starved_rung_instead_of_refusing()
             .map(|picked| picked.target_height),
         Some(360)
     );
+}
+
+#[test]
+fn processed_requalification_replaces_hint_once_and_refuses_full_recipe_collision() {
+    use plurx_core::playback::candidate::CandidateId;
+    let mut candidate = crate::transcode::continuous_test_candidate_context(
+        CandidateId::for_recipe_digest([7; 32]), [7; 32], 720).selected_candidate;
+    candidate.processed_hdr10 = true;
+    candidate.planned_codec = Some("hevc".into());
+    candidate.grade = plurx_core::transcode::OutputGrade::Hdr10;
+    candidate.sustainable = false;
+    let mut hint = crate::media_pool::WorkerQualityCandidate {
+        node_id: "node-a".into(), candidate,
+        binding: Some(crate::media_pool::PlanningBinding { generation: 1, source_digest: "a".repeat(64) }),
+        partial: false, dispatch_supported: true,
+    };
+    let mut catalog = crate::media_pool::QualityCatalogResult {
+        candidates: vec![hint.clone(), hint.clone()], complete: false,
+        causes: vec![crate::media_pool::CatalogCause::LocalDeadline], authority_refused: false,
+    };
+    let mut partial_ordinary = hint.clone();
+    partial_ordinary.candidate = crate::transcode::continuous_test_candidate_context(
+        CandidateId::for_recipe_digest([9; 32]), [9; 32], 720).selected_candidate;
+    partial_ordinary.partial = true;
+    let mixed = vec![hint.clone(), partial_ordinary.clone()];
+    let initial = eligible_quality_workers(&mixed, true, "node-a");
+    assert!(initial.iter().any(|row| row.candidate.id == partial_ordinary.candidate.id),
+        "stale complete description cannot suppress local partial ordinary Auto fallback");
+    assert!(auto_encode_fallback(&initial.iter().map(|row| row.candidate.clone()).collect::<Vec<_>>(), None, 720)
+        .is_some_and(|row| !row.processed_hdr10));
+    let explicit = eligible_quality_workers(&mixed, false, "node-a");
+    assert_eq!(explicit.len(), 1, "explicit known identity keeps independent completeness");
+    assert_eq!(explicit[0].candidate.id, hint.candidate.id);
+    hint.candidate.sustainable = true;
+    upsert_processed_worker_candidate(&mut catalog, hint.clone()).expect("admitted requalification");
+    assert_eq!(catalog.candidates.len(), 1, "one selected descriptor can bind recovery and link receipts");
+    assert!(catalog.candidates[0].candidate.playable());
+    assert!(!catalog.complete, "independent descriptor does not complete ordinary discovery");
+    let mut collision = hint.clone();
+    collision.candidate.recipe_digest = [8; 32];
+    catalog.candidates.push(collision);
+    assert!(upsert_processed_worker_candidate(&mut catalog, hint).is_err());
+    assert_eq!(catalog.candidates.len(), 2, "collision refusal leaves the prior catalog untouched");
 }
 
 #[tokio::test]
@@ -4341,6 +4393,7 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
         .request;
     request.kind = crate::transcode::SessionKind::Transcode { height: 720 };
     request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
+        catalog_query: None,
         prepared_processing: None,
         planning_snapshot: None,
         retained_output: None,
@@ -4778,6 +4831,7 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
         .expect("recipe")
         .request;
     request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
+        catalog_query: None,
         prepared_processing: None,
         planning_snapshot: None,
         retained_output: None,
@@ -5771,7 +5825,7 @@ fn finite_auto_hevc_preference_preserves_shape_evidence_and_explicit_choice() {
         Some(avc.id),
         "disabled preference or explicit identity retains its row"
     );
-    for restriction in 0..6 {
+    for restriction in 0..7 {
         let mut chosen = avc.clone();
         let mut alternative = hevc.clone();
         match restriction {
@@ -5780,6 +5834,11 @@ fn finite_auto_hevc_preference_preserves_shape_evidence_and_explicit_choice() {
             2 => alternative.height = 720,
             3 => alternative.grade = plurx_core::transcode::OutputGrade::Hdr10,
             4 => alternative.decoder_compatible = false,
+            5 => {
+                chosen.grade = plurx_core::transcode::OutputGrade::Hdr10;
+                alternative.grade = plurx_core::transcode::OutputGrade::Hdr10;
+                alternative.processed_hdr10 = true;
+            }
             _ => alternative.peak_bps = Some(20_000_000),
         };
         let rows = vec![chosen, alternative];

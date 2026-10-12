@@ -1487,9 +1487,18 @@ impl MediaPool {
             results
         };
         let (mut result, remote) = tokio::join!(local, remote);
-        for outcome in remote {
+        for mut outcome in remote {
             result.complete &= outcome.complete;
             result.authority_refused |= outcome.authority_refused;
+            // A peer's description cannot restore this process's one-shot
+            // executable or exact parent credit. Ingress decides support.
+            for entry in &mut outcome.candidates {
+                if entry.candidate.processed_hdr10 {
+                    entry.dispatch_supported = false;
+                    entry.candidate.sustainable = false;
+                    entry.candidate.complete_cache = false;
+                }
+            }
             result.candidates.extend(outcome.candidates);
             for cause in outcome.causes {
                 if result.causes.len() < 16 && !result.causes.contains(&cause) {
@@ -1819,6 +1828,7 @@ pub(crate) async fn local_quality_catalog(
         return QualityCatalogResult::unavailable(CatalogCause::Maintenance);
     }
     let progress = std::sync::Mutex::new(Vec::new());
+    let complete_descriptions = std::sync::Mutex::new(Vec::new());
     let binding = std::sync::Mutex::new(None);
     let work = async {
         if !state.serving.accepting_new_media().await {
@@ -1843,6 +1853,21 @@ pub(crate) async fn local_quality_catalog(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(PlanningBinding::from_snapshot(&snapshot));
+        // These known descriptions have their own completed construction.
+        // An unrelated ordinary planner timeout cannot erase an explicit ID
+        // before its subsequent admitted qualification can start.
+        let described = state
+            .transcode
+            .processed_quality_descriptions(&snapshot, request);
+        *complete_descriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            described.iter().map(|row| row.id).collect::<Vec<_>>();
+        progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(described);
+        state.transcode.before_quality_catalog_ordinary().await;
         state
             .transcode
             .quality_catalog_from_snapshot_progress(
@@ -1869,17 +1894,23 @@ pub(crate) async fn local_quality_catalog(
     let binding = binding
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let complete_descriptions = complete_descriptions
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let candidates = progress
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .into_iter()
         .take(32)
-        .map(|candidate| WorkerQualityCandidate {
-            node_id: state.node_id.clone(),
-            candidate,
-            binding: binding.clone(),
-            partial: !complete,
-            dispatch_supported: true,
+        .map(|candidate| {
+            let partial = !complete && !complete_descriptions.contains(&candidate.id);
+            WorkerQualityCandidate {
+                node_id: state.node_id.clone(),
+                candidate,
+                binding: binding.clone(),
+                partial,
+                dispatch_supported: true,
+            }
         })
         .collect();
     QualityCatalogResult {

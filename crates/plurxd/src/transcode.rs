@@ -604,6 +604,8 @@ pub struct TranscodeManager {
     decode_facts: crate::decode_facts::DecodeFactCache,
     decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
     candidate_production_proofs: Arc<crate::vodencode::CandidateProductionProofs>,
+    #[cfg(any(target_os = "linux", test))]
+    processed_candidate_hints: manager_candidates::ProcessedCandidateHints,
     #[cfg(target_os = "linux")]
     processed_preparation_slot: Arc<tokio::sync::Semaphore>,
     #[cfg(target_os = "linux")]

@@ -1239,6 +1239,12 @@ impl TranscodeManager {
             trial.request_id = Some(recovery.incarnation_id.clone());
             trial.kind = SessionKind::Transcode { height };
             trial.hdr10 = true;
+            if matches!(request.kind, SessionKind::Copy { .. }) {
+                // The copy route's retained passthrough/E-AC-3 answer cannot
+                // describe a new reconstructed AAC producer. Resolve the
+                // encoded destination from the same canonical sink claim.
+                trial.audio_delivery = None;
+            }
             let context = trial
                 .candidate_context
                 .as_mut()
@@ -1269,6 +1275,12 @@ impl TranscodeManager {
             };
             let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
             let digest = encoding.processed_candidate_digest(&file, &binding)?;
+            if original.selected_candidate.processed_hdr10 && digest != original.recipe_digest {
+                return Err(vod_refusal_error(
+                    "candidate_recipe_changed",
+                    "processed candidate inputs changed during qualification",
+                ));
+            }
             Arc::get_mut(&mut encoding)
                 .ok_or("processed trial executable escaped before qualification")?
                 .candidate_recipe = Some(digest);
@@ -1373,6 +1385,7 @@ impl TranscodeManager {
                 sustainable: true,
             };
             let mut context = Self::candidate_context(&candidate);
+            context.catalog_query = original.catalog_query.clone();
             context.canonical_caps = Some(caps.clone());
             context.planning_binding = Some(binding);
             context.planning_snapshot = Some(Arc::new(planning));
