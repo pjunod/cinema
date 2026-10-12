@@ -43,6 +43,10 @@ increasing host resident allocations.
 
 The separate host image builder on `lab4` must also be bounded: its Docker
 container has a persistent 4 GiB resident and 10 GiB combined memory limit.
+Runner guests also disable `fstrim.timer` and stop a running trim without
+waiting: scheduled discard on their shared block storage blocked Docker
+container startup during verification. Reconciliation preserves this setting.
+
 When recreating a Buildx builder, pass `--driver-opt memory=4g,memory-swap=10g`.
 A host build previously escaped the operator slice through root-owned BuildKit
 and triggered a global OOM; limiting only `user-1000.slice` does not cover it.

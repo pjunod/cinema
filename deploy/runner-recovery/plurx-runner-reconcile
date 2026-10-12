@@ -151,6 +151,9 @@ def guest(spec):
     if not match:
         raise ValueError("cannot locate existing runner config")
     path = Path(match[1])
+    # Scheduled discard on shared block storage can stall Docker startup.
+    run("systemctl", "disable", "--now", "fstrim.timer")
+    run("systemctl", "stop", "--no-block", "fstrim.service")
     ensure_swap()
     if not coverage:
         # Add backing without replacing or disabling the active original swap.
