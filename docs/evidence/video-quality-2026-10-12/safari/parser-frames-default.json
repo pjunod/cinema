@@ -1,0 +1,15 @@
+{
+  "mode": "default",
+  "module_sha256": "36f7e0298eac14d1a664dfc083702bab812f6c83d196c651420af92f1080f21c",
+  "fixture_sha256": "bece3d5d38cd0c8a3acf76b53929cb52ff7896487abc3fb58b3351f61add161e",
+  "binary_sha256": "1c1e377622a6a2c6ecdeb134cf9bb7a505adf21c03f5f35e91d8b45dfbed7598",
+  "source_sha256": "48be342f2ab57a5e5df5f9a3722e4ec816e9d639da258d9555f96f46c2f2c322",
+  "adapter_sha256": "b2323771ed83c6c0ace00294587f7d4889a443ddf865db627ccdce6cc32b3252",
+  "signing_sha256": "3cccbaad68b197c951585be45f3a86131b62809bd024325545afd0cb1194453d",
+  "timeout_seconds": 60,
+  "guest_deadline_seconds": 10,
+  "exit_code": 0,
+  "stdout": "compile_ms=8105.796\nframes elapsed_ms=30.322 status=0 stdout_bytes=6594 stderr_bytes=0\n",
+  "stderr": "",
+  "wall_seconds": 8.432340374973137
+}

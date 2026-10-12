@@ -1,0 +1,106 @@
+{
+  "scope": "Elapsed whole FFmpeg process, including startup/software decode/scale/encode/mux in2CPU2GiB container. Single finite observations, not sustained GPU throughput or production headroom.",
+  "rows": [
+    {
+      "case": "pressure2m",
+      "variant": "baseline",
+      "source_seconds": 2.002,
+      "elapsed_seconds": 3.335960339056328,
+      "realtime_multiple": 0.6001270388503248
+    },
+    {
+      "case": "pressure2m",
+      "variant": "vbaq",
+      "source_seconds": 2.002,
+      "elapsed_seconds": 3.356685752980411,
+      "realtime_multiple": 0.5964216335182458
+    },
+    {
+      "case": "pressure2m",
+      "variant": "full",
+      "source_seconds": 2.002,
+      "elapsed_seconds": 3.320647975895554,
+      "realtime_multiple": 0.6028943792092492
+    },
+    {
+      "case": "real1800",
+      "variant": "baseline",
+      "source_seconds": 2.002,
+      "elapsed_seconds": 3.452594651840627,
+      "realtime_multiple": 0.5798537627151525
+    },
+    {
+      "case": "real1800",
+      "variant": "vbaq",
+      "source_seconds": 2.002,
+      "elapsed_seconds": 3.5233548700343817,
+      "realtime_multiple": 0.5682084473030853
+    },
+    {
+      "case": "real1800",
+      "variant": "full",
+      "source_seconds": 2.002,
+      "elapsed_seconds": 3.5401080779265612,
+      "realtime_multiple": 0.5655194575789815
+    },
+    {
+      "case": "real3600-corrected",
+      "variant": "baseline",
+      "source_seconds": 2.002,
+      "elapsed_seconds": 3.8777916620019823,
+      "realtime_multiple": 0.5162732231381482
+    },
+    {
+      "case": "real3600-corrected",
+      "variant": "vbaq",
+      "source_seconds": 2.002,
+      "elapsed_seconds": 3.9049359280616045,
+      "realtime_multiple": 0.5126844682938972
+    },
+    {
+      "case": "real3600-corrected",
+      "variant": "full",
+      "source_seconds": 2.002,
+      "elapsed_seconds": 3.913478462025523,
+      "realtime_multiple": 0.5115653553293896
+    },
+    {
+      "case": "sharp",
+      "variant": "baseline",
+      "source_seconds": 4,
+      "elapsed_seconds": 1.7038957858458161,
+      "realtime_multiple": 2.347561413807004
+    },
+    {
+      "case": "sharp",
+      "variant": "level27",
+      "source_seconds": 4,
+      "elapsed_seconds": 1.6460636749397963,
+      "realtime_multiple": 2.4300396521090213
+    },
+    {
+      "case": "sharp",
+      "variant": "level19",
+      "source_seconds": 4,
+      "elapsed_seconds": 1.623951094923541,
+      "realtime_multiple": 2.463128361749298
+    },
+    {
+      "case": "native24s",
+      "variant": "baseline",
+      "source_seconds": 24,
+      "elapsed_seconds": 10.894663376035169,
+      "realtime_multiple": 2.2029134055479354
+    },
+    {
+      "case": "native24s",
+      "variant": "vbaq",
+      "source_seconds": 24,
+      "elapsed_seconds": 10.817774059949443,
+      "realtime_multiple": 2.2185710171979838
+    }
+  ],
+  "conclusion": "Simple static synthetic cases exceed realtime. All48-frame source-local pressure and real cases are below realtime under the imposed CPU budget; a general realtime claim is unsupported. Candidate elapsed observations are close to baseline, but not replicated confidence estimates.",
+  "additional_root_cause_source": "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-26.0.8/src/gallium/drivers/radeonsi/radeon_vcn_enc.c",
+  "firmware_mapping": "Both frontend automatic and explicit enabled VBAQ are normalized to firmware RENCODE_VBAQ_AUTO; quality1 adds preanalysis4X and, on preVCN5 hardware withoutBframes, its two-pass search-center map. Quality19 omits those preanalysis effects."
+}

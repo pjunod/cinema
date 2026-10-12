@@ -1,0 +1,1162 @@
+{
+  "source": "ff1c54b8fb8c333f90cfd4ef0f0372d795f1dc3a",
+  "daemon_sha256": "c83948332843886702cbd143ef5da01868fe6bb640ab72dcecfec9209ebdfaa4",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/manifest.webmanifest",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/reader.css",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/playback-policy.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/app.css",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/theme.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/errors.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/cluster-panel.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/playback-control.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/reader.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/live-tv.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/library-channels.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/hls.min.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/app.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/api.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/file-context.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/shared-decision.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/measurements.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/auth.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/keyboard-reach.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/chrome.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/theme-menu.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/activity-indicator.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/cards.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/home-helpers.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/home.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/renderers.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/header.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/library-grids.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/helpers.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/dynamic-range.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/track-facts.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/preplay-selection.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/edit.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/player.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/continuous-media.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/continuous-quality.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/session.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/prepared-replacement.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/prepared-switch-measurement.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/directed-change.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/decode-tiers.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/decode-margin.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/stall-diagnosis.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/surface.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/projection-chrome.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/transport.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/autoplay-next.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/menus.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/audio-sync.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/stats.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/watch-presentation.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/watch-browser.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/activity.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/analysis.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/activity-stream.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-panels.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/live-tv.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/live-tv-dvr.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/recordings.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/dvr-reminders.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/live-tv-controls.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-developer.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-live-tv.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-system.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/cluster.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/cluster-operations.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/cluster-database.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/cluster-troubleshooting.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-playback.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/users-admin.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/catalog.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/register-classic.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/theater.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/reader.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/library-channels-page.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/shared-artwork.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/lightbox.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/shared-libraries.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/sharing-management.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-navigation.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-router.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-guard.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-client.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-receiver.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-controller.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/remote-pairing.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-remote.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/remote.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/assets/router.js",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/server",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/me",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/features",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hubs",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/home/previews",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/coming-soon",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hubs",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/home/previews",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/coming-soon",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hubs",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/home/previews",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/coming-soon",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/files/1/decision",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/images/678405091926167246-poster-c505533e1a608fa20.jpg",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/files/1/hls/continuous-candidates",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/files/1/hls/continuous-sessions",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-family",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/master.m3u8",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/video/bf31eea5045a811fba0f19743d2a12a4ab960fc53a3df51d7abd8be623f245f4/index.m3u8",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/audio/5ec6aaaf466d4c9f8235cbe74d23b0a47b5eb1144ecd599362d0921a99bbfc85/index.m3u8",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/video/bf31eea5045a811fba0f19743d2a12a4ab960fc53a3df51d7abd8be623f245f4/init/e9780f0df8cba4f4729199bc7854d748da2968475375190f8c7dae666233c0d3.mp4",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/audio/5ec6aaaf466d4c9f8235cbe74d23b0a47b5eb1144ecd599362d0921a99bbfc85/init/d92c91cbf62f2ccfceab0f9659a106c937cdf5df883aba9828ef1c45854f192d.mp4",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/audio/5ec6aaaf466d4c9f8235cbe74d23b0a47b5eb1144ecd599362d0921a99bbfc85/segment/2.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/video/bf31eea5045a811fba0f19743d2a12a4ab960fc53a3df51d7abd8be623f245f4/segment/3.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/video/bf31eea5045a811fba0f19743d2a12a4ab960fc53a3df51d7abd8be623f245f4/segment/4.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/audio/5ec6aaaf466d4c9f8235cbe74d23b0a47b5eb1144ecd599362d0921a99bbfc85/segment/3.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/video/bf31eea5045a811fba0f19743d2a12a4ab960fc53a3df51d7abd8be623f245f4/segment/5.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/audio/5ec6aaaf466d4c9f8235cbe74d23b0a47b5eb1144ecd599362d0921a99bbfc85/segment/4.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/video/bf31eea5045a811fba0f19743d2a12a4ab960fc53a3df51d7abd8be623f245f4/segment/6.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/audio/5ec6aaaf466d4c9f8235cbe74d23b0a47b5eb1144ecd599362d0921a99bbfc85/segment/5.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/control",
+      "status": 429,
+      "error": "{\"code\":\"control_rate_limited\",\"message\":\"the control sequence advanced faster than the per-session budget\",\"generation\":\"e483dd80-7741-4b11-9b75-004c88b5ce12\",\"control_epoch\":1,\"retry_after_ms\":6}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/video/bf31eea5045a811fba0f19743d2a12a4ab960fc53a3df51d7abd8be623f245f4/segment/7.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/audio/5ec6aaaf466d4c9f8235cbe74d23b0a47b5eb1144ecd599362d0921a99bbfc85/segment/6.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/video/bf31eea5045a811fba0f19743d2a12a4ab960fc53a3df51d7abd8be623f245f4/segment/8.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/audio/5ec6aaaf466d4c9f8235cbe74d23b0a47b5eb1144ecd599362d0921a99bbfc85/segment/7.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/video/bf31eea5045a811fba0f19743d2a12a4ab960fc53a3df51d7abd8be623f245f4/segment/9.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/audio/5ec6aaaf466d4c9f8235cbe74d23b0a47b5eb1144ecd599362d0921a99bbfc85/segment/8.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/video/bf31eea5045a811fba0f19743d2a12a4ab960fc53a3df51d7abd8be623f245f4/segment/10.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/audio/5ec6aaaf466d4c9f8235cbe74d23b0a47b5eb1144ecd599362d0921a99bbfc85/segment/9.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/video/bf31eea5045a811fba0f19743d2a12a4ab960fc53a3df51d7abd8be623f245f4/segment/11.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/audio/5ec6aaaf466d4c9f8235cbe74d23b0a47b5eb1144ecd599362d0921a99bbfc85/segment/10.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/video/bf31eea5045a811fba0f19743d2a12a4ab960fc53a3df51d7abd8be623f245f4/segment/12.m4s",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/audio/5ec6aaaf466d4c9f8235cbe74d23b0a47b5eb1144ecd599362d0921a99bbfc85/segment/11.m4s",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/control",
+      "status": 429,
+      "error": "{\"code\":\"control_rate_limited\",\"message\":\"the control sequence advanced faster than the per-session budget\",\"generation\":\"e483dd80-7741-4b11-9b75-004c88b5ce12\",\"control_epoch\":1,\"retry_after_ms\":1}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/control",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/control",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/control",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/control",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/control",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/dvr/reminders",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/dvr/overview",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/dvr/overview",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/dvr/overview",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/dvr/overview",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/dvr/overview",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/dvr/overview",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/dvr/reminders",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/dvr/overview",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity",
+      "status": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 503,
+      "error": ""
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/hls/78837a90-9c31-4177-becc-7adb8a941535/quality-schedule",
+      "status": 200
+    }
+  ],
+  "harness_sha256": "7177507702814f7be928f41efa45e64342d0cfd17c19f16793cc708bedda780d",
+  "playback_lab_sha256": "1be219589ebc733fc8849fe137fa95df8f0fb8a6df98955b0472a8026545294d",
+  "fixtures": [
+    {
+      "name": "authored-sdr.mkv",
+      "bytes": 3294614,
+      "sha256": "bece3d5d38cd0c8a3acf76b53929cb52ff7896487abc3fb58b3351f61add161e"
+    }
+  ],
+  "startup_requested_at": "2026-10-12T17:51:45.596Z",
+  "prepared_at": "2026-10-12T17:53:23.604Z",
+  "bound_tools": {
+    "ffprobe_build_digest": "d5bea12cf7b084c6b0f59982d425f2d310b90b4f6319181667a7cd06167a9ab2",
+    "ffmpeg_version": "ffmpeg version 8.1.3-Jellyfin Copyright (c) 2000-2026 the FFmpeg developers",
+    "hwaccel_pref": "software"
+  },
+  "resource_policy": "Unmodified server default software pool; no qualification cap below shared AAC admission floor",
+  "file": {
+    "id": 1,
+    "filename": "authored-sdr.mkv"
+  },
+  "embedded_document_sha256": "7c7405cb8c98bd3084931af7ac1bba17a6b54e4001219fd218eba55b0cf64a52",
+  "instrumentation": "Original top-level document with auth prelude and appended observer; original application scripts and CSP unchanged",
+  "receipt": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Safari/605.1.15",
+    "phases": [
+      {
+        "name": "cold-mid",
+        "target": 6,
+        "trigger": 232,
+        "frames": [],
+        "observations": [],
+        "initialPreroll": 0,
+        "admitted": false
+      }
+    ],
+    "events": [],
+    "boot": {
+      "authenticated": true,
+      "serverReady": true,
+      "route": "#/"
+    },
+    "caps": {
+      "vcodec": "h264,hevc,hevc10,av1,vp9,vp8",
+      "acodec": "aac,mp3,opus,flac,ac3,eac3",
+      "container": "mp4,webm,mov,m4a,m4b,mp3,aac,flac,ogg,opus,wav",
+      "hdr": 1,
+      "dv": 1,
+      "dvprofile": "5,8",
+      "hdrDisplay": true,
+      "maxheight": 2160,
+      "hdr10t": 1,
+      "progressiveHevcSampleEntries": [
+        "hvc1",
+        "dvh1"
+      ],
+      "hlsHevcSampleEntries": []
+    },
+    "error": "Error: deadline",
+    "pass": false,
+    "diagnostic": {
+      "surface": {
+        "state": {
+          "faults": [],
+          "attached": null,
+          "hidden": false,
+          "hiddenSince": null,
+          "presenting": false,
+          "presentingSince": null,
+          "now": 61979,
+          "seq": 0
+        },
+        "surface": {
+          "kind": "none",
+          "class": null,
+          "source": null,
+          "title": null,
+          "detail": null,
+          "actions": [],
+          "attached": null,
+          "intent": null,
+          "position_ms": null,
+          "player_stopped": false,
+          "input_failed": false,
+          "fault": null
+        },
+        "history": []
+      },
+      "player": {
+        "method": "transcode",
+        "sessionId": "78837a90-9c31-4177-becc-7adb8a941535",
+        "started": true
+      },
+      "video": {
+        "ready": 2
+      }
+    }
+  },
+  "owned_tab_closed": true,
+  "daemon_log_window": {
+    "first": "2026-10-12T17:51:45.613454Z  INFO plurxd: open files: soft 1048575 -> 1048575 (hard 9223372036854775807)",
+    "last": "2026-10-12T17:54:28.225436Z  WARN plurxd::http: http request failed route_group=\"playback\" status=503 latency_ms=16 request_id=6911c2823cc3416f87554d0705785155 path=/api/v1/hls/[REDACTED]/quality-schedule also_suppressed=0"
+  },
+  "server_diagnostics": [
+    "2026-10-12T17:53:26.795657Z  INFO plurxd::transcode: playback startup phase completed file_id=1 phase=\"vod_create\" elapsed_ms=264 outcome=\"ready\"",
+    "2026-10-12T17:53:26.795670Z  INFO plurxd::transcode: playback startup phase completed session=s-203a8c76243050cf01c15b7e7bb977cfbbe1d405a283cd268ef4068c78da83d5 phase=\"create\" elapsed_ms=264"
+  ],
+  "resources_closed": true
+}

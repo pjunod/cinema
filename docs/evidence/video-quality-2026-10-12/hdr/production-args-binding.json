@@ -1,0 +1,243 @@
+{
+  "scope": "Executed compiled production argument exporter at frozen working-source hashes. Actual binary output compared with historical diagnostic candidate args; no repeated media qualification. Root final commit binding is separate.",
+  "source_before": {
+    "capture_kind": "working source snapshot before exporter build; not final merged commit",
+    "head": "c59db20df00559248faf3a7e328075e585efa2c5",
+    "head_tree": "95ba325f2e48c623ad7549e23678bd72bbee2bba",
+    "staged_diff_sha256": "b06a58115cb1154a09c4bd0e356388ef68f6f9a8263c883ed389b6cb81f1cea4",
+    "unstaged_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "source_sha256": {
+      "Cargo.toml": "125629938f90aca82b2c086f55b6959fca308758fc74167b43bb447c177ab149",
+      "Cargo.lock": "92e52a75a9d0bd4a4ce9e5d31f8f237bf2f29cedd37ed56b8a44697668ecc5c0",
+      "rust-toolchain.toml": "03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4",
+      "crates/plurx-core/Cargo.toml": "e60e8023af20c7783bc38ad2c817f6550d911bda6a2edcd9bf40116ceef378b3",
+      "crates/plurx-core/examples/encoder-calibration-args.rs": "9f1d0df0c8e0a78a52e3e4fb558c1f614d663fb58df25a40dc08f3fbd7a40f3d",
+      "crates/plurx-core/src/transcode/encoder.rs": "d00d85db80cd8910ed38e1663c048a930aece3d520b3774e1ae76d32de185cf8",
+      "crates/plurx-core/src/transcode/decode.rs": "d3227118a22209aca34869455023b4b13076eaf6e2d7f1a03276458cdfd1b168",
+      "crates/plurx-core/src/transcode/mod.rs": "eb14600220691da7a62f2ac508d7d176c0fde855d15021ad334d39d916e7a699",
+      "crates/plurx-core/src/transcode/pipeline.rs": "931d0c9d25d91e91909fa34990e6e3b8b3a5ff891b8a112cde6822bb1d2b17d2"
+    }
+  },
+  "source_after_sha256": {
+    "Cargo.toml": "125629938f90aca82b2c086f55b6959fca308758fc74167b43bb447c177ab149",
+    "Cargo.lock": "92e52a75a9d0bd4a4ce9e5d31f8f237bf2f29cedd37ed56b8a44697668ecc5c0",
+    "rust-toolchain.toml": "03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4",
+    "crates/plurx-core/Cargo.toml": "e60e8023af20c7783bc38ad2c817f6550d911bda6a2edcd9bf40116ceef378b3",
+    "crates/plurx-core/examples/encoder-calibration-args.rs": "9f1d0df0c8e0a78a52e3e4fb558c1f614d663fb58df25a40dc08f3fbd7a40f3d",
+    "crates/plurx-core/src/transcode/encoder.rs": "d00d85db80cd8910ed38e1663c048a930aece3d520b3774e1ae76d32de185cf8",
+    "crates/plurx-core/src/transcode/decode.rs": "d3227118a22209aca34869455023b4b13076eaf6e2d7f1a03276458cdfd1b168",
+    "crates/plurx-core/src/transcode/mod.rs": "eb14600220691da7a62f2ac508d7d176c0fde855d15021ad334d39d916e7a699",
+    "crates/plurx-core/src/transcode/pipeline.rs": "931d0c9d25d91e91909fa34990e6e3b8b3a5ff891b8a112cde6822bb1d2b17d2"
+  },
+  "source_unchanged": true,
+  "binary_sha256": "bc863c78aec59fbb59f01a2f9e520933fbf109cc1617fb4fbe372a41c3c63630",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "build_command": "CARGO_TARGET_DIR=/owned/build CARGO_BUILD_JOBS=2 rustup run 1.97.1 cargo build --locked -p plurx-core --example encoder-calibration-args",
+  "build_log_sha256": "fb72891e7a2a6983c78a1b0b1c0bb545fa8353e7c2d258b88cec9d74404e7ebe",
+  "build_result": "passed; 34 preexisting dead-code warnings with standalone core default features",
+  "exports": {
+    "8000": {
+      "argv": [
+        "encoder-calibration-args",
+        "--family",
+        "vaapi",
+        "--grade",
+        "hdr10",
+        "--bitrate-kbps",
+        "8000",
+        "--quality",
+        "22",
+        "--threads",
+        "1",
+        "--vaapi-driver",
+        "Mesa Gallium driver 26.0.8 for AMD Radeon 760M Graphics (radeonsi, phoenix, ACO, DRM 3.64, 7.0.0-31-generic)."
+      ],
+      "stdout": {
+        "bitrate_kbps": 8000,
+        "family": "vaapi",
+        "hdr10_1080_filter": "scale=1920:1080,format=yuv420p10le",
+        "input_args": [
+          "-vaapi_device",
+          "/dev/dri/renderD128"
+        ],
+        "modes": {
+          "qvbr": {
+            "encoder_args": [
+              "-c:v",
+              "hevc_vaapi",
+              "-profile:v",
+              "main10",
+              "-tier:v",
+              "high",
+              "-level:v",
+              "4",
+              "-idr_interval",
+              "0",
+              "-b:v",
+              "8000k",
+              "-maxrate",
+              "12000k",
+              "-bufsize",
+              "16000k",
+              "-color_primaries",
+              "bt2020",
+              "-color_trc",
+              "smpte2084",
+              "-colorspace",
+              "bt2020nc",
+              "-color_range",
+              "tv",
+              "-compression_level",
+              "19"
+            ],
+            "recipe_value": "qvbr:q22:maxrate1.5x:bufsize2x"
+          },
+          "vbr": {
+            "encoder_args": [
+              "-c:v",
+              "hevc_vaapi",
+              "-profile:v",
+              "main10",
+              "-tier:v",
+              "high",
+              "-level:v",
+              "4",
+              "-idr_interval",
+              "0",
+              "-b:v",
+              "8000k",
+              "-maxrate",
+              "12000k",
+              "-bufsize",
+              "16000k",
+              "-color_primaries",
+              "bt2020",
+              "-color_trc",
+              "smpte2084",
+              "-colorspace",
+              "bt2020nc",
+              "-color_range",
+              "tv",
+              "-compression_level",
+              "19"
+            ],
+            "recipe_value": "vbr:maxrate1.5x:bufsize2x"
+          }
+        },
+        "output_grade": "hdr10",
+        "quality": 22,
+        "schema_version": 1,
+        "scope": "encoder_arguments_only",
+        "software_threads": 1,
+        "upload_filter": "format=p010le,hwupload",
+        "vaapi_hdr_policy": "mesa_radeonsi_vbaq",
+        "vod_hevc_sample_entry": "hvc1"
+      },
+      "stderr": "",
+      "encoder_args_identical_to_measured_candidate": true,
+      "filter_and_upload_identical_to_measured_graph": true
+    },
+    "2000": {
+      "argv": [
+        "encoder-calibration-args",
+        "--family",
+        "vaapi",
+        "--grade",
+        "hdr10",
+        "--bitrate-kbps",
+        "2000",
+        "--quality",
+        "22",
+        "--threads",
+        "1",
+        "--vaapi-driver",
+        "Mesa Gallium driver 26.0.8 for AMD Radeon 760M Graphics (radeonsi, phoenix, ACO, DRM 3.64, 7.0.0-31-generic)."
+      ],
+      "stdout": {
+        "bitrate_kbps": 2000,
+        "family": "vaapi",
+        "hdr10_1080_filter": "scale=1920:1080,format=yuv420p10le",
+        "input_args": [
+          "-vaapi_device",
+          "/dev/dri/renderD128"
+        ],
+        "modes": {
+          "qvbr": {
+            "encoder_args": [
+              "-c:v",
+              "hevc_vaapi",
+              "-profile:v",
+              "main10",
+              "-tier:v",
+              "high",
+              "-level:v",
+              "4",
+              "-idr_interval",
+              "0",
+              "-b:v",
+              "2000k",
+              "-maxrate",
+              "3000k",
+              "-bufsize",
+              "4000k",
+              "-color_primaries",
+              "bt2020",
+              "-color_trc",
+              "smpte2084",
+              "-colorspace",
+              "bt2020nc",
+              "-color_range",
+              "tv",
+              "-compression_level",
+              "19"
+            ],
+            "recipe_value": "qvbr:q22:maxrate1.5x:bufsize2x"
+          },
+          "vbr": {
+            "encoder_args": [
+              "-c:v",
+              "hevc_vaapi",
+              "-profile:v",
+              "main10",
+              "-tier:v",
+              "high",
+              "-level:v",
+              "4",
+              "-idr_interval",
+              "0",
+              "-b:v",
+              "2000k",
+              "-maxrate",
+              "3000k",
+              "-bufsize",
+              "4000k",
+              "-color_primaries",
+              "bt2020",
+              "-color_trc",
+              "smpte2084",
+              "-colorspace",
+              "bt2020nc",
+              "-color_range",
+              "tv",
+              "-compression_level",
+              "19"
+            ],
+            "recipe_value": "vbr:maxrate1.5x:bufsize2x"
+          }
+        },
+        "output_grade": "hdr10",
+        "quality": 22,
+        "schema_version": 1,
+        "scope": "encoder_arguments_only",
+        "software_threads": 1,
+        "upload_filter": "format=p010le,hwupload",
+        "vaapi_hdr_policy": "mesa_radeonsi_vbaq",
+        "vod_hevc_sample_entry": "hvc1"
+      },
+      "stderr": "",
+      "encoder_args_identical_to_measured_candidate": true,
+      "filter_and_upload_identical_to_measured_graph": true
+    }
+  },
+  "outcome": "pass"
+}

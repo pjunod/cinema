@@ -1,0 +1,530 @@
+{
+  "source": "445237841",
+  "daemon_sha256": "7dc9ec99c21c1adb5b6bc7799f175141d669666e37c187faa53dfab56327da76",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/manifest.webmanifest"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/reader.css"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/playback-policy.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/app.css"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/theme.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/errors.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/cluster-panel.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/playback-control.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/reader.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/live-tv.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/library-channels.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/hls.min.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/app.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/api.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/file-context.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/shared-decision.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/auth.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/keyboard-reach.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/chrome.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/theme-menu.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/activity-indicator.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/cards.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/lightbox.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/home-helpers.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/home.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/renderers.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/header.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/library-grids.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/helpers.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/dynamic-range.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/track-facts.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/preplay-selection.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/edit.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/player.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/continuous-media.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/continuous-quality.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/session.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/prepared-replacement.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/prepared-switch-measurement.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/directed-change.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/decode-tiers.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/decode-margin.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/stall-diagnosis.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/surface.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/projection-chrome.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/transport.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/autoplay-next.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/menus.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/audio-sync.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/stats.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/watch-presentation.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/detail/watch-browser.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/activity.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/analysis.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/activity-stream.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-panels.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/live-tv.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/live-tv-dvr.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/recordings.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/dvr-reminders.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/live-tv-controls.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-developer.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-live-tv.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-system.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/cluster.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/cluster-operations.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/cluster-database.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/cluster-troubleshooting.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-playback.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/users-admin.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/catalog.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/register-classic.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/layouts/theater.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/reader.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/library-channels-page.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/shared-artwork.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/player/measurements.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/shared-libraries.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/sharing-management.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-navigation.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-router.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-guard.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-client.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-receiver.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/core/remote-controller.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/remote-pairing.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/settings-remote.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/pages/remote.js"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/router.js"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/files/1/decision"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/files/1/hls/continuous-candidates"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/files/1/hls/continuous-sessions"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/server"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/me"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/features"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hubs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/coming-soon"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/home/previews"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/hubs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/coming-soon"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/home/previews"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/client-log"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/images/5527518787049112062-poster-c505533e1a608fa20.jpg"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/activity"
+    }
+  ],
+  "harness_sha256": "f0db4faaf829c6bbf872c98749a08f7065b64024f769418a771ae20dcd311c01",
+  "playback_lab_sha256": "1be219589ebc733fc8849fe137fa95df8f0fb8a6df98955b0472a8026545294d",
+  "fixtures": [
+    {
+      "name": "authored-sdr.mkv",
+      "bytes": 3294614,
+      "sha256": "bece3d5d38cd0c8a3acf76b53929cb52ff7896487abc3fb58b3351f61add161e"
+    }
+  ],
+  "file": {
+    "id": 1,
+    "filename": "authored-sdr.mkv"
+  },
+  "embedded_document_sha256": "7c7405cb8c98bd3084931af7ac1bba17a6b54e4001219fd218eba55b0cf64a52",
+  "instrumentation": "Original top-level document with auth prelude and appended observer; original application scripts and CSP unchanged",
+  "receipt": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Safari/605.1.15",
+    "phases": [
+      {
+        "name": "cold-mid",
+        "target": 6,
+        "trigger": 135,
+        "frames": [],
+        "observations": [],
+        "initialPreroll": 0,
+        "admitted": false
+      }
+    ],
+    "events": [],
+    "caps": {
+      "vcodec": "h264,hevc,hevc10,av1,vp9,vp8",
+      "acodec": "aac,mp3,opus,flac,ac3,eac3",
+      "container": "mp4,webm,mov,m4a,m4b,mp3,aac,flac,ogg,opus,wav",
+      "hdr": 1,
+      "dv": 1,
+      "dvprofile": "5,8",
+      "hdrDisplay": true,
+      "maxheight": 2160,
+      "hdr10t": 0,
+      "progressiveHevcSampleEntries": [],
+      "hlsHevcSampleEntries": []
+    },
+    "error": "Error: media play deadline",
+    "pass": false,
+    "diagnostic": {
+      "surface": {
+        "state": {
+          "faults": [],
+          "attached": null,
+          "hidden": false,
+          "hiddenSince": null,
+          "presenting": false,
+          "presentingSince": null,
+          "now": 309,
+          "seq": 0
+        },
+        "surface": {
+          "kind": "none",
+          "class": null,
+          "source": null,
+          "title": null,
+          "detail": null,
+          "actions": [],
+          "attached": null,
+          "intent": null,
+          "position_ms": null,
+          "player_stopped": false,
+          "input_failed": false,
+          "fault": null
+        },
+        "history": []
+      },
+      "player": {
+        "method": "transcode",
+        "sessionId": null,
+        "started": false
+      },
+      "video": {
+        "ready": 0
+      }
+    }
+  },
+  "owned_tab_closed": true,
+  "resources_closed": true
+}

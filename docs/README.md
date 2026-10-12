@@ -583,6 +583,8 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 
 [Video quality acceptance follow-up](evidence/video-quality-2026-10-08/) — retained source-local title scoring, actual Plurx browser/native playback, HDR cause isolation and matched latency controls. **Measured; acceptance limits and landing status in the [execution ledger](performance/VIDEO-QUALITY-STATUS.md).**
 
+[HDR sharp-edge and autonomous client follow-up](evidence/video-quality-2026-10-12/) — driver-feature ablations, source-matched rate/quality controls and retained Safari/native client validation; current integration and acceptance scope in the [execution ledger](performance/VIDEO-QUALITY-STATUS.md).
+
 Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |

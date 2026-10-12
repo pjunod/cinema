@@ -1,0 +1,389 @@
+{
+  "scope": "Same baseline and VBAQ Main10 PQ assets as HDR/device lanes; independently hashed HLS bytes and probed stream metadata.",
+  "assets": [
+    {
+      "name": "hdr-baseline",
+      "streams": [
+        {
+          "index": 0,
+          "codec_name": "hevc",
+          "codec_long_name": "H.265 / HEVC (High Efficiency Video Coding)",
+          "profile": "Main 10",
+          "codec_type": "video",
+          "codec_tag_string": "hvc1",
+          "codec_tag": "0x31637668",
+          "width": 1920,
+          "height": 1080,
+          "coded_width": 1920,
+          "coded_height": 1088,
+          "has_b_frames": 0,
+          "pix_fmt": "yuv420p10le",
+          "level": 120,
+          "color_range": "tv",
+          "color_space": "bt2020nc",
+          "chroma_location": "left",
+          "field_order": "progressive",
+          "view_ids_available": "",
+          "view_pos_available": "",
+          "id": "0x0",
+          "r_frame_rate": "24/1",
+          "avg_frame_rate": "24/1",
+          "time_base": "1/12288",
+          "start_pts": 258,
+          "start_time": "0.020996",
+          "bit_rate": "152972",
+          "extradata_size": 128,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "variant_bitrate": "0",
+            "language": "und",
+            "handler_name": "VideoHandler",
+            "minor_version": "512",
+            "compatible_brands": "iso5iso6mp41",
+            "major_brand": "iso5",
+            "encoder": "Lavf62.12.103"
+          }
+        },
+        {
+          "index": 1,
+          "codec_name": "aac",
+          "codec_long_name": "AAC (Advanced Audio Coding)",
+          "profile": "LC",
+          "codec_type": "audio",
+          "codec_tag_string": "mp4a",
+          "codec_tag": "0x6134706d",
+          "mime_codec_string": "mp4a.40.2",
+          "sample_fmt": "fltp",
+          "sample_rate": "48000",
+          "channels": 2,
+          "channel_layout": "stereo",
+          "bits_per_sample": 0,
+          "initial_padding": 0,
+          "id": "0x0",
+          "r_frame_rate": "0/0",
+          "avg_frame_rate": "0/0",
+          "time_base": "1/48000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "bit_rate": "2317",
+          "extradata_size": 5,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "variant_bitrate": "0",
+            "language": "und",
+            "handler_name": "SoundHandler"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "index.m3u8",
+          "bytes": 550,
+          "sha256": "c97b492b8dc23fe15010351545ff6f775ab843a1797c7f9cce506221dc557138"
+        },
+        {
+          "name": "init.mp4",
+          "bytes": 1438,
+          "sha256": "6ae90aa23b88ffc333648a75e9c1e6cd80bb91ef83f99b6102ea57be097f9bcc"
+        },
+        {
+          "name": "segment-000.m4s",
+          "bytes": 39718,
+          "sha256": "4193b806d6ca559e0d0de9c6f96ed691c20557532b5d66959123f2616398a867"
+        },
+        {
+          "name": "segment-001.m4s",
+          "bytes": 30215,
+          "sha256": "84b05cc7e34acd1c9008c25760d6e85e863fa3fbdf102e2d7a44457e5efc99a8"
+        },
+        {
+          "name": "segment-002.m4s",
+          "bytes": 30608,
+          "sha256": "c00b8ae9589a546167b1f5ae3ad16e21c0ecef68d32e957bfe8e590f8afbfed8"
+        },
+        {
+          "name": "segment-003.m4s",
+          "bytes": 30209,
+          "sha256": "1de6e8652892afd7f5b0a171b4dba1cdf65d271edd7d2b5367380b5b1e8dfc33"
+        },
+        {
+          "name": "segment-004.m4s",
+          "bytes": 15133,
+          "sha256": "2a1fcd450c6a2fc0a0dd0ba1583d80b2f7c90dac375d4f71293c5630af0a1d7a"
+        },
+        {
+          "name": "segment-005.m4s",
+          "bytes": 15084,
+          "sha256": "80c7ff67273532e8b6f7d00af3ce775644b7069416eca939881218bf564c87be"
+        },
+        {
+          "name": "segment-006.m4s",
+          "bytes": 14691,
+          "sha256": "f40a0c4a912a9e75347f31337a4d7be40bb44a4634d6e843766bcf883fce8349"
+        },
+        {
+          "name": "segment-007.m4s",
+          "bytes": 14685,
+          "sha256": "5a7004b8b021da06954eb0e92da31293fd52fd7d2b934016794c8f5ce5d4f940"
+        },
+        {
+          "name": "segment-008.m4s",
+          "bytes": 15084,
+          "sha256": "ec251e1ff6f86b9f0fc45c5657e8d9b0623b3696860e66224e509ec057877bb5"
+        },
+        {
+          "name": "segment-009.m4s",
+          "bytes": 14691,
+          "sha256": "a4763aeb5eef351b69c7e3714d95023cbced642605b2f24b76b4d22743228d25"
+        },
+        {
+          "name": "segment-010.m4s",
+          "bytes": 15084,
+          "sha256": "6068b0d8682e704704db34a949f18452f1f6734de8695ef526bfdfd456e43503"
+        },
+        {
+          "name": "segment-011.m4s",
+          "bytes": 14685,
+          "sha256": "04cbb15b5023260de17168b08f039ef3ce6503c024ed13b75cb971d9850b8ed1"
+        }
+      ]
+    },
+    {
+      "name": "hdr-vbaq",
+      "streams": [
+        {
+          "index": 0,
+          "codec_name": "hevc",
+          "codec_long_name": "H.265 / HEVC (High Efficiency Video Coding)",
+          "profile": "Main 10",
+          "codec_type": "video",
+          "codec_tag_string": "hvc1",
+          "codec_tag": "0x31637668",
+          "width": 1920,
+          "height": 1080,
+          "coded_width": 1920,
+          "coded_height": 1088,
+          "has_b_frames": 0,
+          "pix_fmt": "yuv420p10le",
+          "level": 120,
+          "color_range": "tv",
+          "color_space": "bt2020nc",
+          "chroma_location": "left",
+          "field_order": "progressive",
+          "view_ids_available": "",
+          "view_pos_available": "",
+          "id": "0x0",
+          "r_frame_rate": "24/1",
+          "avg_frame_rate": "24/1",
+          "time_base": "1/12288",
+          "start_pts": 258,
+          "start_time": "0.020996",
+          "bit_rate": "112132",
+          "extradata_size": 128,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "variant_bitrate": "0",
+            "language": "und",
+            "handler_name": "VideoHandler",
+            "minor_version": "512",
+            "compatible_brands": "iso5iso6mp41",
+            "major_brand": "iso5",
+            "encoder": "Lavf62.12.103"
+          }
+        },
+        {
+          "index": 1,
+          "codec_name": "aac",
+          "codec_long_name": "AAC (Advanced Audio Coding)",
+          "profile": "LC",
+          "codec_type": "audio",
+          "codec_tag_string": "mp4a",
+          "codec_tag": "0x6134706d",
+          "mime_codec_string": "mp4a.40.2",
+          "sample_fmt": "fltp",
+          "sample_rate": "48000",
+          "channels": 2,
+          "channel_layout": "stereo",
+          "bits_per_sample": 0,
+          "initial_padding": 0,
+          "id": "0x0",
+          "r_frame_rate": "0/0",
+          "avg_frame_rate": "0/0",
+          "time_base": "1/48000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "bit_rate": "2317",
+          "extradata_size": 5,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "variant_bitrate": "0",
+            "language": "und",
+            "handler_name": "SoundHandler"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "index.m3u8",
+          "bytes": 550,
+          "sha256": "c97b492b8dc23fe15010351545ff6f775ab843a1797c7f9cce506221dc557138"
+        },
+        {
+          "name": "init.mp4",
+          "bytes": 1438,
+          "sha256": "f42e19d775673e583a172acba0d06a8c6837c9378e42d74086ec91b2aced0e86"
+        },
+        {
+          "name": "segment-000.m4s",
+          "bytes": 29508,
+          "sha256": "939a574271ca764cde9046f0fd57723cf82ce4ed49f4a64bf03d4c4ccdf4b123"
+        },
+        {
+          "name": "segment-001.m4s",
+          "bytes": 30215,
+          "sha256": "84b05cc7e34acd1c9008c25760d6e85e863fa3fbdf102e2d7a44457e5efc99a8"
+        },
+        {
+          "name": "segment-002.m4s",
+          "bytes": 30608,
+          "sha256": "c00b8ae9589a546167b1f5ae3ad16e21c0ecef68d32e957bfe8e590f8afbfed8"
+        },
+        {
+          "name": "segment-003.m4s",
+          "bytes": 30209,
+          "sha256": "1de6e8652892afd7f5b0a171b4dba1cdf65d271edd7d2b5367380b5b1e8dfc33"
+        },
+        {
+          "name": "segment-004.m4s",
+          "bytes": 16354,
+          "sha256": "df21e1980ec69f64e202ccac9301f81e800821aab5b0b7e91f731ea2dcdfdd01"
+        },
+        {
+          "name": "segment-005.m4s",
+          "bytes": 15084,
+          "sha256": "80c7ff67273532e8b6f7d00af3ce775644b7069416eca939881218bf564c87be"
+        },
+        {
+          "name": "segment-006.m4s",
+          "bytes": 14691,
+          "sha256": "f40a0c4a912a9e75347f31337a4d7be40bb44a4634d6e843766bcf883fce8349"
+        },
+        {
+          "name": "segment-007.m4s",
+          "bytes": 14685,
+          "sha256": "5a7004b8b021da06954eb0e92da31293fd52fd7d2b934016794c8f5ce5d4f940"
+        },
+        {
+          "name": "segment-008.m4s",
+          "bytes": 15084,
+          "sha256": "ec251e1ff6f86b9f0fc45c5657e8d9b0623b3696860e66224e509ec057877bb5"
+        },
+        {
+          "name": "segment-009.m4s",
+          "bytes": 14691,
+          "sha256": "a4763aeb5eef351b69c7e3714d95023cbced642605b2f24b76b4d22743228d25"
+        },
+        {
+          "name": "segment-010.m4s",
+          "bytes": 15084,
+          "sha256": "6068b0d8682e704704db34a949f18452f1f6734de8695ef526bfdfd456e43503"
+        },
+        {
+          "name": "segment-011.m4s",
+          "bytes": 14685,
+          "sha256": "04cbb15b5023260de17168b08f039ef3ce6503c024ed13b75cb971d9850b8ed1"
+        }
+      ]
+    }
+  ],
+  "metadata_failure": {
+    "original_vbaq_mp4_vui": {
+      "colour_description_present_flag": 1,
+      "colour_primaries": 2,
+      "transfer_characteristics": 2,
+      "matrix_coefficients": 9
+    },
+    "meaning": "Primaries and transfer are unspecified already in original encoded MP4; HLS demux agrees. This receipt proves Main10 decode, not PQ delivery.",
+    "diagnostic": "FFmpeg9 trace_headers on first copied HEVC packet, fields retained numerically."
+  }
+}

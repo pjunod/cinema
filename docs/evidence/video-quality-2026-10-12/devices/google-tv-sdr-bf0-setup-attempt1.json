@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "case": "google-tv-sdr-bf0",
+  "apk_sha256": "b1a07febb57717c7163f7d4223544a193556184b38b9c7ea3240b769937aade3",
+  "started_utc": "2026-10-12T16:39:07Z",
+  "cleanup": {
+    "post_timeout_package_absent": true
+  },
+  "preflight_media_states": [
+    "ERROR(7)",
+    "ERROR(7)",
+    "NONE(0)"
+  ],
+  "keyguard_not_showing": true,
+  "focus_before": [
+    "mCurrentFocus=Window{4f1577b u0 tv.plurx.app/tv.plurx.app.MainActivity}"
+  ],
+  "launcher_error": "Command '['~/Library/Android/sdk/platform-tools/adb', '-t', '2', 'install', 'docs/evidence/video-quality-2026-10-12/devices/android-probe/app/build/outputs/apk/debug/app-debug.apk']' timed out after 20 seconds",
+  "focus_after": [
+    "mCurrentFocus=Window{4f1577b u0 tv.plurx.app/tv.plurx.app.MainActivity}"
+  ],
+  "finished_utc": "2026-10-12T16:39:30Z"
+}

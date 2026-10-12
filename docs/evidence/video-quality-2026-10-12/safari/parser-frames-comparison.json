@@ -1,0 +1,10 @@
+{
+  "byte_identical": true,
+  "default_sha256": "4883982f478786a0da0309fbb19ee1b7cbde53e9390bb66f9417833e2767a0e7",
+  "no_opt_sha256": "4883982f478786a0da0309fbb19ee1b7cbde53e9390bb66f9417833e2767a0e7",
+  "decoded_frames": 24,
+  "default_bytes": 6594,
+  "no_opt_bytes": 6594,
+  "read_interval": "%+#24",
+  "note": "Bound is 24 source packets; delayed decoder frames are flushed by ffprobe. Both actual guest executions retain the original 10 s deadline and 256/16 KiB output bounds."
+}

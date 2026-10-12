@@ -2,11 +2,12 @@
 //! This exports arguments, not a capability verdict or a qualified playback plan.
 
 use plurx_core::transcode::{
-    EffectiveRateControl, Encoder, OutputGrade, Pipeline, VOD_HEVC_SAMPLE_ENTRY,
+    EffectiveRateControl, Encoder, OutputGrade, Pipeline, VaapiHdrPolicy, VOD_HEVC_SAMPLE_ENTRY,
 };
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vaapi_driver = None;
     let mut family = None;
     let mut grade = None;
     let mut bitrate = None;
@@ -16,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(arg) = args.next() {
         let value = args.next().ok_or("each option requires a value")?;
         match arg.as_str() {
+            "--vaapi-driver" if vaapi_driver.is_none() => vaapi_driver = Some(value),
             "--family" if family.is_none() => family = Some(value),
             "--grade" if grade.is_none() => grade = Some(value),
             "--bitrate-kbps" if bitrate.is_none() => bitrate = Some(value.parse::<u32>()?),
@@ -52,10 +54,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("--quality must be 0..51 (VideoToolbox: 1..100)".into());
     }
+    if vaapi_driver.is_some() && (encoder != Encoder::Vaapi || grade != OutputGrade::Hdr10) {
+        return Err("--vaapi-driver applies only to VAAPI HDR10".into());
+    }
+    let policy = vaapi_driver
+        .as_deref()
+        .and_then(VaapiHdrPolicy::from_driver_description);
     let mode = |rc: EffectiveRateControl| {
+        let mut encoder_args = encoder.encode_args_for(grade, bitrate, rc, true, Some(threads));
+        if let Some(policy) = policy {
+            encoder_args.extend(policy.flags().map(str::to_owned));
+        }
         json!({
             "recipe_value": rc.recipe_value(),
-            "encoder_args": encoder.encode_args_for(grade, bitrate, rc, true, Some(threads)),
+            "encoder_args": encoder_args,
         })
     };
     println!(
@@ -63,6 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::to_string_pretty(&json!({
             "schema_version": 1,
             "scope": "encoder_arguments_only",
+            "vaapi_hdr_policy": policy,
             "family": encoder.family_name(),
             "bitrate_kbps": bitrate,
             "quality": quality,
