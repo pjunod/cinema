@@ -55,6 +55,21 @@ remain acceptance-open; no row closes from this pass. The 2026-10-11 notes
 also correct stale text on S-13, S-14, C-05, S-02, K-06, P-02 and A-05 and
 remove PR600 batch notes copied onto rows they did not describe.
 
+**F1/N2 source follow-up, 2026-10-12:** Paul supplied Claude's stopped-session
+handoff and authorized root to continue and merge directly. Root
+`none:openai:2026-10-12`,
+`codex://threads/01a0c165-d718-73a1-93e9-e81380017705`, owns only the coherent
+copy-landing repair on `codex/copy-landing-origin`: core matching,
+`vodgen.rs`, the VOD generation/rendition constructors, focused tests, their
+ownership ledger and the existing [VOD plan §13](../streaming/VOD-PRESENTATION-PLAN.md#13-f1n2-copy-landing-repair--source-proof-not-device-acceptance)
+with its index/backlog pointers. This is not a new claim on another session's
+whole plan. Original Claude author/WIP and newer main tests are preserved.
+The actual audio-leading negative reproduced before the shared-zero fix;
+focused corrected source tests and the sole adversarial source review pass.
+Current-base compiler/static/hook/fast-lane evidence and landing remain owed.
+Four bounded closures / 45 acceptance-open remain unchanged. No deployment,
+physical-device action, sampler interruption or production fault campaign.
+
 **Fleet source boundary, 2026-09-26 00:04 UTC:** PR #533 advanced `main` to
 `0915b3ee9e62` at 21:52 UTC; PRs #528, #511, #530 and #405 then
 advanced it to `ea215603f`. All four nodes and the currently installed

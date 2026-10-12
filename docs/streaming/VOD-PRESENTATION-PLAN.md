@@ -260,14 +260,33 @@ stable time inside the bytes):
   because `-noaccurate_seek` never lands after it; a match past it is
   neither an answer nor a veto. When three fragments leave more than one
   candidate (three equal counts are ordinary in black, static or slide
-  content), the producer reads on and every fragment it has seen must match,
-  until one candidate is left or the landing buffer reaches one segment's
-  byte ceiling. The discard to the target then runs on past whatever the
-  buffer held, and every fragment read until the first segment is cut must
-  weigh what its index row says. Three outcomes are a typed producer failure
-  plus an index invalidation, not a silent drift: a sequence matching
-  **nowhere** at or before the target, one still matching in **two** places
-  when the reading stops, and a landing a later fragment **contradicts**.
+  content), the producer asks where its demuxer landed: a one-packet
+  `framecrc` probe with `-copyts` and the producer's own `-noaccurate_seek
+  -ss` and input reports the landing keyframe's source PTS. The index does
+  not count from the container's start time but from the film's first video
+  keyframe (its pipe maps only the video and drops the pictures before that
+  keyframe), so the same probe without the seek measures that keyframe's PTS
+  once per rendition, and the landing is the difference. The index row whose
+  start that names, less than one frame away and less than half a row's
+  duration away, is the landing, provided every fragment
+  seen so far still weighs what the rows from there say. Byte counts alone can
+  never settle a run whose fragments all weigh the same — a static picture is
+  one, however far the producer reads (lab F1, 2026-10-11) — and the
+  generation's own timestamps cannot, for the reason above. When the time
+  cannot be measured or names no row the bytes agree with, it is one more
+  piece of evidence rather than a verdict: the producer reads on and every
+  fragment it has seen must match, until one candidate is left or the landing
+  buffer reaches one segment's byte ceiling. The discard to the target then
+  runs on past whatever the buffer held, and every fragment read until the
+  first segment is cut must weigh what its index row says. These outcomes are
+  a typed producer failure plus an index invalidation, not a silent drift: a
+  sequence matching **nowhere** at or before the target, and a landing a later
+  fragment **contradicts**. One still matching in **two** places when the
+  reading stops — with the landing time refused or unmeasured — is a fact
+  about the seek position, not the rendition: it refuses only generations
+  started at that entry, and a seek anywhere else still gets a fresh
+  generation (lab N2, 2026-10-11). It is kept for the rendition's life unless
+  the time was never measured, in which case the next demand tries again.
   That is what keeps D4's promise
   that an ffmpeg upgrade which re-fragments differently fails loudly —
   different fragmentation means different output byte counts, so the sequence
@@ -1278,3 +1297,51 @@ included.
 **Still owed before M2 completes**, via STATUS.html's operator protocols: the
 device halves of P2 and P3, P1 on media1 over NFS, and P0 over at least ten
 real titles including a Dolby Vision title and one with an A/V offset.
+
+## 13. F1/N2 copy-landing repair — source proof, not device acceptance
+
+**Status:** local repair; review clear; current-base compilation and PR gate
+remain required · **Date:** 2026-10-12 · **Owner:**
+`none:openai:2026-10-12`,
+`codex://threads/01a0c165-d718-73a1-93e9-e81380017705` · **Branch:**
+`codex/copy-landing-origin`.
+
+Claude's stopped-session handoff supplied original source commits
+`7c16e191d` / `564bff3d4` and an unfinished repair. Its author remains
+`claude-opus-5-5`,
+`https://claude.ai/code/session_0158MVmDzgMccTLGCMdYLHXA`. The original source
+and saved patch are preserved outside this tree. Those commits were pulled
+from PR #1022 after review found a different timestamp zero and a
+rendition-wide refusal. Root ports the repair onto current main, preserving
+the newer index-demand test rather than replacing its file.
+
+| Requirement | Source outcome and evidence |
+|---|---|
+| Shared zero | The seeking and origin probes retain absolute PTS with `-copyts`; subtract the first video keyframe's PTS. The audio-leading Matroska negative failed with `TimeOffIndex`, while its bytes identified row 29. Correcting the recovered zero multiplier passes both that fixture and the mid-GOP MPEG-TS fixture. |
+| Bounded placement | The nearest row must be less than one packet-duration away and less than half its duration away, at or before the target. Every observed fragment's video-byte count must still match. Off-index or contradicted times are evidence refusals, not guessed placements. |
+| Byte fallback | A refused or unmeasured clock permits further byte evidence under the existing segment-buffer ceiling; a later unique match can still serve. The clock is asked at most once per generation. |
+| Failure scope | Unresolved ambiguity refuses its start entry and dependent audio-tail waiters, not the rendition. A failed/unmeasured probe is transient; the next demand may retry. A measured persistent disagreement remains entry-scoped. |
+| Source and child custody | Each probe independently reopens the held source descriptor, retains the existing 5 s / 64 KiB cancellable collector and awaited reap, and caches only a successful origin for that rendition. There is no new periodic task, setting or enablement gate. |
+
+The sole independent reviewer (`gpt-6.1-sol/high`,
+`agent:/root/anilist_retry_review_sol61`) cleared the corrected source;
+documentation and ownership counts are a subsequent explicit review step.
+Pinned Rust 1.97.1 was verified and the workspace/all-targets baseline passed
+before porting. The wrong `--lib` target and an obsolete `vod::tests` selector
+were command diagnostics, not test failures or passes. Actual tests use
+`cargo test -p plurxd --bin plurxd -- --exact <IDs>`; zero selected tests
+never count as evidence.
+
+The focused proof anchors are
+`the_landing_time_counts_from_the_first_video_keyframe_like_the_index`,
+`a_far_seek_into_constant_size_content_lands_by_its_landing_time`,
+`an_unplaced_start_entry_does_not_refuse_a_seek_elsewhere`,
+`an_unplaced_entry_whose_time_was_never_measured_is_tried_again`,
+`a_landing_time_that_does_not_place_it_leaves_the_bytes_to_settle_it` and
+`an_unsettled_landing_names_what_the_time_said`. The parser/argv and core
+matching controls remain named in the repair's Regression-Test fields.
+Passing IDs are retained once for applicable inputs, not replayed as a suite.
+
+This repairs the two source defects; it does not qualify the physical client
+matrix, every source family, original M0 real-title corpus or fleet rollout.
+The architecture workboard remains four bounded closures / 45 acceptance-open.
