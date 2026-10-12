@@ -57,8 +57,9 @@ Astra independently reviewed the routing and peak corrections. Exact-head
 release build, source-only Linux workspace check/Clippy and Main promotion
 (logical run 4860, actual 4886). The Python receipt records 1,376 passes.
 Main subsequently moved and conflicted only in the ownership census; the
-counts add (main 1,735 plus these two test-only bounds). Integration and its
-new-source qualification remain pending. Windows compilation gates were
+counts add (main 1,735 plus these two test-only bounds). PR #1038 integrates
+that main source; its landing requires the integrated compiler loop and a
+current-head promotion receipt. Windows compilation gates were
 deliberately removed from main by `ee668d0b4`; no Windows pass is claimed.
 
 Startup and seek limitations remain recorded: an abandoned preparation held
