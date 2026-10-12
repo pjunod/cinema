@@ -298,6 +298,8 @@ fn macos_selected_options_preserve_software_decode_recovery_for_sdr_and_hdr10() 
 /// name, so it must not find them.
 #[test]
 fn the_metal_pq_plan_is_keyed_by_the_curve_it_runs() {
+    const BEFORE_METAL_PEAK_UNIT_IN_IDENTITY: &str =
+        "9124aacdc928fb051748a7eb9911694d82ef627b3360c6ea1e697ff7154d906a";
     const BEFORE_CURVE_IN_IDENTITY: &str =
         "3e1b8f575c72b1a098a90b4275b56bb7a2ed672a24ad31cd944d2ecd8f8b87e6";
     let input = facts(macos_stream(true));
@@ -316,6 +318,7 @@ fn the_metal_pq_plan_is_keyed_by_the_curve_it_runs() {
         .expect("the Metal graph maps PQ");
     assert_eq!(terms, "tonemap=hable:tonemap_mode=max:desat=0");
     assert_ne!(plan.plan_digest(), BEFORE_CURVE_IN_IDENTITY);
+    assert_ne!(plan.plan_digest(), BEFORE_METAL_PEAK_UNIT_IN_IDENTITY);
     let execution = TranscodeExecution::from_options(
         &execution_file("/fixture/source.mkv"),
         &execution_options(),
@@ -325,7 +328,7 @@ fn the_metal_pq_plan_is_keyed_by_the_curve_it_runs() {
     .expect("execution");
     let argv = hls_args(&plan, &execution).join(" ");
     assert!(
-        argv.contains(&format!("tonemap_videotoolbox={terms}:")),
+        argv.contains(&format!("tonemap_videotoolbox={terms}:peak=100:")),
         "{argv}"
     );
 }

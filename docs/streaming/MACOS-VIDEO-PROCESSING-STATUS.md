@@ -12,28 +12,53 @@ measurements, negative results, provenance and reproducible raw receipts.
 ## 1. Current position
 
 **Mac HDR acceptance checkpoint, 2026-10-12.** The Metal CPU-parity and
-parser-install repairs are in `main` (PRs #1013/#1025). The Mac service can
-read the network volume after the required Full Disk Access grant. On the
-Air, an explicitly selected VideoToolbox backend passes the Metal boot
-comparison at 2.25×. Auto selects software on this device and skips that
-probe; the temporary backend override is user-authorized and must be
-restored after the comparison.
+parser-install repairs are in `main` (PRs #1013/#1025). The media mount was
+remounted with its original options; native reads and FFprobe pass. The Mac
+service reads the network volume after the user granted Full Disk Access.
+Both Mac installers deliver the bound parser and its ABI. The latest installed
+Air repair is `4e681cc76`; its explicit VideoToolbox Metal boot comparison
+passes at 2.21× and records libplacebo unavailable. Auto selects software and
+skips Metal on this device. The temporary hardware preference and player
+quality have been restored to Auto, the processing switch to on, and Chrome's
+color profile to Default.
 
-Real forced-1080p SDR playback still selected CPU processing because the
-bound source facts omitted HEVC scan type. The ordinary HDR10 control's
-hvcC, VPS and SPS carry explicit progressive, non-interlaced, frame-only
-profile constraints. The acceptance repair collects only the selected
-video stream's configuration through the existing descriptor-bound probe,
-retains Unknown when evidence is absent or contradictory, binds successful
-refinement into facts identity, and protects the refined decoder cache from
-fresh source documents. The first installed repair exposed a catalog/held-plan
-recipe mismatch: catalog selection must collect the same bounded scan facts
-before advertising an encoded recipe. Valid remux offers are published first;
-a failed collection cannot advertise a CPU recipe that later promotes to Metal.
-Core selection and catalog-to-prepared-source regressions pass; Astra review
-findings about remux progress and test timing have been addressed. Real
-Metal/CPU sessions and matching paused
-five-minute frames remain open; boot parity alone does not qualify them.
+Missing HEVC `field_order` originally kept real progressive HDR10 playback on
+the CPU. PR #1038 conservatively refines Unknown only from explicit progressive,
+non-interlaced, frame-only constraints in the selected stream's hvcC/VPS/SPS.
+It binds the descriptor-held evidence into facts identity, protects the refined
+cache from fresh source documents, and makes catalog offers and prepared plans
+use the same evidence. Valid remux offers retain progress before collection;
+failed collection cannot advertise an unstable encoded recipe. The reviewed
+production repair plays physical Air Chrome HDR10 to 1920×1080 SDR through
+Metal in 4.045 seconds; switch-off CPU playback starts in 3.859 seconds. Both
+paused frames at 300,000 ms have independent presented-frame receipts.
+
+**Picture qualification remains open.** The Metal frame is brighter than CPU.
+The installed filter interprets an explicit peak in tens of nits, whereas the
+CPU graph uses hundreds of nits. Supplying 11.79 to both therefore gives Metal
+a 117.9-nit curve for the 1,179-nit source. Its low-peak fallback masks this at
+exactly 1,000 nits, the earlier boot fixture. An offline neutral-PQ control
+confirms clipping with the old units. On the Air's actual five-minute source
+frame, the corrected option reduces mean absolute luma error from 13.75 to
+5.15 levels and the 95th percentile from 23 to 9. These are raw-frame diagnostics,
+not corrected physical-client acceptance. The peak-unit repair, Metal-only
+rendition-key invalidation and non-round boot fixture are under validation.
+The generated colored fixture still accepts both old and corrected options
+under its broad mean-channel threshold; it does not prove this regression is
+caught at boot. The neutral and real-title diagnostics expose it, and the new
+absolute-unit regression prevents the old serialization. Astra independently
+reviewed both the routing repair and this correction.
+
+The routing PR's first preflight failed one ownership-census assertion: two
+new test-only timeout bounds were not recorded. The reviewed ledger correction
+passes seven focused inventory tests; exact-source pinned Linux workspace
+check and Clippy pass. The current promotion gate and main landing remain
+pending. Unbuffered paused seeks stalled, cached playback information omitted
+the encoded frame size, and one replicated-store self-fence caused a transient
+503 before recovering. The laptop's warmed Heretic SDR route presents frames;
+its earlier startup and metadata failures remain recorded. These limitations
+are retained separately from successful Metal routing and do not qualify the
+broader Mac processing matrix.
 
 **Checkpoint 2026-10-10.** The previous session ended on quota with the
 probe-raster correction, three documentation edits and the AMD rerun

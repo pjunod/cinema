@@ -3024,6 +3024,18 @@ impl ResolvedTranscode {
         if let Some(terms) = options.pipeline.tone_map_terms(self.input_hdr_format()) {
             feed("renderer_tone_map_terms", terms.as_bytes());
         }
+        // Metal's explicit peak unit changed after real-title acceptance found
+        // the 1,000-nit fixture masking a factor-of-ten conversion error. Bind
+        // the serialized option so older bright/clipped renditions cannot be
+        // reused under the corrected graph. Other renderers keep their keys.
+        if options.pipeline == Pipeline::VtToneMapMetal {
+            if let Some(peak) = options
+                .pipeline
+                .tone_map_peak_option(self.input_hdr_format(), options.tone_map_peak_nits)
+            {
+                feed("renderer_tone_map_peak_option", peak.to_string().as_bytes());
+            }
+        }
         feed("deinterlace", self.deinterlace.name().as_bytes());
         let subtitle = match options.subtitle_burn.as_ref() {
             None => "none".to_owned(),
