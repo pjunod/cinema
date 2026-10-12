@@ -12,7 +12,7 @@ struct PreparedDecodedCadence {
 
 enum HLSFragmentCadence {
     private struct Box { let type: String; let body: Int; let end: Int }
-    private enum Invalid: Error { case media }
+    private enum Invalid: Error { case media, unavailable }
     private static func uint(_ data: Data, _ at: Int) throws -> UInt32 {
         guard at >= 0, at <= data.count - 4 else { throw Invalid.media }
         return (0..<4).reduce(0) { ($0 << 8) | UInt32(data[at + $1]) }
@@ -183,13 +183,13 @@ enum HLSFragmentCadence {
         private let lock = NSLock()
         private var readers: [Int: AsyncThrowingStream<Event, Error>.Continuation] = [:]
 
-        func events(for request: URLRequest, on session: URLSession) -> AsyncThrowingStream<Event, Error> {
-            AsyncThrowingStream { continuation in
-                let task = session.dataTask(with: request)
-                lock.lock(); readers[task.taskIdentifier] = continuation; lock.unlock()
-                continuation.onTermination = { _ in task.cancel() }
-                task.resume()
-            }
+        func events(for request: URLRequest, on session: URLSession) -> (task: URLSessionDataTask, stream: AsyncThrowingStream<Event, Error>) {
+            let (stream, continuation) = AsyncThrowingStream<Event, Error>.makeStream()
+            let task = session.dataTask(with: request)
+            lock.lock(); readers[task.taskIdentifier] = continuation; lock.unlock()
+            continuation.onTermination = { _ in task.cancel() }
+            task.resume()
+            return (task, stream)
         }
         private func reader(_ task: URLSessionTask, removing: Bool = false) -> AsyncThrowingStream<Event, Error>.Continuation? {
             lock.lock(); defer { lock.unlock() }
@@ -198,7 +198,10 @@ enum HLSFragmentCadence {
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
             reader(dataTask)?.yield(.response(response))
-            completionHandler(.allow)
+            // Refused status bodies cannot contribute media evidence. Cancel
+            // at the response boundary, before allowing any body transfer.
+            let status = (response as? HTTPURLResponse)?.statusCode
+            completionHandler(status == 200 || status == 206 ? .allow : .cancel)
         }
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
             reader(dataTask)?.yield(.bytes(data))
@@ -217,6 +220,24 @@ enum HLSFragmentCadence {
     private static func fetch(_ url: URL, range: Range<Int>? = nil, limit: Int, deadline: TimeInterval,
                               session: URLSession, loads: ChunkedLoads,
                               chunk: (HTTPURLResponse, Data) throws -> Bool) async throws -> HTTPURLResponse {
+        while true {
+            do {
+                return try await fetchAttempt(url, range: range, limit: limit, deadline: deadline,
+                                              session: session, loads: loads, chunk: chunk)
+            } catch Invalid.unavailable {
+                // 503 is an unavailable response, not permission to extend the
+                // preparation or sample proof. The same URL/Range gets only
+                // what remains of the original absolute deadline.
+                let remaining = deadline - ProcessInfo.processInfo.systemUptime
+                guard remaining > 0, !Task.isCancelled else { throw Invalid.media }
+                try await Task.sleep(nanoseconds: UInt64(min(0.1, remaining) * 1_000_000_000))
+            }
+        }
+    }
+
+    private static func fetchAttempt(_ url: URL, range: Range<Int>?, limit: Int, deadline: TimeInterval,
+                                     session: URLSession, loads: ChunkedLoads,
+                                     chunk: (HTTPURLResponse, Data) throws -> Bool) async throws -> HTTPURLResponse {
         let remaining = deadline - ProcessInfo.processInfo.systemUptime
         guard remaining > 0, !Task.isCancelled else { throw Invalid.media }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: remaining)
@@ -226,12 +247,15 @@ enum HLSFragmentCadence {
         }
         var response: HTTPURLResponse?
         var received = 0
-        for try await event in loads.events(for: request, on: session) {
+        let transfer = loads.events(for: request, on: session)
+        defer { transfer.task.cancel() }
+        for try await event in transfer.stream {
             guard !Task.isCancelled, ProcessInfo.processInfo.systemUptime < deadline else { throw Invalid.media }
             switch event {
             case .response(let value):
-                guard response == nil, let http = value as? HTTPURLResponse, http.url == url,
-                      http.statusCode == 200 || (range != nil && http.statusCode == 206),
+                guard response == nil, let http = value as? HTTPURLResponse, http.url == url else { throw Invalid.media }
+                if http.statusCode == 503 { throw Invalid.unavailable }
+                guard http.statusCode == 200 || (range != nil && http.statusCode == 206),
                       http.expectedContentLength <= limit else { throw Invalid.media }
                 response = http
             case .bytes(let data):

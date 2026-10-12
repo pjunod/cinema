@@ -216,6 +216,78 @@ final class HLSFragmentCadenceTests: XCTestCase {
         return (host, cadence)
     }
 
+    private func pendingFragmentHost(statuses: [Int]) -> String {
+        let host = CadenceStub.host()
+        let data = Fixtures.copySegment
+        CadenceStub.install(host, [
+            "/hls/s1/index.m3u8": .text(Self.playlist(map: true)),
+            "/hls/s1/init.mp4": .bytes(Fixtures.initMP4),
+            "/hls/s1/seg0.m4s": .init(length: data.count, ranges: true, statuses: statuses) { Data(data[$0]) },
+        ])
+        return host
+    }
+
+    func testUnavailableFragmentRetriesSameRangeAndProvesRealCadence() async throws {
+        let host = pendingFragmentHost(statuses: [503, 200])
+        let cadence = await HLSFragmentCadence.inspect(
+            url: try XCTUnwrap(URL(string: "http://\(host)/hls/s1/index.m3u8")), itemSeconds: 1, boundMs: 2_000,
+            configuration: CadenceStub.configuration())
+        XCTAssertEqual(try XCTUnwrap(cadence).frameDurationSeconds, 1 / 24.0, accuracy: 1e-9)
+        let ranges = CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s")
+        XCTAssertEqual(ranges.count, 2)
+        XCTAssertEqual(ranges.first, ranges.last, "retry preserves the owned URL and Range")
+        XCTAssertGreaterThanOrEqual(CadenceStub.cancelled(host, "/hls/s1/seg0.m4s"), 1)
+        XCTAssertEqual(CadenceStub.served(host, "/hls/s1/seg0.m4s"), Fixtures.copySegment.count,
+                       "the refused attempt contributes no body bytes")
+    }
+
+    func testPermanentUnavailableFragmentExhaustsOriginalDeadline() async throws {
+        let host = pendingFragmentHost(statuses: [503])
+        let began = ProcessInfo.processInfo.systemUptime
+        let cadence = await HLSFragmentCadence.inspect(
+            url: try XCTUnwrap(URL(string: "http://\(host)/hls/s1/index.m3u8")), itemSeconds: 1, boundMs: 350,
+            configuration: CadenceStub.configuration())
+        XCTAssertNil(cadence)
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - began, 1.5,
+                          "503 retries cannot renew the original deadline")
+        XCTAssertGreaterThan(CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").count, 1)
+        XCTAssertEqual(CadenceStub.served(host, "/hls/s1/seg0.m4s"), 0)
+    }
+
+    func testCancellationStopsUnavailableFragmentRetries() async throws {
+        let host = pendingFragmentHost(statuses: [503])
+        let url = try XCTUnwrap(URL(string: "http://\(host)/hls/s1/index.m3u8"))
+        let inspection = Task {
+            await HLSFragmentCadence.inspect(url: url, itemSeconds: 1, boundMs: 4_000,
+                                            configuration: CadenceStub.configuration())
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 1
+        while CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").isEmpty,
+              ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertFalse(CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").isEmpty)
+        inspection.cancel()
+        let result = await inspection.value
+        XCTAssertNil(result)
+        let attempts = CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").count
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").count, attempts)
+        XCTAssertEqual(CadenceStub.served(host, "/hls/s1/seg0.m4s"), 0)
+    }
+
+    func testUnauthorizedAndForbiddenFragmentsAreNotRetried() async throws {
+        for status in [401, 403] {
+            let host = pendingFragmentHost(statuses: [status, 200])
+            let cadence = await HLSFragmentCadence.inspect(
+                url: try XCTUnwrap(URL(string: "http://\(host)/hls/s1/index.m3u8")), itemSeconds: 1, boundMs: 2_000,
+                configuration: CadenceStub.configuration())
+            XCTAssertNil(cadence)
+            XCTAssertEqual(CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").count, 1)
+            XCTAssertEqual(CadenceStub.served(host, "/hls/s1/seg0.m4s"), 0)
+        }
+    }
+
     func testLargeCopySegmentIsReadThroughItsIndexNotItsPayload() async throws {
         // A 21 Mb/s copy segment of six seconds is ~16 MB; this one is 40 MB.
         let inspected = try await inspectCopy(try largeCopySegment(payload: 40_000_000, ranges: true))
@@ -320,13 +392,14 @@ final class HLSFragmentCadenceTests: XCTestCase {
 /// Serves fixed resources to `HLSFragmentCadence.inspect`, honouring
 /// single `bytes=a-b` ranges when a resource allows them, and counts the
 /// body bytes it actually delivers.
-final class CadenceStub: URLProtocol {
+final class CadenceStub: URLProtocol, @unchecked Sendable {
     struct Resource {
         let length: Int
         let ranges: Bool
         let bytes: @Sendable (Range<Int>) -> Data
-        init(length: Int, ranges: Bool, bytes: @escaping @Sendable (Range<Int>) -> Data) {
-            self.length = length; self.ranges = ranges; self.bytes = bytes
+        let statuses: [Int]
+        init(length: Int, ranges: Bool, statuses: [Int] = [], bytes: @escaping @Sendable (Range<Int>) -> Data) {
+            self.length = length; self.ranges = ranges; self.statuses = statuses; self.bytes = bytes
         }
         static func bytes(_ data: Data) -> Resource {
             Resource(length: data.count, ranges: true) { Data(data[$0]) }
@@ -336,7 +409,14 @@ final class CadenceStub: URLProtocol {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var resources: [String: [String: Resource]] = [:]
     nonisolated(unsafe) private static var counts: [String: Int] = [:]
+    nonisolated(unsafe) private static var requests: [String: [String]] = [:]
+    nonisolated(unsafe) private static var cancellations: [String: Int] = [:]
+    private let stateLock = NSLock()
     private var stopped = false
+    private var isStopped: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return stopped
+    }
 
     static func host() -> String { "cadence-\(UUID().uuidString.lowercased()).test" }
     static func install(_ host: String, _ table: [String: Resource]) {
@@ -345,6 +425,14 @@ final class CadenceStub: URLProtocol {
     static func served(_ host: String, _ path: String) -> Int {
         lock.lock(); defer { lock.unlock() }
         return counts[host + path] ?? 0
+    }
+    static func requestedRanges(_ host: String, _ path: String) -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        return requests[host + path] ?? []
+    }
+    static func cancelled(_ host: String, _ path: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return cancellations[host + path] ?? 0
     }
     static func configuration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
@@ -355,7 +443,12 @@ final class CadenceStub: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         guard let url = request.url, let host = url.host else { return }
-        Self.lock.lock(); let resource = Self.resources[host]?[url.path]; Self.lock.unlock()
+        Self.lock.lock()
+        let resource = Self.resources[host]?[url.path]
+        let key = host + url.path
+        let attempt = Self.requests[key, default: []].count
+        Self.requests[key, default: []].append(request.value(forHTTPHeaderField: "Range") ?? "none")
+        Self.lock.unlock()
         guard let resource else {
             client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: [:])!,
                                 cacheStoragePolicy: .notAllowed)
@@ -363,8 +456,16 @@ final class CadenceStub: URLProtocol {
             return
         }
         var range = 0..<resource.length
-        var status = 200
+        var status = resource.statuses.isEmpty ? 200 : resource.statuses[min(attempt, resource.statuses.count - 1)]
         var headers: [String: String] = [:]
+        if status != 200 {
+            // Advertise a body, but hold it until cancellation. A refused
+            // response must cancel its actual task rather than wait for EOF.
+            headers["Content-Length"] = String(resource.length)
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!,
+                                cacheStoragePolicy: .notAllowed)
+            return
+        }
         if resource.ranges, let header = request.value(forHTTPHeaderField: "Range"), header.hasPrefix("bytes=") {
             let span = header.dropFirst(6).split(separator: "-").compactMap { Int($0) }
             if span.count == 2, span[0] < resource.length {
@@ -377,7 +478,7 @@ final class CadenceStub: URLProtocol {
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!,
                             cacheStoragePolicy: .notAllowed)
         var at = range.lowerBound
-        while at < range.upperBound, !stopped {
+        while at < range.upperBound, !isStopped {
             let end = min(at + 65_536, range.upperBound)
             client?.urlProtocol(self, didLoad: resource.bytes(at..<end))
             Self.lock.lock(); Self.counts[host + url.path, default: 0] += end - at; Self.lock.unlock()
@@ -385,5 +486,10 @@ final class CadenceStub: URLProtocol {
         }
         client?.urlProtocolDidFinishLoading(self)
     }
-    override func stopLoading() { stopped = true }
+    override func stopLoading() {
+        stateLock.lock(); let first = !stopped; stopped = true; stateLock.unlock()
+        if first, let url = request.url, let host = url.host {
+            Self.lock.lock(); Self.cancellations[host + url.path, default: 0] += 1; Self.lock.unlock()
+        }
+    }
 }
