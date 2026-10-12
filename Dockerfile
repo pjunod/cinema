@@ -58,7 +58,7 @@ RUN sed -i \
       /etc/apt/sources.list.d/debian.sources \
     && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
     && apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl build-essential pkg-config ninja-build nasm python3-venv \
+      ca-certificates curl build-essential patch pkg-config ninja-build nasm python3-venv \
       libvulkan-dev glslang-dev libxxhash-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY tools/dv_processing/build-requirements.txt /build-inputs/build-requirements.txt
@@ -70,6 +70,7 @@ COPY rust-toolchain.toml .
 COPY tools/dv_quality/backends/parsed-rpu/fetch_parser.py tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock parsed-rpu/
 COPY tools/dv_quality/backends/libplacebo/fetch_sources.py libplacebo/
 COPY tools/dv_processing/build-dependencies.sh .
+COPY tools/dv_processing/*.patch .
 RUN --mount=type=cache,id=plurx-dv-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     sh /build-inputs/build-dependencies.sh /opt/dv-dependencies
 

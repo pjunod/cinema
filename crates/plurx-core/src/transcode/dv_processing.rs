@@ -640,6 +640,26 @@ pub struct DvBackendIdentity {
     environment: DvDigest,
 }
 impl DvBackendIdentity {
+    /// A driver-specific completed-output policy changes encoded bytes, while
+    /// the native reconstruction plan and its source decoder remain unchanged.
+    pub fn with_completed_encoder_policy(
+        &self,
+        encoder: super::Encoder,
+        policy: Option<super::VaapiHdrPolicy>,
+    ) -> Self {
+        let mut bound = self.clone();
+        if let (super::Encoder::Vaapi, Some(policy)) = (encoder, policy) {
+            let body = (
+                "plurx.dv.completed-vaapi-policy.v1",
+                &self.graph_patch,
+                policy.recipe_value(),
+            );
+            bound.graph_patch = DvDigest(hex::encode(Sha256::digest(
+                serde_json::to_vec(&body).expect("frozen encoder policy serializes"),
+            )));
+        }
+        bound
+    }
     pub fn parser_identity(&self) -> &DvDigest {
         &self.parser
     }
@@ -1140,6 +1160,45 @@ fn completed_window_trailer(init: &crate::fmp4::Init) -> Vec<u8> {
 /// Inputs are collected by the daemon from its held source and completed
 /// private processes. This type is intentionally neither deserializable nor
 /// a helper receipt. Every byte-changing output fact is rechecked below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum DvExportPolicy {
+    NativeRgb48V1,
+    /// Bilinear resampling in BT.2020/PQ RGB, before finite checked RGB48
+    /// quantization. Native BL/EL evidence always retains its original shape.
+    PqBilinearRgb48V1 {
+        raster: (u32, u32),
+    },
+}
+impl DvExportPolicy {
+    pub fn raster(self, native: (u32, u32)) -> Result<(u32, u32), DvContractError> {
+        let raster = match self {
+            Self::NativeRgb48V1 => native,
+            Self::PqBilinearRgb48V1 { raster } => raster,
+        };
+        if raster.0 < 32
+            || raster.1 < 32
+            || raster.0 > native.0
+            || raster.1 > native.1
+            || !raster.0.is_multiple_of(2)
+            || !raster.1.is_multiple_of(2)
+        {
+            return Err(DvContractError::Invalid("explicit export geometry"));
+        }
+        Ok(raster)
+    }
+
+    fn target_parameters(self) -> DvDigest {
+        let bytes = match self {
+            Self::NativeRgb48V1 => b"bt2020-pq-master-clip-v1".to_vec(),
+            Self::PqBilinearRgb48V1 { .. } => {
+                serde_json::to_vec(&("bt2020-pq-master-clip-export-v2", self))
+                    .expect("bounded export policy serializes")
+            }
+        };
+        DvDigest(hex::encode(Sha256::digest(bytes)))
+    }
+}
+
 pub struct DvCompletedWindowInput<'a> {
     pub source: DvSourceFacts,
     pub preferences: DvPreferences,
@@ -1154,6 +1213,7 @@ pub struct DvCompletedWindowInput<'a> {
     pub first_global_frame: u64,
     pub encoded: &'a [u8],
     pub raster: (u32, u32),
+    pub export_policy: DvExportPolicy,
     pub source_trace: DvDigest,
     pub observed_at: i64,
 }
@@ -1163,7 +1223,14 @@ pub fn dv_plan_completed_window(
 ) -> Result<DvProcessingPlan, DvContractError> {
     let invalid = || DvContractError::Invalid("daemon completed DV window");
     let preferences = input.preferences.validate()?;
-    if !matches!(input.encoder, Encoder::Software | Encoder::Nvenc) {
+    if !matches!(
+        input.encoder,
+        Encoder::Software | Encoder::Nvenc | Encoder::Vaapi
+    ) || input.encoder == Encoder::Vaapi
+        && (input.raster.0 > 1920
+            || input.raster.1 > 1080
+            || u64::from(input.grid.numerator) > 30 * u64::from(input.grid.denominator))
+    {
         return Err(invalid());
     }
     let full_fel = input.mode == DvProcessingMode::Fel;
@@ -1202,6 +1269,16 @@ pub fn dv_plan_completed_window(
         return Err(invalid());
     }
     let bl_shape = input.source.bl_shape.ok_or_else(invalid)?;
+    let export_raster = input
+        .export_policy
+        .raster((bl_shape.width, bl_shape.height))?;
+    if matches!(
+        input.export_policy,
+        DvExportPolicy::PqBilinearRgb48V1 { .. }
+    ) && export_raster != input.raster
+    {
+        return Err(invalid());
+    }
     let el_shape = input.source.el_shape;
     let expected_bl = if full_fel {
         DvPlaneRepresentation::P7BaseYuv420P10Limited
@@ -1307,12 +1384,7 @@ pub fn dv_plan_completed_window(
         pixels,
         adapt_metadata_to_reconstructed_base: input.destination == DvDestination::Profile81,
     };
-    let target = DvTargetPolicy::new(
-        1,
-        10_000_000,
-        5,
-        DvDigest(hex::encode(Sha256::digest(b"bt2020-pq-master-clip-v1"))),
-    )?;
+    let target = DvTargetPolicy::new(1, 10_000_000, 5, input.export_policy.target_parameters())?;
     let capability = DvCapabilityEvidence {
         scope: DvEvidenceScope::ProductionRoute,
         completed_window_checked: true,

@@ -2578,6 +2578,7 @@ pub struct ResolvedTranscode {
 pub struct CompletedReconstructedOutputPlan<'a> {
     source: &'a ResolvedTranscode,
     codec: super::encoder::CompletedReconstructedOutputContract,
+    vaapi_hdr_policy: Option<super::VaapiHdrPolicy>,
 }
 impl<'a> CompletedReconstructedOutputPlan<'a> {
     pub fn source_plan(&self) -> &'a ResolvedTranscode {
@@ -2596,7 +2597,21 @@ impl<'a> CompletedReconstructedOutputPlan<'a> {
         &self.codec
     }
     pub fn encode_args(&self, bitrate_kbps: u32, force_idr: bool) -> Vec<String> {
-        self.codec.encode_args(bitrate_kbps, force_idr, Some(1))
+        let mut args = self.codec.encode_args(bitrate_kbps, force_idr, Some(1));
+        args.extend(
+            self.vaapi_hdr_policy
+                .into_iter()
+                .flat_map(|policy| policy.flags().into_iter().map(str::to_owned)),
+        );
+        args
+    }
+    /// The completed encoder can differ from its Software reconstruction plan.
+    /// Freeze the actual proved driver's policy without changing that plan.
+    pub fn with_vaapi_hdr_policy(mut self, policy: Option<super::VaapiHdrPolicy>) -> Self {
+        self.vaapi_hdr_policy = (self.encoder() == Encoder::Vaapi)
+            .then_some(policy)
+            .flatten();
+        self
     }
 }
 
@@ -2611,6 +2626,15 @@ impl ResolvedTranscode {
             || self.output_contract.output_codec() != "hevc"
             || self.options.subtitle_burn.is_some()
             || self.options.video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50
+            || encoder == Encoder::Vaapi
+                && (self
+                    .output_contract
+                    .effective_width()
+                    .is_none_or(|width| width > 1920)
+                    || self
+                        .output_contract
+                        .effective_height()
+                        .is_none_or(|height| height > 1080))
         {
             return None;
         }
@@ -2618,6 +2642,7 @@ impl ResolvedTranscode {
         Some(CompletedReconstructedOutputPlan {
             source: self,
             codec,
+            vaapi_hdr_policy: None,
         })
     }
 

@@ -45,7 +45,7 @@ impl ReconstructedPqInput {
         "bt2020"
     }
     pub(super) fn pairs_with(self, encoder: Encoder) -> bool {
-        matches!(encoder, Encoder::Software | Encoder::Nvenc)
+        matches!(encoder, Encoder::Software | Encoder::Nvenc | Encoder::Vaapi)
     }
 }
 
