@@ -10222,3 +10222,31 @@ Installed idle apps do not reserve hardware; only active use does.
 No unit suite has been run during this continuation. Final adversarial review,
 the requested external review checkpoint and the merge coordinator's affected
 fast lane remain ahead.
+
+
+### 10.310 Lab restart and remaining native qualification — October 12
+
+The next isolated native startup failed before any playback: its committed-source
+staging directory was absent. Inspection also found the exact verifier binary and
+the earlier remote Firefox, Android and Safari raw-report directories absent. The
+lab node reported eight minutes of uptime at 22:32 UTC, consistent with a recent
+reboot clearing temporary storage; the specific deletion mechanism is not proved.
+Local compact summaries and the ledger's previously recorded hashes remain. Those
+hashes are historical identifiers, not a claim that the missing raw files can now
+be inspected. Do not fabricate replacements or turn failures into passes.
+
+Restore committed source only and rebuild the same `26c172d6b` candidate with the
+pinned toolchain and profile recorded in §10.309 before running another campaign.
+The first failed startup's process-birth census has no residual owned process.
+Neither an older production binary nor a diagnostic asset override substitutes
+for this build. The final Safari 15-manual/five-Auto series remains due.
+
+The private Apple actor exercises the actual public manual-selection action and
+joins prepared offers, committed acknowledgements, accepted successor control
+responses and advancing decoded target frames. It follows the documented native
+prepared-handoff contract (§7.3), permitting predecessor/successor sessions while
+retaining logical viewer and file ownership. Its evidence remains partial:
+`AVPlayerItemVideoOutput` is not independent optical/audio observation or proof
+of physical quality-menu taps. The separate phone app is installed; a separate
+TV app is being compiled. Production and older QA apps are preserved. Idle
+installed apps reserve no hardware; only an active run claims a device.
