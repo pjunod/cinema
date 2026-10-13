@@ -10538,3 +10538,34 @@ and control remain fenced. A staged/committed/ended status regression is added
 but unexecuted; pinned all-target Clippy and normal hooks pass. No client retry
 is added. The combined committed-source Linux build and native campaigns will
 run next on unchanged five-thread policy and continuity bounds.
+
+**Combined server and retained failures.** The committed combined source
+`bc96526a7dd3b39cdd41f2781d1858ac7d5af050` builds with pinned Rust1.97.1
+in233seconds. Its `cq-native-gbc96526a7` binary SHA-256 is
+`e01bb5793791cf8d2374908caeb2267b1408868b25908336f8e6b195b9011dc7`.
+No unit executes. A phone run on that exact server has no HTTP refusals and
+all eight cancellation counters remain zero, but fails the unchanged100ms
+active decoded-output limit with a383.408ms cross-item gap. The private
+observer attaches its new output only after active-player adoption;17 playing
+callbacks precede its first new pixel across a317.698ms observer interval.
+All69 owned backend processes retire and its unique QA process exits. That
+failed partial observation remains recorded, not promoted to acceptance.
+
+A separate private measurement output is then preattached to the hidden
+successor and retained through adoption; hidden decoded frames never enter
+scoring. On the same exact server the first720 transition still fails with
+a166.677ms observed gap. The tap is8.099seconds old at the first active720
+pixel; its first active callback precedes that pixel by83.829ms. The last
+1080 row and first720 row both report playing/presenting. An accepted
+committed acknowledgement follows. No HTTP refusal occurs and every
+cancellation counter remains zero; all68 owned backend processes retire and
+the exact phone QA process is absent. Neither full manual nor Auto acceptance
+is claimed because the campaign stops at its first failed switch.
+
+The first-active timestamp is an observer callback, not an exact surface
+promotion timestamp. The private output also drains hidden samples while
+parked; whether it omits an already aligned visible frame needs measurement.
+The next private diagnostic records exact promotion/play checkpoints and
+active sample availability without scoring hidden frames or changing the
+100ms limit. Apple TV qualification on the frozen combined candidate proceeds
+independently. Safari iOS remains blocked on unavailable device settings.
