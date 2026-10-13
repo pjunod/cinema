@@ -1,6 +1,6 @@
 # Mac HDR acceptance — playback follow-ups
 
-**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; ordinary Air hls.js F1 acceptance and restoration complete; F2–F7 remain open · **Recorded:** 2026-10-12.
+**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; ordinary Air hls.js F1 acceptance and restoration complete; F2 source correction qualified and merged, physical transition pending; F3–F7 remain open · **Recorded:** 2026-10-12.
 
 The [full acceptance report](../streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 closes the ordinary HDR10 Metal/CPU comparison. This document specifies the
@@ -422,8 +422,40 @@ buffer coverage are checked before exposure; the incumbent remains visible
 and audible during proof. Nine regressions execute the shipped owner,
 including an aligned later successor callback, sustained drift, expired
 incumbent evidence, pause, supersession, and rate/buffer loss. Independent
-review approves this revised source. Physical qualification and main-bound
-promotion are still pending; these source results do not close the matrix.
+review approves this revised source. At PR opening, physical qualification and
+main-bound promotion were pending; the source landing below supersedes the
+promotion wait. These source results do not close the physical matrix.
+
+### Source qualification and landing — physical acceptance pending
+
+[PR #1074](http://forge.lan:3000/noirr/plurx/pulls/1074) merged as
+`96e4c49e92818f8f3e6b01e4786492b1c37a97d7` at 17:05:35 UTC.
+Its qualified head is `fcac7a4ec6482d6f9b10aa39b02d390bc6771c78`, after
+integrating current main `e4b6c1c6d`. Run 5015 (global 5041) passed policy,
+web, Rust and Main promotion; matching preflight receipts were downloaded.
+All nine regression references are in the landing message. Current-candidate
+local compiler, Clippy, web-unit/static and docs checks also pass.
+
+The [source receipt](evidence/f2-decoded-alignment-20261013.json) binds the
+installed binary digest, served JavaScript digest, review, negative controls,
+qualification and landing. Its private
+[31-member qualification archive](http://forge.lan:3000/attachments/f6639fb2-2bb0-475a-b066-c7a24c79f967)
+has SHA-256 `24895b8ff899e0002fa7c3e1815d3e8d51992a0a53372a6d5ec013b334ebb4f0`.
+The separate [18-member failure archive](http://forge.lan:3000/attachments/09349205-d671-4076-b585-7f1c5335bb2f)
+has SHA-256 `1d47578cc247e4016d5b7e9352c3303bb9519077a22723ce23fc582cd975690a`.
+The original three HDR logs and that failure archive were rechecked unchanged.
+The rejected immediate pair and failed wait-only proposal remain failures.
+
+The qualified binary is installed and the service answers ready. The physical
+Air is locked at Touch ID/password, so no installed-source transition success,
+audible seam, or applied-quality pass is claimed. The next receipt must run
+the actual HDR remux → 1080p SDR prepared transition on this served source,
+retain actual frame/quality and audio-ownership facts, and distinguish any
+unmeasured physical audio output. Close the owned player, restore client
+quality Auto and the exact movie's resume to zero, and verify the fresh page.
+Shared clipboard remains off; backend Auto and Mac processing on were not
+changed by this source correction. Resume cleanup remains owed after the F2
+trials; the prior F1 zero-resume receipt remains a historical successful reset.
 
 ## 5. F3 — abandoned preparation occupies VOD capacity
 
