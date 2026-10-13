@@ -11027,3 +11027,45 @@ stays below0.4ms. This measured correlation motivates asynchronous,
 item-owned throughput sampling rather than speculative teardown changes.
 The public fix is in progress; the exact656 server remains unchanged.
 Unit regressions remain deferred to final review and batched merge.
+
+
+**Playback-thread sampling correction and full phone outcome.** Public
+`12eb6b592` moves all Apple controller access-log reads to one bounded
+background sampler. Actual scalar facts carry exact item, session and
+lifecycle ownership; replaced or late results cannot publish. One native
+read remains in flight even after invalidation, preventing worker growth.
+The two-second poll admits facts for at most two poll periods. Switch and
+pressure observations consume each actual sample once; authoritative
+network-transfer receipts remain separate. Two ownership regressions are
+added but not executed. Both test targets compile and the normal hook
+passes.
+
+Current main integrates cleanly as `a0446f3d2`. Exact integrated iOS/tvOS
+build-for-testing, pinned formatting/Clippy/syntax and Linux compilation
+pass without unit execution. The Linux binary SHA256 is
+`017ed394c9b4e54a4fec788fc8b33b592f8f867227eda4218ea80b62fd9b685b`.
+
+The corrected private phone build completes all15 manual changes with no
+errors: maximum decoded gap82.913ms and callback gap53.108ms. Across336
+snapshots, the cached access-log lookup takes at most0.040ms; the entire
+snapshot takes at most0.746ms. No observer span reaches10ms and the bounded
+writer records zero overflows. This is decoded-output evidence, not optical
+or audio qualification.
+
+The full campaign still fails its unchanged300-second Auto presentation
+deadline. Auto commits an actual720p bootstrap, with current candidate,
+catalog and completed-network receipt/ETag bindings; it does not produce the
+expected first1080p upgrade. Scored Auto changes and supplemental low-link
+changes remain zero. All eight cancellation deltas and known planner-refusal
+counts are zero. Cleanup verifies226 owned processes with zero residuals;
+the SDK wrapper and both owned bootstraps are closed.
+
+The three prewarm proofs were freshly re-read together at538.177seconds;
+they were not accumulated stale success counters. Unleased retained artifacts
+can retire after300seconds, while measured-cost lookup does not refresh
+that idle lease. This is a source hypothesis for later missing cost authority,
+not a captured retirement or established cause. The previous daemon log was
+removed by normal cleanup and successful idle retirement emits no trace.
+The next private diagnostic prepares only a genuine1080p proof and records
+exact chooser exits, per-rung matching proof counts, runway and timer ages.
+It cannot claim the full manual/Auto or low-link acceptance bars.
