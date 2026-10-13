@@ -10727,3 +10727,35 @@ policy is restored after the proof or refusal. Five numeric regressions
 cover rate/origin mapping, exhausted lead/reserve, invalid clocks, cadence
 and backward-startup refusal. Units remain deferred. Hardware qualification
 of this correction remains due.
+
+
+**Clock correction qualification and conservative planning.** The exact
+clock correction `a9e62b680` builds iOS and tvOS test targets without executing
+units. A focused phone two-switch capture accepts both commits with zero
+origin mismatch, maximum decoded gap97.535ms and no cancellation increments;
+all54 owned processes retire. Its subsequent full campaign fails at the
+third switch:114.016ms decoded gap and102.480ms callback gap. Playback clocks
+are already running and advancing; retain that failure. A bounded
+three-switch diagnostic accepts all three commits with86.642ms maximum
+decoded gap,77.695ms callback gap, zero cancellation increments and65 owned
+processes retired. Fixed numeric checkpoints measure post-proof predecessor
+disposal and waiting-policy restoration in a few milliseconds in that run;
+they do not establish a teardown cause for the earlier pause.
+
+TV still fails before a staged commit in the latest diagnostic. The durable
+initial session is superseded, its preparation is replaced and a fresh720
+attachment appears. A predecessor-superseded cancellation increments once,
+with60 owned processes retired and no residuals. A separate private QA
+readiness/reopen checkpoint captures the path before abandonment; it changes
+neither production behavior nor the scorer. The earlier ordinary TV
+clock-anchor refusal and failed phone second commit remain preserved.
+
+The planner can spend all available lead above the exact post-swap reserve,
+leaving zero clock-sampling slack. Reserve one existing100ms poll interval
+before choosing the fixed future target. Keep the original overlap deadline,
+exact4000ms post-swap reserve and measured cadence checks unchanged. A numeric
+regression demonstrates50ms of media-clock lag without consuming that
+reserve, and still refuses one millisecond below it. This prevents a
+mathematically brittle anchor; it does not claim to explain the unmeasured
+inputs of historical refusals or eliminate the callback pause. Compilation
+and exact updated hardware qualification remain due; units are deferred.

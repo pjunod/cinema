@@ -445,7 +445,10 @@ struct PreparedCommitRendezvous: Equatable {
     /// overlap that remains cannot afford a switch at all.
     static func commitLeadWallMs(overlapRemainingMs: Int) -> Int? {
         guard overlapRemainingMs > postSwapReserveMs + 1_000 else { return nil }
-        return min(PreparedReplacementBounds.alignmentMs * 2, overlapRemainingMs - postSwapReserveMs)
+        // Leave one existing poll interval for wall/media clock sampling and
+        // bounded startup lag. The anchor's exact reserve check stays unchanged.
+        return min(PreparedReplacementBounds.alignmentMs * 2,
+                   overlapRemainingMs - postSwapReserveMs - PreparedReplacementBounds.pollMs)
     }
 
     /// Never behind the staged position: a successor asked to seek backwards

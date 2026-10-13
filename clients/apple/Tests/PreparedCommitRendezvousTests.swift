@@ -131,13 +131,32 @@ final class PreparedCommitRendezvousTests: XCTestCase {
 
     func testTheLeadKeepsThePostSwapReserveOfTheOverlap() {
         XCTAssertEqual(PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: 12_000),
-                       PreparedReplacementBounds.alignmentMs * 2)
-        XCTAssertEqual(PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: 9_000), 5_000,
-                       "nine seconds left: five for inspection and alignment, four kept for after the swap")
+                       PreparedReplacementBounds.alignmentMs * 2 - PreparedReplacementBounds.pollMs)
+        XCTAssertEqual(PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: 9_000), 4_900,
+                       "reserve the original four seconds plus one sampling poll before choosing the lead")
         XCTAssertNil(PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: 5_000),
                      "a commit that cannot keep its reserve is refused before it starts")
         XCTAssertEqual(PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: .max),
                        PreparedReplacementBounds.alignmentMs * 2)
+    }
+
+    func testPlannedAnchorToleratesSmallMediaLagWithoutSpendingItsPostSwapReserve() throws {
+        let remainingMs = 9_000
+        let lead = try XCTUnwrap(PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: remainingMs))
+        let plan = PreparedCommitRendezvous.plan(stagedFilmPositionMs: 30_000,
+            incumbentFilmPositionMs: 42_000, mediaOriginMs: 30_000, leadMs: lead)
+        // During one second of preparation the incumbent clock advances only
+        // 950ms. The planned margin absorbs that lag, not the frame tolerance.
+        let afterLag = try XCTUnwrap(plan.clockAnchor(incumbentFilmMs: 42_950,
+            hostSeconds: 101, rate: 1, frameDurationSeconds: 1 / 24,
+            overlapRemainingMs: remainingMs - 1_000))
+        XCTAssertEqual(afterLag.hostSeconds, 104.95, accuracy: 0.000_001)
+        let exactRequiredMs = plan.filmPositionMs - 42_950 + PreparedCommitRendezvous.postSwapReserveMs
+        XCTAssertNotNil(plan.clockAnchor(incumbentFilmMs: 42_950, hostSeconds: 101,
+            rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: exactRequiredMs))
+        XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 42_950, hostSeconds: 101,
+            rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: exactRequiredMs - 1),
+            "one millisecond below the unchanged post-swap reserve still refuses")
     }
 
     func testClockAnchorMapsFilmLeadThroughPlaybackRateWithoutChangingOrigin() throws {
