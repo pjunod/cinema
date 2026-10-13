@@ -5403,13 +5403,19 @@ mod ride_along_tests {
         drop(build);
     }
 
-    /// (g) The cluster worker `select!`s the build against lease loss and
-    /// foreground preemption; the losing branch drops the build future. The
-    /// stage must go with it.
+    /// A standalone pass must stop a running source read when a viewer
+    /// arrives, remove its partial stage, and permit a later retry.
     #[tokio::test]
-    async fn dropping_the_build_future_mid_pass_removes_the_stage() {
+    async fn standalone_index_yields_to_foreground_and_removes_partial_stage() {
         let fixture = fixture(72_002, &[Sub::Pgs]);
         let cache = crate::test_tempdir().expect("cache");
+        let store = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let transcode = crate::transcode::TranscodeManager::new(
+            store,
+            cache.path().join("transcode"),
+            plurx_core::transcode::EncoderCaps::default(),
+            plurx_core::transcode::Pipeline::Cpu,
+        );
         let plan = RideAlongPlan::standalone(
             cache.path(),
             fixture.file.id,
@@ -5427,16 +5433,19 @@ mod ride_along_tests {
             .position(|arg| arg == "-i")
             .expect("an input");
         pass.args.insert(input, "-re".to_owned());
-        let mut build = Box::pin(build_with_args(
-            &fixture.file,
-            pass,
-            None,
-            None,
-            cache.path(),
-            Duration::from_secs(60),
-            Instant::now(),
-            None,
-            None,
+        let mut build = Box::pin(crate::state::local_index_until_foreground(
+            &transcode,
+            build_with_args(
+                &fixture.file,
+                pass,
+                None,
+                None,
+                cache.path(),
+                Duration::from_secs(60),
+                Instant::now(),
+                None,
+                None,
+            ),
         ));
         // Mid-pass: the tee has opened its slaves in the stage.
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -5453,7 +5462,29 @@ mod ride_along_tests {
             }
         }
         assert!(stage.is_dir());
-        drop(build);
-        assert!(!stage.exists(), "the stage outlived the dropped build");
+        let waiting = transcode.test_mark_live_waiting();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), build)
+            .await
+            .expect("foreground playback preempts the running source read");
+        assert!(outcome.is_none(), "preemption is not an index refusal");
+        assert!(!stage.exists(), "the interrupted stage must be removed");
+        drop(waiting);
+        let retry = crate::state::local_index_until_foreground(
+            &transcode,
+            build_with_args(
+                &fixture.file,
+                pass_over(&fixture.source, &fixture.file, None),
+                None,
+                None,
+                cache.path(),
+                Duration::from_secs(60),
+                Instant::now(),
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("the file may retry after the viewer leaves");
+        assert!(matches!(retry.outcome, IndexOutcome::Built(_)));
     }
 }

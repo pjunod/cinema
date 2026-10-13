@@ -4556,7 +4556,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # The test joins its futures in place. No detached task, producer, process,
 # resource owner, or deadline-as-completion proof is introduced. The adversarial
 # review traced the real start caller, atomic reservations and cancellation.
-expected_occurrences = 1742
+# PR #1077 standalone index preemption: 1742 -> 1744 (+2).
+# local_index_until_foreground awaits one 100 ms sleep in the foreground
+# observer selected against the owned index future. Cancellation drops both
+# branches, including the index's kill-on-drop child and partial-stage guard;
+# it neither detaches a task nor advances the file cursor or records refusal.
+# One test-only timeout bounds the real FFmpeg preemption regression, which
+# requires removal of the partial stage and successful retry after the viewer
+# leaves. Timeout fails that assertion; it is not a completion receipt.
+# The single adversarial review covered these paths and found no ownership
+# defect. This inventory records the two constructors already in that review.
+expected_occurrences = 1744
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
