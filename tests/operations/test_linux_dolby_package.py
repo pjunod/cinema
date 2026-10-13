@@ -21,6 +21,115 @@ def recipe():
 
 
 class LinuxDolbyPackageCase(unittest.TestCase):
+    def git_source_role(self):
+        commit = "a" * 40
+        return {"kind": "git", "commit": commit, "url": "https://example.invalid/fontconfig",
+                "archive_acquisition": {"kind": "git-archive", "commit": commit},
+                "archive_sha256": "f" * 64}
+
+    def test_git_source_archive_refuses_a_different_fetched_commit(self):
+        import time
+        module = recipe()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.tar.gz"
+            def execute(arguments, scratch, deadline, output=None):
+                self.assertIsNone(output)
+                return ("b" * 40).encode() if "rev-parse" in arguments else b""
+            with patch.object(module, "bounded_git_source_command", side_effect=execute):
+                with self.assertRaisesRegex(ValueError, "fetched Git source commit"):
+                    module.acquire_git_source_archive(self.git_source_role(), path, time.monotonic() + 10)
+            self.assertFalse(path.exists())
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_git_source_archive_checksum_failure_cannot_publish_output(self):
+        import time
+        module = recipe()
+        role = self.git_source_role()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.tar.gz"
+            def execute(arguments, scratch, deadline, output=None):
+                if output:
+                    output.write_bytes(b"untrusted archive")
+                return role["commit"].encode() if "rev-parse" in arguments else b""
+            with patch.object(module, "bounded_git_source_command", side_effect=execute):
+                with self.assertRaisesRegex(ValueError, "immutable source checksum"):
+                    module.acquire_git_source_archive(role, path, time.monotonic() + 10)
+            self.assertFalse(path.exists())
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_git_source_acquisition_requires_explicit_matching_public_commit(self):
+        import time
+        module = recipe()
+        role = self.git_source_role()
+        for changed in [{"archive_acquisition": {}},
+                        {"archive_acquisition": {"kind": "git-archive", "commit": "b" * 40}},
+                        {"url": "https://user:password@example.invalid/fontconfig"}]:
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(ValueError, "exact public pinned commit"):
+                    module.acquire_git_source_archive({**role, **changed}, Path(directory) / "source", time.monotonic() + 10)
+
+    def test_git_source_deadline_retires_process_group_and_reaps_owner(self):
+        import time
+        module = recipe()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scratch = root / "scratch"
+            scratch.mkdir()
+            (scratch / "home").mkdir()
+            executable = root / "fake-git"
+            executable.write_text("#!/bin/sh\nsleep 60 &\nwait\n")
+            executable.chmod(0o755)
+            children = []
+            original = subprocess.Popen
+            def launch(*args, **kwargs):
+                child = original(*args, **kwargs)
+                children.append(child)
+                return child
+            with patch.object(module.shutil, "which", return_value=str(executable)), patch("subprocess.Popen", side_effect=launch):
+                with self.assertRaisesRegex(ValueError, "deadline exceeded"):
+                    module.bounded_git_source_command(["fetch"], scratch, time.monotonic() + 0.2)
+            self.assertEqual(len(children), 1)
+            self.assertIsNotNone(children[0].returncode)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(children[0].pid, 0)
+
+    def test_git_scratch_scan_tolerates_only_live_disappearance(self):
+        module = recipe()
+        vanished = SimpleNamespace(lstat=lambda: (_ for _ in ()).throw(FileNotFoundError()))
+        scratch = SimpleNamespace(rglob=lambda pattern: [vanished])
+        self.assertEqual(module.git_source_scratch_bytes(scratch, live=True), 0)
+        with self.assertRaises(FileNotFoundError):
+            module.git_source_scratch_bytes(scratch, live=False)
+        denied = SimpleNamespace(lstat=lambda: (_ for _ in ()).throw(PermissionError()))
+        with self.assertRaises(PermissionError):
+            module.git_source_scratch_bytes(SimpleNamespace(rglob=lambda pattern: [denied]), live=True)
+
+    def test_expired_git_acquisition_cannot_spawn(self):
+        import time
+        module = recipe()
+        with tempfile.TemporaryDirectory() as directory, patch("subprocess.Popen") as launch:
+            with self.assertRaisesRegex(ValueError, "before spawn"):
+                module.bounded_git_source_command(["fetch"], Path(directory), time.monotonic() - 1)
+            launch.assert_not_called()
+
+    def test_git_archive_expiry_during_verification_removes_output(self):
+        module = recipe()
+        role = self.git_source_role()
+        clock = [0]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.tar.gz"
+            def execute(arguments, scratch, deadline, output=None):
+                if output:
+                    output.write_bytes(b"verified archive")
+                return role["commit"].encode() if "rev-parse" in arguments else b""
+            def checksum(path):
+                clock[0] = 11
+                return role["archive_sha256"]
+            with patch.object(module, "bounded_git_source_command", side_effect=execute), patch.object(module, "sha", side_effect=checksum), patch.object(module.time, "monotonic", side_effect=lambda: clock[0]):
+                with self.assertRaisesRegex(ValueError, "during verification"):
+                    module.acquire_git_source_archive(role, path, 10)
+            self.assertFalse(path.exists())
+
     def test_provenance_links_are_metadata_and_never_dereferenced(self):
         module = recipe()
         with tempfile.TemporaryDirectory() as tmp:

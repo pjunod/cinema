@@ -2645,7 +2645,11 @@
           "iconv"
         ]
       },
-      "archive_origin": "accepted exact upstream Git source offer"
+      "archive_origin": "accepted exact upstream Git source offer",
+      "archive_acquisition": {
+        "kind": "git-archive",
+        "commit": "6d0a98982ec351c165c9224c8b7dbdfca3010e47"
+      }
     },
     "fribidi": {
       "kind": "git",
