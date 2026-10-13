@@ -1,6 +1,7 @@
 """Capture fixtures must retire actual startup work before photographing it."""
 from pathlib import Path
 import runpy
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,3 +39,22 @@ class UiFixtureStabilityCase(unittest.TestCase):
         with self.assertRaisesRegex(self.fixture['Fail'], 'Live TV caption probe'):
             self.wait(lambda t: [{'purpose': 'Live TV caption probe', 'pid': 123}],
                       lambda t: 'caption graph probe complete', timeout=1)
+
+    def test_prior_boot_terminal_record_cannot_satisfy_the_capture_boot(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'daemon.log'
+            old = b'caption graph probe complete\n'
+            path.write_bytes(old + b'capture boot started\n')
+            current = self.fixture['read_current_boot_log'](path, len(old))
+            self.assertNotIn('caption graph probe complete', current)
+            with self.assertRaises(self.fixture['Fail']):
+                self.wait(lambda t: [], lambda t: current, timeout=1)
+            with path.open('ab') as source:
+                source.write(b'caption graph probe complete\n')
+            self.assertIn('caption graph probe complete',
+                          self.fixture['read_current_boot_log'](path, len(old)))
+
+    def test_capture_child_forces_its_reserved_port_over_inherited_environment(self):
+        import inspect
+        source = inspect.getsource(self.fixture['SelfHost'].spawn)
+        self.assertIn('"PLURX_JELLYFIN_PORT": str(self.jellyfin_port)', source)

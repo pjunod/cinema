@@ -566,6 +566,13 @@ def free_ports(preferred, count):
             listener.close()
 
 
+def read_current_boot_log(path, offset):
+    """Read a bounded tail without admitting any earlier boot's terminal record."""
+    with path.open("rb") as source:
+        source.seek(max(offset, path.stat().st_size - 262144))
+        return source.read(262144).decode(errors="replace")
+
+
 def wait_for_fixture_idle(read_processes, read_boot_log, alive, *,
                           timeout=300, quiet_seconds=2,
                           now=time.monotonic, sleep=time.sleep):
@@ -721,7 +728,8 @@ class SelfHost:
             # operator who exported it in their own shell would otherwise abort
             # every boot here — including the capture boot, which must activate.
             env={**os.environ, "PLURX_LOG": "info", "TZ": "UTC",
-                 ACTIVATION_FAILPOINT_ENV: ""},
+                 ACTIVATION_FAILPOINT_ENV: "",
+                 "PLURX_JELLYFIN_PORT": str(self.jellyfin_port)},
         )
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -785,9 +793,7 @@ class SelfHost:
         # Health is published while the boot caption audit still owns children.
         # Scope its terminal record to this boot; the prior seed boot is not proof.
         def read_boot_log():
-            with self.log.open("rb") as source:
-                source.seek(max(self.boot_log_start, self.log.stat().st_size - 262144))
-                return source.read(262144).decode(errors="replace")
+            return read_current_boot_log(self.log, self.boot_log_start)
 
         def read_processes(timeout):
             detail = api(self.base_url, "/activity/detail", self.token, timeout=timeout)
