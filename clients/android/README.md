@@ -20,7 +20,10 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `165` — A continuous quality change cancelled
+> Status: **v0.3.0**, build `166` — Auto can prefer a sustainable, processed
+> HDR10 rendition. The Dolby Vision repair still awaits final qualification
+> and fleet playback acceptance.
+> Build `165` — A continuous quality change cancelled
 > before it reached its owner is reported retained, so it no longer holds Auto
 > for the rest of the title (#978).
 > Build `164` — Continuous Auto costs rungs by their link
