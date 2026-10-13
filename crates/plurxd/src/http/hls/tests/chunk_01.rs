@@ -274,8 +274,20 @@
             after_mint
                 .matches("recovery_epoch: recovery_epoch.clone(),")
                 .count(),
-            2,
-            "both the session identity and the durable activation, and nothing else"
+            3,
+            "processed qualification, worker identity and activation share the one epoch"
+        );
+        let qualification = after_mint
+            .split_once("let recovery = crate::transcode::SessionRecoveryIdentity {")
+            .expect("processed qualification identity")
+            .1
+            .split_once(".qualify_processed_hdr10_auto(")
+            .expect("processed qualification call")
+            .0;
+        assert!(qualification.contains("recovery_epoch: recovery_epoch.clone(),"));
+        assert!(
+            !qualification.contains("recovery_epoch_for("),
+            "processed qualification borrows the existing epoch and cannot remint"
         );
         // And the mint precedes placement, because the session that carries it
         // is built by the task the placement loop spawns.
