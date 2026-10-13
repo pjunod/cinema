@@ -6360,3 +6360,19 @@ source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticR
 source_anchor = "fun share() = perform"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/DiagnosticReportNavigationTest.kt"
 test_anchor = "exportedZipCanBeAttachedWithoutSupportEnrollment"
+
+[[fixes]]
+id = "diagnostics.apple-tv-local-archive"
+commits = ["77ae6118660031fb8f6871a2e8fd57e68974db7e", "8c80b9a81ca18a6564e7ce8352215bbc60b3a785"]
+source = "clients/apple/Sources/DiagnosticReportView.swift"
+source_anchor = "func shareOnLocalNetwork()"
+test = "clients/apple/UITests/DiagnosticReportingTests.swift"
+test_anchor = "testTVZIPDownloadsSelectedIncidentAndCloseRevokesNewLink"
+
+[[fixes]]
+id = "diagnostics.android-tv-local-archive"
+commits = ["77ae6118660031fb8f6871a2e8fd57e68974db7e", "8c80b9a81ca18a6564e7ce8352215bbc60b3a785"]
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticRuntime.kt"
+source_anchor = "fun shareOnLocalNetwork()"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/DiagnosticReportNavigationTest.kt"
+test_anchor = "televisionExportsItsOwnArchiveAndClosingRevokesTheLink"
