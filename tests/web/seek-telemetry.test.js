@@ -299,3 +299,29 @@ test('Pause during an unbuffered VOD seek keeps fetching only the pending target
   h.c.pauseHlsStartup(h.p);assert.deepEqual(h.loads.at(-1),['start',30]);
   h.present();assert.deepEqual(h.loads.at(-1),['stop']);assert.equal(h.p.hlsStartup.pausedSeek,null);
 });
+
+async function playBeforeBufferedSeekSettlement(initiallyPaused){
+  const h=pausedVodHarness(true);
+  if(!initiallyPaused){h.p.wantsPlayback=true;h.video.paused=false;}
+  await h.dispatch(30);
+  if(!initiallyPaused){
+    h.p.wantsPlayback=false;h.p.controlIntentGeneration++;h.video.paused=true;
+    h.c.pauseHlsStartup(h.p);
+  }
+  h.p.wantsPlayback=true;h.p.controlIntentGeneration++;h.video.paused=false;
+  assert.equal(h.c.resumeHlsStartup(h.video,h.p),true,'buffered target left loading stopped, so Play must restart it');
+  assert.deepEqual(h.loads.at(-1),['start',30]);
+  const count=h.loads.length;h.present();assert.equal(h.loads.length,count,'settlement after Play must retain loading');
+  assert.equal(h.p.controlSeek,null);
+}
+test('buffered VOD seek resumes loading when Play precedes settlement (seek while paused)',()=>playBeforeBufferedSeekSettlement(true));
+test('buffered VOD seek resumes loading when Play precedes settlement (Pause during seek)',()=>playBeforeBufferedSeekSettlement(false));
+test('paused VOD seek coverage without a target frame still invokes bounded recovery',async()=>{
+  const h=pausedVodHarness();await h.dispatch(30);
+  h.c.playbackSeekBufferCovers=()=>true;
+  const deadline=h.timers.find(timer=>timer.ms===h.c.PlaybackPolicy.HLS_STARTUP.seek_deadline_ms);
+  h.c.seekTo=(target,force)=>{h.reopen={target,force};};deadline.fn();
+  assert.deepEqual(h.reopen,{target:30,force:true},'bytes alone cannot terminate target-frame recovery');
+  assert.deepEqual(h.loads.at(-1),['stop']);
+  assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,0);
+});

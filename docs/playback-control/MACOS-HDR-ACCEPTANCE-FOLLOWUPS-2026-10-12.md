@@ -156,7 +156,7 @@ the observed 20-second wait is not an approved tolerance. Add a regression at
 the identified demand/loader/settlement boundary, plus a real browser receipt
 for frame presentation. A test that only updates the timeline is insufficient.
 
-### Repair progress — source built; review and HDR hardware acceptance open
+### Repair progress — source reviewed; PR qualification and HDR hardware acceptance open
 
 F1 is claimed by the paused-seek repair branch. On the October 12 main
 baseline `6dc031387`, Pause suspends the established HLS loader with
@@ -171,7 +171,10 @@ attachment. It keeps the video paused, permits the owned playlist request,
 and restores suspension after actual settlement. Supersession retires the
 previous seek's loading and timer. The next Play can resume the newly held
 loader; Play during loading leaves it running. Pause during a pending VOD
-seek still permits that seek's target loading. The existing deadline remains.
+seek still permits that seek's target loading. A buffered target retains a fresh
+suspension so Play before settlement can restart fetching. A paused deadline
+with bytes but no target frame invokes the existing reopen; it cannot silently
+retire recovery based only on coverage.
 No Rust behavior, playback preference or feature switch changes.
 
 The [repair receipt](evidence/paused-vod-seek-20261012.json) preserves both
@@ -180,9 +183,10 @@ negative and positive controls:
 | Control | Observed result |
 |---|---|
 | Shipped seek regression before repair | 21 pass, one fails: Pause stops fetching and seek issues no target load |
-| Focused seek/loader regressions after repair | 40 pass; target-frame settlement, stale lease/attachment rejection, supersession, Play/Pause interleaving and deadline cleanup |
+| Focused seek/loader regressions after review | 43 pass; target-frame settlement, stale lease/attachment rejection, supersession, Play/Pause interleaving and deadline cleanup |
 | Real Chrome, generated MPEG-TS, stopped-loader baseline | Target 35 s stays seeking, with no target frame or target buffer after 1,502 ms |
 | Same browser/fixture with repaired loading | Unbuffered forward frame 35.000 s in 22 ms; unbuffered backward frame 24.080 s for target 24 s in 8 ms; both paused with seeking completed |
+| Reviewed source, same Chrome fixture | Forward target frame in 19 ms, backward target frame in 5 ms; both remain paused and finish seeking |
 | First browser harness | Preserved but invalid for final settlement: it accepted the callback before `seeked` and reused a buffered backward target |
 | Fresh Air attempt on acceptance build `94dee81da` | Catalog reports analysis pending; original quality uses rolling remux. The rolling unbuffered reopen fails before media arrives. This does not qualify the repaired paused VOD path. |
 
@@ -197,10 +201,15 @@ the shipped seek path. Neither is a genuine HDR physical-display campaign.
 
 Original HDR failures remain in the acceptance manifest/archive unchanged.
 New Air failures and both browser harness versions are retained alongside the
-repair. Remaining closure work is adversarial review, normal PR qualification,
+repair. Astra found and verified the correction of a buffered-seek
+Play-before-settlement race; three new regressions fail before that correction
+and pass afterward. Remaining closure work is normal PR qualification,
 and the source-bound HDR-on-Air paused VOD matrix from this section. Native
 HLS and failed paused reopen/startup paths retain their separate qualification
-needs; this local VOD loader repair does not claim to close them.
+needs; this local VOD loader repair does not claim to close them. In particular,
+a forced reopen while still paused suppresses its fresh startup manifest. The
+deadline test proves a bounded reopen attempt, not autonomous settlement or
+terminal failure on that replacement.
 
 ## 4. F2 — manual SDR quality change loses alignment
 

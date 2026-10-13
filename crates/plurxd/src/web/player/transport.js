@@ -1292,7 +1292,9 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     if(vod&&seekIntent.localVodPresented) { cleanup(); return; }
     timer=setTimeout(()=>{
       if(settled||!current()||vod&&seekIntent.localVodPresented) { cleanup(); return; }
-      if(playbackSeekBufferCovers(v,me,atMs)) { cleanup(); return; }
+      // A paused VOD seek needs its target frame, even after the bytes arrive.
+      // Coverage alone must not retire the only bounded recovery deadline.
+      if(playbackSeekBufferCovers(v,me,atMs)&&!(vod&&me.wantsPlayback===false)) { cleanup(); return; }
       fallback('unsettled');
     },vod?PlaybackPolicy.HLS_STARTUP.seek_deadline_ms:PlaybackPolicy.SEEK_LOCAL_SETTLE_MS);
     return;

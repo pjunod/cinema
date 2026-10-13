@@ -406,6 +406,34 @@
     "web-types.log": {
       "sha256": "b54cdfe0735271d264049857fc866aa160ddc72fcd621db93d8245760e4e9140",
       "bytes": 169
+    },
+    "review-before.log": {
+      "sha256": "17b046203aee59b605b3894551250f11038ef64740e80ebee401a6d735f00734",
+      "bytes": 5145
+    },
+    "review-after.log": {
+      "sha256": "d94df18017245d9ac61a0590e7af2297d476b59e23089e86b6afec04bb69e25c",
+      "bytes": 4048
+    },
+    "astra-review.txt": {
+      "sha256": "2d4467e8fbf2e56a99df326cdc1ebc3edc0426b452944010310fa7802a2301a1",
+      "bytes": 828
+    },
+    "review-web-unit.log": {
+      "sha256": "f94de6ad9d1f9752472d2f6e44946cc681c8bd68b15e6e8425f0b0a20f333984",
+      "bytes": 127029
+    },
+    "review-after-static-titles.log": {
+      "sha256": "b1cc9413ffd47251a567193ab58ce10ac10e428f83afea72bf28dd5b7e8d6d41",
+      "bytes": 4036
+    },
+    "browser-diagnostic-review.json": {
+      "sha256": "fca2df54a205843a6270e01bcc8b9219d91798bee04f131913acf4da8f618aa5",
+      "bytes": 2993
+    },
+    "review-precommit.log": {
+      "sha256": "cd74c17178aeadca5b707a51e5ed3689b8e6c7599ccf5a5abceb98f7dfebb22e",
+      "bytes": 527
     }
   },
   "repair_sources": {
@@ -414,5 +442,267 @@
     "tests/web/seek-telemetry.test.js": "3a37390d322e3de21b1f2c1257b35d975a789adb7efa8bcf7f742a7861fb8615",
     "tests/playback/paused-hls-resume.test.js": "f7921a2bf0005ee11beda4365499b2e130bdf1a5e2cc573340a327ee4c42ca69",
     "tests/web/paused-vod-seek.fixture.cjs": "beeef5adec20bf58267bd6d156e47f0d192a324dfcda4c576ad73aa8d81c3828"
+  },
+  "review_revision": {
+    "reviewed_initial_commit": "bcbb0d9cc3ddd26758e5db4cc68af92a32f90c57",
+    "reviewer": "Astra",
+    "initial_verdict": "request changes: buffered target clears suspension although loader stays stopped",
+    "resolution": "Retain current-generation suspension when target loading is unnecessary. Covered paused target with no frame now invokes existing bounded reopen.",
+    "verdict": "approve revised local VOD loader repair; full F1 acceptance stays open",
+    "regressions_before": {
+      "passed": 22,
+      "failed": 3
+    },
+    "focused_after": {
+      "passed": 43,
+      "failed": 0
+    },
+    "boundary": "A paused reopened startup suppresses its manifest until later Play; a bounded reopen attempt is not bounded terminal failure or frame arrival.",
+    "source_sha256": {
+      "crates/plurxd/src/web/player/player.js": "e7942e993f18d86f9362818d388754324f786b9fcef5e789df4650c5f2cf1307",
+      "crates/plurxd/src/web/player/transport.js": "8aef8d356d9e9cbfab3d631b7efd55e3b83be19ed14e42c19a70ac2c0eac7a2b",
+      "tests/web/seek-telemetry.test.js": "e3331f76bcd077c42782c54817ff977e6a4b1eab76bac24004f955dbde9c25a0",
+      "tests/playback/paused-hls-resume.test.js": "f7921a2bf0005ee11beda4365499b2e130bdf1a5e2cc573340a327ee4c42ca69",
+      "tests/web/paused-vod-seek.fixture.cjs": "beeef5adec20bf58267bd6d156e47f0d192a324dfcda4c576ad73aa8d81c3828"
+    },
+    "browser": {
+      "baseline": {
+        "repaired": false,
+        "landings": [
+          {
+            "target": 35,
+            "before": [
+              [
+                6.08,
+                16.015999
+              ]
+            ],
+            "frame": null,
+            "ms": 1502,
+            "paused": true,
+            "seeking": true,
+            "after": [
+              [
+                6.08,
+                16.015999
+              ]
+            ],
+            "passed": false
+          }
+        ]
+      },
+      "repaired": {
+        "repaired": true,
+        "landings": [
+          {
+            "target": 35,
+            "before": [
+              [
+                6.08,
+                16.015999
+              ]
+            ],
+            "frame": 35,
+            "ms": 19,
+            "paused": true,
+            "seeking": false,
+            "after": [
+              [
+                6.08,
+                16.015999
+              ],
+              [
+                34.08,
+                40.015999
+              ]
+            ],
+            "passed": true
+          },
+          {
+            "target": 24,
+            "before": [
+              [
+                6.08,
+                16.015999
+              ],
+              [
+                34.08,
+                40.015999
+              ]
+            ],
+            "frame": 24.08,
+            "ms": 5,
+            "paused": true,
+            "seeking": false,
+            "after": [
+              [
+                24.08,
+                25.999999
+              ],
+              [
+                34.08,
+                40.015999
+              ]
+            ],
+            "passed": true
+          }
+        ]
+      },
+      "bundle_sha256": "72b87a6e58db623feca73ab370970c1126ec06eb3dcd0a67fd14b47b6340b820",
+      "player_sha256": "e7942e993f18d86f9362818d388754324f786b9fcef5e789df4650c5f2cf1307",
+      "requests": [
+        {
+          "path": "/",
+          "at": 1791855294323
+        },
+        {
+          "path": "/hls.js",
+          "at": 1791855294345
+        },
+        {
+          "path": "/favicon.ico",
+          "at": 1791855294888
+        },
+        {
+          "path": "/index.m3u8",
+          "at": 1791855302237
+        },
+        {
+          "path": "/seg3.ts",
+          "at": 1791855302424
+        },
+        {
+          "path": "/seg4.ts",
+          "at": 1791855302493
+        },
+        {
+          "path": "/seg5.ts",
+          "at": 1791855302498
+        },
+        {
+          "path": "/seg6.ts",
+          "at": 1791855302501
+        },
+        {
+          "path": "/seg7.ts",
+          "at": 1791855302504
+        },
+        {
+          "path": "/index.m3u8",
+          "at": 1791855304319
+        },
+        {
+          "path": "/seg3.ts",
+          "at": 1791855304323
+        },
+        {
+          "path": "/seg4.ts",
+          "at": 1791855304393
+        },
+        {
+          "path": "/seg5.ts",
+          "at": 1791855304400
+        },
+        {
+          "path": "/seg6.ts",
+          "at": 1791855304403
+        },
+        {
+          "path": "/seg7.ts",
+          "at": 1791855304406
+        },
+        {
+          "path": "/seg17.ts",
+          "at": 1791855304764
+        },
+        {
+          "path": "/seg18.ts",
+          "at": 1791855304773
+        },
+        {
+          "path": "/seg19.ts",
+          "at": 1791855304777
+        },
+        {
+          "path": "/seg20.ts",
+          "at": 1791855304780
+        },
+        {
+          "path": "/seg12.ts",
+          "at": 1791855304781
+        },
+        {
+          "path": "/seg11.ts",
+          "at": 1791855304784
+        },
+        {
+          "path": "/receipt",
+          "at": 1791855304787
+        }
+      ]
+    },
+    "web_unit": {
+      "command": "make web-unit-check",
+      "exit": 0
+    },
+    "precommit": {
+      "rustc": "1.97.1",
+      "result": "pass: catalog, rustfmt, workspace all-targets Clippy -D warnings (35.21s), web syntax"
+    }
+  },
+  "preserved_archive": {
+    "sha256": "07201489827c87390e73917362beb192823a160031c6b9aa00cff62bdab846d1",
+    "bytes": 104959,
+    "url": "http://forge.lan:3000/attachments/db3a02f2-9366-4097-9a5d-450fe081e145",
+    "entries": {
+      "air-first-reproduction.log": {
+        "original_sha256": "7d3e2433cfe42418668f2a77dcdea03ee4480e6229ee90c39c896924f5b5cb04",
+        "archive_sha256": "f7717f767e9d4da6df96be5caecb114b00d59cb7d4d5159697f0b783d76b3606"
+      },
+      "browser-diagnostic.json": {
+        "original_sha256": "93542a26f9e5c3a25ea99ec2c9bdca25723ab027a2b29bc6a92e4ee99c3a628e",
+        "archive_sha256": "93542a26f9e5c3a25ea99ec2c9bdca25723ab027a2b29bc6a92e4ee99c3a628e"
+      },
+      "browser-diagnostic-first-frame-only.json": {
+        "original_sha256": "6a03d6546c3155ac6aaa90702deb9d3efe87ae28c36f8cb04f780b383cb7020c",
+        "archive_sha256": "6a03d6546c3155ac6aaa90702deb9d3efe87ae28c36f8cb04f780b383cb7020c"
+      },
+      "browser-diagnostic-review.json": {
+        "original_sha256": "fca2df54a205843a6270e01bcc8b9219d91798bee04f131913acf4da8f618aa5",
+        "archive_sha256": "fca2df54a205843a6270e01bcc8b9219d91798bee04f131913acf4da8f618aa5"
+      },
+      "browser-diagnostic.png": {
+        "original_sha256": "cec4ac2a80703710da9c4e1248ee85f5cb831f7bfffaedca92ded6512b399944",
+        "archive_sha256": "cec4ac2a80703710da9c4e1248ee85f5cb831f7bfffaedca92ded6512b399944"
+      },
+      "unit-before.log": {
+        "original_sha256": "25805a9aa55bf154b37b11d0003495bad7929736bdb417716c33cd3f38edabe6",
+        "archive_sha256": "35da36cd58751560da7f80f672344e89238dd2cf957ec8634501ec8cb43d03bd"
+      },
+      "unit-after.log": {
+        "original_sha256": "b997cf9f7a1db985ab2623db749c5da3f5d2105444070d828508e8ccfb6a2fdc",
+        "archive_sha256": "b997cf9f7a1db985ab2623db749c5da3f5d2105444070d828508e8ccfb6a2fdc"
+      },
+      "review-before.log": {
+        "original_sha256": "17b046203aee59b605b3894551250f11038ef64740e80ebee401a6d735f00734",
+        "archive_sha256": "4ee8c84a4a4bea5c026b945480424a9536c44b955b801dca6cdd509a05ae7b8f"
+      },
+      "review-after.log": {
+        "original_sha256": "d94df18017245d9ac61a0590e7af2297d476b59e23089e86b6afec04bb69e25c",
+        "archive_sha256": "d94df18017245d9ac61a0590e7af2297d476b59e23089e86b6afec04bb69e25c"
+      },
+      "review-after-static-titles.log": {
+        "original_sha256": "b1cc9413ffd47251a567193ab58ce10ac10e428f83afea72bf28dd5b7e8d6d41",
+        "archive_sha256": "b1cc9413ffd47251a567193ab58ce10ac10e428f83afea72bf28dd5b7e8d6d41"
+      },
+      "review-web-unit.log": {
+        "original_sha256": "f94de6ad9d1f9752472d2f6e44946cc681c8bd68b15e6e8425f0b0a20f333984",
+        "archive_sha256": "854fa2547727f85ce797b5f645e9191578cedaeba1e2d9029c6eb98a106502b1"
+      },
+      "astra-review.txt": {
+        "original_sha256": "2d4467e8fbf2e56a99df326cdc1ebc3edc0426b452944010310fa7802a2301a1",
+        "archive_sha256": "2d4467e8fbf2e56a99df326cdc1ebc3edc0426b452944010310fa7802a2301a1"
+      }
+    }
   }
 }

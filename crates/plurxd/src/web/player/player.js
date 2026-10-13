@@ -682,7 +682,9 @@ function resumePausedVodSeek(video,player,pending){
   const lease={pending,attachment:player.mediaAttachment,
     intentGeneration:player.controlIntentGeneration||0};
   episode.pausedSeek=lease;
-  episode.establishedSuspension=null;
+  const needsLoading=!playbackSeekBufferCovers(video,player,pending.targetMs);
+  episode.establishedSuspension=needsLoading?null:{attachment:player.mediaAttachment,
+    intentGeneration:player.controlIntentGeneration||0};
   const cleanup=()=>{
     if(episode.pausedSeek!==lease) return;
     episode.pausedSeek=null;
@@ -693,7 +695,7 @@ function resumePausedVodSeek(video,player,pending){
     try{episode.hls.stopLoad()}catch(e){}
   };
   pending.pausedLoadCleanup=cleanup;
-  if(!playbackSeekBufferCovers(video,player,pending.targetMs)){
+  if(needsLoading){
     const at=Math.max(0,pending.targetMs/1000-(player.offset||0));
     try{episode.hls.startLoad(at);}catch(e){cleanup();return null;}
   }
