@@ -230,17 +230,32 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     for id in 1_i64..=3 {
         client
             .execute(
-                "INSERT INTO cluster_node_capabilities VALUES($1,$2,$4),($1,$3,$4)",
+                "INSERT INTO cluster_node_capabilities VALUES($1,$2,$3),($1,$4,$3)",
                 hiqlite::params!(
                     format!("node-{id}"),
                     plurx_core::cluster::membership::SHARING_INGRESS_CUSTODY_CAPABILITY,
-                    "sharing_ingress_boot_v1:01a1128a-944d-4f11-9bf2-c7599d355213",
-                    now
+                    now,
+                    "sharing_ingress_boot_v1:01a1128a-944d-4f11-9bf2-c7599d355213"
                 ),
             )
             .await
             .expect("routing metadata only; no physical registry proof");
     }
+    // Raw hiqlite binds by placeholder first appearance, unlike sharing::ordered.
+    // Keep integer timestamps observable so a misplaced boot marker cannot hide.
+    let ingress_rows = client
+        .query_consistent_map::<SchemaText, _>(
+            "SELECT CAST(count(*) AS TEXT) AS value FROM cluster_node_capabilities AS c JOIN cluster_nodes AS n ON n.node_id=c.node_id WHERE c.node_id IN ('node-1','node-2','node-3') AND c.capability IN ($1,$2) AND typeof(c.last_seen_at)='integer' AND c.last_seen_at=$3 AND c.last_seen_at=n.last_seen_at",
+            hiqlite::params!(
+                plurx_core::cluster::membership::SHARING_INGRESS_CUSTODY_CAPABILITY,
+                "sharing_ingress_boot_v1:01a1128a-944d-4f11-9bf2-c7599d355213",
+                now
+            ),
+        )
+        .await
+        .expect("exact ingress capability and boot marker heartbeat witness");
+    assert_eq!(ingress_rows.len(), 1);
+    assert_eq!(ingress_rows[0].value, "6");
     exec(&client,"INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1) ON CONFLICT(key) DO UPDATE SET value='true'").await;
     for result in client
         .txn(

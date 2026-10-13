@@ -14104,6 +14104,44 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
         .collect::<Result<Vec<_>, _>>()
         .expect("commit v31 fixture");
 
+    // DROP COLUMN removes the intervening drain comment as well as recovery_epoch.
+    // Rebuild only this empty fixture from the actual published v31 declaration,
+    // preserving every named index and trigger instead of admitting synthetic SQL.
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM media_sessions",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("empty historical session fixture");
+    assert_eq!(rows[0].value, 0, "populated sessions cannot be rewound");
+    let mut objects = client.query_consistent(
+        "SELECT sql FROM sqlite_master WHERE tbl_name='media_sessions' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name",
+        hiqlite::params!(),
+    ).await.expect("preserve exact named session objects");
+    let mut historical = vec![
+        ("DROP TABLE media_sessions".to_owned(), hiqlite::params!()),
+        (
+            include_str!("fixtures/media-sessions-v31.sql")
+                .trim()
+                .trim_end_matches(';')
+                .to_owned(),
+            hiqlite::params!(),
+        ),
+    ];
+    historical.extend(
+        objects
+            .iter_mut()
+            .map(|row| (row.get::<String>("sql"), hiqlite::params!())),
+    );
+    client
+        .txn(historical)
+        .await
+        .expect("submit published v31 session fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("restore published v31 with exact session objects");
+
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v31 through v32 producer-recovery migration");
@@ -18291,6 +18329,34 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
     );
     // Replaying v71 also replays later additive queue columns. Remove the
     // common queue objects, retaining the seeded legacy domain jobs.
+    // The v70 fixture must also lack later non-idempotent additive columns.
+    // Refuse to erase any actual values from the populated import witness.
+    let later_values: i64 = connection.query_row(
+        "SELECT (SELECT count(*) FROM offline_packages WHERE audio_recipe IS NOT NULL) + (SELECT count(*) FROM network_priors WHERE link_worst_rung_height IS NOT NULL OR link_starved_at_ms IS NOT NULL) + (SELECT count(*) FROM watch_state WHERE manual_revision!=0 OR manual_origin IS NOT NULL)",
+        [], |row| row.get(0),
+    ).expect("later additive fixture values");
+    assert_eq!(later_values, 0, "populated later fields cannot be rewound");
+    for table in [
+        "jellyfin_plays",
+        "jellyfin_login_tokens",
+        "jellyfin_entity_ids",
+        "invitation_events",
+        "invitation_cooldowns",
+        "invitation_consents",
+        "invitation_broker_revocations",
+        "invitation_phones",
+        "remote_grants",
+        "remote_receivers",
+        "remote_claim_budget",
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("later compatibility fixture rows");
+        assert_eq!(count, 0, "populated later table {table} cannot be rewound");
+    }
+    drop_composed_v92_v93_columns(&connection);
     queue_fixture::remove_common_queue_schema(&connection);
     connection
         .execute_batch("PRAGMA user_version = 70;")

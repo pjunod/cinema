@@ -231,7 +231,7 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// forbidden — it has to be looked at, and this number updated, which is what
 /// stops a whole statement from disappearing behind an interpolation.
 ///
-/// The eight today, each spliced into a host this census does judge:
+/// The ten today, each spliced into a host this census does judge:
 /// `hiqlite_media.rs`'s two `GENRE` predicates (into the item count and the
 /// item page), `hiqlite_durable.rs`'s two membership tombstone arms (into the
 /// offline-package insert, once per arm), and `hiqlite.rs`'s
@@ -239,6 +239,10 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// completed-request guard, and `hiqlite_publication.rs`'s artwork-repair
 /// exclusion, plus `hiqlite_sessions.rs`'s `LocalSessionSql::existing_user`
 /// predicate, expanded through the actual finite helper at each host call.
+/// The remaining two are `hiqlite_media.rs`'s reconcile GUARD and its generated
+/// job-lease fence. The guard is spliced into each removal template; the fence
+/// starts at `bound.len() + 1`, appends all five lease bindings and is substituted
+/// before the complete statement is passed to `validate_sql`.
 ///
 /// The canonical settings predicate opens on `$4` because it is the tail of the statement it is
 /// spliced into: `put_settings_if_generation` selects `$1, $2, $3` and then
@@ -250,7 +254,7 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// `SELECT {…}`, by `replicated_generation_guard_matches_only_canonical_integer_state`;
 /// that is a `#[cfg(test)]` fixture bound by rusqlite's positional `params!`,
 /// stripped before this census runs, and not a replicated statement.
-const EXPECTED_FRAGMENTS: usize = 8;
+const EXPECTED_FRAGMENTS: usize = 10;
 
 /// One Rust string literal, with its escapes decoded.
 #[derive(Clone)]
