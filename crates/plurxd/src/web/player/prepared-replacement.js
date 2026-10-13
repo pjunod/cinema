@@ -874,6 +874,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
   // the handoff here would reopen an otherwise ready successor at the cliff.
   let settled=false,priorMediaTime=null,advancingSteps=0;
   let priorFrame=null,targetFrame=null,frameSeconds=null;
+  let incumbentFrame=null,lastIncumbentFrameAt=null;
   let videoCallbacks=0,badFrames=0,lastFrameAt=null,lastAdvancingFrameAt=null;
   state.overlapPhase="video";
   const live=()=>PLAYER===p&&preparedState(p)===state
@@ -935,6 +936,28 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     if(settled) return;
     requestIncumbentFrame();
   };
+  const tryExposeAtFrames=()=>{
+    if(v.paused||v.seeking||spare.paused||spare.seeking||p.wantsPlayback===false){
+      finish(false,"viewer-intent");
+      return true;
+    }
+    if(Number(spare.playbackRate)!==Number(v.playbackRate)||!preparedAlignedBuffered(spare)){
+      finish(false,"lost-alignment");
+      return true;
+    }
+    const now=performance.now();
+    if(lastAdvancingFrameAt==null||lastIncumbentFrameAt==null
+      ||now-lastAdvancingFrameAt>PREPARED_HANDOFF_FRAME_AGE_MS
+      ||now-lastIncumbentFrameAt>PREPARED_HANDOFF_FRAME_AGE_MS) return false;
+    // The two decoders can deliver callbacks for the same display tick in
+    // either order. Recheck when either picture arrives, under the original
+    // deadline, instead of comparing only the incumbent's new frame against
+    // the successor's preceding frame. Exposure still requires the same
+    // decoded one-frame tolerance and fresh evidence from both observers.
+    if(!preparedFramesMeet(incumbentFrame,targetFrame,frameSeconds,Number(v.playbackRate))) return false;
+    finish(true);
+    return true;
+  };
   const requestIncumbentFrame=()=>{
     if(settled) return;
     try{
@@ -945,21 +968,13 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
         if(v.paused||v.seeking||spare.paused||spare.seeking||p.wantsPlayback===false){
           finish(false,"viewer-intent"); return;
         }
-        const incumbentFrame={
+        if(!Number.isFinite(meta?.mediaTime)){ finish(false,"lost-alignment"); return; }
+        incumbentFrame={
           filmSeconds:realMediaPositionMs(Number(meta?.mediaTime)*1000,(p.offset||0)*1000,!!p.vod)/1000,
           displayMs:Number.isFinite(meta?.expectedDisplayTime)?meta.expectedDisplayTime:now
         };
-        if(Number(spare.playbackRate)!==Number(v.playbackRate)
-          ||!Number.isFinite(meta?.mediaTime)||!preparedAlignedBuffered(spare)
-          ||!preparedFramesMeet(incumbentFrame,targetFrame,frameSeconds,Number(v.playbackRate))){
-          finish(false,"lost-alignment"); return;
-        }
-        if(lastAdvancingFrameAt==null
-          ||performance.now()-lastAdvancingFrameAt>PREPARED_HANDOFF_FRAME_AGE_MS){
-          requestIncumbentFrame();
-          return;
-        }
-        finish(true);
+        lastIncumbentFrameAt=performance.now();
+        if(!tryExposeAtFrames()) requestIncumbentFrame();
       });
     }catch(e){ finish(false,"incumbent-frame-callback-error"); }
   };
@@ -991,7 +1006,9 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
           finish(false,"viewer-intent");
           return;
         }
-        if(state.overlapPhase==="incumbent-frame") requestFrame();
+        if(state.overlapPhase==="incumbent-frame"){
+          if(!tryExposeAtFrames()) requestFrame();
+        }
         else if(typeof v.requestVideoFrameCallback==="function") exposeAfterIncumbentFrame();
         else finish(true);
         return;

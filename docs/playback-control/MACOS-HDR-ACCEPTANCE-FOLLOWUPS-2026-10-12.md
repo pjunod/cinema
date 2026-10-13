@@ -395,6 +395,36 @@ campaign successes remain valid for their own rows. A full restart only
 qualifies an explicitly requested restart operation; it cannot stand in for
 a claimed continuous transition.
 
+### October 13 repair — compare both decoder callbacks
+
+F2 is claimed by `codex/f2-prepared-alignment`, based on `016a0c59f`.
+The physical Air reproduces the same HDR rolling-remux to 1080p SDR refusal
+at 16:03:09 UTC. Preparation `21eaa26e-0495-4acd-a79f-60676410cff0`
+has 21.5 seconds of runway, decoded advancing target frames and target
+coverage. The rejected pair is incumbent film 17.976 seconds at expected
+display 86,542 ms and target film 17.892875 seconds at 86,508.6 ms.
+Projecting the target to that display instant leaves 49.725 ms of drift,
+above the measured 41.709 ms frame cadence. Immediate exposure would be
+unsafe. The retained October 12 refusal is not relabelled as success.
+
+The first proposed repair kept observing until the existing 800 ms deadline,
+but still compared only on incumbent callbacks. Its physical trial also fails:
+preparation `b012715d-df09-4fa2-bb02-60bea3ae699d` receives 18 successor
+callbacks before a truthful deadline refusal. Independent decoders deliver
+their callbacks in different order; every incumbent-side comparison in that
+trial uses the preceding successor picture. Preserve that failed proposal.
+
+The revised repair caches the latest incumbent observation and evaluates the
+pair when either decoder supplies an advancing picture. Both observations
+must be at most 50 ms old. The decoded one-frame tolerance and original
+800 ms deadline remain unchanged. Ownership, viewer intent, rate and target
+buffer coverage are checked before exposure; the incumbent remains visible
+and audible during proof. Nine regressions execute the shipped owner,
+including an aligned later successor callback, sustained drift, expired
+incumbent evidence, pause, supersession, and rate/buffer loss. Independent
+review approves this revised source. Physical qualification and main-bound
+promotion are still pending; these source results do not close the matrix.
+
 ## 5. F3 — abandoned preparation occupies VOD capacity
 
 ### Observation and evidence
