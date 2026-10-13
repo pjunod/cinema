@@ -19,14 +19,14 @@ class RemoteDiagnosticsStatusTest(unittest.TestCase):
                                        ("merged; qualification active", '<img src=x onerror="bad">')]:
                 ledger.write_text("# Diagnostics status\n\n**Status:** " + state + "\n\n"
                                   "| Field | Current value |\n|---|---|\n"
-                                  "| Active pull request | #1066 |\n"
+                                  "| Qualification pull request | #1066 |\n"
                                   "| Implementation owner | qualification owner |\n"
                                   "| Implementation workspace/base | landed source |\n"
                                   "| Next action | " + next_action + " |\n")
                 subprocess.run(["python3", str(root / "scripts/remote-diagnostics-status")], check=True, capture_output=True)
                 page = (root / "diagnostics-status.html").read_text()
                 banner = page.split('<p class="banner">', 1)[1].split("</p>", 1)[0]
-                self.assertIn("Active qualification PR #1066", page)
+                self.assertIn("Qualification PR #1066", page)
                 self.assertIn("/pulls/1066", page)
                 self.assertNotIn("Active batched PR #1037", page)
                 self.assertIn(state, banner)

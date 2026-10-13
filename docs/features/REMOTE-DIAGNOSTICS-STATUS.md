@@ -15,17 +15,17 @@ duplicating its evidence.
 |---|---|
 | User authorization | 2026-10-13: merge #1037, update status and continue qualification/rollout preparation; production changes require approval of the concrete rollout. |
 | Implementation owner | GPT-6.1 Sol · chat `01a13167-0996-7723-a0fb-fa64421a384d` |
-| Active pull request | #1066 |
+| Qualification pull request | #1066 |
 | Intended effort | Implementation merged into `main`; qualification follows on `codex/remote-diagnostics-qualification` |
 | Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent clone in temporary owner storage; original landing `8040f862c3458245480065e11dec643fbfe370b3`, current base `fa464662fe0b671cec9f37a975b56727b9b26840`, candidate `f96eadf666` plus the review corrections below; user checkouts remain untouched. |
+| Implementation workspace/base | Independent clone in temporary owner storage; original landing `8040f862c3458245480065e11dec643fbfe370b3`, current main base `b2a186450`, diagnostic corrections `a343ffb12`, integrated code candidate `468a06545`; the exact final gate/landing receipt is maintained in #1066; user checkouts remain untouched. |
 | Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
 | Plan review | Original review: 12 findings corrected. One follow-up review complete: two P1 history findings corrected; focused qualification recorded in §24. |
 | Promotion/deployment | PR #1037 merged 2026-10-13, all eight checks passed on `6bc7235a0`; no production changes by this chat. Another rollout placed the landing on two nodes and exposed a router startup failure; recovery owner is recorded in §22. Isolated qualification continues. |
-| Current checks | Exact pre-merge head `6bc7235a0`: eight required checks passed, run 4887. Landing verified with all 32 regression declarations. |
+| Current checks | Original #1037: eight checks passed and all 32 landing anchors verified. Follow-up: normal hooks, affected native compilation and focused regressions passed; all-target pinned check and composed startup passed on integrated `468a06545`. Follow-up fast gate/landing receipt is in #1066. |
 | Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
-| Next action | Qualify and land the two native history review corrections through #1066; composed startup passes with the separate repair; continue isolated durability/device evidence and prepare exact hosting/rollout for approval. |
+| Next action | Finish #1066 through its required fast gate and green merge; composed startup passes with the separate repair; continue isolated durability/device evidence and prepare exact hosting/rollout for approval. |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
 shared checkout and preserve unrelated `Claude outputs/` artifacts.
@@ -672,3 +672,19 @@ chat's recovery receipt, not a deployment by this diagnostics owner.
 The acceptance matrix and generated summary now name the qualified subset
 and active follow-up #1066. Physical/direct-send/cross-network/provider and
 production support acceptance remain open.
+
+The final corrected Android phone and TV report owners each passed the
+failed-grant/frozen-privacy/deletion instrumentation case, one test each.
+The saved-incident/explicit-consent instrumentation case passed again on
+both profiles, one test each. Android TV semantic instrumentation is
+software evidence; it does not stand in for physical D-pad/cross-network
+acceptance. iOS/tvOS real shipped UI each passed one exact-ID relaunch
+case. The local status regression and four docs-index checks passed; the
+infrastructure-name scrub is clean. Both native app versions remain the
+qualification claims 235/169, without changing physical installations.
+
+Current main `b2a186450` was merged normally into the qualification branch
+after the review corrections. All-target pinned compilation and the
+composed startup regression passed on integrated code candidate `468a06545`.
+The final branch and seven named regressions must still pass the required
+fast gate before its green merge; that exact receipt is recorded in #1066.
