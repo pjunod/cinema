@@ -36,6 +36,7 @@ enum AppBuildInfo {
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject private var remoteClient: RemoteClientModel
+    @State private var diagnosticSignOutConfirmation = false
     // Graduated from Developer with the same keys and defaults, so a choice a
     // viewer already made there carries over unchanged.
     @AppStorage("plurx.boundedResume") private var boundedResumeEnabled = true
@@ -221,6 +222,7 @@ struct SettingsView: View {
                 LabeledContent("Server", value: model.serverName ?? model.origin)
                 Button("Change server") { model.changeServer() }
                 Button("Sign out", role: .destructive) {
+                    if DiagnosticReportModel.shared.hasPendingUnsubmitted { diagnosticSignOutConfirmation = true; return }
                     #if os(iOS)
                     Task {
                         async let video = OfflineDownloadManager.shared.hasCurrentProfileDownloads()
@@ -248,6 +250,11 @@ struct SettingsView: View {
                 NavigationLink("Shared libraries, Cinema remotes and other features awaiting evidence") { LiveTvDeveloperView() }
             }
 
+            Section("Help") {
+                DiagnosticReportButton()
+                Text("Save a bounded private incident locally, send it to support, or finish on a phone.").font(.caption)
+            }
+
             Section("About") {
                 LabeledContent("App version", value: AppBuildInfo.current)
             }
@@ -261,6 +268,12 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .tint(Palette.accent)
         .background(Palette.bg)
+        .alert("Clear pending local reports and sign out?", isPresented: $diagnosticSignOutConfirmation) {
+            Button("Clear local reports and sign out", role: .destructive) { model.logout() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Unsubmitted local captures and support credentials are cleared on sign-out. Export or finish a report first if you want to keep it. Already submitted reports remain at support.")
+        }
         #if os(iOS)
         .scrollContentBackground(.hidden)
         .navigationBarTitleDisplayMode(.inline)

@@ -1,0 +1,76 @@
+# Include inside nginx's http block. Replace example hostnames and certificates.
+# Do not enable forwarded real-IP rewriting without its own trusted-proxy policy.
+limit_req_zone $binary_remote_addr zone=cinema_support_peer:1m rate=5r/s;
+limit_conn_zone $server_name zone=cinema_support_global:1m;
+server {
+    listen 80;
+    server_name support.example operators.example;
+    access_log off;
+    return 400 "HTTPS required\n";
+}
+server {
+    listen 443 ssl;
+    server_name support.example;
+    ssl_certificate /etc/cinema-support/tls/support-fullchain.pem;
+    ssl_certificate_key /etc/cinema-support/tls/support-key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    access_log off;
+    error_log /var/log/nginx/cinema-support-error.log crit;
+    client_max_body_size 1m;
+    client_body_timeout 15s;
+    client_header_timeout 10s;
+    send_timeout 15s;
+    keepalive_timeout 10s;
+    limit_conn cinema_support_global 16;
+    limit_req zone=cinema_support_peer burst=8 nodelay;
+    limit_req_status 429;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    location / {
+        proxy_pass http://127.0.0.1:8087;
+        proxy_set_header Host $host;
+        # Always overwrite the incoming value. The service must explicitly trust this ingress.
+        proxy_set_header X-Cinema-Client-IP $remote_addr;
+        proxy_set_header X-Forwarded-For "";
+        proxy_set_header X-Real-IP "";
+        proxy_set_header Cookie "";
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_next_upstream off;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 15s;
+        proxy_send_timeout 15s;
+    }
+}
+server {
+    listen 443 ssl;
+    server_name operators.example;
+    ssl_certificate /etc/cinema-support/tls/operators-fullchain.pem;
+    ssl_certificate_key /etc/cinema-support/tls/operators-key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    access_log off;
+    error_log /var/log/nginx/cinema-support-error.log crit;
+    client_max_body_size 64k;
+    client_body_timeout 15s;
+    client_header_timeout 10s;
+    send_timeout 15s;
+    keepalive_timeout 10s;
+    limit_conn cinema_support_global 8;
+    limit_req zone=cinema_support_peer burst=8 nodelay;
+    limit_req_status 429;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    location / {
+        proxy_pass http://127.0.0.1:8088;
+        proxy_set_header Host $host;
+        proxy_set_header X-Cinema-Client-IP $remote_addr;
+        proxy_set_header X-Forwarded-For "";
+        proxy_set_header X-Real-IP "";
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_next_upstream off;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 15s;
+        proxy_send_timeout 15s;
+    }
+}

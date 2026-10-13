@@ -1,0 +1,28 @@
+[Unit]
+Description=Cinema diagnostic support ingress and operator inbox
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cinema-support
+Group=cinema-support
+StateDirectory=cinema-support
+StateDirectoryMode=0700
+UMask=0077
+LoadCredential=storage-key:/etc/cinema-support/storage-key
+ExecStart=/usr/local/bin/plurx-support --state-dir /var/lib/cinema-support --key-file ${CREDENTIALS_DIRECTORY}/storage-key --limits-file /etc/cinema-support/limits.json serve --support-origin https://support.example --operator-origin https://operators.example --trust-loopback-ingress
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+MemoryMax=768M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

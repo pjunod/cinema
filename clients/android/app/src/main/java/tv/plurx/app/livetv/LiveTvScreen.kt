@@ -2415,6 +2415,7 @@ private fun LiveTvOverlay(
                     Text(if (paused) "Play live" else "Pause", color = Color.White)
                 }
                 TextButton(onClick = onInfo) { Text("Info", color = Color.White) }
+                tv.plurx.app.diagnostics.DiagnosticReportButton(category="playback")
                 TextButton(modifier = Modifier.remoteAction("live-overlay:captions", "Captions") { onCaptions(); RemoteOutcome.Applied }, onClick = onCaptions) { Text("Captions", color = Color.White) }
                 listOf("previous" to previousChannel, "next" to nextChannel).forEach { (direction, candidate) ->
                     if (candidate != null) TextButton(modifier = Modifier.remoteAction("live-overlay:" + direction, candidate.title, deferred = { action -> if (action.type == "select") remoteTune?.invoke(candidate) else null }) { RemoteOutcome.Unsupported }, onClick = { onSelect(candidate) }) { Text(if (direction == "previous") "Previous channel" else "Next channel", color = Color.White) }

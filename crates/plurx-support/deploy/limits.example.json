@@ -1,0 +1,14 @@
+{
+  "uploads_per_enrollment": 2,
+  "uploads_per_publisher": 5,
+  "submissions_per_enrollment_day": 10,
+  "submissions_per_publisher_day": 100,
+  "bytes_per_publisher": 1073741824,
+  "bytes_global": 21474836480,
+  "concurrent_requests": 8,
+  "concurrent_inspections": 2,
+  "code_attempts_per_minute": 5,
+  "publishers": 1000,
+  "report_rows": 50000,
+  "capability_rows": 50000
+}

@@ -140,7 +140,7 @@ list.
 | [STATUS-HISTORY.md](playback-control/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
 | [REPLACEMENT-GATE-SUPERSESSION-RCA.md](playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md) | Why an abandoned replacement held its player key forever, the lab6 evidence, and the supersedable gate that fixes it. | built |
 | [CALLBACK-ROOT-CAUSE-AND-FIX.md](playback-control/CALLBACK-ROOT-CAUSE-AND-FIX.md) | Why Safari cold resume lost frame callbacks, the lifecycle fix, controlled evidence, and questions for Fable review. | open |
-| [MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md](playback-control/MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md) | Seven retained Mac HDR acceptance follow-ups: paused seeks, quality alignment, abandoned capacity, cold startup, rendition facts, authority recovery and calibrated fidelity; evidence, investigations and closure criteria. | open |
+| [MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md](playback-control/MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md) | Seven retained Mac HDR follow-ups, qualified F1 hls.js repairs and the current Air access/restoration blocker; evidence, investigations and closure criteria. | open |
 | [Paused VOD seek repair receipt](playback-control/evidence/paused-vod-seek-20261012.json) | F1 stopped-loader reproduction, failed first harness, actual paused forward/backward target frames, regressions and retained Air rolling-reopen failure; HDR hardware rerun remains open. | open |
 | [PLAYBACK-LIFECYCLE-COVERAGE.md](playback-control/PLAYBACK-LIFECYCLE-COVERAGE.md) | Playback states and transitions, buffer handoffs, communication contracts, existing test anchors, and open acceptance gaps. | open |
 | [PLAYBACK-REWRITE-REMAINDER.md](playback-control/PLAYBACK-REWRITE-REMAINDER.md) | Executed Sol handoff: the finite B01–B05 remainder, its boundaries, and the work promoted through PR #263. | done |
@@ -642,6 +642,9 @@ Two rounds of performance work, each with its plan, review, and response.
 | File | Answers | |
 |---|---|---|
 | [PROJECT-BACKLOG.md](features/PROJECT-BACKLOG.md) | Cross-project to-do: designed but unbuilt work, remaining acceptance, reconciliations and deferred decisions. | live |
+| [REMOTE-DIAGNOSTICS-IMPLEMENTATION.md](features/REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) | First-release build contract for web, Apple and Android diagnostic capture, user-scoped server evidence, TV phone handoff and the independent upload inbox. | open |
+| [REMOTE-DIAGNOSTICS-STATUS.md](features/REMOTE-DIAGNOSTICS-STATUS.md) | Canonical ownership, packet progress, software/device evidence and promotion ledger for remote diagnostics. | open |
+| [REMOTE-DIAGNOSTICS-OPERATIONS.md](server/REMOTE-DIAGNOSTICS-OPERATIONS.md) | Build and operate the independent support ingress, passkey inbox, private storage, quotas and restore fences; deployment/device acceptance remains open. | open |
 | [SHARED-LIBRARIES-DESIGN.md](features/SHARED-LIBRARIES-DESIGN.md) | Why Cinema shares selected libraries over private Tailscale; scope and deferred Plex/Watch Together work. | open |
 | [SHARED-LIBRARIES-IMPLEMENTATION.md](features/SHARED-LIBRARIES-IMPLEMENTATION.md) | Revised S0–S8 build contract, authority, deployment, playback integration and acceptance evidence. | open |
 | [SHARED-LIBRARIES-STATUS.md](features/SHARED-LIBRARIES-STATUS.md) | Shared-libraries integration, live promotion evidence, failed-only qualification and remaining acceptance. | open |
@@ -771,3 +774,6 @@ and no link anywhere in the repo may point at a `docs/` path that does not
 exist.
 
 DV final bounded serving evidence: [HTTP summary](evidence/dv-processing-2026-10-09/http-summary.json) and [artifact manifest](evidence/dv-processing-2026-10-09/http-manifest.json) — retained local synthetic results and failed attempts; full promotion evidence belongs to PR #968.
+
+| [Remote diagnostics Apple wire](apple-builds/remote-diagnostics-wire.md) | What is added to the Apple report format contract? | built |
+| [Remote diagnostics Apple capture](apple-builds/remote-diagnostics-capture.md) | What changes in native private report capture, share, send and TV approval? | open |

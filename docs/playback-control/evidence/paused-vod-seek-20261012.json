@@ -704,5 +704,97 @@
         "archive_sha256": "2d4467e8fbf2e56a99df326cdc1ebc3edc0426b452944010310fa7802a2301a1"
       }
     }
+  },
+  "local_vod_landing": {
+    "pr": 1047,
+    "head": "936b944216b7fb55ea38095f2588a0213a50370e",
+    "base": "2cbf7c39e617977eb002ebadde5f7fc016b07678",
+    "run_id": 4935,
+    "promotion_gate": "passed",
+    "merge": "b2adc5f789f981e189ad72bfbe48383355b5b272"
+  },
+  "paused_reopened_startup": {
+    "recorded": "2026-10-13",
+    "base": "b2adc5f789f981e189ad72bfbe48383355b5b272",
+    "scope": "Executed paused hls.js replacement seek; native HLS unchanged",
+    "before": {
+      "passed": 5,
+      "failed": 3
+    },
+    "after": {
+      "focused_passed": 51,
+      "failed": 0,
+      "type_baseline": {
+        "unchanged": true,
+        "diagnostics": 493,
+        "keys": 80
+      }
+    },
+    "review": {
+      "reviewer": "Astra",
+      "verdict": "approve",
+      "corrected": [
+        "renewal stopped loading without restarting",
+        "Play cancelled reserved corrective manifest reload",
+        "supersession before manifest parse interrupted loading without reload"
+      ]
+    },
+    "behavior": "Current executed target owns first manifest and target loading under Pause. Actual target frame completes startup and restores suspension. Missing frame retains original startup deadline and real terminal diagnosis. Existing single corrective reload credit is retained.",
+    "qualification": {
+      "head": "5dabb22a31297527d34e1399b19e60d91c06cc7e",
+      "base": "b2adc5f789f981e189ad72bfbe48383355b5b272",
+      "run_id": 4953,
+      "promotion_gate": "passed",
+      "merge": "7f82b3894581cd3a2ba0955300dc39da9bfa9428",
+      "preceding_failure": {
+        "run_id": 4948,
+        "stage": "spike-lock-check",
+        "reason": "runner could not resolve index.crates.io; before compilation"
+      }
+    },
+    "hardware": {
+      "installed": "5dabb22a3",
+      "served_sources_match": true,
+      "boot_metal_passed": true,
+      "boot_metal_speedup": 29.05,
+      "library_file_id": 15,
+      "client": "connected laptop Chrome; physical Air Chrome inaccessible",
+      "cold_and_warm": "placement deadline before HLS attachment",
+      "ssh_source_read_bytes": 16777216,
+      "ssh_source_read_seconds": 0.985,
+      "ssh_ffprobe_total_seconds": 1.062,
+      "permission_observation": "updated daemon failed the existing kTCCServiceSystemPolicyAllFiles code requirement",
+      "acceptance": "not qualified",
+      "restore_pending": {
+        "backend_original": "auto",
+        "backend_temporarily_saved": "videotoolbox",
+        "mac_video_processing_original": true,
+        "mac_video_processing_changed": false,
+        "shared_clipboard": "enabled temporarily; remote connection ended; OFF restoration not verified",
+        "resume_observed_ms": 34000,
+        "resume_requested_ms": 0
+      },
+      "manual_blockers": [
+        "local Mac locked; computer use requires manual unlock",
+        "Air Screen Sharing approval and already-authorized access renewal"
+      ]
+    },
+    "evidence_limits": [
+      "Generated and unit evidence does not qualify HDR hardware",
+      "First review-before supersession test had missing clearEffectiveProcessing harness stub; retained as invalid until corrected",
+      "Detach fixture destroys its network loader to model teardown; no backend fault inferred from fixture status ReferenceError"
+    ],
+    "source_sha256": {
+      "crates/plurxd/src/web/player/player.js": "37a7d5dbe17edef153a95a16fcce31caf630e9297ee73eb94f485cffa7374eaa",
+      "crates/plurxd/src/web/player/transport.js": "674112c0ea4d620a3799b6312ecda7e25812c4f0ae5889dec4bb3492b5d0d0df",
+      "tests/playback/paused-hls-resume.test.js": "4f92ce48bb101ae7251e802bf3139efdecc394b41daa5028c93365cb0299943c"
+    },
+    "preserved_archive": {
+      "url": "http://forge.lan:3000/attachments/3df9990f-6607-4a8e-bbb5-8db7123b49d4",
+      "sha256": "5cf7a855b62ecf2ad59627737df5020712190cb3435cb71413212f9fe78569d7",
+      "bytes": 416979,
+      "includes": "before/after regressions, rejected harness records, Astra review, exact qualification/merge receipts, served hashes, access diagnostic, cold/warm startup failures and screenshots",
+      "originals_unchanged": true
+    }
   }
 }

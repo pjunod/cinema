@@ -195,7 +195,18 @@ struct RootView: View {
             invitations.configure(active: phase == .active && model.phase == .ready, remoteEnabled: remoteEnabled)
             if phase != .active { pendingInvitationHandoff = nil }
             #endif
-            if phase != .active { remoteNavigation.invalidate() }
+            if phase != .active {
+                remoteNavigation.invalidate()
+                DiagnosticRecorder.shared.background()
+                DiagnosticReportModel.shared.suspend()
+            } else { DiagnosticRecorder.shared.record("lifecycle", "state", ["state": .text("foreground")]) }
+        }
+        .diagnosticReportHost()
+        .task(id: "\(model.phase)|\(model.diagnosticNamespace)|\(Session.shared.playbackAuthorization.generation)") {
+            await DiagnosticReportModel.shared.configure(model: model)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if model.phase != .ready { DiagnosticReportButton(category: "connection").buttonStyle(.bordered).padding() }
         }
         .remoteRestricted(model.phase != .ready)
         .task(id: remoteLifecycleKey) {

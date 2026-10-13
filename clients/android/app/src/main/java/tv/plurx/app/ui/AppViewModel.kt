@@ -435,6 +435,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * "HTTP 401" on Home; the saved token is dead, so it goes with it.
      */
     private suspend fun endExpiredSession(message: String) {
+        tv.plurx.app.diagnostics.DiagnosticRuntime.signOut()
         if (Session.token == null) return
         settings.clearToken()
         invalidateLibraryPager()
@@ -461,6 +462,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             invalidateLibraryPager()
             OfflineBooks.interruptProfile(instance, user)
             var cancellation: CancellationException? = null
+            tv.plurx.app.diagnostics.DiagnosticRuntime.revokeEnrollment()
             val confirmed = try {
                 if (capturedOrigin.isBlank() || capturedToken == null) false else {
                     val boundApi = Net.api(capturedOrigin, Net.profileClient(capturedToken))
@@ -488,6 +490,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 // Never let a late response clear a newer login or a different
                 // server. The captured client above likewise never borrows it.
                 if (Session.origin == capturedOrigin && Session.token == capturedToken) {
+                    tv.plurx.app.diagnostics.DiagnosticRuntime.signOut()
                     settings.clearToken()
                     Session.token = null
                     currentUser = null
@@ -521,6 +524,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * relaunch before the next login must not offer it to a different one.
      */
     fun changeServer() {
+        tv.plurx.app.diagnostics.DiagnosticRuntime.signOut()
         invalidateLibraryPager()
         OfflineBooks.interruptProfile(serverInstanceId, currentUserId)
         Session.token = null

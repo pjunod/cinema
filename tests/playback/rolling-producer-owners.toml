@@ -2935,7 +2935,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # per-process `CoverageRuns` slot (one walk at a time) through a drop guard,
 # so a finished, failed or panicked walk frees it; its stats run in the
 # walk's own bounded AvailabilityCache, never item detail's.
-expected_occurrences = 948
+# Remote diagnostics: +2 read-only snapshot tasks in diagnostics.rs. The
+# collection task drops its peer futures on cancellation or a five-second
+# deadline; the expiry task removes the original job at JOB_TTL or cancellation.
+# Neither starts a producer/process nor makes a playback decision.
+expected_occurrences = 950
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4531,6 +4535,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and their joined futures; cancellation drops it. The full request-chain
 # regression keeps one real ReceiverGuard credit. No production timer,
 # detached task, process or longer input deadline is introduced.
+# Remote diagnostics: +2, the same job's fixed JOB_TTL retention sleep and
+# five-second collection timeout. Cancellation drops each wait; these bound
+# diagnostic storage/collection and never alter playback or authorize retries.
 # PR #1038 HEVC catalog parity: +2 cfg(test)-only timeout bounds in
 # transcode/manager/candidates.rs. The slow probe regression owns both
 # catalog futures directly: one checks progress before the two-second bound,
@@ -4539,7 +4546,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # cleanup can outlive the timed-out waiter and retains child/source ownership
 # until kill-and-reap finishes. Production retains the catalog deadline
 # captured at request entry.
-# PR #1051 foreground family admission: 1737 -> 1740 (+3).
+# PR #1051 foreground family admission: 1739 -> 1742 (+3).
 # One production tokio::time::sleep is awaited by reserve_media_group under
 # the existing five-second admission deadline and its RAII live-waiter guard.
 # Each atomic attempt drops binding locks and temporary permit references
@@ -4549,7 +4556,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # The test joins its futures in place. No detached task, producer, process,
 # resource owner, or deadline-as-completion proof is introduced. The adversarial
 # review traced the real start caller, atomic reservations and cancellation.
-expected_occurrences = 1740
+expected_occurrences = 1742
+
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
@@ -5609,10 +5617,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # child.
 # Shared-read indexing (+1, test-only): that fixture command's `.output()`,
 # awaited to completion in the test.
+# Remote diagnostics: +1 response.status() in diagnostics_delivery.rs reads
+# the dedicated support HTTP response; it is not an OS process launch.
 # F1/N2 landing repair: +2 matches. constant_size_film.status() synchronously
 # waits/reaps its finite fixture child. record_unplaced's decision.status()
 # names the existing MediaLandingFailed verdict and starts no process.
-expected_occurrences = 752
+expected_occurrences = 753
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

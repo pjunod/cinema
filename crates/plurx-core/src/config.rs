@@ -51,9 +51,62 @@ pub struct Config {
     pub server: ServerConfig,
     pub storage: StorageConfig,
     pub sharing: SharingNetworkConfig,
+    pub support: SupportConfig,
     /// Forward-compatible cluster settings. M0 reads these without changing
     /// the production SQLite backend; later clustering releases activate them.
     pub cluster: ClusterConfig,
+}
+
+/// Non-secret node-local references for the independent support destination.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SupportConfig {
+    pub origin: String,
+    pub publisher_id: String,
+    pub publisher_secret_file: PathBuf,
+    pub development_local: bool,
+}
+impl SupportConfig {
+    pub fn configured(&self) -> bool {
+        !self.origin.is_empty()
+            && !self.publisher_id.is_empty()
+            && !self.publisher_secret_file.as_os_str().is_empty()
+    }
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.origin.is_empty()
+            && self.publisher_id.is_empty()
+            && self.publisher_secret_file.as_os_str().is_empty()
+        {
+            return Ok(());
+        }
+        let fail = || {
+            ConfigError::Value{key:"support".into(),message:"requires a fixed HTTPS origin, publisher ID and protected credential-file reference; loopback HTTP requires development_local".into()}
+        };
+        if !self.configured()
+            || self.publisher_id.len() > 64
+            || !self
+                .publisher_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        {
+            return Err(fail());
+        }
+        let url = reqwest::Url::parse(&self.origin).map_err(|_| fail())?;
+        if url.username() != ""
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || url.path() != "/"
+            || url.host_str().is_none()
+            || (url.scheme() != "https"
+                && !(self.development_local
+                    && url.scheme() == "http"
+                    && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))))
+        {
+            return Err(fail());
+        }
+        Ok(())
+    }
 }
 
 /// Node-local transport configuration; enabled is stored in replicated Settings.
@@ -298,6 +351,7 @@ impl Config {
             },
         };
         config.apply_env()?;
+        config.support.validate()?;
         if config.storage.scan_prune_percent > 100 {
             return Err(ConfigError::Value {
                 key: "storage.scan_prune_percent".to_owned(),
