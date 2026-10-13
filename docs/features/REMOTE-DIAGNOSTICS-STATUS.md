@@ -18,7 +18,7 @@ duplicating its evidence.
 | Intended effort | Implementation merged into `main`; qualification follows on `codex/remote-diagnostics-qualification` |
 | Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent clone in temporary owner storage; original landing `8040f862c3458245480065e11dec643fbfe370b3`, current main base `b2a186450`, diagnostic corrections `a343ffb12`, integrated code candidate `468a06545`; the exact final gate/landing receipt is maintained in #1066; user checkouts remain untouched. |
+| Implementation workspace/base | Independent clone in temporary owner storage; original landing `8040f862c3458245480065e11dec643fbfe370b3`, current main base `e4b6c1c6d`, diagnostic corrections `a343ffb12`, archive-flow correction `069615e85` on the integrated current base; the exact final gate/landing receipt is maintained in #1066; user checkouts remain untouched. |
 | Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
 | Plan review | Original review: 12 findings corrected. One follow-up review complete: two P1 history findings corrected; focused qualification recorded in §24. |
 | Promotion/deployment | PR #1037 merged 2026-10-13, all eight checks passed on `6bc7235a0`; no production changes by this chat. Another rollout placed the landing on two nodes and exposed a router startup failure; recovery owner is recorded in §22. Isolated qualification continues. |
@@ -684,7 +684,7 @@ qualification claims 235/169, without changing physical installations.
 
 Current main `b2a186450` was merged normally into the qualification branch
 after the review corrections. All-target pinned compilation and the
-composed startup regression passed on integrated code candidate `468a06545`.
+composed startup regression passed on archive-flow correction `069615e85` on the integrated current base.
 The final branch and seven named regressions must still pass the required
 fast gate before its green merge; that exact receipt is recorded in #1066.
 
