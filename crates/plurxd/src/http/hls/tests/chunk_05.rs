@@ -3341,3 +3341,16 @@ async fn terminal_failure_discards_the_unpolled_part_of_a_storage_batch() {
     assert!(sender.is_closed());
     assert_eq!(accepted_bytes(), MEDIA_BODY_ACK_GRANULARITY);
 }
+
+#[test]
+fn continuous_family_capacity_is_retryable_after_bounded_admission() {
+    let error = crate::transcode::vod_refusal_error("vod_family_capacity", "family still busy");
+    match session_start_error(42, error) {
+        ApiError::TypedRetry { status, code, retry_after_seconds, .. } => {
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(code, "transcode_capacity_pending");
+            assert!(retry_after_seconds > 0);
+        }
+        other => panic!("capacity must reach the client as a bounded retry: {other:?}"),
+    }
+}
