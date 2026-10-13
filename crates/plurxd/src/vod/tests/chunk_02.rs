@@ -1602,6 +1602,13 @@
                 Failure::Landing("landing".to_owned()),
                 Reason::MediaLandingFailed,
             ),
+            (
+                Failure::Unplaced {
+                    why: "unplaced".to_owned(),
+                    transient: false,
+                },
+                Reason::MediaLandingFailed,
+            ),
             (Failure::Stream("stream".to_owned()), Reason::ReaderFailed),
             (
                 Failure::Sink(io::Error::other("sink")),
