@@ -15,16 +15,17 @@ duplicating its evidence.
 |---|---|
 | User authorization | 2026-10-13: merge #1037, update status and continue qualification/rollout preparation; production changes require approval of the concrete rollout. |
 | Implementation owner | GPT-6.1 Sol · chat `01a13167-0996-7723-a0fb-fa64421a384d` |
+| Active pull request | #1066 |
 | Intended effort | Implementation merged into `main`; qualification follows on `codex/remote-diagnostics-qualification` |
 | Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent clone in temporary owner storage; qualification base/landing `8040f862c3458245480065e11dec643fbfe370b3`; user checkouts remain untouched. |
+| Implementation workspace/base | Independent clone in temporary owner storage; original landing `8040f862c3458245480065e11dec643fbfe370b3`, current base `fa464662fe0b671cec9f37a975b56727b9b26840`, candidate `f96eadf666` plus the review corrections below; user checkouts remain untouched. |
 | Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
-| Plan review | One final adversarial implementation review complete; 12 findings corrected before fast lane |
+| Plan review | Original review: 12 findings corrected. One follow-up review complete: two P1 history findings corrected; focused qualification recorded in §24. |
 | Promotion/deployment | PR #1037 merged 2026-10-13, all eight checks passed on `6bc7235a0`; no production changes by this chat. Another rollout placed the landing on two nodes and exposed a router startup failure; recovery owner is recorded in §22. Isolated qualification continues. |
 | Current checks | Exact pre-merge head `6bc7235a0`: eight required checks passed, run 4887. Landing verified with all 32 regression declarations. |
 | Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
-| Next action | Finish isolated native UI and service durability qualification; incorporate the separately owned router startup repair and verify the composed daemon; prepare a concrete rollout with real hosting/TLS inputs for approval. |
+| Next action | Qualify and land the two native history review corrections through #1066; composed startup passes with the separate repair; continue isolated durability/device evidence and prepare exact hosting/rollout for approval. |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
 shared checkout and preserve unrelated `Claude outputs/` artifacts.
@@ -41,7 +42,7 @@ index/backlog rows; the builder adopts them together in a normal commit.
 | B03 | Support auth, grants, uploads and durable storage | Landed; software evidence recorded | Merged PR #1037 | Independent encrypted SQLite publication, separate capture authority, provisioning/revocation, resume/refresh, quotas and external deletion/revocation fences implemented; final Clippy and composed upload/delete/missing-fence runtime checks passed; broader failure matrix remains open |
 | B04 | TV handoff, mobile page, inbox and packaging | Landed; software evidence recorded | Merged PR #1037 | Phone claim/approval protocol, responsive completion page, named passkey inbox and TLS/service packaging built; composed browser races/passkeys passed; physical acceptance pending |
 | B05 | Web/TV browser reporting | Landed; software evidence recorded | Merged PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks built; hook/types, focused privacy/wire/recovery/consent and composed upload passed; hardware focus remains open |
-| B06 | Apple mobile/TV reporting | Landed; software evidence recorded | Merged PR #1037 | Recorder, protected account store, deterministic ZIP/share, fixed support transport, exact archive resume, report UI and local-only TV approval written; seven focused cases passed on each simulator platform; offline iPhone UI capture/consent/relaunch passed; normal hook passed; TV UI and physical acceptance owed |
+| B06 | Apple mobile/TV reporting | Landed; software evidence recorded | Merged PR #1037 | Recorder, protected account store, deterministic ZIP/share, fixed support transport, exact archive resume, report UI and local-only TV approval written; seven focused cases passed on each simulator platform; offline iPhone and Apple TV remote capture/consent/relaunch UI passed; normal hook passed; direct send and physical acceptance owed |
 | B07 | Android mobile/TV reporting | Landed; software evidence recorded | Merged PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; normal hook passed; signed release and physical acceptance owed |
 | B08 | Reproduction, connection checks, diagnostic adapters | Landed; software evidence recorded | Merged PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 22-case shared event fixture; physical provider delivery remains open |
 | B09 | Composed security/resource/device qualification | Browser software verified; physical open | Merged PR #1037 | Global capture limits/expiry and authority cleanup tightened; real local support/browser/passkey acceptance passed; physical matrix and native overhead measurements remain open |
@@ -60,11 +61,11 @@ from regressions. Record test absence as absence, not a passing check.
 | Web desktop/mobile/all layouts | Built B05 | Types/syntax/hook, focused wire/recorder and composed browser flow passed | None | Remaining browser failure matrix and real-device qualification |
 | Browser TV | Built B05 | Types/syntax/hook passed | None | Remote focus + physical phone handoff |
 | iPhone/iPad | Built B06 | Seven focused cases and actual offline capture/consent/relaunch UI passed | None | Share/send and physical runtime acceptance |
-| Apple TV | Built B06 | Seven focused simulator cases passed | None | Remote UI/direct send + phone on separate network |
-| Android phone/tablet | Built B07 | Seven focused JVM cases passed; isolated current APK built | None | UI share/send/recovery and signed release acceptance |
+| Apple TV | Built B06 | Seven focused simulator cases and real remote offline capture/consent/relaunch UI passed | None | Direct send + physical phone on separate network |
+| Android phone/tablet | Built B07 | Seven focused JVM cases; actual navigation/recovery instrumentation and process-relaunch UI passed | None | UI share/send, tablet and signed release acceptance |
 | Android/Google TV | Built B07 | Debug app/JVM/test APK compiled | None | D-pad/send + phone on separate network |
 | Cinema snapshots / multiple workers | Built B02 | Pinned compiler passed | None | Real two-user/two-node HTTP and peer-failure behavior |
-| Support upload service | Built B03 | Compiler, composed upload/delete/restore-fence checks passed | None | Durable/resume/retention runtime qualification |
+| Support upload service | Built B03 | Compiler, composed upload/delete/restore-fence and five focused durability/receipt cases passed | None | Disk-full, retention and remaining failure matrix |
 | Phone completion page | Built B04 | Real browser claim, approval, disconnected-TV submission passed | None | Real QR/manual claim, TV approval, submission |
 | Operator inbox | Built B04 | Real browser passkey login, escaped description, final ZIP and deletion passed | None | Passkey/inbox runtime and deployment qualification |
 | Privacy/resource/retention | Built | Browser canaries, ZIP/inbox, deletion and observer bounds passed; restore fixes rechecked | None | Native/device overhead and remaining failure matrix |
@@ -642,3 +643,32 @@ immutable receipt, two-phone approval/revocation restore, real HTTP origin
 and listener boundaries, missing external journal rejection, and final
 edited archive content. That is five tests, zero failures; broader disk-full,
 provider, device and deployment acceptance remains open.
+
+
+## 24. Follow-up adversarial findings and composed startup receipt
+
+The one final review of candidate `f96eadf666` against `fa464662f` found two
+P1 defects in retained native history. A row could restore its original
+pre-upload snapshot, losing the current consent, archive binding and support
+issuer. Deleting the selected row left the active draft alive, so Close or
+an upload progress save could recreate it. Neither finding is waived.
+
+Resume now treats the row as identity only: cancel and drain prior work,
+reload the protected store under the account/work revision fence, and
+refresh pending rows after persistence. Frozen archive/privacy/issuer state
+cannot be replaced by an older write. Deletion clears the selected owner
+before draining its work; store tombstones reject queued draft/archive
+writes and secret cleanup runs after the drain. The new frozen-consent/deletion regression passed once on iOS, once on tvOS and once in Android JVM storage. The shipped Android phone owner also passed its failed-grant/frozen-privacy/deletion case (one test). Actual iOS and tvOS remote capture/consent/relaunch UI each passed again after selecting the exact saved incident ID. Those UI fixture failures are retained; selecting the newest row was not evidence of recovery.
+
+Pinned Rust 1.97.1 all-target check and the composed-daemon regression
+`an_unauthenticated_facade_request_is_counted_as_a_client_that_tried` passed
+on `f96eadf666` (one test, zero failures). The exact-source Linux support
+release build also passed after reducing build concurrency to fit the
+container; the first attempt was killed for memory, not a compiler failure.
+The recovery chat reports two nodes healthy and two repair images preloaded;
+its remaining rollout is waiting for the Mac to be unlocked. This is that
+chat's recovery receipt, not a deployment by this diagnostics owner.
+
+The acceptance matrix and generated summary now name the qualified subset
+and active follow-up #1066. Physical/direct-send/cross-network/provider and
+production support acceptance remain open.

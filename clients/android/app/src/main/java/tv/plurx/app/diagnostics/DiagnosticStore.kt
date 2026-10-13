@@ -36,6 +36,7 @@ internal class DiagnosticStore(private val root: File, private val authorization
     private val archives = linkedMapOf<String, ByteArray>()
     private val ringMemory = mutableMapOf<String, DiagnosticCapture>()
     private val retired = mutableSetOf<String>()
+    private val deleted = mutableSetOf<String>()
     private fun directory(scope: String): File {
         require(scope == "anonymous" || Regex("[a-f0-9]{64}").matches(scope)); require(scope !in retired)
         val directory = File(root, scope); if (!directory.exists() && root.listFiles().orEmpty().size >= 32) { prune(); require(root.listFiles().orEmpty().size < 32) }; check(directory.mkdirs() || directory.isDirectory); return directory
@@ -74,7 +75,9 @@ internal class DiagnosticStore(private val root: File, private val authorization
     }
     suspend fun activate(scope: String) = mutex.withLock { retired.remove(scope) }
     suspend fun save(draft: DiagnosticDraft): String = withContext(Dispatchers.IO) { mutex.withLock {
-        if (draft.capture.namespace in retired || draft.capture.generation != authorizationGeneration()) return@withLock "unavailable"
+        if (draft.capture.namespace in retired || draft.id in deleted || draft.capture.generation != authorizationGeneration()) return@withLock "unavailable"
+        val prior = storedDraft(draft.id,draft.capture.namespace)
+        if (prior?.binding != null && (!draft.consented || prior.origin != draft.origin || prior.title != draft.title || prior.includePlatform != draft.includePlatform || prior.binding != draft.binding || prior.manifest != draft.manifest)) return@withLock "unavailable"
         id(draft.id); require(draft.capture.events.size <= 10000 && draft.serverEvents.size <= 10000 && draft.connection.size <= 100)
         require(draft.capture.events.all { it.valid() } && draft.serverEvents.all { it.valid() } && draft.connection.all { it.valid() })
         val bytes = DiagnosticJson.encodeToString(DiagnosticDraft.serializer(), draft).toByteArray(); require(bytes.size <= 8388608)
@@ -93,21 +96,25 @@ internal class DiagnosticStore(private val root: File, private val authorization
         runCatching {
             val folder = directory(scope); prune()
             folder.listFiles().orEmpty().take(32).filter { it.name != "ring.json" && it.extension == "json" }.forEach { file ->
-                runCatching { DiagnosticJson.decodeFromString(DiagnosticDraft.serializer(), read(file, 8388608).toString(Charsets.UTF_8)) }.getOrNull()?.takeIf { it.capture.namespace == scope && it.id + ".json" == file.name && it.capture.events.all { event -> event.valid() } }?.let { memory[it.id] = it }
+                runCatching { DiagnosticJson.decodeFromString(DiagnosticDraft.serializer(), read(file, 8388608).toString(Charsets.UTF_8)) }.getOrNull()?.takeIf { it.id !in deleted && it.capture.namespace == scope && it.id + ".json" == file.name && it.capture.events.all { event -> event.valid() } && it.id !in memory }?.let { memory[it.id] = it }
             }
         }
         memory.values.filter { it.capture.namespace == scope && it.capture.incidentMs >= System.currentTimeMillis() - 86400000 }.sortedByDescending { it.capture.incidentMs }.take(10)
     } }
     suspend fun saveArchive(id: String, scope: String, bytes: ByteArray, generation: Long): String = withContext(Dispatchers.IO) { mutex.withLock {
-        id(id); require(bytes.size <= 8388608); if (scope in retired || generation != authorizationGeneration()) return@withLock "unavailable"
+        id(id); require(bytes.size <= 8388608); if (scope in retired || id in deleted || generation != authorizationGeneration()) return@withLock "unavailable"
+        storedDraft(id,scope)?.binding?.let { if (bytes.size != it.length || DiagnosticFields.hash(bytes) != it.sha256) return@withLock "unavailable" }
         archives.clear(); archives[id] = bytes
         runCatching { write(File(directory(scope), id + ".zip"), bytes); prune(); "available" }.getOrDefault("memory_only")
     } }
-    suspend fun archive(id: String, scope: String): ByteArray? = withContext(Dispatchers.IO) { mutex.withLock { id(id); if (scope in retired) null else archives[id] ?: runCatching { read(File(directory(scope), id + ".zip"), 8388608) }.getOrNull() } }
+    suspend fun archive(id: String, scope: String): ByteArray? = withContext(Dispatchers.IO) { mutex.withLock { id(id); if (scope in retired || id in deleted) null else archives[id] ?: runCatching { read(File(directory(scope), id + ".zip"), 8388608) }.getOrNull() } }
     suspend fun delete(id: String, scope: String) = withContext(Dispatchers.IO) { mutex.withLock {
-        id(id); memory.remove(id); archives.remove(id)
+        id(id); deleted += id; memory.remove(id); archives.remove(id)
         runCatching { val folder = directory(scope); File(folder, id + ".json").delete(); File(folder, id + ".zip").delete() }
     } }
+    private fun storedDraft(id: String, scope: String): DiagnosticDraft? = memory[id]?.takeIf { it.capture.namespace == scope } ?: runCatching {
+        DiagnosticJson.decodeFromString(DiagnosticDraft.serializer(),read(File(directory(scope),id + ".json"),8388608).toString(Charsets.UTF_8)).takeIf { it.id == id && it.capture.namespace == scope }
+    }.getOrNull()
     suspend fun clearRing(scope: String) = withContext(Dispatchers.IO) { mutex.withLock { ringMemory.remove(scope); runCatching { File(directory(scope), "ring.json").delete() }; Unit } }
     suspend fun clear(scope: String) = withContext(Dispatchers.IO) { mutex.withLock {
         memory.entries.removeAll { it.value.capture.namespace == scope }; archives.clear(); ringMemory.remove(scope)

@@ -15,7 +15,7 @@ import java.util.UUID
 
 internal data class DiagnosticUI(
     val visible: Boolean = false, val draft: DiagnosticDraft? = null, val pending: List<DiagnosticDraft> = emptyList(),
-    val busy: Boolean = false, val message: String = "", val destination: String = "", val consent: Boolean = false,
+    val busy: Boolean = false, val message: String = "", val destination: String = "", val consent: Boolean = false, val selectionRevision: Long = 0,
     val includePlatform: Boolean = false, val includeTitle: Boolean = false, val invitation: String = "", val comparison: String? = null, val handoffState: String = "", val history: Boolean = true,
 )
 
@@ -27,6 +27,7 @@ internal object DiagnosticRuntime {
     private lateinit var platform: DiagnosticPlatform
     lateinit var recorder: DiagnosticRecorder; private set
     private val owner = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var workRevision = 0L
     private var operation: Job? = null
     private var poll: Job? = null
     private var transport: DiagnosticTransport? = null
@@ -55,6 +56,7 @@ internal object DiagnosticRuntime {
         }
     }
     private fun retire() {
+        workRevision++
         operation?.cancel(); poll?.cancel(); transport?.cancel(); operation=null; poll=null; transport=null
         mutable.update { DiagnosticUI(history=it.history) }; title=null
     }
@@ -93,6 +95,7 @@ internal object DiagnosticRuntime {
     }
     fun open(category: String = "other", positiveTitle: String? = null, newIncident: Boolean = false) {
         if (!::recorder.isInitialized) return
+        workRevision++
         operation?.cancel(); poll?.cancel(); transport?.cancel(); title=positiveTitle
         if (newIncident) recorder.forgetReproduction()
         val capture = recorder.retainedReproduction ?: recorder.freeze(); val draft = DiagnosticDraft(capture,category=category)
@@ -109,22 +112,40 @@ internal object DiagnosticRuntime {
             catch (_: Exception) { result=result.copy(components=listOf(DiagnosticComponent("server","unavailable",if (capture.namespace == "anonymous") "context_unavailable" else "connection_failed"))) }
             client.current(); if (mutable.value.draft?.id != draft.id) return@launch
             val destination = runCatching { client.supportOrigin() }.getOrNull().orEmpty(); client.current()
-            result=result.copy(description=mutable.value.draft?.description.orEmpty()); store.save(result)
+            result=result.copy(description=mutable.value.draft?.description.orEmpty()); persist(result)
             mutable.update { if (it.draft?.id == result.id) it.copy(draft=result,destination=destination,busy=false,message="Frozen local report. Review its coverage before sending. Missing server evidence does not prevent saving.") else it }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { if (mutable.value.draft?.id == draft.id) mutable.update { it.copy(busy=false,message="Local report available. Server or protected support storage is unavailable.") } }
 
         }
     }
-    fun resume(draft: DiagnosticDraft) {
-        if (draft.capture.namespace != namespace) return
-        // A report switch retires its work without clearing the account's
-        // history or removing the remote's currently focused resume action.
-        operation?.cancel(); poll?.cancel(); transport?.cancel()
-        operation=null; poll=null; transport=null; title=draft.title
-        val value=draft.copy(capture=draft.capture.copy(generation=Session.playbackAuthorization().generation))
-        mutable.update { it.copy(visible=true,draft=value,destination=value.origin.orEmpty(),consent=value.consented,includeTitle=value.title != null,includePlatform=value.includePlatform,busy=false,comparison=null,handoffState="",message="Recovered local report. Sending resumes the same immutable archive.") }
-        if (value.handoff != null) pollHandoff()
+    fun resume(row: DiagnosticDraft) {
+        val selected=mutable.value
+        if (selected.busy || row.capture.namespace != namespace) return
+        val previousWork=operation; val previousPoll=poll
+        previousWork?.cancel(); previousPoll?.cancel(); transport?.cancel()
+        val revision=++workRevision; val scope=namespace; val auth=Session.playbackAuthorization()
+        val previous=selected.draft?.let { if (it.consented) it else it.copy(title=if (selected.includeTitle) title else null,includePlatform=selected.includePlatform) }
+        transport=null; poll=null; mutable.update { it.copy(busy=true,comparison=null,handoffState="") }
+        operation=owner.launch {
+            previousWork?.join(); previousPoll?.join()
+            if (!isActive || revision != workRevision || scope != namespace || auth.generation != Session.playbackAuthorization().generation) return@launch
+            previous?.takeUnless { it.consented }?.let { store.save(it) }
+            val rows=store.drafts(scope)
+            if (!isActive || revision != workRevision || scope != namespace || auth.generation != Session.playbackAuthorization().generation) return@launch
+            val restored=rows.firstOrNull { it.id == row.id }
+            mutable.update { it.copy(pending=rows,busy=false) }
+            if (restored == null) { mutable.update { it.copy(message="This local report expired or was deleted.") }; return@launch }
+            // A retained row supplies identity, never an old consent or grant.
+            val value=restored.copy(capture=restored.capture.copy(generation=auth.generation)); title=value.title
+            mutable.update { it.copy(visible=true,draft=value,destination=value.origin.orEmpty(),consent=value.consented,includeTitle=value.title != null,includePlatform=value.includePlatform,selectionRevision=it.selectionRevision+1,comparison=null,handoffState="",message="Recovered local report. Sending resumes the same immutable archive.") }
+            if (value.handoff != null) pollHandoff()
+        }
+    }
+    private suspend fun persist(value: DiagnosticDraft) {
+        store.save(value); val rows=store.drafts(value.capture.namespace)
+        currentCoroutineContext().ensureActive()
+        if (namespace == value.capture.namespace && Session.playbackAuthorization().generation == value.capture.generation) mutable.update { it.copy(pending=rows) }
     }
     fun edit(description: String? = null, category: String? = null) {
         mutable.update { value -> val draft=value.draft; if (draft == null || draft.consented) value else value.copy(draft=draft.copy(description=description?.let { text -> String(text.codePoints().limit(4000).toArray(),0,minOf(text.codePointCount(0,text.length),4000)) } ?: draft.description,category=category ?: draft.category)) }
@@ -139,12 +160,13 @@ internal object DiagnosticRuntime {
         owner.launch { store.clearRing(namespace); recorder.retireAuthorization(Session.playbackAuthorization().generation); recorder.bind(namespace,Session.playbackAuthorization().generation,null) }
     }
     fun close() {
-        mutable.value.draft?.let { value -> owner.launch { store.save(value) } }
+        workRevision++
+        mutable.value.draft?.takeUnless { it.consented }?.let { value -> owner.launch { store.save(value) } }
         operation?.cancel(); poll?.cancel(); transport?.cancel(); transport=null
         mutable.update { it.copy(visible=false,busy=false) }
     }
     fun background() {
-        if (!::recorder.isInitialized) return; recorder.background()
+        if (!::recorder.isInitialized) return; workRevision++; recorder.background()
         operation?.cancel(); poll?.cancel(); transport?.cancel(); transport=null
         mutable.update { it.copy(busy=false,message=if (it.visible) "Paused in background. Retry this same report when foreground." else it.message) }
     }
@@ -155,15 +177,21 @@ internal object DiagnosticRuntime {
     suspend fun revokeEnrollment() { if (!::recorder.isInitialized) return; val client=DiagnosticTransport(app,namespace); try { client.revokeEnrollment() } finally { client.cancel() } }
     private fun perform(action: suspend (DiagnosticTransport, DiagnosticDraft) -> DiagnosticDraft) {
         val value=mutable.value; val draft=value.draft ?: return; if (value.busy || draft.capture.generation != Session.playbackAuthorization().generation) return
+        val revision=++workRevision
         operation?.cancel(); transport?.cancel(); val client=DiagnosticTransport(app,draft.capture.namespace); transport=client
         mutable.update { it.copy(busy=true,message="Working…") }
         operation=owner.launch {
             try {
-                val result=action(client,draft); client.current(); if (mutable.value.draft?.id != draft.id) return@launch
-                store.save(result); mutable.update { it.copy(draft=result) }
+                val result=action(client,draft); client.current(); if (!isActive || workRevision != revision || mutable.value.draft?.id != draft.id) return@launch
+                persist(result); mutable.update { it.copy(draft=result) }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Exception) { if (mutable.value.draft?.id == draft.id) mutable.update { it.copy(message=if (error is DiagnosticTransport.Failure) error.message.orEmpty() else "The connection or protected storage failed. Retry or save this local report.") } }
-            finally { if (mutable.value.draft?.id == draft.id) mutable.update { it.copy(busy=false) } }
+            catch (error: Exception) {
+                if (isActive && workRevision == revision && mutable.value.draft?.id == draft.id) {
+                    val rows=store.drafts(draft.capture.namespace); val saved=rows.firstOrNull { it.id == draft.id }
+                    if (isActive && workRevision == revision && mutable.value.draft?.id == draft.id) mutable.update { it.copy(draft=saved ?: it.draft,pending=rows,consent=saved?.consented ?: it.consent,includeTitle=if (saved?.consented == true) saved.title != null else it.includeTitle,includePlatform=if (saved?.consented == true) saved.includePlatform else it.includePlatform,message=if (error is DiagnosticTransport.Failure) error.message.orEmpty() else "The connection or protected storage failed. Retry or save this local report.") }
+                }
+            }
+            finally { if (workRevision == revision && mutable.value.draft?.id == draft.id) mutable.update { it.copy(busy=false) } }
         }
     }
     private suspend fun archive(original: DiagnosticDraft): Pair<DiagnosticDraft, DiagnosticArchive> = withContext(Dispatchers.IO) {
@@ -176,7 +204,7 @@ internal object DiagnosticRuntime {
         val value=runInterruptible { DiagnosticReport.archive(draft,television) }; require(value.bytes.size <= 8388608)
         if (draft.consented) {
             val frozen=draft.copy(binding=value.binding,manifest=value.manifest)
-            require(store.saveArchive(frozen.id,frozen.capture.namespace,value.bytes,frozen.capture.generation) != "unavailable"); store.save(frozen); frozen to value
+            require(store.saveArchive(frozen.id,frozen.capture.namespace,value.bytes,frozen.capture.generation) != "unavailable"); persist(frozen); frozen to value
         } else draft to value
     }
     fun share() = perform { _, original ->
@@ -201,7 +229,7 @@ internal object DiagnosticRuntime {
             val origin=DiagnosticTransport.origin(selected.destination,preferences.getBoolean("development_local",false))
             require(!original.consented || original.origin == origin)
             val (frozen,archive)=archive(original.copy(origin=origin,consented=true))
-            var value=client.stage(archive,frozen) { progress -> client.current(); store.save(progress); withContext(Dispatchers.Main.immediate) { mutable.update { if (it.draft?.id == progress.id) it.copy(draft=progress) else it } } }
+            var value=client.stage(archive,frozen) { progress -> client.current(); currentCoroutineContext().ensureActive(); persist(progress); withContext(Dispatchers.Main.immediate) { mutable.update { if (it.draft?.id == progress.id) it.copy(draft=progress) else it } } }
             value=if (phone && value.state != "submitted") client.offer(value) else client.submit(value)
             mutable.update { it.copy(draft=value,message=if (value.state == "submitted") "Submitted. Reference: ${value.reference}" else "Scan on the phone, then compare the phrase here before approving.") }
             if (value.state == "submitted") recorder.forgetReproduction(value.id)
@@ -224,13 +252,15 @@ internal object DiagnosticRuntime {
             var deadline=android.os.SystemClock.elapsedRealtime()+600000; var approved=false
             try {
                 while (isActive && mutable.value.visible && mutable.value.draft?.id == value.id && android.os.SystemClock.elapsedRealtime() < deadline) {
-                    val reply=client.handoffStatus(value); client.current(); val state=reply.getValue("state").jsonPrimitive.content
+                    val reply=client.handoffStatus(value); client.current(); currentCoroutineContext().ensureActive()
+                    if (mutable.value.draft?.id != value.id || !mutable.value.visible) return@launch
+                    val state=reply.getValue("state").jsonPrimitive.content
                     mutable.update { it.copy(handoffState=state,comparison=if (state == "claim_pending") reply["comparison"]?.jsonPrimitive?.content else null) }
                     if (state == "approved" && !approved) { approved=true; deadline=android.os.SystemClock.elapsedRealtime()+1800000; mutable.update { it.copy(message="Phone approved. It can finish this report even if the TV closes.") } }
                     if (state == "submitted") {
                         recorder.forgetReproduction(value.id)
                         val reference=reply["reference"]?.jsonPrimitive?.content; val finished=mutable.value.draft?.copy(state="submitted",reference=reference)
-                        if (finished != null) store.save(finished); mutable.update { it.copy(draft=finished,message="Submitted. Reference: $reference") }; return@launch
+                        if (finished != null) persist(finished); mutable.update { it.copy(draft=finished,message="Submitted. Reference: $reference") }; return@launch
                     }
                     if (state in setOf("expired","cancelled","rejected","deleted")) { mutable.update { it.copy(message="Phone handoff ended. The local report remains available.") }; return@launch }
                     delay(2000)
@@ -265,5 +295,24 @@ internal object DiagnosticRuntime {
         mutable.update { it.copy(message="Checks saved for this Cinema endpoint. No media transfer was requested.") }
         draft.copy(connection=(draft.connection+events).takeLast(100))
     }
-    fun deleteLocal(draft: DiagnosticDraft) { recorder.forgetReproduction(draft.id); owner.launch { store.delete(draft.id,draft.capture.namespace); withContext(Dispatchers.IO) { val secrets=DiagnosticSecrets(app,draft.capture.namespace);for (name in listOf(draft.id,draft.id+":invitation",draft.id+":invitation-proof")) secrets.delete(name) }; mutable.update { it.copy(pending=it.pending.filter { pending -> pending.id != draft.id }) } } }
+    fun deleteLocal(row: DiagnosticDraft) {
+        if (row.capture.namespace != namespace) return
+        val selected=mutable.value.draft?.id == row.id
+        val previousWork=if (selected) operation else null; val previousPoll=if (selected) poll else null
+        if (selected) {
+            workRevision++; previousWork?.cancel(); previousPoll?.cancel(); transport?.cancel()
+            operation=null; poll=null; transport=null
+            mutable.update { it.copy(draft=null,busy=false,comparison=null,handoffState="") }
+        }
+        mutable.update { it.copy(pending=it.pending.filter { pending -> pending.id != row.id }) }; recorder.forgetReproduction(row.id)
+        val scope=namespace; val auth=Session.playbackAuthorization()
+        owner.launch {
+            store.delete(row.id,scope)
+            previousWork?.join(); previousPoll?.join()
+            store.delete(row.id,scope)
+            withContext(Dispatchers.IO) { val secrets=DiagnosticSecrets(app,scope); for (name in listOf(row.id,row.id+":invitation",row.id+":invitation-proof")) secrets.delete(name) }
+            val rows=store.drafts(scope)
+            if (namespace == scope && Session.playbackAuthorization().generation == auth.generation) mutable.update { it.copy(pending=rows,message=if (selected) "Local report deleted." else it.message) }
+        }
+    }
 }

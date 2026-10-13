@@ -50,6 +50,41 @@ final class DiagnosticCaptureTests: XCTestCase {
         XCTAssertTrue(titled.binding.privacy.titles_included); XCTAssertNotEqual(report.binding.sha256, titled.binding.sha256)
         XCTAssertThrowsError(try DiagnosticReport.zip([("../outside", Data())]))
     }
+    @MainActor func testStaleHistoryCannotReplaceFrozenConsentOrResurrectDeletedReport() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let auth = Session.shared.playbackAuthorization
+        let store = DiagnosticStore(root: root, authorizationGeneration: { auth.generation })
+        let initial = DiagnosticRecorder(persistenceEnabled: false).freeze()
+        let capture = DiagnosticCapture(id: initial.id, namespace: "anonymous", generation: auth.generation, capturedAt: initial.capturedAt, incidentMs: initial.incidentMs, events: [], dropped: 0, persistence: "available", historyEnabled: true)
+        let row = DiagnosticStore.Draft(capture: capture, category: "other", description: "", serverEvents: [], serverComponents: [], connection: [])
+        _ = await store.save(row)
+        var frozen = row; frozen.consented = true; frozen.origin = "https://support.example"; frozen.title = "Explicit private title"; frozen.includePlatform = true
+        let report = try DiagnosticReport.archive(frozen, client: DiagnosticReport.client)
+        frozen.binding = report.binding; frozen.manifest = report.manifest; frozen.state = "staged"
+        _ = await store.saveArchive(report.bytes, id: row.id, scope: "anonymous", generation: auth.generation)
+        _ = await store.save(frozen)
+        let staleWrite = await store.save(row); XCTAssertEqual(staleWrite, "unavailable")
+        let replacement = await store.saveArchive(Data("replacement".utf8), id: row.id, scope: "anonymous", generation: auth.generation)
+        XCTAssertEqual(replacement, "unavailable")
+        let model = DiagnosticReportModel(store: store); model.pending = [row]; model.draft = row
+        model.resume(row)
+        for _ in 0..<200 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(model.busy); XCTAssertEqual(model.draft?.binding, report.binding)
+        XCTAssertTrue(model.uploadConsent); XCTAssertTrue(model.includeTitle); XCTAssertTrue(model.includePlatform)
+        XCTAssertEqual(model.destination, frozen.origin); XCTAssertEqual(model.pending.first?.state, "staged")
+        let kept = await store.archive(row.id, scope: "anonymous"); XCTAssertEqual(kept, report.bytes)
+        model.deleteLocal(row); model.close()
+        for _ in 0..<200 {
+            if await store.drafts("anonymous").isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNil(model.draft)
+        let deleted = await store.drafts("anonymous"); XCTAssertTrue(deleted.isEmpty)
+        let queued = await store.save(frozen); XCTAssertEqual(queued, "unavailable")
+        let queuedArchive = await store.saveArchive(report.bytes, id: row.id, scope: "anonymous", generation: auth.generation); XCTAssertEqual(queuedArchive, "unavailable")
+        let removed = await store.archive(row.id, scope: "anonymous"); XCTAssertNil(removed)
+    }
     func testSupportDestinationRefusesCredentialsPathsAndUnapprovedPlaintext() {
         for origin in ["https://user:secret@support.example", "https://support.example/a", "https://support.example?secret=canary", "http://support.example", "file:///tmp/report"] { XCTAssertThrowsError(try DiagnosticTransport.origin(origin)) }
         XCTAssertEqual(try DiagnosticTransport.origin("https://support.example/"), "https://support.example")

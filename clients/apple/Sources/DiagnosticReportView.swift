@@ -8,6 +8,7 @@ final class DiagnosticReportModel: ObservableObject {
     @Published var presenter = "root"
     @Published var draft: DiagnosticStore.Draft?
     @Published var pending: [DiagnosticStore.Draft] = []
+    @Published private(set) var selectionRevision: UInt64 = 0
     @Published var message = ""
     @Published var busy = false
     @Published var destination = ""
@@ -19,6 +20,8 @@ final class DiagnosticReportModel: ObservableObject {
     @Published var handoffState = ""
     @Published var shareURL: URL?
     @Published var history = DiagnosticRecorder.shared.historyEnabled
+    private let store: DiagnosticStore
+    private var workRevision: UInt64 = 0
     private var scope = "anonymous"
     private var generation: UInt64 = 0
     private var title: String?
@@ -27,7 +30,8 @@ final class DiagnosticReportModel: ObservableObject {
     private var polling: Task<Void, Never>?
     private var authorizationObserver: UUID?
     var hasPendingUnsubmitted: Bool { (draft?.state != "submitted" && draft != nil) || pending.contains { $0.state != "submitted" } }
-    init() {
+    init(store: DiagnosticStore = .shared) {
+        self.store = store
         let installed = Session.shared.observeAuthorizationChanges { [weak self] _ in
             Task { @MainActor in self?.retire(); DiagnosticPlatform.shared.retire() }
         }
@@ -36,6 +40,7 @@ final class DiagnosticReportModel: ObservableObject {
         DiagnosticRecorder.shared.record("lifecycle", "state", ["state": .text("starting")])
     }
     private func retire() {
+        workRevision &+= 1
         operation?.cancel(); polling?.cancel(); transport?.cancel(); operation = nil; polling = nil; transport = nil
         draft = nil; pending = []; comparison = nil; handoffState = ""; presented = false; busy = false
         cleanupShare()
@@ -45,16 +50,17 @@ final class DiagnosticReportModel: ObservableObject {
         let next = model.diagnosticNamespace; let auth = Session.shared.playbackAuthorization
         DiagnosticPlatform.shared.bind(next, generation: auth.generation)
         scope = next; generation = auth.generation
-        await DiagnosticStore.shared.activate(next)
+        await store.activate(next)
         await DiagnosticRecorder.shared.bind(namespace: next, generation: auth.generation, erasePrevious: false)
         guard Session.shared.playbackAuthorization.generation == auth.generation else { return }
-        let restored = await DiagnosticStore.shared.drafts(next)
+        let restored = await store.drafts(next)
         guard Session.shared.playbackAuthorization.generation == auth.generation, scope == next else { return }
         pending = restored
         let provisioning = DiagnosticTransport(scope: next, authorization: auth)
         if next != "anonymous" { try? await provisioning.provision() }; provisioning.cancel()
     }
     func open(category: String = "other", title: String? = nil, owner: String = "root", newIncident: Bool = false) {
+        workRevision &+= 1
         operation?.cancel(); polling?.cancel(); transport?.cancel(); cleanupShare()
         if newIncident { DiagnosticRecorder.shared.forgetReproduction() }
         self.title = title; includeTitle = false; includePlatform = false; comparison = nil; handoffState = ""; uploadConsent = false
@@ -79,52 +85,75 @@ final class DiagnosticReportModel: ObservableObject {
             if let origin = try? await client.supportOrigin() { destination = origin }
             guard !Task.isCancelled, draft?.id == value.id else { return }
             collected.description = draft?.description ?? ""; draft = collected
-            _ = await DiagnosticStore.shared.save(collected); busy = false
+            await persist(collected); busy = false
             message = "Frozen local report. Review its coverage before sending. Missing server evidence does not prevent saving."
         }
     }
-    func resume(_ value: DiagnosticStore.Draft) {
-        guard value.capture.namespace == scope else { return }
-        // Switching incidents cancels the previous work, but keeps this
-        // account's history and the focused resume row in the presented form.
-        operation?.cancel(); polling?.cancel(); transport?.cancel()
-        operation = nil; polling = nil; transport = nil; cleanupShare()
-        busy = false; comparison = nil; handoffState = ""
-        var resumed = value; resumed.capture = DiagnosticCapture(id: value.capture.id, namespace: value.capture.namespace, generation: generation,
-            capturedAt: value.capture.capturedAt, incidentMs: value.capture.incidentMs, events: value.capture.events, dropped: value.capture.dropped,
-            persistence: value.capture.persistence, historyEnabled: value.capture.historyEnabled, mode: value.capture.mode, windowMs: value.capture.windowMs)
-        draft = resumed; destination = resumed.origin ?? ""; uploadConsent = resumed.consented; includeTitle = resumed.title != nil
-        title = resumed.title; includePlatform = resumed.includePlatform == true; presented = true; transport = DiagnosticTransport(scope: scope)
-        message = "Recovered local report. Sending resumes this same frozen archive."
-        if resumed.handoff != nil { pollHandoff() }
+    func resume(_ row: DiagnosticStore.Draft) {
+        guard !busy, row.capture.namespace == scope else { return }
+        let previousWork = operation; let previousPoll = polling
+        previousWork?.cancel(); previousPoll?.cancel(); transport?.cancel(); cleanupShare()
+        workRevision &+= 1; let revision = workRevision
+        let namespace = scope; let auth = Session.shared.playbackAuthorization
+        var previous = draft
+        if previous?.consented == false { previous?.title = includeTitle ? title : nil; previous?.includePlatform = includePlatform }
+        busy = true; comparison = nil; handoffState = ""; transport = nil; polling = nil
+        operation = Task {
+            await previousWork?.value; await previousPoll?.value
+            guard !Task.isCancelled, workRevision == revision, scope == namespace, Session.shared.playbackAuthorization.generation == auth.generation else { return }
+            if let previous, !previous.consented { _ = await store.save(previous) }
+            let rows = await store.drafts(namespace)
+            guard !Task.isCancelled, workRevision == revision, scope == namespace, Session.shared.playbackAuthorization.generation == auth.generation else { return }
+            pending = rows; busy = false
+            guard var resumed = rows.first(where: { $0.id == row.id }) else { message = "This local report expired or was deleted."; return }
+            // The row supplies identity only. The protected store supplies the
+            // latest consent, immutable archive and support issuer together.
+            resumed.capture = DiagnosticCapture(id: resumed.capture.id, namespace: namespace, generation: auth.generation,
+                capturedAt: resumed.capture.capturedAt, incidentMs: resumed.capture.incidentMs, events: resumed.capture.events, dropped: resumed.capture.dropped,
+                persistence: resumed.capture.persistence, historyEnabled: resumed.capture.historyEnabled, mode: resumed.capture.mode, windowMs: resumed.capture.windowMs)
+            selectionRevision &+= 1
+            draft = resumed; destination = resumed.origin ?? ""; uploadConsent = resumed.consented; includeTitle = resumed.title != nil
+            title = resumed.title; includePlatform = resumed.includePlatform == true; presented = true; transport = DiagnosticTransport(scope: namespace)
+            message = "Recovered local report. Sending resumes this same frozen archive."
+            if resumed.handoff != nil { pollHandoff() }
+        }
+    }
+    private func persist(_ value: DiagnosticStore.Draft) async {
+        _ = await store.save(value)
+        let rows = await store.drafts(value.capture.namespace)
+        guard !Task.isCancelled, scope == value.capture.namespace, Session.shared.playbackAuthorization.generation == value.capture.generation else { return }
+        pending = rows
     }
     func close() {
-        if let draft { Task { await DiagnosticStore.shared.save(draft) } }
+        workRevision &+= 1
+        if let draft, !draft.consented { Task { await store.save(draft) } }
         operation?.cancel(); polling?.cancel(); transport?.cancel(); transport = nil; busy = false; presented = false; cleanupShare()
     }
     func signOut() {
         let previous = scope
         retire()
-        Task { await DiagnosticStore.shared.clear(previous) }
+        Task { await store.clear(previous) }
     }
     func suspend() {
+        workRevision &+= 1
         operation?.cancel(); polling?.cancel(); transport?.cancel(); transport = nil; busy = false
-        if let draft { Task { await DiagnosticStore.shared.save(draft) } }
+        if let draft, !draft.consented { Task { await store.save(draft) } }
         if presented { message = "Paused in background. Retry the same consented report when foreground." }
     }
     func cleanupShare() { if let shareURL { try? FileManager.default.removeItem(at: shareURL.deletingLastPathComponent()) }; shareURL = nil }
     func setHistory(_ enabled: Bool) { history = enabled; Task { await DiagnosticRecorder.shared.setHistory(enabled) } }
     private func perform(_ action: @escaping (DiagnosticTransport, inout DiagnosticStore.Draft) async throws -> Void) {
         guard !busy, var value = draft, value.capture.generation == Session.shared.playbackAuthorization.generation else { return }; operation?.cancel(); transport?.cancel(); busy = true; message = "Working…"
+        workRevision &+= 1; let revision = workRevision
         let client = DiagnosticTransport(scope: value.capture.namespace); transport = client
         operation = Task {
-            do { try await action(client, &value); try client.current(); guard draft?.id == value.id else { busy = false; return }; draft = value; _ = await DiagnosticStore.shared.save(value) }
-            catch { if !Task.isCancelled, draft?.id == value.id { draft = value; message = (error as? LocalizedError)?.errorDescription ?? "The connection failed. Retry or save this local report." } }
-            if !Task.isCancelled { busy = false }
+            do { try await action(client, &value); try client.current(); guard !Task.isCancelled, workRevision == revision, draft?.id == value.id else { return }; draft = value; await persist(value) }
+            catch { if !Task.isCancelled, workRevision == revision, draft?.id == value.id { draft = value; await persist(value); message = (error as? LocalizedError)?.errorDescription ?? "The connection failed. Retry or save this local report." } }
+            if !Task.isCancelled, workRevision == revision { busy = false }
         }
     }
     private func archive(_ value: inout DiagnosticStore.Draft) async throws -> DiagnosticReport.Archive {
-        if let binding = value.binding, let manifest = value.manifest, let bytes = await DiagnosticStore.shared.archive(value.id, scope: value.capture.namespace) {
+        if let binding = value.binding, let manifest = value.manifest, let bytes = await store.archive(value.id, scope: value.capture.namespace) {
             guard bytes.count == binding.length, DiagnosticRecorder.digest(bytes) == binding.sha256 else { throw DiagnosticTransport.Failure.invalid }
             return DiagnosticReport.Archive(bytes: bytes, binding: binding, manifest: manifest)
         }
@@ -133,12 +162,13 @@ final class DiagnosticReportModel: ObservableObject {
         let snapshot = value; let client = DiagnosticReport.client
         let worker = Task.detached(priority: .utility) { try DiagnosticReport.archive(snapshot, client: client) }
         let result = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+        try Task.checkCancellation()
         guard result.bytes.count <= 8_388_608 else { throw DiagnosticTransport.Failure.limit }
         if value.consented {
             value.binding = result.binding; value.manifest = result.manifest
-            let persistence = await DiagnosticStore.shared.saveArchive(result.bytes, id: value.id, scope: value.capture.namespace, generation: value.capture.generation)
+            let persistence = await store.saveArchive(result.bytes, id: value.id, scope: value.capture.namespace, generation: value.capture.generation)
             guard persistence != "unavailable" else { throw DiagnosticTransport.Failure.storage }
-            _ = await DiagnosticStore.shared.save(value)
+            await persist(value)
         }
         return result
     }
@@ -189,10 +219,10 @@ final class DiagnosticReportModel: ObservableObject {
             while !Task.isCancelled, ContinuousClock.now < deadline, draft?.id == id, presented {
                 do {
                     let status = try await client.handoffStatus(value); try client.current()
-                    guard draft?.id == id else { return }; handoffState = status.state
+                    guard !Task.isCancelled, draft?.id == id, presented else { return }; handoffState = status.state
                     comparison = status.state == "claim_pending" ? status.comparison : nil
                     if status.state == "approved", !approved { approved = true; deadline = ContinuousClock.now.advanced(by: .seconds(1800)); message = "Phone approved. It can finish this report even if the TV closes." }
-                    if status.state == "submitted" { DiagnosticRecorder.shared.forgetReproduction(id); draft?.state = "submitted"; draft?.reference = status.reference; message = "Submitted. Reference: " + (status.reference ?? "unavailable"); if let draft { await DiagnosticStore.shared.save(draft) }; return }
+                    if status.state == "submitted" { DiagnosticRecorder.shared.forgetReproduction(id); draft?.state = "submitted"; draft?.reference = status.reference; message = "Submitted. Reference: " + (status.reference ?? "unavailable"); if let draft { await persist(draft) }; return }
                     if ["expired","cancelled","rejected","deleted"].contains(status.state) { message = "Phone handoff ended. The local report is still available."; return }
                 } catch { if !Task.isCancelled { message = "Handoff status unavailable. Retry when foreground." }; return }
                 try? await Task.sleep(for: .seconds(2))
@@ -208,7 +238,7 @@ final class DiagnosticReportModel: ObservableObject {
     func discard(keep: Bool = false) {
         perform { [weak self] client, value in
             try await client.delete(value, keep: keep)
-            if !keep { DiagnosticRecorder.shared.forgetReproduction(value.id); await DiagnosticStore.shared.delete(value.id, scope: value.capture.namespace); self?.draft = nil; self?.presented = false; self?.message = "Draft deleted." }
+            if !keep { DiagnosticRecorder.shared.forgetReproduction(value.id); await self?.store.delete(value.id, scope: value.capture.namespace); self?.pending.removeAll { $0.id == value.id }; self?.draft = nil; self?.presented = false; self?.busy = false; self?.message = "Draft deleted." }
             else { value.handoff = nil; self?.message = "Phone handoff cancelled; staged draft retained." }
         }
     }
@@ -235,7 +265,26 @@ final class DiagnosticReportModel: ObservableObject {
     func stopReproduction() {
         if let capture = DiagnosticRecorder.shared.stopReproduction() { draft?.capture = capture; message = "Reproduction stopped and frozen locally." }
     }
-    func deleteLocal(_ value: DiagnosticStore.Draft) { DiagnosticRecorder.shared.forgetReproduction(value.id); Task { await DiagnosticStore.shared.delete(value.id, scope: scope); pending = await DiagnosticStore.shared.drafts(scope) } }
+    func deleteLocal(_ row: DiagnosticStore.Draft) {
+        guard row.capture.namespace == scope else { return }
+        let selected = draft?.id == row.id
+        let previousWork = selected ? operation : nil; let previousPoll = selected ? polling : nil
+        if selected {
+            workRevision &+= 1; previousWork?.cancel(); previousPoll?.cancel(); transport?.cancel()
+            operation = nil; polling = nil; transport = nil; draft = nil; busy = false
+            comparison = nil; handoffState = ""; cleanupShare()
+        }
+        pending.removeAll { $0.id == row.id }; DiagnosticRecorder.shared.forgetReproduction(row.id)
+        let namespace = scope; let auth = Session.shared.playbackAuthorization
+        Task {
+            await store.delete(row.id, scope: namespace)
+            await previousWork?.value; await previousPoll?.value
+            await store.delete(row.id, scope: namespace)
+            let rows = await store.drafts(namespace)
+            guard scope == namespace, Session.shared.playbackAuthorization.generation == auth.generation else { return }
+            pending = rows; if selected { message = "Local report deleted." }
+        }
+    }
 }
 
 struct DiagnosticReportButton: View {
@@ -259,7 +308,7 @@ struct DiagnosticReportView: View {
             }
             // Each selected incident starts at its coverage and privacy
             // summary, instead of retaining another incident's scroll offset.
-            .id(reports.draft?.id)
+            .id((reports.draft?.id ?? "") + "-" + String(reports.selectionRevision))
             #if os(tvOS)
             .pickerStyle(.menu)
             #endif
@@ -353,7 +402,7 @@ struct DiagnosticReportView: View {
                     Toggle("Keep recent diagnostic history", isOn: Binding(get: { reports.history }, set: { reports.setHistory($0) }))
                     Text("Local captures expire within 24 hours. Closing keeps this draft. Clearing local data does not delete an already submitted support report.").font(.caption)
                     ForEach(reports.pending) { value in
-                        Button("Resume \(value.capture.capturedAt) · \(value.state)") { reports.resume(value) }
+                        Button("Resume \(value.capture.capturedAt) · \(value.state)") { reports.resume(value) }.disabled(reports.busy).accessibilityIdentifier("diagnostics-resume-" + value.id)
                         Button("Delete local \(value.capture.capturedAt)", role: .destructive) { reports.deleteLocal(value) }
                     }
                 }

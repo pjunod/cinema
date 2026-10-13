@@ -42,7 +42,7 @@ internal fun DiagnosticReportHost() {
     Dialog(onDismissRequest={ DiagnosticRuntime.close() },properties=DialogProperties(usePlatformDefaultWidth=false)) {
         Surface(Modifier.fillMaxWidth(if (television) 0.82f else 0.96f).fillMaxHeight(0.92f),shape=MaterialTheme.shapes.large) {
             // A selected incident opens at its own coverage/privacy summary.
-            val reportScroll = remember(state.draft?.id) { ScrollState(0) }
+            val reportScroll = remember(state.draft?.id,state.selectionRevision) { ScrollState(0) }
             Column(Modifier.padding(if (television) 28.dp else 16.dp).verticalScroll(reportScroll),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
                     Text("Report a problem",style=MaterialTheme.typography.headlineSmall)
@@ -70,7 +70,7 @@ internal fun DiagnosticReportHost() {
                 }
                 Text("Local captures expire within 24 hours. Clearing local data does not remove an already submitted support report.",style=MaterialTheme.typography.bodySmall)
                 state.pending.forEach { pending ->
-                    TextButton(onClick={ DiagnosticRuntime.resume(pending) }) { Text("Resume ${pending.capture.capturedAt} · ${pending.state}") }
+                    TextButton(onClick={ DiagnosticRuntime.resume(pending) },enabled=!state.busy) { Text("Resume ${pending.capture.capturedAt} · ${pending.state}") }
                     TextButton(onClick={ DiagnosticRuntime.deleteLocal(pending) }) { Text("Delete local ${pending.capture.capturedAt}") }
                 }
             }

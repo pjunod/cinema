@@ -29,9 +29,9 @@ final class DiagnosticReportingTests: XCTestCase {
         app.terminate()
         app.launch()
         openReport(app)
-        let resume = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Resume ")).firstMatch
+        let savedID = originalIdentity.replacingOccurrences(of: "Report ", with: "")
+        let resume = app.buttons["diagnostics-resume-" + savedID]
         reveal(resume, in: app)
-        let savedResumeLabel = resume.label
         select(resume, in: app)
         let recovered = app.staticTexts["diagnostics-status"]
         reveal(recovered, in: app, towardStart: true)
@@ -40,7 +40,7 @@ final class DiagnosticReportingTests: XCTestCase {
         XCTAssertEqual(identity.label, originalIdentity, "Recovery must open the incident saved before relaunch")
         reveal(send, in: app)
         XCTAssertFalse(send.isEnabled, "Recovery must not imply upload consent")
-        let savedHistory = app.buttons[savedResumeLabel]
+        let savedHistory = app.buttons["diagnostics-resume-" + savedID]
         reveal(savedHistory, in: app)
         XCTAssertTrue(savedHistory.isEnabled, "Resuming an incident must preserve accessible local history")
     }

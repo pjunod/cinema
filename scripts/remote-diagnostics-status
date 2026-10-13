@@ -64,11 +64,15 @@ for label, field in [("Owner", "Implementation owner"),
     value = current_field(field)
     if value:
         banner += "<br><strong>" + label + ":</strong> " + inline(value)
+active = current_field("Active pull request")
+active_link = ""
+if re.fullmatch(r"#[1-9][0-9]*", active):
+    active_link = ' · <a href="' + forge_origin + '/noirr/plurx/pulls/' + active[1:] + '">Active qualification PR ' + active + '</a>'
 page = """<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Cinema remote diagnostics — build status</title><style>
 :root{color-scheme:dark}body{font:16px/1.5 system-ui;background:#12141a;color:#e9eaf1;max-width:1320px;margin:40px auto;padding:0 24px}h1{font-size:30px}h2{margin-top:40px}a{color:#91baff}p{max-width:1000px}table{border-collapse:collapse;width:100%;font-size:14px}td{padding:12px;border:1px solid #353a4b;vertical-align:top}tr:first-child{background:#242a39;font-weight:bold}code{background:#252a36;padding:2px 4px;border-radius:4px}.scroll{overflow:auto}.banner{padding:16px;background:#1d293b;border-left:4px solid #91baff}
 </style><body><p class="banner">__CURRENT_STATUS__</p>
-<p><a href="docs/features/REMOTE-DIAGNOSTICS-STATUS.md">Canonical ledger</a> · <a href="docs/features/REMOTE-DIAGNOSTICS-IMPLEMENTATION.md">Implementation contract</a> · <a href="http://forge.lan:3000/noirr/plurx/pulls/1037">Active batched PR #1037</a> · <a href="http://forge.lan:3000/noirr/plurx/pulls/1035">Closed B00 draft #1035</a></p>
-""".replace("http://forge.lan:3000", forge_origin).replace("__CURRENT_STATUS__", banner) + "\n".join(blocks) + "</body></html>\n"
+<p><a href="docs/features/REMOTE-DIAGNOSTICS-STATUS.md">Canonical ledger</a> · <a href="docs/features/REMOTE-DIAGNOSTICS-IMPLEMENTATION.md">Implementation contract</a> · <a href="http://forge.lan:3000/noirr/plurx/pulls/1037">Merged implementation PR #1037</a>__ACTIVE_PR__ · <a href="http://forge.lan:3000/noirr/plurx/pulls/1035">Closed B00 draft #1035</a></p>
+""".replace("http://forge.lan:3000", forge_origin).replace("__CURRENT_STATUS__", banner).replace("__ACTIVE_PR__", active_link) + "\n".join(blocks) + "</body></html>\n"
 (root / "diagnostics-status.html").write_text(page)
 print(root / "diagnostics-status.html")
