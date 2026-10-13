@@ -5808,69 +5808,6 @@ fn subtitle_playlist_keeps_takeover_and_sliding_discontinuity_epochs() {
     }
 }
 
-#[test]
-fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
-    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
-    let row = |seed: u8, target, height| crate::media_pool::WorkerQualityCandidate {
-        node_id: "worker".into(),
-        binding: None,
-        partial: false,
-        dispatch_supported: true,
-        candidate: QualityCandidate {
-            id: CandidateId::for_recipe_digest([seed; 32]),
-            recipe_digest: [seed; 32],
-            route: CandidateRoute::Encode,
-            planned_codec: None,
-            normalized_geometry: true,
-            width: 1280,
-            height,
-            target_height: target,
-            average_bps: None,
-            peak_bps: None,
-            grade: plurx_core::transcode::OutputGrade::Sdr,
-            decoder_compatible: true,
-            complete_cache: false,
-            sustainable: true,
-        },
-    };
-    let safe = row(1, 720, 720);
-    let larger_actual = row(2, 720, 1080);
-    let larger_recipe = row(3, 1080, 720);
-    let mut partial = row(4, 720, 720);
-    partial.partial = true;
-    let mut parser_only = row(5, 720, 720);
-    parser_only.dispatch_supported = false;
-    let mut incompatible = row(6, 720, 720);
-    incompatible.candidate.decoder_compatible = false;
-    let mut forged = row(7, 720, 720);
-    forged.candidate.recipe_digest = [8; 32];
-    let mut unsustainable = row(9, 720, 720);
-    unsustainable.candidate.sustainable = false;
-    let refusals = vec![
-        larger_actual,
-        larger_recipe,
-        partial,
-        parser_only,
-        incompatible,
-        forged,
-        unsustainable,
-    ];
-    assert!(manual_auto_bootstrap_candidate(&refusals, 720).is_none());
-    let mut catalog = refusals;
-    catalog.push(row(10, 480, 480));
-    catalog.push(safe.clone());
-    assert_eq!(
-        manual_auto_bootstrap_candidate(&catalog, 720)
-            .expect("safe bootstrap")
-            .id,
-        safe.candidate.id
-    );
-    assert!(
-        manual_auto_bootstrap_candidate(&catalog, 479).is_none(),
-        "bootstrap never borrows implicit upgrade authority"
-    );
-}
-
 #[tokio::test]
 async fn legacy_manual_to_auto_preparation_binds_a_real_non_upgrading_candidate() {
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
@@ -5888,15 +5825,49 @@ async fn legacy_manual_to_auto_preparation_binds_a_real_non_upgrading_candidate(
     predecessor.request.file_id = id;
     predecessor.request.automatic = false;
     predecessor.request.kind = crate::transcode::SessionKind::Transcode { height: 720 };
-    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"]}"#);
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"],"display":{"presentation_target":{"width_px":2436,"height_px":1125,"revision":1}}}"#);
     predecessor.decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).expect("decoder"));
     let selection = crate::playback_control::ClientSelection { quality: crate::playback_control::QualitySelection::Auto { height: None, candidate_id: None }, audio_track: None, subtitle: crate::playback_control::SubtitleSelection { mode: crate::playback_control::SubtitleMode::Off, track: None }, audio_offset_ms: 0, codec: crate::playback_control::CodecPolicy::Auto, dynamic_range: crate::playback_control::DynamicRangePolicy::Auto };
+    let ordinary = resolve_plan(PlanInputs { snapshot: None, state: &state, user_id: 1, file_id: id, source: Some(&source), network_prior: None, network_identity: None, incumbent_receipt: None }, None,
+        CreateSession { playback_id: "ordinary-auto".into(), quality_auto: Some(true), copy: Some(false), caps: Some(caps.clone()), ..bare_create() }).await.expect("unbounded ordinary Auto");
+    assert_eq!(ordinary.height, 1080, "landscape Auto otherwise chooses the source-sized route");
     let request = plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, 720).await.expect("authoritative bootstrap");
     assert!(request.automatic);
     let context = request.candidate_context.as_ref().expect("actual route binding");
+    assert!(request.quality_catalog.as_ref().expect("canonical catalog").candidates.iter().any(|entry| entry.candidate.target_height > 720), "the bootstrap ceiling never erases later upgrade candidates");
     let selected = request.quality_catalog.as_ref().expect("canonical catalog").candidates.iter().find(|entry| entry.candidate.id == context.candidate_id).expect("bound catalog identity");
     assert!(selected.candidate.identity_matches());
     assert!(selected.candidate.height <= 720 && selected.candidate.target_height <= 720, "a manual body is not upgrade proof");
     assert_eq!(context.recipe_digest, selected.candidate.recipe_digest);
     assert!(predecessor.candidate_id.is_none(), "the incumbent remains honestly unattributed");
+    predecessor.request.presentation = crate::transcode::Presentation::Live;
+    assert!(plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, 720).await.is_err(), "a VOD candidate identity cannot authorize rolling bytes");
+}
+
+#[test]
+fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    let row = |node: &str, seed: u8, height, partial| crate::media_pool::WorkerQualityCandidate {
+        node_id: node.into(), binding: None, partial, dispatch_supported: true,
+        candidate: QualityCandidate { id: CandidateId::for_recipe_digest([seed;32]), recipe_digest:[seed;32],
+            route: CandidateRoute::Encode, planned_codec:None, normalized_geometry:true, width:1280,height,target_height:height,
+            average_bps:None,peak_bps:None,grade:plurx_core::transcode::OutputGrade::Sdr,decoder_compatible:true,complete_cache:false,sustainable:true }
+    };
+    let local = row("local",1,720,true);
+    let mut forged = local.clone(); forged.candidate.recipe_digest = [11;32];
+    let mut incompatible = local.clone(); incompatible.candidate.decoder_compatible = false;
+    let mut larger_actual = local.clone(); larger_actual.candidate.height = 1080;
+    let mut larger_rung = local.clone(); larger_rung.candidate.target_height = 1080;
+    let mut unsustainable = local.clone(); unsustainable.candidate.sustainable = false;
+    let mut parser_only = local.clone(); parser_only.dispatch_supported = false;
+    assert!(preparation_catalog_workers(&[forged,incompatible,larger_actual,larger_rung,unsustainable,parser_only],"local",true,Some(720)).is_empty(), "bounded bootstrap rejects invalid identity/decoder/raster/rung/work admission");
+    let foreign = row("foreign",2,720,true);
+    let high_complete = row("foreign",3,1080,false);
+    let workers = [local.clone(),foreign,high_complete];
+    let bootstrap = preparation_catalog_workers(&workers,"local",true,Some(720));
+    assert_eq!(bootstrap.len(),1); assert_eq!(bootstrap[0].candidate.id,local.candidate.id);
+    assert!(preparation_catalog_workers(&workers,"local",false,Some(720)).is_empty(),"named routes never borrow partial admission");
+    assert_eq!(preparation_catalog_workers(&workers,"local",true,None).len(),1,"ordinary complete1080 excludes partial rows");
+    let mut complete = local.clone(); complete.partial=false;
+    assert_eq!(preparation_catalog_workers(&[local,complete],"local",true,Some(720)).len(),1,"a fitting complete route suppresses partial fallback");
 }

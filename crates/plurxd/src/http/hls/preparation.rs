@@ -967,9 +967,6 @@ pub(super) async fn plan_preparation_candidate(
     .map(|(request, _)| request)
 }
 
-/// Entering Auto needs a real output identity before its bodies can supply
-/// upgrade evidence. Bootstrap at or below the manual incumbent; the ordinary
-/// explicit-candidate planner still validates and constructs the actual route.
 async fn plan_preparation_with_candidate(
     state: &AppState,
     predecessor: &RemoteStartRequest,
@@ -1000,128 +997,20 @@ async fn plan_preparation_with_candidate(
         tracing::debug!(target: "plurxd::auto_prepare", phase = "eligibility",
             predecessor_automatic = predecessor.request.automatic,
             predecessor_candidate_present = predecessor.candidate_id.is_some(),
-            decoder_caps_present = predecessor.decoder_caps.is_some(),
-            planning_caps_present = planning_caps.is_some(),
-            unnamed_auto = matches!(selection.quality, QualitySelection::Auto { height: None, candidate_id: None }),
-            bootstrap, "Auto preparation eligibility");
+            decoder_caps_present = predecessor.decoder_caps.is_some(), planning_caps_present = planning_caps.is_some(),
+            unnamed_auto = matches!(selection.quality, QualitySelection::Auto { height: None, candidate_id: None }), bootstrap,
+            "Auto preparation eligibility");
     }
-    let planned = plan_preparation_raw(
-        state,
-        predecessor,
-        planning_caps,
-        planning_overrides,
-        selection,
-        source,
-        delivered_height,
-    )
-    .await?;
-    if !bootstrap {
-        return Ok(planned);
-    }
-    let (request, selected) = planned;
-    // The raw planner retains a request-local canonical catalog even when
-    // ordinary copy negotiation produces no candidate context. It does so
-    // using this predecessor's decoder snapshot, required above.
-    tracing::debug!(target: "plurxd::auto_prepare", phase = "catalog",
-        catalog_count = request.quality_catalog.as_ref().map_or(0, |catalog| catalog.candidates.len()),
-        safe_count = request.quality_catalog.as_ref().map_or(0, |catalog| catalog.candidates.iter().filter(|entry| manual_auto_bootstrap_candidate(std::slice::from_ref(*entry), delivered_height).is_some()).count()),
-        selected_present = selected.is_some(), context_present = request.candidate_context.is_some(),
-        "Auto preparation catalog");
-    let chosen = request
-        .quality_catalog
-        .as_ref()
-        .and_then(|catalog| manual_auto_bootstrap_candidate(&catalog.candidates, delivered_height))
-        .ok_or_else(|| {
-            ApiError::typed(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "prepared_output_unsupported",
-                "no authoritative Auto bootstrap fits the manual incumbent",
-            )
-        })?;
-    if request
-        .candidate_context
-        .as_ref()
-        .is_some_and(|context| context.candidate_id == chosen.id)
-        && selected.as_ref().is_some_and(|candidate| {
-            candidate.id == chosen.id
-                && i64::from(candidate.height) <= delivered_height
-                && i64::from(candidate.target_height) <= delivered_height
-        })
-    {
-        return Ok((request, selected));
-    }
-    let mut bound = selection.clone();
-    bound.quality = QualitySelection::Auto {
-        height: Some(i64::from(chosen.target_height)),
-        candidate_id: Some(chosen.id),
-    };
-    let replanned = plan_preparation_raw(
-        state,
-        predecessor,
-        planning_caps,
-        planning_overrides,
-        &bound,
-        source,
-        delivered_height,
-    )
-    .await?;
-    if !replanned
-        .0
-        .candidate_context
-        .as_ref()
-        .is_some_and(|context| context.candidate_id == chosen.id)
-        || !replanned.1.as_ref().is_some_and(|candidate| {
-            candidate.id == chosen.id
-                && i64::from(candidate.height) <= delivered_height
-                && i64::from(candidate.target_height) <= delivered_height
-        })
-    {
+    // Candidate recipe identity includes its delivery presentation. The
+    // ordinary catalog resolves VOD; never bind that context and then rename
+    // the bytes as the predecessor's rolling presentation.
+    if bootstrap && predecessor.request.presentation != crate::transcode::Presentation::Vod {
         return Err(ApiError::typed(
             StatusCode::UNPROCESSABLE_ENTITY,
             "prepared_output_unsupported",
-            "Auto bootstrap did not bind its admitted output",
+            "Auto bootstrap requires a VOD candidate presentation",
         ));
     }
-    Ok(replanned)
-}
-
-pub(super) fn manual_auto_bootstrap_candidate(
-    candidates: &[crate::media_pool::WorkerQualityCandidate],
-    delivered_height: i64,
-) -> Option<plurx_core::playback::candidate::QualityCandidate> {
-    candidates
-        .iter()
-        .filter(|entry| {
-            entry.dispatch_supported
-                && !entry.partial
-                && entry.candidate.playable()
-                && i64::from(entry.candidate.height) <= delivered_height
-                && i64::from(entry.candidate.target_height) <= delivered_height
-        })
-        .max_by_key(|entry| {
-            (
-                entry.candidate.target_height,
-                u64::from(entry.candidate.width) * u64::from(entry.candidate.height),
-            )
-        })
-        .map(|entry| entry.candidate.clone())
-}
-
-async fn plan_preparation_raw(
-    state: &AppState,
-    predecessor: &RemoteStartRequest,
-    planning_caps: Option<&plurx_core::playback::DeviceCaps>,
-    planning_overrides: Option<&CreateOverrides>,
-    selection: &crate::playback_control::ClientSelection,
-    source: &MediaFile,
-    delivered_height: i64,
-) -> Result<
-    (
-        crate::transcode::SessionRequest,
-        Option<plurx_core::playback::candidate::QualityCandidate>,
-    ),
-    ApiError,
-> {
     if let Some(caps) = planning_caps {
         super::super::stream::validate_device_caps(caps)?;
     }
@@ -1423,7 +1312,7 @@ async fn plan_preparation_raw(
         unix_ms(),
         false,
     );
-    let plan = resolve_plan(
+    let plan = resolve_plan_for_preparation(
         PlanInputs {
             snapshot: None,
             state,
@@ -1439,8 +1328,43 @@ async fn plan_preparation_raw(
         },
         Some(review),
         body,
+        bootstrap.then_some(delivered_height),
     )
     .await?;
+    if bootstrap
+        && !plan
+            .request
+            .candidate_context
+            .as_ref()
+            .zip(plan.selected_candidate.as_ref())
+            .is_some_and(|(context, candidate)| {
+                context.candidate_id == candidate.id
+                    && context.recipe_digest == candidate.recipe_digest
+                    && candidate.identity_matches()
+                    && i64::from(candidate.height) <= delivered_height
+                    && i64::from(candidate.target_height) <= delivered_height
+            })
+    {
+        return Err(unsupported(
+            "Auto bootstrap did not bind its admitted output",
+        ));
+    }
+    if bootstrap {
+        let workers = plan
+            .request
+            .quality_catalog
+            .as_ref()
+            .map(|catalog| catalog.candidates.as_slice())
+            .unwrap_or_default();
+        tracing::debug!(target: "plurxd::auto_prepare", phase = "catalog",
+            catalog_count = workers.len(), safe_count = preparation_catalog_workers(workers, &state.node_id, true, Some(delivered_height)).len(),
+            partial_count = workers.iter().filter(|entry| entry.partial).count(), local_count = workers.iter().filter(|entry| entry.node_id == state.node_id).count(),
+            playable_count = workers.iter().filter(|entry| entry.candidate.playable()).count(),
+            selected_present = plan.selected_candidate.is_some(), context_present = plan.request.candidate_context.is_some(),
+            selected_height = plan.selected_candidate.as_ref().map_or(0, |candidate| candidate.height),
+            selected_rung = plan.selected_candidate.as_ref().map_or(0, |candidate| candidate.target_height),
+            "Auto preparation catalog");
+    }
     let plan_height = plan.height;
     let selected_candidate = plan.selected_candidate;
     let mut resolved = plan.request;

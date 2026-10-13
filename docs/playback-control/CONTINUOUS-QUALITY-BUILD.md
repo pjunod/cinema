@@ -10806,3 +10806,43 @@ actual/recipe outputs, partial/parser-only entries, incompatible/forged and
 unsustainable candidates. Pinned Rust1.97.1 all-target compilation and Clippy
 with denied warnings pass; units are written/compiled but remain deferred.
 Exact isolated-server hardware proof is next; no Auto pass is claimed yet.
+
+
+**Bootstrap runtime refusal and ordinary Auto ceiling.** The exact
+`ed2295b02` server accepts the actual unnamed Auto request, reports staging,
+then offers no preparation. The private phone app verifies real landscape
+geometry2436×1125. Its bounded diagnostic accepts one manual action, no Auto
+commit; all72 owned processes retire. The first landscape attempt fails only
+the private console protocol because its local geometry event was forwarded;
+that bridge mistake is corrected, and its42-process cleanup remains recorded.
+
+Structured DEBUG tracing at `2ed23494f` confirms a legacy manual predecessor,
+no candidate, valid decoder/planning capabilities, and an eligible bootstrap.
+The catalog contains six rows and an ordinarily selected bound candidate,
+but the first repair admits zero rows and fails planning. All70 owned
+processes retire; no unit suite is executed. The isolated log collector
+persists only fixed phase/count/boolean facts before deleting the runtime.
+
+`partial` marks an unfinished discovery sweep, not an incomplete candidate
+recipe. Ordinary initial Auto already permits locally resolved partial rows
+when no complete compatible rows exist. Bootstrap now uses that same
+negotiation with an internal ceiling on both actual raster and requested
+rung. The ceiling cannot be supplied in a client body. Named and foreign
+partial admission remain restricted, source/decoder/recipe bindings remain
+authoritative, and the full canonical catalog remains available for later
+measured upgrades. The predecessor remains unattributed until a real
+successor is committed. The prior strict lookup and duplicate named replan
+are removed. Regressions retain their names and cover a landscape request
+that normally chooses1080 but must bootstrap at or below manual720, alongside
+local/foreign/complete/named catalog boundaries. Compile-only checks and
+exact hardware verification are recorded when completed; no pass is assumed.
+
+
+The narrowed bootstrap refuses rolling presentation because the negotiated
+VOD recipe digest cannot truthfully describe rolling bytes. This preserves
+the incumbent and reports unsupported output. Pinned Rust1.97.1 all-target
+Clippy with denied warnings passes on the exact revised source; formatting
+and whitespace checks pass. Units remain unexecuted. The catalog boundary
+regression also covers forged identities, incompatible decoders, larger
+actual/rung geometry, unsustainable and parser-only rows. Runtime proof of
+the corrected ordinary negotiation remains next.

@@ -1490,11 +1490,86 @@ pub(crate) async fn resolve_plan(
     resolve_plan_with_continuous(inputs, review, body, None).await
 }
 
+/// Preserve ordinary initial Auto's local incomplete-sweep fallback. A bounded
+/// bootstrap only narrows eligible outputs; it never authorizes a foreign or
+/// explicitly named partial route.
+pub(super) fn preparation_catalog_workers(
+    workers: &[crate::media_pool::WorkerQualityCandidate],
+    local_node: &str,
+    initial_auto: bool,
+    bootstrap_ceiling: Option<i64>,
+) -> Vec<crate::media_pool::WorkerQualityCandidate> {
+    let fits = |entry: &&crate::media_pool::WorkerQualityCandidate| {
+        bootstrap_ceiling.is_none_or(|ceiling| {
+            entry.candidate.playable()
+                && i64::from(entry.candidate.height) <= ceiling
+                && i64::from(entry.candidate.target_height) <= ceiling
+        })
+    };
+    let has_complete = workers.iter().filter(fits).any(|entry| {
+        entry.dispatch_supported && !entry.partial && entry.candidate.decoder_compatible
+    });
+    workers
+        .iter()
+        .filter(fits)
+        .filter(|entry| {
+            entry.dispatch_supported
+                && (!entry.partial
+                    || (!has_complete && initial_auto && entry.node_id == local_node))
+        })
+        .cloned()
+        .collect()
+}
+
+#[derive(Default)]
+struct PlanScope<'a> {
+    continuous: Option<&'a ContinuousFamilyStart>,
+    auto_bootstrap_ceiling: Option<i64>,
+}
+
+/// Internal preparation policy, never a create-body override. Ordinary creates
+/// retain their own selection and named-route admission rules.
+pub(super) async fn resolve_plan_for_preparation(
+    inputs: PlanInputs<'_>,
+    review: Option<PlanReview>,
+    body: CreateSession,
+    auto_bootstrap_ceiling: Option<i64>,
+) -> Result<ResolvedPlan, ApiError> {
+    resolve_plan_with_scope(
+        inputs,
+        review,
+        body,
+        PlanScope {
+            continuous: None,
+            auto_bootstrap_ceiling,
+        },
+    )
+    .await
+}
+
 async fn resolve_plan_with_continuous(
     inputs: PlanInputs<'_>,
     review: Option<PlanReview>,
     body: CreateSession,
     continuous: Option<&ContinuousFamilyStart>,
+) -> Result<ResolvedPlan, ApiError> {
+    resolve_plan_with_scope(
+        inputs,
+        review,
+        body,
+        PlanScope {
+            continuous,
+            auto_bootstrap_ceiling: None,
+        },
+    )
+    .await
+}
+
+async fn resolve_plan_with_scope(
+    inputs: PlanInputs<'_>,
+    review: Option<PlanReview>,
+    body: CreateSession,
+    scope: PlanScope<'_>,
 ) -> Result<ResolvedPlan, ApiError> {
     let PlanInputs {
         snapshot,
@@ -1517,7 +1592,7 @@ async fn resolve_plan_with_continuous(
         &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
         review,
         body,
-        continuous,
+        scope,
         network_identity,
         incumbent_receipt,
     )
@@ -1541,7 +1616,13 @@ pub(crate) async fn resolve_plan_for_principal(
     body: CreateSession,
 ) -> Result<ResolvedPlan, ApiError> {
     resolve_plan_for_principal_with_local_evidence(
-        inputs, principal, review, body, None, None, None,
+        inputs,
+        principal,
+        review,
+        body,
+        PlanScope::default(),
+        None,
+        None,
     )
     .await
 }
@@ -1551,10 +1632,23 @@ async fn resolve_plan_for_principal_with_local_evidence(
     principal: &plurx_core::playback_principal::PlaybackPrincipal,
     review: Option<PlanReview>,
     mut body: CreateSession,
-    continuous: Option<&ContinuousFamilyStart>,
+    scope: PlanScope<'_>,
     network_identity: Option<&crate::telemetry::NetworkIdentity>,
     incumbent_receipt: Option<&str>,
 ) -> Result<ResolvedPlan, ApiError> {
+    let PlanScope {
+        continuous,
+        auto_bootstrap_ceiling,
+    } = scope;
+    if auto_bootstrap_ceiling.is_some_and(|ceiling| ceiling <= 0)
+        || (auto_bootstrap_ceiling.is_some()
+            && (body.quality_auto != Some(true)
+                || body.height.is_some()
+                || body.intent.is_some()
+                || continuous.is_some()))
+    {
+        return Err(ApiError::BadRequest("invalid Auto bootstrap policy".into()));
+    }
     if !principal.valid_admission_shape()
         || matches!(
             principal,
@@ -1674,7 +1768,8 @@ async fn resolve_plan_for_principal_with_local_evidence(
             return Err(ApiError::BadRequest("candidate_route_disabled".to_owned()));
         }
         if enabled
-            && (requested.is_some()
+            && (auto_bootstrap_ceiling.is_some()
+                || requested.is_some()
                 || body.height == Some(1440)
                 || (body.quality_auto == Some(true) && body.copy != Some(true)))
         {
@@ -1734,22 +1829,14 @@ async fn resolve_plan_for_principal_with_local_evidence(
             }
             let authority_refused = catalogue_result.authority_refused;
             let worker_catalog = &catalogue_result.candidates;
-            let has_complete_rows = worker_catalog.iter().any(|entry| {
-                entry.dispatch_supported && !entry.partial && entry.candidate.decoder_compatible
-            });
             let initial_auto =
                 requested.is_none() && body.quality_auto == Some(true) && body.height != Some(1440);
-            let eligible_workers: Vec<_> = worker_catalog
-                .iter()
-                .filter(|entry| {
-                    entry.dispatch_supported
-                        && (!entry.partial
-                            || (!has_complete_rows
-                                && initial_auto
-                                && entry.node_id == state.node_id))
-                })
-                .cloned()
-                .collect();
+            let eligible_workers = preparation_catalog_workers(
+                worker_catalog,
+                &state.node_id,
+                initial_auto,
+                auto_bootstrap_ceiling,
+            );
             let mut catalog: Vec<_> = eligible_workers
                 .iter()
                 .map(|entry| entry.candidate.clone())
