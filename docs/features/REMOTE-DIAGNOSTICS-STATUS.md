@@ -1,6 +1,6 @@
 # Remote diagnostics status — ownership, implementation and release evidence
 
-**Status:** open — merged; startup recovery and native qualification active.
+**Status:** open — implementation merged; native qualification recorded; production acceptance open.
 **Updated:** 2026-10-13 · **Planning baseline:** `8d7bc723e`.
 
 The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) defines the first
@@ -25,7 +25,7 @@ duplicating its evidence.
 | Promotion/deployment | PR #1037 merged 2026-10-13, all eight checks passed on `6bc7235a0`; no production changes by this chat. Another rollout placed the landing on two nodes and exposed a router startup failure; recovery owner is recorded in §22. Isolated qualification continues. |
 | Current checks | Original #1037: eight checks passed and all 32 landing anchors verified. Follow-up: normal hooks, affected native compilation and focused regressions passed; all-target pinned check and composed startup passed on integrated `468a06545`. Follow-up fast gate/landing receipt is in #1066. |
 | Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
-| Next action | Finish #1066 through its required fast gate and green merge; composed startup passes with the separate repair; continue isolated durability/device evidence and prepare exact hosting/rollout for approval. |
+| Next action | Continue remaining physical/delivery and durability qualification; deploy the prepared private hosting pilot only after Paul’s installs settle and concrete approval. #1066 carries the current code gate/landing receipt. |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
 shared checkout and preserve unrelated `Claude outputs/` artifacts.
@@ -688,3 +688,11 @@ after the review corrections. All-target pinned compilation and the
 composed startup regression passed on integrated code candidate `468a06545`.
 The final branch and seven named regressions must still pass the required
 fast gate before its green merge; that exact receipt is recorded in #1066.
+
+The first #1066 fast lane on `c5e9fd30e` stopped at corrective-history
+coverage: the two native corrective commits lacked `tests/client-fixes.toml`
+witnesses. Both now have exact commit/source/test rows, and local
+`make history-check` passed. These catalog entries record the real passing
+regressions; they do not add or waive runtime evidence. The corrected head
+must pass the gate before merge. Paul took ownership of fleet installs;
+this chat keeps all fleet/network/service writes held.

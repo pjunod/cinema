@@ -6281,3 +6281,21 @@ source = "crates/plurxd/src/web/pages/diagnostics.js"
 source_anchor = "const authGeneration=AUTH_GENERATION,token=TOKEN"
 test = "tests/web/diagnostics-recorder.test.js"
 test_anchor = "account replacement during IndexedDB report recovery cannot adopt old evidence"
+
+# Native qualification follow-up: current source/test witnesses; actual
+# execution receipts are recorded in PR #1066 and the diagnostics ledger.
+[[fixes]]
+id = "diagnostics.android-report-clears-system-navigation"
+commits = ["faafb9c8d4a89aebd1608cfa9df0a41c480695f5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
+source_anchor = ".navigationBarsPadding()"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/DiagnosticReportNavigationTest.kt"
+test_anchor = "anonymousReportButtonClearsSystemNavigationAndOpensReport"
+
+[[fixes]]
+id = "diagnostics.native-history-frozen-consent-and-deletion"
+commits = ["a343ffb12409318c599976e57a9b48afdcde06ee"]
+source = "clients/apple/Sources/DiagnosticReportView.swift"
+source_anchor = "func resume(_ row: DiagnosticStore.Draft)"
+test = "clients/apple/Tests/DiagnosticCaptureTests.swift"
+test_anchor = "testStaleHistoryCannotReplaceFrozenConsentOrResurrectDeletedReport"
