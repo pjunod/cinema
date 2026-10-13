@@ -36,7 +36,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 23 | K-06 staged startup, clock observation and membership admission | plurx policy | — | Never; Plurx's clock-skew guard must own the actual Raft membership proposal boundary and a learner-only start that waits for authenticated clock observation. |
 | 24 | Source layout guard rollback certificate | plurx policy | — | Never; rolling Source activation requires a definitive pre-application rollback without changing deployed transaction payloads. |
 | 25 | Bounded snapshot transport observations and RPC budgets | plurx policy | — | Never; Plurx owns this process-local observation surface and its configured chunk, transfer and install budgets. |
-| 26 | `TCP_NODELAY` on accepted Raft and API streams | generic bug | pending M6 | Upstream release disables Nagle on the streams its Raft and API listeners accept. |
+| 26 | `TCP_NODELAY` on accepted Raft and API streams | generic bug | https://github.com/sebadob/hiqlite/pull/374 | Upstream release disables Nagle on the streams its Raft and API listeners accept. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -392,6 +392,18 @@ made-up URL and prevents the fork from being declared fully tracked.
   included, and `tests/operations/test_hiqlite_patch_ledger.py` pins that
   every listener is built from them. The proxy listener is not changed.
   Files: `src/start.rs`.
+
+**Row 26 upstream receipt, 2026-10-13:** [PR 374](https://github.com/sebadob/hiqlite/pull/374)
+was accepted on 2026-10-05 as
+[`80a3c2c60c920917d8e7f775557030cf515fe331`](https://github.com/sebadob/hiqlite/commit/80a3c2c60c920917d8e7f775557030cf515fe331).
+The released [v0.15.2 listener source](https://github.com/sebadob/hiqlite/blob/18e3e71be1b40465f82e1f26f17b7d1bfcc6995d/hiqlite/src/start.rs)
+uses `ConfiguredStreamAcceptor` before TLS and `tap_io(configure_tcp_stream)`
+on plain streams for both Raft and API listeners. Its
+[socket helper](https://github.com/sebadob/hiqlite/blob/18e3e71be1b40465f82e1f26f17b7d1bfcc6995d/hiqlite/src/network/tcp_socket.rs)
+calls `set_nodelay(true)` on the accepted stream. This verifies the generic
+mechanism and its accepted/released disposition, not a new upstream runtime
+test, full fork equivalence or an upgraded Plurx dependency. The local patch
+remains; the removal rule still requires a release Plurx has upgraded to.
 
 **Partial upstream receipt, 2026-10-03:** row 1's local-node selection by
 durable id is accepted in [upstream PR 368](https://github.com/sebadob/hiqlite/pull/368),
