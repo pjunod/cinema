@@ -1,0 +1,22 @@
+{
+  "repository": "https://github.com/ReactiveCircus/android-emulator-runner",
+  "commit": "4c44018e59b437e86cdfc41da381398f93ed8808",
+  "files": {
+    "LICENSE": "0b64a565cedfa1ac8d2cd7cf40965e6098f97f260fe51a4df9f697a063d0a8db",
+    "package-lock.json": "33b4c55e66861494c8b348c024cf79f2a387f9b0a5cbc93e2fa7baa50619ed44",
+    "package.json": "ae3568a7724c310cf41b7b632061b52b424c642cb0cb57639e84005fafe51608",
+    "action.yml": "a7c4de9a466ae7d70a599ffdc5a27b2bccadd7b2d602e24b44f8b490cb7bbdfe",
+    "lib/input-validator.js": "2762e8d007f36e4b0bf9055fe4326d7bd696a2bed788e50db6e761c6417f65d8",
+    "lib/emulator-manager.js": "a63db8fe9ffb4fb3651e9a2c97f8bac5ca4ce0078a7bbe61ef2e02019082c577",
+    "lib/channel-id-mapper.js": "b6316d7b037e214a510038e5d3987440a3cce06929cbd412cfbe096e344baafd",
+    "lib/main.js": "8121ea56f1c89d470071e89f80e15f932b2d8d5f711c28fc99476f34a442bc35",
+    "lib/script-parser.js": "6d162ab4384c2ef9c261b5cc4dfb8947f69cab75b98fedb0ee34275619c170ff",
+    "lib/sdk-installer.js": "0d393abad551932cb94a26860eab8af113e68788f9f95475b2fd5a520022f19e"
+  },
+  "modified": [
+    "lib/emulator-manager.js"
+  ],
+  "added": [
+    "lib/startup-readiness.js"
+  ]
+}
