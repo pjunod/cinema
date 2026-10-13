@@ -5,7 +5,8 @@ extension ReadAfterHTTP {
     /// logout/foreign/profile requests cannot borrow it: the transport checks
     /// the already-authorized request against the atomic current credentials.
     static let shared = ReadAfterHTTP(authorization: {
-        let pair = Session.shared.playbackAuthorization
-        return Authorization(origin: pair.origin, token: pair.token, generation: pair.generation)
+        Session.shared.readAfterAuthorization
+    }, recordPeers: { peers, captured in
+        Session.shared.recordReadAfterPeers(peers, authorization: captured)
     })
 }

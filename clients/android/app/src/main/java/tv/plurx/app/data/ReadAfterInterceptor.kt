@@ -6,21 +6,22 @@ import okhttp3.Response
 
 /** Capture is deliberately not a data class: its default toString must not
  * turn a bearer into a diagnostic log field. */
-internal class ReadAfterAuthorization(val origin: String, val token: String?, val generation: Long)
+internal class ReadAfterAuthorization(val origin: String, val token: String?, val generation: Long, val peers: List<String> = emptyList())
 
 /** Actual exchange adapter; preserves the existing auth/status/error policy. */
 internal class ReadAfterInterceptor(
     private val authorization: () -> ReadAfterAuthorization,
     private val receipts: ReadAfterReceipt = ReadAfterReceipt(),
+    private val recordPeers: (List<String>, ReadAfterAuthorization) -> Unit = { _, _ -> },
 ) : Interceptor {
     private class Scope(val url: HttpUrl, val generation: Long)
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val original = chain.request()
-        val captured = authorization()
-        val ticket = if (!captured.token.isNullOrEmpty() &&
+        val captured = original.tag(ReadAfterAuthorization::class.java)
+        val ticket = if (captured != null && !captured.token.isNullOrEmpty() &&
             original.header("Authorization") == "Bearer ${captured.token}" &&
-            isAccountAPI(original.url, captured.origin)
+            isAccountAPI(original.url, captured) && isAccountAPI(original.url, authorization())
         ) receipts.request(captured.generation) { authorization().generation } else null
         val request = original.newBuilder().removeHeader("X-Plurx-Read-After").apply {
             if (ticket?.index != null) header("X-Plurx-Read-After", ticket.index)
@@ -38,6 +39,16 @@ internal class ReadAfterInterceptor(
             if (response.priorResponse != null || response.request.url != original.url) {
                 receipts.transportFailed(mutating, ticket) { authorization().generation }
             } else {
+                if (request.method == "GET" && request.url.encodedPath == "/api/v1/cluster/ingress" && response.isSuccessful) {
+                    // Peek, never consume/replace Retrofit's body. Oversized or
+                    // malformed metadata admits no additional authority.
+                    val peers = runCatching {
+                        val body = response.peekBody(1_048_577).bytes()
+                        if (body.size > 1_048_576) null
+                        else Net.json.decodeFromString<ClusterIngress>(body.toString(Charsets.UTF_8)).node_urls
+                    }.getOrNull()
+                    if (peers != null && captured != null) recordPeers(peers, captured)
+                }
                 // Duplicate headers are malformed, not an arbitrarily chosen
                 // first value that might pretend to be an indexed write.
                 val values = response.headers.values("X-Plurx-Commit-Index")
@@ -54,9 +65,12 @@ internal class ReadAfterInterceptor(
         val request = chain.request()
         val scope = request.tag(Scope::class.java)
         val safe = scope != null && request.url == scope.url &&
-            authorization().generation == scope.generation
+            authorization().let { it.generation == scope.generation && isAccountAPI(request.url, it) }
         chain.proceed(if (safe) request else request.newBuilder().removeHeader("X-Plurx-Read-After").build())
     }
+
+    private fun isAccountAPI(url: HttpUrl, captured: ReadAfterAuthorization): Boolean =
+        (listOf(captured.origin) + captured.peers).any { isAccountAPI(url, it) }
 
     private fun isAccountAPI(url: HttpUrl, origin: String): Boolean {
         val primary = Session.canonicalOrigin(origin) ?: return false
@@ -71,7 +85,6 @@ internal class ReadAfterInterceptor(
 
 internal object ReadAfterNetworking {
     val interceptor = ReadAfterInterceptor({
-        val captured = Session.playbackAuthorization()
-        ReadAfterAuthorization(captured.origin, captured.token, captured.generation)
-    })
+        Session.readAfterAuthorization()
+    }, recordPeers = Session::recordReadAfterPeers)
 }

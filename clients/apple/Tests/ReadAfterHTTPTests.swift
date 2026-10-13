@@ -3,7 +3,7 @@ import XCTest
 @testable import plurx
 
 private final class ReceiptHTTPFixture: @unchecked Sendable {
-    enum Reply { case ok(Int, String?); case failure(URLError); case redirect(String) }
+    enum Reply { case ok(Int, String?); case ingress([String]); case failure(URLError); case redirect(String) }
     private let lock = NSLock()
     private var replies: [(URLRequest) -> Reply] = []
     private var requests: [URLRequest] = []
@@ -27,6 +27,11 @@ private final class ReceiptHTTPProtocol: URLProtocol {
     override func startLoading() {
         guard let fixture = Self.fixture else { client?.urlProtocol(self, didFailWithError: URLError(.cancelled)); return }
         switch fixture.answer(request) {
+        case .ingress(let peers):
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: ["node_urls": peers]))
+            client?.urlProtocolDidFinishLoading(self)
         case .ok(let status, let index):
             var headers = ["Content-Type": "application/json"]
             if let index { headers["X-Plurx-Commit-Index"] = index }
@@ -61,6 +66,7 @@ final class ReadAfterHTTPTests: XCTestCase {
         var request = URLRequest(url: URL(string: path.hasPrefix("https:") ? path : "https://a.test/api/v1/" + path)!)
         request.httpMethod = method
         request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        ReadAfterHTTP.bind(fixture.authorization(), to: &request)
         return request
     }
     private func establish() async throws {
@@ -148,5 +154,67 @@ final class ReadAfterHTTPTests: XCTestCase {
         fixture.enqueue(.ok(200, nil)); _ = try await ReadAfterHTTP.shared.data(for: fresh, using: session)
         XCTAssertNil(fixture.captured.last?.value(forHTTPHeaderField: "X-Plurx-Read-After"))
         XCTAssertEqual(fixture.captured.last?.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-new")
+    }
+
+    func testAuthorizationTimeGenerationFencesReusedBearerAndOpaqueLogout() async throws {
+        let saved = Session.shared.credentials
+        defer { Session.shared.setCredentials(origin: saved.origin, token: saved.token) }
+        Session.shared.setCredentials(origin: "https://a.test", token: "fixture-a")
+        var old = request("libraries"); Session.shared.authorize(&old)
+        Session.shared.setCredentials(origin: "https://a.test", token: nil)
+        Session.shared.setCredentials(origin: "https://a.test", token: "fixture-a")
+        var write = request("items/7/progress", method: "POST"); Session.shared.authorize(&write)
+        fixture.enqueue(.ok(204, "33")); _ = try await ReadAfterHTTP.shared.data(for: write, using: session)
+        fixture.enqueue(.ok(200, "99")); _ = try await ReadAfterHTTP.shared.data(for: old, using: session)
+        XCTAssertNil(fixture.captured.last?.value(forHTTPHeaderField: "X-Plurx-Read-After"), "same bearer text must not relabel an old generation")
+        // Explicit captured logout bypasses Session.authorize on purpose.
+        fixture.enqueue(.ok(204, "77"))
+        var logout = URLRequest(url: URL(string: "https://a.test/api/v1/auth/logout")!)
+        logout.httpMethod = "POST"; logout.setValue("Bearer fixture-a", forHTTPHeaderField: "Authorization")
+        _ = try await ReadAfterHTTP.shared.data(for: logout, using: session)
+        XCTAssertNil(fixture.captured.last?.value(forHTTPHeaderField: "X-Plurx-Read-After"))
+        var fresh = request("libraries"); Session.shared.authorize(&fresh)
+        fixture.enqueue(.ok(200, nil)); _ = try await ReadAfterHTTP.shared.data(for: fresh, using: session)
+        XCTAssertEqual(fixture.captured.last?.value(forHTTPHeaderField: "X-Plurx-Read-After"), "33", "old/unbound replies must not become the current floor")
+    }
+
+    func testAuthenticatedIngressSharesReceiptAcrossVotersAndUnknownPeerWriteClearsIt() async throws {
+        let saved = Session.shared.credentials
+        defer { Session.shared.setCredentials(origin: saved.origin, token: saved.token) }
+        Session.shared.setCredentials(origin: "https://a.test", token: "fixture-cohort")
+        func send(_ path: String, method: String = "GET") async throws -> Data {
+            var req = request(path, method: method); Session.shared.authorize(&req)
+            return try await ReadAfterHTTP.shared.data(for: req, using: session).0
+        }
+        fixture.enqueue(.ingress(["https://b.test:443", "http://downgrade.test", "https://bad.test/path"]))
+        let body = try await send("cluster/ingress")
+        XCTAssertTrue(String(decoding: body, as: UTF8.self).contains("node_urls"), "body remains available to the API decoder")
+        XCTAssertEqual(Session.shared.readAfterAuthorization.peers, ["https://b.test"])
+        fixture.enqueue(.ok(204, "41")); _ = try await send("https://b.test/api/v1/items/7/progress", method: "POST")
+        fixture.enqueue(.ok(200, nil)); _ = try await send("libraries")
+        XCTAssertEqual(fixture.captured.last?.value(forHTTPHeaderField: "X-Plurx-Read-After"), "41")
+        fixture.enqueue(.ok(204, "42")); _ = try await send("items/7/progress", method: "POST")
+        fixture.enqueue(.ok(200, nil)); _ = try await send("https://b.test/api/v1/libraries")
+        XCTAssertEqual(fixture.captured.last?.value(forHTTPHeaderField: "X-Plurx-Read-After"), "42")
+        fixture.enqueue(.ok(204, nil)); _ = try await send("https://b.test/api/v1/items/7/progress", method: "POST")
+        fixture.enqueue(.ok(200, nil)); _ = try await send("libraries")
+        XCTAssertNil(fixture.captured.last?.value(forHTTPHeaderField: "X-Plurx-Read-After"))
+    }
+
+    func testLateIngressCannotAdmitPeersIntoTheNextAuthorizationGeneration() async throws {
+        let saved = Session.shared.credentials
+        defer { Session.shared.setCredentials(origin: saved.origin, token: saved.token) }
+        Session.shared.setCredentials(origin: "https://a.test", token: "fixture-cohort")
+        var req = request("cluster/ingress"); Session.shared.authorize(&req)
+        fixture.enqueue { _ in
+            Session.shared.setCredentials(origin: "https://a.test", token: nil)
+            Session.shared.setCredentials(origin: "https://a.test", token: "fixture-cohort")
+            return .ingress(["https://b.test"])
+        }
+        _ = try await ReadAfterHTTP.shared.data(for: req, using: session)
+        XCTAssertEqual(Session.shared.readAfterAuthorization.peers, [])
+        // The older media registry is deliberately not receipt authority.
+        Session.shared.configureNodeOrigins(["https://b.test"], primary: "https://a.test")
+        XCTAssertEqual(Session.shared.readAfterAuthorization.peers, [])
     }
 }

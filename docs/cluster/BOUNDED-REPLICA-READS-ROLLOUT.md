@@ -572,11 +572,21 @@ acceptance.
    receipt to a public server-identity probe or another account/server.
    Focused state-machine cases cover expiry, maximum u64, out-of-order replies,
    absent/malformed write receipts, failed mutating transports and stale auth.
-   Request-level fixtures must additionally exercise actual API/no-content
-   and control transports, peer trust, logout and capability/profile isolation.
-   Those fixtures, current native compilation, sole review and promotion are
-   still owed; neither helper cases nor a source merge substitutes for §5.1's
-   cross-node read-cost and rolling-upgrade evidence.
+   The native implementation candidate now binds authorization generation at
+   request construction, echoes only to the primary and current-generation
+   authenticated ingress peers, and keeps the receipt separate from the media
+   failover list. The ingress metadata inspection is capped at 1 MiB; malformed
+   or oversized metadata admits no additional origin, and HTTPS never admits
+   an HTTP sibling. Public identity, foreign, capability and captured-profile
+   transports cannot borrow a receipt. Apple control and bounded shared-write
+   delegates use the same unknown-write retirement without changing body
+   ceilings, redirect refusal or cancellation.
+   Focused proofs cover the actual no-content API paths, cross-voter receipt
+   sharing, stale ingress and reused-bearer generations, control writes and
+   shared transport refusal/cancellation. These are synthetic native HTTP and
+   unit proofs, not device/fleet measurements. Review, promotion and landing
+   are still owed; neither the fixtures nor a source merge substitutes for
+   §5.1's cross-node read-cost and rolling-upgrade evidence.
 2. Whether to lengthen the implemented 60 s per-user write index and header
    window; a longer window only costs Authority reads.
 3. Should `route_group` include `reader` (ebooks) as its own value? Nine

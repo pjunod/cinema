@@ -30,13 +30,16 @@ object Net {
             if (BuildConfig.DEBUG) eventListenerFactory(NetCallDiagnostics.factory())
         }
         .addInterceptor { chain ->
-            val token = Session.token
+            val captured = Session.readAfterAuthorization()
+            val token = captured.token
             val req = chain.request()
             // `/server` is public and identifies rediscovered candidates.
             // Never leak a saved bearer token while probing the LAN.
             val publicIdentityRequest = req.url.encodedPath == "/api/v1/server"
             val out = if (token != null && !publicIdentityRequest) {
-                req.newBuilder().header("Authorization", "Bearer $token").build()
+                req.newBuilder().header("Authorization", "Bearer $token")
+                    .tag(ReadAfterAuthorization::class.java,
+                        captured).build()
             } else {
                 req
             }

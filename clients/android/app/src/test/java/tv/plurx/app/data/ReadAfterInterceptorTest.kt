@@ -70,6 +70,7 @@ class ReadAfterInterceptorTest {
     private fun request(path: String, method: String = "GET", bearer: String = token): Request {
         val builder = Request.Builder().url(if (path.startsWith("http:")) path else primary.origin + "/api/v1/" + path)
             .header("Authorization", "Bearer $bearer")
+            .tag(ReadAfterAuthorization::class.java, ReadAfterAuthorization(primary.origin, token, generation))
         return builder.method(method, if (method == "GET" || method == "HEAD") null else "{}".toRequestBody("application/json".toMediaType())).build()
     }
     private fun exchange(request: Request) { client.newCall(request).execute().use { it.body?.string() } }
@@ -149,6 +150,77 @@ class ReadAfterInterceptorTest {
             primary.enqueue(Reply(204)); api.progress(7, ProgressReq(position_ms = 20))
             primary.enqueue(Reply(body = "[]")); assertEquals(emptyList<Library>(), api.libraries())
             assertNull(primary.last().echo)
+        } finally {
+            Session.origin = saved.origin; Session.token = saved.token
+            owned.connectionPool.evictAll(); owned.dispatcher.executorService.shutdown()
+        }
+    }
+
+    @Test fun authorizationTimeGenerationFencesReusedBearerAndUnboundRequests() {
+        val guarded = ReadAfterInterceptor({ ReadAfterAuthorization(primary.origin, token, generation) })
+        val owned = OkHttpClient.Builder().connectTimeout(2, TimeUnit.SECONDS).readTimeout(2, TimeUnit.SECONDS)
+            .addInterceptor(guarded).addNetworkInterceptor(guarded.redirectGuard).build()
+        try {
+            val old = request("libraries").newBuilder().tag(ReadAfterAuthorization::class.java,
+                ReadAfterAuthorization(primary.origin, token, generation)).build()
+            generation = 3 // sign out/in with the exact same bearer text
+            fun bound(path: String, method: String = "GET") = request(path, method).newBuilder()
+                .tag(ReadAfterAuthorization::class.java, ReadAfterAuthorization(primary.origin, token, generation)).build()
+            primary.enqueue(Reply(204, listOf("33")))
+            owned.newCall(bound("items/7/progress", "POST")).execute().use { assertEquals(204, it.code) }
+            primary.enqueue(Reply(indexes = listOf("99"))); owned.newCall(old).execute().use { it.body?.string() }
+            assertNull(primary.last().echo)
+            primary.enqueue(Reply(204, listOf("77")))
+            owned.newCall(request("auth/logout", "POST").newBuilder().tag(ReadAfterAuthorization::class.java, null).build())
+                .execute().use { assertEquals(204, it.code) }
+            assertNull(primary.last().echo)
+            primary.enqueue(Reply()); owned.newCall(bound("libraries")).execute().use { it.body?.string() }
+            assertEquals("33", primary.last().echo)
+        } finally {
+            owned.connectionPool.evictAll(); owned.dispatcher.executorService.shutdown()
+        }
+    }
+
+    @Test fun authenticatedIngressSharesReceiptAcrossVotersAndUnknownPeerWriteClearsIt() = runBlocking {
+        val saved = Session.playbackAuthorization()
+        Session.origin = primary.origin; Session.token = "fixture-cohort"
+        val owned = Net.client.newBuilder().dispatcher(Dispatcher()).connectionPool(ConnectionPool())
+            .eventListener(EventListener.NONE).build()
+        try {
+            val a = Net.api(primary.origin, owned); val b = Net.api(foreign.origin, owned)
+            primary.enqueue(Reply(body = "{\"node_urls\":[\"${foreign.origin}\"]}"))
+            assertEquals(listOf(foreign.origin), a.clusterIngress().node_urls)
+            assertEquals(listOf(foreign.origin), Session.readAfterAuthorization().peers)
+            foreign.enqueue(Reply(204, listOf("41"))); b.progress(7, ProgressReq(position_ms = 10))
+            primary.enqueue(Reply(body = "[]")); a.libraries(); assertEquals("41", primary.last().echo)
+            primary.enqueue(Reply(204, listOf("42"))); a.progress(7, ProgressReq(position_ms = 20))
+            foreign.enqueue(Reply(body = "[]")); b.libraries(); assertEquals("42", foreign.last().echo)
+            foreign.enqueue(Reply(204)); b.progress(7, ProgressReq(position_ms = 30))
+            primary.enqueue(Reply(body = "[]")); a.libraries(); assertNull(primary.last().echo)
+        } finally {
+            Session.origin = saved.origin; Session.token = saved.token
+            owned.connectionPool.evictAll(); owned.dispatcher.executorService.shutdown()
+        }
+    }
+
+    @Test fun lateIngressCannotAdmitPeersIntoTheNextAuthorizationGeneration() = runBlocking {
+        val saved = Session.playbackAuthorization()
+        Session.origin = primary.origin; Session.token = "fixture-cohort"
+        val owned = Net.client.newBuilder().dispatcher(Dispatcher()).connectionPool(ConnectionPool())
+            .eventListener(EventListener.NONE).build()
+        try {
+            primary.enqueue {
+                Session.token = null; Session.token = "fixture-cohort"
+                Reply(body = "{\"node_urls\":[\"${foreign.origin}\"]}")
+            }
+            Net.api(primary.origin, owned).clusterIngress()
+            assertEquals(emptyList<String>(), Session.readAfterAuthorization().peers)
+            Session.configureNodeOrigins(listOf(foreign.origin), primary.origin)
+            assertEquals(emptyList<String>(), Session.readAfterAuthorization().peers)
+            Session.origin = "https://a.test"
+            Session.recordReadAfterPeers(listOf("https://b.test:443", "http://downgrade.test", "https://bad.test/path"),
+                Session.readAfterAuthorization())
+            assertEquals(listOf("https://b.test"), Session.readAfterAuthorization().peers)
         } finally {
             Session.origin = saved.origin; Session.token = saved.token
             owned.connectionPool.evictAll(); owned.dispatcher.executorService.shutdown()
