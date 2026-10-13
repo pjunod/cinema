@@ -220,6 +220,7 @@ function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry
       finishPlaybackSeekTelemetry(p,p.controlSeek,"seek_abandoned");
     p.controlSeek.seekTelemetry?.cleanup?.();
     p.controlSeek.localVodSeekCleanup?.();
+    p.controlSeek.pausedStartupCleanup?.();
     playbackSurfaceStep({intent_superseded:p.controlSeek.sequence});
   }
   p.controlSeekSequence=sequence;
@@ -265,6 +266,9 @@ function markPlaybackControlSeekExecuted(p,targetSec,v){
   pending.playedSampleMs=0;
   if(!v) try{v=document.getElementById("video");}catch(e){}
   pending.element=v;
+  if(p.wantsPlayback===false&&p.hlsStartup
+    &&['active','paused'].includes(p.hlsStartup.state))
+    resumePausedStartupSeek(v,p,pending);
   watchPlaybackSeekTelemetry(p,pending,v);
   samplePlaybackPresentationClock(v,p);
   // Cancel and renew before currentTime assignment; a paused seek may emit
@@ -487,6 +491,7 @@ function settlePlaybackControlSeek(v,p,presentedMediaTime,presentedFrameSequence
   pending.localVodSeekCleanup?.();
   finishPlaybackSeekTelemetry(p,pending,provenance==="positioned"?"seek_positioned":"seek_resumed");
   p.controlSeek=null;
+  pending.pausedStartupCleanup?.(provenance!=="positioned");
   notifyPlaybackControl();
   return true;
 }
