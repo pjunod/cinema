@@ -14,7 +14,7 @@ use plurx_core::{
     store::{
         media_session_principal_rebuild_schema, sharing_catalogue_details::SourceDetailsRead,
         sharing_source_sessions::candidate_statements, SharingSourceDetailsStore,
-        SharingSourceSessionStore, SharingStore,
+        SharingSourceIngressCustodyStore, SharingSourceSessionStore, SharingStore,
     },
 };
 use uuid::Uuid;
@@ -23,6 +23,34 @@ async fn exec(client: &Client, sql: &str) {
         .execute(sql.to_owned(), hiqlite::params!())
         .await
         .expect("replicated fixture mutation");
+}
+// This installed metadata fixture admits no driver or producer. Seal only its
+// actual empty ledger through the public CAS; this is SQL accounting evidence.
+async fn seal_owned_empty_ingress(store: &HiqliteAuthStore, assignment: &SourceDispatchAssignment) {
+    let snapshot = store
+        .source_ingress_custody(assignment)
+        .await
+        .expect("installed custody read")
+        .expect("retained installed ledger");
+    assert!(!snapshot.state.is_sealed());
+    assert_eq!(
+        snapshot.state.open().count(),
+        0,
+        "no transport was admitted"
+    );
+    assert_eq!(
+        store
+            .seal_source_ingress_custody(assignment)
+            .await
+            .expect("production custody CAS"),
+        plurx_core::store::sharing_source_ingress_custody::SourceCustodyWrite::Applied
+    );
+    let sealed = store
+        .source_ingress_custody(assignment)
+        .await
+        .expect("sealed read")
+        .expect("same ledger");
+    assert!(sealed.state.settled());
 }
 async fn observation(
     client: &Client,
@@ -1127,6 +1155,14 @@ async fn installed_source_lifecycle(cluster: &source_contract::SourceContractClu
         "UPDATE settings SET value='false' WHERE key='sharing_enabled'",
     )
     .await;
+    assert_eq!(
+        store
+            .settle_source_assigned_without_activation(&no_spawn)
+            .await
+            .expect("unsealed custody refuses"),
+        SourceReleaseOutcome::Refused
+    );
+    seal_owned_empty_ingress(&store, &no_spawn).await;
     exec(&client,"CREATE TRIGGER source_no_spawn_ignore BEFORE UPDATE OF state ON media_session_requests WHEN NEW.state='failed' BEGIN SELECT RAISE(IGNORE); END").await;
     assert_eq!(
         store
@@ -1152,6 +1188,7 @@ async fn installed_source_lifecycle(cluster: &source_contract::SourceContractClu
     );
     let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("only settled obligation released");
     assert_eq!(rows[0].value, "7");
+    seal_owned_empty_ingress(&store, &assignment).await;
     assert_eq!(
         store
             .settle_source_terminal_worker(&assignment, &renewed)
