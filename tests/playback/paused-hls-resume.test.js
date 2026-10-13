@@ -331,3 +331,35 @@ test("Play during a coalesced seek replaces positioned loader custody only when 
     assert.notEqual(h.startup.pausedSeek.positioned,true);
   }finally{h.close();}
 });
+
+
+test("a local subtitle intent preserves only the current positioned startup lease for Play",async()=>{
+  const h=harness();
+  try{
+    h.seek();await flush();h.startup.manifestState="parsed";
+    const deadline=h.startup.deadlineMs;assert.equal(positionPausedTarget(h),true);
+    h.ctx.supersedePlaybackControlIntent(h.player,{preserveHlsStartup:true});
+    assert.equal(h.startup.pausedSeek.intentGeneration,h.player.controlIntentGeneration);
+    assert.equal(h.resume(),true);assert.equal(h.loads.at(-1),"start");
+    assert.equal(h.startup.state,"active");assert.equal(h.startup.deadlineMs,deadline);
+  }finally{h.close();}
+});
+
+test("a local subtitle intent cannot carry a stale positioned attachment or newer seek",async()=>{
+  for(const stale of ["generation","attachment","element","seek"]){
+    const h=harness();
+    try{
+      h.seek();await flush();h.startup.manifestState="parsed";
+      assert.equal(positionPausedTarget(h),true);
+      const lease=h.startup.pausedSeek;
+      if(stale==="generation")lease.intentGeneration--;
+      else if(stale==="attachment")lease.attachment={};
+      else if(stale==="element")lease.pending.element={};
+      else h.player.controlSeek={sequence:2,targetMs:40000,executed:false};
+      const previous=lease.intentGeneration;
+      h.ctx.supersedePlaybackControlIntent(h.player,{preserveHlsStartup:true});
+      assert.equal(lease.intentGeneration,previous);
+      const count=h.loads.length;assert.equal(h.resume(),false);assert.equal(h.loads.length,count);
+    }finally{h.close();}
+  }
+});
