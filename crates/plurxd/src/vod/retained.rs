@@ -79,13 +79,13 @@ impl VodServe {
         {
             return None;
         }
-        let state = self
+        let mut state = self
             .shared
             .retained_artifacts
             .state
             .lock()
             .expect("retained registry lock");
-        let artifact = state.entries.values().find_map(|entry| {
+        let entry = state.entries.values_mut().find_map(|entry| {
             let artifact = &entry.artifact;
             let binding = artifact.candidate.as_ref()?;
             (binding.candidate_id == candidate.id
@@ -109,11 +109,21 @@ impl VodServe {
                             && requested.valid_snapshot()
                             && actual.byte_identity() == requested.byte_identity()
                     }))
-            .then(|| Arc::clone(artifact))
+            .then_some(entry)
         })?;
-        let binding = artifact.candidate.clone()?;
-        let proof = MeasuredCandidateCostProof { artifact, binding };
-        proof.artifact_facts().valid().then_some(proof)
+        let binding = entry.artifact.candidate.clone()?;
+        let proof = MeasuredCandidateCostProof {
+            artifact: Arc::clone(&entry.artifact),
+            binding,
+        };
+        if !proof.artifact_facts().valid() {
+            return None;
+        }
+        // A validated cost read is actual use of this exact retained output,
+        // just like acquisition. Invalid claims must not renew its idle grace.
+        entry.used = Instant::now();
+        entry.idle_since = None;
+        Some(proof)
     }
 }
 
@@ -3158,6 +3168,214 @@ mod tests {
             .reacquire_expected(&facts, &refusing.shared, &rendition, Duration::from_secs(5))
             .await
             .is_none());
+    }
+
+    async fn measured_cost_activity_fixture() -> (
+        tempfile::TempDir,
+        Arc<VodServe>,
+        Arc<Rendition>,
+        crate::transcode::RetainedOutputFacts,
+        SessionRequest,
+        plurx_core::playback::candidate::QualityCandidate,
+    ) {
+        let (temp, serve, rendition, facts, mut request) =
+            durable_fixture_with_candidate(true).await;
+        // Actual AAC producer delivery and Sink-completed hard-linked bytes;
+        // advertised candidate rates cannot create the returned proof.
+        request.audio_delivery = rendition.recipe.audio_delivery.clone();
+        let candidate = request
+            .candidate_context
+            .as_ref()
+            .expect("bound candidate")
+            .selected_candidate
+            .clone();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let assembling = serve
+                    .shared
+                    .retained_artifacts
+                    .state
+                    .lock()
+                    .expect("registry")
+                    .assembling;
+                if !assembling {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("assembly reservation settled");
+        let directory = temp.path().join(".retained").join(&facts.artifact_id);
+        assert_eq!(
+            tokio::fs::read(directory.join(INIT_NAME))
+                .await
+                .expect("retained init bytes"),
+            b"actual retained fixture init"
+        );
+        assert!(rendition.plan.len() > 1, "nonzero fragment fixture");
+        let last = rendition.plan.len() - 1;
+        assert_eq!(
+            tokio::fs::read(directory.join(segment_name(last as u64)))
+                .await
+                .expect("actual hard-linked complete body"),
+            vec![last as u8; 1000 + last]
+        );
+        (temp, serve, rendition, facts, request, candidate)
+    }
+
+    #[tokio::test]
+    async fn measured_candidate_cost_refreshes_use_then_retires_after_reads_stop() {
+        let (temp, serve, rendition, facts, request, candidate) =
+            measured_cost_activity_fixture().await;
+        let registry = &serve.shared.retained_artifacts;
+        let source = rendition.source.as_ref().expect("actual source fence");
+        let directory = temp.path().join(".retained").join(&facts.artifact_id);
+        assert!(directory.join(INIT_NAME).exists(), "real retained init");
+        let charged = registry.test_capacity_snapshot();
+        assert!(charged.0 > 0 && charged.3 == 1);
+        registry.test_expire_artifact(&facts);
+        let proof = serve
+            .measured_candidate_cost(&candidate, &request, source)
+            .expect("valid measured read renews the exact output");
+        assert_eq!(proof.artifact_facts(), facts);
+        assert!(proof.average_bps() > 0 && proof.rfc_peak_bps() > 0);
+        drop(proof);
+        registry.collect(temp.path()).await;
+        assert!(
+            directory.exists(),
+            "renewed output survives collection without a held proof"
+        );
+        assert_eq!(
+            registry.test_capacity_snapshot(),
+            charged,
+            "cost use adds no pin, charge, reservation or artifact"
+        );
+        let next = serve
+            .measured_candidate_cost(&candidate, &request, source)
+            .expect("real measured bytes remain available");
+        assert_eq!(next.artifact_facts(), facts);
+        drop(next);
+        registry.test_expire_artifact(&facts);
+        for _ in 0..4 {
+            registry.collect(temp.path()).await;
+        }
+        assert!(
+            !directory.exists(),
+            "same idle TTL reclaims output after reads stop"
+        );
+        assert_eq!(registry.test_capacity_snapshot(), (0, 0, 0, 0));
+        assert!(serve
+            .measured_candidate_cost(&candidate, &request, source)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn rejected_measured_candidate_reads_do_not_extend_retention() {
+        use plurx_core::playback::candidate::CandidateRoute;
+        let (temp, serve, rendition, facts, request, candidate) =
+            measured_cost_activity_fixture().await;
+        let registry = &serve.shared.retained_artifacts;
+        let source = rendition.source.as_ref().expect("actual source fence");
+        let directory = temp.path().join(".retained").join(&facts.artifact_id);
+        registry.test_expire_artifact(&facts);
+        let charged = registry.test_capacity_snapshot();
+        let before = {
+            let state = registry.state.lock().expect("registry");
+            let entry = state.entries.values().next().expect("real artifact");
+            (entry.used, entry.idle_since)
+        };
+        let mut wrong = request.clone();
+        wrong
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .owner_node_id = Some("foreign-node".into());
+        assert!(serve
+            .measured_candidate_cost(&candidate, &wrong, source)
+            .is_none());
+        wrong = request.clone();
+        wrong.audio_index = Some(7);
+        assert!(serve
+            .measured_candidate_cost(&candidate, &wrong, source)
+            .is_none());
+        wrong = request.clone();
+        wrong.audio_delivery = None;
+        assert!(serve
+            .measured_candidate_cost(&candidate, &wrong, source)
+            .is_none());
+        wrong = request.clone();
+        wrong.file_id += 1;
+        assert!(serve
+            .measured_candidate_cost(&candidate, &wrong, source)
+            .is_none());
+        let mut other = candidate.clone();
+        other.decoder_compatible = false;
+        assert!(serve
+            .measured_candidate_cost(&other, &request, source)
+            .is_none());
+        other = candidate.clone();
+        other.recipe_digest[31] ^= 1;
+        assert!(serve
+            .measured_candidate_cost(&other, &request, source)
+            .is_none());
+        other = candidate.clone();
+        other.route = CandidateRoute::Remux;
+        assert!(serve
+            .measured_candidate_cost(&other, &request, source)
+            .is_none());
+        other = candidate.clone();
+        other.grade = plurx_core::transcode::OutputGrade::Hdr10;
+        assert!(serve
+            .measured_candidate_cost(&other, &request, source)
+            .is_none());
+        let foreign_path = temp.path().join("other-source.bin");
+        tokio::fs::write(&foreign_path, b"different actual source object bytes")
+            .await
+            .expect("foreign source bytes");
+        let foreign_file = crate::vodserve::tests::media_file_at(foreign_path, 10_000);
+        let foreign_source = crate::fragment_index_cluster::open_source_fence(&foreign_file, None)
+            .await
+            .expect("foreign source fence");
+        assert!(serve
+            .measured_candidate_cost(&candidate, &request, &foreign_source)
+            .is_none());
+        // Corrupt one scalar on an already real, completed artifact. It must
+        // not produce or renew a proof; restoring it does not invent costs.
+        let average = {
+            let mut state = registry.state.lock().expect("registry");
+            let entry = state.entries.values_mut().next().expect("real artifact");
+            let artifact = Arc::get_mut(&mut entry.artifact).expect("sole registry owner");
+            let actual = artifact.observation.rates.average_bps;
+            artifact.observation.rates.average_bps = 0;
+            actual
+        };
+        assert!(serve
+            .measured_candidate_cost(&candidate, &request, source)
+            .is_none());
+        {
+            let mut state = registry.state.lock().expect("registry");
+            let entry = state.entries.values_mut().next().expect("real artifact");
+            Arc::get_mut(&mut entry.artifact)
+                .expect("no leaked rejected proof")
+                .observation
+                .rates
+                .average_bps = average;
+            assert_eq!(
+                (entry.used, entry.idle_since),
+                before,
+                "rejected claims and invalid facts never touch recency or idle grace"
+            );
+        }
+        assert_eq!(registry.test_capacity_snapshot(), charged);
+        for _ in 0..4 {
+            registry.collect(temp.path()).await;
+        }
+        assert!(
+            !directory.exists(),
+            "invalid reads do not prevent actual collection"
+        );
+        assert_eq!(registry.test_capacity_snapshot(), (0, 0, 0, 0));
     }
 
     #[tokio::test]
