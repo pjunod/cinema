@@ -842,6 +842,24 @@ impl Encoding {
         .await
     }
 
+    /// Revalidate demand after the asynchronous policy read. The returned
+    /// guard remains held while registering the queue and attempting admission.
+    pub(crate) async fn try_permit_guarded<G>(
+        &self,
+        demand: impl std::future::Future<Output = Option<G>>,
+    ) -> Option<EncodePermit> {
+        self.hooks.before_admission().await;
+        self.try_permit_with_priority(
+            self.store.get_setting_pair(
+                plurx_core::store::keys::MAX_HW_SESSIONS,
+                plurx_core::store::keys::SW_POOL_THREADS,
+            ),
+            None,
+            demand,
+        )
+        .await
+    }
+
     /// The policy-read future is injected only to test the same production
     /// deadline without making an unresolved backend strand a test runner.
     pub(crate) async fn try_permit_after(
@@ -850,7 +868,8 @@ impl Encoding {
             Output = Result<(Option<String>, Option<String>), plurx_core::error::StoreError>,
         >,
     ) -> Option<EncodePermit> {
-        self.try_permit_with_priority(policy, None).await
+        self.try_permit_with_priority(policy, None, async { Some(()) })
+            .await
     }
 
     /// The finite output-preparation owner uses real background resources;
@@ -862,16 +881,18 @@ impl Encoding {
                 plurx_core::store::keys::SW_POOL_THREADS,
             ),
             Some(Priority::Background),
+            async { Some(()) },
         )
         .await
     }
 
-    async fn try_permit_with_priority(
+    async fn try_permit_with_priority<G>(
         &self,
         policy: impl std::future::Future<
             Output = Result<(Option<String>, Option<String>), plurx_core::error::StoreError>,
         >,
         preparation_priority: Option<Priority>,
+        demand: impl std::future::Future<Output = Option<G>>,
     ) -> Option<EncodePermit> {
         // Pool policy is current node state, not immutable media identity.
         // A failed policy read closes admission; an existing child's permit
@@ -886,6 +907,14 @@ impl Encoding {
                 .take();
             self.policy_retry
                 .store(true, std::sync::atomic::Ordering::Relaxed);
+            return None;
+        };
+        let Some(_demand_guard) = demand.await else {
+            self.cancel_wait();
+            self.last_refusal
+                .lock()
+                .expect("VOD encoder refusal")
+                .take();
             return None;
         };
         self.policy_retry

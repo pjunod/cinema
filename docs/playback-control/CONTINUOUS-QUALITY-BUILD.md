@@ -10569,3 +10569,79 @@ The next private diagnostic records exact promotion/play checkpoints and
 active sample availability without scoring hidden frames or changing the
 100ms limit. Apple TV qualification on the frozen combined candidate proceeds
 independently. Safari iOS remains blocked on unavailable device settings.
+
+**Query-only phone diagnostic separates the observer gap.** On the same
+`bc96526a7` server, a private query-only hidden tap retains its aligned sample
+until the item is active. One focused manual720 switch passes the unchanged
+100ms decoded-output bar: cross-item gap68.652ms, maximum decoded gap74.594ms
+and callback maximum68.652ms. First active acquisition reports a genuine
+1280×720 pixel buffer, `hasNew=true` and `copy_available=true`, at active tap
+age zero. Its14333.333ms film timestamp matches the last1080 sample but has
+new attachment identity; the existing scorer preserves that identity. Hidden
+frames remain excluded and no advancing film sample is manufactured.
+
+Exact surface promotion takes0.3325ms; the path from before promotion through
+playback start takes3.81675ms. First active acquisition follows playback
+start by55.5427ms. This supports the private hidden-consumption diagnosis
+and does not justify another production playback change. The earlier383ms
+and166ms failed observer receipts remain preserved; neither proves physical
+display failure. The focused run completes one manual action, no Auto series,
+with no HTTP refusals and49 owned backend processes retired without residuals.
+Full15-manual/five-Auto qualification and independent physical display/audio
+evidence remain separate requirements.
+
+**Full phone campaign exposes a later admission failure.** The query-only
+observer's full campaign on the same combined server completes one manual
+change, no Auto series, then fails the second1080 presentation deadline.
+Decoded-output maximum99.741ms and callback maximum54.070ms remain below
+the strict frame limit; this failure is missing second preparation, not an
+observed frame gap. The fixed control outcome is `declined` with
+`seek_pending=true`; effective playback remains720. No503/410 occurs, but
+`foreground_claimed` increases from zero to one; the other seven cancellation
+buckets remain zero. The seek flag alone therefore does not establish cause.
+
+Fixed admission evidence records the first successor request and predecessor
+yield at02:23:00.329572UTC and02:23:00.343125UTC. Live requests for four
+threads, while the successor holds three under budget five, report
+`not_prepared` at02:23:09.440831UTC and02:23:15.465633UTC. The first accepted
+commit rebound is recorded at02:23:09.454UTC and the second declined offer
+at02:23:16.271UTC. Those timestamps narrow investigation to admission,
+predecessor retirement and newly staged ownership; they do not alone identify
+which preparation the final cancellation belongs to. All69 owned backend
+processes retire without residuals, the exact phone QA process exits and
+private bootstrap material is removed. Further campaigns wait for a concrete
+correction; no whole-campaign retry or additional unit execution occurs.
+
+**Bounded provenance capture (2026-10-13).** A private instrumented server
+built from the combined candidate records the exact initial1080 rendition
+requesting Live admission at06:08:49.231789UTC after the first720 durable
+activation; the predecessor becomes superseded at06:08:49.463UTC. This
+establishes the requester relationship, without attributing a later
+preparation cancellation to that request. The focused phone capture ends
+before a joined manual landing: a same-720-attachment decoded gap112.154ms
+exceeds the unchanged100ms limit, with callback maximum61.879ms. All eight
+cancellation deltas remain zero. The first active720 pixel is immediate;
+AVPlayer reports waiting while the requested output time moves backwards
+before advancing. Startup clock settlement needs separation from physical
+presentation continuity. No hidden frame is scored and no optical/audio
+acceptance is claimed.
+
+The isolated phone supervisor retires50 owned processes and the TV launch
+attempt retires57, both with zero residuals. The TV console exits before a
+usable capture. Device inspection finds neither unique QA app active;
+hardware is released. Private diagnostic instrumentation is not shipping
+code. Unit suites remain deferred under the operator's explicit final-review
+and batched-merge policy.
+
+**Predecessor drain correction, implementation in progress.** Exact successful
+prepared settlement now marks only the bound predecessor's root and child
+readers as draining before releasing the encoder handoff. Draining readers
+retain their eviction windows and admitted GET obligations; their obsolete
+playback anchor and marker speculation stop contributing proactive producer
+demand. Other readers of the same cached rendition remain active. Encoder
+admission rechecks this demand after its asynchronous policy read and holds
+the reader guard through queue registration and admission. This closes the
+in-flight policy-read race without globally changing cached encoder priority.
+Two focused regressions cover exact ownership, abort, protected bytes,
+admitted response drain and a paused admission crossing commit; they are
+written and compiled only, with execution deferred to the final fast lane.

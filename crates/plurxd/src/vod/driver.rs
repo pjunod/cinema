@@ -536,7 +536,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             let demands = playback_demands(&shared.pool, rendition, &readers, &manifest);
             let ledgers = readers
                 .values()
-                .filter(|reader| !reader.authority_only)
+                .filter(|reader| !reader.authority_only && !reader.draining_after_prepared_commit)
                 .map(|reader| Arc::clone(&reader.marker_prewarm))
                 .collect::<Vec<_>>();
             (demands, ledgers)
@@ -659,16 +659,41 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     }
                     continue;
                 }
+                let mut current_demand = false;
                 prepared_permit = match rendition.retained_admission.current() {
                     Some(reservation) => {
                         // A parent's admitted delivery obligation survives an
                         // idle worker or a later cold seek. Borrow its exact
                         // credit instead of competing for a second allocation.
                         encoding.cancel_wait();
+                        current_demand = true;
                         Some(reservation)
                     }
-                    None => encoding.try_permit().await,
+                    None => {
+                        encoding
+                            .try_permit_guarded(async {
+                                let readers = rendition.readers.lock().await;
+                                let wanted = readers.values().any(|reader| {
+                                    !reader.authority_only && !reader.draining_after_prepared_commit
+                                }) || shared.pool.demands(&rendition.key).iter().any(
+                                    |request| {
+                                        readers
+                                            .get(&request.session)
+                                            .is_none_or(|reader| !reader.authority_only)
+                                    },
+                                );
+                                current_demand = wanted;
+                                wanted.then_some(readers)
+                            })
+                            .await
+                    }
                 };
+                if !current_demand {
+                    // Settlement can remove ahead-fill demand while the policy
+                    // read is pending. It must not publish a stale Live waiter.
+                    rendition.permit_wait_logged.store(false, Relaxed);
+                    return;
+                }
                 notify_new_vod_live_wait(shared, encoding, was_waiting, prepared_permit.is_some());
                 if prepared_permit.is_none() {
                     report_permit_wait(shared, rendition, encoding).await;
@@ -988,7 +1013,7 @@ pub(super) fn playback_demands(
     demands.extend(
         readers
             .values()
-            .filter(|reader| !reader.authority_only)
+            .filter(|reader| !reader.authority_only && !reader.draining_after_prepared_commit)
             .map(|reader| match reader.preparation_frontier {
                 Some(frontier) => {
                     // Admission records an actual bounded Prepare request,

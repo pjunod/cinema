@@ -1173,14 +1173,38 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                 // is reporting has already been written either way.
                 return false;
             };
-            let mut control = session.control.lock().expect("control lock");
-            if !committed {
-                control
-                    .begin_abort_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
+            let settled = {
+                let mut control = session.control.lock().expect("control lock");
+                if !committed {
+                    control.begin_abort_preparation_for_owner(
+                        staged_incarnation_id,
+                        expected_owner_epoch,
+                    );
+                }
+                control.settle_preparation_for_owner(staged_incarnation_id, expected_owner_epoch)
+            };
+            if settled && committed {
+                // The Store CAS has transferred the pointer, but predecessor
+                // projection deliberately lets already admitted responses
+                // drain. Retire only this exact attachment's proactive demand
+                // before releasing the handoff wakes its old producer.
+                if let Some(rendition) = session.rendition.as_ref() {
+                    if let Some(reader) = rendition.readers.lock().await.get_mut(&self.session_id) {
+                        reader.draining_after_prepared_commit = true;
+                    }
+                }
+                for child in &session.children {
+                    if let Some(reader) = child
+                        .rendition
+                        .readers
+                        .lock()
+                        .await
+                        .get_mut(&child.reader_id)
+                    {
+                        reader.draining_after_prepared_commit = true;
+                    }
+                }
             }
-            let settled =
-                control.settle_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
-            drop(control);
             session.release_stale_handoff();
             settled
         })

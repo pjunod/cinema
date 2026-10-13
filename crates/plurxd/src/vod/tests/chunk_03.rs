@@ -2679,6 +2679,84 @@
         .await;
     }
 
+    /// A committed predecessor keeps its protected bytes and already admitted
+    /// GETs during projection, without proactively loading an obsolete anchor.
+    #[tokio::test]
+    async fn committed_predecessor_drains_exact_readers_without_cold_ahead_fill() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, "old", Arc::clone(&rendition), Instant::now()).await;
+        rendition.attach_reader("old-child", 7).await;
+        rendition.attach_reader("other", 3).await;
+        serve.shared.sessions.lock().await.get_mut("old").expect("old").children.push(ParentMediaReader {
+            controlled: false, candidate_id: None, reader_id: "old-child".into(),
+            rendition: Arc::clone(&rendition), _reservation: None,
+        });
+        let gate = serve.preparation_gate("old").await.expect("exact gate");
+        assert!(gate.stage_preparation("successor".into(), uuid::Uuid::new_v4().to_string(), i64::MAX, None).await);
+        assert!(!gate.settle_preparation_for_owner("successor", true, 2).await);
+        assert!(!rendition.readers.lock().await["old"].draining_after_prepared_commit);
+        assert!(!gate.settle_preparation_for_owner("another-successor", true, 1).await);
+        assert!(gate.settle_preparation_for_owner("successor", true, 1).await);
+        assert_eq!(rendition.reader_windows().await.len(), 3, "draining bytes retain eviction protection");
+        {
+            let readers = rendition.readers.lock().await;
+            assert!(readers["old"].draining_after_prepared_commit);
+            assert!(readers["old-child"].draining_after_prepared_commit);
+            assert!(!readers["other"].draining_after_prepared_commit);
+            let manifest = rendition.manifest.lock().await;
+            assert_eq!(playback_demands(&serve.shared.pool, &rendition, &readers, &manifest), vec![Demand::idle_at(3)]);
+        }
+        rendition.readers.lock().await.remove("other");
+        let wait = serve.shared.pool.register(WaitKey { rendition: rendition.key.clone(), index: 45 }, "old")
+            .expect("admitted predecessor request");
+        {
+            let readers = rendition.readers.lock().await;
+            let manifest = rendition.manifest.lock().await;
+            let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+            assert_eq!(demands.len(), 1);
+            assert_eq!(demands[0].blocked_on, Some(45), "a draining response remains owed");
+        }
+        drop(wait);
+        {
+            let readers = rendition.readers.lock().await;
+            let manifest = rendition.manifest.lock().await;
+            assert!(playback_demands(&serve.shared.pool, &rendition, &readers, &manifest).is_empty());
+        }
+        insert_control_session(&serve, "aborted", Arc::clone(&rendition), Instant::now()).await;
+        let aborted = serve.preparation_gate("aborted").await.expect("abort gate");
+        assert!(aborted.stage_preparation("aborted-successor".into(), uuid::Uuid::new_v4().to_string(), i64::MAX, None).await);
+        assert!(aborted.settle_preparation_for_owner("aborted-successor", false, 1).await);
+        assert!(!rendition.readers.lock().await["aborted"].draining_after_prepared_commit);
+    }
+
+    /// The Store policy read can suspend a pass whose old proactive demand
+    /// disappears at commit. It must never register new Live pressure afterward.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn committed_predecessor_fences_an_inflight_encoder_admission() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+        retire_predecessor(&fixture).await;
+        let encoding = fixture.predecessor.recipe.encoding.as_ref().expect("predecessor encoding");
+        let admission = encoding.pause_next_admission();
+        let pass = tokio::spawn({
+            let shared = Arc::clone(&fixture.serve.shared);
+            let predecessor = Arc::clone(&fixture.predecessor);
+            async move { driver_pass(&shared, &predecessor).await }
+        });
+        let held = tokio::time::timeout(Duration::from_secs(2), admission.reached()).await.expect("pending admission");
+        let gate = fixture.serve.preparation_gate("old-session").await.expect("exact predecessor");
+        assert!(gate.settle_preparation_for_owner(STAGED_SUCCESSOR, true, 1).await);
+        held.release();
+        tokio::time::timeout(Duration::from_secs(2), pass).await.expect("bounded retired pass").expect("pass task");
+        assert!(!encoding.has_live_wait(), "retired proactive demand cannot register Live pressure");
+        assert!(matches!(fixture.predecessor.slot.belief().await, Producer::Absent { .. }), "no obsolete worker starts");
+    }
+
     /// Production (lab6, f600d282): every quality change on a full encoder pool
     /// logged `segment_pending` for the successor's init.mp4 and then
     /// `producer_failed`, and no successor ever spawned. The successor asks as

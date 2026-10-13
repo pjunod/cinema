@@ -28,6 +28,10 @@ pub(super) struct Reader {
     /// A parent authority, cold controlled child or verified retained-output
     /// attachment keeps control identity without producing or an eviction window.
     pub(super) authority_only: bool,
+    /// A durable prepared commit has moved playback to another incarnation.
+    /// Keep cached bytes and admitted GETs protected while this reader drains,
+    /// but do not encode ahead for its obsolete playback anchor.
+    pub(super) draining_after_prepared_commit: bool,
     /// Current playback anchor, owned by accepted control once available.
     /// Before control arrives, successful media commits are the fallback.
     pub(super) frontier: u32,
@@ -52,6 +56,7 @@ impl Reader {
     pub(super) fn new(frontier: u32) -> Self {
         Self {
             authority_only: false,
+            draining_after_prepared_commit: false,
             frontier,
             preparation_frontier: None,
             control_sequence: None,
