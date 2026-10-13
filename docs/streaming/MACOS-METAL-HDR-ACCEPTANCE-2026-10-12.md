@@ -174,3 +174,13 @@ paused five-minute picture are both preserved. The
 records source/binary provenance, timing, limits and current completion state.
 Standard Screen Sharing carries SDR pixels; this is ordinary HDR10-to-SDR
 hls.js acceptance, not calibrated HDR-display or native HLS qualification.
+
+The October 13 completion now retains a 58½-minute CPU control at 1920×1080
+with zero recorded stalls and zero dropped frames out of 84,255, plus a 150 ms
+actual paused unbuffered target at 300,000 ms. Ordinary Air hls.js paused
+seek/reopen acceptance is complete. The movie is reset to zero and freshly
+shows Play after restart; client quality and backend are Auto, Mac processing
+is on and clipboard sharing is off. The
+[completion receipt](../playback-control/evidence/air-hdr-paused-20261013.json)
+links the separate immutable completion archive; the original failures remain
+unchanged. F2–F7 and the broader native/device matrix remain separate.

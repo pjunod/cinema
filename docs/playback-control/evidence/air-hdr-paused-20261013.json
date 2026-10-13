@@ -28,27 +28,13 @@
     "receipt": "clipboard-off-receipt.txt"
   },
   "scope_limit": "Ordinary HDR10 to 1080p SDR on Air Chrome hls.js. Standard Screen Sharing captures SDR pixels; no calibrated HDR-display fidelity or native HLS qualification.",
-  "state": "physical Metal pass; final CPU capture and resume reset pending local unlock",
+  "state": "accepted for ordinary Air Chrome hls.js HDR10-to-1080p-SDR paused-seek/reopen scope; cleanup complete",
   "source_landing": "69d3311dd82e23aa869578442e9f1bc903cc6804",
   "qualified_head": "9af79b079cb3e0511b0fbf17fd69d339edda298a",
   "qualification": {
     "repository_run": 4992,
     "global_run": 5018,
     "main_promotion": "passed"
-  },
-  "restoration": {
-    "clipboard_shared": "OFF, functional positive/negative transfer proof",
-    "mac_processing": "ON saved and verified checked, Save disabled, Saved",
-    "backend": "Auto saved; final service restart pending",
-    "quality": "1080p temporary, Auto restoration pending",
-    "movie_resume": "zero still pending; live player must close first"
-  },
-  "cpu_control": {
-    "session": "00c436d1-1e32-4003-9eeb-7d520ad7d00e",
-    "ttff_ms": 3856,
-    "hls_startup_ms": 1692,
-    "started_utc": "2026-10-13T14:37:30.635822Z",
-    "observed_progress": "9:33 at ~14:42 UTC from 5:00 start; final five-minute capture outstanding"
   },
   "preserved_archive": {
     "uuid": "4606c9d1-6bbb-4dda-a629-e6ffaacda016",
@@ -57,5 +43,83 @@
     "bytes": 6783558,
     "members": 50,
     "state": "preserved interim; original failures unchanged; final CPU/restoration pending"
+  },
+  "previous_snapshot_state": "physical Metal pass; final CPU capture and resume reset pending local unlock",
+  "restoration_before_unlock": {
+    "clipboard_shared": "OFF, functional positive/negative transfer proof",
+    "mac_processing": "ON saved and verified checked, Save disabled, Saved",
+    "backend": "Auto saved; final service restart pending",
+    "quality": "1080p temporary, Auto restoration pending",
+    "movie_resume": "zero still pending; live player must close first"
+  },
+  "cpu_control_before_unlock": {
+    "session": "00c436d1-1e32-4003-9eeb-7d520ad7d00e",
+    "ttff_ms": 3856,
+    "hls_startup_ms": 1692,
+    "started_utc": "2026-10-13T14:37:30.635822Z",
+    "observed_progress": "9:33 at ~14:42 UTC from 5:00 start; final five-minute capture outstanding"
+  },
+  "completion": {
+    "date": "2026-10-13",
+    "scope": "Ordinary Air Chrome hls.js HDR10 to 1080p SDR; original and corrected paused frame controls; no calibrated HDR display, native HLS or F2-F7 closure",
+    "cpu": {
+      "session": "00c436d1-1e32-4003-9eeb-7d520ad7d00e",
+      "started_utc": "2026-10-13T14:37:30.635822Z",
+      "captured_utc": "2026-10-13T15:36:04.562099Z",
+      "start_position_ms": 300000,
+      "capture_position_seconds": 3813.913221,
+      "continuous_play_seconds": 3513.913221,
+      "width": 1920,
+      "height": 1080,
+      "paused_at_capture": false,
+      "recorded_stalls": 0,
+      "total_frames": 84255,
+      "dropped_frames": 0,
+      "unbuffered_paused_seek": {
+        "from_ms": 3822165,
+        "buffered_ms": [
+          [
+            3791788,
+            3882325
+          ]
+        ],
+        "target_ms": 300000,
+        "presented_frame_ms": 300000,
+        "settlement_ms": 150,
+        "screenshot": "cpu-paused-300.jpg"
+      }
+    },
+    "restoration": {
+      "clipboard_shared": "OFF, original functional transfer proof retained unchanged",
+      "backend": "Auto active after launchctl restart; CPU/x264 selected by benchmark",
+      "mac_processing": true,
+      "client_quality": "Auto, saved plurx_quality through normal menu; toast and server quality_switch receipt retained",
+      "resume_item_id": "3087334260914406407",
+      "resume_position_ms": 0,
+      "resume_watched": false,
+      "resume_after_restart": "Fresh physical movie page has Play and no Resume",
+      "player_closed": true,
+      "own_session_deleted": true,
+      "screenshots": [
+        "quality-auto-restored.jpg",
+        "backend-auto-restarted.jpg",
+        "processing-on-after-restart.jpg",
+        "resume-zero-after-restart.jpg"
+      ]
+    },
+    "prior_snapshot": {
+      "uuid": "4606c9d1-6bbb-4dda-a629-e6ffaacda016",
+      "sha256": "5d200472b0b11b8774aa1a03f7dc829ce02541bb4349a4854c297e2bde209419",
+      "originals_unchanged": true
+    },
+    "source_merge": "69d3311dd82e23aa869578442e9f1bc903cc6804",
+    "prior_evidence_merge": "b2a186450cd9c20adccee09a5cc53db4ca103bf9"
+  },
+  "completion_archive": {
+    "url": "http://forge.lan:3000/attachments/b6ecdca8-6885-4b71-883a-4e92bfc44cd2",
+    "uuid": "b6ecdca8-6885-4b71-883a-4e92bfc44cd2",
+    "sha256": "5d412aed66cf5f2c3c69d2554f52c21704bb9849c3e982c7cc9d2a4605be9fa0",
+    "bytes": 3912376,
+    "members": 13
   }
 }
