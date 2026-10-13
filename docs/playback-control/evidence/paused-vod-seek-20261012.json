@@ -1,0 +1,800 @@
+{
+  "version": 1,
+  "baseline_commit": "6dc03138724c856128fa8569c8d790b5cafe1de0",
+  "scope": "Generated HLS Chrome diagnostic plus shipped seek/loader regressions; genuine HDR-on-Air repair acceptance remains open.",
+  "browser": {
+    "baseline": {
+      "repaired": false,
+      "landings": [
+        {
+          "target": 35,
+          "before": [
+            [
+              6.08,
+              16.015999
+            ]
+          ],
+          "frame": null,
+          "ms": 1502,
+          "paused": true,
+          "seeking": true,
+          "after": [
+            [
+              6.08,
+              16.015999
+            ]
+          ],
+          "passed": false
+        }
+      ]
+    },
+    "repaired": {
+      "repaired": true,
+      "landings": [
+        {
+          "target": 35,
+          "before": [
+            [
+              6.08,
+              16.015999
+            ]
+          ],
+          "frame": 35,
+          "ms": 22,
+          "paused": true,
+          "seeking": false,
+          "after": [
+            [
+              34.08,
+              41.999999
+            ]
+          ],
+          "passed": true
+        },
+        {
+          "target": 24,
+          "before": [
+            [
+              34.08,
+              41.999999
+            ]
+          ],
+          "frame": 24.08,
+          "ms": 8,
+          "paused": true,
+          "seeking": false,
+          "after": [
+            [
+              22.08,
+              25.999999
+            ],
+            [
+              34.08,
+              41.999999
+            ]
+          ],
+          "passed": true
+        }
+      ]
+    },
+    "bundle_sha256": "72b87a6e58db623feca73ab370970c1126ec06eb3dcd0a67fd14b47b6340b820",
+    "player_sha256": "6707276399008a6fe2b90cd63f0f90dcf964d8c15296bacdfcdc8c884e7755cc",
+    "requests": [
+      {
+        "path": "/",
+        "at": 1791854187079
+      },
+      {
+        "path": "/hls.js",
+        "at": 1791854187112
+      },
+      {
+        "path": "/favicon.ico",
+        "at": 1791854187317
+      },
+      {
+        "path": "/index.m3u8",
+        "at": 1791854193312
+      },
+      {
+        "path": "/seg3.ts",
+        "at": 1791854193421
+      },
+      {
+        "path": "/seg4.ts",
+        "at": 1791854193500
+      },
+      {
+        "path": "/seg5.ts",
+        "at": 1791854193509
+      },
+      {
+        "path": "/seg6.ts",
+        "at": 1791854193514
+      },
+      {
+        "path": "/seg7.ts",
+        "at": 1791854193518
+      },
+      {
+        "path": "/index.m3u8",
+        "at": 1791854195331
+      },
+      {
+        "path": "/seg3.ts",
+        "at": 1791854195335
+      },
+      {
+        "path": "/seg4.ts",
+        "at": 1791854195536
+      },
+      {
+        "path": "/seg5.ts",
+        "at": 1791854195545
+      },
+      {
+        "path": "/seg6.ts",
+        "at": 1791854195550
+      },
+      {
+        "path": "/seg7.ts",
+        "at": 1791854195555
+      },
+      {
+        "path": "/seg17.ts",
+        "at": 1791854195858
+      },
+      {
+        "path": "/seg18.ts",
+        "at": 1791854195864
+      },
+      {
+        "path": "/seg19.ts",
+        "at": 1791854195869
+      },
+      {
+        "path": "/seg20.ts",
+        "at": 1791854195874
+      },
+      {
+        "path": "/seg21.ts",
+        "at": 1791854195878
+      },
+      {
+        "path": "/seg12.ts",
+        "at": 1791854195880
+      },
+      {
+        "path": "/seg11.ts",
+        "at": 1791854195884
+      },
+      {
+        "path": "/receipt",
+        "at": 1791854195890
+      }
+    ]
+  },
+  "invalid_first_receipt": {
+    "reason": "First receipt accepted a frame before seeking completed, and its backward target was already buffered; not final settlement proof. Preserved as negative harness evidence.",
+    "receipt": {
+      "baseline": {
+        "repaired": false,
+        "landings": [
+          {
+            "target": 35,
+            "before": [
+              [
+                6.08,
+                16.015999
+              ]
+            ],
+            "frame": null,
+            "ms": 1503,
+            "paused": true,
+            "seeking": true,
+            "after": [
+              [
+                6.08,
+                16.015999
+              ]
+            ],
+            "passed": false
+          }
+        ]
+      },
+      "repaired": {
+        "repaired": true,
+        "landings": [
+          {
+            "target": 35,
+            "before": [
+              [
+                6.08,
+                16.015999
+              ]
+            ],
+            "frame": 35,
+            "ms": 10,
+            "paused": true,
+            "seeking": true,
+            "after": [
+              [
+                6.08,
+                16.015999
+              ],
+              [
+                34.08,
+                38.010666
+              ]
+            ],
+            "passed": true
+          },
+          {
+            "target": 12,
+            "before": [
+              [
+                6.08,
+                16.015999
+              ],
+              [
+                34.08,
+                38.010666
+              ]
+            ],
+            "frame": 12,
+            "ms": 8,
+            "paused": true,
+            "seeking": true,
+            "after": [
+              [
+                6.08,
+                16.015999
+              ],
+              [
+                34.08,
+                38.010666
+              ]
+            ],
+            "passed": true
+          }
+        ]
+      },
+      "bundle_sha256": "72b87a6e58db623feca73ab370970c1126ec06eb3dcd0a67fd14b47b6340b820",
+      "player_sha256": "c3a0887cfd5a90a96119fd3347b578c15bf4b754e4c65fb4796f494b2c71ee92",
+      "requests": [
+        {
+          "path": "/",
+          "at": 1791854092710
+        },
+        {
+          "path": "/hls.js",
+          "at": 1791854092729
+        },
+        {
+          "path": "/favicon.ico",
+          "at": 1791854093283
+        },
+        {
+          "path": "/index.m3u8",
+          "at": 1791854103706
+        },
+        {
+          "path": "/seg3.ts",
+          "at": 1791854103863
+        },
+        {
+          "path": "/seg4.ts",
+          "at": 1791854103935
+        },
+        {
+          "path": "/seg5.ts",
+          "at": 1791854103941
+        },
+        {
+          "path": "/seg6.ts",
+          "at": 1791854103948
+        },
+        {
+          "path": "/seg7.ts",
+          "at": 1791854103952
+        },
+        {
+          "path": "/index.m3u8",
+          "at": 1791854105759
+        },
+        {
+          "path": "/seg3.ts",
+          "at": 1791854105984
+        },
+        {
+          "path": "/seg4.ts",
+          "at": 1791854106042
+        },
+        {
+          "path": "/seg5.ts",
+          "at": 1791854106046
+        },
+        {
+          "path": "/seg6.ts",
+          "at": 1791854106049
+        },
+        {
+          "path": "/seg7.ts",
+          "at": 1791854106053
+        },
+        {
+          "path": "/seg17.ts",
+          "at": 1791854106357
+        },
+        {
+          "path": "/seg18.ts",
+          "at": 1791854106360
+        },
+        {
+          "path": "/seg19.ts",
+          "at": 1791854106364
+        },
+        {
+          "path": "/receipt",
+          "at": 1791854106376
+        }
+      ]
+    }
+  },
+  "original_acceptance_manifest": "docs/streaming/evidence/macos-metal-hdr-20261012/evidence-manifest.json",
+  "new_air_attempt": {
+    "installed_build": "94dee81daf5fa2c3c400f873c05ee98df32f28d4",
+    "result": "Source is currently analysis-pending, so original-quality playback used rolling remux. Unbuffered rolling reopen failed before media; not a current-source paused VOD qualification.",
+    "original_file": "air-first-reproduction.log",
+    "original_sha256": "7d3e2433cfe42418668f2a77dcdea03ee4480e6229ee90c39c896924f5b5cb04",
+    "retained_failure_lines": [
+      "2026-10-13T01:05:52.167107Z  WARN http_request{method=POST target=/api/v1/client-log version=HTTP/1.1 request_id=\"b431b982bead4a63a505dbeeb64b9690\"}: plurxd::client: client[Chrome] seek_route method=remux vcodec=hevc \u2014 American Gangster file=15 seek_trace={\"id\":\"a1:1\",\"session\":\"d25693cb-92dd-4f47-b39c-db919f7f3b0f\",\"target_ms\":408617,\"element_ms\":73166,\"origin_ms\":0,\"path\":\"hlsjs\",\"mode\":\"rolling\",\"buffered_ms\":[[61019,90258]],\"seekable_ms\":[[0,115782]],\"published_ms\":[0,115782],\"target_duration_ms\":16000,\"produced_end_ms\":null,\"demand_sequence\":null,\"demand_age_ms\":null,\"route\":\"reopen\",\"reason\":\"outside_seekable\"}",
+      "2026-10-13T01:06:01.590395Z  WARN http_request{method=POST target=/api/v1/client-log version=HTTP/1.1 request_id=\"1936d937b4384f8d9e6d635276444a8e\"}: plurxd::client: client[Chrome] stall method=remux vcodec=hevc height=2160 encoder=copy: supply stall, 8.0s, 0s buffered (started 0s) stall_ms=8006 runway=0.0s bw=379779kbps \u2014 American Gangster file=15 [supply-persistent] attempt=a2/seek",
+      "2026-10-13T01:06:01.613931Z  WARN http_request{method=POST target=/api/v1/client-log version=HTTP/1.1 request_id=\"31726e5b81624456b70b94275e18054f\"}: plurxd::client: client[Chrome] stall_recovery method=remux vcodec=hevc height=2160 encoder=copy: persistent supply stall \u2014 reconnecting runway=0.0s bw=379779kbps \u2014 American Gangster file=15 [attempt:restart] attempt=a2/seek",
+      "2026-10-13T01:06:01.613955Z  WARN http_request{method=POST target=/api/v1/client-log version=HTTP/1.1 request_id=\"88ac12c170514ae681c032477712aa1d\"}: plurxd::client: client[Chrome] stall_end method=remux vcodec=hevc height=2160 encoder=copy: stall ended after 8.0s (0.0s after its report) without resuming ms=30 runway=0.0s bw=379779kbps \u2014 American Gangster file=15 [supply-persistent] attempt=a2/seek",
+      "2026-10-13T01:06:10.579587Z  WARN http_request{method=POST target=/api/v1/client-log version=HTTP/1.1 request_id=\"9e968a46be9e49f2a51694eba8c1817c\"}: plurxd::client: client[Chrome] stall method=remux vcodec=hevc height=2160 encoder=copy: supply stall, 8.5s, 0s buffered (started 0s) stall_ms=8494 runway=0.0s bw=379779kbps \u2014 American Gangster file=15 [supply-persistent] attempt=a3/stall-restart",
+      "2026-10-13T01:06:10.597781Z  WARN http_request{method=POST target=/api/v1/client-log version=HTTP/1.1 request_id=\"797a2054a99d4030a47b3962cb574fae\"}: plurxd::client: client[Chrome] seek_abandoned method=remux vcodec=hevc height=2160 encoder=copy decode_supported_prediction=true decode_smooth_prediction=true decode_power_efficient_prediction=true runway=17.1s bw=379779kbps \u2014 American Gangster file=15 seek_trace={\"id\":\"a1:1\",\"session\":\"d25693cb-92dd-4f47-b39c-db919f7f3b0f\",\"target_ms\":408617,\"element_ms\":73166,\"origin_ms\":0,\"path\":\"hlsjs\",\"mode\":\"rolling\",\"buffered_ms\":[[61019,90258]],\"seekable_ms\":[[0,115782]],\"published_ms\":[0,115782],\"target_duration_ms\":16000,\"produced_end_ms\":null,\"demand_sequence\":null,\"demand_age_ms\":null,\"route\":\"reopen\",\"reason\":\"outside_seekable\",\"landing_ms\":null,\"outcome\":\"seek_abandoned\"} attempt=a1/cold-start"
+    ]
+  },
+  "regressions": {
+    "before": {
+      "passed": 21,
+      "failed": 1,
+      "failure": "Pause stopped the loader; seek issued no startLoad(30)."
+    },
+    "focused_after": {
+      "passed": 40,
+      "failed": 0,
+      "command": "node --test tests/web/seek-telemetry.test.js tests/web/hls-seek.test.js tests/playback/paused-hls-resume.test.js"
+    },
+    "web_unit": {
+      "command": "make web-unit-check",
+      "exit": 0
+    },
+    "types": {
+      "command": "scripts/web-types",
+      "result": "unchanged baseline: 493 diagnostics in 80 keys"
+    },
+    "syntax": {
+      "command": "scripts/js-check",
+      "result": "86 served scripts, zero inline blocks: pass"
+    },
+    "compiler_baseline": {
+      "command": "cargo check -p plurxd --all-targets --offline",
+      "rustc": "1.97.1 (8bab26f4f 2026-07-14)",
+      "result": "pass; 2m42s"
+    },
+    "precommit": {
+      "command": "CARGO=cargo make precommit-check",
+      "rustc": "1.97.1",
+      "result": "pass: catalog lint, rustfmt, workspace all-targets Clippy with warnings denied, embedded web syntax; 2m06s Clippy"
+    }
+  },
+  "local_artifacts": {
+    "unit-before.log": {
+      "sha256": "25805a9aa55bf154b37b11d0003495bad7929736bdb417716c33cd3f38edabe6",
+      "bytes": 2941
+    },
+    "unit-after.log": {
+      "sha256": "b997cf9f7a1db985ab2623db749c5da3f5d2105444070d828508e8ccfb6a2fdc",
+      "bytes": 3755
+    },
+    "web-unit.log": {
+      "sha256": "f202ad03a1234a67482d00d08ee3f722658f3875bb1fb487f4cabf932307aca4",
+      "bytes": 126728
+    },
+    "web-types.log": {
+      "sha256": "b54cdfe0735271d264049857fc866aa160ddc72fcd621db93d8245760e4e9140",
+      "bytes": 169
+    },
+    "review-before.log": {
+      "sha256": "17b046203aee59b605b3894551250f11038ef64740e80ebee401a6d735f00734",
+      "bytes": 5145
+    },
+    "review-after.log": {
+      "sha256": "d94df18017245d9ac61a0590e7af2297d476b59e23089e86b6afec04bb69e25c",
+      "bytes": 4048
+    },
+    "astra-review.txt": {
+      "sha256": "2d4467e8fbf2e56a99df326cdc1ebc3edc0426b452944010310fa7802a2301a1",
+      "bytes": 828
+    },
+    "review-web-unit.log": {
+      "sha256": "f94de6ad9d1f9752472d2f6e44946cc681c8bd68b15e6e8425f0b0a20f333984",
+      "bytes": 127029
+    },
+    "review-after-static-titles.log": {
+      "sha256": "b1cc9413ffd47251a567193ab58ce10ac10e428f83afea72bf28dd5b7e8d6d41",
+      "bytes": 4036
+    },
+    "browser-diagnostic-review.json": {
+      "sha256": "fca2df54a205843a6270e01bcc8b9219d91798bee04f131913acf4da8f618aa5",
+      "bytes": 2993
+    },
+    "review-precommit.log": {
+      "sha256": "cd74c17178aeadca5b707a51e5ed3689b8e6c7599ccf5a5abceb98f7dfebb22e",
+      "bytes": 527
+    }
+  },
+  "repair_sources": {
+    "crates/plurxd/src/web/player/player.js": "6707276399008a6fe2b90cd63f0f90dcf964d8c15296bacdfcdc8c884e7755cc",
+    "crates/plurxd/src/web/player/transport.js": "82d1ef16707d63e8e715b40c1cbdb3e8b9539c4fc8d09a9dd886a40d1a095e77",
+    "tests/web/seek-telemetry.test.js": "3a37390d322e3de21b1f2c1257b35d975a789adb7efa8bcf7f742a7861fb8615",
+    "tests/playback/paused-hls-resume.test.js": "f7921a2bf0005ee11beda4365499b2e130bdf1a5e2cc573340a327ee4c42ca69",
+    "tests/web/paused-vod-seek.fixture.cjs": "beeef5adec20bf58267bd6d156e47f0d192a324dfcda4c576ad73aa8d81c3828"
+  },
+  "review_revision": {
+    "reviewed_initial_commit": "bcbb0d9cc3ddd26758e5db4cc68af92a32f90c57",
+    "reviewer": "Astra",
+    "initial_verdict": "request changes: buffered target clears suspension although loader stays stopped",
+    "resolution": "Retain current-generation suspension when target loading is unnecessary. Covered paused target with no frame now invokes existing bounded reopen.",
+    "verdict": "approve revised local VOD loader repair; full F1 acceptance stays open",
+    "regressions_before": {
+      "passed": 22,
+      "failed": 3
+    },
+    "focused_after": {
+      "passed": 43,
+      "failed": 0
+    },
+    "boundary": "A paused reopened startup suppresses its manifest until later Play; a bounded reopen attempt is not bounded terminal failure or frame arrival.",
+    "source_sha256": {
+      "crates/plurxd/src/web/player/player.js": "e7942e993f18d86f9362818d388754324f786b9fcef5e789df4650c5f2cf1307",
+      "crates/plurxd/src/web/player/transport.js": "8aef8d356d9e9cbfab3d631b7efd55e3b83be19ed14e42c19a70ac2c0eac7a2b",
+      "tests/web/seek-telemetry.test.js": "e3331f76bcd077c42782c54817ff977e6a4b1eab76bac24004f955dbde9c25a0",
+      "tests/playback/paused-hls-resume.test.js": "f7921a2bf0005ee11beda4365499b2e130bdf1a5e2cc573340a327ee4c42ca69",
+      "tests/web/paused-vod-seek.fixture.cjs": "beeef5adec20bf58267bd6d156e47f0d192a324dfcda4c576ad73aa8d81c3828"
+    },
+    "browser": {
+      "baseline": {
+        "repaired": false,
+        "landings": [
+          {
+            "target": 35,
+            "before": [
+              [
+                6.08,
+                16.015999
+              ]
+            ],
+            "frame": null,
+            "ms": 1502,
+            "paused": true,
+            "seeking": true,
+            "after": [
+              [
+                6.08,
+                16.015999
+              ]
+            ],
+            "passed": false
+          }
+        ]
+      },
+      "repaired": {
+        "repaired": true,
+        "landings": [
+          {
+            "target": 35,
+            "before": [
+              [
+                6.08,
+                16.015999
+              ]
+            ],
+            "frame": 35,
+            "ms": 19,
+            "paused": true,
+            "seeking": false,
+            "after": [
+              [
+                6.08,
+                16.015999
+              ],
+              [
+                34.08,
+                40.015999
+              ]
+            ],
+            "passed": true
+          },
+          {
+            "target": 24,
+            "before": [
+              [
+                6.08,
+                16.015999
+              ],
+              [
+                34.08,
+                40.015999
+              ]
+            ],
+            "frame": 24.08,
+            "ms": 5,
+            "paused": true,
+            "seeking": false,
+            "after": [
+              [
+                24.08,
+                25.999999
+              ],
+              [
+                34.08,
+                40.015999
+              ]
+            ],
+            "passed": true
+          }
+        ]
+      },
+      "bundle_sha256": "72b87a6e58db623feca73ab370970c1126ec06eb3dcd0a67fd14b47b6340b820",
+      "player_sha256": "e7942e993f18d86f9362818d388754324f786b9fcef5e789df4650c5f2cf1307",
+      "requests": [
+        {
+          "path": "/",
+          "at": 1791855294323
+        },
+        {
+          "path": "/hls.js",
+          "at": 1791855294345
+        },
+        {
+          "path": "/favicon.ico",
+          "at": 1791855294888
+        },
+        {
+          "path": "/index.m3u8",
+          "at": 1791855302237
+        },
+        {
+          "path": "/seg3.ts",
+          "at": 1791855302424
+        },
+        {
+          "path": "/seg4.ts",
+          "at": 1791855302493
+        },
+        {
+          "path": "/seg5.ts",
+          "at": 1791855302498
+        },
+        {
+          "path": "/seg6.ts",
+          "at": 1791855302501
+        },
+        {
+          "path": "/seg7.ts",
+          "at": 1791855302504
+        },
+        {
+          "path": "/index.m3u8",
+          "at": 1791855304319
+        },
+        {
+          "path": "/seg3.ts",
+          "at": 1791855304323
+        },
+        {
+          "path": "/seg4.ts",
+          "at": 1791855304393
+        },
+        {
+          "path": "/seg5.ts",
+          "at": 1791855304400
+        },
+        {
+          "path": "/seg6.ts",
+          "at": 1791855304403
+        },
+        {
+          "path": "/seg7.ts",
+          "at": 1791855304406
+        },
+        {
+          "path": "/seg17.ts",
+          "at": 1791855304764
+        },
+        {
+          "path": "/seg18.ts",
+          "at": 1791855304773
+        },
+        {
+          "path": "/seg19.ts",
+          "at": 1791855304777
+        },
+        {
+          "path": "/seg20.ts",
+          "at": 1791855304780
+        },
+        {
+          "path": "/seg12.ts",
+          "at": 1791855304781
+        },
+        {
+          "path": "/seg11.ts",
+          "at": 1791855304784
+        },
+        {
+          "path": "/receipt",
+          "at": 1791855304787
+        }
+      ]
+    },
+    "web_unit": {
+      "command": "make web-unit-check",
+      "exit": 0
+    },
+    "precommit": {
+      "rustc": "1.97.1",
+      "result": "pass: catalog, rustfmt, workspace all-targets Clippy -D warnings (35.21s), web syntax"
+    }
+  },
+  "preserved_archive": {
+    "sha256": "07201489827c87390e73917362beb192823a160031c6b9aa00cff62bdab846d1",
+    "bytes": 104959,
+    "url": "http://forge.lan:3000/attachments/db3a02f2-9366-4097-9a5d-450fe081e145",
+    "entries": {
+      "air-first-reproduction.log": {
+        "original_sha256": "7d3e2433cfe42418668f2a77dcdea03ee4480e6229ee90c39c896924f5b5cb04",
+        "archive_sha256": "f7717f767e9d4da6df96be5caecb114b00d59cb7d4d5159697f0b783d76b3606"
+      },
+      "browser-diagnostic.json": {
+        "original_sha256": "93542a26f9e5c3a25ea99ec2c9bdca25723ab027a2b29bc6a92e4ee99c3a628e",
+        "archive_sha256": "93542a26f9e5c3a25ea99ec2c9bdca25723ab027a2b29bc6a92e4ee99c3a628e"
+      },
+      "browser-diagnostic-first-frame-only.json": {
+        "original_sha256": "6a03d6546c3155ac6aaa90702deb9d3efe87ae28c36f8cb04f780b383cb7020c",
+        "archive_sha256": "6a03d6546c3155ac6aaa90702deb9d3efe87ae28c36f8cb04f780b383cb7020c"
+      },
+      "browser-diagnostic-review.json": {
+        "original_sha256": "fca2df54a205843a6270e01bcc8b9219d91798bee04f131913acf4da8f618aa5",
+        "archive_sha256": "fca2df54a205843a6270e01bcc8b9219d91798bee04f131913acf4da8f618aa5"
+      },
+      "browser-diagnostic.png": {
+        "original_sha256": "cec4ac2a80703710da9c4e1248ee85f5cb831f7bfffaedca92ded6512b399944",
+        "archive_sha256": "cec4ac2a80703710da9c4e1248ee85f5cb831f7bfffaedca92ded6512b399944"
+      },
+      "unit-before.log": {
+        "original_sha256": "25805a9aa55bf154b37b11d0003495bad7929736bdb417716c33cd3f38edabe6",
+        "archive_sha256": "35da36cd58751560da7f80f672344e89238dd2cf957ec8634501ec8cb43d03bd"
+      },
+      "unit-after.log": {
+        "original_sha256": "b997cf9f7a1db985ab2623db749c5da3f5d2105444070d828508e8ccfb6a2fdc",
+        "archive_sha256": "b997cf9f7a1db985ab2623db749c5da3f5d2105444070d828508e8ccfb6a2fdc"
+      },
+      "review-before.log": {
+        "original_sha256": "17b046203aee59b605b3894551250f11038ef64740e80ebee401a6d735f00734",
+        "archive_sha256": "4ee8c84a4a4bea5c026b945480424a9536c44b955b801dca6cdd509a05ae7b8f"
+      },
+      "review-after.log": {
+        "original_sha256": "d94df18017245d9ac61a0590e7af2297d476b59e23089e86b6afec04bb69e25c",
+        "archive_sha256": "d94df18017245d9ac61a0590e7af2297d476b59e23089e86b6afec04bb69e25c"
+      },
+      "review-after-static-titles.log": {
+        "original_sha256": "b1cc9413ffd47251a567193ab58ce10ac10e428f83afea72bf28dd5b7e8d6d41",
+        "archive_sha256": "b1cc9413ffd47251a567193ab58ce10ac10e428f83afea72bf28dd5b7e8d6d41"
+      },
+      "review-web-unit.log": {
+        "original_sha256": "f94de6ad9d1f9752472d2f6e44946cc681c8bd68b15e6e8425f0b0a20f333984",
+        "archive_sha256": "854fa2547727f85ce797b5f645e9191578cedaeba1e2d9029c6eb98a106502b1"
+      },
+      "astra-review.txt": {
+        "original_sha256": "2d4467e8fbf2e56a99df326cdc1ebc3edc0426b452944010310fa7802a2301a1",
+        "archive_sha256": "2d4467e8fbf2e56a99df326cdc1ebc3edc0426b452944010310fa7802a2301a1"
+      }
+    }
+  },
+  "local_vod_landing": {
+    "pr": 1047,
+    "head": "936b944216b7fb55ea38095f2588a0213a50370e",
+    "base": "2cbf7c39e617977eb002ebadde5f7fc016b07678",
+    "run_id": 4935,
+    "promotion_gate": "passed",
+    "merge": "b2adc5f789f981e189ad72bfbe48383355b5b272"
+  },
+  "paused_reopened_startup": {
+    "recorded": "2026-10-13",
+    "base": "b2adc5f789f981e189ad72bfbe48383355b5b272",
+    "scope": "Executed paused hls.js replacement seek; native HLS unchanged",
+    "before": {
+      "passed": 5,
+      "failed": 3
+    },
+    "after": {
+      "focused_passed": 51,
+      "failed": 0,
+      "type_baseline": {
+        "unchanged": true,
+        "diagnostics": 493,
+        "keys": 80
+      }
+    },
+    "review": {
+      "reviewer": "Astra",
+      "verdict": "approve",
+      "corrected": [
+        "renewal stopped loading without restarting",
+        "Play cancelled reserved corrective manifest reload",
+        "supersession before manifest parse interrupted loading without reload"
+      ]
+    },
+    "behavior": "Current executed target owns first manifest and target loading under Pause. Actual target frame completes startup and restores suspension. Missing frame retains original startup deadline and real terminal diagnosis. Existing single corrective reload credit is retained.",
+    "qualification": {
+      "head": "5dabb22a31297527d34e1399b19e60d91c06cc7e",
+      "base": "b2adc5f789f981e189ad72bfbe48383355b5b272",
+      "run_id": 4953,
+      "promotion_gate": "passed",
+      "merge": "7f82b3894581cd3a2ba0955300dc39da9bfa9428",
+      "preceding_failure": {
+        "run_id": 4948,
+        "stage": "spike-lock-check",
+        "reason": "runner could not resolve index.crates.io; before compilation"
+      }
+    },
+    "hardware": {
+      "installed": "5dabb22a3",
+      "served_sources_match": true,
+      "boot_metal_passed": true,
+      "boot_metal_speedup": 29.05,
+      "library_file_id": 15,
+      "client": "connected laptop Chrome; physical Air Chrome inaccessible",
+      "cold_and_warm": "placement deadline before HLS attachment",
+      "ssh_source_read_bytes": 16777216,
+      "ssh_source_read_seconds": 0.985,
+      "ssh_ffprobe_total_seconds": 1.062,
+      "permission_observation": "updated daemon failed the existing kTCCServiceSystemPolicyAllFiles code requirement",
+      "acceptance": "not qualified",
+      "restore_pending": {
+        "backend_original": "auto",
+        "backend_temporarily_saved": "videotoolbox",
+        "mac_video_processing_original": true,
+        "mac_video_processing_changed": false,
+        "shared_clipboard": "enabled temporarily; remote connection ended; OFF restoration not verified",
+        "resume_observed_ms": 34000,
+        "resume_requested_ms": 0
+      },
+      "manual_blockers": [
+        "local Mac locked; computer use requires manual unlock",
+        "Air Screen Sharing approval and already-authorized access renewal"
+      ]
+    },
+    "evidence_limits": [
+      "Generated and unit evidence does not qualify HDR hardware",
+      "First review-before supersession test had missing clearEffectiveProcessing harness stub; retained as invalid until corrected",
+      "Detach fixture destroys its network loader to model teardown; no backend fault inferred from fixture status ReferenceError"
+    ],
+    "source_sha256": {
+      "crates/plurxd/src/web/player/player.js": "37a7d5dbe17edef153a95a16fcce31caf630e9297ee73eb94f485cffa7374eaa",
+      "crates/plurxd/src/web/player/transport.js": "674112c0ea4d620a3799b6312ecda7e25812c4f0ae5889dec4bb3492b5d0d0df",
+      "tests/playback/paused-hls-resume.test.js": "4f92ce48bb101ae7251e802bf3139efdecc394b41daa5028c93365cb0299943c"
+    },
+    "preserved_archive": {
+      "url": "http://forge.lan:3000/attachments/3df9990f-6607-4a8e-bbb5-8db7123b49d4",
+      "sha256": "5cf7a855b62ecf2ad59627737df5020712190cb3435cb71413212f9fe78569d7",
+      "bytes": 416979,
+      "includes": "before/after regressions, rejected harness records, Astra review, exact qualification/merge receipts, served hashes, access diagnostic, cold/warm startup failures and screenshots",
+      "originals_unchanged": true
+    }
+  }
+}

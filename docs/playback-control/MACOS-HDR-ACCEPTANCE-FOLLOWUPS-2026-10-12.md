@@ -1,7 +1,6 @@
 # Mac HDR acceptance — playback follow-ups
 
-**Status:** open — observed failures and bounded investigations; no follow-up
-repair or new hardware qualification is claimed · **Recorded:** 2026-10-12.
+**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; current hardware qualification remains open · **Recorded:** 2026-10-12.
 
 The [full acceptance report](../streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 closes the ordinary HDR10 Metal/CPU comparison. This document specifies the
@@ -155,6 +154,104 @@ running the matrix. If the contract lacks a budget, propose and review one;
 the observed 20-second wait is not an approved tolerance. Add a regression at
 the identified demand/loader/settlement boundary, plus a real browser receipt
 for frame presentation. A test that only updates the timeline is insufficient.
+
+### Repair progress — both hls.js source repairs qualified and merged; HDR acceptance open
+
+F1 is claimed by the paused-seek repair branch. On the October 12 main
+baseline `6dc031387`, Pause suspends the established HLS loader with
+`stopLoad()`. Local VOD seek execution then assigns `currentTime` without
+restarting loading. An unbuffered paused destination therefore cannot arrive.
+A later Play can also reject the old suspension because seeking advanced the
+intent generation between Pause and Play.
+
+The repair in `player/player.js` and `player/transport.js` grants target
+loading to the current executed VOD seek on its exact media element and
+attachment. It keeps the video paused, permits the owned playlist request,
+and restores suspension after actual settlement. Supersession retires the
+previous seek's loading and timer. The next Play can resume the newly held
+loader; Play during loading leaves it running. Pause during a pending VOD
+seek still permits that seek's target loading. A buffered target retains a fresh
+suspension so Play before settlement can restart fetching. A paused deadline
+with bytes but no target frame invokes the existing reopen; it cannot silently
+retire recovery based only on coverage.
+No Rust behavior, playback preference or feature switch changes.
+
+The [repair receipt](evidence/paused-vod-seek-20261012.json) preserves both
+negative and positive controls:
+
+| Control | Observed result |
+|---|---|
+| Shipped seek regression before repair | 21 pass, one fails: Pause stops fetching and seek issues no target load |
+| Focused seek/loader regressions after review | 43 pass; target-frame settlement, stale lease/attachment rejection, supersession, Play/Pause interleaving and deadline cleanup |
+| Real Chrome, generated MPEG-TS, stopped-loader baseline | Target 35 s stays seeking, with no target frame or target buffer after 1,502 ms |
+| Same browser/fixture with repaired loading | Unbuffered forward frame 35.000 s in 22 ms; unbuffered backward frame 24.080 s for target 24 s in 8 ms; both paused with seeking completed |
+| Reviewed source, same Chrome fixture | Forward target frame in 19 ms, backward target frame in 5 ms; both remain paused and finish seeking |
+| First browser harness | Preserved but invalid for final settlement: it accepted the callback before `seeked` and reused a buffered backward target |
+| Fresh Air attempt on acceptance build `94dee81da` | Catalog reports analysis pending; original quality uses rolling remux. The rolling unbuffered reopen fails before media arrives. This does not qualify the repaired paused VOD path. |
+
+Full `make web-unit-check`, web syntax and the unchanged TypeScript baseline
+pass. The pinned Rust 1.97.1 baseline compiler check also passes. Reproduce the
+interactive frame diagnostic with
+`node tests/web/paused-vod-seek.fixture.cjs`, open its printed loopback URL and
+press **Run diagnostic**. Set `PLURX_F1_RECEIPT` to retain its JSON outside the
+temporary fixture directory. The diagnostic uses generated local media and
+the shipped loading helper; the command-level regressions separately execute
+the shipped seek path. Neither is a genuine HDR physical-display campaign.
+
+Original HDR failures remain in the acceptance manifest/archive unchanged.
+New Air failures and both browser harness versions are retained alongside the
+repair. Astra found and verified the correction of a buffered-seek
+Play-before-settlement race; three new regressions fail before that correction
+and pass afterward. Local VOD PR qualification is complete. Remaining closure
+work is the source-bound HDR-on-Air paused VOD matrix from this section.
+Native HLS retains its separate implementation and qualification needs.
+Before the October 13 follow-up, a forced reopen while still paused suppressed
+its fresh startup manifest. The original local VOD deadline regression proves
+a bounded reopen attempt; the new startup regressions below separately prove
+replacement loading and terminal diagnosis at source level.
+
+The local VOD repair merged in [PR #1047](http://forge.lan:3000/noirr/plurx/pulls/1047)
+as `b2adc5f789f981e189ad72bfbe48383355b5b272`; run 4935 passed the current
+candidate's policy, web, Rust and Main promotion gates.
+
+The October 13 follow-up gives an executed paused hls.js replacement seek its
+own startup loading lease. It can send the first playlist without Play and
+complete startup on the actual target frame, then restore suspension. Its
+original deadline remains active while paused; the real diagnosis raises
+`startup_exhausted` with Close/Retry if no frame arrives. A suppressed or
+interrupted unparsed playlist uses the existing single corrective reload.
+Play carries a reserved reload to the current intent; Pause during the pending
+seek preserves target loading. Supersession and cancellation fence old work.
+Three initial regressions fail before the repair; 51 focused tests now pass.
+Astra found and verified corrections to renewal, retry handoff and unparsed
+supersession. The follow-up qualified on run 4953 and merged in
+[PR #1053](http://forge.lan:3000/noirr/plurx/pulls/1053) as
+`7f82b3894581cd3a2ba0955300dc39da9bfa9428`. Genuine HDR-on-Air acceptance
+remains pending. Native HLS remains unchanged and is not newly qualified. The
+existing repair receipt retains the source identities and failed controls.
+
+**October 13 access blocker and restoration state.** The reviewed source
+`5dabb22a3` is installed on the Air; both served player files match its
+checksums. Its Metal boot probe passes at 29.05×. Cold and warm movie attempts
+from the connected laptop browser fail at placement before HLS attachment;
+these attempts provide no new physical Air frame evidence. A 16 MiB source
+read and FFprobe succeed over SSH in 1.062 seconds. macOS records that the
+updated `/opt/homebrew/bin/plurxd` does not match the existing Full Disk Access
+code requirement. Renew the already-authorized access before another attempt;
+SSH read success does not establish background-service access.
+
+The local control Mac locked, and the Air screen connection requires fresh
+approval. Physical captures and restoration await those manual steps. Original
+backend: Auto; temporarily saved backend: VideoToolbox. Original Mac video
+processing: on, unchanged. Shared clipboard was temporarily enabled; its remote
+connection ended, but restoration to off is not verified. The movie's saved
+resume position is still 34 seconds; the requested zero is not restored.
+These are outstanding obligations, not acceptance results. The
+[qualified source/access archive](http://forge.lan:3000/attachments/3df9990f-6607-4a8e-bbb5-8db7123b49d4) preserves the failed attempts,
+permission diagnostic, checksums, review and qualification/merge receipts; its
+SHA-256 is `5cf7a855b62ecf2ad59627737df5020712190cb3435cb71413212f9fe78569d7`. The first qualification attempt failed at
+`spike-lock-check` because its runner could not resolve crates.io; retry 4953
+passed. Original HDR captures and failures remain unchanged.
 
 ## 4. F2 — manual SDR quality change loses alignment
 

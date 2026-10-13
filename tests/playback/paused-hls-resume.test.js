@@ -4,12 +4,16 @@ const fs=require("node:fs"),path=require("node:path"),vm=require("node:vm");
 const web=path.join(__dirname,"../../crates/plurxd/src/web");
 const policy=require(path.join(web,"playback-policy.js"));
 const playerSource=fs.readFileSync(path.join(web,"player/player.js"),"utf8");
+const transportSource=fs.readFileSync(path.join(web,"player/transport.js"),"utf8");
+const intentSource=fs.readFileSync(path.join(web,"player/prepared-switch-measurement.js"),"utf8");
+const diagnosisSource=fs.readFileSync(path.join(web,"player/stall-diagnosis.js"),"utf8");
 const hlsSource=fs.readFileSync(path.join(web,"hls.min.js"),"utf8");
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 
 function harness({state="active"}={}){
   let now=0,nextTimer=0,current=true,diagnoses=0;
-  const timers=new Map(),sends=[],loaders=[];
+  const timers=new Map(),sends=[],loaders=[],loads=[],surfaces=[];
+  const video={currentTime:0,paused:true,seeking:false,readyState:0,ended:false,playbackRate:1,addEventListener(){},removeEventListener(){}};
   class XHR{
     constructor(){this.readyState=0;this.status=0;}
     open(){this.readyState=1;}
@@ -18,11 +22,16 @@ function harness({state="active"}={}){
     send(){sends.push(this);}
     abort(){this.aborted=true;}
   }
-  const player={started:true,wantsPlayback:false,controlIntentGeneration:1,mediaAttachment:{}};
+  const player={started:true,wantsPlayback:false,controlIntentGeneration:1,mediaAttachment:{},source:{video_codec:"h264"},controlHasFrameCallbacks:true};
   const ctx=vm.createContext({module:{exports:{}},exports:{},console,player,PlaybackPolicy:policy,
-    performance:{now:()=>now},XMLHttpRequest:XHR,
+    performance:{now:()=>now},XMLHttpRequest:XHR,TOKEN:null,
     setTimeout(fn,ms){const id=++nextTimer;timers.set(id,{fn,at:now+ms});return id;},
     clearTimeout(id){timers.delete(id);},bufferTargets:()=>({}),
+    document:{hidden:false,getElementById:()=>video},playbackSurfaceStep(){},notifyPlaybackControl(){},
+    playbackOwnsAttachedMedia:()=>current,playbackSeekBufferCovers:()=>false,
+    currentStreamFailureOverlay:()=>null,finishStallRecovery(){},clearEffectiveProcessing(){},
+    cancelNextEpisodePreparation(){},clearAutoplayNextPreparation(){},clearPlaybackControlWaiters(){},stopPlayerForExhaustion(){loads.push("terminal_stop");},
+    raisePlaybackSurface:(source,facts)=>surfaces.push({source,...facts}),toast(){},
     clientLog(){},playbackContext:()=>({}),reportTtff(){},
     stallDiagnose(){diagnoses++;return Promise.resolve();}});
   ctx.self=ctx;
@@ -31,10 +40,13 @@ function harness({state="active"}={}){
   vm.runInContext(hlsSource,ctx);
   const StockLoader=ctx.module.exports.DefaultConfig.loader;
   vm.runInContext(playerSource,ctx);
+  vm.runInContext(transportSource,ctx);
+  const intentAt=intentSource.indexOf("function supersedePlaybackControlIntent(");
+  vm.runInContext(intentSource.slice(intentAt,intentSource.indexOf("\n}",intentAt)+2),ctx);
   vm.runInContext("PLAYER=player",ctx);
   const {startup}=ctx.hlsStartupEpisode(player,{current:()=>current},"/fixture/master.m3u8",0);
   startup.state=state;
-  const hls={loadSource:loadManifest,startLoad(){},stopLoad(){}};
+  const hls={loadSource:loadManifest,startLoad(){loads.push("start");},stopLoad(){loads.push("stop");for(const loader of [...loaders])loader.destroy();}};
   startup.hls=hls;player.hls=hls;
   const Loader=ctx.createHlsStartupLoader(StockLoader,startup);
   function loadManifest(){
@@ -44,10 +56,13 @@ function harness({state="active"}={}){
       {onSuccess(){},onProgress(){},onAbort(){},onError(){},onTimeout(){}});
   }
   loadManifest();
-  return {player,startup,sends,loaders,
+  return {ctx,player,startup,sends,loaders,loads,surfaces,video,manifest:loadManifest,
+    seek(target=30){player.controlSeek={sequence:1,targetMs:target*1000};return ctx.markPlaybackControlSeekExecuted(player,target,video);},
+    present(target=30){video.readyState=4;video.currentTime=target;return ctx.settlePlaybackControlSeek(video,player,target,1,{epoch:player.controlPresentationEpoch,attachment:player.mediaAttachment,intent:player.controlSeek?.sequence});},
+    useRealDiagnosis(){const at=diagnosisSource.indexOf("async function stallDiagnose(");vm.runInContext(diagnosisSource.slice(at,diagnosisSource.indexOf("\n}",at)+2),ctx);},
     get diagnoses(){return diagnoses;},
     detach(){current=false;},
-    resume(){player.wantsPlayback=true;player.controlIntentGeneration++;return ctx.resumeHlsStartup({currentTime:0},player);},
+    resume(){player.wantsPlayback=true;ctx.supersedePlaybackControlIntent(player);return ctx.resumeHlsStartup(video,player);},
     advance(ms){
       now+=ms;
       for(;;){
@@ -104,6 +119,117 @@ test("paused manifest gate does not revive cancelled or exhausted startup",async
       await flush();assert.notEqual(h.startup.state,"paused");
       assert.equal(h.resume(),false);
       h.advance(0);await flush();assert.equal(h.sends.length,0);
+    }finally{h.close();}
+  }
+});
+
+test("paused VOD seek permits a manifest only for its current target lease",async()=>{
+  const h=harness({state:"presenting"});
+  try{
+    await flush();assert.equal(h.sends.length,0);
+    const pending={executed:true};h.player.controlSeek=pending;
+    h.startup.pausedSeek={pending,attachment:h.player.mediaAttachment,
+      intentGeneration:h.player.controlIntentGeneration};
+    h.manifest();await flush();assert.equal(h.sends.length,1,'current paused seek may fetch its playlist');
+    h.player.controlIntentGeneration++;h.manifest();await flush();
+    assert.equal(h.sends.length,1,'a stale seek generation cannot dispatch');
+    h.startup.pausedSeek.intentGeneration=h.player.controlIntentGeneration;
+    h.player.controlSeek={executed:true};h.manifest();await flush();
+    assert.equal(h.sends.length,1,'another target cannot reuse the old lease');
+    h.player.controlSeek=pending;h.detach();h.manifest();await flush();
+    assert.equal(h.sends.length,1,'a detached lease cannot fetch');
+  }finally{h.close();}
+});
+
+
+test("paused reopened seek sends its first manifest and settles its target without Play",async()=>{
+  const h=harness();
+  try{
+    h.seek();await flush();
+    assert.equal(h.sends.length,1,"the shipped seek execution must authorize the first playlist");
+    assert.equal(h.player.wantsPlayback,false);assert.equal(h.video.paused,true);
+    assert.equal(h.present(),true);
+    assert.equal(h.player.controlSeek,null);assert.equal(h.startup.state,"presenting");
+    assert.equal(h.loads.at(-1),"stop","only the paused target is fetched");
+    h.advance(policy.HLS_STARTUP.cold_deadline_ms);await flush();
+    assert.equal(h.diagnoses,0,"settlement retires the startup deadline");
+  }finally{h.close();}
+});
+test("paused reopened seek revives a suppressed manifest within the original startup budget",async()=>{
+  const h=harness();
+  try{
+    await flush();assert.equal(h.startup.state,"paused");const deadline=h.startup.deadlineMs;
+    h.seek();h.advance(0);await flush();assert.equal(h.sends.length,1);
+    assert.equal(h.startup.deadlineMs,deadline);assert.equal(h.player.wantsPlayback,false);
+  }finally{h.close();}
+});
+test("paused reopened seek with no target frame reaches the terminal startup surface",async()=>{
+  const h=harness();
+  try{
+    h.useRealDiagnosis();h.seek();await flush();
+    h.startup.manifestState="parsed";h.startup.levelState="loaded";h.startup.mediaLoaded=true;
+    h.advance(policy.HLS_STARTUP.cold_deadline_ms);await flush();
+    assert.equal(h.startup.state,"exhausted");
+    assert.equal(h.surfaces.length,1);assert.equal(h.surfaces[0].source,"startup_exhausted");
+    assert.deepEqual(Array.from(h.surfaces[0].actions),["close","retry"]);
+    assert.match(h.surfaces[0].detail,/no presented frame/);
+    assert.ok(h.loads.includes("terminal_stop"));assert.equal(h.player.wantsPlayback,false);
+  }finally{h.close();}
+});
+
+test("Play then Pause during reopened target loading keeps the loader running",async()=>{
+  const h=harness();
+  try{
+    h.seek();await flush();h.startup.manifestState="parsed";
+    h.resume();h.player.wantsPlayback=false;h.player.controlIntentGeneration++;
+    h.ctx.pauseHlsStartup(h.player);
+    assert.equal(h.loads.at(-1),"start");assert.equal(h.startup.state,"active");
+    assert.equal(h.present(),true);assert.equal(h.video.paused,true);
+  }finally{h.close();}
+});
+test("Play before a paused startup corrective reload transfers its retry intent",async()=>{
+  const h=harness();
+  try{
+    await flush();h.seek();h.resume();h.advance(0);await flush();
+    assert.equal(h.sends.length,1);assert.equal(h.startup.retry.state,"dispatched");
+  }finally{h.close();}
+});
+test("superseding a paused startup target restarts loading and fences old cleanup",async()=>{
+  const h=harness();
+  try{
+    h.seek();await flush();h.startup.manifestState="parsed";
+    const old=h.player.controlSeek.pausedStartupCleanup;
+    h.ctx.beginPlaybackControlSeek(h.player,40);
+    h.ctx.markPlaybackControlSeekExecuted(h.player,40,h.video);
+    assert.equal(h.loads.at(-1),"start");const count=h.loads.length;
+    old();assert.equal(h.loads.length,count);assert.equal(h.present(40),true);
+  }finally{h.close();}
+});
+
+test("superseding a paused startup before manifest parse spends only the existing reload",async()=>{
+  const h=harness();
+  try{
+    h.seek();await flush();const deadline=h.startup.deadlineMs;
+    h.ctx.beginPlaybackControlSeek(h.player,40);
+    h.ctx.markPlaybackControlSeekExecuted(h.player,40,h.video);
+    h.advance(0);await flush();assert.equal(h.sends.length,2);
+    assert.equal(h.startup.deadlineMs,deadline);assert.equal(h.startup.retry.state,"dispatched");
+    h.ctx.beginPlaybackControlSeek(h.player,50);
+    h.ctx.markPlaybackControlSeekExecuted(h.player,50,h.video);
+    h.advance(0);await flush();assert.equal(h.sends.length,2,"a third target cannot mint another reload");
+    assert.equal(h.startup.state,"exhausted");
+  }finally{h.close();}
+});
+test("detaching or cancelling a paused startup lease fences its deadline and requests",async()=>{
+  for(const action of ["detach","cancel"]){
+    const h=harness();
+    try{
+      h.seek();await flush();const old=h.player.controlSeek.pausedStartupCleanup;
+      if(action==="detach"){h.detach();for(const loader of h.loaders)loader.destroy();}
+      else h.ctx.cancelHlsStartup(h.player,"closed");
+      h.manifest();await flush();assert.equal(h.sends.length,1);
+      const count=h.loads.length;old();assert.equal(h.loads.length,count);
+      h.advance(policy.HLS_STARTUP.cold_deadline_ms);await flush();assert.equal(h.diagnoses,0);
     }finally{h.close();}
   }
 });

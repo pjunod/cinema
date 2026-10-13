@@ -541,6 +541,7 @@ function cancelHlsStartup(player,reason){
     return;
   }
   clearTimeout(episode.native?.deadlineTimer);
+  episode.pausedSeek?.pending.pausedStartupCleanup?.();
   episode.state='cancelled'; episode.cancelledReason=reason||'cancelled';
   clearTimeout(episode.retry.timer); episode.retry.timer=null;
   abortHlsStartupLoaders(episode,true);
@@ -629,7 +630,10 @@ function armHlsStartupRetry(video,player,episode){
       episode.retry.state='cancelled'; return;
     }
     if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'deadline');
-    if(player.wantsPlayback===false) return pauseHlsStartup(player);
+    const seekLoading=episode.pausedSeek?.pending===player.controlSeek
+      &&episode.pausedSeek?.attachment===player.mediaAttachment
+      &&episode.pausedSeek?.intentGeneration===(player.controlIntentGeneration||0);
+    if(player.wantsPlayback===false&&!seekLoading) return pauseHlsStartup(player);
     episode.retry.state='dispatched'; player.hlsRetryUsed=1;
     const at=Math.max(0,Number(video&&video.currentTime)||0);
     const missing=episode.state!=='presenting'&&episode.manifestState!=='parsed';
@@ -659,13 +663,106 @@ function pauseHlsStartup(player){
         intentGeneration:player.controlIntentGeneration||0};
     }
     try{episode.hls.stopLoad()}catch(e){}
+    if(player.controlSeek?.executed&&player.controlSeek.localVodSeek)
+      resumePausedVodSeek(document.getElementById("video"),player,player.controlSeek);
     return true;
   }
+  if(player.controlSeek?.executed&&player.wantsPlayback===false
+    &&episode.transport!=='native'
+    &&resumePausedStartupSeek(document.getElementById("video"),player,player.controlSeek)) return true;
   episode.state='paused';
   clearTimeout(episode.retry.timer); episode.retry.timer=null;
   abortHlsStartupLoaders(episode);
   try{episode.hls.stopLoad()}catch(e){}
   return true;
+}
+// Pause suspends HLS fetching, but a committed VOD seek still needs bytes for
+// its one target frame. This lease belongs to that seek and attachment only;
+// its cleanup restores suspension without changing the viewer's Pause intent.
+function resumePausedVodSeek(video,player,pending){
+  const episode=player&&player.hlsStartup;
+  if(player?.wantsPlayback!==false||!player.vod||!pending?.executed
+    ||!pending.localVodSeek||player.controlSeek!==pending
+    ||pending.attachment!==player.mediaAttachment||pending.element!==video
+    ||!hlsStartupCurrent(player,episode)||episode.state!=='presenting'
+    ||episode.transport==='native') return null;
+  const lease={pending,attachment:player.mediaAttachment,
+    intentGeneration:player.controlIntentGeneration||0};
+  episode.pausedSeek=lease;
+  const needsLoading=!playbackSeekBufferCovers(video,player,pending.targetMs);
+  episode.establishedSuspension=needsLoading?null:{attachment:player.mediaAttachment,
+    intentGeneration:player.controlIntentGeneration||0};
+  const cleanup=()=>{
+    if(episode.pausedSeek!==lease) return;
+    episode.pausedSeek=null;
+    if(!hlsStartupCurrent(player,episode)||player.mediaAttachment!==lease.attachment
+      ||player.wantsPlayback!==false) return;
+    episode.establishedSuspension={attachment:player.mediaAttachment,
+      intentGeneration:player.controlIntentGeneration||0};
+    try{episode.hls.stopLoad()}catch(e){}
+  };
+  pending.pausedLoadCleanup=cleanup;
+  if(needsLoading){
+    const at=Math.max(0,pending.targetMs/1000-(player.offset||0));
+    try{episode.hls.startLoad(at);}catch(e){cleanup();return null;}
+  }
+  return cleanup;
+}
+// A reopened seek needs its first playlist and target frame even under Pause.
+// This temporary loader owner expires at the attachment's original deadline;
+// neither Pause nor a retry grants another startup window.
+function resumePausedStartupSeek(video,player,pending){
+  const episode=player&&player.hlsStartup;
+  if(player?.wantsPlayback!==false||!pending?.executed||player.controlSeek!==pending
+    ||pending.element!==video||pending.attachment!==player.mediaAttachment
+    ||!hlsStartupCurrent(player,episode)||episode.transport==='native'
+    ||!['active','paused'].includes(episode.state)) return null;
+  const generation=player.controlIntentGeneration||0;
+  const previous=episode.pausedSeek;
+  if(previous?.pending===pending&&previous.intentGeneration===generation)
+    return pending.pausedStartupCleanup;
+  pending.pausedStartupCleanup?.(false,true);
+  const wasPaused=episode.state==='paused';
+  episode.state='active'; episode.intentGeneration=generation;
+  const lease={pending,attachment:player.mediaAttachment,intentGeneration:generation,timer:null};
+  episode.pausedSeek=lease;
+  const cleanup=(presented=false,keepLoading=false)=>{
+    clearTimeout(lease.timer);
+    if(episode.pausedSeek!==lease) return;
+    episode.pausedSeek=null;
+    if(!hlsStartupCurrent(player,episode)) return;
+    if(presented) completeHlsStartup(player);
+    if(player.wantsPlayback===false&&!keepLoading){
+      if(episode.state==='presenting') episode.establishedSuspension={
+        attachment:player.mediaAttachment,intentGeneration:player.controlIntentGeneration||0};
+      try{episode.hls.stopLoad()}catch(e){}
+    }
+  };
+  pending.pausedStartupCleanup=cleanup;
+  lease.timer=setTimeout(()=>{
+    if(episode.pausedSeek===lease&&player.controlSeek===pending
+      &&hlsStartupCurrent(player,episode)) exhaustHlsStartup(player,'paused_seek_deadline');
+  },Math.max(0,episode.deadlineMs-performance.now()));
+  if(performance.now()>=episode.deadlineMs){
+    exhaustHlsStartup(player,'paused_seek_deadline');return cleanup;
+  }
+  if(episode.manifestState==='parsed'){
+    const at=Math.max(0,pending.targetMs/1000-(player.offset||0));
+    try{episode.hls.startLoad(at);}catch(e){exhaustHlsStartup(player,'paused_seek_dispatch_failed');}
+  }else if(episode.retry.state==='reserved'){
+    episode.retry.intentGeneration=generation;
+    armHlsStartupRetry(video,player,episode);
+  }else if(wasPaused||episode.loaders.size===0){
+    // The first request was suppressed or an older target stopped it.
+    // Use the existing single corrective reload rather than a new retry owner.
+    if(episode.retry.state==='unused'){
+      episode.retry.state='reserved';episode.retry.dueMs=performance.now();
+      episode.retry.detail='paused_seek_after_startup_pause';
+      episode.retry.intentGeneration=generation;
+      armHlsStartupRetry(video,player,episode);
+    }else exhaustHlsStartup(player,'paused_seek_retry_spent');
+  }
+  return cleanup;
 }
 function resumeHlsStartup(video,player){
   const episode=player&&player.hlsStartup;
@@ -693,6 +790,19 @@ function resumeHlsStartup(video,player){
         playbackContext()));
       return true;
     }catch(e){ return false; }
+  }
+  const lease=episode.pausedSeek;
+  if(episode.state==='active'&&lease&&lease.pending===player.controlSeek
+    &&lease.pending.executed&&lease.attachment===player.mediaAttachment
+    &&lease.pending.element===video&&player.wantsPlayback!==false
+    &&(player.controlIntentGeneration||0)===lease.intentGeneration+1){
+    lease.intentGeneration=player.controlIntentGeneration||0;
+    episode.intentGeneration=lease.intentGeneration;
+    if(episode.retry.state==='reserved'){
+      episode.retry.intentGeneration=lease.intentGeneration;
+      armHlsStartupRetry(video,player,episode);
+    }
+    return true;
   }
   if(episode.state!=='paused') return false;
   episode.intentGeneration=player.controlIntentGeneration||0;
@@ -865,7 +975,12 @@ function createHlsStartupLoader(StockLoader,episode){
         // Suppress its request without retiring the attachment: cancelled
         // startup cannot be resumed and an already-started player skips its
         // watchdog, leaving the preparation surface up forever.
-        if(attached&&episode.player.wantsPlayback===false
+        const pausedSeek=episode.pausedSeek;
+        const seekLoading=attached&&pausedSeek
+          &&pausedSeek.attachment===episode.player.mediaAttachment
+          &&pausedSeek.pending===episode.player.controlSeek&&pausedSeek.pending.executed
+          &&pausedSeek.intentGeneration===(episode.player.controlIntentGeneration||0);
+        if(attached&&episode.player.wantsPlayback===false&&!seekLoading
           &&['active','paused'].includes(episode.state)){
           pauseHlsStartup(episode.player);
           try{this.abort()}catch(e){}
@@ -874,7 +989,7 @@ function createHlsStartupLoader(StockLoader,episode){
         }
         const current=attached
           &&this.plurxIntentGeneration===(episode.player.controlIntentGeneration||0)
-          &&episode.player.wantsPlayback!==false;
+          &&(episode.player.wantsPlayback!==false||seekLoading);
         // Presentation retires startup accounting, not the loader. Ordinary
         // level refreshes still cross the same ownership/intent gate, but no
         // longer consume the startup request ceiling.
