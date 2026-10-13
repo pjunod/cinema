@@ -21,7 +21,13 @@ object Net {
         explicitNulls = false
     }
 
-    val client: OkHttpClient = OkHttpClient.Builder()
+    val client: OkHttpClient = authenticatedClient()
+
+    /** Production keeps Android's suspend-aware monotonic clock. JVM HTTP
+     * fixtures inject time without mocking networking or removing observers. */
+    internal fun authenticatedClient(
+        diagnosticMillis: () -> Long = android.os.SystemClock::elapsedRealtime,
+    ): OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .apply {
@@ -44,12 +50,12 @@ object Net {
                 req
             }
             val authorization = Session.playbackAuthorization()
-            val started = android.os.SystemClock.elapsedRealtime()
+            val started = diagnosticMillis()
             val path = out.url.encodedPath
             val route = when { path.startsWith("/api/v1/auth/") -> "auth"; path.startsWith("/api/v1/diagnostics/") -> "diagnostics"; path.contains("/sessions") || path.endsWith("/decision") -> "playback"; else -> "browse" }
             fun observe(status: Int, failure: String? = null) {
                 if (authorization.generation != Session.playbackAuthorization().generation || authorization.token != token) return
-                val facts = mutableMapOf("route" to kotlinx.serialization.json.JsonPrimitive(route), "method" to kotlinx.serialization.json.JsonPrimitive(out.method), "status" to kotlinx.serialization.json.JsonPrimitive(status), "duration_ms" to kotlinx.serialization.json.JsonPrimitive((android.os.SystemClock.elapsedRealtime()-started).coerceIn(0,604800000)))
+                val facts = mutableMapOf("route" to kotlinx.serialization.json.JsonPrimitive(route), "method" to kotlinx.serialization.json.JsonPrimitive(out.method), "status" to kotlinx.serialization.json.JsonPrimitive(status), "duration_ms" to kotlinx.serialization.json.JsonPrimitive((diagnosticMillis()-started).coerceIn(0,604800000)))
                 if (failure != null) facts["failure"] = kotlinx.serialization.json.JsonPrimitive(failure)
                 tv.plurx.app.diagnostics.DiagnosticRuntime.record("network","request",facts,authorization.generation)
             }

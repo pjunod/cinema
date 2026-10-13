@@ -136,9 +136,9 @@ class ReadAfterInterceptorTest {
     @Test fun actualNativeApiEchoesTheNoContentProgressReceipt() = runBlocking {
         val saved = Session.playbackAuthorization()
         Session.origin = primary.origin; Session.token = "fixture-native"
-        // Use Net's real auth/receipt interceptors, with owned dispatcher/pool
-        // and no Android-only DEBUG diagnostic sink in this JVM fixture.
-        val owned = Net.client.newBuilder().dispatcher(Dispatcher()).connectionPool(ConnectionPool())
+        // Use Net's real auth/receipt/diagnostic interceptors. Only the Android
+        // clock and DEBUG event listener need JVM-compatible fixture inputs.
+        val owned = Net.authenticatedClient { System.nanoTime() / 1_000_000 }.newBuilder().dispatcher(Dispatcher()).connectionPool(ConnectionPool())
             .eventListener(EventListener.NONE).build()
         try {
             val api = Net.api(primary.origin, owned)
@@ -184,7 +184,7 @@ class ReadAfterInterceptorTest {
     @Test fun authenticatedIngressSharesReceiptAcrossVotersAndUnknownPeerWriteClearsIt() = runBlocking {
         val saved = Session.playbackAuthorization()
         Session.origin = primary.origin; Session.token = "fixture-cohort"
-        val owned = Net.client.newBuilder().dispatcher(Dispatcher()).connectionPool(ConnectionPool())
+        val owned = Net.authenticatedClient { System.nanoTime() / 1_000_000 }.newBuilder().dispatcher(Dispatcher()).connectionPool(ConnectionPool())
             .eventListener(EventListener.NONE).build()
         try {
             val a = Net.api(primary.origin, owned); val b = Net.api(foreign.origin, owned)
@@ -206,7 +206,7 @@ class ReadAfterInterceptorTest {
     @Test fun lateIngressCannotAdmitPeersIntoTheNextAuthorizationGeneration() = runBlocking {
         val saved = Session.playbackAuthorization()
         Session.origin = primary.origin; Session.token = "fixture-cohort"
-        val owned = Net.client.newBuilder().dispatcher(Dispatcher()).connectionPool(ConnectionPool())
+        val owned = Net.authenticatedClient { System.nanoTime() / 1_000_000 }.newBuilder().dispatcher(Dispatcher()).connectionPool(ConnectionPool())
             .eventListener(EventListener.NONE).build()
         try {
             primary.enqueue {
@@ -230,7 +230,7 @@ class ReadAfterInterceptorTest {
     @Test fun capturedDvrWriteRetiresOnlyItsOwnAccountGeneration() = runBlocking {
         val saved = Session.playbackAuthorization()
         Session.origin = primary.origin; Session.token = "fixture-cohort"
-        val owned = Net.client.newBuilder().dispatcher(Dispatcher()).connectionPool(ConnectionPool())
+        val owned = Net.authenticatedClient { System.nanoTime() / 1_000_000 }.newBuilder().dispatcher(Dispatcher()).connectionPool(ConnectionPool())
             .eventListener(EventListener.NONE).build()
         try {
             val api = Net.api(primary.origin, owned)
