@@ -1512,6 +1512,7 @@ impl RetainedArtifactRegistry {
             .as_ref()
             .is_some_and(|prepare| prepare.allowance.footprint().is_none())
         {
+            tracing::debug!(target: "plurxd::vodserve", phase = "reserve", reason = "footprint_missing", "complete output assembly refused");
             return Err(AssemblyRefusal::Refused);
         }
         let mut state = shared
@@ -1522,29 +1523,49 @@ impl RetainedArtifactRegistry {
         // One queued metadata clone at a time. Another rendition's assembly
         // is not a property of this output: defer, never refuse.
         if state.assembling {
+            tracing::debug!(target: "plurxd::vodserve", phase = "reserve", reason = "assembly_busy", "complete output assembly refused");
             return Err(AssemblyRefusal::Busy);
         }
         let reserved = state
             .preparations
             .values()
             .try_fold(0_u64, |sum, cap| sum.checked_add(*cap))
-            .ok_or(AssemblyRefusal::Refused)?;
+            .ok_or_else(|| {
+                tracing::debug!(target: "plurxd::vodserve", phase = "reserve", reason = "reserved_overflow", "complete output assembly refused");
+                AssemblyRefusal::Refused
+            })?;
         let own_cap = prepare_nonce
             .and_then(|nonce| state.preparations.get(&nonce).copied())
             .unwrap_or(0);
         let reserved = reserved
             .checked_sub(own_cap)
-            .ok_or(AssemblyRefusal::Refused)?;
-        if state.entries.contains_key(&rates.identity)
-            || state.artifact_count() - usize::from(prepare_nonce.is_some()) >= MAX_ARTIFACTS
-            || (prepare_nonce.is_some() && rates.wire_bytes > own_cap)
-            || state
-                .bytes
-                .checked_add(state.cold_capacity)
-                .and_then(|bytes| bytes.checked_add(reserved))
-                .and_then(|bytes| bytes.checked_add(own_cap.max(rates.wire_bytes)))
-                .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
+            .ok_or_else(|| {
+                tracing::debug!(target: "plurxd::vodserve", phase = "reserve", reason = "own_cap_underflow", "complete output assembly refused");
+                AssemblyRefusal::Refused
+            })?;
+        let refusal = if state.entries.contains_key(&rates.identity) {
+            Some("identity_exists")
+        } else if state.artifact_count() - usize::from(prepare_nonce.is_some()) >= MAX_ARTIFACTS {
+            Some("artifact_limit")
+        } else if prepare_nonce.is_some() && rates.wire_bytes > own_cap {
+            Some("wire_exceeds_own_cap")
+        } else if state
+            .bytes
+            .checked_add(state.cold_capacity)
+            .and_then(|bytes| bytes.checked_add(reserved))
+            .and_then(|bytes| bytes.checked_add(own_cap.max(rates.wire_bytes)))
+            .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
         {
+            Some("completed_budget")
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            tracing::debug!(target: "plurxd::vodserve", phase = "reserve", reason,
+                own_cap, wire_bytes = rates.wire_bytes, registry_bytes = state.bytes,
+                cold_capacity = state.cold_capacity, reserved_bytes = reserved,
+                completed_budget = rendition.completed_cache_budget,
+                artifact_count = state.artifact_count(), "complete output assembly refused");
             return Err(AssemblyRefusal::Refused);
         }
         let preparation_owner = preparation
@@ -1554,6 +1575,7 @@ impl RetainedArtifactRegistry {
             .as_ref()
             .is_some_and(|storage| !storage.assembly_begin())
         {
+            tracing::debug!(target: "plurxd::vodserve", phase = "reserve", reason = "storage_owner_not_ready", "complete output assembly refused");
             return Err(AssemblyRefusal::Refused);
         }
         state.bytes += rates.wire_bytes;
@@ -1590,11 +1612,13 @@ impl RetainedArtifactRegistry {
         // completed full-title preparation for a momentary GC pass.
         let preparing = self.collector.lock().await;
         if !self.own_namespace(&shared.base).await {
+            tracing::debug!(target: "plurxd::vodserve", phase = "namespace", reason = "ownership_unavailable", "complete output assembly refused");
             return false;
         }
         self.collect_orphans().await;
         let Ok(init_metadata) = tokio::fs::metadata(rendition.dir.path().join(INIT_NAME)).await
         else {
+            tracing::debug!(target: "plurxd::vodserve", phase = "init_metadata", reason = "metadata_unavailable", "complete output assembly refused");
             return false;
         };
         let init_bytes = init_metadata.len();
@@ -1604,9 +1628,11 @@ impl RetainedArtifactRegistry {
             0
         };
         let Some(extra_charge) = init_bytes.checked_add(manifest_charge) else {
+            tracing::debug!(target: "plurxd::vodserve", phase = "capacity", reason = "extra_charge_overflow", "complete output assembly refused");
             return false;
         };
         let Some(charge) = observation.rates.wire_bytes.checked_add(extra_charge) else {
+            tracing::debug!(target: "plurxd::vodserve", phase = "capacity", reason = "charge_overflow", "complete output assembly refused");
             return false;
         };
         drop(preparing);
@@ -1617,6 +1643,7 @@ impl RetainedArtifactRegistry {
                 .values()
                 .try_fold(0_u64, |sum, cap| sum.checked_add(*cap))
             else {
+                tracing::debug!(target: "plurxd::vodserve", phase = "capacity", reason = "reserved_overflow", "complete output assembly refused");
                 return false;
             };
             let transfer = reservation
@@ -1625,15 +1652,28 @@ impl RetainedArtifactRegistry {
                 .and_then(|storage| state.preparations.get(&storage.nonce).copied())
                 .unwrap_or(0)
                 .min(extra_charge);
-            if !state.startup_done
-                || !state.orphans.is_empty()
-                || state
-                    .bytes
-                    .checked_add(state.cold_capacity)
-                    .and_then(|bytes| bytes.checked_add(reserved))
-                    .and_then(|bytes| bytes.checked_add(extra_charge - transfer))
-                    .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
+            let refusal = if !state.startup_done {
+                Some("startup_pending")
+            } else if !state.orphans.is_empty() {
+                Some("orphans_pending")
+            } else if state
+                .bytes
+                .checked_add(state.cold_capacity)
+                .and_then(|bytes| bytes.checked_add(reserved))
+                .and_then(|bytes| bytes.checked_add(extra_charge - transfer))
+                .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
             {
+                Some("completed_budget")
+            } else {
+                None
+            };
+            if let Some(reason) = refusal {
+                tracing::debug!(target: "plurxd::vodserve", phase = "capacity", reason,
+                    registry_bytes = state.bytes, cold_capacity = state.cold_capacity,
+                    reserved_bytes = reserved, extra_charge, transfer,
+                    completed_budget = rendition.completed_cache_budget,
+                    startup_done = state.startup_done, orphan_count = state.orphans.len(),
+                    "complete output assembly refused");
                 return false;
             }
             if let Some(storage) = reservation.preparation_owner.as_ref() {
@@ -1679,16 +1719,28 @@ impl RetainedArtifactRegistry {
             tracing::debug!(target: "plurxd::vodserve", %error, artifact = %artifact.id,
                 "complete retained artifact assembly unavailable");
         }
+        if let Err(error) = &result {
+            tracing::debug!(target: "plurxd::vodserve", phase = "link", reason = "io_failure", io_kind = ?error.kind(), "complete output assembly refused");
+        }
         if let Some(preparation) = preparation {
             // The origin captured at offer time remains private until the
             // exact job settlement and post-statement source revalidation.
             // A revoked origin must never fall through to ordinary exposure.
-            if result.is_ok()
-                && preparation.live(rendition).await
-                && preparation.stage(Arc::clone(&artifact))
-            {
+            let linked = result.is_ok();
+            let live = linked && preparation.live(rendition).await;
+            let staged = live && preparation.stage(Arc::clone(&artifact));
+            if staged {
                 reservation.published = true;
                 completion.completed = true;
+            } else {
+                let reason = if !linked {
+                    "link_failed"
+                } else if !live {
+                    "preparation_not_live"
+                } else {
+                    "stage_refused"
+                };
+                tracing::debug!(target: "plurxd::vodserve", phase = "stage", reason, linked, live, staged, "complete output assembly refused");
             }
             preparation.progress.notify_waiters();
             return completion.completed;
@@ -1769,31 +1821,48 @@ impl RetainedArtifactRegistry {
         rendition: &Rendition,
         artifact: &Arc<RetainedVodArtifact>,
     ) -> io::Result<()> {
+        fn trace_io(reason: &'static str, error: io::Error) -> io::Error {
+            tracing::debug!(target: "plurxd::vodserve", phase = "link", reason, io_kind = ?error.kind(), "complete output assembly refused");
+            error
+        }
         let gate = shared.rendition_build_gate(&rendition.key);
         let _gate = gate.lock().await;
         let init = rendition.identity.lock().await.identity.clone();
         let _manifest = rendition.manifest.lock().await;
         if !recipe_engine_is_current(&rendition.recipe).await {
-            return Err(io::ErrorKind::InvalidData.into());
+            return Err(trace_io("engine_before", io::ErrorKind::InvalidData.into()));
         }
-        let valid = || {
-            !rendition.closed.load(Acquire)
+        let valid = |reason: &'static str| {
+            let open = !rendition.closed.load(Acquire);
+            let source_current = open
                 && rendition
                     .source
                     .as_ref()
-                    .is_some_and(|source| source.unchanged())
+                    .is_some_and(|source| source.unchanged());
+            let init_matches = source_current
                 && init
                     .as_ref()
-                    .is_some_and(|init| init.served_init == artifact.observation.served_init)
+                    .is_some_and(|init| init.served_init == artifact.observation.served_init);
+            let observation_matches = init_matches
                 && rendition
                     .output_measurement
                     .lock()
                     .expect("output measurement lock")
                     .complete_observation()
-                    .is_some_and(|now| now == artifact.observation)
+                    .is_some_and(|now| now == artifact.observation);
+            if !observation_matches {
+                tracing::debug!(target: "plurxd::vodserve", phase = "link", reason, open, source_current, init_matches, observation_matches, "complete output assembly refused");
+            }
+            observation_matches
         };
-        if !valid() || !recipe_engine_is_current(&rendition.recipe).await {
+        if !valid("valid_before") {
             return Err(io::ErrorKind::InvalidData.into());
+        }
+        if !recipe_engine_is_current(&rendition.recipe).await {
+            return Err(trace_io(
+                "engine_recheck",
+                io::ErrorKind::InvalidData.into(),
+            ));
         }
         let lease = Arc::clone(artifact);
         tokio::task::spawn_blocking(move || {
@@ -1802,17 +1871,19 @@ impl RetainedArtifactRegistry {
             std::fs::create_dir(&lease.directory)
         })
         .await
-        .map_err(io::Error::other)??;
+        .map_err(|error| trace_io("directory_task", io::Error::other(error)))?
+        .map_err(|error| trace_io("directory_create", error))?;
         let versions = rendition
             .publication_versions
             .lock()
             .expect("publication versions lock")
             .clone();
-        if tokio::fs::metadata(rendition.dir.path().join(INIT_NAME))
-            .await?
-            .len()
-            != artifact.init_bytes
-        {
+        let actual_init_bytes = tokio::fs::metadata(rendition.dir.path().join(INIT_NAME))
+            .await
+            .map_err(|error| trace_io("init_metadata", error))?
+            .len();
+        if actual_init_bytes != artifact.init_bytes {
+            tracing::debug!(target: "plurxd::vodserve", phase = "link", reason = "init_size", actual_bytes = actual_init_bytes, expected_bytes = artifact.init_bytes, "complete output assembly refused");
             return Err(io::ErrorKind::InvalidData.into());
         }
         retained_hard_link(
@@ -1820,41 +1891,56 @@ impl RetainedArtifactRegistry {
             rendition.dir.path().join(INIT_NAME),
             artifact.directory.join(INIT_NAME),
         )
-        .await?;
+        .await
+        .map_err(|error| trace_io("init_link", error))?;
         if rendition.private_storage.is_some()
             && shared
                 .hooks
                 .get()
                 .private_cleanup_failure("link_after_init")
         {
-            return Err(io::ErrorKind::PermissionDenied.into());
+            return Err(trace_io(
+                "injected_link_failure",
+                io::ErrorKind::PermissionDenied.into(),
+            ));
         }
         for (index, member) in artifact.observation.members.iter().enumerate() {
             if versions.get(index).copied().flatten() != Some(member.publication) {
+                tracing::debug!(target: "plurxd::vodserve", phase = "link", reason = "member_version", member_index = index, "complete output assembly refused");
                 return Err(io::ErrorKind::InvalidData.into());
             }
             let name = segment_name(index as u64);
             let source = rendition.dir.path().join(&name);
-            if tokio::fs::metadata(&source).await?.len() != member.bytes {
+            let actual_bytes = tokio::fs::metadata(&source)
+                .await
+                .map_err(|error| trace_io("member_metadata", error))?
+                .len();
+            if actual_bytes != member.bytes {
+                tracing::debug!(target: "plurxd::vodserve", phase = "link", reason = "member_size", member_index = index, actual_bytes, expected_bytes = member.bytes, "complete output assembly refused");
                 return Err(io::ErrorKind::InvalidData.into());
             }
-            retained_hard_link(artifact, source, artifact.directory.join(name)).await?;
+            retained_hard_link(artifact, source, artifact.directory.join(name))
+                .await
+                .map_err(|error| trace_io("member_link", error))?;
         }
-        if !valid() {
+        if !valid("valid_after") {
             return Err(io::ErrorKind::InvalidData.into());
         }
         if let Some(logical) = rendition.recipe.retained_logical.clone() {
             let manifest =
                 super::retained_manifest::ArtifactManifest::from_artifact(artifact, logical);
-            let seal = manifest.seal()?;
+            let seal = manifest
+                .seal()
+                .map_err(|error| trace_io("manifest_seal", error))?;
             let lease = Arc::clone(artifact);
             tokio::task::spawn_blocking(move || manifest.commit(&lease.directory))
                 .await
-                .map_err(io::Error::other)??;
+                .map_err(|error| trace_io("manifest_task", io::Error::other(error)))?
+                .map_err(|error| trace_io("manifest_commit", error))?;
             artifact
                 .sealed_identity
                 .set(seal)
-                .map_err(|_| io::ErrorKind::InvalidData)?;
+                .map_err(|_| trace_io("seal_already_set", io::ErrorKind::InvalidData.into()))?;
         }
         Ok(())
     }

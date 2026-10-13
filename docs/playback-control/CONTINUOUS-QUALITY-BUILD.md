@@ -10923,3 +10923,19 @@ audio and canonical context, alongside absent/invalid claim boundaries.
 Pinned all-target compilation, denied-warning Clippy and formatting pass;
 units remain deferred. Private prewarm uses the actual full planning caps
 and exact production identities, with full-mux proof still required.
+
+
+**Completed-output assembly diagnosis.** The exact audio-authority candidate
+queues a real canonical1080 output job using the captured phone capabilities.
+Three attempts reach `preparation assembly failed`; the first two consume
+233.699s and219.696s, with no lease yield. Those durations do not establish a
+production timeout: assembly starts only after complete output measurement.
+No complete retained proof is published, and no hardware campaign starts.
+Normal shutdown retires all259 owned processes, with zero residuals and the
+private bootstrap removed.
+
+Fixed structured assembly diagnostics distinguish reservation, namespace,
+metadata, capacity, linking and staging refusals. They report fixed reasons
+and bounded accounting facts without identifiers or paths. The next isolated
+attempt stops at its first failure so repeated full encodes do not hide the
+cause. No unit suite runs before final review and batched qualification.
