@@ -986,16 +986,6 @@ async fn plan_preparation_with_candidate(
     ApiError,
 > {
     use crate::playback_control::QualitySelection;
-    let planned = plan_preparation_raw(
-        state,
-        predecessor,
-        planning_caps,
-        planning_overrides,
-        selection,
-        source,
-        delivered_height,
-    )
-    .await?;
     let bootstrap = !predecessor.request.automatic
         && predecessor.candidate_id.is_none()
         && predecessor.decoder_caps.is_some()
@@ -1006,6 +996,25 @@ async fn plan_preparation_with_candidate(
                 candidate_id: None
             }
         );
+    if matches!(selection.quality, QualitySelection::Auto { .. }) {
+        tracing::debug!(target: "plurxd::auto_prepare", phase = "eligibility",
+            predecessor_automatic = predecessor.request.automatic,
+            predecessor_candidate_present = predecessor.candidate_id.is_some(),
+            decoder_caps_present = predecessor.decoder_caps.is_some(),
+            planning_caps_present = planning_caps.is_some(),
+            unnamed_auto = matches!(selection.quality, QualitySelection::Auto { height: None, candidate_id: None }),
+            bootstrap, "Auto preparation eligibility");
+    }
+    let planned = plan_preparation_raw(
+        state,
+        predecessor,
+        planning_caps,
+        planning_overrides,
+        selection,
+        source,
+        delivered_height,
+    )
+    .await?;
     if !bootstrap {
         return Ok(planned);
     }
@@ -1013,6 +1022,11 @@ async fn plan_preparation_with_candidate(
     // The raw planner retains a request-local canonical catalog even when
     // ordinary copy negotiation produces no candidate context. It does so
     // using this predecessor's decoder snapshot, required above.
+    tracing::debug!(target: "plurxd::auto_prepare", phase = "catalog",
+        catalog_count = request.quality_catalog.as_ref().map_or(0, |catalog| catalog.candidates.len()),
+        safe_count = request.quality_catalog.as_ref().map_or(0, |catalog| catalog.candidates.iter().filter(|entry| manual_auto_bootstrap_candidate(std::slice::from_ref(*entry), delivered_height).is_some()).count()),
+        selected_present = selected.is_some(), context_present = request.candidate_context.is_some(),
+        "Auto preparation catalog");
     let chosen = request
         .quality_catalog
         .as_ref()
@@ -1670,6 +1684,12 @@ pub(super) async fn process_preparation_candidate(
     {
         Ok(candidate) => candidate,
         Err(error) => {
+            if matches!(
+                selection.quality,
+                crate::playback_control::QualitySelection::Auto { .. }
+            ) {
+                tracing::debug!(target: "plurxd::auto_prepare", phase = "stage", outcome = "planning_failed", "Auto preparation stage");
+            }
             tracing::warn!(
                 target: "plurxd::http::hls",
                 ?error, "prepared successor could not be planned"
@@ -1756,6 +1776,21 @@ pub(super) async fn process_preparation_candidate(
         capabilities.as_ref(),
         conditions,
     );
+    if matches!(
+        selection.quality,
+        crate::playback_control::QualitySelection::Auto { .. }
+    ) {
+        let decision_name = match decision {
+            crate::playback_control::PreparationDecision::Unchanged => "unchanged",
+            crate::playback_control::PreparationDecision::Prepare { .. } => "prepare",
+            crate::playback_control::PreparationDecision::Fallback { .. } => "fallback",
+        };
+        tracing::debug!(target: "plurxd::auto_prepare", phase = "planned",
+            current_automatic = delivered.quality_auto, proposed_automatic = proposed.quality_auto,
+            candidate_bound = candidate.candidate_context.is_some(), selected_present = selected_candidate.is_some(),
+            proposed_height = proposed.height, delivered_height = delivered.height,
+            decision = decision_name, "Auto preparation planned");
+    }
     crate::playback_control::record_preparation_decision(platform, decision);
     // Keep the counterfactual beside the production decision as advisory
     // rollout telemetry. All three clients may advertise the explicit runtime
@@ -1800,6 +1835,7 @@ pub(super) async fn process_preparation_candidate(
             .is_some_and(super::prepared_link::PreparedProof::has_transition_admission)
         && matches!(purpose, PreparationPurpose::SelectionChange)
     {
+        trace_auto_preparation_stage(&candidate, "upgrade_proof_refused");
         None
     } else {
         successor_owner
@@ -1837,6 +1873,15 @@ pub(super) async fn process_preparation_candidate(
             primes,
         )
         .await;
+    }
+}
+
+fn trace_auto_preparation_stage(
+    candidate: &crate::transcode::SessionRequest,
+    outcome: &'static str,
+) {
+    if candidate.automatic {
+        tracing::debug!(target: "plurxd::auto_prepare", phase = "stage", outcome, "Auto preparation stage");
     }
 }
 
@@ -2027,6 +2072,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
         .ok()
         .is_some_and(|value| plurx_core::store::stored_switch(value.as_deref(), true));
     if !enabled {
+        trace_auto_preparation_stage(candidate, "disabled");
         crate::playback_control::record_preparation_staged(false);
         return;
     }
@@ -2050,6 +2096,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
             .await
             .unwrap_or(true);
         if cancelled {
+            trace_auto_preparation_stage(candidate, "intent_cancelled");
             if let Some(token) = planning_cancellation.as_ref() {
                 token.cancel();
             }
@@ -2066,6 +2113,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // The actor owns the slot. No live local worker means no slot to take, and
     // an expired, remote-owned or retired playback stages nothing.
     let Some(gate) = state.transcode.session_preparation_gate(session_id).await else {
+        trace_auto_preparation_stage(candidate, "no_gate");
         // Counted, not silent: a decision that never reached a gate is
         // exactly what the first version of this did on every production
         // session, and an uncounted return made that indistinguishable from
@@ -2392,6 +2440,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
         }
         arm_preparation_foreground_watch(active.clone());
         let Some(reservation) = reserve_preparation_before(active.clone()).await else {
+            trace_auto_preparation_stage(candidate, "reservation_refused");
             crate::playback_control::record_preparation_staged(false);
             return;
         };
@@ -2467,6 +2516,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
             .prepared_prime_is_ready(&preparation, primed)
             .await
         {
+            trace_auto_preparation_stage(candidate, "prime_not_ready");
             crate::playback_control::record_preparation_staged(false);
             return;
         }
@@ -2501,8 +2551,10 @@ pub(super) async fn stage_prepared_successor_with_prime(
                     .await;
                 }
             }
+            trace_auto_preparation_stage(candidate, "activated");
             crate::playback_control::record_preparation_staged(true);
         } else {
+            trace_auto_preparation_stage(candidate, "activation_refused");
             crate::playback_control::record_preparation_staged(false);
         }
         return;
