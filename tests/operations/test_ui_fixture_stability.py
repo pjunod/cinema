@@ -2,6 +2,8 @@
 from pathlib import Path
 import runpy
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -55,6 +57,23 @@ class UiFixtureStabilityCase(unittest.TestCase):
                           self.fixture['read_current_boot_log'](path, len(old)))
 
     def test_capture_child_forces_its_reserved_port_over_inherited_environment(self):
-        import inspect
-        source = inspect.getsource(self.fixture['SelfHost'].spawn)
-        self.assertIn('"PLURX_JELLYFIN_PORT": str(self.jellyfin_port)', source)
+        with tempfile.TemporaryDirectory() as root:
+            cls = self.fixture['SelfHost']
+            with patch.dict(cls.__init__.__globals__,
+                            {'free_ports': lambda preferred, count: [19000, 19001, 19002, 19003]}):
+                host = cls(SimpleNamespace(out=root, port=0))
+            host.log.parent.mkdir(parents=True)
+            host.server_bin = lambda: Path('test-plurxd')
+            child, response = MagicMock(), MagicMock()
+            child.poll.return_value = None
+            response.__enter__.return_value.status = 200
+            globals_ = cls.spawn.__globals__
+            with patch.dict(globals_['os'].environ, {'PLURX_JELLYFIN_PORT': '0'}), \
+                 patch.object(globals_['subprocess'], 'Popen', return_value=child) as spawn, \
+                 patch.object(globals_['urllib'].request, 'urlopen', return_value=response):
+                try:
+                    host.spawn()
+                    self.assertEqual(spawn.call_args.kwargs['env']['PLURX_JELLYFIN_PORT'], '19003')
+                finally:
+                    if spawn.called:
+                        spawn.call_args.kwargs['stdout'].close()
