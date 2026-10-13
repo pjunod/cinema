@@ -106,7 +106,9 @@ private fun DiagnosticIncidentFields(state: DiagnosticUI,draft: DiagnosticDraft)
     if (isTelevision(LocalContext.current) && !draft.consented && !state.busy) {
         // Reuse the TV select-to-edit field: D-pad traversal must reach privacy
         // controls instead of becoming cursor movement in a multiline editor.
+        // diagnostic-consent-navigation-adapter:begin
         AuthTextField(value=draft.description,onValueChange={ DiagnosticRuntime.edit(description=it) },label="What happened? Optional user content",modifier=Modifier.fillMaxWidth().testTag("diagnostics-description"),downFocus=titleFocus)
+        // diagnostic-consent-navigation-adapter:end
     } else OutlinedTextField(value=draft.description,onValueChange={ DiagnosticRuntime.edit(description=it) },label={ Text("What happened? Optional user content") },enabled=!draft.consented && !state.busy,modifier=Modifier.fillMaxWidth().testTag("diagnostics-description"),minLines=2,maxLines=6)
     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
         Text("Include the current title",Modifier.weight(1f))

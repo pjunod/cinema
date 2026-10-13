@@ -1,7 +1,7 @@
 {
   "schema": "plurx-f2-decoded-alignment-v1",
   "date": "2026-10-13",
-  "state": "source fix reviewed, qualified, merged and installed; physical Air transition blocked before decoding by renewed NAS permission denial",
+  "state": "two-sided source correction merged; installed HDR-preserving transition passes; explicit SDR transition safely refuses a two-frame clock gap; measured-cadence clock correction reviewed and in qualification",
   "scope": "F2 HDR rolling remux to encoded 1080p SDR decoded-frame alignment",
   "source_head": "fcac7a4ec6482d6f9b10aa39b02d390bc6771c78",
   "base": "e4b6c1c6daff0ceef3d80cec3bafbeb544b56f24",
@@ -112,13 +112,13 @@
     "Full platform continuous-quality matrix remains open"
   ],
   "restoration": {
-    "client_quality": "Auto verified from fresh browser localStorage",
-    "shared_clipboard": "OFF unchanged",
+    "utc": "2026-10-13T20:10Z",
+    "client_quality": "Auto after fresh reload, temporary capability override removed",
+    "shared_clipboard": "OFF verified in Screen Sharing Edit menu",
     "backend": "Auto unchanged",
     "mac_processing": "ON unchanged",
-    "movie_resume": "position_ms 0 and watched false verified through authenticated item read after progress committed; fresh movie page offers Play without Resume",
-    "owned_player": "closed before progress reset; no active browser session after reload",
-    "utc": "2026-10-13T17:49Z"
+    "movie_resume": "authenticated fresh item.watch position_ms0, watchedfalse; Play-only page",
+    "owned_player": "closed before deferred reset; no active browser session"
   },
   "source_merge": "96e4c49e92818f8f3e6b01e4786492b1c37a97d7",
   "merged_at": "2026-10-13T17:05:35Z",
@@ -154,5 +154,76 @@
     "bytes": 2270297,
     "members": 4,
     "state": "authenticated persisted zero-resume and Auto quality; fresh Play-only page"
-  }
+  },
+  "physical_continuation": {
+    "access": "existing Plurx Full Disk Access grant rebound to installed binary after user authentication; NAS reads and playback restored",
+    "hdr_preserving": {
+      "utc": "2026-10-13T19:47:05.511Z",
+      "preparation": "0d85d803-202f-49ef-b67e-7c52b2e40465",
+      "incumbent_session": "8227d906-2103-4f89-872a-d504da28df6b",
+      "result": "prepared 1080p successor committed; fresh decoded delta 41.667ms within measured41.708ms; first frame about30.1ms after commit",
+      "output": "HEVC1920x1080, 10-bit BT2020/PQ: HDR retained, not SDR",
+      "proof_ms": 35,
+      "preparation_ms": 20891
+    },
+    "sdr_refusal": {
+      "utc": "2026-10-13T19:56:53.976Z",
+      "preparation": "e203a2a2-2a27-4352-b4f4-a623ac9d7281",
+      "incumbent_session": "f641fe7a-058a-4cf8-afbb-5c3755c5191e",
+      "output": "pinned FFprobe confirms H2641920x1080 BT709/AAC",
+      "capability_diagnostic": "after HDR incumbent started, hdr/hdrDisplay/hdr10t/dv disabled only in temporary successor capability request; restored on reload",
+      "incumbent_film_seconds": 9.968,
+      "target_film_seconds": 9.884875,
+      "same_display_ms": 132524.2,
+      "frame_cadence_ms": 41.709,
+      "target_gap_ms": 83.125,
+      "result": "19 advancing target callbacks; original800msdeadline; incumbent retained; no SDR exposure or applied-quality pass"
+    },
+    "warm_retry": {
+      "utc": "2026-10-13T20:00:29.123Z",
+      "preparation": "f9a291ce-f222-4868-b043-c35904064afa",
+      "result": "incumbent pressure9.9s refuses before decoded proof; not further alignment evidence"
+    },
+    "archive": {
+      "uuid": "27798e53-f80c-4897-8a90-961253559255",
+      "url": "http://forge.lan:3000/attachments/27798e53-f80c-4897-8a90-961253559255",
+      "sha256": "97f431a4ab2dafadde66de58be6a02642303477518870df4cb6a13e0dd6abfa5",
+      "members": 24,
+      "bytes": 7500991,
+      "state": "immutable installed-source HDR pass, explicit SDR refusal, NAS renewal and negative/positive clock regression"
+    }
+  },
+  "clock_correction": {
+    "branch": "codex/f2-clock-alignment",
+    "base": "4366a32dc4423cecfb584e6ef8f210d4167571e7",
+    "cause": "250ms clock slack skips correction of an83ms gap; independent decoded guard correctly requires one41.709msframe",
+    "repair": "use min(250ms,1000/measured_incumbent_fps) for initial and postseek clock alignment; retain250msfallback for unknown cadence",
+    "unchanged": "decoded pair tolerance/freshness, original800msproof deadline, two bounded seeks, ownership/rate/buffer guards and incumbent audio",
+    "review": "Astra approved; suggested postseek second-correction regression added; no source change after approval",
+    "focused_command": "node --test tests/playback/prepared-frame-rendezvous.test.js",
+    "focused_pass": 11,
+    "negative_control": "new two-frame-gap regression fails against original clock owner (0 seeks), passes correction",
+    "local_web_unit": "passed",
+    "local_web_static": "passed",
+    "state": "reviewed source; exact qualification and installed-source SDR retest pending",
+    "qualification_failure": {
+      "global_run": 5071,
+      "repository_run": 5045,
+      "cause": "pre-existing Android diagnostic consent-focus adapter was not bounded in player input fence",
+      "repair": "bounded import and existing Down-to-consent handler regions; no runtime change; neighboring raw media handler still trips",
+      "local_fence_tests": 13,
+      "review": "Astra approved ancillary correction"
+    }
+  },
+  "restoration_history": [
+    {
+      "client_quality": "Auto verified from fresh browser localStorage",
+      "shared_clipboard": "OFF unchanged",
+      "backend": "Auto unchanged",
+      "mac_processing": "ON unchanged",
+      "movie_resume": "position_ms 0 and watched false verified through authenticated item read after progress committed; fresh movie page offers Play without Resume",
+      "owned_player": "closed before progress reset; no active browser session after reload",
+      "utc": "2026-10-13T17:49Z"
+    }
+  ]
 }
