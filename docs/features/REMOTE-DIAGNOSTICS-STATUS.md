@@ -495,3 +495,31 @@ helper, so borrowed health functions retain their served dependency without
 replacing it with a fake. Web types pass against the unchanged 493/80 baseline.
 The applicable policy and native compiler results remain valid; the new
 corrective web head still requires its fast-lane pass before integration.
+
+
+## 19. Exact-candidate native passes and final CI environment/fixture fixes
+
+Run 4877 on `de8e35565` passed preflight, mobile version, Apple compilation and
+Android compilation. Its web job reached two older logout fixtures whose
+function-only environments omitted `window` and assumed bearer logout started
+before the new enrollment-revocation wait. The corrected fixtures assert that
+private diagnostic history is erased and that each captured account finishes
+its own enrollment revocation before its bearer request; late old replies
+still cannot clear a newer session. The failed page-read-budget script passes
+locally, with real bounded test waits rather than scheduler-turn assumptions.
+
+The Linux Rust job failed because its fresh Ubuntu container lacked
+`openssl.pc`; the selected `openssl-sys` graph is not vendored. The existing
+Rust prerequisites now explicitly install `libssl-dev`, as required by the
+support service's already documented WebAuthn dependency. Rust source and
+native source are unchanged. Local pinned workspace compilation/Clippy remains
+applicable, and the Linux environment check must pass on the repaired workflow.
+All final native/policy successes remain evidence for their unchanged inputs.
+
+
+The remaining 39 required web scripts were then checked locally before the
+next push: 37 passed immediately. Two function-only harnesses omitted the
+actual `diagnosticDeveloperCard` and `observeDiagnosticPlayback` definitions.
+Adding those served helpers made the full settings script pass 65/65 and the
+single failing Shared-direct health case pass. No production callback or
+assertion was weakened; the other passing scripts were not rerun.
