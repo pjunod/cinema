@@ -84,7 +84,12 @@ final class DiagnosticReportModel: ObservableObject {
         }
     }
     func resume(_ value: DiagnosticStore.Draft) {
-        guard value.capture.namespace == scope else { return }; retire()
+        guard value.capture.namespace == scope else { return }
+        // Switching incidents cancels the previous work, but keeps this
+        // account's history and the focused resume row in the presented form.
+        operation?.cancel(); polling?.cancel(); transport?.cancel()
+        operation = nil; polling = nil; transport = nil; cleanupShare()
+        busy = false; comparison = nil; handoffState = ""
         var resumed = value; resumed.capture = DiagnosticCapture(id: value.capture.id, namespace: value.capture.namespace, generation: generation,
             capturedAt: value.capture.capturedAt, incidentMs: value.capture.incidentMs, events: value.capture.events, dropped: value.capture.dropped,
             persistence: value.capture.persistence, historyEnabled: value.capture.historyEnabled, mode: value.capture.mode, windowMs: value.capture.windowMs)
@@ -252,6 +257,9 @@ struct DiagnosticReportView: View {
                 sendingSection
                 pendingSection
             }
+            // Each selected incident starts at its coverage and privacy
+            // summary, instead of retaining another incident's scroll offset.
+            .id(reports.draft?.id)
             #if os(tvOS)
             .pickerStyle(.menu)
             #endif

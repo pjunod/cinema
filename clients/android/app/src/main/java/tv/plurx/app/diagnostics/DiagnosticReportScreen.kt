@@ -2,7 +2,7 @@ package tv.plurx.app.diagnostics
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -41,7 +41,9 @@ internal fun DiagnosticReportHost() {
     val television=isTelevision(context)
     Dialog(onDismissRequest={ DiagnosticRuntime.close() },properties=DialogProperties(usePlatformDefaultWidth=false)) {
         Surface(Modifier.fillMaxWidth(if (television) 0.82f else 0.96f).fillMaxHeight(0.92f),shape=MaterialTheme.shapes.large) {
-            Column(Modifier.padding(if (television) 28.dp else 16.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            // A selected incident opens at its own coverage/privacy summary.
+            val reportScroll = remember(state.draft?.id) { ScrollState(0) }
+            Column(Modifier.padding(if (television) 28.dp else 16.dp).verticalScroll(reportScroll),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
                     Text("Report a problem",style=MaterialTheme.typography.headlineSmall)
                     TextButton(onClick={ DiagnosticRuntime.close() }) { Text("Close") }

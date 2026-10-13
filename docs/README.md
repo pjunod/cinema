@@ -776,3 +776,4 @@ DV final bounded serving evidence: [HTTP summary](evidence/dv-processing-2026-10
 
 | [Remote diagnostics Apple wire](apple-builds/remote-diagnostics-wire.md) | What is added to the Apple report format contract? | built |
 | [Remote diagnostics Apple capture](apple-builds/remote-diagnostics-capture.md) | What changes in native private report capture, share, send and TV approval? | open |
+| [remote-diagnostics-qualification.md](apple-builds/remote-diagnostics-qualification.md) | Registers and qualifies the actual offline report UI, explicit upload boundary and same-incident relaunch recovery. | open |

@@ -118,9 +118,12 @@ internal object DiagnosticRuntime {
     }
     fun resume(draft: DiagnosticDraft) {
         if (draft.capture.namespace != namespace) return
-        retire(); title=draft.title
+        // A report switch retires its work without clearing the account's
+        // history or removing the remote's currently focused resume action.
+        operation?.cancel(); poll?.cancel(); transport?.cancel()
+        operation=null; poll=null; transport=null; title=draft.title
         val value=draft.copy(capture=draft.capture.copy(generation=Session.playbackAuthorization().generation))
-        mutable.update { it.copy(visible=true,draft=value,destination=value.origin.orEmpty(),consent=value.consented,includeTitle=value.title != null,includePlatform=value.includePlatform,message="Recovered local report. Sending resumes the same immutable archive.") }
+        mutable.update { it.copy(visible=true,draft=value,destination=value.origin.orEmpty(),consent=value.consented,includeTitle=value.title != null,includePlatform=value.includePlatform,busy=false,comparison=null,handoffState="",message="Recovered local report. Sending resumes the same immutable archive.") }
         if (value.handoff != null) pollHandoff()
     }
     fun edit(description: String? = null, category: String? = null) {

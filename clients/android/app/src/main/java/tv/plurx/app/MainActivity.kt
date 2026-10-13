@@ -1,6 +1,7 @@
 package tv.plurx.app
 
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.ui.unit.dp
 import android.content.Intent
 import android.net.Uri
@@ -189,7 +190,7 @@ private fun AppRoot(
         Phase.NeedLogin -> LoginScreen(vm, busy, authError)
         Phase.Ready -> MainNav(vm, reminderChannel, onReminderChannelUsed, invitationId, onInvitationUsed)
     }
-        if (phase != Phase.Ready) Box(Modifier.align(androidx.compose.ui.Alignment.BottomEnd).padding(16.dp)) { tv.plurx.app.diagnostics.DiagnosticReportButton(category="connection") }
+        if (phase != Phase.Ready) Box(Modifier.align(androidx.compose.ui.Alignment.BottomEnd).navigationBarsPadding().padding(16.dp)) { tv.plurx.app.diagnostics.DiagnosticReportButton(category="connection") }
         tv.plurx.app.diagnostics.DiagnosticReportHost()
     }
 }
