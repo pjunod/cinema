@@ -976,12 +976,12 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --lib \
 	  store::sqlite::users::tests::failed_combined_promotion_never_authorizes_the_old_session \
 	  -- --exact
-	$(CARGO) test --locked -p plurx-core \
+	RUST_MIN_STACK=8388608 $(CARGO) test --locked -p plurx-core \
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test store_contract \
 	  clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure \
 	  -- --exact --test-threads=1
-	$(CARGO) test --locked -p plurx-core \
+	RUST_MIN_STACK=8388608 $(CARGO) test --locked -p plurx-core \
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test store_contract \
 	  login_token_insert_requires_the_verified_password_version \
@@ -1057,7 +1057,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --manifest-path "$$OPENRAFT_MANIFEST" --features generic-snapshot-data \
 	  network::snapshot_transport::tests::test_chunked_reset_offset_if_snapshot_id_mismatch \
 	  --lib -- --exact
-	PLURX_EXPECT_TEST_COUNT=10 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	PLURX_EXPECT_TEST_COUNT=13 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  snapshot_metrics --lib -- --test-threads=1
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \

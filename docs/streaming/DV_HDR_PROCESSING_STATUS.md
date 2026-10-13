@@ -995,7 +995,8 @@ authorize it. The complete processing pipeline must sustain the existing
 | R09 | Bound the effort compiler resource budget | PR #1056 landed as `e112f137b` after gate 4970 passed all seven jobs on `77e999c50`. The Rust compile job uses one Cargo build worker and a 20-minute whole-job deadline; every compiler and static/history check remains enabled. The green Rust job took about six minutes. Temporary runner routing and memory adjustments were restored; previous timeout results remain failures. |
 | R10 | Bound Android emulator post-boot service readiness | PR #1058 landed as `3c4a7d626` after compile-only gate 4985 passed all seven jobs on exact head `b2247d003`. It vendors the exact pinned upstream action and changes only its post-boot startup block. One shared 60-second deadline requires positive package/input service readiness before unlock and settings, retries only the failed stage, and kills/reaps a timed-out child. Four new focused cases and the affected operations contract passed once on integrated effort `a7fa0053e`; its exact committed-source compiler loop passed, and the original instrumentation checks remain unchanged. |
 | R11 | Reproduce the unchanged Fontconfig source archive | PR #1059 landed as `a7fa0053e` after compile-only gate 4987 passed all seven jobs on exact head `d3528414b`. It replaces the broken HTML-returning source URL acquisition with an explicit public exact-commit Git archive. Reproduction matches the existing locked SHA-256; the source, hash and recipe are unchanged. Fresh isolated Git state, shared deadlines, bounded scratch/archive size and process-group retirement remain enforced. Seven new cases and the affected source contract passed once on integrated effort `a7fa0053e`; the exact current-base pinned compiler loop passed; package qualification remains owed. |
-| R13 | Model actual composed library-path SQL and reconcile enumerated source audits | A task based on effort `a7fa0053e` updates two exact consistent-read pins, registers the new library-root removal transaction, and records one prepared SQLite deletion whose bindings live at execution. The SQL scanner evaluates the production path-set helper with reviewed literal placeholders, admits composed SELECTs, and refuses dynamic arguments or ambiguous local ownership. Nine positive and negative controls are written and compiled. Pinned affected check and denied-lint Clippy pass; Astra found no remaining source-review blockers. Task units are deferred to the effort. The effort core target completed 1,861 passes, seven source-audit failures and four existing ignored cases; these failures remain preserved. The scanner failure is missing helper modeling, not a production SQL gap. Qualification and physical acceptance remain open. |
+| R13 | Model actual composed library-path SQL and reconcile enumerated source audits | PR #1061 landed as `e52f1e360` after compile-only gate 4992 passed all seven jobs on exact head `05cf54397`. The helper model, two read pins and transaction census compiled with pinned Rust and denied-lint Clippy. All 19 affected cases then ran once on the integrated effort: 15 passed and four failed. Two negative census fixtures assume a saturated ceiling; two scanner cases expose completed-expression and lexical-use handling. These failures remain preserved and require a follow-up; source review and compilation did not establish runtime test success. |
+| R14 | Align historical Store fixtures with the current unactivated schema and exact WAL inventory | In progress on effort `e52f1e360`. Ordinary migration fixtures require baseline 81 and explicitly refuse accidental Source activation. Historical downgrades retain and restore the exact Jellyfin/background trigger definitions; import fixtures verify the complete 92-table inventory and only remove empty later sharing declarations. Watch read counts include the preference query, and retained ready handoff checks compare every stored job, waiter and request field. The snapshot-metrics batch requires its actual 13 cases, and two WAL Store commands use the same documented 8 MiB stack as their source-bound feature Store results. Production schema and lineage guards remain unchanged. Pinned feature-qualified Store check and denied-lint Clippy pass; Astra found no remaining source blocker. Nineteen affected Store cases and one operations guard await effort-only execution after integration. |
 | A01 | Current-main fleet build and physical Profile 5, Profile 8 and Profile 7 FEL acceptance on web, Android and Apple TV | Owed after qualification/deployment. Retain startup, stalls, seek/reopen report clearing, stats, screenshots and exact effective-processing logs; repeat with both preferences off. |
 
 Tasks integrate serially through pull requests into the effort after the
@@ -1056,3 +1057,22 @@ passed once on the integrated main-bound effort `a7fa0053e`, with no failures
 or skips. The earlier preflight suites were not replayed. This focused result
 does not close UI captures, Android device execution, package qualification,
 Store/runtime failures or the final promotion receipt.
+
+The resource retry completed all 35 selected previously failed Store cases
+successfully, retaining the distinct earlier isolated media pass. The feature
+Store inventory now has 335 passing, 29 failing and three ignored named cases;
+R14 addresses 18 of those failures and invalidates one earlier v23 fixture pass.
+The ordinary workspace Store continuation ran only its 43 previously missing
+cases and passed all 43, completing its 264-case source-bound inventory without
+replaying the first 221 passes.
+
+The WAL continuation retained 125 previously completed commands and executed
+126 missing commands. All native test bodies passed, including 13 cases in the
+snapshot-metrics batch; its wrapper failed because it expected ten, and that
+failure remains preserved. Two Store commands were withheld from duplicate
+execution: their existing feature-qualified results can be adopted only after
+source, inventory and runtime-environment compatibility are proved, including
+the explicit stack setting now recorded by R14. This evidence does not claim
+a successful complete WAL lane or a promotion receipt. Remaining Source
+fixtures, other qualification cohorts, deployment and physical acceptance are
+still open.
