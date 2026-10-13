@@ -1127,3 +1127,21 @@ R12 landing. Their canonical methods resolve in that exact original tree; the
 required permanent erratum records the mistake without changing the resolver
 or boundary. Current task references are checked locally before another gate. Complete authenticated
 qualification, fleet deployment and physical HDR ON/OFF acceptance remain open.
+
+R26 landed as #1086 on effort `da8d67f18` after all seven compile-only checks
+in gate 5093 passed. The reviewed 65 selectors ran once there: all passed,
+including the corrected prior failure. The enclosing capture wrapper then
+failed its final clean-tree assertion. Its original `source_clean_after=false`,
+wrapper exit 1 and native unittest exit 0 remain separate measurements. A
+digest-bound custody supplement compares all 5,874 tracked inputs with the
+original source archive: bytes, types and Git executable bits match; every
+tracked mtime and ctime predates execution. The original dirty-path string was
+not captured. Overlapping Kotlin compiler residue is an inference, not a
+reconstructed observation. R27 permits only this exact binding/supplement
+pair and refuses other false-clean captures; its three new controls remain
+effort-only obligations before final qualification.
+
+Both current JVM source sets compiled successfully without executing tests.
+Independent compiled discovery on `da8d67f18` finds 1,149 methods in 664 class
+files; these are membership facts, not runtime outcomes. Full authenticated
+qualification, deployment and the 18 physical HDR ON/OFF cases remain open.
