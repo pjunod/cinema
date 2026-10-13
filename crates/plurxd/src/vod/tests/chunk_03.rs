@@ -4721,6 +4721,263 @@
         assert!(rendition.output_measurement.lock().expect("measurement").complete_rates().is_some(), "retirement did not discard a verified complete trailer");
     }
 
+    /// The landing probe opens the source exactly as the producer does — the
+    /// same global options, the same `-noaccurate_seek -ss`, the same input —
+    /// and asks only for the first video packet.
+    #[test]
+    fn a_landing_probe_keeps_the_producers_seek_and_input() {
+        let production: Vec<String> = [
+            "-hide_banner", "-loglevel", "error", "-noaccurate_seek", "-ss", "30.000", "-i",
+            "/dev/fd/3", "-map_chapters", "-1", "-map", "0:v:0?", "-c:v", "copy", "-f", "mp4",
+            "pipe:1",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let probe = copy_landing_probe(&production).expect("a seeking producer has a probe");
+        let output = ["-map", "0:v:0", "-c:v", "copy", "-frames:v", "1", "-f", "framecrc", "pipe:1"];
+        assert_eq!(probe.args[0], "-copyts");
+        assert_eq!(probe.args[1..9], production[..8]);
+        assert_eq!(probe.args[9..], output);
+        // The origin is the same probe without the seek.
+        assert_eq!(
+            probe.origin_args[..5],
+            ["-copyts", "-hide_banner", "-loglevel", "error", "-i"]
+        );
+        assert_eq!(probe.origin_args[5], "/dev/fd/3");
+        assert_eq!(probe.origin_args[6..], output);
+        assert!(probe.attested);
+        // A generation that does not seek starts at the first fragment.
+        assert!(copy_landing_probe(&["-i".to_owned(), "/media/x.mkv".to_owned()]).is_none());
+    }
+
+    /// A landing probe reads the first packet's PTS and duration.
+    #[test]
+    fn a_landing_probe_reads_the_first_packets_pts_and_duration() {
+        let framecrc = "#extradata 0:       39, 0xffe00c7b\n#tb 0: 1/1000\n\
+                        #media_type 0: video\n0,      29625,      29708,       41,      244, 0x1e5180d4\n";
+        let (pts, duration) = first_packet_time(framecrc).expect("one packet");
+        assert!((pts - 29.708).abs() < 1e-9 && (duration - 0.041).abs() < 1e-9);
+        assert!(first_packet_time("#tb 0: 1/1000\n").is_err());
+        assert!(first_packet_time("0, 0, 0, 41, 244, 0x0\n").is_err());
+        assert!(first_packet_time("#tb 0: 1/1000\n0, 1, x, 41, 244, 0x0\n").is_err());
+    }
+
+    /// Review of F1: the landing time was counted from the container's start
+    /// time, the earliest packet of any stream, while the index counts from
+    /// the first video keyframe. Audio leading the video by 0.7 s, or a
+    /// transport stream that begins mid-GOP, then named the neighbouring row
+    /// and published a fragment early under the wrong entry. The fixtures here
+    /// move, so the bytes alone settle each landing and say what the time
+    /// must agree with.
+    #[tokio::test]
+    async fn the_landing_time_counts_from_the_first_video_keyframe_like_the_index() {
+        testfixtures::require_ffmpeg();
+        let media = crate::test_tempdir().expect("fixtures");
+        for (name, mpegts, duration_ms, target) in [
+            ("audio-leads.mkv", false, 60_000, 30usize),
+            ("mid-gop.ts", true, 30_000, 10),
+        ] {
+            let path = media.path().join(name);
+            offset_film(&path, mpegts);
+            let mut file = media_file_at(path, duration_ms);
+            file.container = Some(if mpegts { "mpegts" } else { "matroska" }.into());
+            file.video_codec = Some("h264".into());
+            file.video_profile = Some("High".into());
+            file.width = Some(320);
+            file.height = Some(240);
+            let (_, index) = store_with_index(&file).await;
+            let start = index.rows[target].dts as f64 / f64::from(index.timescale);
+            let production = plurx_core::transcode::copy_pipe_args(
+                &file,
+                start,
+                None,
+                true,
+                Pacing::unpaced(),
+                false,
+            );
+            let observed = video_bytes_of_pipe(&production);
+            let truth = plurx_core::segplan::match_landing(&index, &observed, target)
+                .unwrap_or_else(|error| panic!("{name}: a moving picture lands by its bytes: {error}"));
+            let probe = copy_landing_probe(&production).expect("a seeking probe");
+            let time = measure_landing(
+                Path::new(&testfixtures::ffmpeg()),
+                &probe,
+                None,
+                &tokio::sync::OnceCell::new(),
+                index.timescale,
+                media.path(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(
+                plurx_core::segplan::match_landing_at(
+                    &index,
+                    &observed,
+                    target,
+                    time.ticks,
+                    time.frame_ticks
+                ),
+                Ok(truth),
+                "{name}: the time {time:?} must name the row its bytes landed on"
+            );
+        }
+    }
+
+    /// A moving 1 s-GOP H.264 film whose first video keyframe is not the
+    /// container's start: in Matroska the audio leads by 0.7 s; in MPEG-TS the
+    /// stream is cut so it begins inside a GOP.
+    fn offset_film(path: &Path, mpegts: bool) {
+        let mut encode = std::process::Command::new(testfixtures::ffmpeg());
+        encode.args(["-hide_banner", "-loglevel", "error", "-y"]);
+        if !mpegts {
+            encode.args(["-itsoffset", "0.7"]);
+        }
+        let seconds = if mpegts { "30" } else { "60" };
+        encode
+            .args(["-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size=320x240:rate=24:duration={seconds}"))
+            .args(["-f", "lavfi", "-i"])
+            .arg(format!("sine=frequency=440:sample_rate=48000:duration={seconds}"))
+            .args(["-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast"])
+            .args(["-bf", "2", "-g", "24", "-keyint_min", "24", "-sc_threshold", "0"])
+            .args(["-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"]);
+        if mpegts {
+            let stream = testfixtures::run(encode.args(["-f", "mpegts", "pipe:1"]));
+            // Drop the first 2 % of the 188-byte packets: the remainder starts
+            // inside a GOP, with audio and leading pictures before the first
+            // keyframe the index can start from.
+            let cut = stream.len() / 188 / 50 * 188;
+            std::fs::write(path, &stream[cut..]).expect("cut transport stream");
+        } else {
+            testfixtures::run(encode.args(["-f", "matroska"]).arg(path));
+        }
+    }
+
+    /// The video sample bytes of every fragment a production copy argv emits.
+    fn video_bytes_of_pipe(args: &[String]) -> Vec<u32> {
+        let mut pipe = std::process::Command::new(testfixtures::ffmpeg());
+        let bytes = testfixtures::run(pipe.args(args));
+        let mut reader = FragmentReader::new();
+        reader.push(&bytes);
+        let mut video = None;
+        let mut observed = Vec::new();
+        while let Some(unit) = reader.next_unit().expect("the pipe parses") {
+            match unit {
+                Unit::Init(init) => video = init.video().map(|track| track.id),
+                Unit::Fragment(fragment) => {
+                    if let Some(track) = video.and_then(|id| fragment.track(id)) {
+                        observed.push(u32::try_from(track.byte_len()).expect("fragment size"));
+                    }
+                }
+                Unit::Trailer => {}
+            }
+        }
+        observed
+    }
+
+    /// Lab F1 (2026-10-11), constant-size content: every fragment of a
+    /// static picture after the first weighs the same, so a far seek's byte
+    /// sequence reproduces from every row before it, and reading on to the end
+    /// of the film cannot change that — the landing failed "undetermined"
+    /// and the seek 502'd. The demuxer's measured landing time places it.
+    #[tokio::test]
+    async fn a_far_seek_into_constant_size_content_lands_by_its_landing_time() {
+        let media = crate::test_tempdir().expect("constant-size fixture");
+        let (file, store) = constant_size_film(media.path()).await;
+
+        let base = crate::test_tempdir().expect("vod base");
+        let serve = local_serve(base.path().to_path_buf(), store);
+        create(&serve, &file, "sess-static", "static-play", &settings()).await;
+        let entries = plan_len(&serve, "sess-static").await;
+        assert!(entries >= 6, "the fixture must plan several entries, got {entries}");
+        let far = entries as u32 - 3;
+        let ready = fetch(&serve, "sess-static", &segment_name(u64::from(far))).await;
+        assert!(ready.len > 0);
+        let rendition = rendition_of(&serve, "sess-static").await;
+        assert!(rendition.failure().is_none(), "{:?}", rendition.failure_cause());
+        serve.end("sess-static", Terminal::Deleted).await;
+    }
+
+    /// A 62-second copy-able H.264 picture that never changes, and a store
+    /// holding its real fragment index: every fragment after the first weighs
+    /// the same, which is the shape that defeats a byte-count landing.
+    async fn constant_size_film(dir: &Path) -> (MediaFile, Arc<dyn Store>) {
+        testfixtures::require_ffmpeg();
+        let path = dir.join("static.mkv");
+        let made = std::process::Command::new(testfixtures::ffmpeg())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"])
+            // 62 s leaves a full final GOP and several late seek entries.
+            .args(["-i", "color=c=gray:s=320x240:r=24:d=62"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-bf", "2", "-g", "48"])
+            .args(["-keyint_min", "48", "-sc_threshold", "0", "-pix_fmt", "yuv420p"])
+            .arg(&path)
+            .status()
+            .expect("running ffmpeg");
+        assert!(made.success(), "the fixture must encode");
+        let mut file = media_file_at(path, 62_000);
+        file.video_codec = Some("h264".into());
+        file.video_profile = Some("High".into());
+        file.width = Some(320);
+        file.height = Some(240);
+        let (store, index) = store_with_index(&file).await;
+        let sizes: HashSet<u32> = index.rows[1..].iter().map(|row| row.video_bytes).collect();
+        assert_eq!(sizes.len(), 1, "every fragment after the first must weigh the same");
+        (file, store)
+    }
+
+    /// Lab N2 (2026-10-11): one undetermined landing failed the whole
+    /// rendition, so every later seek in the session answered 502 within
+    /// milliseconds and no producer was ever tried again. An unplaced start
+    /// entry now refuses only the GETs a generation started there would serve.
+    #[tokio::test]
+    async fn an_unplaced_start_entry_does_not_refuse_a_seek_elsewhere() {
+        let media = crate::test_tempdir().expect("constant-size fixture");
+        let (file, store) = constant_size_film(media.path()).await;
+        let base = crate::test_tempdir().expect("vod base");
+        let serve = local_serve(base.path().to_path_buf(), store);
+        create(&serve, &file, "sess-n2", "n2-play", &settings()).await;
+        let rendition = rendition_of(&serve, "sess-n2").await;
+        let entries = rendition.plan.len() as u32;
+        assert!(entries >= 6, "the fixture must plan several entries, got {entries}");
+        let (unplaced, elsewhere) = (2u32, entries - 3);
+        on_generation_end(
+            &serve.shared,
+            &rendition,
+            Outcome::Failed(Failure::Unplaced {
+                why: "the landing is undetermined".to_owned(),
+                transient: false,
+            }),
+            rendition.gen_epoch.load(Relaxed),
+            unplaced,
+        )
+        .await;
+        assert!(
+            rendition.failure().is_none(),
+            "one seek position must not fail the rendition"
+        );
+
+        let ready = fetch(&serve, "sess-n2", &segment_name(u64::from(elsewhere))).await;
+        assert!(ready.len > 0, "a seek elsewhere gets a fresh generation");
+
+        let answer = serve
+            .segment("sess-n2", &segment_name(u64::from(unplaced)))
+            .await;
+        assert!(
+            matches!(
+                answer,
+                Some(VodPublication {
+                    result: Err(VodError::ProducerFailed(ref cause)),
+                    ..
+                }) if cause.contains("undetermined")
+            ),
+            "the unplaced entry itself is refused, not respawned: {}",
+            describe(answer)
+        );
+        assert!(rendition.failure().is_none());
+        serve.end("sess-n2", Terminal::Deleted).await;
+    }
+
     /// Lab N4 (2026-10-11): a title whose start was refused for want of a
     /// local fragment index waited for the round-robin indexing cursor to
     /// reach it — about 56 hours behind 900 other files — and played only
@@ -4756,4 +5013,36 @@
         assert_eq!(serve.local_index_demand(), vec![file.id]);
         serve.settle_local_index_demand(file.id);
         assert!(serve.local_index_demand().is_empty());
+    }
+
+    /// Review of N2: a probe that could not answer once (its 5 s bound under
+    /// load, a failed reopen) left its entry refused for the rendition's
+    /// life. A refusal whose landing time was never measured is not kept.
+    #[tokio::test]
+    async fn an_unplaced_entry_whose_time_was_never_measured_is_tried_again() {
+        let media = crate::test_tempdir().expect("constant-size fixture");
+        let (file, store) = constant_size_film(media.path()).await;
+        let base = crate::test_tempdir().expect("vod base");
+        let serve = local_serve(base.path().to_path_buf(), store);
+        create(&serve, &file, "sess-n2b", "n2b-play", &settings()).await;
+        let rendition = rendition_of(&serve, "sess-n2b").await;
+        let entry = rendition.plan.len() as u32 - 3;
+        on_generation_end(
+            &serve.shared,
+            &rendition,
+            Outcome::Failed(Failure::Unplaced {
+                why: "the landing is undetermined; the landing time could not be measured: \
+                      VOD landing probe timed out after 5 seconds"
+                    .to_owned(),
+                transient: true,
+            }),
+            rendition.gen_epoch.load(Relaxed),
+            entry,
+        )
+        .await;
+        assert!(rendition.unplaced_cause(entry).is_none());
+        assert!(rendition.failure().is_none());
+        let ready = fetch(&serve, "sess-n2b", &segment_name(u64::from(entry))).await;
+        assert!(ready.len > 0, "the next demand gets a fresh generation");
+        serve.end("sess-n2b", Terminal::Deleted).await;
     }

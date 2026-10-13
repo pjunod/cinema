@@ -336,6 +336,29 @@ the durable library status shows. The retry is the next pass — the
 scheduled scan, the artwork sweep — which builds a new client; there is no
 timer.
 
+**AniList transient retry follow-up, 2026-10-12.** #1022's per-pass health
+repair initially treated AniList's first connect/header timeout as the final
+outage verdict. `AniListClient` now retries that read-only GraphQL POST or
+artwork GET once before tripping the corresponding host. Every attempt
+reacquires the shared allowance and observes lease cancellation. A single
+60 s outer deadline includes both allowance waits and sends; per-request
+connect/read/30 s total deadlines and response-body bounds remain unchanged.
+This outer deadline matters because the allowance's own wait clock must not
+restart the call's budget after its first timeout. It is one awaited timer,
+not a spawned worker, periodic retry or new setting. HTTP statuses (including
+404/429/5xx), parse failures and response-body failures retain their existing
+handling, not the new transport retry. Unsent deferred/unauthorized calls do
+not increment provider-call counters. A persistent outage still stops that
+host for this pass, and a fresh pass starts healthy.
+
+The focused controls in `metadata::anilist::tests` cover one-blip recovery,
+two-failure deferral and next-pass recovery, artwork recovery, no HTTP/parse
+retry, lost retry authority, and the original 60 s deadline across a long
+retry cooldown. The existing queued-show and stale-owner controls are also
+affected. These loopback/controlled-clock tests are not fleet provider-drop
+or NAS acceptance. The continuation's ownership and landing status are on
+the [workboard](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md).
+
 **A timed-out read is not proof it did not happen.** Every provider call
 here is a `GET` or a read-only GraphQL `POST`; repeating one cannot double
 anything, which is why the existing comment at `tmdb.rs:218-220` is
@@ -586,3 +609,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M2 | #400 | Commits `4995d5f6f611`, `fb98dc611a54`, and `9d766cf9169d`: bounded TMDB/AniList connect, read, total-call, retry-wall, JSON-body, and item deadlines with fixed-cardinality metrics; retryable continuation and independent lease renewal pinned. `cargo test -p plurx-core metadata::` (66 passed), `cargo test -p plurxd enrich` (6 passed), the focused lease-renewal test, pinned 1.97.1 checks and scoped Clippy passed. Fleet provider-drop acceptance remains post-merge evidence. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M3 | #400 | Commit `407683cc91b1`: shared bounded no-redirect join client, capped error body, distinct ambiguous-timeout recovery, and repeated same-node redemption contract. `cargo test -p plurx-core --features hiqlite-store cluster::migration` (80 passed), both focused new contract tests, pinned 1.97.1 checks and scoped Clippy passed. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | Review #3104 | #400 | Commits `8b7c20f5c92e`, `e49591fd52eb`, and `67269a7cf766`: cancellation is observed for every walked entry even when no media page is emitted; a partially enriched multi-season show remains in the ordinary queue until every local season succeeds; replicated join state now proves expired same-identity redemption and repeated finalization after an ambiguous response. The three focused regressions and the existing ambiguous-response test passed on pinned Rust 1.97.1. PR remains draft until P-01 #401 repairs and lands the shared fast lane; fleet NAS timing and provider-drop acceptance remain post-merge evidence. |
+| 2026-10-12 | none:openai:2026-10-12 (root runtime exposes no exact model ID) | codex://threads/01a0c165-d718-73a1-93e9-e81380017705 | AniList transient retry follow-up | #1040, draft opened 22:48 UTC on `codex/anilist-transient-retry` | Base `607d3577c` includes #1022; source commit `50b7f8953`. Reproduced the first-timeout defect with one exact loopback test; a separate sandbox socket refusal is not behavior evidence. Sole adversarial reviewer `agent:/root/anilist_retry_review_sol61`, dispatched as `gpt-6.1-sol`, found a retry-allowance budget overrun; an outer 60 s deadline and controlled-clock regression address it. All eight exact regressions passed on pinned Rust 1.97.1; the same reviewer cleared the correction and final comment clarification at source hashes `5e508179` (AniList) / `49ddf705` (metadata module). Workspace/all-targets check, strict Clippy, format, catalog, 25 static contracts and normal tracked hooks passed. Draft run4864 allocated no jobs; current-head fast lane/landing remain unproven. Original C-02 fleet NAS/provider-drop acceptance remains open; no deployment. |
+| 2026-10-12 | none:openai:2026-10-12 | codex://threads/01a0c165-d718-73a1-93e9-e81380017705 | AniList source landing; fleet scope retained | [#1040](http://forge.lan:3000/noirr/plurx/pulls/1040), `290346685` at 23:18 UTC | Run4866 scope/preflight/Rust/Main promotion passed on `78da930a58`; main `0da656d3a` composition passed pinned current-tree compiler/strict Clippy/format/catalog. Actual landing tree `1ec0f4c3` exactly matches the composition; all eight fields are byte-identical. Unchanged applicable unit passes were retained, not replayed. Source-only logging/retry fix, not C-02 fleet acceptance; no deployment. |

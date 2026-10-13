@@ -559,7 +559,8 @@ impl Pipeline {
     /// [`Pipeline::filters`] with the source's peak, in nits, threaded into
     /// the graphs that take the CPU chain's operator — the same peak the CPU
     /// chain is given (MaxCLL, else mastering maximum, else 1,000), in the
-    /// same unit. Without it Jellyfin's filters read the peak from frame
+    /// filter's unit. Metal's explicit option is in tens of nits; CUDA and
+    /// OpenCL use the CPU's hundreds of nits. Without it Jellyfin's filters read the peak from frame
     /// metadata and fall back to their own default for an untagged source: a
     /// different curve from the CPU chain's under the same operator. HLG and
     /// graphs without the controls ignore it.
@@ -573,7 +574,11 @@ impl Pipeline {
         let hdr = hdr_format.is_some();
         let mapping = self.tone_map_terms(hdr_format).map(|terms| {
             match peak_nits.filter(|_| terms == CPU_MATCHED_TONE_MAP_TERMS) {
-                Some(nits) => format!("{terms}:peak={}", f64::from(nits) / 100.0),
+                Some(nits) => format!(
+                    "{terms}:peak={}",
+                    self.tone_map_peak_option(hdr_format, nits)
+                        .expect("CPU-matched terms have an explicit peak unit")
+                ),
                 None => terms.to_owned(),
             }
         });
@@ -757,6 +762,23 @@ impl Pipeline {
             }
             _ => None,
         }
+    }
+
+    /// Translate absolute nits into this filter's explicit peak option.
+    /// Jellyfin 8.1.3-1 Metal converts that option as `peak / 10 * 100 / 203`,
+    /// while its PQ linearizer uses nits / 203. Supplying the CPU's nits / 100
+    /// therefore loses a factor of ten. Its <=100-nit fallback masks this at
+    /// exactly 1,000 nits, but not at the 1,179-nit real-title control.
+    pub fn tone_map_peak_option(self, hdr_format: Option<&str>, nits: u32) -> Option<f64> {
+        if self.tone_map_terms(hdr_format) != Some(CPU_MATCHED_TONE_MAP_TERMS) {
+            return None;
+        }
+        let divisor = if self == Pipeline::VtToneMapMetal {
+            10.0
+        } else {
+            100.0
+        };
+        Some(f64::from(nits) / divisor)
     }
 
     /// Whether sessions may reach this graph only through the resolved macOS
@@ -1030,6 +1052,35 @@ mod tests {
     use super::*;
     use crate::domain::FieldOrder;
 
+    #[test]
+    fn metal_explicit_peak_preserves_absolute_nits_across_the_fallback_boundary() {
+        // Exercise the pinned filter's conversion, including the discontinuity
+        // that lets the old option=10 pass while option=11.79 clips highlights.
+        for nits in [999, 1_000, 1_001, 1_179, 4_000] {
+            for hdr in ["hdr10", "hdr10plus"] {
+                let option = Pipeline::VtToneMapMetal
+                    .tone_map_peak_option(Some(hdr), nits)
+                    .expect("PQ has a peak");
+                let filter_peak = option / 10.0 * (100.0 / 203.0);
+                assert!((filter_peak - f64::from(nits) / 203.0).abs() < 1e-12);
+                let graph = Pipeline::VtToneMapMetal
+                    .filters_at_peak(Some(1920), 1080, Some(hdr), Some(nits))
+                    .expect("graph");
+                assert!(graph.contains(&format!(":peak={option}:")), "{graph}");
+            }
+        }
+        assert_eq!(
+            Pipeline::VtToneMapMetal.tone_map_peak_option(Some("hlg"), 1_179),
+            None
+        );
+        for pipeline in [Pipeline::TonemapCuda, Pipeline::TonemapOpencl] {
+            assert_eq!(
+                pipeline.tone_map_peak_option(Some("hdr10"), 1_179),
+                Some(11.79)
+            );
+        }
+    }
+
     /// Each GPU graph that names its curve takes the terms from one place,
     /// and for PQ those terms are the CPU reference's operator. A graph that
     /// says `hable` and leaves the mode to Jellyfin's `auto` is a different
@@ -1068,8 +1119,12 @@ mod tests {
                 .filters_at_peak(Some(1920), 1080, Some("hdr10"), Some(4_000))
                 .expect("graph");
             assert!(
-                graph.contains("=tonemap=hable:tonemap_mode=max:desat=0:peak=40:"),
-                "the CPU chain's peak, in its unit (cf. {cpu}): {graph}"
+                graph.contains(if pipeline == Pipeline::VtToneMapMetal {
+                    "=tonemap=hable:tonemap_mode=max:desat=0:peak=400:"
+                } else {
+                    "=tonemap=hable:tonemap_mode=max:desat=0:peak=40:"
+                }),
+                "the same absolute peak in this filter's unit (cf. {cpu}): {graph}"
             );
         }
         let hlg_at_peak = Pipeline::VtToneMapMetal

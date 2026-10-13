@@ -806,6 +806,7 @@ pub struct DecodeFacts {
     normalization_transform_known: bool,
     field_order: Option<String>,
     interlace_verdict: InterlaceVerdict,
+    hevc_progressive_constraint: bool,
     bit_depth: Option<u8>,
     color_range: Option<String>,
     color_space: Option<String>,
@@ -1003,6 +1004,7 @@ impl DecodeFacts {
             normalization_transform_known,
             field_order,
             interlace_verdict: InterlaceVerdict::NotChecked,
+            hevc_progressive_constraint: false,
             bit_depth,
             color_range,
             color_space,
@@ -1087,11 +1089,44 @@ impl DecodeFacts {
     }
 
     pub fn scan_type(&self) -> ScanType {
-        if self.interlace_verdict == InterlaceVerdict::FlagOverruled {
+        if self.interlace_verdict == InterlaceVerdict::FlagOverruled
+            || self.hevc_progressive_constraint
+        {
             ScanType::Progressive
         } else {
             ScanType::from_field_order(self.field_order())
         }
+    }
+
+    /// Refine missing HEVC scan metadata from the same held source and parser.
+    /// The selected absolute stream must match; a failed or contradictory
+    /// configuration preserves the incumbent scan decision and facts digest.
+    pub fn with_hevc_scan_metadata(mut self, document: &Value) -> Self {
+        if self.codec() != Some("hevc")
+            || self.scan_type() != ScanType::Unknown
+            || self.field_order().is_some_and(|order| order != "unknown")
+        {
+            return self;
+        }
+        let Some(streams) = document.get("streams").and_then(Value::as_array) else {
+            return self;
+        };
+        let mut selected = streams.iter().filter(|stream| {
+            stream_index(stream) == Some(self.input_video_stream)
+                && stream.get("codec_type").and_then(Value::as_str) == Some("video")
+        });
+        let Some(stream) = selected.next() else {
+            return self;
+        };
+        if selected.next().is_some() || !super::hevc_scan::progressive_configuration(stream) {
+            return self;
+        }
+        self.hevc_progressive_constraint = true;
+        let encoded =
+            serde_json::to_vec(&(self.facts_digest.as_str(), "hevc_progressive_frame_only_v1"))
+                .expect("HEVC scan evidence serialization is infallible");
+        self.facts_digest = hex::encode(Sha256::digest(encoded));
+        self
     }
 
     pub fn interlace_verdict(&self) -> InterlaceVerdict {
@@ -2988,6 +3023,18 @@ impl ResolvedTranscode {
         // curve is never served for another under the same renderer name.
         if let Some(terms) = options.pipeline.tone_map_terms(self.input_hdr_format()) {
             feed("renderer_tone_map_terms", terms.as_bytes());
+        }
+        // Metal's explicit peak unit changed after real-title acceptance found
+        // the 1,000-nit fixture masking a factor-of-ten conversion error. Bind
+        // the serialized option so older bright/clipped renditions cannot be
+        // reused under the corrected graph. Other renderers keep their keys.
+        if options.pipeline == Pipeline::VtToneMapMetal {
+            if let Some(peak) = options
+                .pipeline
+                .tone_map_peak_option(self.input_hdr_format(), options.tone_map_peak_nits)
+            {
+                feed("renderer_tone_map_peak_option", peak.to_string().as_bytes());
+            }
         }
         feed("deinterlace", self.deinterlace.name().as_bytes());
         let subtitle = match options.subtitle_burn.as_ref() {

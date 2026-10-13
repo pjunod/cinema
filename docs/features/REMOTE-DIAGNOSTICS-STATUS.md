@@ -523,3 +523,20 @@ actual `diagnosticDeveloperCard` and `observeDiagnosticPlayback` definitions.
 Adding those served helpers made the full settings script pass 65/65 and the
 single failing Shared-direct health case pass. No production callback or
 assertion was weakened; the other passing scripts were not rerun.
+
+
+## 20. Current-main integration after the green candidate
+
+All eight fast-lane checks passed on `72b6e2e8e` (run 4881). Current main had
+advanced to `eef013b5e` during validation. Only the Rust ownership inventory
+conflicted: both branches added independently reviewed waits/accessors to the
+same counters. Integration preserves both ownership explanations and their
+additive counts (1,739 time constructors and 753 launch-shaped accessors).
+Current main's HEVC/VOD/AniList code and its evidence are retained unchanged.
+
+The merged Rust tree passed the fresh pinned Rust 1.97.1 workspace/all-target
+check. Its focused ownership inventory test passed with the combined counts.
+The normal Clippy/format/catalog/JavaScript hook remains required at commit.
+Native and web application source is unchanged; its passing receipts remain
+applicable. The published updated head must receive its fast merge gate before
+integration; no second adversarial review is added.
