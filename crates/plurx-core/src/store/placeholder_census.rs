@@ -1139,6 +1139,26 @@ fn library_path_template(
         if !is_code[at] {
             continue;
         }
+        // Its SQL literal was independently modeled when scanned. A completed
+        // format expression is not a direct path-predicate binding for this
+        // later statement; treating it as one would reject ordinary follow-up
+        // reads in the same function.
+        if capture[2].trim().starts_with("format!(") {
+            let expression = capture.get(2).expect("binding expression");
+            let start = function_start + expression.start();
+            let end = function_start + expression.end();
+            if let Some(own_sql) = literals
+                .iter()
+                .find(|literal| literal.start >= start && literal.end <= end)
+            {
+                if is_sql_shaped(&own_sql.text)
+                    && (is_sql_candidate(&own_sql.text)
+                        || composed_library_path_candidate(source, own_sql, literals, is_code))
+                {
+                    continue;
+                }
+            }
+        }
         if let Some(value) = library_path_call(&capture[2]) {
             assert_eq!(
                 declarations
@@ -2139,6 +2159,7 @@ mod scanner {
             r#"fn query() { let sql = format!("SELECT {0}", super::library_paths_are_sql("$1", "$2")); }"#,
             r#"fn query() { let sql = format!("SELECT {p}", p = super::library_paths_are_sql("$1", "$2")); }"#,
             r#"fn query() { let paths_are = super::library_paths_are_sql("$1", "$2"); let alias = paths_are; let sql = format!("SELECT {alias}"); }"#,
+            r#"fn query() { let paths = format!("{}", super::library_paths_are_sql("$1", "$4")); let sql = format!("SELECT $1 WHERE {paths} AND $2 = $2"); }"#,
         ] {
             let refused = std::panic::catch_unwind(|| {
                 let (literals, mask) = literals_and_code_mask(source);
@@ -2152,6 +2173,25 @@ mod scanner {
                 refused.is_err(),
                 "unsupported format authority must fail closed: {source}"
             );
+        }
+    }
+
+    #[test]
+    fn composed_path_statement_does_not_become_a_later_direct_binding() {
+        let source = r#"fn query() {
+            let sql = format!("INSERT INTO roots SELECT $1, $2 WHERE $3 AND {}", super::library_paths_are_sql("$1", "$4"));
+            conn.execute(sql, params![library, fingerprint, establish, paths]);
+            let rows = conn.query("SELECT fingerprint FROM roots WHERE library_id = $1");
+        }"#;
+        let (literals, mask) = literals_and_code_mask(source);
+        for sql in literals.iter().filter(|literal| {
+            literal.text.starts_with("INSERT") || literal.text.starts_with("SELECT")
+        }) {
+            let variants =
+                principal_templates("hiqlite_media.rs", source, sql, &literals, &mask, &[]);
+            assert_eq!(variants.len(), 1);
+            validate_sql(&variants[0])
+                .expect("both independently composed statements retain their own parameters");
         }
     }
 
