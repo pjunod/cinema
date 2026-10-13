@@ -119,6 +119,10 @@ targets:
     platform: iOS
     sources:
       - path: Tests
+      - path: ../../crates/plurx-core/tests/fixtures/diagnostics-events-v1.json
+        buildPhase: resources
+      - path: ../../crates/plurx-core/tests/fixtures/diagnostics-v1.json
+        buildPhase: resources
       - path: ../../crates/plurx-core/tests/fixtures/remote-control-v1.json
         buildPhase: resources
       - path: ../../tests/contracts/channel-subject-wire.json
@@ -157,6 +161,10 @@ targets:
     platform: tvOS
     sources:
       - path: Tests
+      - path: ../../crates/plurx-core/tests/fixtures/diagnostics-events-v1.json
+        buildPhase: resources
+      - path: ../../crates/plurx-core/tests/fixtures/diagnostics-v1.json
+        buildPhase: resources
       - path: ../../crates/plurx-core/tests/fixtures/remote-control-v1.json
         buildPhase: resources
       - path: ../../tests/contracts/channel-subject-wire.json

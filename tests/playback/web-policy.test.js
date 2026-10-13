@@ -19,7 +19,8 @@ const SHIPPED_UI = SHIPPED_SHELL.bodyScript;
 const FILE_CONTEXT_SOURCE=fs.readFileSync(path.join(__dirname,
   "../../crates/plurxd/src/web/core/file-context.js"),"utf8");
 function PlaybackContextFunction(...args){
-  args[args.length-1]=FILE_CONTEXT_SOURCE+"\n"+args[args.length-1];
+  args[args.length-1]=FILE_CONTEXT_SOURCE+"\n"+
+    shippedSource("observeDiagnosticPlayback")+"\n"+args[args.length-1];
   return new Function(...args);
 }
 // The player's own DOM is in the shell's markup and its treatments are in

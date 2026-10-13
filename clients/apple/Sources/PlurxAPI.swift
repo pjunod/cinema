@@ -238,10 +238,23 @@ struct PlurxAPI {
         _ req: URLRequest,
         using session: URLSession? = nil
     ) async throws -> T {
+        let authorization = Session.shared.playbackAuthorization
+        let diagnosticOwner = req.value(forHTTPHeaderField: "Authorization") == authorization.token.map { "Bearer " + $0 }
+        let diagnosticStart = ProcessInfo.processInfo.systemUptime
+        let path = req.url?.path ?? ""
+        let diagnosticRoute = path.contains("/auth/") ? "auth" : path.contains("/diagnostics/") ? "diagnostics" : path.contains("/sessions") || path.contains("/decision") ? "playback" : "browse"
+        func observe(_ status: Int, failure: String? = nil) {
+            guard diagnosticOwner, Session.shared.playbackAuthorization.generation == authorization.generation else { return }
+            var facts: [String: DiagnosticFact] = ["route": .text(diagnosticRoute), "method": .text(req.httpMethod ?? "GET"), "status": .number(UInt64(max(0, status))),
+                "duration_ms": .number(UInt64(min(604_800_000, max(0, (ProcessInfo.processInfo.systemUptime - diagnosticStart) * 1000))))]
+            if let failure { facts["failure"] = .text(failure) }
+            DiagnosticRecorder.shared.record("network", "request", facts, generation: authorization.generation)
+        }
         let data: Data
         let resp: URLResponse
         do { (data, resp) = try await ReadAfterHTTP.shared.data(for: req, using: session ?? self.session) }
-        catch { throw Self.transportError(from: error) }
+        catch { observe(0, failure: "network"); throw Self.transportError(from: error) }
+        observe((resp as? HTTPURLResponse)?.statusCode ?? 0)
         try Self.check(resp, data: data)
         return try Self.decoder.decode(T.self, from: data)
     }

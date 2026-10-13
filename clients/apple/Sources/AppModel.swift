@@ -89,6 +89,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    var diagnosticNamespace: String {
+        guard let userId, let instance = settings.instanceId,
+              let identity = RemoteSecretStorage.scopedIdentity(origin: origin, instance: instance, userID: userId) else { return "anonymous" }
+        return String(identity.dropFirst("origin-v1:".count))
+    }
+
     func requireAPI() -> PlurxAPI {
         if let api { return api }
         let a = PlurxAPI(origin: origin)
@@ -397,9 +403,11 @@ final class AppModel: ObservableObject {
             return
         }
         let capturedOrigin = origin
+        let diagnostics = DiagnosticTransport(scope: diagnosticNamespace)
         busy = true
         Task { @MainActor [weak self] in
             guard let self else { return }
+            await diagnostics.revokeEnrollment(); diagnostics.cancel()
             let confirmed: Bool
             do {
                 try await PlurxAPI(origin: capturedOrigin).logout(token: token)
@@ -425,6 +433,7 @@ final class AppModel: ObservableObject {
     }
 
     private func signOutLocally(message: String? = nil) {
+        DiagnosticReportModel.shared.signOut()
         settings.clearToken()
         Session.shared.setCredentials(origin: origin, token: nil)
         userId = nil
@@ -442,6 +451,7 @@ final class AppModel: ObservableObject {
     }
 
     func changeServer() {
+        DiagnosticReportModel.shared.signOut()
         // Clearing the origin clears the persisted bearer in the same write:
         // abandoning a server must not leave its credential on disk where the
         // next one could be handed it, whether or not this process survives to

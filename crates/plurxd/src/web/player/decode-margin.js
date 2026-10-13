@@ -421,6 +421,7 @@ function beginPlaybackMediaAttachment(p){
   const token={id:(p._mediaAttachmentOrdinal||0)+1};
   p._mediaAttachmentOrdinal=token.id;
   p.mediaAttachment=token;
+  try{window.CinemaDiagnostics?.attach(token,AUTH_GENERATION);}catch(_){}
   // A deliberate reopen mints a new attachment. Clear the retired attempt
   // only after the old attachment can no longer pass its identity closure.
   p.terminalStop=null;

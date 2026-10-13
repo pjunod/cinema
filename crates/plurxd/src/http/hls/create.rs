@@ -5323,6 +5323,14 @@ pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
         return ApiError::BadRequest(reason.to_owned());
     }
     if let Some((code, reason)) = crate::transcode::vod_refusal(&error) {
+        if code == "vod_family_capacity" {
+            return ApiError::TypedRetry {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "transcode_capacity_pending",
+                message: reason.to_owned(),
+                retry_after_seconds: crate::transcode::REPLACEMENT_WAIT_RETRY_AFTER_SECS,
+            };
+        }
         let (status, code) = match code {
             "vod_disabled" => (StatusCode::SERVICE_UNAVAILABLE, "vod_disabled"),
             "vod_index_pending" => (StatusCode::SERVICE_UNAVAILABLE, "vod_index_pending"),

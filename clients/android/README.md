@@ -24,6 +24,12 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 > echo bounded read-after receipts across the advertised voter cohort;
 > unknown writes retire the floor (#1049). Source qualification only, not yet
 > installed on hardware or qualified against the fleet read-cost target.
+>
+> Build `168` — Private incident capture, protected account
+> storage, local ZIP sharing, resumed support delivery and physical-only TV
+> phone approval are implemented. Debug app and regression-source compilation
+> pass; release, runtime/privacy/resource and physical acceptance remain open.
+>
 > Build `165` — A continuous quality change cancelled
 > before it reached its owner is reported retained, so it no longer holds Auto
 > for the rest of the title (#978).

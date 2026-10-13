@@ -52,6 +52,12 @@ unit-core: override CARGO := PLURX_EXPECT_TEST_COUNT_AT_LEAST=$${PLURX_EXPECT_TE
 unit-core: ## Run plurx-core with replicated-store tests and enforce the count floor
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib
 
+# Shared diagnostics wire, strict privacy schema and hostile-archive regressions.
+.PHONY: unit-diagnostics
+unit-diagnostics: ## Run focused diagnostics schema/archive and web wire tests
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib diagnostics::
+	node --test tests/web/diagnostics-wire.test.js tests/web/diagnostics-recorder.test.js
+
 .PHONY: unit-broker
 unit-broker: test-socket-permission-check ## Run focused notification broker security and provider contracts
 	$(CARGO) test --locked -p plurx-notification-broker
@@ -1529,6 +1535,7 @@ web-check: web-unit-check ## Test playback policy, embedded JS, and every shippe
 # runs exactly this, so a web pull request executes the same tests web-check
 # does apart from the two real-browser scripts.
 web-unit-check: ## Run every Node web and playback test (no browser)
+	@node --test tests/web/diagnostics-wire.test.js tests/web/diagnostics-recorder.test.js
 	@node --test tests/web/cinema-remote-client.test.js
 	@node --test tests/web/cinema-remote-controller.test.js
 	@node --test tests/web/cinema-remote-guard.test.js

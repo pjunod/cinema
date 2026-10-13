@@ -6276,3 +6276,60 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/Net.kt"
 source_anchor = "internal fun capturedReceiptClient(auth: Session.PlaybackAuthorization, transport: OkHttpClient): OkHttpClient ="
 test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
 test_anchor = "fun actualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt()"
+[[fixes]]
+id = "diagnostics.apple-wire"
+commits = ["f13a362361fbab0d7754a380f5e212cede32f429"]
+source = "clients/apple/Sources/DiagnosticWire.swift"
+source_anchor = "static func manifest"
+test = "clients/apple/Tests/DiagnosticWireTests.swift"
+test_anchor = "testSharedManifestFixturesRejectPrivacyAndEncodingViolations"
+
+[[fixes]]
+id = "diagnostics.web-recorder"
+commits = ["9ca45b52ac9d4b4a330f20f096d3045cc5a4a933"]
+source = "crates/plurxd/src/web/core/diagnostics-recorder.js"
+source_anchor = "function createCinemaDiagnosticRecorder"
+test = "tests/web/diagnostics-recorder.test.js"
+test_anchor = "sample floods retain terminal markers within count and byte limits"
+
+[[fixes]]
+id = "diagnostics.apple-capture"
+commits = ["4e523845bb7faac7ee2b1f394ae510c45f51a651"]
+source = "clients/apple/Sources/DiagnosticRecorder.swift"
+source_anchor = "final class DiagnosticRecorder"
+test = "clients/apple/Tests/DiagnosticCaptureTests.swift"
+test_anchor = "testBoundedRecorderRetainsTerminalAndExactCountersWithoutSecrets"
+
+[[fixes]]
+id = "diagnostics.android-capture"
+commits = ["593f745506b6bd7e7678ff7a82ea1857a730beb1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticRecorder.kt"
+source_anchor = "internal class DiagnosticRecorder"
+test = "clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticCaptureTest.kt"
+test_anchor = "boundedRecorderRetainsTerminalAndExactCountersWithoutSecrets"
+
+
+# One historical witness per corrective commit; additional regressions are in PR #1037.
+[[fixes]]
+id = "diagnostics.platform-event-wire"
+commits = ["ff49684d3b907921ddfc8f5f256835cbe8637910"]
+source = "clients/apple/Sources/DiagnosticWire.swift"
+source_anchor = "static func event"
+test = "clients/apple/Tests/DiagnosticWireTests.swift"
+test_anchor = "testSharedEventFixturesPreserveCodecLayersAndRefusePrivateFields"
+
+[[fixes]]
+id = "diagnostics.immutable-support-consent"
+commits = ["707d8bb1b89fa9d690d5ff74e6c12532a75c927e"]
+source = "crates/plurxd/src/web/pages/diagnostics.js"
+source_anchor = "const destination=run.deliveryState?.origin||run.frozenOrigin"
+test = "tests/web/diagnostics-recorder.test.js"
+test_anchor = "resumed delivery confirms and displays its immutable destination"
+
+[[fixes]]
+id = "diagnostics.account-recovery-fence"
+commits = ["f25cfce318975461042dedc37220e607a57fd57e"]
+source = "crates/plurxd/src/web/pages/diagnostics.js"
+source_anchor = "const authGeneration=AUTH_GENERATION,token=TOKEN"
+test = "tests/web/diagnostics-recorder.test.js"
+test_anchor = "account replacement during IndexedDB report recovery cannot adopt old evidence"

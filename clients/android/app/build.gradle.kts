@@ -209,6 +209,7 @@ androidComponents {
 }
 
 dependencies {
+    implementation(libs.zxing.core)
     implementation(libs.firebase.messaging)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.profileinstaller)

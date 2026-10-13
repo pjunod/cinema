@@ -1658,6 +1658,7 @@ private fun PlayerContent(
 
         if (playbackTransportOnScreen(isInPip, controlsVisible, panel, statsMode, blockingFault != null)) {
             Controls(
+                diagnosticGeneration = controller.diagnosticAuthorizationGeneration,
                 title = plan.title,
                 subtitle = plan.subtitle,
                 releaseDate = plan.releaseDate,
@@ -1909,6 +1910,7 @@ internal fun PGSBitmapOverlay(
 
 @Composable
 internal fun Controls(
+    diagnosticGeneration: Long? = null,
     title: String,
     subtitle: String? = null,
     releaseDate: String? = null,
@@ -1990,6 +1992,7 @@ internal fun Controls(
                     Icon(Icons.Filled.Tune, contentDescription = "Playback settings", tint = Color.White)
                 }
             }
+            tv.plurx.app.diagnostics.DiagnosticReportButton(category="playback",positiveTitle=title,generation=diagnosticGeneration)
             TvIconButton(
                 onClick = onInfo,
                 modifier = transportModifier(PlayerControlId.Info),
@@ -3349,6 +3352,7 @@ internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlayba
                 if (subtitles.isNotEmpty()) SharedChoiceMenu("Subtitles", subtitles.firstOrNull { it.index.toInt() == current.subtitle }?.let { sharedTrackLabel(it.language, it.title, it.codec) } ?: "Off",
                     listOf("Off" to current.copy(subtitle = null)) + subtitles.map { sharedTrackLabel(it.language, it.title, it.codec) to current.copy(subtitle = it.index.toInt()) }, !starting, { choice -> remoteClient?.physicalInput(); controller.change(choice) })
             }
+            tv.plurx.app.diagnostics.DiagnosticReportButton(category="playback")
             androidx.compose.material3.TextButton(onClick = { remoteClient?.physicalInput(); controller.beginStop(); onExit() }) { Text("Close") }
         }
     }

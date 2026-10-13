@@ -630,6 +630,7 @@ function developerPanels(){
       // without being composed here, so this whole gate died on its name.
       shippedSource("clusterBackupCard"),
       shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"), shippedSource("cinemaSharingCard"), shippedSource("cinemaRemoteCard"), shippedSource("cinemaRemoteInvitationsCard"),
+      shippedSource("diagnosticDeveloperCard"),
       shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       // 2026-10-10: the graduated cards are drawn by their own sections.
       shippedSource("preparedHandoffBrowserCard"), shippedSource("clusterSettingsSection"),

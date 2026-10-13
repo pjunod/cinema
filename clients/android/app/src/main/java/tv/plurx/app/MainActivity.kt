@@ -1,5 +1,7 @@
 package tv.plurx.app
 
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -119,7 +121,7 @@ class MainActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); RemoteRuntime.get(applicationContext).windowChanged() }
     override fun onResume() { super.onResume(); RemoteRuntime.scene(true, false) }
     override fun onPause() { RemoteRuntime.scene(false, false); super.onPause() }
-    override fun onStop() { if (!isChangingConfigurations) RemoteRuntime.scene(false, true); super.onStop() }
+    override fun onStop() { if (!isChangingConfigurations) tv.plurx.app.diagnostics.DiagnosticRuntime.background(); if (!isChangingConfigurations) RemoteRuntime.scene(false, true); super.onStop() }
     override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
         if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) RemoteRuntime.get(applicationContext).physicalInput()
         return super.dispatchTouchEvent(event)
@@ -177,11 +179,18 @@ private fun AppRoot(
         }
     }
 
+    LaunchedEffect(phase,vm.origin,vm.serverInstanceId,vm.currentUserId) {
+        if (phase != Phase.Loading) tv.plurx.app.diagnostics.DiagnosticRuntime.configure(vm.origin,vm.serverInstanceId,vm.currentUserId,tv.plurx.app.player.isTelevision(context))
+    }
+    Box(Modifier.fillMaxSize()) {
     when (phase) {
         Phase.Loading -> LoadingBox()
         Phase.NeedServer -> ConnectScreen(vm, busy, authError)
         Phase.NeedLogin -> LoginScreen(vm, busy, authError)
         Phase.Ready -> MainNav(vm, reminderChannel, onReminderChannelUsed, invitationId, onInvitationUsed)
+    }
+        if (phase != Phase.Ready) Box(Modifier.align(androidx.compose.ui.Alignment.BottomEnd).padding(16.dp)) { tv.plurx.app.diagnostics.DiagnosticReportButton(category="connection") }
+        tv.plurx.app.diagnostics.DiagnosticReportHost()
     }
 }
 

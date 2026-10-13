@@ -1878,8 +1878,10 @@ test("local sign-out clears every protected page cache before rendering auth", (
      // is about.
      let REPORTER_TOKEN="token";
      function refreshClientErrorReporterAuth(){REPORTER_TOKEN=TOKEN;}
+     let DIAGNOSTIC_HISTORY="secret";
+     const window={CinemaDiagnostics:{clear(){DIAGNOSTIC_HISTORY=null;}}};
      ${shippedSource("clearLocalSession")};
-     return {logout:()=>clearLocalSession(AUTH_GENERATION,""),state:()=>({TOKEN,ME,REPORTER_TOKEN,SHARING_SECRET,PAGE_RENDER_GENERATION,PAGE_TIMER,ACTIVITY_SNAPSHOT,
+     return {logout:()=>clearLocalSession(AUTH_GENERATION,""),state:()=>({TOKEN,ME,REPORTER_TOKEN,DIAGNOSTIC_HISTORY,SHARING_SECRET,PAGE_RENDER_GENERATION,PAGE_TIMER,ACTIVITY_SNAPSHOT,
        SETTINGS_DATA,loaded:SETTINGS_LOADED.size,loads:SETTINGS_LOADS.size,LOGS_RUN,CLUSTER_LOGS_RUN,
        CLUSTER_TOKEN,CLUSTER_REFUSAL,CLUSTER_LOADED,CLUSTER_LEAVING,rendered,DVR_REMINDER_TIMER,
        due:DVR_DUE.length,LIBRARY_CHANNEL_DRAFT,LIBRARY_CHANNEL_TUNING,
@@ -1888,7 +1890,7 @@ test("local sign-out clears every protected page cache before rendering auth", (
   harness.logout();
   // The due-reminder overlay is a protected page cache like any other: it
   // names what somebody is about to watch, and its timer outlives every route.
-  assert.deepEqual(harness.state(),{TOKEN:null,ME:null,REPORTER_TOKEN:null,SHARING_SECRET:null,PAGE_RENDER_GENERATION:8,PAGE_TIMER:null,
+  assert.deepEqual(harness.state(),{TOKEN:null,ME:null,REPORTER_TOKEN:null,DIAGNOSTIC_HISTORY:null,SHARING_SECRET:null,PAGE_RENDER_GENERATION:8,PAGE_TIMER:null,
     ACTIVITY_SNAPSHOT:null,SETTINGS_DATA:{},loaded:0,loads:0,LOGS_RUN:null,CLUSTER_LOGS_RUN:null,
     CLUSTER_TOKEN:null,CLUSTER_REFUSAL:null,CLUSTER_LOADED:false,CLUSTER_LEAVING:false,rendered:1,
     DVR_REMINDER_TIMER:null,due:0,LIBRARY_CHANNEL_DRAFT:null,LIBRARY_CHANNEL_TUNING:false,main:""});
@@ -1896,9 +1898,16 @@ test("local sign-out clears every protected page cache before rendering auth", (
 });
 
 test("logout revokes the captured bearer and cannot clear a newer login", async () => {
-  const requests=[];
-  const fetch=(url,options)=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject}));
-  const harness=new Function("fetch","setTimeout","clearTimeout",
+  const requests=[],revocations=[],requestSignals=[];
+  const requested=()=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(new Error("logout request did not reach its captured origin")),1000);
+    requestSignals.push(()=>{clearTimeout(timer);resolve();});
+  });
+  const fetch=(url,options)=>new Promise((resolve,reject)=>{
+    requests.push({url,options,resolve,reject});requestSignals.shift()?.();
+  });
+  const diagnosticRevokeEnrollment=token=>new Promise(resolve=>revocations.push({token,resolve}));
+  const harness=new Function("fetch","setTimeout","clearTimeout","diagnosticRevokeEnrollment",
     `const API="/api/v1",location={origin:"https://old.example"};
      let TOKEN="old-token",AUTH_GENERATION=4,SIGN_OUT_RUN=null,notice="";
      function clearLocalSession(expectedGeneration,message){
@@ -1908,13 +1917,21 @@ test("logout revokes the captured bearer and cannot clear a newer login", async 
      ${shippedSource("logout")};
      return {logout,login:(token)=>{TOKEN=token;AUTH_GENERATION++;},
        state:()=>({TOKEN,AUTH_GENERATION,notice})};`,
-  )(fetch,()=>1,()=>{});
+  )(fetch,()=>1,()=>{},diagnosticRevokeEnrollment);
 
+  const oldRequested=requested();
   const oldLogout=harness.logout();
+  assert.equal(revocations[0].token,"old-token");
+  assert.equal(requests.length,0,"diagnostic enrollment revocation precedes bearer logout");
+  revocations[0].resolve();await oldRequested;
   assert.equal(requests[0].url,"https://old.example/api/v1/auth/logout");
   assert.equal(requests[0].options.headers.authorization,"Bearer old-token");
   harness.login("new-token");
+  const currentRequested=requested();
   const currentLogout=harness.logout();
+  assert.equal(revocations[1].token,"new-token");
+  assert.equal(requests.length,1,"the new account's revocation owns its own wait");
+  revocations[1].resolve();await currentRequested;
   assert.equal(requests[1].options.headers.authorization,"Bearer new-token");
   requests[0].resolve({ok:true,status:200});
   assert.equal(await oldLogout,true);

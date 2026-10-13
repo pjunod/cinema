@@ -140,7 +140,7 @@ list.
 | [STATUS-HISTORY.md](playback-control/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
 | [REPLACEMENT-GATE-SUPERSESSION-RCA.md](playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md) | Why an abandoned replacement held its player key forever, the lab6 evidence, and the supersedable gate that fixes it. | built |
 | [CALLBACK-ROOT-CAUSE-AND-FIX.md](playback-control/CALLBACK-ROOT-CAUSE-AND-FIX.md) | Why Safari cold resume lost frame callbacks, the lifecycle fix, controlled evidence, and questions for Fable review. | open |
-| [MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md](playback-control/MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md) | Seven retained Mac HDR acceptance follow-ups: paused seeks, quality alignment, abandoned capacity, cold startup, rendition facts, authority recovery and calibrated fidelity; evidence, investigations and closure criteria. | open |
+| [MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md](playback-control/MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md) | Seven retained Mac HDR follow-ups, qualified F1 hls.js repairs and the current Air access/restoration blocker; evidence, investigations and closure criteria. | open |
 | [Paused VOD seek repair receipt](playback-control/evidence/paused-vod-seek-20261012.json) | F1 stopped-loader reproduction, failed first harness, actual paused forward/backward target frames, regressions and retained Air rolling-reopen failure; HDR hardware rerun remains open. | open |
 | [PLAYBACK-LIFECYCLE-COVERAGE.md](playback-control/PLAYBACK-LIFECYCLE-COVERAGE.md) | Playback states and transitions, buffer handoffs, communication contracts, existing test anchors, and open acceptance gaps. | open |
 | [PLAYBACK-REWRITE-REMAINDER.md](playback-control/PLAYBACK-REWRITE-REMAINDER.md) | Executed Sol handoff: the finite B01–B05 remainder, its boundaries, and the work promoted through PR #263. | done |
@@ -187,6 +187,7 @@ list.
 | [M6-WEB-CLIENT.md](playback-control/M6-WEB-CLIENT.md) | Historical web implementation record; its throughput qualification prose is not current admission policy. | superseded |
 | [M6-SERVER-PRIME-HANDOFF.md](playback-control/M6-SERVER-PRIME-HANDOFF.md) | Phase 3 — the reserve/prime constraints and the implementation that now attaches the staged VOD worker. | built |
 | [CONTINUOUS-QUALITY-STATUS.html](playback-control/CONTINUOUS-QUALITY-STATUS.html) | Current continuous-quality build progress, retained evidence and ownership dependencies. | open |
+| [CONTINUOUS-FOREGROUND-ADMISSION.md](playback-control/CONTINUOUS-FOREGROUND-ADMISSION.md) | Why background indexing refused continuous starts, and the bounded foreground admission repair. | open |
 | [CONTINUOUS-QUALITY-BUILD.md](playback-control/CONTINUOUS-QUALITY-BUILD.md) | The next quality-switch build: safe failed changes, continuous HLS renditions, shared audio, bounded JIT production, web-first execution and native/device acceptance. | open |
 | [CONTINUOUS-QUALITY-REVIEW.md](playback-control/CONTINUOUS-QUALITY-REVIEW.md) | Adversarial findings and dispositions for the continuous-quality build contract. | open |
 | [CONTINUOUS-QUALITY-MATRIX.md](playback-control/CONTINUOUS-QUALITY-MATRIX.md) | Which source/lifecycle/pressure rows have current, older or missing evidence, and how to read the focused lifecycle helper. | open |
@@ -265,6 +266,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [PLAYBACK-STARTUP-LATENCY-M0-20261002.md](streaming/PLAYBACK-STARTUP-LATENCY-M0-20261002.md) | Native Safari preparation/publication incident and review-reported index backlog, with evidence limits. | done |
 | [PLAYBACK-STARTUP-LATENCY-M0-20261002.json](streaming/PLAYBACK-STARTUP-LATENCY-M0-20261002.json) | Sanitized retained phase receipt for the native Safari incident; no successful presentation claim. | done |
 | [PLAYBACK-STARTUP-LATENCY-REVIEW-20261002.md](streaming/PLAYBACK-STARTUP-LATENCY-REVIEW-20261002.md) | Supplied proposal review, single final implementation review and conservative admission disposition. | done |
+| [HDR-CONTENT-LIGHT-INDEX.md](streaming/HDR-CONTENT-LIGHT-INDEX.md) | Why changing HDR light-level metadata forced rolling startup, and the indexed-copy metadata repair. | open |
 | [PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md](streaming/PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md) | Monotonic phase origins, exact incident replay, repeated index/resource observations, transport measurement limits, and the A-M0 target/bootstrap startup lab with its decision rule. | open |
 | [PLAYBACK-STARTUP-LATENCY-BUILD.md](streaming/PLAYBACK-STARTUP-LATENCY-BUILD.md) | Sol execution handoff: isolated clone, latest user CI/CD rulings, milestone deliverables, one reviewed PR, fast lane, merge and cleanup. | open |
 | [PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md](streaming/PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md) | Reviewed runtime build contract for the measured 14.2-second start, index availability, qualified publication policy and cross-client acceptance. | open |
@@ -641,6 +643,9 @@ Two rounds of performance work, each with its plan, review, and response.
 | File | Answers | |
 |---|---|---|
 | [PROJECT-BACKLOG.md](features/PROJECT-BACKLOG.md) | Cross-project to-do: designed but unbuilt work, remaining acceptance, reconciliations and deferred decisions. | live |
+| [REMOTE-DIAGNOSTICS-IMPLEMENTATION.md](features/REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) | First-release build contract for web, Apple and Android diagnostic capture, user-scoped server evidence, TV phone handoff and the independent upload inbox. | open |
+| [REMOTE-DIAGNOSTICS-STATUS.md](features/REMOTE-DIAGNOSTICS-STATUS.md) | Canonical ownership, packet progress, software/device evidence and promotion ledger for remote diagnostics. | open |
+| [REMOTE-DIAGNOSTICS-OPERATIONS.md](server/REMOTE-DIAGNOSTICS-OPERATIONS.md) | Build and operate the independent support ingress, passkey inbox, private storage, quotas and restore fences; deployment/device acceptance remains open. | open |
 | [SHARED-LIBRARIES-DESIGN.md](features/SHARED-LIBRARIES-DESIGN.md) | Why Cinema shares selected libraries over private Tailscale; scope and deferred Plex/Watch Together work. | open |
 | [SHARED-LIBRARIES-IMPLEMENTATION.md](features/SHARED-LIBRARIES-IMPLEMENTATION.md) | Revised S0–S8 build contract, authority, deployment, playback integration and acceptance evidence. | open |
 | [SHARED-LIBRARIES-STATUS.md](features/SHARED-LIBRARIES-STATUS.md) | Shared-libraries integration, live promotion evidence, failed-only qualification and remaining acceptance. | open |
@@ -770,3 +775,6 @@ and no link anywhere in the repo may point at a `docs/` path that does not
 exist.
 
 DV final bounded serving evidence: [HTTP summary](evidence/dv-processing-2026-10-09/http-summary.json) and [artifact manifest](evidence/dv-processing-2026-10-09/http-manifest.json) — retained local synthetic results and failed attempts; full promotion evidence belongs to PR #968.
+
+| [Remote diagnostics Apple wire](apple-builds/remote-diagnostics-wire.md) | What is added to the Apple report format contract? | built |
+| [Remote diagnostics Apple capture](apple-builds/remote-diagnostics-capture.md) | What changes in native private report capture, share, send and TV approval? | open |
