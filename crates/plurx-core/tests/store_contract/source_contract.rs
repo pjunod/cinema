@@ -202,6 +202,32 @@ impl SourceContractCluster {
                 .expect("each original running voter verifies installed Source"));
         }
     }
+    pub(super) async fn selected_member(
+        &self,
+        index: usize,
+    ) -> (String, u64, Arc<plurx_core::secrets::CredentialKey>) {
+        let members = self.members.lock().await;
+        let member = &members[index];
+        (
+            member.identity.node_id.clone(),
+            member.identity.raft_id,
+            Arc::clone(&member.credential_key),
+        )
+    }
+
+    /// Metadata-only boot used by SQL custody controls; no physical driver exists.
+    pub(super) async fn publish_metadata_ingress_boot(&self, boot: uuid::Uuid) {
+        let members = self.members.lock().await;
+        for member in members.iter() {
+            let manager = member.membership_manager();
+            manager.set_ingress_custody_boot(Some(boot));
+            manager
+                .publish_ingress_custody_boot()
+                .await
+                .expect("selected manager publishes fixture boot");
+        }
+    }
+
     async fn drain(&mut self) -> Vec<String> {
         let mut failures = self
             .uncertain_selection_roots
