@@ -1102,9 +1102,11 @@ discovery. Compiled membership is explicitly separate from historical runtime
 outcomes. It retains the original opaque full-command successes, measured
 named overlays, source-impact reviews and failure chronology. Default test
 recipes still run normally; adoption requires a complete authenticated proof.
-The original JVM XML gaps remain opaque and the legacy capture adapters are
-still being completed. Astra identified 51 additional existing Python checks
+The original JVM XML gaps remain opaque. Seven finite original JVM capture
+adapters preserve reviewed source equivalence separately from unknown execution
+SHAs and runtime/image fingerprints. A parser-only check accepts those original
+captures and the existing 40-case run without executing unit bodies. Astra identified 51 additional existing Python checks
 whose real repository inputs changed; only those invalidated bodies, new
-controls and the one failed fixture require effort execution. New protocol and
-collector controls have not yet run. Fleet deployment and physical HDR ON/OFF
+controls and the one failed fixture require effort execution. The 26 new protocol and collector controls have not yet run. The workflow
+change also invalidates the previously passed YAML duplicate-key check. Fleet deployment and physical HDR ON/OFF
 acceptance remain open.
