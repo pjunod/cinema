@@ -141,6 +141,8 @@ fn private(value: impl IntoResponse) -> Response {
 }
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
+        // Preserve the outer router's literal Plex `:` routes when merged.
+        .without_v07_checks()
         .route("/api/v1/diagnostics/upload-grants", post(grant))
         .route(
             "/api/v1/diagnostics/enrollments",
