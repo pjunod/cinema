@@ -545,7 +545,7 @@ def free_ports(preferred, count):
 
     Holding every socket until the set is complete prevents a concurrent
     Forgejo job (or the kernel's ephemeral allocator) from handing the same
-    port back for the daemon's HTTP, Raft, and cluster API listeners.
+    port back for the daemon's HTTP, Raft, cluster API and Jellyfin listeners.
     """
     reservations = []
     try:
@@ -564,6 +564,34 @@ def free_ports(preferred, count):
     finally:
         for listener in reservations:
             listener.close()
+
+
+def wait_for_fixture_idle(read_processes, read_boot_log, alive, *,
+                          timeout=300, quiet_seconds=2,
+                          now=time.monotonic, sleep=time.sleep):
+    """Wait for this boot's audit retirement and a stable empty local inventory."""
+    deadline, quiet_since, last = now() + timeout, None, []
+    while now() < deadline:
+        if not alive():
+            raise Fail("capture fixture exited while waiting for boot audit retirement")
+        remaining = deadline - now()
+        if remaining <= 0:
+            break
+        last = read_processes(min(5, remaining))
+        terminal = re.search(r"caption graph probe (?:complete|unavailable)", read_boot_log())
+        observed = now()
+        if observed >= deadline:
+            break
+        if terminal and not last:
+            if quiet_since is None:
+                quiet_since = observed
+            if observed - quiet_since >= quiet_seconds:
+                return
+        else:
+            quiet_since = None
+        sleep(min(0.25, max(0, deadline - now())))
+    raise Fail("capture fixture did not retire boot children before its deadline: "
+               + json.dumps(last, sort_keys=True))
 
 
 def free_port(preferred):
@@ -657,9 +685,9 @@ class SelfHost:
         self.media_dir = Path(args.out).resolve() / "media"
         self.config = self.root / "plurx.toml"
         self.log = self.root / "plurxd.log"
-        # The same three ports stay in the config across all three deliberate
+        # The same four ports stay in the config across all three deliberate
         # boots. A shared runner may already own the daemon defaults 32401/2.
-        self.port, self.raft_port, self.api_port = free_ports(args.port, 3)
+        self.port, self.raft_port, self.api_port, self.jellyfin_port = free_ports(args.port, 4)
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.proc = None
         self.token = None
@@ -680,6 +708,7 @@ class SelfHost:
         return path
 
     def spawn(self):
+        self.boot_log_start = self.log.stat().st_size if self.log.exists() else 0
         handle = open(self.log, "a")
         # start_new_session so a Ctrl-C in the terminal does not race us to the
         # child: this script stops it explicitly, in `stop`.
@@ -726,7 +755,8 @@ class SelfHost:
         self.data_dir.mkdir(parents=True)
         self.config.write_text(
             "# Written by scripts/ui-baseline --self-host. Throwaway.\n"
-            f'[server]\nname = "plurx"\nbind = "127.0.0.1:{self.port}"\n\n'
+            f'[server]\nname = "plurx"\nbind = "127.0.0.1:{self.port}"\n'
+            f'jellyfin_port = {self.jellyfin_port}\n\n'
             f'[cluster]\nraft_bind = "127.0.0.1:{self.raft_port}"\n'
             f'api_bind = "127.0.0.1:{self.api_port}"\n\n'
             f'[storage]\ndata_dir = "{self.data_dir}"\n'
@@ -748,7 +778,34 @@ class SelfHost:
         self.stop()
         self.freeze_database()
         self.spawn()
+        self.wait_for_capture_idle()
         self.discover()
+
+    def wait_for_capture_idle(self):
+        # Health is published while the boot caption audit still owns children.
+        # Scope its terminal record to this boot; the prior seed boot is not proof.
+        def read_boot_log():
+            with self.log.open("rb") as source:
+                source.seek(max(self.boot_log_start, self.log.stat().st_size - 262144))
+                return source.read(262144).decode(errors="replace")
+
+        def read_processes(timeout):
+            detail = api(self.base_url, "/activity/detail", self.token, timeout=timeout)
+            rows = detail.get("processes")
+            if not isinstance(rows, list):
+                raise Fail("capture fixture returned no process inventory")
+            return rows
+
+        wait_for_fixture_idle(read_processes, read_boot_log,
+                              lambda: self.proc.poll() is None)
+        readiness = api(self.base_url, "/developer/readiness", self.token, timeout=5)
+        ports = [requirement for item in readiness.get("items", [])
+                 if item.get("id") == "jellyfin_compatibility"
+                 for requirement in item.get("requirements", [])
+                 if requirement.get("id") == "standard_port"]
+        if len(ports) != 1 or ports[0].get("status") != "met":
+            raise Fail("capture fixture Jellyfin listener did not bind its reserved port: "
+                       + json.dumps(ports, sort_keys=True))
 
     def spend_activation_recovery_boot(self):
         """Abort one activation attempt so the next boot stays on SQLite.

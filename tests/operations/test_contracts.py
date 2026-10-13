@@ -485,12 +485,13 @@ assert.equal(context.ACT_TIMER, null);
         contract = runpy.run_path(
             str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_port_contract"
         )
-        ports = contract["free_ports"](0, 3)
+        ports = contract["free_ports"](0, 4)
 
-        self.assertEqual(len(ports), 3)
-        self.assertEqual(len(set(ports)), 3)
+        self.assertEqual(len(ports), 4)
+        self.assertEqual(len(set(ports)), 4)
         self.assertTrue(all(port > 0 for port in ports))
-        self.assertIn("self.port, self.raft_port, self.api_port = free_ports", script)
+        self.assertIn("self.port, self.raft_port, self.api_port, self.jellyfin_port = free_ports", script)
+        self.assertIn('jellyfin_port = {self.jellyfin_port}', script)
         self.assertIn('raft_bind = "127.0.0.1:{self.raft_port}"', script)
         self.assertIn('api_bind = "127.0.0.1:{self.api_port}"', script)
 
