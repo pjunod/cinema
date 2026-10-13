@@ -60,7 +60,7 @@ struct PlaybackControlTransport {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: urlRequest)
+            (data, response) = try await ReadAfterHTTP.shared.data(for: urlRequest, using: session)
         } catch {
             // No status at all — the reporter treats that as retryable
             // transport, which is right: the server never saw this exchange.

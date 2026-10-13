@@ -6224,6 +6224,58 @@ source_anchor = "let complete = times.filter { $0 < lastDTS }.sorted()"
 test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
 test_anchor = "func testTransportStreamSuccessorStopsAtACompletePrefix()"
 
+# K04 native echo: source/test bindings only; focused execution is recorded
+# separately in PR1049. These rows do not waive any history or landing gate.
+[[fixes]]
+id = "apple.read-after-unknown-write-retires-inflight-floor"
+commits = ["97ee042ac5e9b045284b6c2e9c71a96e4a81d82f"]
+source = "clients/apple/Sources/ReadAfterReceipt.swift"
+source_anchor = "func observe(_ value: String?, mutating: Bool, request: Request,"
+test = "clients/apple/Tests/ReadAfterReceiptTests.swift"
+test_anchor = "func testUnknownWriteRetiresInFlightKnownReplies()"
+
+[[fixes]]
+id = "android.read-after-unknown-write-retires-inflight-floor"
+commits = []
+supplements = "apple.read-after-unknown-write-retires-inflight-floor"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/ReadAfterInterceptor.kt"
+source_anchor = "receipts.observe(value, mutating, ticket) { authorization().generation }"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/ReadAfterReceiptTest.kt"
+test_anchor = "fun unknownWriteRetiresInFlightKnownReplies()"
+
+[[fixes]]
+id = "apple.read-after-authorization-time-generation"
+commits = ["d597fcea97816b2b64bfa38a744e6b77ee4f834c"]
+source = "clients/apple/Sources/ReadAfterHTTP.swift"
+source_anchor = "URLProtocol.setProperty(authorization, forKey: authorizationKey, in: mutable)"
+test = "clients/apple/Tests/ReadAfterHTTPTests.swift"
+test_anchor = "func testAuthorizationTimeGenerationFencesReusedBearerAndOpaqueLogout()"
+
+[[fixes]]
+id = "android.read-after-authorization-time-generation"
+commits = []
+supplements = "apple.read-after-authorization-time-generation"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/ReadAfterInterceptor.kt"
+source_anchor = "val captured = original.tag(ReadAfterAuthorization::class.java)"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/ReadAfterInterceptorTest.kt"
+test_anchor = "fun authorizationTimeGenerationFencesReusedBearerAndUnboundRequests()"
+
+[[fixes]]
+id = "apple.read-after-captured-watched-writer"
+commits = ["5a74d83d0af09eb811bfaecf7d144e380f37ea34"]
+source = "clients/apple/Sources/SharedLibraryClient.swift"
+source_anchor = "ReadAfterHTTP.bindCaptured(origin: origin, token: token, generation: generation, to: &request)"
+test = "clients/apple/Tests/SharedLibraryTests.swift"
+test_anchor = "func testActualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt()"
+
+[[fixes]]
+id = "android.read-after-captured-watched-writer"
+commits = []
+supplements = "apple.read-after-captured-watched-writer"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Net.kt"
+source_anchor = "internal fun capturedReceiptClient(auth: Session.PlaybackAuthorization, transport: OkHttpClient): OkHttpClient ="
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+test_anchor = "fun actualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt()"
 [[fixes]]
 id = "diagnostics.apple-wire"
 commits = ["f13a362361fbab0d7754a380f5e212cede32f429"]

@@ -21,7 +21,13 @@ object Net {
         explicitNulls = false
     }
 
-    val client: OkHttpClient = OkHttpClient.Builder()
+    val client: OkHttpClient = authenticatedClient()
+
+    /** Production keeps Android's suspend-aware monotonic clock. JVM HTTP
+     * fixtures inject time without mocking networking or removing observers. */
+    internal fun authenticatedClient(
+        diagnosticMillis: () -> Long = android.os.SystemClock::elapsedRealtime,
+    ): OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .apply {
@@ -30,28 +36,33 @@ object Net {
             if (BuildConfig.DEBUG) eventListenerFactory(NetCallDiagnostics.factory())
         }
         .addInterceptor { chain ->
-            val token = Session.token
+            val captured = Session.readAfterAuthorization()
+            val token = captured.token
             val req = chain.request()
             // `/server` is public and identifies rediscovered candidates.
             // Never leak a saved bearer token while probing the LAN.
             val publicIdentityRequest = req.url.encodedPath == "/api/v1/server"
             val out = if (token != null && !publicIdentityRequest) {
-                req.newBuilder().header("Authorization", "Bearer $token").build()
+                req.newBuilder().header("Authorization", "Bearer $token")
+                    .tag(ReadAfterAuthorization::class.java,
+                        captured).build()
             } else {
                 req
             }
             val authorization = Session.playbackAuthorization()
-            val started = android.os.SystemClock.elapsedRealtime()
+            val started = diagnosticMillis()
             val path = out.url.encodedPath
             val route = when { path.startsWith("/api/v1/auth/") -> "auth"; path.startsWith("/api/v1/diagnostics/") -> "diagnostics"; path.contains("/sessions") || path.endsWith("/decision") -> "playback"; else -> "browse" }
             fun observe(status: Int, failure: String? = null) {
                 if (authorization.generation != Session.playbackAuthorization().generation || authorization.token != token) return
-                val facts = mutableMapOf("route" to kotlinx.serialization.json.JsonPrimitive(route), "method" to kotlinx.serialization.json.JsonPrimitive(out.method), "status" to kotlinx.serialization.json.JsonPrimitive(status), "duration_ms" to kotlinx.serialization.json.JsonPrimitive((android.os.SystemClock.elapsedRealtime()-started).coerceIn(0,604800000)))
+                val facts = mutableMapOf("route" to kotlinx.serialization.json.JsonPrimitive(route), "method" to kotlinx.serialization.json.JsonPrimitive(out.method), "status" to kotlinx.serialization.json.JsonPrimitive(status), "duration_ms" to kotlinx.serialization.json.JsonPrimitive((diagnosticMillis()-started).coerceIn(0,604800000)))
                 if (failure != null) facts["failure"] = kotlinx.serialization.json.JsonPrimitive(failure)
                 tv.plurx.app.diagnostics.DiagnosticRuntime.record("network","request",facts,authorization.generation)
             }
             try { chain.proceed(out).also { observe(it.code) } } catch (error: java.io.IOException) { observe(0,"network"); throw error }
         }
+        .addInterceptor(ReadAfterNetworking.interceptor)
+        .addNetworkInterceptor(ReadAfterNetworking.interceptor.redirectGuard)
         .build()
 
     /** Capability URLs already carry their narrow authority. Adding the
@@ -80,6 +91,24 @@ object Net {
             )
         }
         .build()
+
+    /** Opt in only clients that already captured and fence the full account
+     * generation. Ordinary background profile/capability clients stay opaque;
+     * this never replaces their bearer or adopts a later login. */
+    internal fun capturedReceiptClient(auth: Session.PlaybackAuthorization, transport: OkHttpClient): OkHttpClient =
+        transport.newBuilder().apply {
+            // Wrap existing interceptors as well: a test/cache interceptor
+            // may answer without reaching the network or later interceptors.
+            interceptors().add(0, okhttp3.Interceptor { chain ->
+                val original = chain.request()
+                val current = Session.readAfterAuthorization()
+                val peers = if (current.generation == auth.generation && current.origin == auth.origin && current.token == auth.token) current.peers else emptyList()
+                val captured = ReadAfterAuthorization(auth.origin, auth.token, auth.generation, peers)
+                chain.proceed(original.newBuilder().tag(ReadAfterAuthorization::class.java, captured).build())
+            })
+            interceptors().add(1, ReadAfterNetworking.interceptor)
+            addNetworkInterceptor(ReadAfterNetworking.interceptor.redirectGuard)
+        }.build()
 
     private val contentType = "application/json".toMediaType()
 

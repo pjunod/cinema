@@ -14,6 +14,7 @@ object Session {
     private var credentialOrigin = ""
     private var credentialToken: String? = null
     private var credentialGeneration = 0L
+    private var readAfterPeers: List<String> = emptyList()
     private var authorizationObserverId = 0L
     private val authorizationObservers = mutableMapOf<Long, (Long) -> Unit>()
     data class AuthorizationObservation(val id: Long, val generation: Long)
@@ -26,13 +27,25 @@ object Session {
     fun playbackAuthorization(): PlaybackAuthorization = synchronized(authorizationLock) {
         PlaybackAuthorization(credentialOrigin, credentialToken, credentialGeneration)
     }
+    internal fun readAfterAuthorization(): ReadAfterAuthorization = synchronized(authorizationLock) {
+        ReadAfterAuthorization(credentialOrigin, credentialToken, credentialGeneration, readAfterPeers)
+    }
+    /** Media failover refreshes are not generation-fenced ingress receipts. */
+    internal fun recordReadAfterPeers(peers: List<String>, captured: ReadAfterAuthorization) = synchronized(authorizationLock) {
+        val primary = canonicalOrigin(credentialOrigin) ?: return@synchronized
+        if (captured.generation != credentialGeneration || captured.token != credentialToken ||
+            credentialToken == null || canonicalOrigin(captured.origin) != primary) return@synchronized
+        readAfterPeers = peers.mapNotNull(::canonicalOrigin).filter {
+            it != primary && (!primary.startsWith("https://") || it.startsWith("https://"))
+        }.distinct().sorted()
+    }
     /** Server origin, no trailing slash, e.g. `http://192.168.1.10:32400`. */
     var origin: String
         get() = synchronized(authorizationLock) { credentialOrigin }
         set(value) {
             val notification = synchronized(authorizationLock) {
                 val changed = credentialOrigin != value
-                if (changed) credentialGeneration++
+                if (changed) { credentialGeneration++; readAfterPeers = emptyList() }
                 credentialOrigin = value
                 credentialGeneration to if (changed) authorizationObservers.values.toList() else emptyList()
             }
@@ -45,7 +58,7 @@ object Session {
         set(value) {
             val notification = synchronized(authorizationLock) {
                 val changed = credentialToken != value
-                if (changed) credentialGeneration++
+                if (changed) { credentialGeneration++; readAfterPeers = emptyList() }
                 credentialToken = value
                 credentialGeneration to if (changed) authorizationObservers.values.toList() else emptyList()
             }
