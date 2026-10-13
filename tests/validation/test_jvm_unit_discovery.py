@@ -159,3 +159,22 @@ class CurrentCompiledRosterCase(unittest.TestCase):
             adopted['ids_count'] = 2
             with self.assertRaises(discovery.InventoryError):
                 discovery.verify_adopted(workspace, adopted)
+
+    def test_streaming_entry_bound_refuses_an_unbounded_directory_walk(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            workspace, classes, _ = self.workspace(root)
+            from pathlib import Path
+            with patch.object(Path, 'rglob', return_value=iter([classes] * 8193)):
+                with self.assertRaises(discovery.InventoryError):
+                    discovery.compiled_roster(workspace)
+
+    def test_bounded_read_refuses_growth_after_the_stat_measurement(self):
+        import io
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as root:
+            workspace, _, _ = self.workspace(root)
+            with patch.object(Path, 'open', return_value=io.BytesIO(FIXTURE + b'x')):
+                with self.assertRaises(discovery.InventoryError):
+                    discovery.compiled_roster(workspace)

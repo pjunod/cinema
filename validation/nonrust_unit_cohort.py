@@ -13,6 +13,7 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from validation.nonrust_original_captures import LEGACY_JVM
 from validation import promotion_unit_retention as retention
 from validation import python_unit_receipts as receipts
 
@@ -28,6 +29,8 @@ NODELESS_MODERN_CAPTURES = {
     '7293165eaf69133db2a6a3036ff5ece2f1f1e2e6ad063e3b859fac34cb1b0aa9': '2d0d5864808c99631eaef4098a6af36a8d4e3130',
 }
 MODERN_JVM_BINARY = 'b6adf75c6ce0d3666da6eced72b5ca9359e175e2aa958812919bb7b547e4a201'
+MODERN_JVM_ORIGINAL_BINDING = '127ce14386b206d0c140d67d6d876c0b6e2a44a27b07951434a736cb6a8cb6f8'
+MODERN_JVM_ORIGINAL_ENVIRONMENT = '7e937df7e09182c234d801fc1b4a9d37149a8d678f8a28f0ffe3475a5979ded7'
 JVM_BUILD_INPUTS = {
     'clients/android/gradle/wrapper/gradle-wrapper.properties': 'd01b41913834fb3cb14e71f69a08898e6a47e663b08f5c9b8c7e0772c38889d2',
     'clients/android/gradle/libs.versions.toml': 'ced36ebe0658327618e6b959982f31acc1baae352a46ee2b8cc23b15250f00c2',
@@ -214,6 +217,19 @@ def jvm_metadata(proof, reference, source):
     return sorted(ids)
 
 
+def modern_jvm_argv(command):
+    prefix = ['./gradlew', '--no-daemon', '--max-workers=1', ':app:testDebugUnitTest',
+              '-Dorg.gradle.jvmargs=-Xmx4g']
+    receipts.require(command[:5] == prefix and len(command) > 5 and (len(command) - 5) % 2 == 0,
+                     'Unreviewed JVM executable, task, option or semantic override')
+    pairs = list(zip(command[5::2], command[6::2]))
+    receipts.require(all(flag == '--tests' and re.fullmatch(r'[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+){3,}', selector)
+                         for flag, selector in pairs), 'Unknown or non-exact JVM selection option')
+    selectors = [selector for _, selector in pairs]
+    receipts.require(len(selectors) == len(set(selectors)), 'Repeated actual JVM selector')
+    return selectors
+
+
 def current_binding(proof, record, raw, candidate, archive_digest):
     """New local captures retain their original measured sidecar, without edits."""
     execution = record['origin']['execution']
@@ -245,7 +261,78 @@ def current_binding(proof, record, raw, candidate, archive_digest):
                          and binding['java_binary_sha256'] == MODERN_JVM_BINARY
                          and binding['platform'] == 'darwin',
                          'Measured JVM unit runtime unavailable')
+        environment = binding['environment']
+        receipts.require(isinstance(environment, dict)
+                         and set(environment) == {'JAVA_HOME', 'ANDROID_HOME', 'GRADLE_USER_HOME'}
+                         and all(isinstance(value, str) and value.startswith('/') for value in environment.values()),
+                         'Original JVM execution environment shape differs')
+        if retention.digest(binding_raw) == MODERN_JVM_ORIGINAL_BINDING:
+            receipts.require(source == '4a44a2279275f93e04de0e379b400a4bdb5709c9'
+                             and retention.digest(raw) == '64149a12b291e78248bf4d99498e85ba724ade7601f98f387dc39f4dfaf7f6ed'
+                             and retention.digest(json.dumps(environment, sort_keys=True, separators=(',', ':')).encode()) == MODERN_JVM_ORIGINAL_ENVIRONMENT,
+                             'Finite original measured JVM capture differs')
+        else:
+            receipts.require(binding['gradle_semantic_environment'] == {} and binding['gradle_init_scripts'] == [],
+                             'New JVM capture contains unknown environment or Gradle init behavior')
+        modern_jvm_argv(command)
     return command, binding
+
+
+def legacy_jvm_outcomes(proof, record, capture, raw, universe):
+    """Retain finite source equivalence without inventing execution measurements."""
+    origin, coverage = record['origin'], record['coverage']
+    digest = record['log']['sha256_ref']
+    receipts.require(origin['kind'] == 'attested-local' and origin['identity'] == capture['tool']
+                     and origin['command'] is None
+                     and record['source_commit'] == capture['reviewed_source_equivalence']
+                     and record['exit_code'] == capture['exit_code']
+                     and origin['execution'] == {'mode': 'source-cohort-v1', 'kind': 'android_jvm',
+                                                 'legacy_capture': digest, 'actual_execution_source_commit': None,
+                                                 'runtime_binary_sha256': None, 'image_digest': None},
+                     'Finite legacy JVM execution/source-equivalence boundary differs')
+    receipts.require(all(retention.git_bytes(record['source_commit'], path) is not None
+                         and retention.digest(retention.git_bytes(record['source_commit'], path)) == expected
+                         for path, expected in capture['reviewed_input_sha256'].items()),
+                     'Reviewed equivalent native source input witness differs')
+    text = raw.decode()
+    from validation.qualification_unit_continuation import clean_log
+    text = clean_log(text)
+    receipts.require(re.search(r'^> Task :app:testDebugUnitTest[ \t]*$', text, re.M)
+                     and not re.search(r'^> Task :app:testDebugUnitTest (?:UP-TO-DATE|FROM-CACHE|SKIPPED|NO-SOURCE)', text, re.M)
+                     and bool(re.search(r'^BUILD SUCCESSFUL in ', text, re.M)) == (record['exit_code'] == 0)
+                     and (record['exit_code'] == 0 or re.search(r'^BUILD FAILED in ', text, re.M)),
+                     'Original legacy JVM task did not execute with its actual disposition')
+    membership = set(capture['membership_ids'])
+    receipts.require(membership and membership <= universe, 'Unknown legacy source-cohort membership')
+    if capture['mode'] == 'jvm-selected':
+        receipts.require(set(coverage) == {'mode', 'observation'} and coverage['mode'] == 'jvm-selected'
+                         and coverage['observation'] == {'sha256_ref': capture['observation_sha256']}
+                         and record['exit_code'] == 0 and len(membership) == capture['native_count'],
+                         'Original opaque selected JVM observation differs')
+        blob(proof, coverage['observation'])  # Exact original observed suite summary, not recreated XML.
+        return {test_id: 'opaque-pass' for test_id in membership}
+    receipts.require(set(coverage) == {'mode', 'xml'} and coverage['mode'] == 'junit-xml'
+                     and isinstance(coverage['xml'], list)
+                     and sorted(reference['sha256_ref'] for reference in coverage['xml']) == capture['xml_sha256'],
+                     'Original exact native XML set differs')
+    result = {}
+    for reference in coverage['xml']:
+        rows = junit_rows(blob(proof, reference), universe)
+        receipts.require(set(rows).isdisjoint(result), 'Repeated legacy native XML case')
+        result.update(rows)
+    receipts.require(set(result) == membership
+                     and (record['exit_code'] == 0) == all(value == 'pass' for value in result.values()),
+                     'Legacy XML membership or native disposition contradicts original execution')
+    return result
+
+
+def require_legacy_chronology(legacy_sequences):
+    chronology = ['9b07da0a9bcb25fdf1183a3c4f41056ab96b179aab9a247b0dda7e4dad9fdad6',
+                  '12ffb580c4ae2bf03f9a76b42b7bfff87678744eb4294ee5905b8cef6f08fdeb',
+                  'd998e79e3563d80208b23b20b16e0e547a7972aca1ed614d6187a23af7cdc5be']
+    receipts.require(all(digest in legacy_sequences for digest in chronology)
+                     and [legacy_sequences[digest] for digest in chronology] == sorted(legacy_sequences[digest] for digest in chronology),
+                     'Original JVM negative/clock/Main repair chronology incomplete or reordered')
 
 
 def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archive_digest):
@@ -266,6 +353,7 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
     universe = set(ids)
     receipts.require(isinstance(item['records'], list) and item['records'], 'No actual source-cohort executions')
     sequences, retained, owners, failures, passes, opaque_sources = set(), {}, {}, {}, {}, []
+    legacy_sequences = {}
     for record in sorted(item['records'], key=lambda row: row['sequence']):
         receipts.require(set(record) == {'sequence', 'source_commit', 'origin', 'changes', 'log', 'coverage', 'exit_code'},
                          'Unknown source-cohort execution fields')
@@ -287,7 +375,17 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
         coverage = record['coverage']; mode = coverage['mode']
         opaque = mode in {'python-discovery', 'jvm-whole-command'}
         legacy = execution.get('legacy_capture')
-        if legacy is not None:
+        if legacy is not None and kind == 'android_jvm':
+            capture = LEGACY_JVM.get(legacy)
+            receipts.require(capture is not None, 'Unreviewed original JVM capture')
+            actual = legacy_jvm_outcomes(proof, record, capture, raw, universe)
+            receipts.require(legacy not in legacy_sequences, 'Original JVM capture enrolled twice')
+            legacy_sequences[legacy] = sequence
+            if capture['mode'] == 'jvm-selected':
+                opaque_sources.append({'sequence': sequence, 'source_commit': record['source_commit'],
+                                       'log_sha256': legacy, 'membership_ids': sorted(set(actual) - invalid),
+                                       'runtime_named_outcomes': None})
+        elif legacy is not None:
             capture = LEGACY_PYTHON.get(legacy)
             receipts.require(kind != 'android_jvm' and capture is not None
                              and record['log']['sha256_ref'] == legacy
@@ -379,7 +477,7 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
                                      for path, digest in JVM_BUILD_INPUTS.items()),
                                  'Original JVM build configuration differs from reviewed contract')
                 actual = junit_archive(proof, coverage['xml_archive'], binding['xml_archive_sha256'], universe)
-                selectors = [command[i + 1] for i, token in enumerate(command[:-1]) if token == '--tests']
+                selectors = modern_jvm_argv(command)
                 expected_selectors = sorted(test_id.replace('/', '.') for test_id in actual)
                 receipts.require(sorted(selectors) == expected_selectors
                                  and ':app:testDebugUnitTest' in command
@@ -400,6 +498,8 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
             owners[test_id] = sequence
             if outcome == 'pass':
                 passes[test_id] = sequence
+    if kind == 'android_jvm':
+        require_legacy_chronology(legacy_sequences)
     receipts.require(set(retained) == universe and all(value in {'pass', 'opaque-pass'} for value in retained.values())
                      and all(passes.get(test_id, 0) > sequence for test_id, sequence in failures.items()),
                      'Incomplete source-applicable cohort or failure without later actual named pass')

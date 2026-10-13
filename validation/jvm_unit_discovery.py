@@ -270,6 +270,7 @@ def compiled_roster(workspace):
              build / 'intermediates/javac/debugUnitTest/compileDebugUnitTestJavaWithJavac/classes']
     classfiles = {}
     total_bytes = 0
+    entries = 0
     for root in roots:
         require(all(not parent.is_symlink() for parent in [root, *root.parents]
                     if parent == workspace or workspace in parent.parents),
@@ -277,7 +278,9 @@ def compiled_roster(workspace):
         if not root.exists():
             continue  # Gradle NO-SOURCE is permitted for the empty Java set.
         require(root.is_dir(), 'Compiled source-set root is not a directory')
-        for path in sorted(root.rglob('*')):
+        for path in root.rglob('*'):
+            entries += 1
+            require(entries <= 8192, 'Compiled source-set entry count outside bound')
             require(not path.is_symlink(), 'Compiled class tree contains a symlink')
             if path.is_dir():
                 continue
@@ -290,8 +293,12 @@ def compiled_roster(workspace):
             size = path.stat().st_size
             require(len(classfiles) < 4096 and size <= 8 * 1024 * 1024
                     and total_bytes + size <= 16 * 1024 * 1024, 'Compiled class roster outside bound')
-            total_bytes += size
-            classfiles[name] = path.read_bytes()
+            allowance = min(8 * 1024 * 1024, 16 * 1024 * 1024 - total_bytes)
+            with path.open('rb') as stream:
+                raw = stream.read(allowance + 1)
+            require(len(raw) == size and len(raw) <= allowance, 'Compiled artifact grew or changed during bounded read')
+            total_bytes += len(raw)
+            classfiles[name] = raw
     require(classfiles, 'No current compiled JVM test classes')
     return classfiles
 

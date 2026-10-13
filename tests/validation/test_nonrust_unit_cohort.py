@@ -138,6 +138,53 @@ class NonRustSourceCohortCase(unittest.TestCase):
         with self.assertRaises(receipts.ReceiptError):
             cohort.jvm_metadata(proof, ref, 'b' * 40)
 
+    def test_actual_jvm_command_shape_refuses_executable_init_project_and_runtime_overrides(self):
+        command = ['./gradlew', '--no-daemon', '--max-workers=1', ':app:testDebugUnitTest',
+                   '-Dorg.gradle.jvmargs=-Xmx4g', '--tests', 'tv.plurx.app.data.ExampleTest.example']
+        self.assertEqual(cohort.modern_jvm_argv(command), ['tv.plurx.app.data.ExampleTest.example'])
+        for bad in [['evil-gradle', *command[1:]], command + ['--init-script', 'evil.gradle'],
+                    command + ['--project-dir', '/other'], command + ['-PskipTests=true'],
+                    command + ['-Dorg.gradle.java.home=/other'], command + command[5:]]:
+            with self.subTest(bad=bad), self.assertRaises(receipts.ReceiptError):
+                cohort.modern_jvm_argv(bad)
+
+    def test_legacy_native_xml_preserves_unknown_execution_and_exact_source_equivalence(self):
+        proof = {'logs': {}}
+        xml = b'<testsuite tests="1" failures="0" errors="0"><testcase classname="a.Case" name="same"/></testsuite>'
+        reference = self.blob(proof, xml)
+        raw = b'> Task :app:testDebugUnitTest\nBUILD SUCCESSFUL in 1s\n'
+        source = b'original reviewed equivalent input'
+        capture = {'tool': 'actual-original-tool', 'reviewed_source_equivalence': 'b' * 40,
+                   'exit_code': 0, 'mode': 'junit-xml', 'membership_ids': ['a.Case/same'],
+                   'reviewed_input_sha256': {'native.kt': retention.digest(source)},
+                   'xml_sha256': [reference['sha256_ref']]}
+        log = self.blob(proof, raw)
+        record = {'source_commit': 'b' * 40, 'exit_code': 0, 'log': log,
+                  'origin': {'kind': 'attested-local', 'identity': 'actual-original-tool', 'command': None,
+                             'execution': {'mode': 'source-cohort-v1', 'kind': 'android_jvm',
+                                           'legacy_capture': log['sha256_ref'], 'actual_execution_source_commit': None,
+                                           'runtime_binary_sha256': None, 'image_digest': None}},
+                  'coverage': {'mode': 'junit-xml', 'xml': [reference]}}
+        with mock.patch.object(retention, 'git_bytes', return_value=source):
+            self.assertEqual(cohort.legacy_jvm_outcomes(proof, record, capture, raw, {'a.Case/same'}),
+                             {'a.Case/same': 'pass'})
+            record['origin']['execution']['actual_execution_source_commit'] = 'b' * 40
+            with self.assertRaises(receipts.ReceiptError):
+                cohort.legacy_jvm_outcomes(proof, record, capture, raw, {'a.Case/same'})
+            record['origin']['execution']['actual_execution_source_commit'] = None
+            record['coverage']['xml'] = [self.blob(proof, xml + b'\n')]
+            with self.assertRaises(receipts.ReceiptError):
+                cohort.legacy_jvm_outcomes(proof, record, capture, raw, {'a.Case/same'})
+
+    def test_original_jvm_failure_repair_chronology_cannot_be_omitted_or_reordered(self):
+        order = ['9b07da0a9bcb25fdf1183a3c4f41056ab96b179aab9a247b0dda7e4dad9fdad6',
+                 '12ffb580c4ae2bf03f9a76b42b7bfff87678744eb4294ee5905b8cef6f08fdeb',
+                 'd998e79e3563d80208b23b20b16e0e547a7972aca1ed614d6187a23af7cdc5be']
+        cohort.require_legacy_chronology(dict(zip(order, [5, 6, 7])))
+        for sequences in [dict(zip(order[:2], [5, 6])), dict(zip(order, [6, 5, 7]))]:
+            with self.assertRaises(receipts.ReceiptError):
+                cohort.require_legacy_chronology(sequences)
+
     def test_finite_legacy_capture_cannot_authorize_different_log_or_source(self):
         item, proof, ids, raw, _ = self.fixture()
         record = item['records'][1]
