@@ -19,6 +19,7 @@ final class DiagnosticReportModel: ObservableObject {
     @Published var comparison: String?
     @Published var handoffState = ""
     @Published var localExportURL: URL?
+    private var localExportRevision: UInt64 = 0
     private var localExport: DiagnosticLocalExport?
     @Published var shareURL: URL?
     @Published var history = DiagnosticRecorder.shared.historyEnabled
@@ -147,12 +148,15 @@ final class DiagnosticReportModel: ObservableObject {
     func cleanupShare() { if let shareURL { try? FileManager.default.removeItem(at: shareURL.deletingLastPathComponent()) }; shareURL = nil }
     func setHistory(_ enabled: Bool) { history = enabled; Task { await DiagnosticRecorder.shared.setHistory(enabled) } }
     private func perform(_ action: @escaping (DiagnosticTransport, inout DiagnosticStore.Draft) async throws -> Void) {
-        guard !busy, var value = draft, value.capture.generation == Session.shared.playbackAuthorization.generation else { return }; operation?.cancel(); transport?.cancel(); busy = true; message = "Working…"
+        guard !busy, var value = draft, value.capture.generation == Session.shared.playbackAuthorization.generation else { return }; stopLocalExport(); operation?.cancel(); transport?.cancel(); busy = true; message = "Working…"
         workRevision &+= 1; let revision = workRevision
         let client = DiagnosticTransport(scope: value.capture.namespace); transport = client
         operation = Task {
             do { try await action(client, &value); try client.current(); guard !Task.isCancelled, workRevision == revision, draft?.id == value.id else { return }; draft = value; await persist(value) }
-            catch { if !Task.isCancelled, workRevision == revision, draft?.id == value.id { draft = value; await persist(value); message = (error as? LocalizedError)?.errorDescription ?? "The connection failed. Retry or save this local report." } }
+            catch { if !Task.isCancelled, workRevision == revision, draft?.id == value.id {
+                if error is CancellationError { stopLocalExport(); message = "The report changed. Save its ZIP again when ready." }
+                else { draft = value; await persist(value); message = (error as? LocalizedError)?.errorDescription ?? "The connection failed. Retry or save this local report." }
+            } }
             if !Task.isCancelled, workRevision == revision { busy = false }
         }
     }
@@ -176,18 +180,20 @@ final class DiagnosticReportModel: ObservableObject {
         }
         return result
     }
-    func stopLocalExport() { localExport?.stop(); localExport = nil; localExportURL = nil }
+    func stopLocalExport() { localExportRevision &+= 1; localExport?.stop(); localExport = nil; localExportURL = nil }
     func shareOnLocalNetwork() {
         stopLocalExport()
         perform { [weak self] _, value in
             guard let self else { return }
+            let offerRevision = self.localExportRevision
             let report = try await self.archive(&value); let revision = self.workRevision
+            guard offerRevision == self.localExportRevision else { throw CancellationError() }
             let transfer = try DiagnosticLocalExport(bytes: report.bytes, reportID: value.id, ended: { [weak self] in
                 Task { @MainActor in if self?.workRevision == revision { self?.stopLocalExport() } }
             })
             self.localExport = transfer
             let url = try await transfer.start()
-            guard !Task.isCancelled, self.workRevision == revision, self.presented else { transfer.stop(); return }
+            guard !Task.isCancelled, self.workRevision == revision, self.localExportRevision == offerRevision, self.presented else { transfer.stop(); throw CancellationError() }
             self.localExportURL = url; self.message = "Scan on a phone on the same network, then download the TV's ZIP. Keep this screen open."
         }
     }
@@ -262,6 +268,7 @@ final class DiagnosticReportModel: ObservableObject {
         }
     }
     func startReproduction() {
+        stopLocalExport()
         guard let capture = draft?.capture, draft?.binding == nil else { return }
         if DiagnosticRecorder.shared.startReproduction(capture) { message = "Recording for up to five minutes. Reproduce the issue, then reopen Help and stop. Recording ends on background." }
     }
@@ -282,6 +289,7 @@ final class DiagnosticReportModel: ObservableObject {
         }
     }
     func stopReproduction() {
+        stopLocalExport()
         if let capture = DiagnosticRecorder.shared.stopReproduction() { draft?.capture = capture; message = "Reproduction stopped and frozen locally." }
     }
     func deleteLocal(_ row: DiagnosticStore.Draft) {

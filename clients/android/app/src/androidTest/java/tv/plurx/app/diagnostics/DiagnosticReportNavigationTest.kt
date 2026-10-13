@@ -60,6 +60,12 @@ class DiagnosticReportNavigationTest {
         }
         compose.onNodeWithTag("diagnostics-export-tv").performScrollTo().performClick()
         compose.waitUntil(timeoutMillis=20_000) { DiagnosticRuntime.state.value.localExportURL != null && !DiagnosticRuntime.state.value.busy }
+        val edited=requireNotNull(DiagnosticRuntime.state.value.localExportURL)
+        compose.runOnIdle { DiagnosticRuntime.edit(description="Edited after offering") }
+        assertEquals(null,DiagnosticRuntime.state.value.localExportURL)
+        assertTrue(runCatching { java.net.URL(edited).openStream().use { it.readBytes() } }.isFailure)
+        compose.onNodeWithTag("diagnostics-export-tv").performScrollTo().performClick()
+        compose.waitUntil(timeoutMillis=20_000) { DiagnosticRuntime.state.value.localExportURL != null && !DiagnosticRuntime.state.value.busy }
         val cancelled=requireNotNull(DiagnosticRuntime.state.value.localExportURL)
         compose.onNodeWithText("Close").performScrollTo().performClick()
         assertTrue(runCatching { java.net.URL(cancelled).openStream().use { it.readBytes() } }.isFailure)

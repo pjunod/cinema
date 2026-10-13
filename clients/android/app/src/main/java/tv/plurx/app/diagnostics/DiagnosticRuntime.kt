@@ -28,6 +28,7 @@ internal object DiagnosticRuntime {
     lateinit var recorder: DiagnosticRecorder; private set
     private val owner = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var workRevision = 0L
+    private var localExportRevision = 0L
     private var localExport: DiagnosticLocalExport? = null
     private var operation: Job? = null
     private var poll: Job? = null
@@ -180,6 +181,7 @@ internal object DiagnosticRuntime {
     suspend fun revokeEnrollment() { if (!::recorder.isInitialized) return; val client=DiagnosticTransport(app,namespace); try { client.revokeEnrollment() } finally { client.cancel() } }
     private fun perform(action: suspend (DiagnosticTransport, DiagnosticDraft) -> DiagnosticDraft) {
         val value=mutable.value; val draft=value.draft ?: return; if (value.busy || draft.capture.generation != Session.playbackAuthorization().generation) return
+        stopLocalExport()
         val revision=++workRevision
         operation?.cancel(); transport?.cancel(); val client=DiagnosticTransport(app,draft.capture.namespace); transport=client
         mutable.update { it.copy(busy=true,message="Working…") }
@@ -211,20 +213,23 @@ internal object DiagnosticRuntime {
         } else draft to value
     }
     fun stopLocalExport() {
+        localExportRevision++
         localExport?.close(); localExport=null
         mutable.update { it.copy(localExportURL=null) }
     }
     fun shareOnLocalNetwork() {
         stopLocalExport()
         perform { _, original ->
+            val offerRevision=localExportRevision
             val (draft,archive)=archive(original)
             val revision=workRevision
+            if (offerRevision != localExportRevision) { mutable.update { it.copy(message="The report changed. Save its ZIP again when ready.") }; throw CancellationException() }
             val transfer=withContext(Dispatchers.IO + NonCancellable) {
                 DiagnosticLocalExport(archive.bytes,draft.id,ended={
                     owner.launch { if (workRevision == revision) stopLocalExport() }
                 })
             }
-            if (!currentCoroutineContext().isActive || workRevision != revision || !mutable.value.visible) { transfer.close(); throw CancellationException() }
+            if (!currentCoroutineContext().isActive || workRevision != revision || localExportRevision != offerRevision || !mutable.value.visible) { transfer.close(); throw CancellationException() }
             localExport=transfer
             mutable.update { it.copy(localExportURL=transfer.url,message="Scan on a phone on the same network, then download the TV's ZIP. Keep this screen open.") }
             draft
@@ -303,11 +308,11 @@ internal object DiagnosticRuntime {
         else mutable.update { it.copy(message="Phone handoff cancelled; staged draft retained.") }
         draft.copy(handoff=null)
     }
-    fun startReproduction() {
+    fun startReproduction() { stopLocalExport();
         val value=mutable.value.draft ?: return; if (value.consented) return
         if (recorder.startReproduction(value.capture)) mutable.update { it.copy(message="Recording for at most five minutes. Reproduce the issue, then reopen Help and stop. Background ends recording.") }
     }
-    fun stopReproduction() { recorder.stopReproduction()?.let { capture -> mutable.update { it.copy(draft=it.draft?.copy(capture=capture),message="Reproduction stopped and frozen locally.") } } }
+    fun stopReproduction() { stopLocalExport(); recorder.stopReproduction()?.let { capture -> mutable.update { it.copy(draft=it.draft?.copy(capture=capture),message="Reproduction stopped and frozen locally.") } } }
     fun systemSnapshot() = perform { client,draft ->
         require(!draft.consented); val (events,components)=client.snapshot(draft.capture,true)
         mutable.update { it.copy(message="Administrator snapshot saved: typed version, readiness, producer and hardware admission facts.") }
