@@ -31,12 +31,13 @@ struct SharedSharingManagementClient {
         guard let url = components.url else { throw APIError.badURL }
         var request = URLRequest(url: url); request.httpMethod = method; request.timeoutInterval = 30
         request.setValue("Bearer \(auth.token!)", forHTTPHeaderField: "Authorization")
+        ReadAfterHTTP.bindCaptured(origin: auth.origin, token: auth.token, generation: auth.generation, to: &request)
         if let body {
             let data = try JSONEncoder().encode(body)
             guard data.count <= 16_384 else { throw SharedSharingManagementError.invalid("Sharing update exceeds the server’s 16 KiB mutation limit. No request was sent.") }
             request.httpBody = data; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await transport.data(for: request); try requireCurrent()
+        let (data, response) = try await ReadAfterHTTP.shared.data(for: request, using: transport, refuseRedirects: true); try requireCurrent()
         guard let http = response as? HTTPURLResponse, http.url == url else { throw APIError.badURL }
         if http.statusCode == 401 || http.statusCode == 403 { SharedSharingSecretDraft.retireAuthorization(generation: auth.generation) }
         guard data.count <= ((path == "libraries" || path == "users" || path.hasSuffix("/assignments")) ? 4_194_304 : 131_072) else { throw APIError.badURL }

@@ -759,6 +759,7 @@ extension LiveTvRequests {
 final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
     let origin: String
     private let token: String?
+    private let receiptAuthorization: ReadAfterHTTP.Authorization?
     private let transport: URLSession
     private let control: URLSession
     private let cleanup: URLSession
@@ -787,6 +788,8 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
     init(origin: String, token: String?, session: URLSession? = nil) {
         self.origin = origin
         self.token = token
+        let captured = Session.shared.readAfterAuthorization
+        receiptAuthorization = captured.origin == origin && captured.token == token ? captured : nil
         func makeSession(_ timeout: TimeInterval, delegate: URLSessionTaskDelegate) -> URLSession {
             let configuration = URLSessionConfiguration.ephemeral
             configuration.timeoutIntervalForRequest = timeout
@@ -836,7 +839,8 @@ final class LiveTvAPI: LiveTvRequests, @unchecked Sendable {
         request.httpBody = body
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         if authenticated, let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        let (data, response) = try await (session ?? control).data(for: request)
+        if authenticated, let receiptAuthorization { ReadAfterHTTP.bind(receiptAuthorization, to: &request) }
+        let (data, response) = try await ReadAfterHTTP.shared.data(for: request, using: session ?? control, refuseRedirects: true)
         guard let response = response as? HTTPURLResponse else { throw LiveTvFailure(code: "owner_unavailable") }
         guard (200..<300).contains(response.statusCode) else {
             // Snake-case aware, because a typed refusal carries more than its
