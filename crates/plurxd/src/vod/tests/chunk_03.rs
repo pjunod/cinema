@@ -9,6 +9,10 @@ async fn processed_instance_cleanup_keeps_failed_unlink_charged_and_protects_liv
     let slots = Arc::new(Semaphore::new(1));
     Arc::get_mut(&mut rendition).expect("unpublished instance")._processed_instance_allowance =
         Some(Arc::new(Arc::clone(&slots).try_acquire_owned().expect("instance slot")));
+    assert!(serve.shared.renditions.lock().await
+        .insert(rendition.key.clone(), Arc::clone(&rendition)).is_none());
+    assert!(serve.shared.renditions.lock().await.get(&rendition.key)
+        .is_some_and(|registered| Arc::ptr_eq(registered, &rendition)));
     insert_control_session(&serve, "processed-cleanup", Arc::clone(&rendition), Instant::now()).await;
     {
         let mut manifest = rendition.manifest.lock().await;

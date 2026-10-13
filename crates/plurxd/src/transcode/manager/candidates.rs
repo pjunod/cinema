@@ -1759,7 +1759,8 @@ mod snapshot_catalog_regression {
         }];
         let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
             "v":2, "video":[{"codec":"hevc","profiles":["main10"],"present":["hdr10"]}],
-            "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],"audio":["aac"]
+            "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],"audio":["aac"],
+            "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000],"passthrough":false}]
         })).expect("caps");
         let mut query = crate::media_pool::QualityCatalogRequest {
             audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(&caps).expect("claim"),
