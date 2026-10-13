@@ -1,0 +1,1328 @@
+{
+  "version": 1,
+  "scope": "Complete HDR acceptance records, including failures, provenance, local and CI receipts; raw source Git bundle excluded because source is already preserved by merged commit history.",
+  "text_archive_sha256": "598791a0ca07ebfcfac3ed4f784c4c8cb777d69f0ec58cbc97369b2d1b149364",
+  "privacy": "Git text uses repository-neutral infrastructure names and removes authentication values. Raw screenshots retain pixels in private PR attachments. Original hashes preserve provenance.",
+  "private_attachments": [
+    {
+      "pr": 1038,
+      "id": 65,
+      "uuid": "8e191b9e-898b-4525-8cfb-77897f99c559",
+      "name": "macos-metal-hdr-evidence-20261012.zip",
+      "bytes": 15751458,
+      "sha256": "943153bde1a1175db1f8498dd7c7482dd23ae84fb0d1efff7b3204a091152533",
+      "download_url": "http://forge.lan:3000/attachments/8e191b9e-898b-4525-8cfb-77897f99c559"
+    }
+  ],
+  "files": [
+    {
+      "name": "94-linux-workspace-check-clippy.log",
+      "bytes": 1622,
+      "original_sha256": "5e6fe0d74e5ebb9e3470d7c1212e740c782f9951b119e534ebee8607f6cbd877",
+      "archived_sha256": "5e6fe0d74e5ebb9e3470d7c1212e740c782f9951b119e534ebee8607f6cbd877",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "acceptance-receipt.json",
+      "bytes": 12678,
+      "original_sha256": "0233ac9a8f303507f0521968e008bf0c84d47310046c034998eb46c5dd474f3b",
+      "archived_sha256": "d359d7108ea345bbefac904003cfbdc2438a21f44e5e57a860ae1bb704642886",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "acceptance-report.md",
+      "bytes": 7612,
+      "original_sha256": "61b205d940e42fb90a4046ed3ca193505b29d760d7c76a46835a8a885c661a3b",
+      "archived_sha256": "692f835c0ed179ff98664796eefee8765b8f60a67b6d47a02435a9135d79eeac",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-1080-sdr-capacity-failure-20261012.png",
+      "bytes": 621206,
+      "original_sha256": "c2c9f6402159cf7bf8a6b6945a7fb855df68626103a56b2fd0a8526876d793f6",
+      "archived_sha256": "c2c9f6402159cf7bf8a6b6945a7fb855df68626103a56b2fd0a8526876d793f6",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-4e-auto-restored-system.jpg",
+      "bytes": 106657,
+      "original_sha256": "67e2ecc2602f6ef884f1818e23a7c8c7d7b31ec96473a17c7be5ef87a10d5e8a",
+      "archived_sha256": "67e2ecc2602f6ef884f1818e23a7c8c7d7b31ec96473a17c7be5ef87a10d5e8a",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-4e-auto-restored.log",
+      "bytes": 36555,
+      "original_sha256": "4892b0589f6779fcab5d8f4ce76fecb75f3146683d9fdf0c9706d111652efabe",
+      "archived_sha256": "3a199b2e57c88e25bfd01e78364543b49ee82a7a9092d3716ed8a2bb60870614",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-4e-boot-pipeprobe.log",
+      "bytes": 519,
+      "original_sha256": "8be30c898438386a629b02100939b8755aaecac6f799b0d33aa47de7f0fd0f8b",
+      "archived_sha256": "8be30c898438386a629b02100939b8755aaecac6f799b0d33aa47de7f0fd0f8b",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-4e-chrome-profile-restored.jpg",
+      "bytes": 460692,
+      "original_sha256": "b8600085e8c5958c200fd3e810b9b9fa3727646fca37bacd52dfc35b6eb639dd",
+      "archived_sha256": "b8600085e8c5958c200fd3e810b9b9fa3727646fca37bacd52dfc35b6eb639dd",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-4e-cpu-5m-presented-info.jpg",
+      "bytes": 717491,
+      "original_sha256": "b6af70f63f48d3a4f2388bf78ed726d3bdc1ff5284238bef52a431e369fa5505",
+      "archived_sha256": "b6af70f63f48d3a4f2388bf78ed726d3bdc1ff5284238bef52a431e369fa5505",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-4e-cpu-5m-presented.jpg",
+      "bytes": 714796,
+      "original_sha256": "4ffd1503a42349b7276f614e98bb4cc9003baed16a6b28f42809fbf11a51d88f",
+      "archived_sha256": "4ffd1503a42349b7276f614e98bb4cc9003baed16a6b28f42809fbf11a51d88f",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-4e-cpu-start-and-producer.txt",
+      "bytes": 13165,
+      "original_sha256": "1c27621f9806761a4d402b6ce340865e47bbc494b3b5e0f2d93ecb3446f2a33b",
+      "archived_sha256": "1c27621f9806761a4d402b6ce340865e47bbc494b3b5e0f2d93ecb3446f2a33b",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-4e-final-playback.log",
+      "bytes": 640300,
+      "original_sha256": "f1d39a14cad4d63c840cef4e9a02f3b809cd9374a7503e68e2dc97ad343659fc",
+      "archived_sha256": "79a4c1cb800f22321af3416ab697e2974eb83615d20c70296442caca57e470d6",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-4e-metal-5m-info.jpg",
+      "bytes": 704764,
+      "original_sha256": "97a2bdf7e146da8e7eae41bc214416e93f144915df7fdeaa1aaff28edec5be47",
+      "archived_sha256": "97a2bdf7e146da8e7eae41bc214416e93f144915df7fdeaa1aaff28edec5be47",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-4e-metal-5m-presented-info.jpg",
+      "bytes": 721854,
+      "original_sha256": "e07c0c75069ce0c7368241cf0c1f0dcbd8e7d31283e9f9bf1affd97b1a9169bf",
+      "archived_sha256": "e07c0c75069ce0c7368241cf0c1f0dcbd8e7d31283e9f9bf1affd97b1a9169bf",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-4e-metal-5m-presented.jpg",
+      "bytes": 737681,
+      "original_sha256": "b4a1934ed8c28a7e9815bdf4bab5d4af1b957b155a77e042f4a48d0ff384aabf",
+      "archived_sha256": "b4a1934ed8c28a7e9815bdf4bab5d4af1b957b155a77e042f4a48d0ff384aabf",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-4e-metal-5m.jpg",
+      "bytes": 736336,
+      "original_sha256": "99cc2aeff42eafba4ce920f78768c79eda260ba97f7eea17c9a68cfd69730449",
+      "archived_sha256": "99cc2aeff42eafba4ce920f78768c79eda260ba97f7eea17c9a68cfd69730449",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-4e-metal-producer.txt",
+      "bytes": 1350,
+      "original_sha256": "738937ceb63404e63fe9b2333570883bf91d007be013536595efc39e2389f6c2",
+      "archived_sha256": "738937ceb63404e63fe9b2333570883bf91d007be013536595efc39e2389f6c2",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-4e-metal-startup-and-seek.log",
+      "bytes": 47796,
+      "original_sha256": "3ab90d4e2f2cd9fb3f9aed79311d5b94583cdec96fb72b1f8054c60219ef4fe7",
+      "archived_sha256": "968133bb1c0156916da4336cdc9ff7d7c327f180d47255b8a6db7994f6bcdb56",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-4e-system-probe-details.jpg",
+      "bytes": 107994,
+      "original_sha256": "9386058ceb852933fe7fb8ecd339f676cfd8e35e6703986f1824f30199f48950",
+      "archived_sha256": "9386058ceb852933fe7fb8ecd339f676cfd8e35e6703986f1824f30199f48950",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-4e-system.json",
+      "bytes": 35,
+      "original_sha256": "261f7d57777ec45a642c4a33f29a3cfd3ece2a6c4f69ef874227bcde82e5c53c",
+      "archived_sha256": "3df74e4c03d5b177f1560cc8d7665b2bd79a65c8bfdf583a446fc63911b462ae",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-94-auto-restored-boot.log",
+      "bytes": 63045,
+      "original_sha256": "34d0c9ec4e9e6e309a590746640e9043bda6bdab80ba37949583f65b9896269e",
+      "archived_sha256": "a36154438dff81e527396eb3daffc12a72c486dc6882e14799bc31be606a4fc5",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-94-auto-restored-system.jpg",
+      "bytes": 278968,
+      "original_sha256": "7b81fe7b436a72b8d99d93c68915c57bdb8ddc3ca2ad4c815673d552ad5770a2",
+      "archived_sha256": "7b81fe7b436a72b8d99d93c68915c57bdb8ddc3ca2ad4c815673d552ad5770a2",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-94-boot-pipeprobe.log",
+      "bytes": 1038,
+      "original_sha256": "6572b8d6ea0f230cc9d3ef92e1a9396081d4bfb2ae5c9267466a8d7222997d17",
+      "archived_sha256": "6572b8d6ea0f230cc9d3ef92e1a9396081d4bfb2ae5c9267466a8d7222997d17",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-94-capacity-error.jpg",
+      "bytes": 643597,
+      "original_sha256": "a1cd88be86bf83f03c16ff81ad1080c88b1b3796155cc764543b80bcb17397c6",
+      "archived_sha256": "a1cd88be86bf83f03c16ff81ad1080c88b1b3796155cc764543b80bcb17397c6",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-94-chrome-profile-restored.jpg",
+      "bytes": 673847,
+      "original_sha256": "3d2eb08c223f9856ebeb73d6e1e3d2bad8a8419a1c00700a02aeb979cdf8bd99",
+      "archived_sha256": "3d2eb08c223f9856ebeb73d6e1e3d2bad8a8419a1c00700a02aeb979cdf8bd99",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-94-cpu-5m-presented-info.jpg",
+      "bytes": 725304,
+      "original_sha256": "52115b7d6d18c1c78f123b771894570cc4bc604ed35dea33b41ebd6bcf4bce7c",
+      "archived_sha256": "52115b7d6d18c1c78f123b771894570cc4bc604ed35dea33b41ebd6bcf4bce7c",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-94-cpu-5m-presented.jpg",
+      "bytes": 726157,
+      "original_sha256": "9b5f7531cf7165bfd0a51652da4931226f3e2015bd2365fea73e874435d55e2e",
+      "archived_sha256": "9b5f7531cf7165bfd0a51652da4931226f3e2015bd2365fea73e874435d55e2e",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-94-cpu-5m-proof.log",
+      "bytes": 42424,
+      "original_sha256": "9cd27a685c39e104f90c92464747111fc99ec6f81a37ef17b86471acb7263e5b",
+      "archived_sha256": "9cd27a685c39e104f90c92464747111fc99ec6f81a37ef17b86471acb7263e5b",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-94-cpu-producer-command.log",
+      "bytes": 1365,
+      "original_sha256": "2ff9895906cac8737da7803294e3c126fa33b9b7ccc56ed323cd217bcc495841",
+      "archived_sha256": "2ff9895906cac8737da7803294e3c126fa33b9b7ccc56ed323cd217bcc495841",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-94-fresh-boot.log",
+      "bytes": 34902,
+      "original_sha256": "452a3fb6221ef28baf6979e251fff536df1757e193f16ad9f38aa50602f6743e",
+      "archived_sha256": "5b1c5a211961cd73db6969345669962942ff39c525b569067b68cc75452069c9",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-94-metal-5m-counters.jpg",
+      "bytes": 722602,
+      "original_sha256": "0bf1d9e168e7a7266f16f32a9ea4b84098b1812336edea79e18c14a178592035",
+      "archived_sha256": "0bf1d9e168e7a7266f16f32a9ea4b84098b1812336edea79e18c14a178592035",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-94-metal-5m-presented-info.jpg",
+      "bytes": 743303,
+      "original_sha256": "5c8fff2b17fe82e06634a958951cabc6abbe2c68e6e39c91b0e33067134208ab",
+      "archived_sha256": "5c8fff2b17fe82e06634a958951cabc6abbe2c68e6e39c91b0e33067134208ab",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-94-metal-5m-presented.jpg",
+      "bytes": 717821,
+      "original_sha256": "5d1c5f57b1e82217a5c273484cf0d52e0da8e4bf93da7e8fe59f241fa860ecdb",
+      "archived_sha256": "5d1c5f57b1e82217a5c273484cf0d52e0da8e4bf93da7e8fe59f241fa860ecdb",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-94-metal-5m-proof.log",
+      "bytes": 42427,
+      "original_sha256": "8d69a759452578d690f410f93487e84328d382f73fe150f98cec998c73471455",
+      "archived_sha256": "8d69a759452578d690f410f93487e84328d382f73fe150f98cec998c73471455",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-94-metal-overview.jpg",
+      "bytes": 719769,
+      "original_sha256": "4030f6edd550a5b7c60ec5fd8607f582ae5d5038827fa412097d266a38e97794",
+      "archived_sha256": "4030f6edd550a5b7c60ec5fd8607f582ae5d5038827fa412097d266a38e97794",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-94-metal-producer-command.log",
+      "bytes": 1350,
+      "original_sha256": "6b5f0c04d80b2d3d1ddb53102d28351c0e6f3c563d1caf262ac51b34ec85be86",
+      "archived_sha256": "6b5f0c04d80b2d3d1ddb53102d28351c0e6f3c563d1caf262ac51b34ec85be86",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-94-metal-retry.log",
+      "bytes": 31072,
+      "original_sha256": "923e06b96e975cd8b19edb9cd52efeb2ce2fe62e3bd956f30aa155c4d5d5acad",
+      "archived_sha256": "923e06b96e975cd8b19edb9cd52efeb2ce2fe62e3bd956f30aa155c4d5d5acad",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-94-metal-server-work.jpg",
+      "bytes": 706963,
+      "original_sha256": "b528a3f5b0eb1d714899ee1783dd2748ed21fb4ef24c073c83ffd736ae90c30b",
+      "archived_sha256": "b528a3f5b0eb1d714899ee1783dd2748ed21fb4ef24c073c83ffd736ae90c30b",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-94-metal-startup-error.log",
+      "bytes": 71633,
+      "original_sha256": "1f669f220bd6c7eee2ae708c9d504c742a1575359574b3f6937850d39ad674d0",
+      "archived_sha256": "5d42d6381f9bafb6529b804b4bff1ccd8de1e6f48b898726dd4bae0c0c37a2d6",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-94-metal-startup.log",
+      "bytes": 67398,
+      "original_sha256": "8b3eb8f1b276f579981112ac56319b6c17d2a44e95e54cab307b944f3151bd5c",
+      "archived_sha256": "f8e60fbf90e42491558ba89384e3c1d336827b67e8959c8e11e38ccb5a8ec27c",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-94-resume-restored.jpg",
+      "bytes": 717905,
+      "original_sha256": "36ed7478294311e558a6e6849f3c0d3cc457a3dff97d5776848bdeea7ea3acf7",
+      "archived_sha256": "36ed7478294311e558a6e6849f3c0d3cc457a3dff97d5776848bdeea7ea3acf7",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-94-startup.log",
+      "bytes": 84932,
+      "original_sha256": "4067686fd7fda7e328a128076ebdc551f6e2765d4136eb67b13b512ba266d840",
+      "archived_sha256": "2c1bc8a7624e63eebe260366ef19b7a6660fb477a5f51bbbb9bc013ed68dc972",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-94-system-probe-details.jpg",
+      "bytes": 108797,
+      "original_sha256": "2c3ae7888f913d4191b99b93fd40226abc6098b765619c0a48de8e60587dabf2",
+      "archived_sha256": "2c3ae7888f913d4191b99b93fd40226abc6098b765619c0a48de8e60587dabf2",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-ae4-candidate-recipe-refusal.jpg",
+      "bytes": 644198,
+      "original_sha256": "6ad51df2a54315f2f3f90290f4771ed5d736da896444fea606f1abb27246c906",
+      "archived_sha256": "6ad51df2a54315f2f3f90290f4771ed5d736da896444fea606f1abb27246c906",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-ae4-candidate-recipe-refusal.png",
+      "bytes": 644198,
+      "original_sha256": "6ad51df2a54315f2f3f90290f4771ed5d736da896444fea606f1abb27246c906",
+      "archived_sha256": "6ad51df2a54315f2f3f90290f4771ed5d736da896444fea606f1abb27246c906",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-ae4-catalog-refusal.log",
+      "bytes": 14135,
+      "original_sha256": "ca3d57c726bb42c62ab43bc36ce7fe4dc54fdaa3cd377e478b2aede5a1db4e9e",
+      "archived_sha256": "c1aa8a87eb9876bb7190cb6420539590dc7dd3d3a786fb3d3eea3e8147177565",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-ae4f1f027-boot-probe.log",
+      "bytes": 519,
+      "original_sha256": "e62c4a2672682f975ecdb4bdfef65a8fc96554a524a4d4e2778f219451cbad6f",
+      "archived_sha256": "e62c4a2672682f975ecdb4bdfef65a8fc96554a524a4d4e2778f219451cbad6f",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-auto-selects-software-20261012.jpg",
+      "bytes": 106948,
+      "original_sha256": "c18fbb6903052e41eae3187efaeec7d724e40676fb29f7663f44439a03e71583",
+      "archived_sha256": "c18fbb6903052e41eae3187efaeec7d724e40676fb29f7663f44439a03e71583",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-boot.log",
+      "bytes": 27163,
+      "original_sha256": "ee49638a0cd75b17fa36dc385096a967a5b31fff8e232670305ffcb61a3829eb",
+      "archived_sha256": "cd76d903e9444f5f9308aceb079cd04cf1eec2cd6249e2e33e46e56a577c65a1",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-chrome-color-profile-original.png",
+      "bytes": 504654,
+      "original_sha256": "aee94e1298da8105b0314ee22cb53ebe2ba554e4ef6e8314b5db9940ca4088c8",
+      "archived_sha256": "aee94e1298da8105b0314ee22cb53ebe2ba554e4ef6e8314b5db9940ca4088c8",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-chrome-color-profile-restored.png",
+      "bytes": 485555,
+      "original_sha256": "3e6cdb4b5a69e0a5693725434cd2061f35ba8cb172eaf53be01b398edce3b78a",
+      "archived_sha256": "3e6cdb4b5a69e0a5693725434cd2061f35ba8cb172eaf53be01b398edce3b78a",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-cleanup.txt",
+      "bytes": 171,
+      "original_sha256": "d05606c1e8f054579869900da99fecd8209ff0c17b4cfe5db2d282ce8ceb853f",
+      "archived_sha256": "d05606c1e8f054579869900da99fecd8209ff0c17b4cfe5db2d282ce8ceb853f",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-current-auto-software-system.txt",
+      "bytes": 94558,
+      "original_sha256": "ef0b955057f32c5713237ad021f1ca84acf8feb2a057d1fe274db37e1418b586",
+      "archived_sha256": "ef6269447c6f50e082d77fd938663d698bc6c77d7116b163498eb3c82731e991",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-diagnostic-failure-20261012.jpg",
+      "bytes": 74302,
+      "original_sha256": "53cf3a176de1ad8677fc773e213b8726306fc38537472a0e63e798df94890a06",
+      "archived_sha256": "53cf3a176de1ad8677fc773e213b8726306fc38537472a0e63e798df94890a06",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-diagnostic-failure-20261012.txt",
+      "bytes": 2268,
+      "original_sha256": "b08c9c1fbfadb3efdfc78f551b42f271a58126c1344bf4baa74bbf8d0b6b7161",
+      "archived_sha256": "b08c9c1fbfadb3efdfc78f551b42f271a58126c1344bf4baa74bbf8d0b6b7161",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-final-verification.txt",
+      "bytes": 3330,
+      "original_sha256": "dc9fd7f330d13f4694e282d8bd84be1027e3b1c719978c7b9503f9e5d110a3d2",
+      "archived_sha256": "eb60ca0aa49c6a40b76d78972ba8655ad5431fa4a5e3a679b4d955a05fb41f0a",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-full.log",
+      "bytes": 312470,
+      "original_sha256": "1bebebb7fd93e7b50f792a399d08372a60a24eacbf02f900797c72a079e67968",
+      "archived_sha256": "99f2fc741fa024f679453cc1256b0e2cc00901ab9826acd1578baa4db6ded151",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-install-homebrew.log",
+      "bytes": 1748,
+      "original_sha256": "ce3ae972ed8982a6b8375b67b5bf05324b0f4d4f68ffdf2dc1ddada0646c8d91",
+      "archived_sha256": "863bc8cc77c93e35944642e0110ad36bd50e7bf72a118c5a5409f6d7f10cf978",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-install-path-before.txt",
+      "bytes": 329,
+      "original_sha256": "a53cc48d346a6fcd8cfcb7ca563c98e58da579b176c6fbba145d76ee76f8374b",
+      "archived_sha256": "a53cc48d346a6fcd8cfcb7ca563c98e58da579b176c6fbba145d76ee76f8374b",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-install-receipt.txt",
+      "bytes": 735,
+      "original_sha256": "a193a2f8eda8a5a52fc03c8bbf1a8e9bd3896c8eede33606b7bbaee443c13fab",
+      "archived_sha256": "a193a2f8eda8a5a52fc03c8bbf1a8e9bd3896c8eede33606b7bbaee443c13fab",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-install-runtime-check.txt",
+      "bytes": 7328,
+      "original_sha256": "69f10f2931ed3b80c6d64b0c16439c68e38e73e9f1668c23e6087004d9df3bcc",
+      "archived_sha256": "69f10f2931ed3b80c6d64b0c16439c68e38e73e9f1668c23e6087004d9df3bcc",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-install.log",
+      "bytes": 16414,
+      "original_sha256": "446faf7568096ea7bceb7e70026544e8e9ae9b147fb4c6a7cde210abf6b89ed6",
+      "archived_sha256": "daaef00ac4bdb6f5923cd37e58aaa3e950c200cac478d45438cb7b5e03f1d192",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-instrumented-startup-20261012.log",
+      "bytes": 99360,
+      "original_sha256": "9f0f401311a264d7082b9522d35de896abf46c0d50722f89b1b4f04b57d92fd9",
+      "archived_sha256": "d27ec2aa76e05faab746cd01e0daaaa057365e8b5282005a55ba299cddc58cd3",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-latest-auto-boot-20261012.log",
+      "bytes": 1538,
+      "original_sha256": "b91d2b19ce5e9cd5449387c7a669d56701728a52599e66ee48d2153e3bc9ff2f",
+      "archived_sha256": "2a191fd408aaf71389bc7bf1b8240c9a162527b4ecf504d227af13303fcc9b1d",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-nfs-before.txt",
+      "bytes": 13588,
+      "original_sha256": "555e6f6132c107166a5a40f478b785d5bdbf07a31720088b77e75167a9320944",
+      "archived_sha256": "555e6f6132c107166a5a40f478b785d5bdbf07a31720088b77e75167a9320944",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-nfs-second-read.txt",
+      "bytes": 3455,
+      "original_sha256": "132f801b4f7f130e7913325bc36d6ac3756d7e85efd2a685bf865566b5983cbd",
+      "archived_sha256": "b8dce6d8c9c81e1bf30b34ad756dc0c3914df63fed45a1dd9fd5708d3090ee6e",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-nfs-validation.txt",
+      "bytes": 1104,
+      "original_sha256": "4a07c20ac84ce53186e994e3400a8cc8e135f5aca8ca15b52508f226c4db50d2",
+      "archived_sha256": "772a85474df710b9933971c214c3f6df7e69150f73ad750ea7112f462af569ca",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-on-vt-cpu-fallback-playback-info.png",
+      "bytes": 755595,
+      "original_sha256": "e0afbe79eccf42d69951c139f203971e4b7ab28ec6632882972d1d5eaa099c2a",
+      "archived_sha256": "e0afbe79eccf42d69951c139f203971e4b7ab28ec6632882972d1d5eaa099c2a",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-pipeprobe.txt",
+      "bytes": 519,
+      "original_sha256": "5c46563fb3c41c7d2e08dad659c53a66dbb9cf956db87a7bdec1f2e5c89ef1d4",
+      "archived_sha256": "5c46563fb3c41c7d2e08dad659c53a66dbb9cf956db87a7bdec1f2e5c89ef1d4",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-post-fda-playback-20261012.log",
+      "bytes": 81869,
+      "original_sha256": "edef7e98f085631ec89fb8e660178767ae668cfdff62a2910fbb1f1507ab3968",
+      "archived_sha256": "edef7e98f085631ec89fb8e660178767ae668cfdff62a2910fbb1f1507ab3968",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-remount-20261012.json",
+      "bytes": 572,
+      "original_sha256": "fd9b2dd989a461b132efe556b0d2086ded51a66a60de06e7866b55ab8664ecfc",
+      "archived_sha256": "4bbdec641094fedb9f65df3ad42f12de06c9d55e39c26f5b2a108091e14b5632",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-restored-boot-pipeprobe-20261012.log",
+      "bytes": 464,
+      "original_sha256": "c21d2ceb39d241e34e69312d837bf232cd61a2b6386e1b0b27bb7d117275fcd2",
+      "archived_sha256": "c21d2ceb39d241e34e69312d837bf232cd61a2b6386e1b0b27bb7d117275fcd2",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-sdr-capacity-log-20261012.log",
+      "bytes": 56000,
+      "original_sha256": "79c17b774239dbec81cb1fdbcae92edb8fbe7aaf918bb0eee78a9f6e94803aef",
+      "archived_sha256": "79c17b774239dbec81cb1fdbcae92edb8fbe7aaf918bb0eee78a9f6e94803aef",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-server-real-started-pro-client-20261012.jpg",
+      "bytes": 127923,
+      "original_sha256": "6d86e304458a227e276110c40c7edcc412cd192b59da136b91a43c174fd43a97",
+      "archived_sha256": "6d86e304458a227e276110c40c7edcc412cd192b59da136b91a43c174fd43a97",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-server-real-started-pro-client-20261012.txt",
+      "bytes": 3703,
+      "original_sha256": "7904e0f5f4a75fd8de11f362971cfbcf2a0275e870c73f7b2be7d44d6f5e83a4",
+      "archived_sha256": "7904e0f5f4a75fd8de11f362971cfbcf2a0275e870c73f7b2be7d44d6f5e83a4",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-session-failure-20261012.jpg",
+      "bytes": 78442,
+      "original_sha256": "22080788f7447ca9d9073c6f9c23d127aba0ef1604086c1421fb1117b5103f17",
+      "archived_sha256": "22080788f7447ca9d9073c6f9c23d127aba0ef1604086c1421fb1117b5103f17",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-session-failure-20261012.txt",
+      "bytes": 2494,
+      "original_sha256": "a2e84f985d615524c3bccf75292f7272854143828e509c7ac10c140217b34836",
+      "archived_sha256": "a2e84f985d615524c3bccf75292f7272854143828e509c7ac10c140217b34836",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-settings-final.txt",
+      "bytes": 52273,
+      "original_sha256": "68c6ed963ad10dc26b0d15de0055773a0d19a9a9e2dad18e7cfb2e76f97566ee",
+      "archived_sha256": "cbb3c746975433b1b785046d82e5be653b524acfa4c71c95cd89dcbee5700eee",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-settings-original-20261012.txt",
+      "bytes": 27,
+      "original_sha256": "446f8460ec21519258b3cd52098307b663ea395fe5e4f6e84a4d0c75700fb754",
+      "archived_sha256": "446f8460ec21519258b3cd52098307b663ea395fe5e4f6e84a4d0c75700fb754",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-settings-original.json",
+      "bytes": 0,
+      "original_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archived_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-settings-original.txt",
+      "bytes": 52273,
+      "original_sha256": "3e7fded1b345866f82fa11f4271668957e57a85713ec09394b82e4bdc5e4c335",
+      "archived_sha256": "4a9706ea396e5e2040cd3578e5ce7165b0acacec0e411a49c64a9c4fcf3e7061",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-source-checkout.txt",
+      "bytes": 700,
+      "original_sha256": "addd1b2e47ac767b0b2f824181fbe95a18b0962d9645577bd880ab199452d8a7",
+      "archived_sha256": "c74a5b626226bf2837c409ea6242b94bc3e43ee2520c81329f783753c4a6ddb4",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-startup-failure-20261012.log",
+      "bytes": 73103,
+      "original_sha256": "7003eefb481a6c9f538eeccc836742e76dac121c327fb08f88f480235269bb97",
+      "archived_sha256": "a2bf1638bf07f798eba8ac597be97ffc08f13cf5cdf21f0839689eb2d49193b6",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-system-before.har",
+      "bytes": 1041150,
+      "original_sha256": "a2614b5e0b9060acb92f2004d71476ba7b0771adb6ea91927b505abaab8c6b1d",
+      "archived_sha256": "6e63d5c2ac6c0d792f0f2f35a67d8c4f5d0d980ae968a12e930a0a65b68e1488",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-system-before.json",
+      "bytes": 29532,
+      "original_sha256": "d7b51d3af4a7efd568c761ee714b3a6e3bfff81818c9bf30df640ed9d45841f6",
+      "archived_sha256": "431366d8bc8bc54f7f13507fd0ad64371de7a62fee356f3bd6efbc8b18d38985",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-system-final.har",
+      "bytes": 56090,
+      "original_sha256": "1aaef38e2c6d6a57f65778c210fa2a8e0ee35900bd875d472805e9b99e4ef3bb",
+      "archived_sha256": "d32d68d76f92f3140bbe9330e9c44422be6553d725fcce3af003919e66746ecd",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-system-final.json",
+      "bytes": 29957,
+      "original_sha256": "78ba0f48d2b2cde33fca739d142a0cbbeca003c8bd686cdeebf5b692cb620d83",
+      "archived_sha256": "effb424f8d58c348bf77aec6d17c75d69396c441fe51e0a99d8800d33d7e1291",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-system-probe-details.jpg",
+      "bytes": 101078,
+      "original_sha256": "854678b5f387d4ba85871cce643d1bc30bdd8991ca677d981464bb0eba9d8387",
+      "archived_sha256": "854678b5f387d4ba85871cce643d1bc30bdd8991ca677d981464bb0eba9d8387",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-updated-plurxd-network-volume-prompt.png",
+      "bytes": 701598,
+      "original_sha256": "e918b2a68e022cb687615a1d252c377a6c6c36a55628fc0cdadaad2840e4b7a4",
+      "archived_sha256": "e918b2a68e022cb687615a1d252c377a6c6c36a55628fc0cdadaad2840e4b7a4",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "air-vt-boot-20261012.log",
+      "bytes": 519,
+      "original_sha256": "f55bb266381b0c7ff6f3519779d814e47c1a2bcae4f1d813a4e88b38722a79ec",
+      "archived_sha256": "f55bb266381b0c7ff6f3519779d814e47c1a2bcae4f1d813a4e88b38722a79ec",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "air-vt-system-probe-details.png",
+      "bytes": 114241,
+      "original_sha256": "af6804208870b67a825251703d60428ce81e75076ff7d26489a58102940e5847",
+      "archived_sha256": "af6804208870b67a825251703d60428ce81e75076ff7d26489a58102940e5847",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "american-hevc-configuration.json",
+      "bytes": 1126,
+      "original_sha256": "ed0323492fa5830d719687d0bc53dbe2668dac891bddd1c52b9cb89837e81334",
+      "archived_sha256": "e6a455f915afbe53b44f7fb6e434619e606fcf8ec1c3df0c13cbfb05c79336c5",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "ansible-deploy-lab3-retry.log",
+      "bytes": 5112,
+      "original_sha256": "10ac89d34b467c3818527cc1d8251c5cd4d17acb8f41db3704218952df6171d8",
+      "archived_sha256": "aa119b553c57f4c0f2ec2ff2c2cfc5724f985f4649378052dadd8f58b1caba39",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "ansible-deploy-lab3.log",
+      "bytes": 240857,
+      "original_sha256": "ed2ecd8996bf74f220f1121de3de53bd04d2e8555447df9fa5f34225cb969316",
+      "archived_sha256": "d10d5197318a98b615ba1cf5bbf2284e757311be736911ec65fc17adacbfe7b0",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "ansible-deploy-lab4-retry.log",
+      "bytes": 5766,
+      "original_sha256": "8489719dae70dd1edbc26d3dada16e6b112cefa167a21101224cad16413bea74",
+      "archived_sha256": "a0388cf34c823023ef6ac902b21f135925257684767942c26d9ec79d9ef99898",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "ansible-deploy.log",
+      "bytes": 358671,
+      "original_sha256": "6b91deb56304cce35c8627c06831b4666dacacb12ceeb7d91aafeabf445ff950",
+      "archived_sha256": "e01f6b42634b9d99d5b1c6d06836f9aafa7edeaab3cf64be7fef2d5289bc3d97",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "browser-inventory-final.json",
+      "bytes": 860,
+      "original_sha256": "b8440ebdbc24680873431272b78d7dbd2f330a9bba2b92c698d9aaf7a9fd9011",
+      "archived_sha256": "257d80c9078b5810de683ab84d4cb44d3c1f5ae424f040224733b77cc5ce06ab",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "fleet-final.json",
+      "bytes": 1024,
+      "original_sha256": "1b0bd793e0954d0dfcab180b872a9755d0892dbac98aa7d451745024990c3136",
+      "archived_sha256": "ce8c76f05b1a36509753156e86ae021f687949146a42adeec5da5e4da454b52e",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "fleet-interim.json",
+      "bytes": 762,
+      "original_sha256": "9e98b20c4cb12cf899fbe03d2361d7dc371a7cadad16eda960911072b0b948d0",
+      "archived_sha256": "68a9ef487847003ca30258b43feedf4530a25b05a4758902c779f54cc3cd3bfa",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "hevc-catalog-astra-review-20261012.txt",
+      "bytes": 415,
+      "original_sha256": "7d7a881f231c33770dafbb4960a08077aa6df7aba140f2f687c3323105a46bd6",
+      "archived_sha256": "7d7a881f231c33770dafbb4960a08077aa6df7aba140f2f687c3323105a46bd6",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "hevc-linux-ae4f1f027-retry.log",
+      "bytes": 775,
+      "original_sha256": "6f678df1f0260a1ef8d88d28383165a7c7b71454529358d53a4aba2760daefe3",
+      "archived_sha256": "6f678df1f0260a1ef8d88d28383165a7c7b71454529358d53a4aba2760daefe3",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "hevc-scan-astra-review-20261012.txt",
+      "bytes": 385,
+      "original_sha256": "893e33069dfc7e2b3a172d3631a3328392124fdc1971da917f1bba3174769830",
+      "archived_sha256": "893e33069dfc7e2b3a172d3631a3328392124fdc1971da917f1bba3174769830",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-boot.log",
+      "bytes": 61155,
+      "original_sha256": "7a6f461fc6fd15c239ba76ea3a81ce96b529e4363e7763b806f29d92081106f5",
+      "archived_sha256": "76e33d0ea5e93a211148e9ebf0dc8d8183530ed231b1934e9b056b1f0fa0e001",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-heretic-1080-started-20261012.jpg",
+      "bytes": 123888,
+      "original_sha256": "2c768b976c4ea4166824b86f1e3f74e3c7d10def82f4d06ab1e2b7d2a9ef0ff5",
+      "archived_sha256": "2c768b976c4ea4166824b86f1e3f74e3c7d10def82f4d06ab1e2b7d2a9ef0ff5",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "laptop-heretic-1080-started-20261012.txt",
+      "bytes": 3721,
+      "original_sha256": "d5a0819f13b0e293e546e64c12594ac070514b02d83953095a07815f4447751d",
+      "archived_sha256": "d5a0819f13b0e293e546e64c12594ac070514b02d83953095a07815f4447751d",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-heretic-20261012-failure.jpg",
+      "bytes": 69768,
+      "original_sha256": "c51fb1c541ab101dd4f0850a757dc0fc4311097abe31e16ff128eaf1b17efca3",
+      "archived_sha256": "c51fb1c541ab101dd4f0850a757dc0fc4311097abe31e16ff128eaf1b17efca3",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "laptop-heretic-20261012-failure.txt",
+      "bytes": 2510,
+      "original_sha256": "f2254ed4588e4924659901b3bbd59abb22b370939fc5932f675b6cbdd175f9c9",
+      "archived_sha256": "f2254ed4588e4924659901b3bbd59abb22b370939fc5932f675b6cbdd175f9c9",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-heretic-20261012-session.log",
+      "bytes": 35881,
+      "original_sha256": "18c0d34a01f90eed0939cd41e5f978f2079b16b01ecb4dbde741d2674acb0433",
+      "archived_sha256": "18c0d34a01f90eed0939cd41e5f978f2079b16b01ecb4dbde741d2674acb0433",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-heretic-diagnostics.jpg",
+      "bytes": 103368,
+      "original_sha256": "d4a51b762771b3fce97453681804dd949632cbab05766ce0a65a6c16421a6255",
+      "archived_sha256": "d4a51b762771b3fce97453681804dd949632cbab05766ce0a65a6c16421a6255",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "laptop-heretic-diagnostics.txt",
+      "bytes": 4129,
+      "original_sha256": "8c51ccfc1cc36826f331a50cb5a3e0a57b03abde1d840ab63b7ef255e63853cc",
+      "archived_sha256": "8c51ccfc1cc36826f331a50cb5a3e0a57b03abde1d840ab63b7ef255e63853cc",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-heretic-final-failure.jpg",
+      "bytes": 74148,
+      "original_sha256": "2bf035e1b3680dca72ec55efeef535ef9123c499b9b589d6671c454e393af11d",
+      "archived_sha256": "2bf035e1b3680dca72ec55efeef535ef9123c499b9b589d6671c454e393af11d",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "laptop-heretic-final-failure.txt",
+      "bytes": 2778,
+      "original_sha256": "9b4e697c8ea51663d7218c413f5170c2879a9edbd5efae1effa658019b699737",
+      "archived_sha256": "9b4e697c8ea51663d7218c413f5170c2879a9edbd5efae1effa658019b699737",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-heretic-initial-timeout.jpg",
+      "bytes": 66958,
+      "original_sha256": "f93c33fef8fb142f8b33f3935b8a64d2556657c75d3ca89c8d3f28446b7f2bdc",
+      "archived_sha256": "f93c33fef8fb142f8b33f3935b8a64d2556657c75d3ca89c8d3f28446b7f2bdc",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "laptop-heretic-quality-unavailable.jpg",
+      "bytes": 72922,
+      "original_sha256": "4deb229ee857927b4c151a1c1fa1db5affcde51d18dbee6e51feb3c09c8d8df2",
+      "archived_sha256": "4deb229ee857927b4c151a1c1fa1db5affcde51d18dbee6e51feb3c09c8d8df2",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "laptop-heretic-quality-unavailable.txt",
+      "bytes": 2462,
+      "original_sha256": "da82850130e81c689382ebaf1e579b16f5db8327d154cb4a981f470a4b212010",
+      "archived_sha256": "da82850130e81c689382ebaf1e579b16f5db8327d154cb4a981f470a4b212010",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-heretic-session.log",
+      "bytes": 28132,
+      "original_sha256": "8facac3d821a052e99de6af4c606de5e358d7f0276cba65a0be48be7145a572d",
+      "archived_sha256": "8facac3d821a052e99de6af4c606de5e358d7f0276cba65a0be48be7145a572d",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-heretic-source-read.txt",
+      "bytes": 182,
+      "original_sha256": "38c16621ffe79702bc77a1f2a8b9a808afb8a52052b5c32eaa7e233d29650308",
+      "archived_sha256": "38c16621ffe79702bc77a1f2a8b9a808afb8a52052b5c32eaa7e233d29650308",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-heretic-source.txt",
+      "bytes": 3840,
+      "original_sha256": "1fc5f79014008dd462c330b8db31af9951a61ec72f707d7ad13012faf19a7d81",
+      "archived_sha256": "1fc5f79014008dd462c330b8db31af9951a61ec72f707d7ad13012faf19a7d81",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-heretic-warm-retry.jpg",
+      "bytes": 69664,
+      "original_sha256": "4c78ddc9fcc3d8d46fb486fb4c814ef991f5fa3dde9e4239e5485ffb68b66018",
+      "archived_sha256": "4c78ddc9fcc3d8d46fb486fb4c814ef991f5fa3dde9e4239e5485ffb68b66018",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "laptop-heretic-warm-retry.txt",
+      "bytes": 2539,
+      "original_sha256": "3108731bc87d5e3f8215cd513c0551434bdd7a3c1a65d45c3af6b7529db533a3",
+      "archived_sha256": "3108731bc87d5e3f8215cd513c0551434bdd7a3c1a65d45c3af6b7529db533a3",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-install-receipt.txt",
+      "bytes": 862,
+      "original_sha256": "80b41d639b4e5e8cc165bbd2bfea1e771f0d852e9cc300de926efc7d65b317e6",
+      "archived_sha256": "80b41d639b4e5e8cc165bbd2bfea1e771f0d852e9cc300de926efc7d65b317e6",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-install.log",
+      "bytes": 17231,
+      "original_sha256": "227a262ad9380fd23d08de4379414d5a4132ba11d1395263e7450934bf454fb6",
+      "archived_sha256": "dd51feaaf7eba95969e88661e8f734d514687c945ff7cc32f602330a160cbe26",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-pipeprobe.txt",
+      "bytes": 331,
+      "original_sha256": "b1cf28dc9bbc12a93ac4860f5b5dfff6b75b706b3745aba77a82217ad5672fa6",
+      "archived_sha256": "b1cf28dc9bbc12a93ac4860f5b5dfff6b75b706b3745aba77a82217ad5672fa6",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-settings-final.txt",
+      "bytes": 52388,
+      "original_sha256": "5ba5b939e5793f5ec10f97c6c456d44c261df60ff4d57f84c2996ea5496a742d",
+      "archived_sha256": "5ba5b939e5793f5ec10f97c6c456d44c261df60ff4d57f84c2996ea5496a742d",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-settings-original.json",
+      "bytes": 0,
+      "original_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archived_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "laptop-settings-original.txt",
+      "bytes": 52347,
+      "original_sha256": "6dcf8497c5edd3ac6e4c89bbb1782150d2d9d4524f3af591a5a43425d12e5dc5",
+      "archived_sha256": "6dcf8497c5edd3ac6e4c89bbb1782150d2d9d4524f3af591a5a43425d12e5dc5",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "lab3-build-failure.txt",
+      "bytes": 1066,
+      "original_sha256": "1800f41ed5b6b3166e8e3743273cd7c3ff31c8fc37afd4dfba170bd78c210dc4",
+      "archived_sha256": "1800f41ed5b6b3166e8e3743273cd7c3ff31c8fc37afd4dfba170bd78c210dc4",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "lab4-build-failure.txt",
+      "bytes": 2301,
+      "original_sha256": "3f1333948dd766c102fd08a2508810f94f58c612847b2eb758e96fd5024c8b95",
+      "archived_sha256": "3f1333948dd766c102fd08a2508810f94f58c612847b2eb758e96fd5024c8b95",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-air-real-frame-check.log",
+      "bytes": 1557,
+      "original_sha256": "5a6e9cf5ab315b8ab9d9401eda4017fb5a66b0761159d15ab36f03b1d677f35d",
+      "archived_sha256": "5a6e9cf5ab315b8ab9d9401eda4017fb5a66b0761159d15ab36f03b1d677f35d",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-air-real-frame-check.py",
+      "bytes": 2005,
+      "original_sha256": "c3a7a4ed2fc3cdc9a90c4d88de4e19cd04c71b6242722ebba31682f09415f940",
+      "archived_sha256": "08321fcd2948ad5cb9d91f54725be9972dd58861a4ade2cd9f0a3487d2f799bd",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-hdr-clean-start-sample-20261012.txt",
+      "bytes": 159912,
+      "original_sha256": "ce949e493e531eb2b80770bc5d6f4d440cc3634de50f8f5884c53d035c05a800",
+      "archived_sha256": "ce949e493e531eb2b80770bc5d6f4d440cc3634de50f8f5884c53d035c05a800",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-hdr-startup-sample-20261012.txt",
+      "bytes": 196607,
+      "original_sha256": "67cdb0b074ac83746c5f90bd653ea1b39fd47a948a1af4c386909490f0245682",
+      "archived_sha256": "67cdb0b074ac83746c5f90bd653ea1b39fd47a948a1af4c386909490f0245682",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-hdr-startup-sample-20261012b.txt",
+      "bytes": 323835,
+      "original_sha256": "2d2cd1d4216739e0532aa14ac58a8e746751b22b97065be3c5fca03501d83f2f",
+      "archived_sha256": "2d2cd1d4216739e0532aa14ac58a8e746751b22b97065be3c5fca03501d83f2f",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-heretic-duplicate-fd-test-20261012.json",
+      "bytes": 3861,
+      "original_sha256": "2c01813aee9e7d689e1508675b6bcd7a80e4443794491e9c4663b5c517385bca",
+      "archived_sha256": "2c01813aee9e7d689e1508675b6bcd7a80e4443794491e9c4663b5c517385bca",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-heretic-fd-test-20261012.json",
+      "bytes": 2341,
+      "original_sha256": "8a10bccc40b07d2ab38f1674a9f9747acba0d3e965f48e51c2188b75d98f3ada",
+      "archived_sha256": "8a10bccc40b07d2ab38f1674a9f9747acba0d3e965f48e51c2188b75d98f3ada",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-heretic-independent-fd-test-20261012.json",
+      "bytes": 3404,
+      "original_sha256": "35a3fb32b84556be37d520fc93f8fb284ddde7b51313bdb5f550d8d69f565e22",
+      "archived_sha256": "35a3fb32b84556be37d520fc93f8fb284ddde7b51313bdb5f550d8d69f565e22",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-heretic-transcode-sample-20261012.txt",
+      "bytes": 99691,
+      "original_sha256": "7b8a36a32c1a3d41e4dffe5714f2000a46bfed7411ff9be237c2d8b0644bcc88",
+      "archived_sha256": "7b8a36a32c1a3d41e4dffe5714f2000a46bfed7411ff9be237c2d8b0644bcc88",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-hevc-air-install-94dee81da-correct-prefix.log",
+      "bytes": 1250,
+      "original_sha256": "4648203c0fb1d6d9821b375f0692ebf1b51bef937ec223349cfdea5d97809d8f",
+      "archived_sha256": "19897acefa1e1f98aa18f5b7aa56e31ed857833f08560eb2821175c66b6e5782",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-hevc-air-install-94dee81da.log",
+      "bytes": 1322,
+      "original_sha256": "412bfb13761efd45be60b1be2d21678b98bb2748fde636bb38a478dc18571e1f",
+      "archived_sha256": "9c2aec4a01b55bc0dd4546ddc0f26aad3bcd711938055be3628e23b3272ab1e7",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-hevc-air-install-ae4f1f027.log",
+      "bytes": 675,
+      "original_sha256": "f50fd2c7d62205ff4f5bb8277114fd4bbdf57173e5523de1ee240cbb1c724f1b",
+      "archived_sha256": "4eb6f53d410a088fb01faefd70e3c7da88c3cfbaa9a643690cc67773cb118fa7",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-hevc-commit.log",
+      "bytes": 726,
+      "original_sha256": "de40e45856b819e1be6c3fdd3a3496faa84e0833f5cbe29d7273e11ddf025325",
+      "archived_sha256": "a9480f9a77453f7fed349e729b81a2974816f70653100296c605c6e034e967fd",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-hevc-current-docs-tests.log",
+      "bytes": 117,
+      "original_sha256": "d37aecf6f6d94c70f00e2fd6cf3c295318ef737932425cd96cf1e6e2fa0c8b9e",
+      "archived_sha256": "d37aecf6f6d94c70f00e2fd6cf3c295318ef737932425cd96cf1e6e2fa0c8b9e",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-hevc-final-verification.log",
+      "bytes": 15139,
+      "original_sha256": "a04c32e0222ec179d8b94ca9c964864611e6542632ac25381d9aa8cfe8b28bde",
+      "archived_sha256": "d90a41274ccd7e69095f462394647931c8a98572ffa4ba579bc4974ce9bd4d9d",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-hevc-pr-body.md",
+      "bytes": 1494,
+      "original_sha256": "ff60d2f82f7c6447789f29be3ff4887c6961871046e378df8d4c7c8c85906de5",
+      "archived_sha256": "ff60d2f82f7c6447789f29be3ff4887c6961871046e378df8d4c7c8c85906de5",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-hevc-pr.json",
+      "bytes": 181,
+      "original_sha256": "353d05052ae21e68856edbe18dee29e413eb35d118298537162ee2ca65756fd6",
+      "archived_sha256": "5b45bb57bf90f769ab8a7292cb4530087af17eb744f78bb106bf1f5a932233c5",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-hevc-release-ae4f1f027.log",
+      "bytes": 435,
+      "original_sha256": "16d98242b61374a390f5067eed5860ade38b05ef96bd6e801a5b571371cebf59",
+      "archived_sha256": "71aedc29ec10fd1369bf0f31161b4c12e889fe8d429f91cc045eea6bbcd7aa85",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-jellyfin-metal.patch",
+      "bytes": 88347,
+      "original_sha256": "fe73cb851c0f13bc1437f8327cd7497556f12fccec3fbb6a1b9dda47bb4ecb88",
+      "archived_sha256": "fe73cb851c0f13bc1437f8327cd7497556f12fccec3fbb6a1b9dda47bb4ecb88",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-boot-fixture-check.log",
+      "bytes": 1614,
+      "original_sha256": "5ea233737970933b40d5c63d7a737a7dd333a4663ab96ea80262d5cf095f7150",
+      "archived_sha256": "5ea233737970933b40d5c63d7a737a7dd333a4663ab96ea80262d5cf095f7150",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-boot-fixture-check.py",
+      "bytes": 2712,
+      "original_sha256": "c969efe98d3329b37484f8aa3186ee27a4325e4454ea57f56bbd72aa644a59d3",
+      "archived_sha256": "c969efe98d3329b37484f8aa3186ee27a4325e4454ea57f56bbd72aa644a59d3",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-final-check.log",
+      "bytes": 973,
+      "original_sha256": "eb6b36bbe36dcfb3388e78df92af7e4040e357b0c517b198f2832b3474d8fd2f",
+      "archived_sha256": "22a2e0dfe0a1f94e4224071932fe961c694e466da56cfff6167136c8117dcc94",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-final-clippy.log",
+      "bytes": 183,
+      "original_sha256": "629cba98dd6f23a05730c5e5022d5a709a4bfc19e6133014d892c0610b873253",
+      "archived_sha256": "b46bc1c98156beb5e13d5505f8f31dbd5325cb96eabf5f59a8d0a33e0120c844",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-integrated-decoder.log",
+      "bytes": 8394,
+      "original_sha256": "6e502eb61ea0507e24c5ecd1553bbe3605b2a41798b02e6e61d7e379543e3441",
+      "archived_sha256": "c66db052bb0c11955bc9c212da83fa861292d326265981d7d6356f6870d388ec",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-integrated-doc-commit.log",
+      "bytes": 738,
+      "original_sha256": "e050f282828c94f23866afe3f4e5fbb491fa16de54cde014c2bbca55c0358a1e",
+      "archived_sha256": "a73ee824534ed29392f71b9260afe4edcc24cc0b35fb0a0f3598a855b713562c",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-integrated-hevc.log",
+      "bytes": 3848,
+      "original_sha256": "d0787e28ed6418c1c466d8bad275d83b7739c5e79190f03b1bc85f1277381494",
+      "archived_sha256": "4da9682781113b365aaec965d4d2c64dcbc7c66a1de5140e578a0409028a88ca",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-integrated-linux.log",
+      "bytes": 3878,
+      "original_sha256": "69577f519cb9eaa099428aadb34e833666d3143a1760e88e217669ef0fb893a7",
+      "archived_sha256": "69577f519cb9eaa099428aadb34e833666d3143a1760e88e217669ef0fb893a7",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-integrated-pipeline.log",
+      "bytes": 2638,
+      "original_sha256": "9f4dabfdd9efb3e6e34a74c835ffa681d7b91d3c7fe14afca8fdfdb54835480e",
+      "archived_sha256": "62a6adc7b1747e09fa6de5beb842a7653db0442c4669964b6171263f8b099b5d",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-integrated-pipeprobe.log",
+      "bytes": 5922,
+      "original_sha256": "5ad5aa53a0f76e564dc34277a713435dc1f4375e0a9c603d75ea948d249cf90b",
+      "archived_sha256": "5ad5aa53a0f76e564dc34277a713435dc1f4375e0a9c603d75ea948d249cf90b",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-integrated-policy.log",
+      "bytes": 125,
+      "original_sha256": "f74bdaf208279b54c3bbf706371e9c24c15d7be538f688de0035e49b0bb8b116",
+      "archived_sha256": "f74bdaf208279b54c3bbf706371e9c24c15d7be538f688de0035e49b0bb8b116",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-peak-check.log",
+      "bytes": 5158,
+      "original_sha256": "b451f2f9219ce3b8e8593d5393f84328528b801454dcabd8cc51ff47ba14f0ee",
+      "archived_sha256": "b451f2f9219ce3b8e8593d5393f84328528b801454dcabd8cc51ff47ba14f0ee",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-peak-check.py",
+      "bytes": 2852,
+      "original_sha256": "e7365ff95fd13db5ad5b4dfc769bb33a45fefea12cdeecf2785ae5e00e3740f2",
+      "archived_sha256": "7785da6e2e05336929394ededc72fd71d67b5f107c89c3cbc93df3ecae59aa97",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-peak-clippy.log",
+      "bytes": 569,
+      "original_sha256": "b0f4c59f06d4e3c5da86682bf26058683d231c8be4a7089d88d889dc4bef6b60",
+      "archived_sha256": "140fece3706911e3309f9b8224182f98951bdf0d6697bc496ae20a4035babdfb",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-peak-commit.log",
+      "bytes": 573,
+      "original_sha256": "26241f61d6d5b46194b2f48fdad48a4b77caadb052952abbd2e2ff6cd31ace71",
+      "archived_sha256": "a1c47a5ca93070c8ee5749f2a82fcdd796214c53b916e772c05439cc0dbc225f",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-peak-decoder-tests.log",
+      "bytes": 8227,
+      "original_sha256": "9c2b9d6392211fe1f96a085a59a02795e3fe0951c7edcdadf54778ff7553a259",
+      "archived_sha256": "247a181521f2cf7a2a625bc1a9a520c5eed7051e28b4abc33d95c4914c3ecd15",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-peak-doc-contracts.log",
+      "bytes": 117,
+      "original_sha256": "ce1b400c26540ce1b7ca248def183303c0b7c350bc25643a50c5a304b5eac393",
+      "archived_sha256": "ce1b400c26540ce1b7ca248def183303c0b7c350bc25643a50c5a304b5eac393",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-peak-pipeline-tests.log",
+      "bytes": 2638,
+      "original_sha256": "da169b203b0110e441cc08a9d2fa1c277aa016bf23b50164830d02ab5f92483a",
+      "archived_sha256": "b6902d626ebcc6d38064047bed36bf9e8b59d5865c56c6139abcd9df8dba8c21",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-peak-pipeprobe-native-tests.log",
+      "bytes": 4325,
+      "original_sha256": "b9db0900754ea9a23e2b3bdb3bd7e6224fe7a44b0d3a6e4c1b828d3babf17732",
+      "archived_sha256": "b9db0900754ea9a23e2b3bdb3bd7e6224fe7a44b0d3a6e4c1b828d3babf17732",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-peak-pipeprobe-tests.log",
+      "bytes": 4686,
+      "original_sha256": "bdd4992314bf962b6fe63779cbfb8cb0f965b50b16bb8b2b0044b7193cbd7933",
+      "archived_sha256": "25c763f9c2033f6adfbc906710c6ebd1904e94547d95cebf9c936445c25fc213",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-peak-release-94dee81da.log",
+      "bytes": 435,
+      "original_sha256": "49de29b4700d42683eb14e6b505f8dd0791ec44c8bd018636e5d593da0fefcab",
+      "archived_sha256": "7bb6e7736f559e29f1e9df3fc72e7e8fd915922c4b328130b9c5fd02ca44ec90",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-metal-peak-rust-test.log",
+      "bytes": 775,
+      "original_sha256": "f5b8331b91ea0bd12ab6ae8bdefe413b4965a3ea48941086ff9e5c8a68d24dd6",
+      "archived_sha256": "3b72b6247c1cf1a8ea402151841fca1a8c46b9aff1dbbff002b5551af1ff5366",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "plurx-pr1038-python-unit-receipt.json",
+      "bytes": 284162,
+      "original_sha256": "d04e0197229556b852092687b3aa06116aa6479ee80e1fd60fbe32a0e0f89af9",
+      "archived_sha256": "6ecbea87e8fa1350c24f7ad37b6b209f0f265fa7f94716abab9c1e467712b92e",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-94-artifacts.json",
+      "bytes": 1506,
+      "original_sha256": "e4935026219a33e34d62f91720b71af0d2085c69e8de946052096d09babef383",
+      "archived_sha256": "8b85c95a02db4a32ecfb24192da27598295fe0884b246a8153a78ce0f7f6b15e",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-94-gate-status.json",
+      "bytes": 1972,
+      "original_sha256": "877905669d1dc189436f5e7551f79177e5753c3591e85df863b31aae91213b2d",
+      "archived_sha256": "8bda2151dbb560ac0fd879b5d03e961420682c7a6a8e31fb85989b251e02fc28",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-94-preflight-receipt.json",
+      "bytes": 3702,
+      "original_sha256": "b0f0a20c16dc6fcfd9aa1d9ae50eed86cb79e6f21aab5e02263c90327100d111",
+      "archived_sha256": "ad7fc31ffbf9043a21ddcef03c7969ed28b1c4e08bacd1566e843c6519f3aee4",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-94-python-units-receipt.json",
+      "bytes": 284415,
+      "original_sha256": "bcee30651dc1fe27ca6fd1161e7c1c8e18d73b58a9760f8d14b29cd8142721d4",
+      "archived_sha256": "e7c0fffa238b4933d61579540a1289bbf2ffe57d46915321918879fb03b409f7",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-current-status.json",
+      "bytes": 1652,
+      "original_sha256": "a36b5a052c5d03358f06bfd49b5194e2a1eb6f70b3decfa864b4392686edca5c",
+      "archived_sha256": "a36b5a052c5d03358f06bfd49b5194e2a1eb6f70b3decfa864b4392686edca5c",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-final-artifacts.json",
+      "bytes": 1507,
+      "original_sha256": "f4b1f74a9ed59eacbc5b3b2bc24dbce9b3fca4c5a4166a6b8403d0b246cae4be",
+      "archived_sha256": "53d910fc7e0e9c6131db77102f8e4119e93c0f08d74887287ad0eb8f7969412d",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-final-body.md",
+      "bytes": 5482,
+      "original_sha256": "57f59caf83c586b929f49a51037250c9fa9ec8041e1d738a8ef4b43a1b0f2d75",
+      "archived_sha256": "57f59caf83c586b929f49a51037250c9fa9ec8041e1d738a8ef4b43a1b0f2d75",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-final-gate-status.json",
+      "bytes": 1652,
+      "original_sha256": "a36b5a052c5d03358f06bfd49b5194e2a1eb6f70b3decfa864b4392686edca5c",
+      "archived_sha256": "a36b5a052c5d03358f06bfd49b5194e2a1eb6f70b3decfa864b4392686edca5c",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-final-preflight-receipt.json",
+      "bytes": 3703,
+      "original_sha256": "3e269ac20f74c7f52afce422d5300bf50e7bac079cdc9bb63cc8ef509ad03d27",
+      "archived_sha256": "3e269ac20f74c7f52afce422d5300bf50e7bac079cdc9bb63cc8ef509ad03d27",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-final-python-units-receipt.json",
+      "bytes": 284416,
+      "original_sha256": "acf9da64b8aa5eb27e0d9c90657efa2b612b93e279bf921ce438e08f754f6f51",
+      "archived_sha256": "acf9da64b8aa5eb27e0d9c90657efa2b612b93e279bf921ce438e08f754f6f51",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-final-run-identities.json",
+      "bytes": 182,
+      "original_sha256": "8c3d32fa3abbb0ab445ded6f33bb7fc9dc3fb6271fcd01338272faa885e7dc23",
+      "archived_sha256": "8c3d32fa3abbb0ab445ded6f33bb7fc9dc3fb6271fcd01338272faa885e7dc23",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-landing-receipt.json",
+      "bytes": 978,
+      "original_sha256": "37e6c7864a387a61a3ac0a2206c47dfdb1f7c192c670b286efa62a8173e81987",
+      "archived_sha256": "37e6c7864a387a61a3ac0a2206c47dfdb1f7c192c670b286efa62a8173e81987",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-merge-result.json",
+      "bytes": 165,
+      "original_sha256": "4e1715f3189d8c94684d5bc0b8cb61d984d9dac9d8a8e79eed9d77399898c977",
+      "archived_sha256": "4e1715f3189d8c94684d5bc0b8cb61d984d9dac9d8a8e79eed9d77399898c977",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-merged.jpg",
+      "bytes": 238916,
+      "original_sha256": "4957bde82a11b913455e3b9da154f0dd3050eb598c6c30e08f31191dc3373d79",
+      "archived_sha256": "4957bde82a11b913455e3b9da154f0dd3050eb598c6c30e08f31191dc3373d79",
+      "storage": "private evidence attachment on PR1038"
+    },
+    {
+      "name": "pr1038-preflight-dom.txt",
+      "bytes": 705890,
+      "original_sha256": "7d0e3a8bfd71f24885f908468d2dfe0120bd24d867431f0c01fb55cf8a307732",
+      "archived_sha256": "7d0e3a8bfd71f24885f908468d2dfe0120bd24d867431f0c01fb55cf8a307732",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "pr1038-qualified-body.md",
+      "bytes": 5720,
+      "original_sha256": "d22adc3be8bb613dd6e8fdbf4619506ec540760a105f52aa46562d845822ed41",
+      "archived_sha256": "d22adc3be8bb613dd6e8fdbf4619506ec540760a105f52aa46562d845822ed41",
+      "storage": "text-receipts.tar.gz"
+    },
+    {
+      "name": "temporary-startup-diagnostic.patch",
+      "bytes": 2062,
+      "original_sha256": "9fa20c1ae117421c11b43852e09500b74d96c46c9f5269350624382da4f2624b",
+      "archived_sha256": "9fa20c1ae117421c11b43852e09500b74d96c46c9f5269350624382da4f2624b",
+      "storage": "text-receipts.tar.gz"
+    }
+  ]
+}
