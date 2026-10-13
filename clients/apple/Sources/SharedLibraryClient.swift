@@ -36,6 +36,7 @@ struct SharedLibraryClient {
         guard let url = components.url else { throw APIError.badURL }
         var request = URLRequest(url: url); request.timeoutInterval = 30
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        ReadAfterHTTP.bindCaptured(origin: origin, token: token, generation: generation, to: &request)
         if let enabled {
             request.httpMethod = "PUT"; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: ["enabled": enabled])
@@ -43,7 +44,7 @@ struct SharedLibraryClient {
             request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: post, options: [.sortedKeys])
         }
-        let (data, response) = try await transport.data(for: request)
+        let (data, response) = try await ReadAfterHTTP.shared.data(for: request, using: transport, refuseRedirects: true)
         try requireCurrent()
         guard let response = response as? HTTPURLResponse, response.url == url,
               data.count <= 4_194_304 else { throw APIError.badURL }
