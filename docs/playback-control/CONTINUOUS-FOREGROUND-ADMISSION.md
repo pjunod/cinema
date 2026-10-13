@@ -1,6 +1,6 @@
 # Continuous startup — foreground playback preempts background indexing
 
-**Status:** implemented; focused regressions passed, PR review pending · **Written:** 2026-10-12
+**Status:** implemented; focused regressions and adversarial review passed, physical qualification pending · **Written:** 2026-10-12
 
 Companion to [the continuous-quality build](CONTINUOUS-QUALITY-BUILD.md):
 this records the startup failure caused by omitting foreground admission.
