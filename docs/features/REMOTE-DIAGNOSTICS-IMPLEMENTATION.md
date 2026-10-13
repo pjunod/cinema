@@ -1,6 +1,6 @@
 # Remote diagnostics — build a report that explains a Cinema failure
 
-**Status:** open — implementation complete; release acceptance pending ·
+**Status:** open — archive export is the current release scope; device acceptance pending ·
 **Written:** 2026-10-12 · **Source baseline:** `8d7bc723e` ·
 **Executes:** Paul's request for remote diagnostics on web, Apple and Android,
 with TV phone handoff and the upload inbox in the first release ·
@@ -14,6 +14,32 @@ Re-verify source anchors against the actual task base. Work through §12 in
 order; record a contract change and its reason before implementing it.
 Preserve playback authority, account isolation and sharing boundaries. A
 diagnostic observer must never become another playback controller.
+
+## Current direction — attach a ZIP to a bug report
+
+Paul changed the release direction on 2026-10-13: the diagnostic tool should
+produce an archive a viewer can attach to a bug or issue report. This supersedes
+the inbox, direct-send and hosted phone-handoff requirements below. Their built
+source is retained as deferred work; it is not a release dependency and the
+prepared private service will not be installed.
+
+The ordinary flow is Report a problem → describe the issue → review optional
+private content → Save / share diagnostic ZIP → attach it to an issue. Web
+saves a file; iPhone/iPad and Android phones use the system share sheet. Export
+must work when Cinema is unreachable, and must not enroll an installation or
+contact a support service. A ZIP contains `summary.txt`, `manifest.json`, the
+user's `description.txt`, bounded structured client events, and available
+user-scoped server evidence. Title and platform attachments stay opt-in.
+
+Native TVs retain local capture and history, but transferring their actual
+archive to a phone without a hosted inbox remains unfinished. Do not represent
+an export from a different device as the TV's report. Physical file sharing and
+TV transfer need their own acceptance evidence. The execution ledger records
+the current qualified subset and remaining work.
+
+The sections below retain the original implementation design and receipts.
+Hosted delivery requirements are historical until a new user instruction
+reopens that work.
 
 ## 1. First release — capture, explain and deliver one incident
 

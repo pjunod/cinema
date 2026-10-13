@@ -645,9 +645,9 @@ Two rounds of performance work, each with its plan, review, and response.
 | File | Answers | |
 |---|---|---|
 | [PROJECT-BACKLOG.md](features/PROJECT-BACKLOG.md) | Cross-project to-do: designed but unbuilt work, remaining acceptance, reconciliations and deferred decisions. | live |
-| [REMOTE-DIAGNOSTICS-IMPLEMENTATION.md](features/REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) | First-release build contract for web, Apple and Android diagnostic capture, user-scoped server evidence, TV phone handoff and the independent upload inbox. | open |
-| [REMOTE-DIAGNOSTICS-STATUS.md](features/REMOTE-DIAGNOSTICS-STATUS.md) | Canonical ownership, packet progress, software/device evidence and promotion ledger for remote diagnostics. | open |
-| [REMOTE-DIAGNOSTICS-OPERATIONS.md](server/REMOTE-DIAGNOSTICS-OPERATIONS.md) | Build and operate the independent support ingress, passkey inbox, private storage, quotas and restore fences; deployment/device acceptance remains open. | open |
+| [REMOTE-DIAGNOSTICS-IMPLEMENTATION.md](features/REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) | Current archive-attachment contract and historical hosted-delivery design for web, Apple and Android diagnostic capture. | open |
+| [REMOTE-DIAGNOSTICS-STATUS.md](features/REMOTE-DIAGNOSTICS-STATUS.md) | Canonical ownership, archive qualification, deferred hosted delivery and promotion ledger for diagnostics. | open |
+| [REMOTE-DIAGNOSTICS-OPERATIONS.md](server/REMOTE-DIAGNOSTICS-OPERATIONS.md) | Retained operating instructions for the deferred support service; archive attachments do not require its deployment. | open |
 | [SHARED-LIBRARIES-DESIGN.md](features/SHARED-LIBRARIES-DESIGN.md) | Why Cinema shares selected libraries over private Tailscale; scope and deferred Plex/Watch Together work. | open |
 | [SHARED-LIBRARIES-IMPLEMENTATION.md](features/SHARED-LIBRARIES-IMPLEMENTATION.md) | Revised S0–S8 build contract, authority, deployment, playback integration and acceptance evidence. | open |
 | [SHARED-LIBRARIES-STATUS.md](features/SHARED-LIBRARIES-STATUS.md) | Shared-libraries integration, live promotion evidence, failed-only qualification and remaining acceptance. | open |
@@ -780,3 +780,4 @@ DV final bounded serving evidence: [HTTP summary](evidence/dv-processing-2026-10
 
 | [Remote diagnostics Apple wire](apple-builds/remote-diagnostics-wire.md) | What is added to the Apple report format contract? | built |
 | [Remote diagnostics Apple capture](apple-builds/remote-diagnostics-capture.md) | What changes in native private report capture, share, send and TV approval? | open |
+| [remote-diagnostics-qualification.md](apple-builds/remote-diagnostics-qualification.md) | Registers and qualifies the actual offline report UI, explicit upload boundary and same-incident relaunch recovery. | open |
