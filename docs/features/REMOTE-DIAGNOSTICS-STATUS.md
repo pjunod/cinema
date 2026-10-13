@@ -1,6 +1,6 @@
 # Remote diagnostics status — ownership, implementation and release evidence
 
-**Status:** open — archive export qualification; hosted delivery deferred.
+**Status:** open — web/phone ZIP export qualified; native TV transfer and physical acceptance open.
 **Updated:** 2026-10-13 · **Planning baseline:** `8d7bc723e`.
 
 The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md#current-direction--attach-a-zip-to-a-bug-report) defines the current archive-attachment release.
@@ -18,13 +18,13 @@ duplicating its evidence.
 | Intended effort | Implementation merged into `main`; qualification follows on `codex/remote-diagnostics-qualification` |
 | Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent clone in temporary owner storage; original landing `8040f862c3458245480065e11dec643fbfe370b3`, current main base `e4b6c1c6d`, diagnostic corrections `a343ffb12`, archive-flow correction `069615e85` on the integrated current base; the exact final gate/landing receipt is maintained in #1066; user checkouts remain untouched. |
+| Implementation workspace/base | Independent clone in temporary owner storage; original landing `8040f862c3458245480065e11dec643fbfe370b3`, current main base `96e4c49e9`, diagnostic corrections `a343ffb12`, archive-flow correction `069615e85` on the integrated current base; the exact final gate/landing receipt is maintained in #1066; user checkouts remain untouched. |
 | Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
 | Plan review | Original review: 12 findings corrected. One follow-up review complete: two P1 history findings corrected; focused qualification recorded in §24. |
 | Promotion/deployment | PR #1037 merged 2026-10-13, all eight checks passed on `6bc7235a0`; no production changes by this chat. Another rollout placed the landing on two nodes and exposed a router startup failure; recovery owner is recorded in §22. Isolated qualification continues. |
 | Current checks | Original #1037: eight checks passed and all 32 landing anchors verified. Follow-up: normal hooks, affected native compilation and focused regressions passed; all-target pinned check and composed startup passed on integrated `468a06545`. Follow-up fast gate/landing receipt is in #1066. |
 | Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
-| Next action | Make portable ZIP export the ordinary web/phone flow and verify saved files; finish #1066 only on a green gate. Native TV archive transfer remains open. Hosted delivery and the approved private pilot are superseded by Paul’s archive-first direction. |
+| Next action | Finish #1066 only on its required green gate; qualify physical sharing and implement native TV archive transfer separately. Web/phone ZIP export is built and qualified on owned software devices. Hosted delivery and the approved private pilot are superseded by Paul’s archive-first direction. |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
 shared checkout and preserve unrelated `Claude outputs/` artifacts.
@@ -735,3 +735,16 @@ file alive until dismissal. Earlier button-selector failures and the zero-test
 receipt remain failures, not qualification. This batch claims Apple236 and
 Android170 above current main’s Apple235/Android169; current-base compilation
 and the required fast gate remain recorded in #1066.
+
+Final current-base receipts: iOS and tvOS capture/wire suites each passed nine
+cases; Android capture/wire passed eight. Actual UI passed two iPhone cases
+including the system share sheet, one Apple TV retained-incident case, three
+Android phone and four Android TV cases. The iPhone generated target's missing
+report-test source was caught by its zero-test result, restored normally and
+rerun with two executed passes. Apple236/Android170 are valid against current
+main. Pinned all-target check, full composed-router startup and normal hooks
+passed; the local history audit passed all 3773 corrective commits and 565
+client-fix anchors. The later playback landing `96e4c49e9` changes no native
+product/test inputs; native receipts remain applicable after source comparison.
+Its focused browser rendezvous checks were included in the latest-base web run.
+The exact final head, fast-gate outcome and landing are maintained in #1066.
