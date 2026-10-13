@@ -4231,6 +4231,29 @@ assert.equal(context.ACT_TIMER, null);
             "'Which ffmpeg the profiles assume' in the same commit",
         )
 
+    def test_container_rust_jobs_supply_openssl_before_compilation(self):
+        ci_stage = read("Dockerfile").split("FROM runtime-assets AS ci", 1)[1].split(
+            "FROM runtime-assets AS runtime", 1
+        )[0]
+        self.assertIn("libssl-dev", ci_stage)
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        checked = set()
+        for name, block in jobs.items():
+            if "/noirr/plurx-ci@sha256:" not in block:
+                continue
+            with self.subTest(job=name):
+                dependency = "uses: ./.github/actions/rust-native-deps"
+                self.assertIn(dependency, block)
+                # Provision before the first compiler-capable local action.
+                self.assertLess(block.index(dependency), block.index("uses: ./.github/actions/ffmpeg"))
+                checked.add(name)
+        self.assertEqual(checked, {"check", "cluster_daemon", "web_layout", "vod_web"})
+        action = read(".github/actions/rust-native-deps/action.yml")
+        self.assertIn("pkg-config --exists openssl", action)
+        self.assertIn("#include <openssl/ssl.h>", action)
+        self.assertIn("OPENSSL_init_ssl", action)
+        self.assertIn('"$probe/openssl"', action)
+
     def test_m5_shipped_ffmpeg_jobs_use_one_digest_and_keep_burst_coverage(self):
         dockerfile = read("Dockerfile")
         self.assertIn("FROM runtime-assets AS ci", dockerfile)

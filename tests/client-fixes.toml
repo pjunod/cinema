@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "android.shared-library-fixture-platform-ownership"
+commits = ["937bfc7000269015cde95c18130694a5c862ffe7"]
+source = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+source_anchor = "Net.authenticatedClient { System.nanoTime() / 1_000_000 }"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+test_anchor = "actualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt"
+
+[[fixes]]
 id = "subtitles.available-count-includes-selection"
 commits = ["884614df1b58c2878c30c758d21adbeb973f60c9"]
 source = "crates/plurxd/src/web/detail/watch-browser.js"
