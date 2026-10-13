@@ -44,7 +44,7 @@ function harness({state="active"}={}){
       {onSuccess(){},onProgress(){},onAbort(){},onError(){},onTimeout(){}});
   }
   loadManifest();
-  return {player,startup,sends,loaders,
+  return {player,startup,sends,loaders,manifest:loadManifest,
     get diagnoses(){return diagnoses;},
     detach(){current=false;},
     resume(){player.wantsPlayback=true;player.controlIntentGeneration++;return ctx.resumeHlsStartup({currentTime:0},player);},
@@ -106,4 +106,22 @@ test("paused manifest gate does not revive cancelled or exhausted startup",async
       h.advance(0);await flush();assert.equal(h.sends.length,0);
     }finally{h.close();}
   }
+});
+
+test("paused VOD seek permits a manifest only for its current target lease",async()=>{
+  const h=harness({state:"presenting"});
+  try{
+    await flush();assert.equal(h.sends.length,0);
+    const pending={executed:true};h.player.controlSeek=pending;
+    h.startup.pausedSeek={pending,attachment:h.player.mediaAttachment,
+      intentGeneration:h.player.controlIntentGeneration};
+    h.manifest();await flush();assert.equal(h.sends.length,1,'current paused seek may fetch its playlist');
+    h.player.controlIntentGeneration++;h.manifest();await flush();
+    assert.equal(h.sends.length,1,'a stale seek generation cannot dispatch');
+    h.startup.pausedSeek.intentGeneration=h.player.controlIntentGeneration;
+    h.player.controlSeek={executed:true};h.manifest();await flush();
+    assert.equal(h.sends.length,1,'another target cannot reuse the old lease');
+    h.player.controlSeek=pending;h.detach();h.manifest();await flush();
+    assert.equal(h.sends.length,1,'a detached lease cannot fetch');
+  }finally{h.close();}
 });
