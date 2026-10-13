@@ -874,6 +874,55 @@ impl VodServe {
             .iter()
             .map(|encoding| encoding.resources())
             .collect::<Vec<_>>();
+        let priority = priority.unwrap_or_else(|| {
+            if encodings
+                .iter()
+                .any(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
+            {
+                crate::admission::Priority::Speculative
+            } else {
+                crate::admission::Priority::Live
+            }
+        });
+        // Foreground family starts participate in the same preemption protocol
+        // as ordinary encoders. Keep the waiter alive across every attempt so
+        // background indexing yields and cannot reclaim its released budget.
+        // Speculative renewals never preempt an active viewer or wait here.
+        let mut waiting = (priority == crate::admission::Priority::Live)
+            .then(|| first.admissions.queue_for_slot());
+        let deadline = Instant::now() + crate::admission::QUEUE_WAIT;
+        loop {
+            if let Some(permits) = Self::try_reserve_media_group(
+                media,
+                &first.admissions,
+                hardware_limit,
+                software_budget,
+                &estimates,
+                priority,
+            ) {
+                return Ok(permits);
+            }
+            if let Some(waiting) = waiting.as_mut() {
+                waiting.mark_capacity_blocked();
+            }
+            let now = Instant::now();
+            if priority != crate::admission::Priority::Live || now >= deadline {
+                return Err(refuse());
+            }
+            tokio::time::sleep(crate::transcode::ADMISSION_POLL.min(deadline - now)).await;
+        }
+    }
+
+    // One atomic attempt. Binding guards must never survive an await: workers
+    // need those bindings to release capacity while a foreground start waits.
+    fn try_reserve_media_group(
+        media: &[Arc<Rendition>],
+        admissions: &crate::admission::Admissions,
+        hardware_limit: usize,
+        software_budget: usize,
+        estimates: &[crate::admission::TranscodeResourceEstimate],
+        priority: crate::admission::Priority,
+    ) -> Option<Vec<crate::vodencode::EncodePermit>> {
         // The callers hold these renditions' sorted build gates. Stabilize
         // weak bindings as well: an ordinary worker must not substitute a
         // newly acquired, unrelated credit after the pool decision adopts
@@ -886,16 +935,6 @@ impl VodServe {
             .iter()
             .map(|binding| binding.current())
             .collect::<Vec<_>>();
-        let priority = priority.unwrap_or_else(|| {
-            if encodings
-                .iter()
-                .any(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
-            {
-                crate::admission::Priority::Speculative
-            } else {
-                crate::admission::Priority::Live
-            }
-        });
         let views = retained
             .iter()
             .map(|permit| {
@@ -904,16 +943,13 @@ impl VodServe {
                     .map(crate::vodencode::EncodePermit::retained_resources)
             })
             .collect::<Vec<_>>();
-        let (family, admitted) = first
-            .admissions
-            .try_admit_family(
-                hardware_limit,
-                software_budget,
-                &estimates,
-                &views,
-                priority,
-            )
-            .ok_or_else(refuse)?;
+        let (family, admitted) = admissions.try_admit_family(
+            hardware_limit,
+            software_budget,
+            estimates,
+            &views,
+            priority,
+        )?;
         let mut admitted = admitted.into_iter();
         for (binding, permit) in bindings.iter_mut().zip(&mut retained) {
             if permit.is_none() {
@@ -931,10 +967,12 @@ impl VodServe {
             }),
             "locked bindings preserve the atomically admitted family"
         );
-        Ok(retained
-            .into_iter()
-            .map(|permit| permit.expect("every role admitted"))
-            .collect())
+        Some(
+            retained
+                .into_iter()
+                .map(|permit| permit.expect("every role admitted"))
+                .collect(),
+        )
     }
 
     async fn try_create_with_release_fence(
