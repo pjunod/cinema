@@ -2885,6 +2885,7 @@ impl MediaSessionCoordinator {
             return false;
         }
         self.route_generations[shard].fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        crate::telemetry::diagnostics(Arc::clone(&self.store)).route(&route);
         insert_cached_route(&mut routes, &session_id, Some(route), now);
         self.route_cache_metrics.cache_entries(routes.len());
         true
@@ -2918,6 +2919,9 @@ impl MediaSessionCoordinator {
     }
 
     async fn cache_route_result(&self, session_id: &str, route: Option<MediaSessionRoute>) {
+        if let Some(route) = &route {
+            crate::telemetry::diagnostics(Arc::clone(&self.store)).route(route);
+        }
         let now = tokio::time::Instant::now();
         let mut routes = self.lock_routes(RouteLockSite::Insert).await;
         let walked = routes.len();
@@ -2955,6 +2959,9 @@ impl MediaSessionCoordinator {
         }
         if let Some(cached) = routes.get(session_id) {
             return cached.route.clone();
+        }
+        if let Some(route) = &route {
+            crate::telemetry::diagnostics(Arc::clone(&self.store)).route(route);
         }
         insert_cached_route(&mut routes, session_id, route.clone(), now);
         self.route_cache_metrics.cache_entries(routes.len());

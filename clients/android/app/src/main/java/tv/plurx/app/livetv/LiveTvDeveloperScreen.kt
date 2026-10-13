@@ -43,6 +43,9 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(14.dp)) {
         TextButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) { Text("Back") }
         Text("Developer", style = MaterialTheme.typography.headlineMedium)
+        Text("Remote diagnostics · advisory readiness",style=MaterialTheme.typography.titleMedium)
+        tv.plurx.app.diagnostics.DiagnosticReportButton()
+        Text("Awaiting privacy/resource qualification, signed-release evidence and physical phone/TV approval-flow acceptance. This advisory leaves Developer after those checks pass; local history remains a privacy choice in Help.")
         tv.plurx.app.ui.SharedSharingDeveloperCard()
         tv.plurx.app.remote.RemoteDeveloperCard()
         Text("Enable Live TV and the tuner, guide, recording and Library channel settings are in Settings → Live TV.")

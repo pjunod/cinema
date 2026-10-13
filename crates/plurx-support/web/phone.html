@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Complete a Cinema report</title><link rel="stylesheet" href="/support.css"><script src="/phone.js" defer></script></head>
+<body><main><h1>Complete a Cinema report</h1><p>This page connects to the independent Cinema support service. Your phone does not need access to your Cinema server.</p>
+<p id="status" role="status" aria-live="polite">Enter the code shown on your TV, or open its QR link.</p>
+<form id="claim"><label>TV code <input id="code" autocomplete="off" inputmode="text" maxlength="10" required></label><button>Connect to TV</button></form>
+<section id="comparison" hidden><h2>Confirm on your TV</h2><p>Check that the TV displays this same comparison phrase. Use your TV remote to approve this phone.</p><p id="phrase" class="phrase"></p><p>The report remains hidden until your TV approves.</p></section>
+<section id="report" hidden><h2>Review your report</h2><pre id="summary"></pre><p id="reference"></p>
+<form id="submit"><label>What went wrong? <textarea id="description" maxlength="4000" rows="6" required></textarea></label>
+<label class="check"><input id="titles" type="checkbox"> Include titles already present in this draft</label><label class="check"><input id="attachments" type="checkbox"> Include the draft’s diagnostic attachments</label>
+<p>Turning an option off removes that information from the staged draft. It cannot be restored from this phone. Submission sends this report to the authenticated support inbox.</p><button>Send report</button></form>
+<button id="cancel" class="secondary">Delete this staged report</button></section>
+<section id="done" hidden><h2>Report sent</h2><p id="receipt"></p><p>Keep this reference when contacting support.</p></section>
+</main></body></html>

@@ -1,7 +1,6 @@
 # Mac HDR acceptance — playback follow-ups
 
-**Status:** open — observed failures and bounded investigations; no follow-up
-repair or new hardware qualification is claimed · **Recorded:** 2026-10-12.
+**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; current hardware qualification remains open · **Recorded:** 2026-10-12.
 
 The [full acceptance report](../streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 closes the ordinary HDR10 Metal/CPU comparison. This document specifies the
@@ -156,7 +155,7 @@ the observed 20-second wait is not an approved tolerance. Add a regression at
 the identified demand/loader/settlement boundary, plus a real browser receipt
 for frame presentation. A test that only updates the timeline is insufficient.
 
-### Repair progress — source reviewed; PR qualification and HDR hardware acceptance open
+### Repair progress — both hls.js source repairs qualified and merged; HDR acceptance open
 
 F1 is claimed by the paused-seek repair branch. On the October 12 main
 baseline `6dc031387`, Pause suspends the established HLS loader with
@@ -203,13 +202,56 @@ Original HDR failures remain in the acceptance manifest/archive unchanged.
 New Air failures and both browser harness versions are retained alongside the
 repair. Astra found and verified the correction of a buffered-seek
 Play-before-settlement race; three new regressions fail before that correction
-and pass afterward. Remaining closure work is normal PR qualification,
-and the source-bound HDR-on-Air paused VOD matrix from this section. Native
-HLS and failed paused reopen/startup paths retain their separate qualification
-needs; this local VOD loader repair does not claim to close them. In particular,
-a forced reopen while still paused suppresses its fresh startup manifest. The
-deadline test proves a bounded reopen attempt, not autonomous settlement or
-terminal failure on that replacement.
+and pass afterward. Local VOD PR qualification is complete. Remaining closure
+work is the source-bound HDR-on-Air paused VOD matrix from this section.
+Native HLS retains its separate implementation and qualification needs.
+Before the October 13 follow-up, a forced reopen while still paused suppressed
+its fresh startup manifest. The original local VOD deadline regression proves
+a bounded reopen attempt; the new startup regressions below separately prove
+replacement loading and terminal diagnosis at source level.
+
+The local VOD repair merged in [PR #1047](http://forge.lan:3000/noirr/plurx/pulls/1047)
+as `b2adc5f789f981e189ad72bfbe48383355b5b272`; run 4935 passed the current
+candidate's policy, web, Rust and Main promotion gates.
+
+The October 13 follow-up gives an executed paused hls.js replacement seek its
+own startup loading lease. It can send the first playlist without Play and
+complete startup on the actual target frame, then restore suspension. Its
+original deadline remains active while paused; the real diagnosis raises
+`startup_exhausted` with Close/Retry if no frame arrives. A suppressed or
+interrupted unparsed playlist uses the existing single corrective reload.
+Play carries a reserved reload to the current intent; Pause during the pending
+seek preserves target loading. Supersession and cancellation fence old work.
+Three initial regressions fail before the repair; 51 focused tests now pass.
+Astra found and verified corrections to renewal, retry handoff and unparsed
+supersession. The follow-up qualified on run 4953 and merged in
+[PR #1053](http://forge.lan:3000/noirr/plurx/pulls/1053) as
+`7f82b3894581cd3a2ba0955300dc39da9bfa9428`. Genuine HDR-on-Air acceptance
+remains pending. Native HLS remains unchanged and is not newly qualified. The
+existing repair receipt retains the source identities and failed controls.
+
+**October 13 access blocker and restoration state.** The reviewed source
+`5dabb22a3` is installed on the Air; both served player files match its
+checksums. Its Metal boot probe passes at 29.05×. Cold and warm movie attempts
+from the connected laptop browser fail at placement before HLS attachment;
+these attempts provide no new physical Air frame evidence. A 16 MiB source
+read and FFprobe succeed over SSH in 1.062 seconds. macOS records that the
+updated `/opt/homebrew/bin/plurxd` does not match the existing Full Disk Access
+code requirement. Renew the already-authorized access before another attempt;
+SSH read success does not establish background-service access.
+
+The local control Mac locked, and the Air screen connection requires fresh
+approval. Physical captures and restoration await those manual steps. Original
+backend: Auto; temporarily saved backend: VideoToolbox. Original Mac video
+processing: on, unchanged. Shared clipboard was temporarily enabled; its remote
+connection ended, but restoration to off is not verified. The movie's saved
+resume position is still 34 seconds; the requested zero is not restored.
+These are outstanding obligations, not acceptance results. The
+[qualified source/access archive](http://forge.lan:3000/attachments/3df9990f-6607-4a8e-bbb5-8db7123b49d4) preserves the failed attempts,
+permission diagnostic, checksums, review and qualification/merge receipts; its
+SHA-256 is `5cf7a855b62ecf2ad59627737df5020712190cb3435cb71413212f9fe78569d7`. The first qualification attempt failed at
+`spike-lock-check` because its runner could not resolve crates.io; retry 4953
+passed. Original HDR captures and failures remain unchanged.
 
 ## 4. F2 — manual SDR quality change loses alignment
 
