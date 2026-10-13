@@ -2225,10 +2225,6 @@ class CatalogRoutingScopeCase(unittest.TestCase):
         self.assertTrue(scope_for_paths(catalog, ("Makefile",))["cluster_auth"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class NamedRustOutcomeGuardCase(unittest.TestCase):
     def run_guard(self, lines):
         environment = dict(os.environ)
@@ -2256,3 +2252,7 @@ class NamedRustOutcomeGuardCase(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("observed 2", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
