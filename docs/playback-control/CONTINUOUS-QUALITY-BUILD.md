@@ -10489,3 +10489,52 @@ The added regression keeps an admitted prepared handoff beyond the retry
 expiry, prevents incumbent re-admission, then verifies abort releases it;
 the existing unclaimed-expiry regression remains unchanged. Exact Linux
 rebuild and native landing evidence are pending.
+
+**Bounded-handoff TV result: transfer commits; continuity still fails.** Exact
+`e2d246a` builds in144seconds with Rust1.97.1. Binary SHA-256 is
+`747786887e9b8229c362403a018e9766b899c356aacdc2b12ec389e3ab7f8975`.
+Its first720 run records25 actual decoded720 rows, metadata-ready/buffer-ready
+and an accepted committed acknowledgement. Requested-handoff and yielded-permit
+counts are one each; all eight cancellation counters remain zero. This proves
+the transfer now crosses the old expiry/cancellation boundary.
+
+The unchanged strict scorer nevertheless fails on a208.0698ms active720
+decoded-output gap. The first exposed successor row has rate zero/changing true;
+the next distinct720 row has rate one/changing false208ms later. Callback
+maximum102.4639ms is retained, so selection work alone is not assigned the whole
+gap. The committed acknowledgement follows the second row by46ms. Public
+Local playback exposes the paused successor before awaiting asynchronous media
+selection reconciliation and starting it. That exposed suspension path is being
+corrected with exact staged-item/attempt ownership rather than bypassed active
+selection guards.
+
+A remaining503 is `media_owner_transition` on the successor,105ms after its
+first-frame timestamp and114ms before the accepted commit; no410 occurs. This
+requires a separate server ownership-transition correction, not a client retry.
+All66 owned processes retire and the unique TV app exits. Full native campaigns
+remain unqualified.
+
+Current main `6dc031387` is integrated as `08be988faab7afb06790c22eb561d3806e5d7434`
+before final qualification; its normal pinned commit hook passes. The focused
+`e2d246a` run above is diagnostic evidence on its stated source, not acceptance
+of the newly integrated tree. Safari iOS session creation is refused with a
+Web Inspector reference; no session/media starts and its owned driver is cleaned.
+The required device settings cannot be checked by the operator currently, so
+Safari iOS remains explicitly blocked. No unit tests execute.
+
+**Combined corrections ready for qualification.** Public Apple correction
+`0c2fcd962b5eb07bb79a9b0e603dd61b82f222a2` resolves genuine staged audio/subtitle
+operations before alignment and exposure, under exact item/player/attempt and
+viewer ownership. iOS and tvOS test targets compile; normal hooks pass. Its two
+regressions cover nonactive staged-item application and late owner/viewer changes;
+unit execution remains deferred. Both distinct private QA apps now include that
+patch with their existing frame/seek/HTTP probes preserved.
+
+The remaining refusal's resource hash proves it was the successor status route.
+`ae62361c5f5955a52629361d2207c44117ebb260` uses existing exact prepared-media
+authorization for status in relay and local reads, retaining publication-owner
+checks and all ended/expired/foreign ownership fences. Delete, passive presence
+and control remain fenced. A staged/committed/ended status regression is added
+but unexecuted; pinned all-target Clippy and normal hooks pass. No client retry
+is added. The combined committed-source Linux build and native campaigns will
+run next on unchanged five-thread policy and continuity bounds.
