@@ -4866,6 +4866,22 @@ impl ControlState {
         }
     }
 
+    /// The bounded lifetime of the exact still-owned successor.
+    pub(crate) fn live_preparation_deadline_ms(&self, incarnation: &str) -> Option<i64> {
+        match &self.preparation {
+            PreparationSlot::Staged {
+                staged_incarnation_id,
+                deadline_ms,
+                ..
+            }
+            | PreparationSlot::Committing {
+                staged_incarnation_id,
+                deadline_ms,
+            } if staged_incarnation_id == incarnation => Some(*deadline_ms),
+            _ => None,
+        }
+    }
+
     fn preparation_quality_current(&self) -> bool {
         self.preparation_capabilities.as_ref().is_none_or(|staged| {
             self.last_capabilities.as_ref().is_some_and(|latest| {

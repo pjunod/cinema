@@ -82,8 +82,9 @@ const STOPPED_ENCODER_POLL: Duration = Duration::from_secs(1);
 /// How long one refused prepared successor's request keeps its own viewer's
 /// predecessor from producing. The successor refreshes it on every refused
 /// retry (its driver polls every 250 ms while it waits), so it expires on its
-/// own shortly after the successor either starts or goes away, and the
-/// predecessor is never parked by a successor that no longer exists.
+/// own shortly after an unclaimed successor goes away. Once admitted, the
+/// exact transfer remains bound to its staged preparation and its deadline;
+/// commit or abort releases the predecessor through the control slot.
 const HANDOFF_REQUEST_TTL: Duration = Duration::from_secs(2);
 
 /// How long capacity a predecessor yielded stays reserved for its successor.
@@ -97,6 +98,8 @@ const HANDOFF_RESERVATION_TTL: Duration = Duration::from_secs(2);
 #[derive(Clone)]
 struct HandoffRequest {
     until: Instant,
+    deadline_ms: i64,
+    admitted: Arc<std::sync::atomic::AtomicBool>,
     incarnation: String,
     successor: Weak<Rendition>,
     wanted: crate::admission::TranscodeResourceEstimate,

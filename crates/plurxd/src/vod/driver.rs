@@ -272,7 +272,7 @@ async fn request_predecessor_handoff(
     if refusal.pool.live_waiting > 0 {
         return Err("live_waiter");
     }
-    let (incarnation, bound, predecessor) = {
+    let (incarnation, deadline_ms, bound, predecessor) = {
         let sessions = shared.sessions.lock().await;
         let Some((incarnation, playback_id)) = sessions.values().find_map(|session| {
             let incarnation = session.prepared_incarnation.as_ref()?;
@@ -303,11 +303,23 @@ async fn request_predecessor_handoff(
                     .map(|rendition| (id.clone(), Arc::clone(rendition)))
             })
             .collect();
+        let deadline_ms = bound
+            .keys()
+            .filter_map(|id| sessions.get(id))
+            .filter_map(|session| {
+                session
+                    .control
+                    .lock()
+                    .expect("control lock")
+                    .live_preparation_deadline_ms(&incarnation)
+            })
+            .min()
+            .ok_or("no_local_predecessor")?;
         let predecessor = bound
             .values()
             .find(|rendition| !Arc::ptr_eq(rendition, successor))
             .cloned();
-        (incarnation, bound, predecessor)
+        (incarnation, deadline_ms, bound, predecessor)
     };
     let Some(predecessor) = predecessor else {
         return Err("no_local_predecessor");
@@ -340,7 +352,8 @@ async fn request_predecessor_handoff(
     if !encoding.fits_after_release(&released.resources) {
         return Err("would_not_fit");
     }
-    let fresh = predecessor.request_handoff(&incarnation, successor, encoding.resources());
+    let fresh =
+        predecessor.request_handoff(&incarnation, deadline_ms, successor, encoding.resources());
     predecessor.kick();
     Ok((predecessor.key.clone(), fresh))
 }
@@ -418,7 +431,7 @@ fn reserve_for_successor(request: &HandoffRequest) -> Option<Arc<Rendition>> {
         let token = encoding
             .admissions
             .reserve_for_handoff(&request.wanted, HANDOFF_RESERVATION_TTL);
-        encoding.accept_handoff_claim(token);
+        encoding.accept_handoff_claim(token, Arc::clone(&request.admitted));
     }
     Some(successor)
 }

@@ -2957,6 +2957,31 @@
         assert!(!fixture.predecessor.handoff_requested());
     }
 
+    /// A successfully claimed transfer belongs to the staged preparation,
+    /// not to the short retry timer. Its abort still releases the incumbent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_admitted_prepared_handoff_survives_retry_expiry_until_abort() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+        assert!(successor_then_predecessor(&fixture).await);
+        let permit = fixture.successor_encoding.try_permit().await
+            .expect("the successor claims the exact yielded reservation");
+        tokio::time::sleep(HANDOFF_REQUEST_TTL + Duration::from_millis(50)).await;
+        assert!(fixture.predecessor.handoff_requested(), "admission does not abandon staged ownership");
+        let predecessor_encoding = fixture.predecessor.recipe.encoding.as_ref().expect("encoding");
+        let admission = predecessor_encoding.pause_next_admission();
+        driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+        assert!(!admission.was_reached(), "the incumbent cannot take back the admitted transfer");
+        admission.release();
+        let gate = fixture.serve.preparation_gate("old-session").await.expect("gate");
+        assert!(gate.begin_abort_preparation_for_owner(STAGED_SUCCESSOR, 1).await);
+        assert!(!fixture.predecessor.handoff_requested(), "abort releases the exact transfer");
+        drop(permit);
+    }
+
     /// A successor that closes or fails stops polling for a handoff and gives
     /// back any reservation made for it.
     #[cfg(unix)]

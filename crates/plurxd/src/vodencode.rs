@@ -181,6 +181,13 @@ pub(crate) fn try_admit_frozen_bundle(
         .ok_or(false)
 }
 
+/// Receipt shared with the exact predecessor handoff that reserved capacity.
+#[derive(Clone)]
+pub(crate) struct HandoffClaim {
+    token: u64,
+    admitted: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Resolved once before attachment. A restart cannot silently change encoder,
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
 pub(crate) struct Encoding {
@@ -227,7 +234,7 @@ pub(crate) struct Encoding {
     pub last_refusal: Mutex<Option<PermitRefusal>>,
     /// The pool reservation a yielding predecessor made for this successor.
     /// Only this rendition's admission can claim it.
-    pub handoff_claim: Mutex<Option<u64>>,
+    pub handoff_claim: Mutex<Option<HandoffClaim>>,
     /// The admission point a race test can pause at; production installs
     /// [`NoopEncodingHooks`] (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
     pub hooks: Box<dyn EncodingHooks>,
@@ -908,7 +915,12 @@ impl Encoding {
         // A shared-audio producer admits its own bounded AAC estimate, never
         // the video recipe it was resolved beside.
         let claim = (priority != Priority::Background)
-            .then(|| *self.handoff_claim.lock().expect("VOD handoff claim"))
+            .then(|| {
+                self.handoff_claim
+                    .lock()
+                    .expect("VOD handoff claim")
+                    .clone()
+            })
             .flatten();
         let bundle = match try_admit_frozen_bundle(
             &self.admissions,
@@ -917,7 +929,7 @@ impl Encoding {
             &self.resources(),
             self.admission_software_threads(),
             priority,
-            claim,
+            claim.as_ref().map(|claim| claim.token),
         ) {
             Ok(bundle) => bundle,
             Err(over_budget) => {
@@ -931,7 +943,18 @@ impl Encoding {
         };
         let permit = EncodePermit::from(bundle);
         queued.take();
-        self.handoff_claim.lock().expect("VOD handoff claim").take();
+        if let Some(claim) = claim {
+            claim
+                .admitted
+                .store(true, std::sync::atomic::Ordering::Release);
+            let mut pending = self.handoff_claim.lock().expect("VOD handoff claim");
+            if pending
+                .as_ref()
+                .is_some_and(|current| current.token == claim.token)
+            {
+                pending.take();
+            }
+        }
         self.handoff_wait
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.last_refusal
@@ -966,21 +989,25 @@ impl Encoding {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.handoff_wait
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        if let Some(token) = self.handoff_claim.lock().expect("VOD handoff claim").take() {
-            self.admissions.release_reservation(token);
+        if let Some(claim) = self.handoff_claim.lock().expect("VOD handoff claim").take() {
+            self.admissions.release_reservation(claim.token);
         }
     }
 
     /// Install the reservation a yielding predecessor made for this rendition,
     /// releasing any earlier one it replaces.
-    pub(crate) fn accept_handoff_claim(&self, token: u64) {
+    pub(crate) fn accept_handoff_claim(
+        &self,
+        token: u64,
+        admitted: Arc<std::sync::atomic::AtomicBool>,
+    ) {
         if let Some(earlier) = self
             .handoff_claim
             .lock()
             .expect("VOD handoff claim")
-            .replace(token)
+            .replace(HandoffClaim { token, admitted })
         {
-            self.admissions.release_reservation(earlier);
+            self.admissions.release_reservation(earlier.token);
         }
     }
 

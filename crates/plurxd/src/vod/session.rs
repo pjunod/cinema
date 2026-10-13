@@ -279,6 +279,7 @@ impl Rendition {
     pub(super) fn request_handoff(
         &self,
         incarnation: &str,
+        deadline_ms: i64,
         successor: &Arc<Rendition>,
         wanted: crate::admission::TranscodeResourceEstimate,
     ) -> bool {
@@ -287,8 +288,15 @@ impl Rendition {
         let fresh = !slot
             .as_ref()
             .is_some_and(|request| request.until > now && request.incarnation == incarnation);
+        let admitted = slot
+            .as_ref()
+            .filter(|request| request.incarnation == incarnation)
+            .map(|request| Arc::clone(&request.admitted))
+            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
         *slot = Some(HandoffRequest {
             until: now + HANDOFF_REQUEST_TTL,
+            deadline_ms,
+            admitted,
             incarnation: incarnation.to_owned(),
             successor: Arc::downgrade(successor),
             wanted,
@@ -297,12 +305,26 @@ impl Rendition {
     }
 
     pub(super) fn live_handoff(&self) -> Option<HandoffRequest> {
-        self.handoff
-            .lock()
-            .expect("handoff lock")
-            .as_ref()
-            .filter(|request| request.until > Instant::now())
-            .cloned()
+        let mut request = self.handoff.lock().expect("handoff lock").as_ref()?.clone();
+        let successor = request.successor.upgrade()?;
+        if successor.closed.load(Relaxed) || successor.failure().is_some() {
+            return None;
+        }
+        let now = Instant::now();
+        let remaining = request
+            .deadline_ms
+            .saturating_sub(crate::media_sessions::unix_ms());
+        if remaining <= 0 {
+            return None;
+        }
+        if request.admitted.load(std::sync::atomic::Ordering::Acquire) {
+            // Admission completes the capacity transfer, not the staged
+            // ownership. Recheck its bounded lifetime without a busy timer.
+            request.until = now + Duration::from_millis(remaining.min(1_000) as u64);
+        } else if request.until <= now {
+            return None;
+        }
+        Some(request)
     }
 
     #[cfg(test)]
