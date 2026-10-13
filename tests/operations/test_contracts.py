@@ -3113,11 +3113,14 @@ assert.equal(context.ACT_TIMER, null);
         )[0]
         self.assertEqual(
             android_device.count(
-                "uses: https://github.com/reactivecircus/android-emulator-runner@"
-                "4c44018e59b437e86cdfc41da381398f93ed8808"
+                "uses: ./.github/actions/android-emulator-ready"
             ),
             2,
         )
+        self.assertIn('node-version: "24"', android_device)
+        self.assertIn("npm ci --prefix .github/actions/android-emulator-ready --ignore-scripts --omit=dev", android_device)
+        provenance = read(".github/actions/android-emulator-ready/upstream.json")
+        self.assertIn("4c44018e59b437e86cdfc41da381398f93ed8808", provenance)
         android_steps = workflow_step_blocks(android_device)
         first_attempt = android_steps[
             "Run the Compose and TV focus suite on a disposable emulator"
