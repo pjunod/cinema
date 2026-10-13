@@ -15,6 +15,7 @@ import tv.plurx.app.data.offline.OfflineDownloads
 class PlurxApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
+        tv.plurx.app.diagnostics.DiagnosticRuntime.initialize(this)
         tv.plurx.app.invitations.InvitationFirebase.initialize(this)
         tv.plurx.app.invitations.InvitationNotifications.channel(this)
         tv.plurx.app.invitations.InvitationRuntime.get(this)

@@ -99,6 +99,7 @@ function cinemaRemoteRestrictedOverlay(){
 function cinemaRemoteVod(){ return !!document.getElementById("modal")?.classList.contains("open"); }
 function cinemaRemoteLive(){ return !!(LIVE_TV_LEASE.current&&cinemaRemoteVisible(liveTvHost())); }
 function cinemaRemoteGuard(){
+  if(document.getElementById("diagnostic-dialog"))return true;
   return !!(TOKEN&&ME&&!cinemaRemoteRestrictedOverlay()&&
     (cinemaRemoteSafeRoute(location.hash||"#/")||location.hash==="#/live-tv"));
 }
@@ -115,6 +116,7 @@ function cinemaRemoteGo(route,returnItem=null,remember=true){
   CinemaRemote.invalidate("route_intent"); location.hash=route; return "applied";
 }
 function cinemaRemoteBind(){
+  if(typeof cinemaDiagnosticsRemoteBind==="function"&&cinemaDiagnosticsRemoteBind())return;
   if(CINEMA_REMOTE_CHOICE&&cinemaRemoteBindChoice())return;
   if(CINEMA_REMOTE_PRESENTATION&&cinemaRemoteBindPresentation())return;
   const route=location.hash||"#/";
@@ -309,6 +311,13 @@ function CinemaRemoteRouteAction(action,context,nav){
   const fields={navigate:["direction"],select:[],back:[],home:[],set_playing:["playing"],seek_relative:["seconds"],seek_absolute:["position_ms"],stop:[],open_tracks:["kind"],choose_track:["kind","option_id"],text_replace:["text_nonce","text"],play_item:["item_id"]};
   if(!Object.hasOwn(fields,action.type))return "unsupported";
   if(Object.keys(action).some(key=>key!=="type"&&!fields[action.type].includes(key))||fields[action.type].some(key=>!(key in action)))return "invalid";
+  if(document.getElementById("diagnostic-dialog")){
+    if(context?.source==="network")return "restricted_surface";
+    if(action.type==="navigate"&&["left","right","up","down"].includes(action.direction))return nav.navigate(action.direction);
+    if(action.type==="select")return nav.activate();
+    if(action.type==="back"||action.type==="home")return nav.scope.back();
+    return "unsupported";
+  }
   const vod=cinemaRemoteVod(),live=cinemaRemoteLive();
   if(action.type==="text_replace"){
     if(typeof action.text!=="string"||new TextEncoder().encode(action.text).length>512)return "invalid";

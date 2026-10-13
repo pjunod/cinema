@@ -49,6 +49,7 @@ final class Session: @unchecked Sendable {
         let generation = credentialGeneration
         let observers = changed ? Array(authorizationObservers.values) : []
         nodeLock.unlock()
+        if changed { DiagnosticRecorder.shared.retireAuthorization(to: generation) }
         // Observers may inspect current authorization or unregister themselves.
         observers.forEach { $0(generation) }
     }

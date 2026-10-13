@@ -123,8 +123,15 @@ internal class RemoteClientModel(private val app: Context) {
         if (!resumed) { receiverGuard.invalidate(); playback.physicalInput(); navigation?.suspend(); shutdown(false) }
     }
     fun saveEnabled(value: Boolean) { preferences.edit().putBoolean("enabled", value).apply(); enabled = value; if (!value) shutdown(false) }
+    private var diagnosticBlocked = false
+    private val diagnosticRestriction = UUID.randomUUID().toString()
+    fun diagnosticRestricted(value: Boolean) {
+        check(uiOwner()); diagnosticBlocked=value
+        navigation?.restrict(diagnosticRestriction,value)
+        if (value) { receiverGuard.invalidate(); retireNetworkWorkers(); stopHolding() }
+    }
     fun configure(vm: AppViewModel, nav: RemoteNavigationCoordinator, isTelevision: Boolean) {
-        check(uiOwner()); navigation = nav; television = isTelevision
+        check(uiOwner()); navigation = nav; television = isTelevision; nav.restrict(diagnosticRestriction,diagnosticBlocked)
         nav.onPhysicalInput = { receiverGuard.invalidate(); retireNetworkWorkers(); stopHolding(); playback.physicalInput() }
         val instance = vm.serverInstanceId; val user = vm.currentUserId
         val auth = Session.playbackAuthorization()

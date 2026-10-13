@@ -874,6 +874,7 @@ struct PlayerView: View {
                 }
             }
         }
+        .diagnosticReportHost(owner: "player")
         .remoteScope(remoteScope)
         .background(RemoteOwnedPresentationProbe(navigation: remoteNavigation, token: remoteOwner, scope: remoteScope))
         .remoteRestricted(showStats && statsMode != .mini)
@@ -1654,6 +1655,7 @@ struct PlayerView: View {
                     .multilineTextAlignment(.center)
             }
             HStack(spacing: 12) {
+                DiagnosticReportButton(category: "playback", title: controller.diagnosticTitle, owner: "player")
                 ForEach(Self.failureActions(for: surface), id: \.self) { action in
                     failureActionButton(action)
                 }
@@ -2309,6 +2311,7 @@ struct PlayerView: View {
             if !controller.qualityRungs.isEmpty { qualityMenu }
             settingsMenu
             statsButton
+            DiagnosticReportButton(category: "playback", title: controller.diagnosticTitle, owner: "player")
             if pictureInPicture.isSupported { pictureInPictureButton }
         }
     }

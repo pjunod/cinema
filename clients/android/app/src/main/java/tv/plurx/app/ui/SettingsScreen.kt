@@ -85,6 +85,14 @@ fun SettingsScreen(
     var audio by remember { mutableStateOf(LANGS.firstOrNull { it.first == vm.audioLang } ?: LANGS.first()) }
     var sub by remember { mutableStateOf(SUB_LANGS.firstOrNull { it.first == vm.subLang } ?: SUB_LANGS.first()) }
     var confirmingSignOut by remember { mutableStateOf(false) }
+    var diagnosticSignOutConfirmation by remember { mutableStateOf(false) }
+    val diagnosticState by tv.plurx.app.diagnostics.DiagnosticRuntime.state.collectAsStateWithLifecycle()
+    if (diagnosticSignOutConfirmation) {
+        AlertDialog(onDismissRequest={ diagnosticSignOutConfirmation=false },title={ Text("Clear pending local reports and sign out?") },
+            text={ Text("Unsubmitted local captures and support credentials are cleared on sign-out. Export or finish a report first to keep it. Submitted reports remain at support.") },
+            confirmButton={ TextButton(onClick={ diagnosticSignOutConfirmation=false; vm.logout() }) { Text("Clear local reports and sign out") } },
+            dismissButton={ TextButton(onClick={ diagnosticSignOutConfirmation=false }) { Text("Cancel") } })
+    }
     // A build fact, read once and shown in About: it has no switch, so it is
     // not a Developer entry (it left Developer on 2026-10-10).
     var profileStatus by remember { mutableStateOf("Checking release profile status…") }
@@ -258,11 +266,15 @@ fun SettingsScreen(
                     "Sign out",
                     destructive = true,
                     onClick = {
-                        if (currentProfileHasDownloads) confirmingSignOut = true else vm.logout()
+                        if ((diagnosticState.draft != null && diagnosticState.draft?.state != "submitted") || diagnosticState.pending.any { it.state != "submitted" }) diagnosticSignOutConfirmation=true
+                        else if (currentProfileHasDownloads) confirmingSignOut = true else vm.logout()
                     },
                 )
             }
 
+            SettingsSection("Help", "Save a bounded private incident, send it to support, or finish on a phone.") {
+                tv.plurx.app.diagnostics.DiagnosticReportButton()
+            }
             SettingsSection("Developer", "Runtime enablement with the requirements needed to use each feature safely.") {
         tv.plurx.app.ui.components.TvTextButton(onClick = onOpenRemotes) { Text("Remotes & devices") }
                 PreferenceAction("Match television refresh rate, sharing and remotes", onClick = onOpenDeveloper)

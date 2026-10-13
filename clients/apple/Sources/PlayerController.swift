@@ -3381,6 +3381,26 @@ final class PlayerController: ObservableObject {
     /// Declared by AVKit, never inferred: a PiP window is presentation this
     /// controller cannot see in `presentationSize`.
     private var pictureInPictureIsActive = false
+    private var diagnosticAuthorizationGeneration: UInt64?
+    var diagnosticTitle: String? {
+        diagnosticAuthorizationGeneration == Session.shared.playbackAuthorization.generation && started ? title : nil
+    }
+    private func recordDiagnosticPlayback(_ kind: String = "sample", action: String? = nil) {
+        guard let generation = diagnosticAuthorizationGeneration, generation == Session.shared.playbackAuthorization.generation, started else { return }
+        var facts: [String: DiagnosticFact] = ["state": .text(surface.presenting ? "playing" : (wantsPlayback ? "waiting" : "paused")),
+            "playhead_ms": .number(UInt64(min(604_800_000, max(0, currentMs)))), "mode": .text(["direct","remux","transcode"].contains(clientLogMethod) ? clientLogMethod : "unknown"),
+            "source_codec": .text(Self.diagnosticCodec(decision?.source?.videoCodec)), "delivered_codec": .text("unknown"), "render_codec": .text("unknown")]
+        if let action { facts["action"] = .text(action) }
+        if let runway = bufferedRunwaySeconds(), runway.isFinite { facts["headroom_ms"] = .number(UInt64(min(604_800_000, max(0, runway * 1000)))) }
+        if let item = player.currentItem, let sample = accessLogSample(for: item), sample.values.numberOfDroppedVideoFrames >= 0 { facts["dropped_frames"] = .text(String(sample.values.numberOfDroppedVideoFrames)) }
+        if let sessionId, sessionId.utf8.count <= 256 { facts["correlation"] = .text("s-" + DiagnosticRecorder.digest(Data(sessionId.utf8))) }
+        DiagnosticRecorder.shared.record("playback", kind, facts, generation: generation)
+    }
+    nonisolated private static func diagnosticCodec(_ text: String?) -> String {
+        let value = text?.lowercased() ?? "unknown"
+        if ["h264","hevc","av1","vp9","aac","ac3","eac3","dts","truehd","opus","flac","pcm"].contains(value) { return value }
+        if value == "h265" { return "hevc" }; return value == "unknown" ? value : "other"
+    }
     private var started = false
     private(set) var loadingTask: Task<Void, Never>?
     /// A title owns its decision and all subsequent asynchronous work. A new
@@ -3876,6 +3896,8 @@ final class PlayerController: ObservableObject {
     ) {
         guard !started else { return }
         started = true
+        diagnosticAuthorizationGeneration = Session.shared.playbackAuthorization.generation
+        recordDiagnosticPlayback("state", action: "play")
         lifecycleGeneration &+= 1
         let lifecycle = lifecycleGeneration
         wantsPlayback = true
@@ -4170,6 +4192,7 @@ final class PlayerController: ObservableObject {
     }
 
     func togglePlayPause() {
+        recordDiagnosticPlayback("action", action: wantsPlayback ? "pause" : "play")
         // Under a system hold the transport is paused whatever the retained
         // intent says, and the control reads Play: the press is a resume.
         setPlaybackRequested(systemPaused || !wantsPlayback)
@@ -4798,6 +4821,7 @@ final class PlayerController: ObservableObject {
     }
 
     func seek(toMs requested: Int) {
+        recordDiagnosticPlayback("action", action: "seek")
         beginSeek(toMs: requested, viewerOrigin: true)
     }
 
@@ -5602,6 +5626,8 @@ final class PlayerController: ObservableObject {
     }
 
     func stop(deactivateAudioSession: Bool = true) {
+        recordDiagnosticPlayback("terminal", action: "stop")
+        diagnosticAuthorizationGeneration = nil
         cancelAutoCostCatalogRefresh()
         accessLogSampler.invalidate()
         lastPreparedAccessLogSequence = nil
@@ -8003,6 +8029,7 @@ final class PlayerController: ObservableObject {
             sessionId: sessionId,
             attempt: playbackAttemptId
         )
+        recordDiagnosticPlayback("state")
         for entry in entries {
             surfaceHistory.record(entry, atMs: elapsed, player: snapshot)
             reportSurfaceEvent(entry, at: elapsed, snapshot: snapshot)
@@ -9412,6 +9439,7 @@ final class PlayerController: ObservableObject {
     }
 
     private func reportPlaybackProbe(at positionMs: Int) {
+        recordDiagnosticPlayback()
         #if os(iOS)
         if offlineId != nil { return }
         #endif

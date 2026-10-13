@@ -488,9 +488,19 @@ function updateStats(){
 // a poll that ran regardless would keep an abandoned session's numbers moving
 // for no one. The endpoint deliberately does not count as activity, so this
 // can't keep a session alive past the idle reaper either.
+function observeDiagnosticPlayback(p){
+  try{const video=/** @type {HTMLVideoElement} */(document.getElementById("video"));if(!video||!TOKEN||!ME||!window.CinemaDiagnostics?.owns(p.mediaAttachment,AUTH_GENERATION))return;
+    void window.CinemaDiagnostics.correlate(p.mediaAttachment,AUTH_GENERATION,p.sessionId);
+    const facts={correlation:window.CinemaDiagnostics.correlation(p.mediaAttachment,AUTH_GENERATION),mode:p.method||"unknown",state:video.paused?"paused":video.readyState>=3?"playing":"waiting",playhead_ms:Math.max(0,Math.round((video.currentTime||0)*1000)),width:video.videoWidth,height:video.videoHeight,source_codec:p.source?.video_codec||"unknown",delivered_codec:"unknown",render_range:"unknown"};
+    const quality=video.getVideoPlaybackQuality?.();if(quality&&Number.isSafeInteger(quality.totalVideoFrames)&&Number.isSafeInteger(quality.droppedVideoFrames))Object.assign(facts,{frame_count:String(quality.totalVideoFrames),dropped_frames:String(quality.droppedVideoFrames)});
+    for(let i=0;i<Math.min(32,video.buffered.length);i++)if(video.buffered.start(i)<=video.currentTime&&video.buffered.end(i)>=video.currentTime){Object.assign(facts,{headroom_ms:Math.max(0,Math.round((video.buffered.end(i)-video.currentTime)*1000))});break;}
+    window.CinemaDiagnostics.record("playback","sample",facts);
+  }catch(_){}
+}
 async function pollSessionHealth(force){
   const p=PLAYER;
   if(!playbackOwnsAttachedMedia(p)) return;
+  observeDiagnosticPlayback(p);
   if(p.directedChange?.autoMove?.retainIncumbent) void pollPreparedQualityHealth(p);
   const session=p.sessionId, stream=p.streamId, attachment=p.mediaAttachment;
   const current=()=>playbackOwnsAttachedMedia(p)&&p.sessionId===session&&p.streamId===stream
