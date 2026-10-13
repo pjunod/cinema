@@ -5858,9 +5858,12 @@ fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
     let mut incompatible = local.clone(); incompatible.candidate.decoder_compatible = false;
     let mut larger_actual = local.clone(); larger_actual.candidate.height = 1080;
     let mut larger_rung = local.clone(); larger_rung.candidate.target_height = 1080;
-    let mut unsustainable = local.clone(); unsustainable.candidate.sustainable = false;
+    let mut cold = local.clone(); cold.candidate.sustainable = false;
+    assert_eq!(preparation_catalog_workers(&[cold.clone()],"local",true,Some(720)).len(),1,"unknown production may stage a bounded first attachment, without claiming sustainable proof");
+    assert!(!cold.candidate.playable(),"bootstrap admission does not manufacture measured production");
+    let mut zero_geometry = local.clone(); zero_geometry.candidate.width = 0;
     let mut parser_only = local.clone(); parser_only.dispatch_supported = false;
-    assert!(preparation_catalog_workers(&[forged,incompatible,larger_actual,larger_rung,unsustainable,parser_only],"local",true,Some(720)).is_empty(), "bounded bootstrap rejects invalid identity/decoder/raster/rung/work admission");
+    assert!(preparation_catalog_workers(&[forged,incompatible,larger_actual,larger_rung,zero_geometry,parser_only],"local",true,Some(720)).is_empty(), "bounded bootstrap rejects invalid identity/decoder/raster/rung/work admission");
     let foreign = row("foreign",2,720,true);
     let high_complete = row("foreign",3,1080,false);
     let workers = [local.clone(),foreign,high_complete];

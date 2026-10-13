@@ -1501,7 +1501,10 @@ pub(super) fn preparation_catalog_workers(
 ) -> Vec<crate::media_pool::WorkerQualityCandidate> {
     let fits = |entry: &&crate::media_pool::WorkerQualityCandidate| {
         bootstrap_ceiling.is_none_or(|ceiling| {
-            entry.candidate.playable()
+            entry.candidate.identity_matches()
+                && entry.candidate.decoder_compatible
+                && entry.candidate.width > 0
+                && entry.candidate.height > 0
                 && i64::from(entry.candidate.height) <= ceiling
                 && i64::from(entry.candidate.target_height) <= ceiling
         })
@@ -1905,6 +1908,15 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     .await;
                 }
             }
+            if let Some(ceiling) = auto_bootstrap_ceiling {
+                tracing::debug!(target: "plurxd::auto_prepare", phase = "catalog",
+                    catalog_count = worker_catalog.len(), safe_count = catalog.len(),
+                    partial_count = worker_catalog.iter().filter(|entry| entry.partial).count(),
+                    local_count = worker_catalog.iter().filter(|entry| entry.node_id == state.node_id).count(),
+                    playable_count = worker_catalog.iter().filter(|entry| entry.candidate.playable()).count(),
+                    proposed_height = height.min(ceiling),
+                    "Auto bootstrap eligible catalog");
+            }
             let picked = if requested.is_none() && body.height != Some(1440) {
                 (if let Some(snapshot) = snapshot {
                     crate::transcode::TranscodeManager::quality_facts_from_snapshot(snapshot)
@@ -1923,7 +1935,24 @@ async fn resolve_plan_for_principal_with_local_evidence(
                         None,
                     )
                 })
-                .or_else(|| auto_encode_fallback(&catalog, before_link_verdict.as_deref(), height))
+                .or_else(|| {
+                    if let Some(ceiling) = auto_bootstrap_ceiling {
+                        // Cold first attachment has no production measurement.
+                        // Ordinary Auto can stage an encoded route; actual
+                        // admission still belongs to the preparation lifecycle.
+                        catalog
+                            .iter()
+                            .filter(|candidate| {
+                                candidate.decoder_compatible
+                                    && candidate.route
+                                        == plurx_core::playback::candidate::CandidateRoute::Encode
+                                    && i64::from(candidate.target_height) <= height.min(ceiling)
+                            })
+                            .max_by_key(|candidate| candidate.target_height)
+                    } else {
+                        auto_encode_fallback(&catalog, before_link_verdict.as_deref(), height)
+                    }
+                })
             } else {
                 catalog.iter().find(|candidate| {
                     requested.map_or(candidate.target_height == 1440, |id| candidate.id == id)

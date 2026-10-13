@@ -10863,3 +10863,18 @@ iOS and tvOS build-for-testing pass, including the two ownership/proof
 regressions, without executing units. Real cost proof still requires completed
 production full-mux output jobs; partial preparation and advertised bitrate
 remain insufficient. Native runtime verification remains outstanding.
+
+
+**Cold bootstrap production and rung correction.** The exact89f04485c phone
+diagnostic completes one manual change and no Auto commit. Fixed tracing
+reports candidate encode-route refusal; all68 owned processes retire.
+The bounded filter had required measured sustainable production before a
+first attachment, while ordinary cold Auto may stage an encoded route with
+unknown production. It now retains identity, decoder, positive geometry,
+dispatch authority and both incumbent ceilings without inventing production
+proof. Scoped preparation still owns actual admission. Its fallback selects
+an offered encoded rung within the ceiling instead of searching for the
+unbounded default1080 after narrowing to720. Early fixed catalog counts
+now survive selection refusal. The existing boundary regression explicitly
+admits unknown production without changing its measured playable verdict.
+Units remain deferred.
