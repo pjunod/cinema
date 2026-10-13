@@ -78,6 +78,21 @@ pub(super) struct Rendition {
     /// guesses toward retry — reopening, getting the same verdict, reopening
     /// again.
     pub(super) failed: StdMutex<Option<RenditionFailure>>,
+    /// Start entries a generation could not be placed at, with the sentence
+    /// that said why ([`vodgen::Failure::Unplaced`]).
+    ///
+    /// Scoped to the entry on purpose. An undetermined landing is a fact about
+    /// the bytes around one seek position, so recording it in `failed` made
+    /// one unlucky seek refuse every later GET of the session in milliseconds
+    /// (lab N2, 2026-10-11). A generation is never spawned at an entry listed
+    /// here — the same seek lands the same way — and waiters on it are told
+    /// the failure; every other entry still gets a fresh generation.
+    pub(super) unplaced: StdMutex<HashMap<u32, String>>,
+    /// The PTS of the source's first video keyframe, the zero its fragment
+    /// index counts from, measured once by the first landing probe that needs
+    /// it ([`super::generation::LandingProbe`]). The held source cannot change
+    /// under the rendition, so neither can this.
+    pub(super) landing_origin: tokio::sync::OnceCell<f64>,
     /// The capacity hold this rendition is under, if any, retained across the
     /// producer that was terminated for it.
     ///
@@ -327,6 +342,15 @@ impl Rendition {
         if released {
             self.kick();
         }
+    }
+
+    /// Why no generation can be placed at `entry`, if one was refused there.
+    pub(super) fn unplaced_cause(&self, entry: u32) -> Option<String> {
+        self.unplaced
+            .lock()
+            .expect("unplaced lock")
+            .get(&entry)
+            .cloned()
     }
 
     pub(super) fn failure(&self) -> Option<RenditionFailure> {
