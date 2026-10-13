@@ -2343,8 +2343,10 @@ impl MediaSessionCoordinator {
     /// Resolve a prepared media object while its control publication remains
     /// fenced. Before commit the live preparation ledger is the authority;
     /// after commit the prepared-response marker plus the playback pointer is.
-    /// Control and status deliberately continue to use
-    /// `route_resolution_before` until predecessor projection finishes.
+    /// Status uses the same exact preparation authority as media so a client
+    /// can inspect the successor it is already decoding. Mutating control,
+    /// Delete and passive presence retain `route_resolution_before` until
+    /// predecessor projection finishes.
     pub(crate) async fn media_route_resolution_before(
         &self,
         session_id: &str,

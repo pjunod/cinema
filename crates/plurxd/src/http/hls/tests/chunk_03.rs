@@ -1121,6 +1121,129 @@
     }
 
     #[tokio::test]
+    async fn prepared_successor_status_serves_staged_and_committed_but_not_ended_media() {
+        let dir = crate::test_tempdir().expect("status preparation directory");
+        let playback_id = unique_playback_id("prepared-status");
+        let (fixture, predecessor_session, predecessor) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        stage_prepared_successor(
+            &fixture.state,
+            &predecessor_session,
+            &predecessor,
+            &staged_predecessor_recipe(&predecessor),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+            AcceptedAsk {
+                prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
+        )
+        .await;
+        let staged = fixture
+            .store
+            .staged_media_session_for_playback(&predecessor.principal, &playback_id)
+            .await
+            .expect("preparation ledger")
+            .expect("staged successor");
+        let successor = fixture
+            .store
+            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+            .await
+            .expect("successor route lookup")
+            .expect("successor route");
+        // The metadata-only preparation fixture needs an actual local status
+        // producer. Admission below still uses its real durable staged row.
+        let _owner = install_vod_http_session(&fixture, dir.path(), &successor.session_id).await;
+        let assert_status = || async {
+            let response = status(
+                State(fixture.state.clone()),
+                AxPath(successor.session_id.clone()),
+                HeaderMap::new(),
+            )
+            .await
+            .expect("authorized successor status");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("successor status body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("status JSON");
+            assert!(
+                json.get("producer_state").is_some(),
+                "actual VOD status is published"
+            );
+        };
+        assert!(matches!(
+            fixture
+                .state
+                .media_sessions
+                .authoritative_route_resolution_before(
+                    &successor.session_id,
+                    &fixture.state.node_id,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await
+                .expect("control route remains fenced"),
+            DurableRouteResolution::OwnerTransition(_)
+        ));
+        assert_status().await;
+        let now_ms = unix_ms();
+        fixture
+            .store
+            .commit_media_session_preparation(
+                &predecessor.principal,
+                &playback_id,
+                &plurx_core::domain::MediaSessionPreparationCommitRequest {
+                    staged_incarnation_id: successor.incarnation_id.clone(),
+                    expected_predecessor_owner_node_id: fixture.state.node_id.clone(),
+                    expected_predecessor_owner_epoch: predecessor.owner_epoch,
+                    now_ms,
+                    lease_expires_at_ms: now_ms.saturating_add(60_000),
+                    control_receipt: None,
+                    expected_desired_revision: None,
+                },
+            )
+            .await
+            .expect("commit staged status successor")
+            .expect("commit wins");
+        assert!(fixture
+            .store
+            .staged_media_session_for_playback(&predecessor.principal, &playback_id)
+            .await
+            .expect("committed ledger lookup")
+            .is_none());
+        // No readiness projection is cleared: the committed pointer itself
+        // authorizes the same exact prepared successor while it drains.
+        assert_status().await;
+        fixture
+            .store
+            .end_media_session(&successor.session_id, "deleted", unix_ms())
+            .await
+            .expect("end successor")
+            .expect("durable end");
+        let lookups = observe_status_lookups(&fixture.state, &successor.session_id);
+        let error = status(
+            State(fixture.state.clone()),
+            AxPath(successor.session_id.clone()),
+            HeaderMap::new(),
+        )
+        .await
+        .expect_err("ended successor cannot publish lingering telemetry");
+        assert!(matches!(
+            error,
+            ApiError::Typed {
+                status: StatusCode::GONE,
+                code: "media_session_ended",
+                ..
+            }
+        ));
+        assert_eq!(lookups.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
     async fn a_rolling_preparation_commit_reaches_the_store() {
         let dir = crate::test_tempdir().expect("state dir");
         let (fixture, session_id, route) = staging_fixture(dir.path()).await;

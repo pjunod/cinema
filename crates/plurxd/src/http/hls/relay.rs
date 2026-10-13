@@ -9,7 +9,7 @@ pub(super) async fn relay_if_remote(
 ) -> Result<Option<Response>, ApiError> {
     let media_resource = !matches!(
         resource,
-        RelayResource::Status | RelayResource::Delete | RelayResource::PassivePresence { .. }
+        RelayResource::Delete | RelayResource::PassivePresence { .. }
     );
     let resolution = if media_resource {
         state
