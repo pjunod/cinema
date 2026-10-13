@@ -28,13 +28,19 @@ unspecified: if a component is explicitly unknown anywhere, the title-wide
 component remains unknown. Mastering-display payloads must agree, and malformed
 metadata or incompatible decoder parameter sets still reject indexed copy.
 
-The stored promotion contains canonical metadata. Both hvcC content-light
-messages and existing sample-entry clli boxes are normalized from that stored
-value before the muxer identity check and before ordinary promotion fills missing fields. Seeking to a different
+The stored promotion contains canonical metadata. The relevant hvcC messages
+and sample-entry metadata boxes have canonical
+presence, grouping, position and values before the muxer identity check.
+Mastering-display declarations must agree with the index; missing declarations
+are supplied. Light levels use the stored title-wide maxima. Seeking to a different
 scene therefore cannot produce a different initialization segment solely
-because its light-level metadata differs. Other initialization messages and
+because its light-level metadata differs. Unrelated initialization messages and
 boxes are preserved. Video samples, their per-sequence SEIs and Dolby Vision
 RPUs remain untouched by this change.
+
+A persisted `indexed_hdr10_metadata` policy is enabled only by a new complete
+scan. Older promotion records deserialize with it disabled, retaining their
+original fill-only promotion, identity and served bytes across upgrades.
 
 Local and shared HEVC index identities include the metadata-scan revision.
 Old rejection records cannot silently become new positive evidence. A source

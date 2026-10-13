@@ -1132,6 +1132,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     }
     let mut promotion = promotion.unwrap_or_default();
     promotion.hdr10_sei = hdr10.promotion_nals();
+    promotion.indexed_hdr10_metadata = true;
     // The record cannot come out of a fragment: what the muxer wrote describes
     // the source, not the converted stream, which is the whole reason plurx
     // supplies its own. It rides in the stored promotion inputs so the served
@@ -3231,6 +3232,7 @@ mod tests {
             index.parameter_sets_constant,
             "changing light levels are not changing codec parameters"
         );
+        assert!(index.promotion.indexed_hdr10_metadata);
         let light = &index.promotion.hdr10_sei;
         assert_eq!(light.len(), 1);
         assert_eq!(
@@ -4856,6 +4858,7 @@ mod tests {
         // makes.
         use plurx_core::fmp4::PromotionInputs;
         let canonical = PromotionInputs {
+            indexed_hdr10_metadata: false,
             hevc_configuration: None,
             strip_dolby_vision: false,
             dolby_vision: None,
@@ -4863,6 +4866,7 @@ mod tests {
             hdr10_sei: Vec::new(),
         };
         let differing = PromotionInputs {
+            indexed_hdr10_metadata: false,
             hevc_configuration: None,
             strip_dolby_vision: false,
             dolby_vision: None,

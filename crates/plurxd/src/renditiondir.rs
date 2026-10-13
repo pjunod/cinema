@@ -32,7 +32,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use plurx_core::fmp4::{
-    collapse_equivalent_hevc_sample_entries, normalize_hdr10_content_light, promote_from,
+    collapse_equivalent_hevc_sample_entries, normalize_indexed_hdr10_metadata, promote_from,
     segment_name, Fmp4Error, Init, PromotionInputs,
 };
 use sha2::{Digest, Sha256};
@@ -185,7 +185,9 @@ fn parse_segment_name(name: &str) -> Option<u64> {
 fn normalized_muxer(muxer: &Init, promotion: &PromotionInputs) -> Result<Init, Fmp4Error> {
     let mut normalized = muxer.clone();
     collapse_equivalent_hevc_sample_entries(&mut normalized)?;
-    normalize_hdr10_content_light(&mut normalized, &promotion.hdr10_sei)?;
+    if promotion.indexed_hdr10_metadata {
+        normalize_indexed_hdr10_metadata(&mut normalized, &promotion.hdr10_sei)?;
+    }
     Ok(normalized)
 }
 
@@ -996,6 +998,7 @@ mod tests {
         promote_hdr10_static_metadata_from(&mut late, &[light(283, 200)])
             .expect("valid HDR fixture");
         let promotion = PromotionInputs {
+            indexed_hdr10_metadata: true,
             hdr10_sei: vec![light(283, 200)],
             ..Default::default()
         };
@@ -1016,6 +1019,80 @@ mod tests {
             identity.served_init_for(&late),
             Err(InitRefused::MuxerDrift { .. })
         ));
+    }
+
+    #[test]
+    fn title_light_metadata_presence_and_grouping_are_stable_in_both_seek_directions() {
+        use plurx_core::fmp4::{promote_hdr10_static_metadata_from, FragmentReader, Unit};
+        let mut reader = FragmentReader::new();
+        reader.push(&plurx_core::testfixtures::pipe("closed-gop"));
+        let Some(Unit::Init(absent)) = reader.next_unit().expect("fixture init") else {
+            panic!("fixture init");
+        };
+        let light = vec![0x4e, 1, 144, 4, 1, 27, 0, 200, 0x80];
+        let mut mastering = vec![0x4e, 1, 137, 24];
+        mastering.extend([1; 24]);
+        mastering.push(0x80);
+        let mut combined = mastering[..mastering.len() - 1].to_vec();
+        combined.extend_from_slice(&light[2..]);
+        let mut separate = absent.clone();
+        promote_hdr10_static_metadata_from(&mut separate, &[mastering.clone(), light.clone()])
+            .expect("separate metadata");
+        let mut grouped = absent.clone();
+        promote_hdr10_static_metadata_from(&mut grouped, &[combined]).expect("grouped metadata");
+        let promotion = PromotionInputs {
+            indexed_hdr10_metadata: true,
+            hdr10_sei: vec![mastering, light],
+            ..Default::default()
+        };
+        let inits = [absent, separate, grouped];
+        for first in &inits {
+            let identity = InitIdentity::establish(first, promotion.clone()).expect("establish");
+            for later in &inits {
+                let served = identity
+                    .served_init_for(later)
+                    .expect("metadata presence is not drift");
+                assert_eq!(digest(&served.bytes), identity.served_init);
+            }
+        }
+    }
+
+    #[test]
+    fn title_light_metadata_legacy_record_keeps_its_original_identity_and_bytes() {
+        use plurx_core::fmp4::{promote_hdr10_static_metadata_from, FragmentReader, Unit};
+        let mut reader = FragmentReader::new();
+        reader.push(&plurx_core::testfixtures::pipe("closed-gop"));
+        let Some(Unit::Init(mut muxer)) = reader.next_unit().expect("fixture init") else {
+            panic!("fixture init");
+        };
+        let existing = vec![0x4e, 1, 144, 4, 1, 27, 0, 200, 0x80];
+        promote_hdr10_static_metadata_from(&mut muxer, &[existing]).expect("old muxer CLL");
+        let captured = vec![0x4e, 1, 144, 4, 0, 230, 0, 197, 0x80];
+        // This is the old serialized shape, deliberately missing the policy.
+        let promotion: PromotionInputs = serde_json::from_value(serde_json::json!({
+            "parameter_sets": [], "hdr10_sei": [captured]
+        }))
+        .expect("old promotion record");
+        assert!(!promotion.indexed_hdr10_metadata);
+        let mut old_served = muxer.clone();
+        promote_hdr10_static_metadata_from(&mut old_served, &promotion.hdr10_sei)
+            .expect("old fill-only promotion");
+        let identity = InitIdentity {
+            muxer_init: digest(&muxer.bytes),
+            served_init: digest(&old_served.bytes),
+            promotion,
+        };
+        assert_eq!(
+            identity
+                .served_init_for(&muxer)
+                .expect("legacy resume")
+                .bytes,
+            old_served.bytes
+        );
+        assert_eq!(
+            InitIdentity::establish(&muxer, identity.promotion.clone()).expect("legacy establish"),
+            identity
+        );
     }
 
     #[test]
@@ -1042,6 +1119,7 @@ mod tests {
         // which is exactly what M0-P0 clause (d) turned out to have measured.
         let (first, _) = two_generations();
         let promoting = PromotionInputs {
+            indexed_hdr10_metadata: false,
             hevc_configuration: None,
             strip_dolby_vision: false,
             dolby_vision: None,

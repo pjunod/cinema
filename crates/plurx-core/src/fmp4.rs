@@ -1067,6 +1067,10 @@ fn parse_stbl(payload: &[u8], track: &mut Track) -> Result<(), Fmp4Error> {
 /// a refused generation whose media the stored init describes perfectly.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PromotionInputs {
+    /// Canonical HDR metadata from a complete index scan. Old persisted
+    /// renditions default to fill-only promotion and keep their exact bytes.
+    #[serde(default)]
+    pub indexed_hdr10_metadata: bool,
     /// Complete original-header scan; old persisted records remain unverified.
     #[serde(default)]
     pub hevc_configuration: Option<crate::hevc_configuration::Proof>,
@@ -1151,6 +1155,7 @@ impl PromotionInputs {
             .and_then(|location| hvcc_nal_array_types(&init.bytes[location.payload]).ok())
             .unwrap_or_default();
         PromotionInputs {
+            indexed_hdr10_metadata: false,
             hevc_configuration: None,
             // Never from a fragment: a fragment has no record and no facts to
             // build one from. Both answers are the caller's, taken from the
@@ -1772,7 +1777,7 @@ fn write_be_u32(bytes: &mut [u8], at: usize, value: u32) -> Result<(), Fmp4Error
 #[path = "fmp4/hdr10_index.rs"]
 mod hdr10_index;
 pub use hdr10_index::{
-    normalize_hdr10_content_light, Hdr10IndexMetadata, HDR10_INDEX_METADATA_REVISION,
+    normalize_indexed_hdr10_metadata, Hdr10IndexMetadata, HDR10_INDEX_METADATA_REVISION,
 };
 
 /// Promote an init from captured inputs — the planned generation's path.
@@ -1814,7 +1819,8 @@ pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, F
     } else {
         false
     };
-    let content_light = normalize_hdr10_content_light(init, &inputs.hdr10_sei)?;
+    let content_light =
+        inputs.indexed_hdr10_metadata && normalize_indexed_hdr10_metadata(init, &inputs.hdr10_sei)?;
     let hdr10 = promote_hdr10_static_metadata_from(init, &inputs.hdr10_sei)?;
     // Last, and deliberately so. The HDR10 promotion above refuses to run on a
     // sample entry that already carries a Dolby Vision configuration, and
@@ -7197,6 +7203,7 @@ mod tests {
         let converted =
             DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("a representable record");
         let inputs = PromotionInputs {
+            indexed_hdr10_metadata: false,
             hevc_configuration: None,
             dolby_vision: Some(converted.clone()),
             ..PromotionInputs::default()
@@ -7404,6 +7411,7 @@ mod tests {
         let record = DolbyVisionRecord::new(7, 6, true, true, false, 0).expect("record");
         assert!(set_dolby_vision_record(&mut stale, &record).expect("insert"));
         let inputs = PromotionInputs {
+            indexed_hdr10_metadata: false,
             hevc_configuration: None,
             strip_dolby_vision: true,
             hdr10_sei,
@@ -7536,6 +7544,7 @@ mod tests {
         assert!(set_dolby_vision_record(&mut muxer, &stale).expect("insert"));
 
         let inputs = PromotionInputs {
+            indexed_hdr10_metadata: false,
             hevc_configuration: None,
             strip_dolby_vision: true,
             ..PromotionInputs::default()
@@ -7602,6 +7611,7 @@ mod tests {
         assert_ne!(moves.bytes, minimal.bytes);
 
         let contradiction = PromotionInputs {
+            indexed_hdr10_metadata: false,
             hevc_configuration: None,
             dolby_vision: Some(DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("record")),
             strip_dolby_vision: true,
@@ -9171,6 +9181,7 @@ mod tests {
         // promotes from the stored copy rather than a live one.
         let init = muxed_init();
         let inputs = PromotionInputs {
+            indexed_hdr10_metadata: false,
             hevc_configuration: None,
             dolby_vision: None,
             strip_dolby_vision: false,

@@ -175,10 +175,11 @@ fn encode_sei(header: &[u8], messages: &[(usize, Vec<u8>)]) -> Vec<u8> {
     nal
 }
 
-/// A resumed muxer may have copied the landing scene's CLL into hvcC/clli.
-/// Replace those declarations with the stored whole-title values before normal
-/// promotion fills missing fields. Preserve every other init message and box.
-pub fn normalize_hdr10_content_light(
+/// Canonicalize the HDR metadata proved by a complete index scan. Presence,
+/// NAL grouping, and sample-entry box position are independent of the landing.
+/// Conflicting mastering metadata is refused; unrelated metadata is retained.
+/// The caller opts in through the persisted `indexed_hdr10_metadata` policy.
+pub fn normalize_indexed_hdr10_metadata(
     init: &mut Init,
     inputs: &[Vec<u8>],
 ) -> Result<bool, Fmp4Error> {
@@ -186,76 +187,151 @@ pub fn normalize_hdr10_content_light(
     for nal in inputs {
         metadata.observe_nal(nal)?;
     }
-    let Some(light) = metadata.light else {
-        return Ok(false);
-    };
-    let payload: Vec<u8> = light.into_iter().flat_map(u16::to_be_bytes).collect();
-    let Some(location) = locate_hvcc(&init.bytes)? else {
-        return Ok(false);
-    };
-    let entry = location.ancestors[1];
-    let children = entry.start + entry.header_len + 78..location.sample_entry_end;
-    let mut changed = false;
-    for (at, box_header) in find_children(&init.bytes, children, b"clli")? {
-        let range = at.start + box_header.header_len..at.start + box_header.size;
-        if range.len() != 4 {
-            return malformed("clli payload is not four bytes");
-        }
-        changed |= init.bytes[range.clone()] != payload;
-        init.bytes[range].copy_from_slice(&payload);
+    let mut declarations: Vec<(usize, [u8; 4], Vec<u8>)> = Vec::new();
+    if let Some(mastering) = &metadata.mastering {
+        declarations.push((137, *b"mdcv", mastering.clone()));
     }
-    let record = &init.bytes[location.payload.clone()];
+    if let Some(light) = metadata.light {
+        declarations.push((
+            144,
+            *b"clli",
+            light.into_iter().flat_map(u16::to_be_bytes).collect(),
+        ));
+    }
+    if declarations.is_empty() {
+        return Ok(false);
+    }
+    // Work on a candidate so a malformed box or conflicting mastering value
+    // cannot partially mutate the caller's init before returning an error.
+    let mut candidate = init.clone();
+    let Some(location) = locate_hvcc(&candidate.bytes)? else {
+        return Ok(false);
+    };
+    let record = &candidate.bytes[location.payload.clone()];
     hvcc_nal_arrays(record)?;
     let mut rewritten = record[..23].to_vec();
+    rewritten[22] = 0;
     let mut pos = 23;
     for _ in 0..record[22] {
-        let kind = record[pos] & 63;
+        let header = record[pos];
         let count = u16::from_be_bytes([record[pos + 1], record[pos + 2]]);
-        rewritten.extend_from_slice(&record[pos..pos + 3]);
         pos += 3;
+        let mut kept = Vec::new();
         for _ in 0..count {
             let len = usize::from(u16::from_be_bytes([record[pos], record[pos + 1]]));
             pos += 2;
             let nal = &record[pos..pos + len];
             pos += len;
-            let mut replacement = None;
-            if kind == 39 {
-                let mut messages = sei_messages(nal)?;
-                let mut replaced = false;
-                for (typ, bytes) in &mut messages {
-                    if *typ == 144 && *bytes != payload {
-                        *bytes = payload.clone();
-                        replaced = true;
+            let mut remaining = None;
+            if header & 63 == 39 {
+                let messages = sei_messages(nal)?;
+                let mut retained = Vec::new();
+                let mut removed = false;
+                for (kind, payload) in messages {
+                    if let Some((_, _, canonical)) =
+                        declarations.iter().find(|(k, _, _)| *k == kind)
+                    {
+                        if (kind == 137 && payload != *canonical)
+                            || payload.len() != canonical.len()
+                        {
+                            return malformed("muxer HDR metadata conflicts with the index");
+                        }
+                        removed = true;
+                    } else {
+                        retained.push((kind, payload));
                     }
                 }
-                if replaced {
-                    let bytes = encode_sei(&nal[..2], &messages);
-                    if bytes != nal {
-                        replacement = Some(bytes);
+                if removed {
+                    if retained.is_empty() {
+                        continue;
                     }
+                    remaining = Some(encode_sei(&nal[..2], &retained));
                 }
             }
-            let bytes = replacement.as_deref().unwrap_or(nal);
-            let size = u16::try_from(bytes.len())
-                .map_err(|_| Fmp4Error::Unsupported("canonical HDR SEI too large".into()))?;
-            rewritten.extend_from_slice(&size.to_be_bytes());
-            rewritten.extend_from_slice(bytes);
+            kept.push(remaining.unwrap_or_else(|| nal.to_vec()));
+        }
+        // Strip an array emptied by removing the old declarations. All
+        // canonical declarations go into one final, deterministic array.
+        if !kept.is_empty() || header & 63 != 39 {
+            append_array(&mut rewritten, header, &kept)?;
         }
     }
-    if rewritten != record {
-        let old_len = location.payload.len();
-        let new_len = rewritten.len();
-        init.bytes.splice(location.payload, rewritten);
-        for ancestor in location.ancestors {
-            if new_len > old_len {
-                grow_box(&mut init.bytes, ancestor, new_len - old_len)?;
-            } else if old_len > new_len {
-                shrink_box(&mut init.bytes, ancestor, old_len - new_len)?;
+    append_array(&mut rewritten, 39, &metadata.promotion_nals())?;
+    let old_len = location.payload.len();
+    let new_len = rewritten.len();
+    candidate.bytes.splice(location.payload, rewritten);
+    for ancestor in location.ancestors {
+        resize_box(&mut candidate.bytes, ancestor, old_len, new_len)?;
+    }
+    // Remove existing declarations, then write one canonical copy in a stable
+    // position, including when the landing did not declare either box.
+    let location = locate_hvcc(&candidate.bytes)?.expect("hvcC retained");
+    let entry = location.ancestors[1];
+    let children = entry.start + entry.header_len + 78..location.sample_entry_end;
+    let mut removals = Vec::new();
+    for (kind, box_kind, canonical) in &declarations {
+        for (at, header) in find_children(&candidate.bytes, children.clone(), box_kind)? {
+            let payload = &candidate.bytes[at.start + header.header_len..at.start + header.size];
+            if payload.len() != canonical.len() || (*kind == 137 && payload != canonical) {
+                return malformed("sample-entry HDR metadata conflicts with the index");
             }
+            removals.push((at.start, header.size));
         }
-        changed = true;
     }
+    removals.sort_unstable();
+    for (start, len) in removals.into_iter().rev() {
+        candidate.bytes.drain(start..start + len);
+        for &ancestor in &location.ancestors[1..] {
+            shrink_box(&mut candidate.bytes, ancestor, len)?;
+        }
+    }
+    let location = locate_hvcc(&candidate.bytes)?.expect("hvcC retained");
+    let mut boxes = Vec::new();
+    for (_, kind, payload) in declarations {
+        boxes.extend(mp4_box(&kind, &payload)?);
+    }
+    let delta = boxes.len();
+    candidate
+        .bytes
+        .splice(location.sample_entry_end..location.sample_entry_end, boxes);
+    for &ancestor in &location.ancestors[1..] {
+        grow_box(&mut candidate.bytes, ancestor, delta)?;
+    }
+    let changed = candidate.bytes != init.bytes;
+    *init = candidate;
     Ok(changed)
+}
+
+fn append_array(record: &mut Vec<u8>, header: u8, nals: &[Vec<u8>]) -> Result<(), Fmp4Error> {
+    record[22] = record[22]
+        .checked_add(1)
+        .ok_or_else(|| Fmp4Error::Unsupported("too many canonical hvcC arrays".into()))?;
+    record.push(header);
+    let count = u16::try_from(nals.len())
+        .map_err(|_| Fmp4Error::Unsupported("too many canonical HDR NALs".into()))?;
+    record.extend_from_slice(&count.to_be_bytes());
+    for nal in nals {
+        let len = u16::try_from(nal.len())
+            .map_err(|_| Fmp4Error::Unsupported("canonical HDR SEI too large".into()))?;
+        record.extend_from_slice(&len.to_be_bytes());
+        record.extend_from_slice(nal);
+    }
+    Ok(())
+}
+
+fn resize_box(
+    bytes: &mut [u8],
+    at: BoxAt,
+    old_len: usize,
+    new_len: usize,
+) -> Result<(), Fmp4Error> {
+    if new_len > old_len {
+        grow_box(bytes, at, new_len - old_len)
+    } else if old_len > new_len {
+        shrink_box(bytes, at, old_len - new_len)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -328,6 +404,21 @@ mod tests {
     }
 
     #[test]
+    fn title_light_metadata_refuses_muxer_mastering_conflict_without_mutating_init() {
+        let mut reader = FragmentReader::new();
+        reader.push(&crate::testfixtures::pipe("closed-gop"));
+        let Some(Unit::Init(mut init)) = reader.next_unit().expect("fixture init") else {
+            panic!("fixture init");
+        };
+        let original = encode_sei(&[0x4e, 1], &[(137, vec![1; 24])]);
+        promote_hdr10_static_metadata_from(&mut init, &[original]).expect("mastering init");
+        let before = init.bytes.clone();
+        let conflicting = encode_sei(&[0x4e, 1], &[(137, vec![2; 24])]);
+        assert!(normalize_indexed_hdr10_metadata(&mut init, &[conflicting]).is_err());
+        assert_eq!(init.bytes, before);
+    }
+
+    #[test]
     fn title_light_metadata_makes_different_landing_inits_identical() {
         let mut reader = FragmentReader::new();
         reader.push(&crate::testfixtures::pipe("closed-gop"));
@@ -347,6 +438,7 @@ mod tests {
         meta.observe_nal(&light(283, 200))
             .expect("valid HDR fixture");
         let inputs = PromotionInputs {
+            indexed_hdr10_metadata: true,
             hdr10_sei: meta.promotion_nals(),
             ..Default::default()
         };
