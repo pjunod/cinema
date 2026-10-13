@@ -61,6 +61,40 @@ final class DiagnosticReportingTests: XCTestCase {
         #endif
     }
 
+    func testTVZIPDownloadsSelectedIncidentAndCloseRevokesNewLink() async throws {
+        #if os(iOS)
+        throw XCTSkip("TV local transfer uses the TV report interface")
+        #else
+        continueAfterFailure = false
+        let app = XCUIApplication(); app.launchArguments += ["-plurx.origin", "http://127.0.0.1:9"]
+        app.launch(); defer { app.terminate() }; openReport(app)
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "Frozen local report"), object: app.staticTexts["diagnostics-status"])
+        await fulfillment(of: [ready], timeout: 20)
+        let identity = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "Report [0-9a-f-]{36}")).firstMatch
+        reveal(identity, in: app); let reportID = identity.label.replacingOccurrences(of: "Report ", with: "")
+        let action = app.buttons["diagnostics-export-tv"]; reveal(action, in: app); select(action, in: app)
+        let link = app.staticTexts["diagnostics-export-url"]
+        XCTAssertTrue(link.waitForExistence(timeout: 15), app.debugDescription); reveal(link, in: app)
+        let url = try XCTUnwrap(URL(string: link.label))
+        let configuration = URLSessionConfiguration.ephemeral; configuration.timeoutIntervalForRequest = 5
+        let session = URLSession(configuration: configuration); defer { session.invalidateAndCancel() }
+        let (page, _) = try await session.data(from: url)
+        XCTAssertTrue(String(decoding: page, as: UTF8.self).contains("Download diagnostic ZIP"))
+        var request = URLRequest(url: url); request.httpMethod = "POST"
+        let (bytes, response) = try await session.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.mimeType, "application/zip")
+        XCTAssertTrue(bytes.starts(with: [0x50, 0x4b, 3, 4]))
+        XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains(reportID))
+        XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("manifest.json"))
+        XCTAssertFalse(app.buttons["Send report"].exists)
+        reveal(action, in: app, towardStart: true); select(action, in: app)
+        XCTAssertTrue(link.waitForExistence(timeout: 15)); reveal(link, in: app)
+        let cancelledURL = try XCTUnwrap(URL(string: link.label)); XCTAssertNotEqual(url, cancelledURL)
+        select(app.buttons["Close"], in: app)
+        do { _ = try await session.data(from: cancelledURL); XCTFail("Closing must revoke the local transfer") } catch {}
+        #endif
+    }
+
     private func reveal(_ element: XCUIElement, in app: XCUIApplication, towardStart: Bool = false) {
         // SwiftUI Form creates rows as they enter the viewport. Exercise the
         // same scrolling a person uses before inspecting a lazy row.

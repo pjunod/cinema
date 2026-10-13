@@ -1,10 +1,10 @@
 # Remote diagnostics status — ownership, implementation and release evidence
 
-**Status:** open — web/phone ZIP export qualified; native TV transfer and physical acceptance open.
+**Status:** built — web/phone ZIP export merged; native TV local transfer passes owned device qualification; review and gate pending.
 **Updated:** 2026-10-13 · **Planning baseline:** `8d7bc723e`.
 
 The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md#current-direction--attach-a-zip-to-a-bug-report) defines the current archive-attachment release.
-Hosted submission is deferred; native TV file transfer is unfinished. This file is the canonical execution ledger.
+Hosted submission is deferred; native TV file transfer is built and being qualified. This file is the canonical execution ledger.
 The [project backlog](PROJECT-BACKLOG.md) indexes the effort rather than
 duplicating its evidence.
 
@@ -14,17 +14,17 @@ duplicating its evidence.
 |---|---|
 | User authorization | 2026-10-13: produce a diagnostic ZIP users can attach to bug/issue reports. This supersedes hosted rollout and the private-pilot approval. Normal qualification and green merge continue; no production service changes. |
 | Implementation owner | GPT-6.1 Sol · chat `01a13167-0996-7723-a0fb-fa64421a384d` |
-| Qualification pull request | #1066 |
-| Intended effort | Implementation merged into `main`; qualification follows on `codex/remote-diagnostics-qualification` |
+| Qualification pull request | TV archive follow-up not opened yet; #1066 merged |
+| Intended effort | Archive implementation merged into `main`; remaining TV transfer on `codex/diagnostics-tv-archive` |
 | Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent clone in temporary owner storage; original landing `8040f862c3458245480065e11dec643fbfe370b3`, current main base `96e4c49e9`, diagnostic corrections `a343ffb12`, archive-flow correction `069615e85` on the integrated current base; the exact final gate/landing receipt is maintained in #1066; user checkouts remain untouched. |
+| Implementation workspace/base | Independent owned clone; current main base `4366a32dc`, archive landing `569678f25` (#1066). TV transfer changes are uncommitted while focused qualification runs. User checkouts untouched. |
 | Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
 | Plan review | Original review: 12 findings corrected. One follow-up review complete: two P1 history findings corrected; focused qualification recorded in §24. |
-| Promotion/deployment | PR #1037 merged 2026-10-13, all eight checks passed on `6bc7235a0`; no production changes by this chat. Another rollout placed the landing on two nodes and exposed a router startup failure; recovery owner is recorded in §22. Isolated qualification continues. |
-| Current checks | Original #1037: eight checks passed and all 32 landing anchors verified. Follow-up: normal hooks, affected native compilation and focused regressions passed; all-target pinned check and composed startup passed on integrated `468a06545`. Follow-up fast gate/landing receipt is in #1066. |
+| Promotion/deployment | #1037 and archive-first #1066 merged. #1066 landing `569678f2513695bb9f7b1923ed2c39af6dd19043`, eight required passes. Hosted/private service rollout cancelled by the archive direction; no production changes by this chat. |
+| Current checks | #1066 merged with eight required passes. TV download source compiles on Apple TV and Android; focused single-download/expiry/cancellation tests pass. Apple TV shipped remote UI passes selected-incident download and close revocation; Android TV export/QR, D-pad and recovery pass three tests. iOS/tvOS capture/wire suites each pass eleven cases; Android capture/wire/download suites pass eleven. Final review/gate pending. |
 | Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
-| Next action | Finish #1066 only on its required green gate; qualify physical sharing and implement native TV archive transfer separately. Web/phone ZIP export is built and qualified on owned software devices. Hosted delivery and the approved private pilot are superseded by Paul’s archive-first direction. |
+| Next action | Finish actual TV archive/QR/close qualification, commit normally, obtain one final adversarial review and merge only after every required fast check passes. No service or fleet installation. |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
 shared checkout and preserve unrelated `Claude outputs/` artifacts.
@@ -45,7 +45,7 @@ index/backlog rows; the builder adopts them together in a normal commit.
 | B07 | Android mobile/TV reporting | Landed; software evidence recorded | Merged PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; normal hook passed; signed release and physical acceptance owed |
 | B08 | Reproduction, connection checks, diagnostic adapters | Landed; software evidence recorded | Merged PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 22-case shared event fixture; physical provider delivery remains open |
 | B09 | Composed security/resource/device qualification | Browser software verified; physical open | Merged PR #1037 | Global capture limits/expiry and authority cleanup tightened; real local support/browser/passkey acceptance passed; physical matrix and native overhead measurements remain open |
-| B10 | Operations, exact-candidate promotion and rollout | Merged; rollout preparation active | Merged PR #1037 | Operations/runbook landed; one review and all 12 corrections complete; eight fast checks passed; merge verified at `8040f862c`; isolated qualification/read-only deployment audit active |
+| B10 | Operations, exact-candidate promotion and rollout | Merged; hosted rollout cancelled | Merged PR #1037 | Operations/runbook landed; one review and all 12 corrections complete; eight fast checks passed; merge verified at `8040f862c`; isolated qualification/read-only deployment audit active |
 
 Replace “Not started” with claimed/building/built/software verified/physical
 verified/promoted as evidence warrants. “Built” never means deployed.
@@ -53,34 +53,26 @@ Every command receipt states source commit, command, result, platform and
 artifact location. Keep failure evidence and distinguish pre-existing faults
 from regressions. Record test absence as absence, not a passing check.
 
-## 3. First-release acceptance matrix
+## 3. Current archive acceptance matrix
 
-| Surface | Implementation | Software evidence | Physical/real delivery | Remaining |
-|---|---|---|---|---|
-| Web desktop/mobile/all layouts | Built B05 | Types/syntax/hook, focused wire/recorder and composed browser flow passed | None | Remaining browser failure matrix and real-device qualification |
-| Browser TV | Built B05 | Types/syntax/hook passed | None | Remote focus + physical phone handoff |
-| iPhone/iPad | Built B06 | Seven focused cases and actual offline capture/consent/relaunch UI passed | None | Share/send and physical runtime acceptance |
-| Apple TV | Built B06 | Seven focused simulator cases and real remote offline capture/consent/relaunch UI passed | None | Direct send + physical phone on separate network |
-| Android phone/tablet | Built B07 | Seven focused JVM cases; actual navigation/recovery instrumentation and process-relaunch UI passed | None | UI share/send, tablet and signed release acceptance |
-| Android/Google TV | Built B07 | Debug app/JVM/test APK compiled | None | D-pad/send + phone on separate network |
-| Cinema snapshots / multiple workers | Built B02 | Pinned compiler passed | None | Real two-user/two-node HTTP and peer-failure behavior |
-| Support upload service | Built B03 | Compiler, composed upload/delete/restore-fence and five focused durability/receipt cases passed | None | Disk-full, retention and remaining failure matrix |
-| Phone completion page | Built B04 | Real browser claim, approval, disconnected-TV submission passed | None | Real QR/manual claim, TV approval, submission |
-| Operator inbox | Built B04 | Real browser passkey login, escaped description, final ZIP and deletion passed | None | Passkey/inbox runtime and deployment qualification |
-| Privacy/resource/retention | Built | Browser canaries, ZIP/inbox, deletion and observer bounds passed; restore fixes rechecked | None | Native/device overhead and remaining failure matrix |
+| Surface | Implementation | Software evidence | Remaining acceptance |
+|---|---|---|---|
+| Web desktop/mobile | Merged #1066 | Actual anonymous/authenticated ZIP downloads, selected identity, inventory hashes and no support calls passed | Physical browser/device sampling |
+| iPhone/iPad | Merged #1066 | Exact ZIP file, real system share sheet and retained incident recovery passed | Signed/physical file sharing |
+| Android phone | Merged #1066 | Actual readable ZIP share URI, selected incident and recovery passed | Signed/physical recipient sampling |
+| Apple TV | Local HTTP archive transfer built in follow-up | Current-source bounded download/expiry/cancellation tests and shipped remote UI pass | Final review/green gate, signed/physical QR and LAN sampling |
+| Android/Google TV | Local HTTP archive transfer built in follow-up | Current-source socket/expiry/cancellation/identity tests and shipped TV UI pass | Final review/green gate, signed/physical D-pad and LAN sampling |
+| Capture, privacy and recovery | Merged #1037/#1066 | Shared wire fixtures, bounded typed events, title opt-in, frozen history and deletion regressions passed | Real provider evidence and native overhead sampling |
+| Hosted upload/inbox | Deferred | Historical #1037 software receipts retained | Outside current archive release; no deployment required |
 
 ## 4. Decisions and external inputs
 
-The plan supplies build defaults so implementation can proceed. Production
-support hostname/hosting, TLS, operator identity enrollment and real
-publisher credentials remain deployment inputs, not permission to invent or
-publish them. Physical devices and signed release artifacts are acceptance
-inputs. Use isolated synthetic/local service fixtures until those exist.
-
-No first-release scope has been deferred. Record proposed deviations here
-with the affected contract, reason, replacement evidence and whether a user
-decision is actually necessary. Routine module/file choices belong to the
-builder; weakening authorization or dropping a required client does not.
+Paul's archive direction supersedes hosted upload, inbox and hosted phone
+handoff. No DNS/TLS/provider answer or service installation is needed. The TV
+local transfer uses trusted Wi-Fi and an explicit, temporary unencrypted HTTP
+capability. Phone-to-TV reachability is required; isolated guest networks are
+not qualification fixtures. Signed/physical sampling is acceptance evidence,
+separate from implementation and owned software-device proof.
 
 ## 5. Evidence and handoff history
 
@@ -748,3 +740,34 @@ client-fix anchors. The later playback landing `96e4c49e9` changes no native
 product/test inputs; native receipts remain applicable after source comparison.
 Its focused browser rendezvous checks were included in the latest-base web run.
 The exact final head, fast-gate outcome and landing are maintained in #1066.
+
+## 26. Finish the TV archive — 2026-10-13
+
+Paul instructed the owner to continue until done after #1066's archive-first
+landing. The remaining implementation exports the TV's actual selected ZIP
+through an explicit, foreground-only local listener. Its QR opens a phone page
+with a Download button. GET previews do not consume the single-download POST
+capability. No support enrollment, external upload or service installation is
+involved. The interface warns that trusted Wi-Fi is required and local HTTP is
+unencrypted. Privacy choices and incident changes revoke the active link.
+
+The endpoint binds a private IPv4 interface, has a five-minute wall/monotonic
+lifetime, accepts at most 32 bounded requests with an 8 KiB header ceiling,
+and closes sockets on report/background/authorization retirement. It serves
+only the frozen in-memory ZIP, with attachment/no-store/no-referrer headers.
+Focused tests cover exact bytes, rejected capabilities/cross-origin/body
+framing, one-download use, expiry and cancellation. Final source, UI results,
+review and gate receipts will be recorded before merge. Apple237/Android171
+are source build claims, not physical installations.
+
+Qualification receipts: Apple TV's actual remote-driven report interface passed
+one ZIP/selected-ID/close-revocation case. iOS and tvOS capture/wire suites each
+passed eleven tests. Android app and test APKs compile; capture/wire/local
+socket tests passed eleven cases. Actual Android TV UI passed three cases:
+QR decoding and selected report download, D-pad privacy traversal and exact-ID
+relaunch recovery. Android socket close originally crashed the app's accept
+thread; the normal cancellation exception is now handled and the corrected
+instrumentation passes. A timestamp-only recovery selector matched two saved
+incidents; it now uses the report's unique ID. Failed receipts are retained,
+not counted as passes. Owned software devices prove neither signed physical
+installs nor guest-network reachability.

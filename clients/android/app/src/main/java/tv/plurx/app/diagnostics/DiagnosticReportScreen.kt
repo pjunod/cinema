@@ -1,6 +1,11 @@
 package tv.plurx.app.diagnostics
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import android.graphics.Bitmap
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.qrcode.QRCodeWriter
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -60,7 +65,17 @@ internal fun DiagnosticReportHost() {
                     if (!television) {
                         Button(onClick={ DiagnosticRuntime.share() },enabled=!state.busy,modifier=Modifier.testTag("diagnostics-export")) { Text("Save / share diagnostic ZIP") }
                         Text("Attach the ZIP to your bug or issue report. Saving does not submit it.",style=MaterialTheme.typography.bodySmall)
-                    } else Text("This TV keeps the report locally. Transferring the TV's ZIP to a phone is not available yet.",style=MaterialTheme.typography.bodySmall)
+                    } else {
+                        Text("Use trusted Wi-Fi. This local download is unencrypted; anyone with its link can download the ZIP. It ends after one download or five minutes.",style=MaterialTheme.typography.bodySmall)
+                        Button(onClick={ DiagnosticRuntime.shareOnLocalNetwork() },enabled=!state.busy,modifier=Modifier.testTag("diagnostics-export-tv")) { Text("Save TV ZIP on a phone") }
+                        state.localExportURL?.let { url ->
+                            val qr=remember(url) { diagnosticExportQR(url) }
+                            Image(qr.asImageBitmap(),"Scan to save this TV's diagnostic ZIP",Modifier.size(256.dp))
+                            Text(url,modifier=Modifier.testTag("diagnostics-export-url"),style=MaterialTheme.typography.bodySmall)
+                            Text("Your phone must be on the same local network. Save the ZIP, then attach it to an issue.")
+                            Button(onClick={ DiagnosticRuntime.stopLocalExport() },modifier=Modifier.testTag("diagnostics-stop-export")) { Text("Stop local download") }
+                        }
+                    }
                     if (DiagnosticRuntime.recorder.recording) Button(onClick={ DiagnosticRuntime.stopReproduction() }) { Text("Stop reproduction recording") }
                     else Button(onClick={ DiagnosticRuntime.startReproduction() },enabled=!draft.consented && !state.busy) { Text("Record reproduction (five minutes)") }
                     Text("Recording stops within five minutes or on background. Closing keeps this draft. Save the ZIP when you are ready to attach it to an issue.",style=MaterialTheme.typography.bodySmall)
@@ -76,7 +91,7 @@ internal fun DiagnosticReportHost() {
                 }
                 Text("Local captures expire within 24 hours. Clearing local data does not remove an already submitted support report.",style=MaterialTheme.typography.bodySmall)
                 state.pending.forEach { pending ->
-                    TextButton(onClick={ DiagnosticRuntime.resume(pending) },enabled=!state.busy) { Text("Resume ${pending.capture.capturedAt} · ${pending.state}") }
+                    TextButton(onClick={ DiagnosticRuntime.resume(pending) },enabled=!state.busy,modifier=Modifier.testTag("diagnostics-resume-${pending.id}")) { Text("Resume ${pending.capture.capturedAt} · ${pending.state}") }
                     TextButton(onClick={ DiagnosticRuntime.deleteLocal(pending) }) { Text("Delete local ${pending.capture.capturedAt}") }
                 }
             }
@@ -115,4 +130,10 @@ private fun DiagnosticIncidentFields(state: DiagnosticUI,draft: DiagnosticDraft)
     var preview by remember(draft.id) { mutableStateOf(false) }
     TextButton(onClick={ preview=!preview }) { Text(if (preview) "Hide safe event preview" else "Preview safe event fields") }
     if (preview) draft.capture.events.takeLast(30).forEach { event -> Text("${event.utc} ${event.domain}/${event.kind} ${event.facts}",style=MaterialTheme.typography.bodySmall) }
+}
+
+internal fun diagnosticExportQR(url: String): Bitmap {
+    val matrix=QRCodeWriter().encode(url,BarcodeFormat.QR_CODE,256,256)
+    val pixels=IntArray(matrix.width*matrix.height) { index -> if (matrix[index%matrix.width,index/matrix.width]) android.graphics.Color.BLACK else android.graphics.Color.WHITE }
+    return Bitmap.createBitmap(pixels,matrix.width,matrix.height,Bitmap.Config.ARGB_8888)
 }

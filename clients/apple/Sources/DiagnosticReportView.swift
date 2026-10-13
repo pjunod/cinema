@@ -18,6 +18,8 @@ final class DiagnosticReportModel: ObservableObject {
     @Published var includePlatform = false
     @Published var comparison: String?
     @Published var handoffState = ""
+    @Published var localExportURL: URL?
+    private var localExport: DiagnosticLocalExport?
     @Published var shareURL: URL?
     @Published var history = DiagnosticRecorder.shared.historyEnabled
     private let store: DiagnosticStore
@@ -40,6 +42,7 @@ final class DiagnosticReportModel: ObservableObject {
         DiagnosticRecorder.shared.record("lifecycle", "state", ["state": .text("starting")])
     }
     private func retire() {
+        stopLocalExport()
         workRevision &+= 1
         operation?.cancel(); polling?.cancel(); transport?.cancel(); operation = nil; polling = nil; transport = nil
         draft = nil; pending = []; comparison = nil; handoffState = ""; presented = false; busy = false
@@ -58,6 +61,7 @@ final class DiagnosticReportModel: ObservableObject {
         pending = restored
     }
     func open(category: String = "other", title: String? = nil, owner: String = "root", newIncident: Bool = false) {
+        stopLocalExport()
         workRevision &+= 1
         operation?.cancel(); polling?.cancel(); transport?.cancel(); cleanupShare()
         if newIncident { DiagnosticRecorder.shared.forgetReproduction() }
@@ -88,6 +92,7 @@ final class DiagnosticReportModel: ObservableObject {
         }
     }
     func resume(_ row: DiagnosticStore.Draft) {
+        stopLocalExport()
         guard !busy, row.capture.namespace == scope else { return }
         let previousWork = operation; let previousPoll = polling
         previousWork?.cancel(); previousPoll?.cancel(); transport?.cancel(); cleanupShare()
@@ -122,6 +127,7 @@ final class DiagnosticReportModel: ObservableObject {
         pending = rows
     }
     func close() {
+        stopLocalExport()
         workRevision &+= 1
         if let draft, !draft.consented { Task { await store.save(draft) } }
         operation?.cancel(); polling?.cancel(); transport?.cancel(); transport = nil; busy = false; presented = false; cleanupShare()
@@ -132,6 +138,7 @@ final class DiagnosticReportModel: ObservableObject {
         Task { await store.clear(previous) }
     }
     func suspend() {
+        stopLocalExport()
         workRevision &+= 1
         operation?.cancel(); polling?.cancel(); transport?.cancel(); transport = nil; busy = false
         if let draft, !draft.consented { Task { await store.save(draft) } }
@@ -168,6 +175,21 @@ final class DiagnosticReportModel: ObservableObject {
             await persist(value)
         }
         return result
+    }
+    func stopLocalExport() { localExport?.stop(); localExport = nil; localExportURL = nil }
+    func shareOnLocalNetwork() {
+        stopLocalExport()
+        perform { [weak self] _, value in
+            guard let self else { return }
+            let report = try await self.archive(&value); let revision = self.workRevision
+            let transfer = try DiagnosticLocalExport(bytes: report.bytes, reportID: value.id, ended: { [weak self] in
+                Task { @MainActor in if self?.workRevision == revision { self?.stopLocalExport() } }
+            })
+            self.localExport = transfer
+            let url = try await transfer.start()
+            guard !Task.isCancelled, self.workRevision == revision, self.presented else { transfer.stop(); return }
+            self.localExportURL = url; self.message = "Scan on a phone on the same network, then download the TV's ZIP. Keep this screen open."
+        }
     }
     func export() {
         perform { [weak self] _, value in
@@ -263,6 +285,7 @@ final class DiagnosticReportModel: ObservableObject {
         if let capture = DiagnosticRecorder.shared.stopReproduction() { draft?.capture = capture; message = "Reproduction stopped and frozen locally." }
     }
     func deleteLocal(_ row: DiagnosticStore.Draft) {
+        stopLocalExport()
         guard row.capture.namespace == scope else { return }
         let selected = draft?.id == row.id
         let previousWork = selected ? operation : nil; let previousPoll = selected ? polling : nil
@@ -338,21 +361,21 @@ struct DiagnosticReportView: View {
     private func incidentDescription(_ draft: DiagnosticStore.Draft) -> some View {
         Group {
             Text("Report " + draft.id).font(.caption)
-                        Picker("Category", selection: Binding(get: { reports.draft?.category ?? "other" }, set: { reports.draft?.category = $0 })) {
+                        Picker("Category", selection: Binding(get: { reports.draft?.category ?? "other" }, set: { reports.stopLocalExport(); reports.draft?.category = $0 })) {
                             Text("Playback").tag("playback"); Text("Connection / sign-in").tag("connection"); Text("Interface / interrupted run").tag("interface"); Text("Other").tag("other")
                         }.disabled(draft.consented)
                         #if os(iOS)
-                        TextEditor(text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.draft?.description = String($0.prefix(4_000)) })).frame(minHeight: 100).accessibilityLabel("What happened? Description is user content")
+                        TextEditor(text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.stopLocalExport(); reports.draft?.description = String($0.prefix(4_000)) })).frame(minHeight: 100).accessibilityLabel("What happened? Description is user content")
                             .disabled(draft.consented)
                         #else
-                        TextField("Optional description", text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.draft?.description = String($0.prefix(4_000)) })).disabled(draft.consented)
+                        TextField("Optional description", text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.stopLocalExport(); reports.draft?.description = String($0.prefix(4_000)) })).disabled(draft.consented)
                         #endif
         }
     }
     private func incidentPrivacy(_ draft: DiagnosticStore.Draft) -> some View {
         Group {
-            Toggle("Include the current title", isOn: $reports.includeTitle).disabled(draft.consented)
-                        Toggle("Include available platform diagnostics", isOn: $reports.includePlatform).disabled(draft.consented || draft.platform?.isEmpty != false)
+            Toggle("Include the current title", isOn: $reports.includeTitle).disabled(draft.consented).onChange(of: reports.includeTitle) { _, _ in reports.stopLocalExport() }
+                        Toggle("Include available platform diagnostics", isOn: $reports.includePlatform).disabled(draft.consented || draft.platform?.isEmpty != false).onChange(of: reports.includePlatform) { _, _ in reports.stopLocalExport() }
                         Text("No passwords, addresses, request bodies, media or raw stream identifiers are collected. Your description and an optional title are private content.").font(.caption)
                         Text("Client: " + (draft.capture.historyEnabled ? (draft.capture.dropped > 0 ? "partial (overflow)" : "bounded history") : "history disabled") + "; persistence: " + draft.capture.persistence).font(.caption)
                         ForEach(draft.serverComponents, id: \.name) { component in Text("\(component.name): \(component.state) \(component.reason ?? "")").font(.caption) }
@@ -376,7 +399,12 @@ struct DiagnosticReportView: View {
                         Button("Save / share diagnostic ZIP") { reports.export() }.disabled(reports.busy).accessibilityIdentifier("diagnostics-export")
                         Text("Attach the ZIP to your bug or issue report. Saving does not submit it.").font(.caption)
                         #else
-                        Text("This TV keeps the report locally. Transferring the TV's ZIP to a phone is not available yet.").font(.caption)
+                        Text("Use trusted Wi-Fi. This local download is unencrypted; anyone with its link can download the ZIP. It ends after one download or five minutes.").font(.caption)
+                        Button("Save TV ZIP on a phone") { reports.shareOnLocalNetwork() }.disabled(reports.busy).accessibilityIdentifier("diagnostics-export-tv")
+                        if let url = reports.localExportURL {
+                            DiagnosticLocalExportView(url: url)
+                            Button("Stop local download") { reports.stopLocalExport() }.accessibilityIdentifier("diagnostics-stop-export")
+                        }
                         #endif
                         if DiagnosticRecorder.shared.recording { Button("Stop reproduction recording") { reports.stopReproduction() } }
                         else { Button("Record reproduction (five minutes)") { reports.startReproduction() }.disabled(draft.consented || reports.busy) }
@@ -397,6 +425,20 @@ struct DiagnosticReportView: View {
                 }
     }
 
+}
+
+private struct DiagnosticLocalExportView: View {
+    let url: URL
+    private var qr: UIImage? {
+        let filter = CIFilter.qrCodeGenerator(); filter.message = Data(url.absoluteString.utf8)
+        guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)), let image = CIContext().createCGImage(output, from: output.extent) else { return nil }
+        return UIImage(cgImage: image)
+    }
+    var body: some View {
+        if let qr { Image(uiImage: qr).interpolation(.none).resizable().scaledToFit().frame(width: 256, height: 256).accessibilityLabel("Scan to save this TV's diagnostic ZIP") }
+        Text(url.absoluteString).font(.caption).accessibilityIdentifier("diagnostics-export-url")
+        Text("Your phone must be on the same local network. Save the ZIP, then attach it to an issue.").font(.caption)
+    }
 }
 
 struct DiagnosticHandoffView: View {

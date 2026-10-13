@@ -14,7 +14,7 @@ import java.io.File
 import java.util.UUID
 
 internal data class DiagnosticUI(
-    val visible: Boolean = false, val draft: DiagnosticDraft? = null, val pending: List<DiagnosticDraft> = emptyList(),
+    val localExportURL: String? = null, val visible: Boolean = false, val draft: DiagnosticDraft? = null, val pending: List<DiagnosticDraft> = emptyList(),
     val busy: Boolean = false, val message: String = "", val destination: String = "", val consent: Boolean = false, val selectionRevision: Long = 0,
     val includePlatform: Boolean = false, val includeTitle: Boolean = false, val invitation: String = "", val comparison: String? = null, val handoffState: String = "", val history: Boolean = true,
 )
@@ -28,6 +28,7 @@ internal object DiagnosticRuntime {
     lateinit var recorder: DiagnosticRecorder; private set
     private val owner = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var workRevision = 0L
+    private var localExport: DiagnosticLocalExport? = null
     private var operation: Job? = null
     private var poll: Job? = null
     private var transport: DiagnosticTransport? = null
@@ -56,6 +57,7 @@ internal object DiagnosticRuntime {
         }
     }
     private fun retire() {
+        stopLocalExport()
         workRevision++
         operation?.cancel(); poll?.cancel(); transport?.cancel(); operation=null; poll=null; transport=null
         mutable.update { DiagnosticUI(history=it.history) }; title=null
@@ -91,6 +93,7 @@ internal object DiagnosticRuntime {
         record("playback",if (state == "stopped") "terminal" else if (state != null) "state" else "sample",facts,generation)
     }
     fun open(category: String = "other", positiveTitle: String? = null, newIncident: Boolean = false) {
+        stopLocalExport()
         if (!::recorder.isInitialized) return
         workRevision++
         operation?.cancel(); poll?.cancel(); transport?.cancel(); title=positiveTitle
@@ -117,6 +120,7 @@ internal object DiagnosticRuntime {
         }
     }
     fun resume(row: DiagnosticDraft) {
+        stopLocalExport()
         val selected=mutable.value
         if (selected.busy || row.capture.namespace != namespace) return
         val previousWork=operation; val previousPoll=poll
@@ -144,24 +148,27 @@ internal object DiagnosticRuntime {
         if (namespace == value.capture.namespace && Session.playbackAuthorization().generation == value.capture.generation) mutable.update { it.copy(pending=rows) }
     }
     fun edit(description: String? = null, category: String? = null) {
+        stopLocalExport()
         mutable.update { value -> val draft=value.draft; if (draft == null || draft.consented) value else value.copy(draft=draft.copy(description=description?.let { text -> String(text.codePoints().limit(4000).toArray(),0,minOf(text.codePointCount(0,text.length),4000)) } ?: draft.description,category=category ?: draft.category)) }
     }
     fun destination(value: String) { mutable.update { if (it.draft?.consented == true) it else it.copy(destination=value.take(1024)) } }
     fun consent(value: Boolean) { mutable.update { it.copy(consent=value) } }
-    fun includeTitle(value: Boolean) { mutable.update { if (it.draft?.consented == true) it else it.copy(includeTitle=value) } }
-    fun includePlatform(value: Boolean) { mutable.update { if (it.draft?.consented == true) it else it.copy(includePlatform=value) } }
+    fun includeTitle(value: Boolean) { stopLocalExport(); mutable.update { if (it.draft?.consented == true) it else it.copy(includeTitle=value) } }
+    fun includePlatform(value: Boolean) { stopLocalExport(); mutable.update { if (it.draft?.consented == true) it else it.copy(includePlatform=value) } }
     fun invitation(value: String) { mutable.update { it.copy(invitation=value.take(10)) } }
     fun history(value: Boolean) {
         preferences.edit().putBoolean("history",value).apply(); mutable.update { it.copy(history=value) }
         owner.launch { store.clearRing(namespace); recorder.retireAuthorization(Session.playbackAuthorization().generation); recorder.bind(namespace,Session.playbackAuthorization().generation,null) }
     }
     fun close() {
+        stopLocalExport()
         workRevision++
         mutable.value.draft?.takeUnless { it.consented }?.let { value -> owner.launch { store.save(value) } }
         operation?.cancel(); poll?.cancel(); transport?.cancel(); transport=null
         mutable.update { it.copy(visible=false,busy=false) }
     }
     fun background() {
+        stopLocalExport()
         if (!::recorder.isInitialized) return; workRevision++; recorder.background()
         operation?.cancel(); poll?.cancel(); transport?.cancel(); transport=null
         mutable.update { it.copy(busy=false,message=if (it.visible) "Paused in background. Retry this same report when foreground." else it.message) }
@@ -202,6 +209,26 @@ internal object DiagnosticRuntime {
             val frozen=draft.copy(binding=value.binding,manifest=value.manifest)
             require(store.saveArchive(frozen.id,frozen.capture.namespace,value.bytes,frozen.capture.generation) != "unavailable"); persist(frozen); frozen to value
         } else draft to value
+    }
+    fun stopLocalExport() {
+        localExport?.close(); localExport=null
+        mutable.update { it.copy(localExportURL=null) }
+    }
+    fun shareOnLocalNetwork() {
+        stopLocalExport()
+        perform { _, original ->
+            val (draft,archive)=archive(original)
+            val revision=workRevision
+            val transfer=withContext(Dispatchers.IO + NonCancellable) {
+                DiagnosticLocalExport(archive.bytes,draft.id,ended={
+                    owner.launch { if (workRevision == revision) stopLocalExport() }
+                })
+            }
+            if (!currentCoroutineContext().isActive || workRevision != revision || !mutable.value.visible) { transfer.close(); throw CancellationException() }
+            localExport=transfer
+            mutable.update { it.copy(localExportURL=transfer.url,message="Scan on a phone on the same network, then download the TV's ZIP. Keep this screen open.") }
+            draft
+        }
     }
     fun share() = perform { _, original ->
         val (draft,archive)=archive(original)
@@ -292,6 +319,7 @@ internal object DiagnosticRuntime {
         draft.copy(connection=(draft.connection+events).takeLast(100))
     }
     fun deleteLocal(row: DiagnosticDraft) {
+        stopLocalExport()
         if (row.capture.namespace != namespace) return
         val selected=mutable.value.draft?.id == row.id
         val previousWork=if (selected) operation else null; val previousPoll=if (selected) poll else null
