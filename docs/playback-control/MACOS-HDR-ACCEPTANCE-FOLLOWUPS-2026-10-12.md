@@ -446,16 +446,29 @@ has SHA-256 `1d47578cc247e4016d5b7e9352c3303bb9519077a22723ce23fc582cd975690a`.
 The original three HDR logs and that failure archive were rechecked unchanged.
 The rejected immediate pair and failed wait-only proposal remain failures.
 
-The qualified binary is installed and the service answers ready. The physical
-Air is locked at Touch ID/password, so no installed-source transition success,
+The qualified binary is installed and the service answers ready. After the
+Air was unlocked, the installed-source attempt at 17:38:43 UTC failed before
+decoding: macOS denied the NAS source open with `Operation not permitted`.
+FFmpeg exited before `moov` or any frame; this is not an F2 alignment outcome.
+The existing Plurx Full Disk Access row shows ON, but refreshing that grant
+requires local Touch ID/password. The new
+[four-member startup archive](http://forge.lan:3000/attachments/22ebe6e5-f5cd-4baf-a10a-26c3d5dc39dd)
+has SHA-256 `59555bbf49760a37c1845db742e6b7141769a8b3099212bdb67498965d3ed20f`.
+It preserves both fresh logs and the failed player/access-row screenshot.
+No installed-source transition success,
 audible seam, or applied-quality pass is claimed. The next receipt must run
 the actual HDR remux → 1080p SDR prepared transition on this served source,
 retain actual frame/quality and audio-ownership facts, and distinguish any
 unmeasured physical audio output. Close the owned player, restore client
 quality Auto and the exact movie's resume to zero, and verify the fresh page.
+At 17:49 UTC the owned failed player was closed, client quality Auto was
+verified, and the authenticated item read returned `position_ms: 0` and
+`watched: false`. A fresh movie page offers **Play**, with no Resume.
+The [restoration archive](http://forge.lan:3000/attachments/dfd38c6f-aba3-4109-bc41-209eb829a05a)
+has SHA-256 `5d931248692a957e71ec577a8315557861b28410ddb9fc72e03a04723d6b922c` and preserves the API receipts and page.
 Shared clipboard remains off; backend Auto and Mac processing on were not
-changed by this source correction. Resume cleanup remains owed after the F2
-trials; the prior F1 zero-resume receipt remains a historical successful reset.
+changed by this source correction. Cleanup is complete for these attempts;
+a subsequent physical run must restore the same state again.
 
 ## 5. F3 — abandoned preparation occupies VOD capacity
 
