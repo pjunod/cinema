@@ -135,6 +135,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     # Includes toolchain/cache setup and every-target compilation on cold runners.
     timeout-minutes: 20
+    env:
+      # Match main's bound rather than the host's visible CPU count.
+      CARGO_BUILD_JOBS: "1"
     steps:
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
