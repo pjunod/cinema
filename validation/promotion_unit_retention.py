@@ -448,7 +448,7 @@ def main():
     print('retained_units=' + json.dumps(proof, separators=(',', ':')))
     for lane in sorted(LANES):
         print('retain_' + lane + '=' + str(lane in proof['lanes']).lower())
-    for kind in ['validation', 'operations', 'store_contract', 'wal']:
+    for kind in ['validation', 'operations', 'store_contract', 'wal', 'android_jvm']:
         print('retain_' + kind + '_units=' + str(kind in proof.get('command_units', {})).lower())
 
 

@@ -87,6 +87,11 @@ jobs:
       retain_apple: ${{ steps.retention.outputs.retain_apple }}
       retain_android_jvm: ${{ steps.retention.outputs.retain_android_jvm }}
       retain_android_device: ${{ steps.retention.outputs.retain_android_device }}
+      retain_validation_units: ${{ steps.retention.outputs.retain_validation_units }}
+      retain_operations_units: ${{ steps.retention.outputs.retain_operations_units }}
+      retain_store_contract_units: ${{ steps.retention.outputs.retain_store_contract_units }}
+      retain_wal_units: ${{ steps.retention.outputs.retain_wal_units }}
+      retain_android_jvm_units: ${{ steps.retention.outputs.retain_android_jvm_units }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -150,8 +155,14 @@ jobs:
         id: execution_mode
         env:
           REQUESTED_MODE: ${{ vars.CI_EXECUTION_MODE || 'legacy' }}
+          RETAIN_STORE_UNITS: ${{ steps.retention.outputs.retain_store_contract_units }}
         run: |
+          set -euo pipefail
           mode="$(scripts/ci-execution-mode resolve "$REQUESTED_MODE")"
+          if [ "$RETAIN_STORE_UNITS" = true ] && [ "$mode" != legacy ]; then
+            echo "Retained Store units require legacy mode; shards would replay them" >&2
+            exit 1
+          fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
   # A stale counter must fail the aggregate gate without hiding the native test
@@ -231,9 +242,15 @@ jobs:
           PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
         run: make history-check
       - name: Check validation catalog and contract unit tests
+        env:
+          RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}
         run: |
           make validation-lint
-          python3 -m unittest discover -s tests/validation -p 'test_*.py'
+          if [ "$RETAIN_VALIDATION_UNITS" = true ]; then
+            echo "Adopted authenticated complete validation unit discovery"
+          else
+            python3 -m unittest discover -s tests/validation -p 'test_*.py'
+          fi
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -244,7 +261,14 @@ jobs:
           timeout 90s python3 scripts/provision-hiqlite-upstream "$fixture"
           printf 'PLURX_HIQLITE_UPSTREAM_DIR=%s\n' "$fixture" >> "$GITHUB_ENV"
       - name: Check CI, deploy, and shipping contracts
-        run: make operations-check
+        env:
+          RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}
+        run: |
+          if [ "$RETAIN_OPERATIONS_UNITS" = true ]; then
+            echo "Adopted authenticated complete operations unit discovery"
+          else
+            make operations-check
+          fi
       - name: Check the shared player input contract
         run: |
           node tests/playback/player-input-contract.test.js
@@ -411,21 +435,31 @@ jobs:
         id: store_contracts
         continue-on-error: true
         shell: bash
+        env:
+          RETAIN_STORE_UNITS: ${{ needs.scope.outputs.retain_store_contract_units }}
+          PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}
         run: |
           set -euo pipefail
           mkdir -p target/validation
-          make cluster-store-check 2>&1 | tee target/validation/cluster-store.log
+          if [ "$RETAIN_STORE_UNITS" = true ]; then
+            echo "command=python3 -m validation.qualification_unit_continuation --compile-units store_contract" >> "$GITHUB_OUTPUT"
+            python3 -m validation.qualification_unit_continuation --compile-units store_contract 2>&1 | tee target/validation/cluster-store.log
+          else
+            echo "command=make cluster-store-check" >> "$GITHUB_OUTPUT"
+            make cluster-store-check 2>&1 | tee target/validation/cluster-store.log
+          fi
       - name: Record the Store lane result
         if: always()
         env:
           LANE_RESULT: ${{ steps.store_contracts.outcome }}
+          LANE_COMMAND: ${{ steps.store_contracts.outputs.command }}
         run: >-
           python3 -m validation.ci_lane_receipt
           --output target/validation/cluster-store-receipt.json
           --log target/validation/cluster-store.log
           --lane cluster-store-legacy
           --result "$LANE_RESULT"
-          --command "make cluster-store-check"
+          --command "$LANE_COMMAND"
       - name: Retain the Store lane log and receipt
         if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -932,7 +966,15 @@ jobs:
         with:
           lane: cluster-wal
       - name: Run exact Hiqlite and WAL recovery regressions
-        run: make cluster-wal-check
+        env:
+          RETAIN_WAL_UNITS: ${{ needs.scope.outputs.retain_wal_units }}
+          PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}
+        run: |
+          if [ "$RETAIN_WAL_UNITS" = true ]; then
+            python3 -m validation.qualification_unit_continuation --compile-units wal
+          else
+            make cluster-wal-check
+          fi
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize
@@ -1293,7 +1335,7 @@ jobs:
   android_jvm:
     name: Android JVM tests and lint
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_jvm == 'true' && needs.scope.outputs.retain_android_jvm != 'true'
+    if: needs.scope.outputs.android_jvm == 'true'
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 20
     steps:
@@ -1328,9 +1370,16 @@ jobs:
           key: gradle-${{ hashFiles('clients/android/build.gradle.kts', 'clients/android/settings.gradle.kts', 'clients/android/app/build.gradle.kts', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-
       - name: Run unit tests and lint in the pinned Android toolchain
+        env:
+          RETAIN_JVM_LANE: ${{ needs.scope.outputs.retain_android_jvm }}
+          RETAIN_JVM_UNITS: ${{ needs.scope.outputs.retain_android_jvm_units }}
         run: |
           mkdir -p target/validation/buildx
-          BUILDX_CONFIG=target/validation/buildx make android-test
+          if [ "$RETAIN_JVM_LANE" = true ] || [ "$RETAIN_JVM_UNITS" = true ]; then
+            BUILDX_CONFIG=target/validation/buildx make android-unit-compile-lint
+          else
+            BUILDX_CONFIG=target/validation/buildx make android-test
+          fi
 
   apple:
     name: Apple iOS + tvOS tests

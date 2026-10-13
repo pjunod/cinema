@@ -3,6 +3,8 @@ import base64
 import copy
 import hashlib
 import unittest
+import shlex
+import sys
 from unittest.mock import patch
 from validation import qualification_unit_continuation as q
 from validation import python_unit_receipts as receipts
@@ -20,20 +22,27 @@ def fixture():
     features = ['cluster-read-cost-validation', 'hiqlite-contract-tests', 'hiqlite-store']
     environment = {'platform': 'linux-x64', 'toolchain': 'rust1.97.1', 'features': features,
                    'runtime': {'test_threads': 1, 'rust_min_stack': 8388608}}
-    raw = log('running 2 tests\ntest a ... ok\ntest b ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored;\n')
-    record = {'sequence': 1, 'source_commit': CANDIDATE, 'environment': copy.deepcopy(environment),
-              'origin': {'kind': 'attested-local', 'identity': 'actual owned effort executor', 'command': 'binary --test-threads=1'},
-              'changes': {}, 'log': {'sha256_ref': raw['sha256']}, 'exit_code': 0,
-              'coverage': {'mode': 'rust', 'first_line': 1, 'last_line': 5, 'format': 'rust-serial', 'outcomes': {'a': 'pass', 'b': 'pass'}}}
+    records=[]; logs={}
+    for sequence,name in enumerate(['a','b'],1):
+        argv=['/owned/store_contract-deadbeef',name,'--exact','--test-threads=1']
+        text='COMMAND '+__import__('json').dumps(argv)+'\nrunning 1 test\ntest '+name+' ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored;\nNATIVE_EXIT 0\n'
+        raw=log(text);logs[raw['sha256']]=raw
+        records.append({'sequence':sequence,'source_commit':CANDIDATE,'environment':copy.deepcopy(environment),
+            'origin':{'kind':'attested-local','identity':'actual owned effort executor','command':shlex.join(argv),
+                'execution':{'mode':'local-binary','first_line':1,'build_invocation':COMMAND.replace('$(CARGO)','cargo')+' --no-run',
+                    'archive_sha256':'d'*64,'binary_sha256_before':'c'*64,'binary_sha256_after':'c'*64,'features':features,
+                    'fingerprint':{'features':__import__('json').dumps(features),'profile':123}}},
+            'changes':{},'log':{'sha256_ref':raw['sha256']},'exit_code':0,
+            'coverage':{'mode':'rust','first_line':2,'last_line':5,'format':'rust-serial','outcomes':{name:'pass'}}})
     item = {'name': 'store_contract:1', 'invocation': COMMAND, 'environment': environment,
             'inventory': {'source_commit': CANDIDATE, 'ids': ['a', 'b'], 'list_log': log('a: test\nb: test\n'),
-                          'binary_sha256': 'c' * 64, 'features': features}, 'records': [record], 'obligations': []}
-    return {'version': 1, 'source_commit': CANDIDATE, 'commands': [item], 'logs': {raw['sha256']: raw}}
+                          'binary_sha256': 'c' * 64, 'features': features}, 'records': records, 'obligations': []}
+    return {'version': 1, 'source_commit': CANDIDATE, 'commands': [item], 'logs': logs}
 
 
 class CompleteCommandUnitCase(unittest.TestCase):
     def validate(self, proof, commands=None, invalid=()):
-        with patch.object(q, 'changed_inputs', return_value=set(invalid)):
+        with patch.object(q, 'changed_inputs', return_value=set(invalid)),patch.object(q,'source_archive_digest',return_value='d'*64):
             return q.validate(proof, CANDIDATE, commands=lambda _: commands or {'store_contract:1': COMMAND})
 
     def test_complete_actual_union_is_pure_and_candidate_bound(self):
@@ -80,13 +89,10 @@ class CompleteCommandUnitCase(unittest.TestCase):
         proof=fixture();proof['commands'].append(copy.deepcopy(proof['commands'][0]))
         with self.assertRaises(receipts.ReceiptError):self.validate(proof)
 
-    def test_original_failed_command_needs_explicit_completion_obligation(self):
+    def test_original_unexplained_command_failure_cannot_be_cleared_by_reason(self):
         proof=fixture();proof['commands'][0]['records'][0]['exit_code']=101
-        with self.assertRaises(receipts.ReceiptError):self.validate(proof)
         proof['commands'][0]['obligations']=[{'sequence':1,'source_commit':CANDIDATE,'invocation':COMMAND,
-            'native_pass_count':2,'reason':'preserved original wrapper count failure; complete current native count verified'}]
-        self.assertEqual(self.validate(proof)['store_contract']['mode'],'retained-complete-command-union')
-        proof['commands'][0]['obligations'][0]['native_pass_count']=1
+            'native_pass_count':2,'reason':'freeform repaired wrapper'}]
         with self.assertRaises(receipts.ReceiptError):self.validate(proof)
 
     def test_full_python_summary_uses_actual_frozen_discovery(self):
@@ -113,3 +119,34 @@ class CompleteCommandUnitCase(unittest.TestCase):
             self.assertEqual(q.changed_inputs(record,CANDIDATE),{'a'})
             record['changes']={}
             with self.assertRaises(receipts.ReceiptError):q.changed_inputs(record,CANDIDATE)
+
+    def test_later_invalidated_failure_requires_a_later_applicable_pass(self):
+        proof=fixture();item=proof['commands'][0]
+        failed=copy.deepcopy(item['records'][0]);failed['sequence']=3;failed['source_commit']='a'*40
+        item['records'].append(failed)
+        with patch.object(q,'source_archive_digest',return_value='d'*64),patch.object(q,'bound_execution',return_value=''),patch.object(q,'changed_inputs',side_effect=[set(),set(),{'a'}]),patch.object(q,'coverage',side_effect=[{'a':'pass'},{'b':'pass'},{'a':'fail'}]):
+            with self.assertRaises(receipts.ReceiptError):q.validate(proof,CANDIDATE,commands=lambda _: {'store_contract:1':COMMAND})
+
+    def test_retained_store_refuses_accelerated_and_shadow_before_jobs(self):
+        for mode in ['accelerated', 'shadow', 'unknown']:
+            with self.assertRaises(receipts.ReceiptError): q.require_store_mode({'store_contract':{}},mode)
+        q.require_store_mode({'store_contract':{}},'legacy')
+        q.require_store_mode({},'shadow')
+
+    def test_owned_command_timeout_and_output_limit_refuse(self):
+        for command,timeout,limit in [([sys.executable,'-c','import time;time.sleep(5)'],0.05,1024),
+                                       ([sys.executable,'-c','print("x"*65536)'],5,1024)]:
+            with self.assertRaises(receipts.ReceiptError):q.owned_output(command,timeout=timeout,limit=limit)
+
+    def test_local_hash_malformed_boundary_and_target_mismatch_refuse(self):
+        for change in [lambda w:w.update(binary_sha256_after='e'*64),
+                       lambda w:w.update(first_line=2),
+                       lambda w:w.update(build_invocation=w['build_invocation'].replace('--test store_contract','--test different'))]:
+            proof=fixture();change(proof['commands'][0]['records'][0]['origin']['execution'])
+            with self.assertRaises(receipts.ReceiptError):self.validate(proof)
+
+    def test_complete_block_cannot_crop_a_failed_outcome(self):
+        proof=fixture();row=proof['commands'][0]['records'][0]
+        original=q.command_log(proof,row);raw=log(original.replace('NATIVE_EXIT 0','test hidden ... FAILED\nNATIVE_EXIT 0'))
+        proof['logs'][raw['sha256']]=raw;row['log']={'sha256_ref':raw['sha256']}
+        with self.assertRaises(receipts.ReceiptError):self.validate(proof)

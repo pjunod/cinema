@@ -1907,6 +1907,14 @@ android-test: android-image ## Run Android JVM unit tests + lint in the pinned i
 	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
 	  $(ANDROID_IMAGE) ./gradlew --no-daemon testDebugUnitTest lintDebug
 
+.PHONY: android-unit-compile-lint
+android-unit-compile-lint: android-image ## Compile every JVM test source and lint after authenticated unit adoption
+	docker run --rm --platform $(ANDROID_PLATFORM) \
+	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
+	  -e GRADLE_USER_HOME=/workspace/clients/android/.gradle-validation \
+	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
+	  $(ANDROID_IMAGE) ./gradlew --no-daemon compileDebugUnitTestKotlin compileDebugUnitTestJavaWithJavac lintDebug
+
 .PHONY: android-instrumentation-build
 android-instrumentation-build: android-image ## Build app + test APKs for an emulator/device run
 	docker run --rm --platform $(ANDROID_PLATFORM) \

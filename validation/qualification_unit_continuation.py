@@ -11,6 +11,9 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
+import selectors
+import time
 import shlex
 import subprocess
 import sys
@@ -364,8 +367,167 @@ def command_log(proof, record):
     return retention.decoded_log(item)
 
 
+@lru_cache(maxsize=16)
+def source_archive_digest(source):
+    receipts.sha(source)
+    with tempfile.TemporaryDirectory(prefix='plurx-unit-source-binding-') as temporary:
+        path = Path(temporary) / 'source.tar'
+        with path.open('wb') as output:
+            completed = subprocess.run(['git','archive',source],stdout=output,stderr=subprocess.PIPE,timeout=60)
+        receipts.require(completed.returncode == 0 and path.stat().st_size <= 256*1024*1024,
+                         'Execution source archive unavailable')
+        return retention.digest(path.read_bytes())
+
+
+def normalized_cargo(command, *, compile_only=False):
+    words = shlex.split(command)
+    if compile_only:
+        words = [word for word in words if word != '--no-run' and not word.startswith('--message-format=')]
+    receipts.require('cargo' in words, 'Actual command has no Cargo executor')
+    at = words.index('cargo')
+    prefix = words[:at]
+    receipts.require(all('=' in word or word == 'scripts/require-test-count' for word in prefix),
+                     'Unknown actual Cargo command prefix')
+    prefix = [word for word in prefix if word != 'scripts/require-test-count']
+    return rust_identity(shlex.join(prefix + ['$(CARGO)'] + words[at+1:]))
+
+
+def same_target(left, right):
+    # Count-wrapper policy is evaluated separately. Target/filter/harness and
+    # actual compilation/runtime semantics cannot change by assertion.
+    keys = {'-p','--manifest-path','--test','--bin','--lib','--no-default-features','--release','--locked'}
+    receipts.require({k:v for k,v in left['cargo'].items() if k in keys} ==
+                     {k:v for k,v in right['cargo'].items() if k in keys}
+                     and set(left['cargo'].get('--features','').split(',')) == set(right['cargo'].get('--features','').split(','))
+                     and left['filter'] == right['filter'] and left['harness'] == right['harness']
+                     and left['environment'].get('RUST_MIN_STACK') == right['environment'].get('RUST_MIN_STACK'),
+                     'Historical command target/features/filter/runtime differ')
+
+
+def bound_execution(record, item, raw, source_commands=canonical):
+    """No receipt-selected slice can remove another outcome from one execution."""
+    kind = item['name'].split(':')[0]
+    origin = record['origin']
+    receipts.require(set(origin) == {'kind','identity','command','execution'}, 'Missing execution binding')
+    witness = origin['execution']
+    lines = raw.splitlines()
+    first = witness['first_line']
+    receipts.require(type(first) is int and 0 < first <= len(lines), 'Invalid command anchor')
+    if witness['mode'] == 'local-binary':
+        receipts.require(origin['kind'] == 'attested-local' and kind in {'wal','store_contract'}
+                         and set(witness) == {'mode','first_line','build_invocation','archive_sha256','binary_sha256_before','binary_sha256_after','features','fingerprint'},
+                         'Unknown local binary witness')
+        receipts.require(lines[first-1].startswith('COMMAND '), 'Local command anchor unavailable')
+        argv = receipts.bounded_json(lines[first-1].removeprefix('COMMAND ').encode())
+        receipts.require(isinstance(argv,list) and argv and all(isinstance(arg,str) for arg in argv)
+                         and origin['command'] == shlex.join(argv), 'Local command contradicts actual argv')
+        receipts.require(retention.DIGEST.fullmatch(witness['archive_sha256'])
+                         and retention.DIGEST.fullmatch(witness['binary_sha256_before'])
+                         and witness['binary_sha256_after'] == witness['binary_sha256_before']
+                         and witness['features'] == record['environment']['features']
+                         and witness['archive_sha256'] == source_archive_digest(record['source_commit'])
+                         and isinstance(witness['fingerprint'],dict)
+                         and json.loads(witness['fingerprint'].get('features','null')) == witness['features']
+                         and type(witness['fingerprint'].get('profile')) is int, 'Local build/binary witness differs')
+        build = normalized_cargo(witness['build_invocation'],compile_only=True);target = rust_identity(item['invocation'])
+        keys = {'-p','--manifest-path','--test','--bin','--lib','--no-default-features','--release'}
+        receipts.require({k:v for k,v in build['cargo'].items() if k in keys} == {k:v for k,v in target['cargo'].items() if k in keys}
+                         and set(target['cargo'].get('--features','').split(',')) <= set(witness['features']), 'Local binary belongs to another target or graph')
+        ends = [index for index in range(first,len(lines)) if lines[index].startswith('NATIVE_EXIT ') or lines[index].startswith('COMMAND ')]
+        receipts.require(ends and lines[ends[0]].startswith('NATIVE_EXIT '), 'Local execution exit boundary missing')
+        end = ends[0]
+        receipts.require(lines[end] == 'NATIVE_EXIT ' + str(record['exit_code']), 'Actual local exit differs')
+        body = '\n'.join(lines[first:end])
+        # Native argv may select a missing-only subset of the canonical cohort.
+        args = argv[1:]
+        receipts.require('--list' not in args and '--exact' in args and '--test-threads=1' in args
+                         and len([arg for arg in args if not arg.startswith('--')]) == 1,
+                         'Unknown local missing-only harness')
+        selected = next(arg for arg in args if not arg.startswith('--'))
+        actual = retention.log_outcomes(body, record['coverage']['format'])
+        receipts.require(set(actual) == {selected}, 'Actual local selector/outcomes differ')
+    else:
+        receipts.require(witness['mode'] == 'cargo-command' and kind in {'wal','store_contract'}
+                         and set(witness) == {'mode','first_line','historical_name'}, 'Unknown Cargo execution witness')
+        historical = source_commands(record['source_commit'])
+        name = witness['historical_name']
+        receipts.require(name in historical and name.split(':')[0] == kind, 'Unknown historical command ordinal')
+        expected = rust_identity(historical[name]);current = rust_identity(item['invocation']);same_target(expected,current)
+        start = first-1;end_command = start;parts = []
+        while True:
+            line = lines[end_command];parts.append(line.removesuffix('\\').strip())
+            if not line.endswith('\\'):break
+            end_command += 1
+            receipts.require(end_command < len(lines), 'Incomplete logged command continuation')
+        command = ' '.join(parts)
+        receipts.require(origin['command'] == command, 'Origin command contradicts exact logged invocation')
+        same_target(normalized_cargo(command),expected)
+        actual_env = normalized_cargo(command)['environment']
+        receipts.require(actual_env == expected['environment'], 'Historical wrapper environment differs')
+        end = len(lines)
+        for index in range(end_command+1,len(lines)):
+            if re.match(r'^(?:(?:[A-Z_]+=[^ ]+|scripts/require-test-count) +)*cargo test(?: |$)|^COMMAND ',lines[index]):
+                end = index;break
+        body = '\n'.join(lines[end_command+1:end])
+        flags = expected['cargo']
+        target = flags.get('--test') or flags.get('--bin') or flags.get('-p')
+        if target is None:
+            import tomllib
+            manifest = retention.git_bytes(record['source_commit'],flags['--manifest-path'])
+            receipts.require(manifest is not None,'Historical manifest unavailable')
+            target = tomllib.loads(manifest.decode())['package']['name']
+        target = target.replace('-','_')
+        running = re.findall(r'^\s*Running (?:unittests|tests/).*?\(([^)]+)\)$',body,re.M)
+        receipts.require(len(running) == 1 and re.search(r'(?:^|/)' + re.escape(target) + r'-[0-9a-f]+$',running[0]),
+                         'Actual Cargo target differs or is ambiguous')
+        actual = retention.log_outcomes(body, record['coverage']['format'])
+    receipts.require(actual == record['coverage']['outcomes'], 'Cropped or contradictory complete execution outcomes')
+    return body
+
+
+def completion_obligations(item, records, result, bodies):
+    """Closed failure categories; current wrapper predicates are derived from source."""
+    identity = rust_identity(item['invocation'])
+    environment = identity['environment']
+    passed = sum(value == 'pass' for value in result.values())
+    expected = environment.get('PLURX_EXPECT_TEST_COUNT')
+    if expected is None and '--exact' in identity['harness']:
+        expected = '1'
+    if expected is not None:
+        receipts.require(passed == int(expected), 'Current exact count predicate fails')
+    minimum = environment.get('PLURX_EXPECT_TEST_COUNT_AT_LEAST')
+    if minimum is not None:
+        receipts.require(passed >= int(minimum), 'Current minimum count predicate fails')
+    names = environment.get('PLURX_EXPECT_TEST_NAMES','')
+    receipts.require(all(result.get(name) == 'pass' for name in names.split(',') if name), 'Current required-name predicate fails')
+    failed = [record for record in records if record['exit_code'] != 0]
+    receipts.require(len(item['obligations']) == len(failed), 'Original failed execution obligation missing')
+    for obligation, record in zip(item['obligations'],failed):
+        receipts.require(set(obligation) == {'sequence','category'} and obligation['sequence'] == record['sequence'], 'Unknown completion obligation')
+        body = bodies[record['sequence']]
+        outcomes = record['coverage']['outcomes']
+        if obligation['category'] == 'native-failure':
+            receipts.require(record['exit_code'] == 101 and 'fail' in outcomes.values()
+                             and re.search(r'^test result: FAILED\.',body,re.M), 'Unknown native failure category')
+        else:
+            receipts.require(obligation['category'] == 'stale-count-wrapper', 'Unexplained failed command')
+            diagnostics = re.findall(r'^expected (\d+) matching Rust test\(s\), but (\d+) passed$',body,re.M)
+            terminals = re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored;',body,re.M)
+            old_env = normalized_cargo(record['origin']['command'])['environment']
+            old_expected = old_env.get('PLURX_EXPECT_TEST_COUNT')
+            receipts.require(record['exit_code'] in {1,2} and old_expected is not None and len(diagnostics) == 1 and terminals
+                             and diagnostics[0] == (old_expected,str(sum(map(int,terminals))))
+                             and int(diagnostics[0][1]) == sum(value == 'pass' for value in outcomes.values())
+                             and set(outcomes.values()) == {'pass'} and old_expected != diagnostics[0][1]
+                             and not re.search(r'(?im)^(?!make: \*\*\*|##\[error\]Process completed with exit code [12]\.?$).*?(?:fatal|panicked|error:)',body), 'Ambiguous or unproved stale count failure')
+            wrapper = retention.git_bytes(record['source_commit'],'scripts/require-test-count')
+            receipts.require(wrapper is not None and b'expected %s matching Rust test(s), but %s passed' in wrapper
+                             and b'status=${PIPESTATUS[0]}' in wrapper, 'Historical count wrapper unavailable')
+
+
 def authenticate(api, proof, document, repository):
     """Local records use the authenticated writer; CI records also use live logs."""
+    origins = {}
     for item in proof['commands']:
         kind = item['name'].split(':')[0]
         for record in item['records']:
@@ -393,7 +555,9 @@ def authenticate(api, proof, document, repository):
             receipts.require(workflow is not None and historical_command(workflow.decode(), kind),
                              'Historical command executor differs')
             authenticate_scope(api, run_id, run, workflow.decode(), document, record['source_commit'], repository)
-            raw = api.bytes(f'/actions/jobs/{job_id}/logs')
+            if job_id not in origins:
+                origins[job_id] = api.bytes(f'/actions/jobs/{job_id}/logs')
+            raw = origins[job_id]
             receipts.require(retention.digest(raw) == record['log']['sha256_ref']
                              and command_log(proof, record).encode() == raw, 'Authenticated command log mismatch')
 
@@ -407,7 +571,7 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
     claims = proof['commands']
     receipts.require(isinstance(claims, list) and claims and len(claims) <= 512,
                      'Empty or oversized command enrollment')
-    seen, by_kind = set(), {}
+    seen, by_kind, native_inventories = set(), {}, {}
     for item in claims:
         receipts.require(set(item) == {'name', 'invocation', 'environment', 'inventory', 'records', 'obligations'},
                          'Unknown command unit fields')
@@ -428,6 +592,7 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
                              and environment['runtime'].get('rust_min_stack') == (int(identity['environment']['RUST_MIN_STACK']) if 'RUST_MIN_STACK' in identity['environment'] else None),
                              'Rust command runtime differs from exact canonical invocation')
             ids = native_inventory(item['inventory'], identity, candidate)
+            native_inventories[name] = {'ids_sha256': retention.digest(json.dumps(ids, separators=(',', ':')).encode()), 'features': environment['features']}
             requested = identity['cargo'].get('--features', '').split(',')
             requested = [feature for feature in requested if feature]
             receipts.require(set(requested) <= set(item['inventory']['features'])
@@ -441,7 +606,7 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
             ids = ['whole-command']
         receipts.require(len(ids) == len(set(ids)), 'Repeated current unit identity')
         records = item['records'];receipts.require(isinstance(records, list) and records, 'No actual command executions')
-        result, failed, sequences = {}, set(), set()
+        result, last_failure, last_pass, sequences, bodies = {}, {}, {}, set(), {}
         for record in sorted(records, key=lambda row: row['sequence']):
             receipts.require(set(record) == {'sequence', 'source_commit', 'environment', 'origin', 'changes', 'log', 'coverage', 'exit_code'},
                              'Unknown command execution record')
@@ -449,37 +614,168 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
             receipts.require(type(sequence) is int and sequence > 0 and sequence not in sequences,
                              'Ambiguous actual execution chronology');sequences.add(sequence)
             receipts.require(record['environment'] == environment, 'Actual runtime environment differs')
-            origin = record['origin'];receipts.require(set(origin) == {'kind', 'identity', 'command'}
+            origin = record['origin'];receipts.require(set(origin) == {'kind', 'identity', 'command', 'execution'}
                 and origin['kind'] in {'attested-local', 'authenticated-ci'} and origin['identity'] and origin['command'],
                 'Missing real execution origin')
             invalid = changed_inputs(record, candidate)
             receipts.require(invalid <= set(ids), 'Unknown affected command unit')
-            actual = coverage(record, clean_log(command_log(proof, record)), kind, discovery)
+            raw = clean_log(command_log(proof, record))
+            if kind in {'wal','store_contract'}:
+                bodies[sequence] = bound_execution(record,item,raw)
+            actual = coverage(record, raw, kind, discovery)
             receipts.require(set(actual) <= set(ids), 'Execution belongs to another command inventory')
             if kind == 'android_jvm':
                 receipts.require(not invalid and record['exit_code'] == 0,
                                  'Opaque JVM result cannot qualify changed unit inputs or failed command')
             for test_id, outcome in actual.items():
-                if outcome == 'fail':failed.add(test_id)
-                if test_id not in invalid:result[test_id] = outcome
+                if outcome == 'ignored':
+                    receipts.require(kind == 'store_contract' and test_id in IGNORED_STORE_HELPERS,
+                                     'Ignored result is outside the closed canonical helper policy')
+                if outcome == 'fail':
+                    last_failure[test_id] = sequence
+                if test_id not in invalid:
+                    result[test_id] = outcome
+                    if outcome == 'pass':
+                        last_pass[test_id] = sequence
         receipts.require(set(result) == set(ids) and all(value in {'pass', 'ignored'} for value in result.values())
-                         and all(result[test_id] == 'pass' for test_id in failed), 'Incomplete or failed applicable command coverage')
-        obligations = item['obligations']
-        receipts.require(isinstance(obligations, list), 'Unknown command completion obligations')
-        # A failed outer command remains failed. A native-pass union requires an
-        # explicit candidate-bound successful wrapper/count validation witness.
-        failed_commands = [row['sequence'] for row in records if row['exit_code'] != 0]
-        receipts.require(len(obligations) == len(failed_commands), 'Failed outer command obligation not discharged')
-        for obligation, sequence in zip(obligations, failed_commands):
-            receipts.require(set(obligation) == {'sequence', 'source_commit', 'invocation', 'native_pass_count', 'reason'}
-                             and obligation['sequence'] == sequence and obligation['source_commit'] == candidate
-                             and obligation['invocation'] == item['invocation'] and obligation['reason'],
-                             'Invalid repaired command obligation')
-            receipts.require(obligation['native_pass_count'] == sum(value == 'pass' for value in result.values()),
-                             'Repaired wrapper/count obligation disagrees with complete native union')
+                         and all(last_pass.get(test_id, 0) > sequence for test_id, sequence in last_failure.items()), 'Incomplete or failed applicable command coverage')
+        if kind in {'wal','store_contract'}:
+            completion_obligations(item,records,result,bodies)
+        else:
+            receipts.require(item['obligations'] == [] and all(row['exit_code'] == 0 for row in records),
+                             'Non-Rust failed commands cannot qualify by assertion')
         by_kind.setdefault(kind, []).append(name)
     for kind, names in by_kind.items():
         receipts.require(set(names) == {name for name in canonical_commands if name.split(':')[0] == kind},
                          'Incomplete canonical command cohort')
     return {kind: {'mode': 'retained-complete-command-union', 'commands': sorted(names),
+                   'native_inventories': {name: native_inventories[name] for name in names if name in native_inventories},
                    'validator': retention.digest(Path(__file__).read_bytes())} for kind, names in by_kind.items()}
+
+
+def compile_commands(kind, candidate):
+    """Compile distinct package/target/feature combinations; execute no tests."""
+    actions = {}
+    for name, invocation in canonical(candidate).items():
+        if name.split(':')[0] != kind:
+            continue
+        identity = rust_identity(invocation)
+        flags = identity['cargo']
+        arguments = ['cargo', 'test', '--no-run', '--message-format=json']
+        for flag, value in flags.items():
+            arguments.append(flag)
+            if value is not True:
+                arguments.append(value)
+        actions.setdefault(tuple(arguments), []).append((name, identity))
+    receipts.require(actions, 'No canonical Rust cohort to compile')
+    return actions
+
+
+def owned_output(command, *, timeout, limit):
+    """Bound live output and retire/wait every owned child on cancellation."""
+    def cancelled(signum, _frame):
+        raise receipts.ReceiptError(f'Owned command cancelled by signal {signum}')
+    previous = {signum: signal.signal(signum, cancelled) for signum in (signal.SIGTERM, signal.SIGINT)}
+    process = None
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, start_new_session=True)
+        deadline = time.monotonic() + timeout
+        output = bytearray()
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                receipts.require(remaining > 0, 'Owned command timeout')
+                if not selector.select(min(remaining, 1)):
+                    continue
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                receipts.require(len(output) + len(chunk) <= limit, 'Owned command output limit exceeded')
+                output.extend(chunk)
+        receipts.require(process.wait(timeout=max(0.01, deadline-time.monotonic())) == 0,
+                         'Owned command failed')
+        return output.decode('utf-8', errors='strict')
+    finally:
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=10)
+            if process.stdout is not None:
+                process.stdout.close()
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def owned_compile(command):
+    return owned_output(command, timeout=1800, limit=64 * 1024 * 1024)
+
+
+def require_store_mode(adopted, mode):
+    receipts.require('store_contract' not in adopted or mode == 'legacy',
+                     'Retained Store units require legacy mode; shards would replay them')
+
+
+def compile_adopted(kind, proof, candidate):
+    """The current compiler independently verifies each adopted native inventory."""
+    receipts.require(proof['mode'] == 'retained-complete-command-union'
+                     and proof['validator'] == retention.digest(Path(__file__).read_bytes()),
+                     'Command adoption validator changed after scope')
+    version = subprocess.check_output(['rustc', '--version'], text=True).strip()
+    receipts.require(version.startswith('rustc 1.97.1 '), 'Command compiler toolchain mismatch')
+    expected = proof['native_inventories']
+    actions = compile_commands(kind, candidate)
+    receipts.require(set(expected) == {name for group in actions.values() for name, _ in group},
+                     'Adopted command/compiler footprint incomplete')
+    for command, group in actions.items():
+        print('COMPILE_ONLY ' + shlex.join(command), flush=True)
+        output = owned_compile(command)
+        artifacts = []
+        for line in output.splitlines():
+            try:
+                row = json.loads(line)
+            except (ValueError, TypeError) as error:
+                raise receipts.ReceiptError('Malformed current Cargo JSON evidence') from error
+            receipts.require(isinstance(row, dict), 'Malformed current Cargo artifact')
+            if row.get('reason') == 'compiler-artifact' and row.get('profile', {}).get('test') and row.get('executable'):
+                artifacts.append(row)
+        for name, identity in group:
+            flags = identity['cargo']
+            target_name = flags.get('--test') or flags.get('--bin')
+            if target_name is None:
+                package = flags.get('-p')
+                if package is None:
+                    import tomllib
+                    package = tomllib.loads(Path(flags['--manifest-path']).read_text())['package']['name']
+                target_name = package.replace('-', '_')
+            matching = [row for row in artifacts if row['target']['name'] == target_name]
+            receipts.require(len(matching) == 1, 'Current target artifact missing or ambiguous')
+            artifact = matching[0]
+            receipts.require(sorted(artifact['features']) == sorted(expected[name]['features']),
+                             'Current compiled feature graph differs from adopted target')
+            output = owned_output([artifact['executable'], '--list', '--format=terse'], timeout=30, limit=8 * 1024 * 1024)
+            ids = [line.removesuffix(': test') for line in output.splitlines() if line.endswith(': test')]
+            selector = identity['filter']
+            selected = [test_id for test_id in ids if selector is None or
+                        (test_id == selector if '--exact' in identity['harness'] else selector in test_id)]
+            actual = retention.digest(json.dumps(selected, separators=(',', ':')).encode())
+            receipts.require(actual == expected[name]['ids_sha256'],
+                             'Current compiler discovered another unit universe')
+            print('ADOPTED_COMPLETE_UNIT_COMMAND ' + name, flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--compile-units', choices=['store_contract', 'wal'], required=True)
+    args = parser.parse_args()
+    candidate = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+    receipts.require(candidate == os.environ['GITHUB_SHA'], 'Checked-out adoption source differs')
+    verified = receipts.bounded_json(os.environ['PLURX_RETAINED_UNITS'].encode())
+    receipts.require(verified['candidate_sha'] == candidate, 'Scope adoption bound to another source')
+    compile_adopted(args.compile_units, verified['command_units'][args.compile_units], candidate)
+
+
+if __name__ == '__main__':
+    main()
