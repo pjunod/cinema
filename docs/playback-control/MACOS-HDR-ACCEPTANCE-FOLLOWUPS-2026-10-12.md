@@ -1,6 +1,6 @@
 # Mac HDR acceptance — playback follow-ups
 
-**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; ordinary Air hls.js F1 acceptance and restoration complete; F2 two-sided correction merged; HDR transition passes, SDR clock correction in qualification; F3–F7 remain open · **Recorded:** 2026-10-12.
+**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; ordinary Air hls.js F1 acceptance and restoration complete; F2 repairs qualified and merged; bounded installed Air HDR-to-SDR transition and restoration complete; F3–F7 remain open · **Recorded:** 2026-10-12.
 
 The [full acceptance report](../streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 closes the ordinary HDR10 Metal/CPU comparison. This document specifies the
@@ -514,6 +514,65 @@ rate-limited control measurements remain unmeasured. At 20:10 UTC the player
 was closed, the temporary capabilities removed by reload, quality Auto and
 persisted resume zero verified, and shared clipboard OFF verified. A new
 installed-source trial must repeat cleanup.
+
+### Final clock correction — qualified, merged and installed SDR accepted
+
+PR #1083 merges as `f1bffab5963399f084db2f94b158412d5cb8d9d2` at
+21:23:44 UTC. Exact candidate `d1b480b5d5bd0ef7f9f6bad8ce9133bdcef05fa9`,
+based on `b35eebb6b28c9f94b0a174c145953f79f39c1c8f`, passes run 5051
+(global 5077): policy, Rust, web, Android and Main promotion are green;
+Apple is outside the selected scope. Final Python receipt 2796 is complete,
+with 1,385 applicable passes and no fixture errors; preflight receipt 2797
+has no phase errors. All three regression lines are verified in the landing.
+The intermediate missing client-history anchor was corrected before the
+passing qualification, and its failed run remains in the archive.
+
+The exact source was built with Rust 1.97.1 and installed on the Air. Binary
+SHA-256 is `e2c906fe955ba3147c8dd9bb64ec7bbb6dc956db6a60d35438385628e66000ef`;
+served alignment-owner SHA-256 is
+`785140c1c3b5cbaa4aeb2a3506361c9682d4c97eabb0c2f5ad29b2b33298cbba`.
+The existing network-volume grant was renewed for the updated binary.
+
+At 21:17:07 UTC, HDR remux incumbent
+`91d727cc-86e9-48fd-864e-6ff5fb21f423` commits SDR successor
+`e123d10f-2295-4d1f-b412-147cb297a53d`. The diagnostic changes only the
+successor capability request to SDR after HDR playback starts; observation
+wrappers return the production functions' unmodified results. Pinned FFprobe
+confirms H.264 1920×1080 BT.709 with AAC in the attached rendition
+`6a3c64ce9f08e64e854fee57f01e62a770948d672bde51ff425d2bcb8844e898`.
+This is an applied SDR transition, unlike the earlier HDR-preserving pass.
+
+The decoded guard rejects a 41.959 ms pair, then accepts a 41.25 ms pair
+within the measured 41.709 ms cadence at a common display instant. The
+original tolerance, freshness, 800 ms deadline, bounded seeks and ownership
+checks remain enforced. Preparation takes 3,180 ms; first-frame presentation
+follows the internal commit timestamp by 31.5 ms. Tap-to-first-frame is
+3,766.7 ms, including preparation. At film time 224.401 s, the successor is
+still playing at 1920×1080, quality 1080, unmuted with volume 1; 5,290 decoded
+frames and zero recorded postcommit hitches/faults are retained. Those
+postcommit counters do not establish zero frame loss at the switch boundary.
+The switch frame ledger and physical speaker seam remain unmeasured; control
+measurement uploads return 429/425. The 21:14 warm trial safely refuses under
+9.8 s incumbent runway before alignment and is preserved separately.
+
+The [41-member final source, qualification and physical archive](http://forge.lan:3000/attachments/26063af1-42b0-4c76-84b7-49769b9cb135)
+is 64,419,028 bytes with SHA-256
+`cbbbcb741c83b9721fa2f1b1c1fb477e1c35dcdc39e2f31907f75fdf8fb97642`.
+It includes the exact committed source archive, build/install identities,
+complete frame/state logs, real output probe, passing receipts, landing,
+retained pressure refusal and restoration. The preceding
+[22-member review and qualification controls](http://forge.lan:3000/attachments/d3c2e45e-bb9e-4d96-8c9e-c0f2a3e6e145)
+have SHA-256 `36fc1931321f4021d7cc52e52115e8656a89db6896b069482508bfaad09c27c8`.
+All original Oct 12 raw log lengths and hashes were reverified; earlier
+failures and archives remain intact.
+
+At 21:25:41 UTC, a fresh authenticated item read verifies resume
+`position_ms: 0`, `watched: false`, quality Auto and no active browser session.
+Reload removes temporary capabilities and observation wrappers; the movie
+page shows Play. Shared clipboard is OFF, and temporary keyboard sync is
+reverted. Backend Auto and Mac processing ON were unchanged. The bounded
+ordinary Air hls.js F2 alignment case is complete. Physical speaker continuity,
+the broader continuous-quality platform matrix and F3–F7 remain separate work.
 
 ## 5. F3 — abandoned preparation occupies VOD capacity
 
