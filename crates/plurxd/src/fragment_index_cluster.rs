@@ -1145,6 +1145,10 @@ fn pipeline_digest_for_transform(
     let mut args = plurx_core::transcode::copy_index_pipe_args(file, video);
     if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
         args.push(format!(
+            "{{plurx-hdr10-index:{}}}",
+            plurx_core::fmp4::HDR10_INDEX_METADATA_REVISION
+        ));
+        args.push(format!(
             "{{plurx-hevc-proof:{}}}",
             plurx_core::hevc_configuration::REVISION
         ));
@@ -2111,5 +2115,29 @@ mod tests {
             table.load(&key(1, "v2")).is_none(),
             "the oldest entry is the one evicted"
         );
+    }
+    #[test]
+    fn hdr10_metadata_revision_invalidates_shared_copy_indexes() {
+        let dir = tempfile::tempdir().expect("valid HDR fixture");
+        let path = dir.path().join("movie.mkv");
+        std::fs::write(&path, b"source").expect("valid HDR fixture");
+        let file = sampled_file(path);
+        let video = plurx_core::transcode::CopyVideoOptions::new(true, false);
+        let engine = "a".repeat(64);
+        let mut old_args = plurx_core::transcode::copy_index_pipe_args(&file, video);
+        old_args.push(format!(
+            "{{plurx-hevc-proof:{}}}",
+            plurx_core::hevc_configuration::REVISION
+        ));
+        if let Some(input) = old_args
+            .windows(2)
+            .position(|w| w[0] == "-i")
+            .map(|i| i + 1)
+        {
+            old_args[input] = "{attested-source-fd}".into();
+        }
+        let old =
+            cluster_fragment_index_pipeline_digest(&engine, &old_args).expect("valid HDR fixture");
+        assert_ne!(pipeline_digest(&file, &engine, video), old);
     }
 }
