@@ -21,7 +21,8 @@ def log(text):
 def fixture():
     features = ['cluster-read-cost-validation', 'hiqlite-contract-tests', 'hiqlite-store']
     environment = {'platform': 'linux-x64', 'toolchain': 'rust1.97.1', 'features': features,
-                   'runtime': {'test_threads': 1, 'rust_min_stack': 8388608}}
+                   'runtime': {'test_threads': 1, 'rust_min_stack':8388608,'target':'x86_64-unknown-linux-gnu',
+                              'rustc_version':q.RUSTC_VERSION,'profile':{'opt_level':'0','debuginfo':0,'debug_assertions':True,'overflow_checks':True,'test':True}}}
     records=[]; logs={}
     for sequence,name in enumerate(['a','b'],1):
         argv=['/owned/store_contract-deadbeef',name,'--exact','--test-threads=1']
@@ -31,7 +32,8 @@ def fixture():
             'origin':{'kind':'attested-local','identity':'actual owned effort executor','command':shlex.join(argv),
                 'execution':{'mode':'local-binary','first_line':1,'build_invocation':COMMAND.replace('$(CARGO)','cargo')+' --no-run',
                     'archive_sha256':'d'*64,'binary_sha256_before':'c'*64,'binary_sha256_after':'c'*64,'features':features,
-                    'fingerprint':{'features':__import__('json').dumps(features),'profile':123}}},
+                    'fingerprint':{'features':__import__('json').dumps(features),'profile':16018505129029273480,'rustc':q.RUSTC_FINGERPRINT,'compile_kind':0,'rustflags':[]},
+                    'binary_path':argv[0],'fingerprint_path':'/owned/.fingerprint/plurx-core-deadbeef/test-integration-test-store_contract.json'}},
             'changes':{},'log':{'sha256_ref':raw['sha256']},'exit_code':0,
             'coverage':{'mode':'rust','first_line':2,'last_line':5,'format':'rust-serial','outcomes':{name:'pass'}}})
     item = {'name': 'store_contract:1', 'invocation': COMMAND, 'environment': environment,
@@ -42,7 +44,7 @@ def fixture():
 
 class CompleteCommandUnitCase(unittest.TestCase):
     def validate(self, proof, commands=None, invalid=()):
-        with patch.object(q, 'changed_inputs', return_value=set(invalid)),patch.object(q,'source_archive_digest',return_value='d'*64):
+        with patch.object(q, 'changed_inputs', return_value=set(invalid)),patch.object(q,'source_archive_digest',return_value='d'*64),patch.object(q,'test_profile',return_value=fixture()['commands'][0]['environment']['runtime']['profile']):
             return q.validate(proof, CANDIDATE, commands=lambda _: commands or {'store_contract:1': COMMAND})
 
     def test_complete_actual_union_is_pure_and_candidate_bound(self):
@@ -52,6 +54,18 @@ class CompleteCommandUnitCase(unittest.TestCase):
         self.assertEqual(proof, before)
         proof['source_commit'] = 'd' * 40
         with self.assertRaises(receipts.ReceiptError): self.validate(proof)
+
+    def test_no_explicit_features_accepts_actual_empty_feature_graph(self):
+        proof=fixture();item=proof['commands'][0]
+        command=COMMAND.replace(' --features cluster-read-cost-validation,hiqlite-contract-tests','')
+        item['invocation']=command;item['environment']['features']=[];item['inventory']['features']=[]
+        for record in item['records']:
+            record['environment']['features']=[]
+            witness=record['origin']['execution'];witness['features']=[]
+            witness['fingerprint']['features']='[]'
+            witness['build_invocation']=command.replace('$(CARGO)','cargo')+' --no-run'
+        self.assertEqual(self.validate(proof,{'store_contract:1':command})['store_contract']['mode'],
+                         'retained-complete-command-union')
 
     def test_missing_command_and_wrong_invocation_refuse(self):
         for mutate in [lambda p: p['commands'][0].update(invocation=COMMAND+' --ignored'),
@@ -124,7 +138,7 @@ class CompleteCommandUnitCase(unittest.TestCase):
         proof=fixture();item=proof['commands'][0]
         failed=copy.deepcopy(item['records'][0]);failed['sequence']=3;failed['source_commit']='a'*40
         item['records'].append(failed)
-        with patch.object(q,'source_archive_digest',return_value='d'*64),patch.object(q,'bound_execution',return_value=''),patch.object(q,'changed_inputs',side_effect=[set(),set(),{'a'}]),patch.object(q,'coverage',side_effect=[{'a':'pass'},{'b':'pass'},{'a':'fail'}]):
+        with patch.object(q,'source_archive_digest',return_value='d'*64),patch.object(q,'test_profile',return_value=item['environment']['runtime']['profile']),patch.object(q,'bound_execution',return_value=''),patch.object(q,'changed_inputs',side_effect=[set(),set(),{'a'}]),patch.object(q,'coverage',side_effect=[{'a':'pass'},{'b':'pass'},{'a':'fail'}]):
             with self.assertRaises(receipts.ReceiptError):q.validate(proof,CANDIDATE,commands=lambda _: {'store_contract:1':COMMAND})
 
     def test_retained_store_refuses_accelerated_and_shadow_before_jobs(self):
@@ -202,6 +216,24 @@ class CompleteCommandUnitCase(unittest.TestCase):
         self.assertTrue(process.stdout.closed)
         self.assertEqual(before,{signum:signal.getsignal(signum) for signum in before})
 
+    def test_successful_child_cancelled_during_retirement_does_not_return_success(self):
+        import os,signal
+        from unittest.mock import Mock
+        read,write=os.pipe();os.close(write)
+        process=Mock(pid=123,stdout=os.fdopen(read,'rb'),returncode=0)
+        process.poll.return_value=0
+        before={signum:signal.getsignal(signum) for signum in (signal.SIGTERM,signal.SIGINT)}
+        def retire(**_):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM,None)
+            return 0
+        process.wait.side_effect=retire
+        with patch.object(q.subprocess,'Popen',return_value=process),patch.object(q.os,'killpg'):
+            with self.assertRaisesRegex(receipts.ReceiptError,'cancelled'):
+                q.owned_output(['cargo'],timeout=1,limit=1024)
+        process.wait.assert_called_once_with(timeout=10)
+        self.assertTrue(process.stdout.closed)
+        self.assertEqual(before,{signum:signal.getsignal(signum) for signum in before})
+
     def test_actual_wrapper_failure_cannot_be_labelled_exit_zero(self):
         old='PLURX_EXPECT_TEST_COUNT=1 '+COMMAND.replace('$(CARGO)','scripts/require-test-count cargo')
         body='test a ... ok\ntest b ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored;\nexpected 1 matching Rust test(s), but 2 passed\n'
@@ -212,3 +244,51 @@ class CompleteCommandUnitCase(unittest.TestCase):
     def test_positive_native_rows_require_complete_target_terminal(self):
         body='test a ... ok\n'
         with self.assertRaises(receipts.ReceiptError):q.require_native_terminals(body,{'a':'pass'},0,COMMAND.replace('$(CARGO)','cargo'))
+
+    def test_current_fingerprint_refuses_hidden_compiler_target_or_flags(self):
+        import tempfile,json
+        with tempfile.TemporaryDirectory() as temporary:
+            root=q.Path(temporary)/'debug';binary=root/'deps'/'store_contract-deadbeef'
+            fingerprint=root/'.fingerprint'/'plurx-core-deadbeef'/'test-integration-test-store_contract.json'
+            fingerprint.parent.mkdir(parents=True)
+            artifact={'executable':str(binary),'features':[]}
+            base={'rustc':q.RUSTC_FINGERPRINT,'profile':q.TEST_PROFILE_FINGERPRINTS[0],
+                  'compile_kind':0,'rustflags':[],'features':'[]'}
+            profile=fixture()['commands'][0]['environment']['runtime']['profile']
+            fingerprint.write_text(json.dumps(base));q.require_current_fingerprint(artifact,profile)
+            for key,value in [('rustc',0),('profile',0),('compile_kind',1),('rustflags',['--cfg','hidden'])]:
+                fingerprint.write_text(json.dumps({**base,key:value}))
+                with self.assertRaises(receipts.ReceiptError):q.require_current_fingerprint(artifact,profile)
+
+    def test_semantic_cargo_environment_overrides_refuse(self):
+        q.require_unmodified_cargo_environment({'CARGO_TARGET_DIR':'/owned/target','CARGO_BUILD_JOBS':'1'})
+        for key in ['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_TARGET','RUSTC',
+                    'RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','CARGO_PROFILE_TEST_DEBUG',
+                    'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS']:
+            with self.assertRaises(receipts.ReceiptError):q.require_unmodified_cargo_environment({key:'override'})
+
+    def test_rust_environment_unknown_platform_profile_or_runtime_extra_refuse(self):
+        for mutate in [lambda env:env.update(platform='unknown'),
+                       lambda env:env['runtime'].update(unreviewed_flag=True),
+                       lambda env:env['runtime'].update(target='aarch64-apple-darwin'),
+                       lambda env:env['runtime']['profile'].update(debuginfo=2)]:
+            proof=fixture();mutate(proof['commands'][0]['environment'])
+            with self.assertRaises(receipts.ReceiptError):self.validate(proof)
+
+    def test_same_suffix_wrong_native_target_or_fingerprint_refuses(self):
+        for key,value in [('binary_path','/owned/different-deadbeef'),
+                          ('fingerprint_path','/owned/.fingerprint/plurx-core-deadbeef/test-integration-test-other.json'),
+                          ('fingerprint_path','/owned/.fingerprint/other-package-deadbeef/test-integration-test-store_contract.json')]:
+            proof=fixture();record=proof['commands'][0]['records'][0]
+            record['origin']['execution'][key]=value
+            if key=='binary_path':
+                import json
+                raw=q.command_log(proof,record).replace('/owned/store_contract-deadbeef',value)
+                bound=log(raw);proof['logs'][bound['sha256']]=bound;record['log']['sha256_ref']=bound['sha256']
+                argv=json.loads(raw.splitlines()[0].removeprefix('COMMAND '));record['origin']['command']=shlex.join(argv)
+            with self.assertRaises(receipts.ReceiptError):self.validate(proof)
+
+    def test_native_argv_must_be_the_preserved_fingerprint_binary(self):
+        for key,value in [('binary_path','/different/store_contract-deadbeef'),('fingerprint_path','/owned/.fingerprint/plurx-core-ffffffff/test-integration-test-store_contract.json')]:
+            proof=fixture();proof['commands'][0]['records'][0]['origin']['execution'][key]=value
+            with self.assertRaises(receipts.ReceiptError):self.validate(proof)

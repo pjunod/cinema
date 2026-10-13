@@ -446,6 +446,38 @@ def source_archive_digest(source):
         return retention.digest(path.read_bytes())
 
 
+RUSTC_VERSION='rustc 1.97.1 (8bab26f4f 2026-07-14)'
+RUSTC_FINGERPRINT=12019306335353385202
+TEST_PROFILE_FINGERPRINTS={0:16018505129029273480,2:6599234302872229273}
+
+
+@lru_cache(maxsize=32)
+def test_profile(source,manifest):
+    import tomllib
+    path=manifest or 'Cargo.toml'
+    raw=retention.git_bytes(source,path)
+    receipts.require(raw is not None,'Historical profile manifest unavailable')
+    document=tomllib.loads(raw.decode())
+    profile=document.get('profile',{}).get('test',{})
+    receipts.require(set(profile)<= {'debug'} and not any(key.startswith('package') for key in profile),
+                     'Changed Rust test profile requires reviewed compatibility')
+    debug=profile.get('debug',2)
+    receipts.require(type(debug) is int and debug in {0,2},'Unknown Rust test debuginfo profile')
+    return {'opt_level':'0','debuginfo':debug,'debug_assertions':True,'overflow_checks':True,'test':True}
+
+
+def rust_environment(environment,identity,source):
+    receipts.require(set(environment)=={'platform','toolchain','features','runtime'}
+                     and environment['platform']=='linux-x64' and environment['toolchain']=='rust1.97.1'
+                     and isinstance(environment['features'],list) and environment['features']==sorted(set(environment['features'])),
+                     'Unknown actual Rust platform/toolchain/feature contract')
+    runtime=environment['runtime']
+    receipts.require(set(runtime)=={'test_threads','rust_min_stack','target','profile','rustc_version'}
+                     and runtime['target']=='x86_64-unknown-linux-gnu' and runtime['rustc_version']==RUSTC_VERSION
+                     and runtime['profile']==test_profile(source,identity['cargo'].get('--manifest-path')),
+                     'Rust compiler/target/profile witness differs')
+
+
 def normalized_cargo(command, *, compile_only=False):
     words = shlex.split(command)
     if compile_only:
@@ -546,6 +578,23 @@ def require_native_terminals(body,actual,exit_code,command):
                              'Actual historical required-name wrapper predicate failed')
 
 
+def native_target_paths(identity,source):
+    flags=identity['cargo'];package=flags.get('-p')
+    if package is None:
+        import tomllib
+        manifest=retention.git_bytes(source,flags['--manifest-path'])
+        receipts.require(manifest is not None,'Native target manifest unavailable')
+        package=tomllib.loads(manifest.decode())['package']['name']
+    if '--test' in flags:
+        name=flags['--test'];kind='integration-test'
+    elif '--bin' in flags:
+        name=flags['--bin'];kind='bin'
+    else:
+        receipts.require('--lib' in flags,'Implicit missing-only target needs explicit target authority')
+        name=package.replace('-','_');kind='lib'
+    return package,name.replace('-','_'),'test-'+kind+'-'+name+'.json'
+
+
 def bound_execution(record, item, raw, source_commands=canonical):
     """No receipt-selected slice can remove another outcome from one execution."""
     kind = item['name'].split(':')[0]
@@ -557,7 +606,7 @@ def bound_execution(record, item, raw, source_commands=canonical):
     receipts.require(type(first) is int and 0 < first <= len(lines), 'Invalid command anchor')
     if witness['mode'] == 'local-binary':
         receipts.require(origin['kind'] == 'attested-local' and kind in RUST_KINDS
-                         and set(witness) == {'mode','first_line','build_invocation','archive_sha256','binary_sha256_before','binary_sha256_after','features','fingerprint'},
+                         and set(witness) == {'mode','first_line','build_invocation','archive_sha256','binary_sha256_before','binary_sha256_after','features','fingerprint','binary_path','fingerprint_path'},
                          'Unknown local binary witness')
         receipts.require(lines[first-1].startswith('COMMAND '), 'Local command anchor unavailable')
         argv = receipts.bounded_json(lines[first-1].removeprefix('COMMAND ').encode())
@@ -570,17 +619,29 @@ def bound_execution(record, item, raw, source_commands=canonical):
                          and witness['archive_sha256'] == source_archive_digest(record['source_commit'])
                          and isinstance(witness['fingerprint'],dict)
                          and json.loads(witness['fingerprint'].get('features','null')) == witness['features']
-                         and type(witness['fingerprint'].get('profile')) is int, 'Local build/binary witness differs')
+                         and witness['fingerprint'].get('profile')==TEST_PROFILE_FINGERPRINTS[record['environment']['runtime']['profile']['debuginfo']]
+                         and witness['fingerprint'].get('rustc')==RUSTC_FINGERPRINT
+                         and witness['fingerprint'].get('compile_kind')==0 and witness['fingerprint'].get('rustflags')==[], 'Local build/binary witness differs')
         build = normalized_cargo(witness['build_invocation'],compile_only=True);target = rust_identity(item['invocation'])
         keys = {'-p','--manifest-path','--test','--bin','--lib','--no-default-features','--release'}
         receipts.require({k:v for k,v in build['cargo'].items() if k in keys} == {k:v for k,v in target['cargo'].items() if k in keys}
-                         and set(target['cargo'].get('--features','').split(',')) <= set(witness['features']), 'Local binary belongs to another target or graph')
+                         and {feature for feature in target['cargo'].get('--features','').split(',') if feature} <= set(witness['features']), 'Local binary belongs to another target or graph')
         ends = [index for index in range(first,len(lines)) if lines[index].startswith('NATIVE_EXIT ') or lines[index].startswith('COMMAND ')]
         receipts.require(ends and lines[ends[0]].startswith('NATIVE_EXIT '), 'Local execution exit boundary missing')
         end = ends[0]
         receipts.require(lines[end] == 'NATIVE_EXIT ' + str(record['exit_code']), 'Actual local exit differs')
         body = '\n'.join(lines[first:end])
         # Native argv may select a missing-only subset of the canonical cohort.
+        receipts.require(witness['binary_path']==argv[0], 'Native argv is not the preserved binary witness')
+        suffix=Path(argv[0]).name.rsplit('-',1)[-1]
+        package,stem,fingerprint_name=native_target_paths(target,record['source_commit'])
+        fingerprint_path=Path(witness['fingerprint_path'])
+        receipts.require(re.fullmatch(r'[0-9a-f]{8,64}',suffix) is not None
+                         and Path(argv[0]).name==stem+'-'+suffix
+                         and fingerprint_path.name==fingerprint_name
+                         and fingerprint_path.parent.name==package+'-'+suffix
+                         and fingerprint_path.parent.parent.name=='.fingerprint',
+                         'Native binary/fingerprint target linkage differs')
         args = argv[1:]
         receipts.require('--list' not in args and '--exact' in args and '--test-threads=1' in args
                          and len([arg for arg in args if not arg.startswith('--')]) == 1,
@@ -694,6 +755,28 @@ def completion_obligations(item, records, result, bodies):
             receipts.require(wrapper is not None and retention.digest(wrapper) in COUNT_WRAPPERS, 'Historical count wrapper unavailable')
 
 
+def historical_rust_environment_contract(source,workflow,kind):
+    # Source/action authority only. Historical compiler binaries and host-global
+    # configuration were not captured, and are deliberately not retroactively hashed.
+    for path,digest in {
+        '.github/actions/cargo-cache/action.yml':'b22fa9dcb68f0cb063ae9de4f80a420631d19f61af60b32e1c6b47e2d9aadb43',
+        'rust-toolchain.toml':'03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4',
+    }.items():
+        raw=retention.git_bytes(source,path)
+        receipts.require(raw is not None and retention.digest(raw)==digest,
+                         'Historical Rust cache/toolchain contract requires review')
+    for root in ('','.cargo/','vendor/hiqlite/.cargo/'):
+        paths=('.cargo/config','.cargo/config.toml') if not root else (root+'config',root+'config.toml')
+        for path in paths:
+            receipts.require(retention.git_bytes(source,path) is None,'Historical Cargo source config requires review')
+    job={'store_contract':'cluster_store_legacy','wal':'cluster_wal','topology':'cluster_topology',
+         'transport':'cluster_transport_recovery_contracts'}[kind]
+    text='\n'.join(job_steps(workflow,job))
+    receipts.require(text.count('uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5')==1
+                     and not re.search(r'RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_TARGET|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_PROFILE_',text),
+                     'Historical Rust setup or semantic overrides differ')
+
+
 def authenticate(api, proof, document, repository):
     """Local records use the authenticated writer; CI records also use live logs."""
     origins, runs, jobs_by_run, scopes = {}, {}, {}, set()
@@ -736,6 +819,12 @@ def authenticate(api, proof, document, repository):
             if job_id not in origins:
                 origins[job_id] = api.bytes(f'/actions/jobs/{job_id}/logs')
             raw = origins[job_id]
+            if kind in RUST_KINDS:
+                historical_rust_environment_contract(record['source_commit'],workflow.decode(),kind)
+                text=clean_log(raw.decode())
+                receipts.require(re.search(r'^'+re.escape(RUSTC_VERSION)+r'$',text,re.M), 'Actual historical pinned compiler version unavailable')
+                job_header=workflow.decode().split('  '+{'store_contract':'cluster_store_legacy','wal':'cluster_wal','topology':'cluster_topology','transport':'cluster_transport_recovery_contracts'}[kind]+':',1)[1].split('    steps:',1)[0]
+                receipts.require(re.search(r'^    runs-on: \[self-hosted, Linux, X64,',job_header,re.M), 'Historical compiler platform authority differs')
             receipts.require(retention.digest(raw) == record['log']['sha256_ref']
                              and command_log(proof, record).encode() == raw, 'Authenticated command log mismatch')
 
@@ -765,6 +854,7 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
                          and isinstance(environment['runtime'], dict), 'Incomplete command environment values')
         if kind in RUST_KINDS:
             identity = rust_identity(item['invocation'])
+            rust_environment(environment,identity,candidate)
             receipts.require(environment['toolchain'] == 'rust1.97.1'
                              and environment['runtime'].get('test_threads') == (1 if '--test-threads=1' in identity['harness'] else 'libtest-default')
                              and environment['runtime'].get('rust_min_stack') == (int(identity['environment']['RUST_MIN_STACK']) if 'RUST_MIN_STACK' in identity['environment'] else None),
@@ -794,6 +884,8 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
             receipts.require(type(sequence) is int and sequence > 0 and sequence not in sequences,
                              'Ambiguous actual execution chronology');sequences.add(sequence)
             receipts.require(record['environment'] == environment, 'Actual runtime environment differs')
+            if kind in RUST_KINDS:
+                rust_environment(record['environment'],identity,record['source_commit'])
             origin = record['origin'];receipts.require(set(origin) == {'kind', 'identity', 'command', 'execution'}
                 and origin['kind'] in {'attested-local', 'authenticated-ci'} and origin['identity'] and origin['command'],
                 'Missing real execution origin')
@@ -861,6 +953,7 @@ def owned_output(command, *, timeout, limit):
         receipts.require(not pending, f'Owned command cancelled by signal {pending[0] if pending else "none"}')
     previous={}
     process=None
+    successful=False
     try:
         for signum in (signal.SIGTERM,signal.SIGINT):
             previous[signum]=signal.signal(signum,cancelled)
@@ -887,7 +980,9 @@ def owned_output(command, *, timeout, limit):
             time.sleep(0.05)
         check_cancel()
         receipts.require(process.returncode==0,'Owned command failed')
-        return output.decode('utf-8',errors='strict')
+        decoded=output.decode('utf-8',errors='strict')
+        successful=True
+        return decoded
     finally:
         try:
             if process is not None:
@@ -903,6 +998,8 @@ def owned_output(command, *, timeout, limit):
         finally:
             for signum,handler in previous.items():
                 signal.signal(signum,handler)
+        if successful:
+            check_cancel()
 
 
 def owned_compile(command):
@@ -914,13 +1011,44 @@ def require_store_mode(adopted, mode):
                      'Retained Store units require legacy mode; shards would replay them')
 
 
+def require_unmodified_cargo_environment(environment):
+    semantic={'RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_TARGET','RUSTC',
+              'RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','CARGO_BUILD_RUSTC',
+              'CARGO_BUILD_RUSTC_WRAPPER','CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER'}
+    values=dict(environment)
+    if re.fullmatch(r'/(?:home|opt)/[^\s]+/\.rustup/toolchains/1\.97\.1-x86_64-unknown-linux-gnu/bin/rustc',values.get('RUSTC','')):
+        values.pop('RUSTC')
+    overrides=[key for key,value in values.items() if value and
+               (key in semantic or key.startswith('CARGO_PROFILE_') or
+                (key.startswith('CARGO_TARGET_') and key.endswith('_RUSTFLAGS')))]
+    receipts.require(not overrides,'Unbound semantic Cargo overrides: '+','.join(sorted(overrides)))
+
+
+def require_current_fingerprint(artifact,profile):
+    binary=Path(artifact['executable'])
+    suffix=binary.name.rsplit('-',1)[-1]
+    receipts.require(binary.parent.name=='deps' and re.fullmatch(r'[0-9a-f]{8,64}',suffix) is not None,
+                     'Unknown current artifact layout')
+    root=binary.parent.parent/'.fingerprint'
+    matches=list(root.glob('*-'+suffix+'/test-*.json'))
+    receipts.require(len(matches)==1,'Current test artifact fingerprint unavailable or ambiguous')
+    fingerprint=receipts.bounded_json(matches[0].read_bytes())
+    receipts.require(fingerprint.get('rustc')==RUSTC_FINGERPRINT
+                     and fingerprint.get('profile')==TEST_PROFILE_FINGERPRINTS[profile['debuginfo']]
+                     and fingerprint.get('compile_kind')==0 and fingerprint.get('rustflags')==[]
+                     and json.loads(fingerprint.get('features','null'))==sorted(artifact['features']),
+                     'Actual current Cargo compiler/target/flags/profile differs')
+
+
 def compile_adopted(kind, proof, candidate):
     """The current compiler independently verifies each adopted native inventory."""
     receipts.require(proof['mode'] == 'retained-complete-command-union'
                      and proof['validator'] == retention.digest(Path(__file__).read_bytes()),
                      'Command adoption validator changed after scope')
-    version = subprocess.check_output(['rustc', '--version'], text=True).strip()
-    receipts.require(version.startswith('rustc 1.97.1 '), 'Command compiler toolchain mismatch')
+    require_unmodified_cargo_environment(os.environ)
+    version=owned_output(['rustc','-vV'],timeout=10,limit=8192)
+    receipts.require(version.splitlines()[0]==RUSTC_VERSION and 'host: x86_64-unknown-linux-gnu' in version.splitlines(),
+                     'Current command compiler release/host mismatch')
     expected = proof['native_inventories']
     actions = compile_commands(kind, candidate)
     receipts.require(set(expected) == {name for group in actions.values() for name, _ in group},
@@ -939,6 +1067,7 @@ def compile_adopted(kind, proof, candidate):
                 artifacts.append(row)
         for name, identity in group:
             flags = identity['cargo']
+            profile=test_profile(candidate,flags.get('--manifest-path'))
             if implicit_cluster_target(identity):
                 footprint=expected[name]['targets']
                 matching=[row for row in artifacts if row['package_id'].split('#')[-1].startswith('plurx-cluster-check@') or '/plurx-cluster-check#' in row['package_id']]
@@ -947,7 +1076,8 @@ def compile_adopted(kind, proof, candidate):
                 all_ids=[]
                 for target in footprint:
                     rows=[row for row in matching if row['target']['name']==target['name'] and row['target']['kind']==target['kind']]
-                    receipts.require(len(rows)==1 and sorted(rows[0]['features'])==sorted(target['features']),'Implicit target feature graph differs')
+                    receipts.require(len(rows)==1 and sorted(rows[0]['features'])==sorted(target['features']) and rows[0]['profile']==profile,'Implicit target feature graph differs')
+                    require_current_fingerprint(rows[0],profile)
                     output=owned_output([rows[0]['executable'],'--list','--format=terse'],timeout=30,limit=8*1024*1024)
                     full=[line.removesuffix(': test') for line in output.splitlines() if line.endswith(': test')]
                     all_ids.extend(select_ids(full,identity))
@@ -964,8 +1094,9 @@ def compile_adopted(kind, proof, candidate):
             matching = [row for row in artifacts if row['target']['name'] == target_name]
             receipts.require(len(matching) == 1, 'Current target artifact missing or ambiguous')
             artifact = matching[0]
-            receipts.require(sorted(artifact['features']) == sorted(expected[name]['features']),
+            receipts.require(sorted(artifact['features']) == sorted(expected[name]['features']) and artifact['profile']==profile,
                              'Current compiled feature graph differs from adopted target')
+            require_current_fingerprint(artifact,profile)
             output = owned_output([artifact['executable'], '--list', '--format=terse'], timeout=30, limit=8 * 1024 * 1024)
             ids = [line.removesuffix(': test') for line in output.splitlines() if line.endswith(': test')]
             selector = identity['filter']
