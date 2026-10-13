@@ -1,7 +1,7 @@
 # Remote diagnostics status — ownership, implementation and release evidence
 
-**Status:** open — implementation complete; release acceptance pending ·
-**Planning baseline:** `8d7bc723e`.
+**Status:** open — merged; qualification and rollout active.
+**Updated:** 2026-10-13 · **Planning baseline:** `8d7bc723e`.
 
 The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) defines the first
 release: web, Apple and Android, including both native TV handoffs and the
@@ -13,15 +13,18 @@ duplicating its evidence.
 
 | Field | Current value |
 |---|---|
-| User authorization | 2026-10-12: detailed build plan and a GPT-6.1 Sol session to build it |
-| Implementation owner | GPT-6.1 Sol chat; launch reference added by the planning chat |
-| Intended effort | Superseded by `codex/remote-diagnostics`, targeting `main` |
-| Task branch convention | Normal packet commits on `codex/remote-diagnostics` |
+| User authorization | 2026-10-13: merge #1037, update status and continue qualification/rollout preparation; production changes require approval of the concrete rollout. |
+| Implementation owner | GPT-6.1 Sol · chat `01a13167-0996-7723-a0fb-fa64421a384d` |
+| Intended effort | Implementation merged into `main`; qualification follows on `codex/remote-diagnostics-qualification` |
+| Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent clone in temporary owner storage; base includes current main `607d3577c`; B00 committed source `3f92afc9d`. Former managed worktree archived after verified preservation. |
-| Compiler loop | Local Rust/cargo 1.97.1 verified via rustup toolchain bin; isolated warm target in temporary storage; daemon baseline passed |
+| Implementation workspace/base | Independent clone in temporary owner storage; qualification base/landing `8040f862c3458245480065e11dec643fbfe370b3`; user checkouts remain untouched. |
+| Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check active. |
 | Plan review | One final adversarial implementation review complete; 12 findings corrected before fast lane |
-| Promotion/deployment | Not started |
+| Promotion/deployment | PR #1037 merged 2026-10-13, all eight checks passed on `6bc7235a0`; production not deployed. Isolated qualification and read-only deployment audit active. |
+| Current checks | Exact pre-merge head `6bc7235a0`: eight required checks passed, run 4887. Landing verified with all 32 regression declarations. |
+| Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
+| Next action | Inventory available devices and read-only hosting/DNS/TLS inputs; qualify native/runtime/privacy/recovery in isolated environments; prepare exact rollout targets, exposure, health checks and rollback for approval. |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
 shared checkout and preserve unrelated `Claude outputs/` artifacts.
@@ -32,17 +35,17 @@ index/backlog rows; the builder adopts them together in a normal commit.
 
 | Packet | Scope | State | Branch/PR | Verification and remaining evidence |
 |---|---|---|---|---|
-| B00 | Isolated workspace, compile baseline, plan adoption | Software verified; old gate superseded | Batched PR #1037 | Pinned Rust daemon check, iOS/tvOS builds, Android app/test APKs passed on current main |
-| B01 | Schema/privacy fixtures and archive inspector | Built; compiler verified | Batched PR #1037 | Owned-clone workspace Clippy, iOS/tvOS and Android compilation passed; historical 35-case four-language fixtures passed before ruling; three extra timestamp fixtures await final checks |
-| B02 | User-scoped server/worker snapshot collection | Built; compiler verified | Batched PR #1037 | Pinned daemon Clippy passed; positive attribution, accepted route receipts, account-generation fencing, bounded jobs and signed peers implemented; real HTTP acceptance pending |
-| B03 | Support auth, grants, uploads and durable storage | Built; compiler verified | Batched PR #1037 | Independent encrypted SQLite publication, separate capture authority, provisioning/revocation, resume/refresh, quotas and external deletion/revocation fences implemented; final Clippy and composed upload/delete/missing-fence runtime checks passed; broader failure matrix remains open |
-| B04 | TV handoff, mobile page, inbox and packaging | Built; compiler verified | Batched PR #1037 | Phone claim/approval protocol, responsive completion page, named passkey inbox and TLS/service packaging built; composed browser races/passkeys passed; physical acceptance pending |
-| B05 | Web/TV browser reporting | Built; compiler verified | Batched PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks built; hook/types, focused privacy/wire/recovery/consent and composed upload passed; hardware focus remains open |
-| B06 | Apple mobile/TV reporting | Built; compiler verified | Batched PR #1037 | Recorder, protected account store, deterministic ZIP/share, fixed support transport, exact archive resume, report UI and local-only TV approval written; tests declared, no unit execution; both targets and declared XCTest sources compiled; normal hook passed; physical acceptance owed |
-| B07 | Android mobile/TV reporting | Built; compiler verified | Batched PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; normal hook passed; signed release and physical acceptance owed |
-| B08 | Reproduction, connection checks, diagnostic adapters | Built; compiler verified | Batched PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 22-case shared event fixture; physical provider delivery remains open |
-| B09 | Composed security/resource/device qualification | Browser software verified; physical open | Batched PR #1037 | Global capture limits/expiry and authority cleanup tightened; real local support/browser/passkey acceptance passed; physical matrix and native overhead measurements remain open |
-| B10 | Operations, exact-candidate promotion and rollout | Final candidate | Batched PR #1037 | Operations/runbook built; one adversarial review complete, findings corrected; fast lane pending; production/device inputs remain external |
+| B00 | Isolated workspace, compile baseline, plan adoption | Software verified; old gate superseded | Merged PR #1037 | Pinned Rust daemon check, iOS/tvOS builds, Android app/test APKs passed on current main |
+| B01 | Schema/privacy fixtures and archive inspector | Landed; software evidence recorded | Merged PR #1037 | Owned-clone workspace Clippy, iOS/tvOS and Android compilation passed; 38 shared manifest cases retained; core/web final runtime checks passed; native unit runtime remains open |
+| B02 | User-scoped server/worker snapshot collection | Landed; software evidence recorded | Merged PR #1037 | Pinned daemon Clippy passed; positive attribution, accepted route receipts, account-generation fencing, bounded jobs and signed peers implemented; real HTTP acceptance pending |
+| B03 | Support auth, grants, uploads and durable storage | Landed; software evidence recorded | Merged PR #1037 | Independent encrypted SQLite publication, separate capture authority, provisioning/revocation, resume/refresh, quotas and external deletion/revocation fences implemented; final Clippy and composed upload/delete/missing-fence runtime checks passed; broader failure matrix remains open |
+| B04 | TV handoff, mobile page, inbox and packaging | Landed; software evidence recorded | Merged PR #1037 | Phone claim/approval protocol, responsive completion page, named passkey inbox and TLS/service packaging built; composed browser races/passkeys passed; physical acceptance pending |
+| B05 | Web/TV browser reporting | Landed; software evidence recorded | Merged PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks built; hook/types, focused privacy/wire/recovery/consent and composed upload passed; hardware focus remains open |
+| B06 | Apple mobile/TV reporting | Landed; software evidence recorded | Merged PR #1037 | Recorder, protected account store, deterministic ZIP/share, fixed support transport, exact archive resume, report UI and local-only TV approval written; tests declared, no unit execution; both targets and declared XCTest sources compiled; normal hook passed; physical acceptance owed |
+| B07 | Android mobile/TV reporting | Landed; software evidence recorded | Merged PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; normal hook passed; signed release and physical acceptance owed |
+| B08 | Reproduction, connection checks, diagnostic adapters | Landed; software evidence recorded | Merged PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 22-case shared event fixture; physical provider delivery remains open |
+| B09 | Composed security/resource/device qualification | Browser software verified; physical open | Merged PR #1037 | Global capture limits/expiry and authority cleanup tightened; real local support/browser/passkey acceptance passed; physical matrix and native overhead measurements remain open |
+| B10 | Operations, exact-candidate promotion and rollout | Merged; rollout preparation active | Merged PR #1037 | Operations/runbook landed; one review and all 12 corrections complete; eight fast checks passed; merge verified at `8040f862c`; isolated qualification/read-only deployment audit active |
 
 Replace “Not started” with claimed/building/built/software verified/physical
 verified/promoted as evidence warrants. “Built” never means deployed.
@@ -130,9 +133,9 @@ Git configuration or a remote URL.
 Old draft #1035 is superseded by batched main-bound PR #1037 and closed. Its body was
 updated with owner/chat, source, checks, workflow change and next step.
 
-- Active PR: [#1037](http://forge.lan:3000/noirr/plurx/pulls/1037), owned by
-  this chat/model, draft while implementation continues. Final review and
-  fast lane have not started. The app attachment tool refuses Forgejo URLs;
+- Historical PR state (2026-10-12): [#1037](http://forge.lan:3000/noirr/plurx/pulls/1037)
+  was a draft while implementation continued. Its final review and fast lane
+  had not started at that checkpoint. The app attachment tool refuses Forgejo URLs;
   the canonical link is retained here and in the local status page.
 
 ## 7. B01 — strict report format and archive inspection
@@ -540,3 +543,24 @@ The normal Clippy/format/catalog/JavaScript hook remains required at commit.
 Native and web application source is unchanged; its passing receipts remain
 applicable. The published updated head must receive its fast merge gate before
 integration; no second adversarial review is added.
+
+
+## 21. Merge receipt and continued qualification — 2026-10-13
+
+PR [#1037](http://forge.lan:3000/noirr/plurx/pulls/1037) merged at
+`8040f862c3458245480065e11dec643fbfe370b3`, from qualified head
+`6bc7235a07463719617957b9e372686303dab781`. Fresh Forgejo state confirmed
+all eight required checks passed and the candidate was mergeable. The API
+request pinned that head and supplied all 32 `Regression-Test` lines in
+`MergeMessageField`; the landed commit retains all 32. No repeated review
+or unchanged-suite rerun preceded the merge.
+
+The ready-to-merge handoff was an incomplete response to Paul's authorized
+merge instruction. Qualification now continues on the actual landed source.
+Physical acceptance, signed releases and production deployment remain open.
+
+Automatic approval review rejected the earlier broad production instruction
+because exact targets and changes were unspecified. That rejected instruction
+was not delivered and supplies no deployment authority. Read-only inspection,
+isolated qualification and concrete rollout preparation continue; production
+service/network changes wait for approval of the prepared exact scope.

@@ -1,6 +1,6 @@
 # Remote diagnostics — operating the independent support service
 
-**Status:** open · **Updated:** 2026-10-12 · **Implementation:** batched PR #1037.
+**Status:** open · **Updated:** 2026-10-13 · **Implementation:** merged #1037.
 
 The support executable receives fixed-format Cinema reports and serves a
 passkey-authenticated operator inbox. It has no Cinema playback, household
