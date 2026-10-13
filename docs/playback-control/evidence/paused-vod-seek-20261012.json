@@ -796,5 +796,13 @@
       "includes": "before/after regressions, rejected harness records, Astra review, exact qualification/merge receipts, served hashes, access diagnostic, cold/warm startup failures and screenshots",
       "originals_unchanged": true
     }
+  },
+  "air_hdr_physical_rerun_20261013": {
+    "receipt": "air-hdr-paused-20261013.json",
+    "source_pr": 1068,
+    "source_landing": "69d3311dd82e23aa869578442e9f1bc903cc6804",
+    "ordinary_metal_paused_reopen": "passed",
+    "final_cpu_capture_and_restoration": "pending local Mac unlock",
+    "historical_evidence_unchanged": true
   }
 }
