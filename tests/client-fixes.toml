@@ -6362,6 +6362,14 @@ test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/Diagno
 test_anchor = "exportedZipCanBeAttachedWithoutSupportEnrollment"
 
 [[fixes]]
+id = "diagnostics.bounded-consent-focus-input-fence"
+commits = ["91d00f579bf0617b68f2c7de77c108c5be784681"]
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticReportScreen.kt"
+source_anchor = "// diagnostic-consent-navigation-adapter:begin"
+test = "tests/operations/test_player_input_fence.py"
+test_anchor = "test_diagnostic_consent_adapter_does_not_exempt_other_handlers"
+
+[[fixes]]
 id = "apple.growing-playlist-before-native-attachment"
 commits = ["94124323d9439c92c78d2d36d0e1dc3a6cc6fcce"]
 source = "clients/apple/Sources/PlayerController.swift"

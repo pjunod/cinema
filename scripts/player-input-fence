@@ -43,9 +43,6 @@ WHOLE_FILE_ALLOWLIST = {
         "what each one does is LiveTvInputPolicy's answer, from the fixture.",
     Path("clients/android/app/src/main/java/tv/plurx/app/ui/AuthScreens.kt"):
         "The sign-in form uses Select/Enter to begin editing; it is not a player.",
-    Path("clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticReportScreen.kt"):
-        "The modal report form moves D-pad focus from its description to title consent; "
-        "companion navigation is restricted while visible, and no playback command is decoded.",
     Path("clients/apple/Sources/PlayerRemoteAdapter.swift"):
         "Apple remote commands are decoded into contract inputs here.",
     Path("crates/plurxd/src/web/reader.js"):
@@ -64,7 +61,7 @@ TOKEN_FILE_ALLOWLIST = {
 }
 
 # The web app is several independent applications (docs/clients/WEB-SHELL-LAYOUT.md).
-# These bounded regions are non-player keyboard adapters with reasons beside
+# These bounded platform regions are non-player keyboard adapters with reasons beside
 # their anchors. The player itself gets one region only; adding a second handler
 # makes the fence fail even if it happens to agree with the reducer today.
 #
@@ -75,6 +72,18 @@ TOKEN_FILE_ALLOWLIST = {
 # line of the next file.
 WEB = Path("crates/plurxd/src/web")
 WEB_REGIONS = (
+    (
+        Path("clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticReportScreen.kt"),
+        "import androidx.compose.ui.input.key.onPreviewKeyEvent",
+        "import androidx.compose.ui.input.key.onPreviewKeyEvent",
+        "Import for the bounded diagnostic consent focus adapter below; no event handling in the import.",
+    ),
+    (
+        Path("clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticReportScreen.kt"),
+        "// diagnostic-consent-navigation-adapter:begin",
+        "// diagnostic-consent-navigation-adapter:end",
+        "The report editor owns Down only to reach title-consent focus; no playback commands or companion navigation.",
+    ),
     (
         WEB / "pages/diagnostics.js",
         "// diagnostic-modal-keyboard-adapter:begin",

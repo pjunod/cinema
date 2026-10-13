@@ -101,3 +101,43 @@ test("prepared successor callback rechecks viewer intent before exposing an alig
   assert.equal(h.exposed.length,0);assert.equal(h.failed.length,1);h.deadline();
   assert.equal(h.failed.length,1);
 });
+
+// Installed SDR trial: both clocks advance steadily, but the 83ms gap is
+// inside the old 250ms coarse window and outside one 24fps decoded frame.
+test("prepared SDR clock alignment seeks a two-frame gap before exposure",async()=>{
+  const h=harness({origin:0});
+  h.player.hitches={fps:24000/1001};
+  h.incumbent.currentTime=9.968;
+  h.target.currentTime=9.884875;
+  const seeks=[],proof=[];
+  h.ctx.detachPreparedOverlapListeners=()=>{};
+  h.ctx.exposePreparedReplacementAtFrame=()=>{proof.push(h.target.currentTime);return true;};
+  h.ctx.preparedAlignSeek=async(spare,wanted)=>{
+    seeks.push(wanted);spare.currentTime=wanted;
+    // The incumbent keeps advancing while the corrective seek completes.
+    h.incumbent.currentTime+=0.012;return true;
+  };
+  h.ctx.commitPreparedReplacement(h.player,h.state);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(seeks.length,1,"83ms cannot skip alignment merely because it is below 250ms");
+  assert.equal(proof.length,1,"only the corrected clock proceeds to decoded-frame proof");
+  assert.ok(Math.abs(proof[0]-h.incumbent.currentTime)<1001/24000);
+  assert.equal(h.incumbent.muted,false);assert.equal(h.target.muted,true);
+});
+
+test("prepared SDR clock alignment retries when the first seek still trails by more than a frame",async()=>{
+  const h=harness({origin:0});h.player.hitches={fps:24};
+  h.incumbent.currentTime=9.968;h.target.currentTime=9.884875;
+  const seeks=[],proof=[];
+  h.ctx.detachPreparedOverlapListeners=()=>{};
+  h.ctx.exposePreparedReplacementAtFrame=()=>{proof.push(h.target.currentTime);return true;};
+  h.ctx.preparedAlignSeek=async(spare,wanted)=>{
+    seeks.push(wanted);spare.currentTime=wanted;
+    h.incumbent.currentTime+=seeks.length===1?0.060:0.012;return true;
+  };
+  h.ctx.commitPreparedReplacement(h.player,h.state);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(seeks.length,2,"60ms after a seek still exceeds one24fps frame");
+  assert.equal(proof.length,1);assert.equal(proof[0],seeks[1]);
+  assert.equal(h.failed.length,0);assert.equal(h.incumbent.muted,false);
+});

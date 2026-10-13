@@ -751,6 +751,15 @@ function notePreparedBuffer(p,state){
 // commit is a claim that the switch happened, and the store CAS that follows
 // moves the playback pointer; destroying the predecessor before that proof
 // turns a failed successor into an unrecoverable black player.
+// A coarse 250ms window can contain several decoded frames. Once the
+// incumbent has measured its cadence, align its clock within one frame before
+// asking the independent decoded-pair guard to prove exposure. Unknown cadence
+// retains the coarse fallback; it never relaxes the decoded exposure guard.
+function preparedClockAlignmentSlackMs(p){
+  const fps=Number(p&&p.hitches&&p.hitches.fps);
+  return Number.isFinite(fps)&&fps>0
+    ?Math.min(PREPARED_ALIGN_SLACK_MS,1000/fps):PREPARED_ALIGN_SLACK_MS;
+}
 function commitPreparedReplacement(p,state){
   const v=document.getElementById("video"), spare=preparedVideoElement();
   if(!v||!spare||PLAYER!==p||preparedState(p)!==state) return false;
@@ -763,7 +772,7 @@ function commitPreparedReplacement(p,state){
   const drift=Math.abs((spare.currentTime||0)-wanted)*1000;
   // Already on the incumbent's second: nothing to wait for, and the exposure
   // is the same synchronous block it has always been.
-  if(drift<=PREPARED_ALIGN_SLACK_MS) return exposePreparedReplacementAtFrame(p,state,v,spare);
+  if(drift<=preparedClockAlignmentSlackMs(p)) return exposePreparedReplacementAtFrame(p,state,v,spare);
   // Otherwise finish aligning BEFORE the successor is seen or heard. The
   // corrective seek used to be the line above, with nothing between it and the
   // element swap; a seek is asynchronous, so the successor had nothing decoded
@@ -797,7 +806,7 @@ async function alignPreparedReplacement(p,state,v,spare){
     if(landed&&preparedAlignedBuffered(spare)){
       const filmMs=playbackFilmPositionMs(v,p);
       const target=preparedLocalPositionMs(filmMs,state.mediaOriginMs)/1000;
-      if(Math.abs((spare.currentTime||0)-target)*1000<=PREPARED_ALIGN_SLACK_MS)
+      if(Math.abs((spare.currentTime||0)-target)*1000<=preparedClockAlignmentSlackMs(p))
         return exposePreparedReplacementAtFrame(p,state,v,spare);
     }
   }

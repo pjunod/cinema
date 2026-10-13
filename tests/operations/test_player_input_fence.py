@@ -192,6 +192,16 @@ class PlayerInputFenceTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(len(self.fence.scan_lines(Path(path), raw, set())), 3)
 
+    def test_diagnostic_consent_adapter_does_not_exempt_other_handlers(self):
+        relative = Path("clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticReportScreen.kt")
+        self.assertNotIn(relative, self.fence.WHOLE_FILE_ALLOWLIST)
+        lines = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        self.assertEqual(self.fence.scan_lines(relative, lines, self.fence.web_allowed_lines(relative, lines)), [])
+        lines.append('.onPreviewKeyEvent { event -> event.key == Key.MediaStop }')
+        failures = self.fence.scan_lines(relative, lines, self.fence.web_allowed_lines(relative, lines))
+        self.assertEqual(len(failures), 3)
+        self.assertTrue(all(f":{len(lines)}:" in failure for failure in failures))
+
     def test_the_fence_passes_the_repository_as_it_stands(self):
         self.assertEqual(self.fence.scan(), [])
 

@@ -1,6 +1,6 @@
 # Mac HDR acceptance — playback follow-ups
 
-**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; ordinary Air hls.js F1 acceptance and restoration complete; F2 source correction qualified and merged, physical transition pending; F3–F7 remain open · **Recorded:** 2026-10-12.
+**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; ordinary Air hls.js F1 acceptance and restoration complete; F2 two-sided correction merged; HDR transition passes, SDR clock correction in qualification; F3–F7 remain open · **Recorded:** 2026-10-12.
 
 The [full acceptance report](../streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 closes the ordinary HDR10 Metal/CPU comparison. This document specifies the
@@ -469,6 +469,51 @@ has SHA-256 `5d931248692a957e71ec577a8315557861b28410ddb9fc72e03a04723d6b922c` a
 Shared clipboard remains off; backend Auto and Mac processing on were not
 changed by this source correction. Cleanup is complete for these attempts;
 a subsequent physical run must restore the same state again.
+
+### Installed continuation — HDR passes; SDR needs clock correction
+
+Renewing the existing Plurx access entry against the installed binary restored
+NAS playback after user authentication. At 19:47:05 UTC, preparation
+`0d85d803-202f-49ef-b67e-7c52b2e40465` committed a 1080p successor on the
+installed #1074 source. The fresh decoded pair differs by 41.667 ms within
+41.708 ms cadence; the first visible frame follows commit by about 30.1 ms.
+Pinned FFprobe confirms HEVC, 10-bit BT2020/PQ: this transition retains HDR.
+It proves the two-sided rendezvous can commit, but is not an SDR pass.
+
+The explicit SDR diagnostic at 19:56:53 UTC uses a temporary successor-only
+SDR capability request after the HDR incumbent starts. FFprobe confirms an
+H264 1920×1080 BT709/AAC successor. Preparation
+`e203a2a2-2a27-4352-b4f4-a623ac9d7281` receives 19 advancing callbacks but
+refuses at the unchanged 800 ms deadline. At one common display instant the
+incumbent is at 9.968 s and successor at 9.884875 s: an 83.125 ms gap exceeds
+the measured 41.709 ms frame cadence. The incumbent correctly remains visible
+and audible. A warm retry refuses under incumbent pressure before frame proof;
+that is a separate guard outcome, not another alignment measurement.
+
+The remaining source defect is in clock correction: the 250 ms coarse window
+skips seeking an 83 ms gap that the decoded guard must reject. Branch
+`codex/f2-clock-alignment`, based on `4366a32dc`, limits initial and postseek
+clock slack to one measured incumbent frame (capped at 250 ms), keeping the
+coarse fallback when cadence is unknown. Decoded tolerance, freshness,
+ownership, rate, buffer and audio guards remain unchanged. Two regressions
+execute the shipped commit/alignment functions: correct the initial two-frame
+gap, and correct a first seek that still trails by 60 ms. The first rejects the
+unchanged owner; all eleven focused tests and full web units/static checks
+pass. Astra approves the source. Qualification and installed SDR proof remain
+pending; no SDR acceptance is claimed from these tests. The first qualification
+run (global 5071) fails on an existing Android diagnostic consent-focus
+adapter missing from the input fence. The correction scopes only its import
+and existing handler; thirteen fence tests prove neighboring media handlers
+still fail. Astra approves that ancillary correction. The failed run is retained.
+
+The [24-member physical archive](http://forge.lan:3000/attachments/27798e53-f80c-4897-8a90-961253559255)
+has SHA-256 `97f431a4ab2dafadde66de58be6a02642303477518870df4cb6a13e0dd6abfa5`.
+It retains the NAS renewal failure, HDR pass, SDR refusal, warm pressure refusal
+and clock regression controls. Physical speaker continuity and the
+rate-limited control measurements remain unmeasured. At 20:10 UTC the player
+was closed, the temporary capabilities removed by reload, quality Auto and
+persisted resume zero verified, and shared clipboard OFF verified. A new
+installed-source trial must repeat cleanup.
 
 ## 5. F3 — abandoned preparation occupies VOD capacity
 
