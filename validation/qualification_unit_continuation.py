@@ -103,9 +103,18 @@ def clean_log(raw):
     return re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', text)
 
 
-def changed_inputs(record, candidate):
+def changed_inputs(record, candidate, shared_logs=None):
     """No protocol-path exemption: the adapter/workflow are tested inputs too."""
     changes = record['changes']
+    if set(changes)=={'sha256_ref'}:
+        digest=changes['sha256_ref']
+        receipts.require(shared_logs is not None and retention.DIGEST.fullmatch(digest)
+                         and digest in shared_logs,'Shared applicability manifest unavailable')
+        manifest=receipts.bounded_json(retention.decoded_log(shared_logs[digest]).encode())
+        receipts.require(set(manifest)=={'source_commit','candidate','changes'}
+                         and manifest['source_commit']==record['source_commit'] and manifest['candidate']==candidate,
+                         'Shared applicability manifest belongs to another source or candidate')
+        changes=manifest['changes']
     paths = retention.changed(record['source_commit'], candidate)
     receipts.require(isinstance(changes, dict) and set(changes) == set(paths),
                      'Continuation must classify every changed path')
@@ -1176,7 +1185,7 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
             origin = record['origin'];receipts.require(set(origin) == {'kind', 'identity', 'command', 'execution'}
                 and origin['kind'] in {'attested-local', 'authenticated-ci'} and origin['identity'] and origin['command'],
                 'Missing real execution origin')
-            invalid = changed_inputs(record, candidate)
+            invalid = changed_inputs(record, candidate, proof['logs'])
             receipts.require(invalid <= set(ids), 'Unknown affected command unit')
             raw = clean_log(command_log(proof, record))
             if kind in RUST_KINDS:

@@ -115,6 +115,22 @@ class CompleteCommandUnitCase(unittest.TestCase):
             proof['commands'].reverse()
             with self.assertRaises(receipts.ReceiptError):q.validate(proof,CANDIDATE,commands=lambda _:commands)
 
+    def test_shared_applicability_manifest_binds_exact_source_and_candidate(self):
+        import json
+        record=fixture()['commands'][0]['records'][0]
+        changes={'input.rs':{'before':'d'*64,'after':'e'*64,'affected_ids':['a'],'reason':'reviewed changed function'}}
+        manifest={'source_commit':record['source_commit'],'candidate':CANDIDATE,'changes':changes}
+        blob=log(json.dumps(manifest));record['changes']={'sha256_ref':blob['sha256']}
+        with patch.object(q.retention,'changed',return_value={'input.rs'}),patch.object(q.retention,'git_bytes',return_value=b'input'),patch.object(q.retention,'digest',side_effect=lambda raw: hashlib.sha256(raw).hexdigest() if raw.startswith(b'{') else 'd'*64):
+            # Exact old/current content hashes are still verified after deduplication.
+            with self.assertRaises(receipts.ReceiptError):q.changed_inputs(record,CANDIDATE,{blob['sha256']:blob})
+            changes['after']='d'*64;blob=log(json.dumps(manifest));record['changes']={'sha256_ref':blob['sha256']}
+            self.assertEqual(q.changed_inputs(record,CANDIDATE,{blob['sha256']:blob}),{'a'})
+            for key in ['source_commit','candidate']:
+                altered=copy.deepcopy(manifest);altered[key]='a'*40;other=log(json.dumps(altered));record['changes']={'sha256_ref':other['sha256']}
+                with self.assertRaises(receipts.ReceiptError):q.changed_inputs(record,CANDIDATE,{other['sha256']:other})
+        with self.assertRaises(receipts.ReceiptError):q.changed_inputs(record,CANDIDATE,{})
+
     def test_original_capture_keeps_unknown_observations_and_refuses_substitution(self):
         import json
         argv=['/owned/store_contract-0123456789abcdef','a','--exact','--test-threads=1']
