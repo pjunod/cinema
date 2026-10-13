@@ -352,7 +352,7 @@ def rust_identity(command):
             'harness': harness, 'environment': environment}
 
 
-def canonical(candidate):
+def canonical(candidate, *, historical=False):
     makefile = retention.git_bytes(candidate, 'Makefile')
     receipts.require(makefile is not None, 'Canonical Makefile unavailable')
     result = {'validation': COMMANDS['validation'], 'operations': COMMANDS['operations'],
@@ -369,9 +369,18 @@ def canonical(candidate):
         for command in make_commands(text,target):
             if '$(CARGO) test ' in command:
                 rust_identity(command);selected.append(command)
-        receipts.require(len(selected) == (8 if kind=='topology' else 6), 'Changed embedded unit cohort requires review')
+        expected=8 if kind=='topology' else 6
+        if historical and kind=='transport' and candidate=='59440187d0ad16ceec7632f2461493112f3dfc60':
+            expected=13  # Original authenticated recipe before duplicate component commands were removed.
+        receipts.require(len(selected)==expected, 'Changed embedded unit cohort requires review')
         for index,command in enumerate(selected,1):result[f'{kind}:{index}']=command
     return result
+
+
+def historical_canonical(source):
+    # Current inventory stays strict; only the authenticated original command
+    # recipe may retain its old ordinal layout.
+    return canonical(source,historical=True)
 
 
 def implicit_cluster_target(identity):
@@ -599,7 +608,9 @@ def executor_terminal(record,kind,lines,start):
     receipts.require(workflow is not None,'Historical executor step unavailable')
     job={'store_contract':'cluster_store_legacy','wal':'cluster_wal','topology':'cluster_topology',
          'transport':'cluster_transport_recovery_contracts'}[kind]
-    steps=[step for step in job_steps(workflow.decode(),job) if COMMANDS[kind] in step]
+    steps=[step for step in job_steps(workflow.decode(),job)
+           if any(command==COMMANDS[kind] or command.startswith(COMMANDS[kind]+' ')
+                  for command in run_commands('jobs:\n  proof:\n'+step,'proof'))]
     receipts.require(len(steps)==1,'Historical executor step ambiguous')
     name=re.search(r'^      - name: (.+)$',steps[0],re.M)
     receipts.require(name is not None,'Historical executor step has no bound name')
@@ -806,7 +817,7 @@ def complete_original_capture_ordinals(records):
                          'Original authenticated partial failure must precede local completion')
 
 
-def bound_execution(record, item, raw, source_commands=canonical):
+def bound_execution(record, item, raw, source_commands=historical_canonical):
     """No receipt-selected slice can remove another outcome from one execution."""
     kind = item['name'].split(':')[0]
     origin = record['origin']
@@ -1055,6 +1066,13 @@ def historical_rust_environment_contract(source,workflow,kind):
                      'Historical Rust setup or semantic overrides differ')
 
 
+def authenticated_ids(identity):
+    receipts.require(isinstance(identity,str),'Malformed CI command origin')
+    match=re.fullmatch(r'run:([1-9]\d{0,18})/job:([1-9]\d{0,18})',identity)
+    receipts.require(match is not None,'Malformed CI command origin')
+    return tuple(receipts.positive(int(value)) for value in match.groups())
+
+
 def authenticate(api, proof, document, repository):
     """Local records use the authenticated writer; CI records also use live logs."""
     origins, runs, jobs_by_run, scopes = {}, {}, {}, set()
@@ -1064,9 +1082,7 @@ def authenticate(api, proof, document, repository):
             origin = record['origin']
             if origin['kind'] != 'authenticated-ci':
                 continue
-            match = re.fullmatch(r'run:(\d+)/job:(\d+)', origin['identity'])
-            receipts.require(match is not None, 'Malformed CI command origin')
-            run_id, job_id = map(receipts.positive, match.groups())
+            run_id, job_id = authenticated_ids(origin['identity'])
             if run_id not in runs:
                 runs[run_id]=api.get(f'/actions/runs/{run_id}')
                 jobs_by_run[run_id]=api.pages(f'/actions/runs/{run_id}/jobs')

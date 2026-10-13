@@ -115,6 +115,37 @@ class CompleteCommandUnitCase(unittest.TestCase):
             proof['commands'].reverse()
             with self.assertRaises(receipts.ReceiptError):q.validate(proof,CANDIDATE,commands=lambda _:commands)
 
+    def test_authenticated_identity_numbers_are_typed_and_bounded(self):
+        self.assertEqual(q.authenticated_ids('run:4954/job:49310'),(4954,49310))
+        for identity in ['run:0/job:1','run:01/job:2','run:1/job:0','run:'+'9'*20+'/job:1',
+                         'run:1/job:2/extra','run:one/job:two',1,None]:
+            with self.assertRaises(receipts.ReceiptError):q.authenticated_ids(identity)
+
+    def test_executor_step_is_actual_make_invocation_not_receipt_argument(self):
+        workflow='jobs:\n  cluster_store_legacy:\n    steps:\n      - name: Run Store\n        run: |\n          make cluster-store-check 2>&1 | tee log\n      - name: Record Store\n        run: |\n          python3 -m validation.ci_lane_receipt --command "make cluster-store-check"\n'
+        record={'source_commit':CANDIDATE,'origin':{'kind':'authenticated-ci'}}
+        lines=['make cluster-store-check','test a ... ok','  ✅ Success - Main Run Store']
+        with patch.object(q.retention,'git_bytes',return_value=workflow.encode()):
+            self.assertEqual(q.executor_terminal(record,'store_contract',lines,0),(2,True))
+        only_receipt=workflow.split('      - name: Run Store',1)[0]+'      - name: Record Store'+workflow.split('      - name: Record Store',1)[1]
+        with patch.object(q.retention,'git_bytes',return_value=only_receipt.encode()):
+            with self.assertRaises(receipts.ReceiptError):q.executor_terminal(record,'store_contract',lines,0)
+        doubled=workflow+'      - name: Second Store\n        run: make cluster-store-check\n'
+        with patch.object(q.retention,'git_bytes',return_value=doubled.encode()):
+            with self.assertRaises(receipts.ReceiptError):q.executor_terminal(record,'store_contract',lines,0)
+
+    def test_historical_transport_layout_cannot_weaken_current_command_inventory(self):
+        source='59440187d0ad16ceec7632f2461493112f3dfc60'
+        make='cluster-harness-check: ## old topology\ncluster-transport-recovery-contracts: ## old transport\n'
+        def commands(_,target):
+            if target in ['cluster-store-check','cluster-wal-check']:return [COMMAND]
+            count=8 if target=='cluster-harness-check' else 13
+            return ['$(CARGO) test --locked -p plurx-cluster-check case'+str(i)+' --lib -- --exact' for i in range(count)]
+        with patch.object(q.retention,'git_bytes',return_value=make.encode()),patch.object(q,'make_commands',side_effect=commands):
+            self.assertIn('transport:13',q.historical_canonical(source))
+            with self.assertRaises(receipts.ReceiptError):q.canonical(source)
+            with self.assertRaises(receipts.ReceiptError):q.historical_canonical(CANDIDATE)
+
     def test_shared_applicability_manifest_binds_exact_source_and_candidate(self):
         import json
         record=fixture()['commands'][0]['records'][0]
