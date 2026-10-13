@@ -27,6 +27,8 @@ declare var CinemaNative: any;
 
 /** Assigned by pages/reader.js for the native shells to call. */
 interface Window {
+  CinemaDiagnostics?: ReturnType<typeof createCinemaDiagnosticRecorder>;
+  CinemaOpenDiagnostics?: typeof showDiagnostics;
   /** Safari and older WebKit expose these optional browser constructors. */
   ManagedMediaSource?: typeof MediaSource;
   WebKitMediaSource?: typeof MediaSource;

@@ -4031,3 +4031,80 @@ A final stop is serialized under the same user/item entry lock and commits
 its exact tombstone with its watch update. It preserves another viewer's
 pending beat. Failure still releases the exact direct presence/grant, leaves
 reconciliation retriable, and returns an error rather than durable success.
+
+## Incident diagnostics and independent support delivery
+
+Implemented in the remote-diagnostics branch; release acceptance is tracked
+in the [canonical ledger](features/REMOTE-DIAGNOSTICS-STATUS.md). The report
+schema is `cinema.diagnostics.v1`. These operations observe evidence and
+never start, stop, renew or recover playback.
+
+Cinema routes are rooted at `/api/v1/diagnostics`. Sensitive replies are
+private/no-store; snapshot and provisioning request JSON is limited to 16 KiB.
+
+| Method and suffix | Authority and body | Result |
+|---|---|---|
+| `GET /capabilities` | Public; no report data | Version, snapshot window ceiling and non-secret configured support origin/readiness |
+| `POST /snapshots` | Current `AuthUser`; `incident_at_ms`, `window_ms` ≤600000, optional established `correlation`, optional admin-only `include_system` | 202 with opaque owner-bound job ID and fifteen-minute expiry |
+| `GET /snapshots/{id}` | Same user and password generation | Pending or bounded typed complete/partial/unavailable projection |
+| `DELETE /snapshots/{id}` | Same user and generation | Cancel and erase; 204 |
+| `POST /upload-grants` | Current `AuthUser`; canonical `report_id`, lowercase SHA-256 `sha256`, positive `length` ≤16 MiB, exact `privacy` booleans | Configured HTTPS `origin` and nested `grant` containing upload-only capability/expiry |
+| `POST /enrollments` | Current `AuthUser`; canonical local `installation_id` UUID | Provision/rotate that user's installation; origin and restricted upload-only `authorization` |
+| `DELETE /enrollments` | Current `AuthUser`; same installation UUID | Revoke its current enrollment and descendants when support is reachable |
+
+Ordinary snapshots select only positively attributed events for that user.
+Only accepted server route receipts select workers; a client correlation label
+cannot establish ownership. The exact signed internal peer route is
+`POST /_internal/v1/diagnostic-snapshot`; it revalidates account generation
+and returns a bounded signed projection. Jobs allow two per user, 32 per node,
+three starts per user per five minutes, a 2 MiB result and a five-second total
+collection deadline. Peer loss produces explicit partial coverage; it never
+falls back to general log text. Optional system facts require administrator
+authority; unauthorized inclusion is 403. Foreign job IDs return 404.
+
+The support executable serves `/support/v1` on its ingress listener and
+`/operator/v1` on a separate operator listener/origin. Cinema's credential
+is read from a protected operator file and is used only by its dedicated,
+redirect-refusing support client. Apps never receive that credential. An
+enrollment can obtain one-report upload authority, not server evidence,
+report contents, enumeration or operator access; offline revocation knowledge
+is bounded by its maximum 24-hour expiry.
+
+| Support method and suffix | Authority and behavior |
+|---|---|
+| `POST /grants` | Publisher or restricted enrollment/invitation; bind the four report identity/content/privacy fields; thirty-minute upload grant |
+| `POST /uploads` | Bound upload grant and identical fields; reserve capture and return separate `management_grant`, `upload_id` and fixed `chunk_bytes` |
+| `PUT /uploads/{id}/chunks/{index}` | Upload grant; 1 MiB body except final chunk, `X-Chunk-Sha256`; identical repeats succeed, conflicts are 409 |
+| `GET /uploads/{id}/status` | Bound upload/creator/approved-phone grant; state, reference, expiry and received indexes only |
+| `POST /uploads/{id}/refresh` | Creator management grant; refresh only the original unfinished capture, identity and absolute expiry |
+| `POST /uploads/{id}/complete` | Upload grant; inspect exact full hash/length, bounded ZIP and schema; transactionally commit encrypted staged archive |
+| `POST /reports/{id}/submit` | Creator or approved phone; bounded `description`; commit submitted receipt once, repeated finalization does not mutate evidence |
+| `GET /reports/{id}/receipt` | Bound report grant; delivery/reference only |
+| `DELETE /reports/{id}` | Creator or approved phone; erase content and revoke associated authority |
+| `POST /handoffs` | Creator; `report_id` of staged capture; recoverable offer with fragment-only QR authority, manual code and expiry |
+| `POST /handoffs/claim` | Code or QR claim secret plus fresh 256-bit phone `proof`; atomic single-phone reservation; comparison and state only before approval |
+| `GET /handoffs/{id}/status` | Creator; claim/comparison/state/expiry for the TV |
+| `POST /handoffs/{id}/approve` | Creator physical action and exact `comparison`; bind approved phone to current privacy revision |
+| `POST /handoffs/{id}/reject`, `DELETE /handoffs/{id}` | Creator; optional explicit `keep_draft`; otherwise erase staged draft and revoke handoff |
+| `GET /handoffs/{id}/phone-status` | Bound phone proof; management authority and report identity only after approval |
+| `GET /reports/{id}/preview` | Approved phone only; safe summary, frozen description and privacy |
+| `POST /reports/{id}/redact` | Approved phone only; exact privacy object; can narrow, never widen staged scope |
+| `POST /invitations/redeem` | Operator-issued short code and phone/client proof; one-capture upload-only authority, no preview/inbox access |
+
+Publisher provisioning uses `X-Publisher-Id` with its bearer credential;
+report operations use only their dedicated bearer capability. Exact browser
+origins are publisher-scoped, and ingress does not use cookies. Unknown
+request/schema fields, malformed integers, nulls and duplicates are refused.
+Typed failures are `invalid_report_or_request` (400), `authorization_required`
+(401), `not_found` (404), `state_or_content_conflict` (409), `expired` (410),
+`quota_exceeded` (429) and `storage_unavailable` (503), without reflected raw
+SQL, credentials or report text. Quota/storage failures are retryable; a
+successful receipt requires committed validated storage.
+
+Operator registration starts with a protected one-use CLI-issued token and
+upstream WebAuthn ceremonies. Named passkey sessions use Secure/HttpOnly/
+SameSite Strict cookies plus a separate CSRF header for every report operation.
+The inbox supports exact authenticated reference lookup, bounded safe field
+filters/pagination, text-only details, verified ZIP download, labels, retention,
+deletion and one-use invitation issuance. Deployment, limits and restore
+fencing are specified in [the operations guide](server/REMOTE-DIAGNOSTICS-OPERATIONS.md).

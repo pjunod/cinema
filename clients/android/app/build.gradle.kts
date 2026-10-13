@@ -108,7 +108,7 @@ android {
         // builds share an explicit supported-platform policy.
         minSdk = 28
         targetSdk = 37
-        versionCode = 165
+        versionCode = 168
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -209,6 +209,7 @@ androidComponents {
 }
 
 dependencies {
+    implementation(libs.zxing.core)
     implementation(libs.firebase.messaging)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.profileinstaller)

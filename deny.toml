@@ -37,6 +37,24 @@ allow = [
 # before its license is believed.
 confidence-threshold = 0.9
 
+# The independent support executable uses established WebAuthn ceremonies.
+# MPL applies only to these named upstream files; it is not a blanket allowance.
+[[licenses.exceptions]]
+name = "webauthn-rs"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+name = "webauthn-rs-core"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+name = "webauthn-rs-proto"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+name = "webauthn-attestation-ca"
+allow = ["MPL-2.0"]
+[[licenses.exceptions]]
+name = "base64urlsafedata"
+allow = ["MPL-2.0"]
+
 [bans]
 multiple-versions = "allow"   # ecosystem lag is allowed; named native stacks are not
 deny = [
@@ -53,7 +71,8 @@ deny = [
     # A second native TLS implementation is a security and build-policy
     # decision, never an incidental transitive dependency.
     { crate = "native-tls", use-instead = "rustls" },
-    { crate = "openssl-sys", use-instead = "rustls" },
+    { crate = "openssl-sys", wrappers = ["openssl", "webauthn-rs-core", "webauthn-attestation-ca"], reason = "WebAuthn cryptographic verification only; native-tls remains forbidden" },
+    { crate = "openssl", wrappers = ["webauthn-rs-core", "webauthn-attestation-ca"], reason = "Only the independent WebAuthn support binary may introduce this crypto edge" },
 ]
 
 [advisories]
