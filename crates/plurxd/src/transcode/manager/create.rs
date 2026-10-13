@@ -3294,6 +3294,22 @@ impl TranscodeManager {
                 .map(|item| item.title)
                 .unwrap_or_else(|| format!("#{}", file.item_id));
             let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+            // First local preparations create the same complete output as a
+            // normal start. Give the existing owned publication worker the
+            // identical work after actual attachment; recovery never queues.
+            let output_enqueue = first_owner.as_ref().map(|owner| {
+                (
+                    OutputEnqueue {
+                        request: req.clone(),
+                        file: file.clone(),
+                        settings: settings.clone(),
+                        encoding: encoding.clone(),
+                        session_id: session_id.to_owned(),
+                        queued_at: Instant::now(),
+                    },
+                    owner.clone(),
+                )
+            });
             match self
                 .vod
                 .try_create_before_release(
@@ -3327,6 +3343,17 @@ impl TranscodeManager {
                 .await
             {
                 Ok(_) => {
+                    if let Some((work, owner)) = output_enqueue {
+                        if !release_gate.released.load(Acquire) {
+                            if let Some(facts) = self.vod.hls_facts(session_id).await {
+                                self.hand_off_prepared_output_enqueue(
+                                    work,
+                                    &owner,
+                                    &facts.response_owner,
+                                );
+                            }
+                        }
+                    }
                     if speculative {
                         self.vod
                             .mark_prepared_incarnation(session_id, &remote.incarnation_id)
@@ -3344,6 +3371,57 @@ impl TranscodeManager {
         })
         .await
         .unwrap_or(false)
+    }
+
+    /// A first prepared attachment already restored the exact source/caps/
+    /// recipe context. Its actual local attachment owner may publish work even
+    /// when an unrelated catalog sweep did not finish. Fresh retained reuse
+    /// remains separately fenced by `bind_prepared_candidate_owner`.
+    fn hand_off_prepared_output_enqueue(
+        &self,
+        mut work: OutputEnqueue,
+        owner: &PreparedVodOwner,
+        response_owner: &crate::vodserve::ResponseOwner,
+    ) {
+        if work.request.presentation != Presentation::Vod
+            || work.request.continuous_media.is_some()
+            || !work
+                .settings
+                .output_preparation
+                .admits(work.encoding.is_some())
+            || owner
+                .source_authority
+                .as_ref()
+                .is_none_or(|state| state.node_id != owner.node_id)
+            || self.cache_location().map(|(_, node)| node) != Some(owner.node_id.as_str())
+        {
+            return;
+        }
+        let Some(context) = work.request.candidate_context.as_mut() else {
+            return;
+        };
+        if context.retained_output.is_some()
+            || context.canonical_caps.is_none()
+            || context.planning_binding.is_none()
+            || context.candidate_id != context.selected_candidate.id
+            || context.recipe_digest != context.selected_candidate.recipe_digest
+            || !context.selected_candidate.identity_matches()
+            || !context.selected_candidate.decoder_compatible
+            || context.selected_candidate.width == 0
+            || context.selected_candidate.height == 0
+            || context.selected_candidate.target_height == 0
+            || context
+                .owner_node_id
+                .as_deref()
+                .is_some_and(|node| node != owner.node_id)
+        {
+            return;
+        }
+        // Queue-only owner binding: byte reuse remains untouched. The worker
+        // independently restores current source/settings and the exact recipe
+        // before it constructs a durable encoded-output job.
+        context.owner_node_id = Some(owner.node_id.clone());
+        self.hand_off_output_enqueue(work, Some(response_owner));
     }
 
     /// Hand a started session's complete-output queue publication to the
@@ -3791,7 +3869,7 @@ mod retained_recovery_tests {
     #[tokio::test]
     async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues() {
         use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
-        let (_temp, _serve, facts, _) =
+        let (_temp, serve, facts, _) =
             crate::vodserve::retained::test_post_attachment_output_facts().await;
         assert!(facts.response_owner.retained_output_facts().is_some());
         let work_root = crate::test_tempdir().expect("enqueue work root");
@@ -3800,6 +3878,11 @@ mod retained_recovery_tests {
             work_root.path().to_path_buf(),
             EncoderCaps::default(),
             Pipeline::Cpu,
+        )
+        .with_cache(
+            work_root.path().join("cache"),
+            "fixture-build".into(),
+            "fixture".into(),
         );
         let mut receiver = manager
             .output_enqueue
@@ -3825,7 +3908,7 @@ mod retained_recovery_tests {
             complete_cache: true,
             sustainable: true,
         };
-        let request = SessionRequest {
+        let mut request = SessionRequest {
             sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
@@ -3856,6 +3939,20 @@ mod retained_recovery_tests {
             block_budget_secs: None,
             transport: None,
         };
+        let context = request
+            .candidate_context
+            .as_mut()
+            .expect("canonical context");
+        context.canonical_caps = Some(serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls"]})).expect("caps"));
+        context.planning_binding = Some(crate::media_pool::PlanningBinding::from_snapshot(
+            &plurx_core::store::PlaybackPlanningSnapshot {
+                file: facts.file.clone(),
+                probe_json: None,
+                settings: Default::default(),
+                generation: 1,
+                item_title: None,
+            },
+        ));
         let make_work = |session_id: &str| OutputEnqueue {
             request: request.clone(),
             file: facts.file.clone(),
@@ -3908,6 +4005,146 @@ mod retained_recovery_tests {
                 .expect("no-artifact fallback still offered")
                 .session_id,
             "rolling-no-facts"
+        );
+        let source_authority = Arc::new(crate::state::AppState::new(
+            "fixture".into(),
+            Arc::clone(&manager.store),
+            crate::state::Dirs {
+                artwork: work_root.path().join("artwork"),
+                transcode: work_root.path().join("transcode"),
+                cache: work_root.path().join("cache"),
+                subs: work_root.path().join("subs"),
+                runtime_cache: work_root.path().join("runtime"),
+                renditions: work_root.path().join("renditions"),
+            },
+            "fixture".into(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(64)),
+        ));
+        let owner = PreparedVodOwner {
+            node_id: "fixture".into(),
+            source_authority: Some(source_authority),
+        };
+        manager.hand_off_prepared_output_enqueue(
+            make_work("prepared-cached"),
+            &owner,
+            &facts.response_owner,
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "actual retained output skips duplicate prepared publication"
+        );
+        crate::vodserve::retained::test_make_attachment_uncaptured(
+            &serve,
+            "00000000-0000-4000-8000-00000000cace",
+        )
+        .await;
+        let cold_facts = serve
+            .hls_facts("00000000-0000-4000-8000-00000000cace")
+            .await
+            .expect("cold actual attachment");
+        assert!(cold_facts.response_owner.retained_output_facts().is_none());
+        let mut cold_work = make_work("prepared-cold");
+        let cold_candidate = &mut cold_work
+            .request
+            .candidate_context
+            .as_mut()
+            .expect("canonical context")
+            .selected_candidate;
+        cold_candidate.complete_cache = false;
+        cold_candidate.sustainable = false;
+        assert!(
+            !cold_candidate.playable(),
+            "unknown producer capacity is not negative source/recipe authority"
+        );
+        manager.hand_off_prepared_output_enqueue(cold_work, &owner, &cold_facts.response_owner);
+        let prepared = receiver
+            .try_recv()
+            .expect("local first canonical preparation reaches owned publication worker");
+        assert_eq!(prepared.session_id, "prepared-cold");
+        assert_eq!(
+            prepared
+                .request
+                .candidate_context
+                .as_ref()
+                .expect("binding")
+                .owner_node_id
+                .as_deref(),
+            Some("fixture")
+        );
+        assert!(
+            !prepared
+                .request
+                .candidate_context
+                .as_ref()
+                .expect("queued candidate")
+                .selected_candidate
+                .playable(),
+            "cold output is queued without inventing measured production"
+        );
+        assert!(
+            request
+                .candidate_context
+                .as_ref()
+                .expect("incumbent binding")
+                .owner_node_id
+                .is_none(),
+            "queue-only binding cannot change the attachment's retained reuse authority"
+        );
+        let mut invalid_decoder = make_work("invalid-decoder");
+        invalid_decoder
+            .request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .selected_candidate
+            .decoder_compatible = false;
+        manager.hand_off_prepared_output_enqueue(
+            invalid_decoder,
+            &owner,
+            &cold_facts.response_owner,
+        );
+        let mut invalid_identity = make_work("invalid-identity");
+        invalid_identity
+            .request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .selected_candidate
+            .recipe_digest = [99; 32];
+        manager.hand_off_prepared_output_enqueue(
+            invalid_identity,
+            &owner,
+            &cold_facts.response_owner,
+        );
+        let foreign_owner = PreparedVodOwner {
+            node_id: "foreign".into(),
+            source_authority: owner.source_authority.clone(),
+        };
+        manager.hand_off_prepared_output_enqueue(
+            make_work("foreign"),
+            &foreign_owner,
+            &cold_facts.response_owner,
+        );
+        let missing_authority = PreparedVodOwner {
+            node_id: "fixture".into(),
+            source_authority: None,
+        };
+        manager.hand_off_prepared_output_enqueue(
+            make_work("unproven"),
+            &missing_authority,
+            &cold_facts.response_owner,
+        );
+        let mut disabled = make_work("disabled");
+        disabled.settings.output_preparation = crate::vodserve::OutputPreparation::Off;
+        manager.hand_off_prepared_output_enqueue(disabled, &owner, &cold_facts.response_owner);
+        let mut split = make_work("split");
+        split.request.candidate_context = None;
+        manager.hand_off_prepared_output_enqueue(split, &owner, &cold_facts.response_owner);
+        assert!(
+            receiver.try_recv().is_err(),
+            "foreign/unproven/disabled/unattributed work never publishes"
         );
     }
 

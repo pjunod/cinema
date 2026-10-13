@@ -10878,3 +10878,22 @@ unbounded default1080 after narrowing to720. Early fixed catalog counts
 now survive selection refusal. The existing boundary regression explicitly
 admits unknown production without changing its measured playable verdict.
 Units remain deferred.
+
+
+**Local prepared output publication parity.** Ordinary canonical session
+creation hands complete-output preparation to a bounded owned worker, but
+first local prepared attachments did not publish that work. After actual
+attachment, the local path now offers the same work under the existing
+output-preparation setting. Recovery, split families, disabled preparation,
+actual retained outputs, missing canonical source/caps/recipe and foreign
+ownership do not enqueue. A queue-only owner is bound to the actual local
+source/cache owner; the attached context and strict retained-byte reuse
+authority are unchanged. The worker restores current source/settings and
+revalidates the exact recipe before publishing a durable job.
+
+Cold production remains unknown rather than falsely sustainable. The
+regression exercises the real bounded receiver with a cold canonical
+attachment, proves no attachment-context mutation, and refuses foreign,
+missing, disabled, incompatible or forged ownership. Pinned all-target
+compilation and denied-warning Clippy pass without executing units. Genuine
+full-mux jobs and exact native verification remain next.
