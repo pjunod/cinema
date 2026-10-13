@@ -14008,6 +14008,10 @@ async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
     // `settle_migration_attempt` should forgive: no other voter finished the
     // step, so the tree is inconsistent and the daemon must refuse rather
     // than carry on against a schema it cannot account for.
+    // Keep the target column present, but remove every later schema family
+    // before lowering the marker. Refusal must reach this exact duplicate
+    // column, rather than an unrelated private-sharing lineage guard.
+    downgrade_current_schema_after_request_identity(&client).await;
     client
         .execute(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
@@ -14317,6 +14321,17 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
     // `settle_migration_attempt` should forgive: no other voter finished the
     // step, so the tree is inconsistent and the daemon must refuse rather
     // than carry on against a schema it cannot account for.
+    // Keep the target column present, but remove every later schema family
+    // before lowering the marker. Refusal must reach this exact duplicate
+    // column, rather than an unrelated private-sharing lineage guard.
+    downgrade_current_schema_after_request_identity(&client).await;
+    client
+        .execute(
+            "ALTER TABLE analysis_requests DROP COLUMN video_identity",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("rewind later request identity while retaining attempt history");
     client
         .execute(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
@@ -16850,15 +16865,40 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
     assert_eq!(force_submitted.state, "submitted");
     assert!(force_submitted.owner_node_id.is_empty());
 
-    client
-        .execute(
-            "UPDATE cluster_fragment_index_jobs
-                SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
-                    updated_at_ms = 42 WHERE cache_key = $1",
-            hiqlite::params!(&forced_job.cache_key),
+    let completed_worker = store
+        .fixture_claim_cluster_fragment_index("node-a", &[], 42, 1_042)
+        .await
+        .expect("claim actual common forced worker")
+        .expect("forced worker claim");
+    assert_eq!(completed_worker.cache_key, forced_job.cache_key);
+    let completed_artifact = ClusterFragmentIndexArtifact {
+        cache_key: forced_job.cache_key.clone(),
+        file_id: forced_job.file_id,
+        source_size: forced_job.source_size,
+        source_mtime: forced_job.source_mtime,
+        source_sha256: forced_job.source_sha256.clone(),
+        pipeline_sha256: forced_job.pipeline_sha256.clone(),
+        blob_sha256: "d".repeat(64),
+        bytes: 10,
+        built_by_node_id: "node-a".into(),
+        built_at_ms: 42,
+    };
+    let completed_location = ClusterFragmentIndexLocation {
+        cache_key: forced_job.cache_key.clone(),
+        node_id: "node-a".into(),
+        bytes: 10,
+        verified_at_ms: 42,
+        last_seen_at_ms: 42,
+    };
+    assert!(store
+        .fixture_complete_cluster_fragment_index(
+            &completed_worker,
+            &completed_artifact,
+            &completed_location,
+            42,
         )
         .await
-        .expect("finish forced worker before stale replay");
+        .expect("publish actual common forced worker before stale replay"));
     let receipt_snapshot = || async {
         let mut snapshot = Vec::new();
         for table in [
@@ -18227,15 +18267,57 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         assert_eq!(rows, 0, "populated sharing table {table} cannot be rewound");
     }
     queue_fixture::remove_sharing_schema(&connection);
+    // These later durable settings did not exist in the prequeue schema.
+    // Preserve their complete typed rows, then restore them after the actual
+    // upgrade; deleting them would defeat this import regression.
+    let storage_rows = connection.prepare("SELECT library_id,root_path,domain_id FROM background_storage_domains ORDER BY library_id,root_path")
+        .expect("durable storage fixture").query_map([], |row|
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+        .expect("storage rows").collect::<Result<Vec<_>, _>>().expect("all storage rows");
+    let budget_rows = connection.prepare("SELECT provider,next_dispatch_ms,interval_ms FROM background_provider_budgets ORDER BY provider")
+        .expect("durable budget fixture").query_map([], |row|
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))
+        .expect("budget rows").collect::<Result<Vec<_>, _>>().expect("all budget rows");
+    assert_eq!(
+        storage_rows,
+        vec![(9, "/fixture/shows".into(), "fixture-nas".into())]
+    );
+    assert_eq!(
+        budget_rows,
+        vec![
+            ("ani_list".into(), 63_000, 2_100),
+            ("tmdb".into(), 42_000, 100)
+        ]
+    );
+    // Replaying v71 also replays later additive queue columns. Remove the
+    // common queue objects, retaining the seeded legacy domain jobs.
+    queue_fixture::remove_common_queue_schema(&connection);
     connection
-        .execute_batch(
-            "DELETE FROM background_job_migration;
-            ALTER TABLE dv_conversions DROP COLUMN requested_manually;
-            PRAGMA user_version = 70;",
-        )
+        .execute_batch("PRAGMA user_version = 70;")
         .expect("stage pre-queue fixture");
     drop(connection);
     let upgraded = SqliteStore::open(&source_path).expect("apply common queue migration");
+    let connection = rusqlite::Connection::open(&source_path)
+        .expect("restore postqueue durable fixture settings");
+    for (library, root, domain) in &storage_rows {
+        connection.execute("INSERT INTO background_storage_domains(library_id,root_path,domain_id) VALUES(?1,?2,?3)",
+            rusqlite::params![library, root, domain]).expect("restore exact storage fixture row");
+    }
+    for (provider, next, interval) in &budget_rows {
+        connection.execute("INSERT INTO background_provider_budgets(provider,next_dispatch_ms,interval_ms) VALUES(?1,?2,?3)",
+            rusqlite::params![provider, next, interval]).expect("restore exact budget fixture row");
+    }
+    let restored_storage = connection.prepare("SELECT library_id,root_path,domain_id FROM background_storage_domains ORDER BY library_id,root_path")
+        .expect("restored storage witness").query_map([], |row|
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+        .expect("restored storage").collect::<Result<Vec<_>, _>>().expect("all restored storage");
+    let restored_budgets = connection.prepare("SELECT provider,next_dispatch_ms,interval_ms FROM background_provider_budgets ORDER BY provider")
+        .expect("restored budget witness").query_map([], |row|
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))
+        .expect("restored budgets").collect::<Result<Vec<_>, _>>().expect("all restored budgets");
+    assert_eq!(restored_storage, storage_rows);
+    assert_eq!(restored_budgets, budget_rows);
+    drop(connection);
     assert!(upgraded
         .import_legacy_jobs(1_000)
         .await
