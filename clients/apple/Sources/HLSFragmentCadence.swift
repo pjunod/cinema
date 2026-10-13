@@ -12,7 +12,7 @@ struct PreparedDecodedCadence {
 
 enum HLSFragmentCadence {
     private struct Box { let type: String; let body: Int; let end: Int }
-    private enum Invalid: Error { case media, unavailable }
+    private enum Invalid: Error { case media }
     private static func uint(_ data: Data, _ at: Int) throws -> UInt32 {
         guard at >= 0, at <= data.count - 4 else { throw Invalid.media }
         return (0..<4).reduce(0) { ($0 << 8) | UInt32(data[at + $1]) }
@@ -218,24 +218,6 @@ enum HLSFragmentCadence {
     /// early and cancels its transfer. The byte limit, the deadline and
     /// cancellation are checked per chunk.
     private static func fetch(_ url: URL, range: Range<Int>? = nil, limit: Int, deadline: TimeInterval,
-                              session: URLSession, loads: ChunkedLoads,
-                              chunk: (HTTPURLResponse, Data) throws -> Bool) async throws -> HTTPURLResponse {
-        while true {
-            do {
-                return try await fetchAttempt(url, range: range, limit: limit, deadline: deadline,
-                                              session: session, loads: loads, chunk: chunk)
-            } catch Invalid.unavailable {
-                // 503 is an unavailable response, not permission to extend the
-                // preparation or sample proof. The same URL/Range gets only
-                // what remains of the original absolute deadline.
-                let remaining = deadline - ProcessInfo.processInfo.systemUptime
-                guard remaining > 0, !Task.isCancelled else { throw Invalid.media }
-                try await Task.sleep(nanoseconds: UInt64(min(0.1, remaining) * 1_000_000_000))
-            }
-        }
-    }
-
-    private static func fetchAttempt(_ url: URL, range: Range<Int>?, limit: Int, deadline: TimeInterval,
                                      session: URLSession, loads: ChunkedLoads,
                                      chunk: (HTTPURLResponse, Data) throws -> Bool) async throws -> HTTPURLResponse {
         let remaining = deadline - ProcessInfo.processInfo.systemUptime
@@ -254,7 +236,6 @@ enum HLSFragmentCadence {
             switch event {
             case .response(let value):
                 guard response == nil, let http = value as? HTTPURLResponse, http.url == url else { throw Invalid.media }
-                if http.statusCode == 503 { throw Invalid.unavailable }
                 guard http.statusCode == 200 || (range != nil && http.statusCode == 206),
                       http.expectedContentLength <= limit else { throw Invalid.media }
                 response = http

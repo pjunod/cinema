@@ -216,74 +216,32 @@ final class HLSFragmentCadenceTests: XCTestCase {
         return (host, cadence)
     }
 
-    private func pendingFragmentHost(statuses: [Int]) -> String {
+    private func refusedFragmentHost(status: Int) -> String {
         let host = CadenceStub.host()
         let data = Fixtures.copySegment
         CadenceStub.install(host, [
             "/hls/s1/index.m3u8": .text(Self.playlist(map: true)),
             "/hls/s1/init.mp4": .bytes(Fixtures.initMP4),
-            "/hls/s1/seg0.m4s": .init(length: data.count, ranges: true, statuses: statuses) { Data(data[$0]) },
+            "/hls/s1/seg0.m4s": .init(length: data.count, ranges: true, statuses: [status, 200]) { Data(data[$0]) },
         ])
         return host
     }
 
-    func testUnavailableFragmentRetriesSameRangeAndProvesRealCadence() async throws {
-        let host = pendingFragmentHost(statuses: [503, 200])
-        let cadence = await HLSFragmentCadence.inspect(
-            url: try XCTUnwrap(URL(string: "http://\(host)/hls/s1/index.m3u8")), itemSeconds: 1, boundMs: 2_000,
-            configuration: CadenceStub.configuration())
-        XCTAssertEqual(try XCTUnwrap(cadence).frameDurationSeconds, 1 / 24.0, accuracy: 1e-9)
-        let ranges = CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s")
-        XCTAssertEqual(ranges.count, 2)
-        XCTAssertEqual(ranges.first, ranges.last, "retry preserves the owned URL and Range")
-        XCTAssertGreaterThanOrEqual(CadenceStub.cancelled(host, "/hls/s1/seg0.m4s"), 1)
-        XCTAssertEqual(CadenceStub.served(host, "/hls/s1/seg0.m4s"), Fixtures.copySegment.count,
-                       "the refused attempt contributes no body bytes")
-    }
-
-    func testPermanentUnavailableFragmentExhaustsOriginalDeadline() async throws {
-        let host = pendingFragmentHost(statuses: [503])
-        let began = ProcessInfo.processInfo.systemUptime
-        let cadence = await HLSFragmentCadence.inspect(
-            url: try XCTUnwrap(URL(string: "http://\(host)/hls/s1/index.m3u8")), itemSeconds: 1, boundMs: 350,
-            configuration: CadenceStub.configuration())
-        XCTAssertNil(cadence)
-        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - began, 1.5,
-                          "503 retries cannot renew the original deadline")
-        XCTAssertGreaterThan(CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").count, 1)
-        XCTAssertEqual(CadenceStub.served(host, "/hls/s1/seg0.m4s"), 0)
-    }
-
-    func testCancellationStopsUnavailableFragmentRetries() async throws {
-        let host = pendingFragmentHost(statuses: [503])
-        let url = try XCTUnwrap(URL(string: "http://\(host)/hls/s1/index.m3u8"))
-        let inspection = Task {
-            await HLSFragmentCadence.inspect(url: url, itemSeconds: 1, boundMs: 4_000,
-                                            configuration: CadenceStub.configuration())
-        }
-        let deadline = ProcessInfo.processInfo.systemUptime + 1
-        while CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").isEmpty,
-              ProcessInfo.processInfo.systemUptime < deadline {
-            try await Task.sleep(nanoseconds: 5_000_000)
-        }
-        XCTAssertFalse(CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").isEmpty)
-        inspection.cancel()
-        let result = await inspection.value
-        XCTAssertNil(result)
-        let attempts = CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").count
-        try await Task.sleep(nanoseconds: 200_000_000)
-        XCTAssertEqual(CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").count, attempts)
-        XCTAssertEqual(CadenceStub.served(host, "/hls/s1/seg0.m4s"), 0)
-    }
-
-    func testUnauthorizedAndForbiddenFragmentsAreNotRetried() async throws {
-        for status in [401, 403] {
-            let host = pendingFragmentHost(statuses: [status, 200])
+    func testRefusedFragmentsAreTerminalAndCancelBodyTransfer() async throws {
+        for status in [503, 401, 403, 410] {
+            let host = refusedFragmentHost(status: status)
             let cadence = await HLSFragmentCadence.inspect(
                 url: try XCTUnwrap(URL(string: "http://\(host)/hls/s1/index.m3u8")), itemSeconds: 1, boundMs: 2_000,
                 configuration: CadenceStub.configuration())
             XCTAssertNil(cadence)
-            XCTAssertEqual(CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").count, 1)
+            XCTAssertEqual(CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s").count, 1,
+                           "a refused response must not be hidden by retrying")
+            let deadline = ProcessInfo.processInfo.systemUptime + 0.5
+            while CadenceStub.cancelled(host, "/hls/s1/seg0.m4s") == 0,
+                  ProcessInfo.processInfo.systemUptime < deadline {
+                try await Task.sleep(nanoseconds: 5_000_000)
+            }
+            XCTAssertGreaterThanOrEqual(CadenceStub.cancelled(host, "/hls/s1/seg0.m4s"), 1)
             XCTAssertEqual(CadenceStub.served(host, "/hls/s1/seg0.m4s"), 0)
         }
     }
