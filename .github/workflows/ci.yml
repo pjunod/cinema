@@ -609,6 +609,7 @@ jobs:
           LANE_RESULT: ${{ steps.topology_contracts.outcome }}
           RUN_CLUSTER_AUTH: ${{ needs.scope.outputs.cluster_auth }}
           RUN_HIQLITE_SPIKE: ${{ needs.scope.outputs.hiqlite_spike }}
+          RETAIN_TOPOLOGY_UNITS: ${{ needs.scope.outputs.retain_topology_units }}
         run: |
           set -euo pipefail
           receipt=(
@@ -620,7 +621,12 @@ jobs:
           )
           if [ "$RUN_CLUSTER_AUTH" = true ]; then
             receipt+=(--command "make hiqlite-vendor-clippy")
-            receipt+=(--command "make cluster-harness-check")
+            if [ "$RETAIN_TOPOLOGY_UNITS" = true ]; then
+              receipt+=(--command "python3 -m validation.qualification_unit_continuation --compile-units topology")
+              receipt+=(--command "make cluster-harness-nonunit-check")
+            else
+              receipt+=(--command "make cluster-harness-check")
+            fi
           fi
           if [ "$RUN_HIQLITE_SPIKE" = true ]; then
             receipt+=(

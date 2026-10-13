@@ -1924,6 +1924,13 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("needs: [scope, preflight]", package)
 
         preflight = workflow_job_blocks(".github/workflows/ci.yml")["preflight"]
+        operations_run = workflow_step_blocks(preflight)["Check CI, deploy, and shipping contracts"]
+        self.assertEqual(workflow_step_literal(operations_run, "run"), [
+            'if [ "$RETAIN_OPERATIONS_UNITS" = true ]; then',
+            '  echo "Adopted authenticated complete operations unit discovery"',
+            "else", "  make operations-check", "fi",
+        ])
+        self.assertIn("RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}", operations_run)
         effort_preflight = workflow_job_blocks(".github/workflows/effort-ci.yml")[
             "preflight"
         ]
@@ -1931,7 +1938,7 @@ assert.equal(context.ACT_TIMER, null);
             "preflight"
         ]
         for workflow, contract_preflight, unit_command in (
-            ("ci", preflight, "run: make operations-check"),
+            ("ci", preflight, "make operations-check"),
             ("effort-ci", effort_preflight, "run: python3 -m validation.python_unit_receipts run"),
             ("main-fast-lane", main_preflight, "run: python3 -m validation.main_unit_receipts run"),
         ):
@@ -2401,7 +2408,14 @@ assert.equal(context.ACT_TIMER, null);
                 f"cluster-harness-check does not run {test_name}",
             )
             self.assertIn("scripts/require-test-count", command)
-        self.assertIn("run: make cluster-wal-check", workflow)
+        wal_run = workflow_step_blocks(jobs["cluster_wal"])["Run exact Hiqlite and WAL recovery regressions"]
+        self.assertEqual(workflow_step_literal(wal_run, "run"), [
+            'if [ "$RETAIN_WAL_UNITS" = true ]; then',
+            "  python3 -m validation.qualification_unit_continuation --compile-units wal",
+            "else", "  make cluster-wal-check", "fi",
+        ])
+        self.assertIn("RETAIN_WAL_UNITS: ${{ needs.scope.outputs.retain_wal_units }}", wal_run)
+        self.assertIn("PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}", wal_run)
         wal_commands = make_dry_run_commands("cluster-wal-check")
         self.assertTrue(
             all("scripts/require-test-count" in command for command in wal_commands),
@@ -2711,8 +2725,13 @@ assert.equal(context.ACT_TIMER, null);
             [
                 "set -euo pipefail",
                 "mkdir -p target/validation",
-                "make cluster-store-check 2>&1 | tee "
-                "target/validation/cluster-store.log",
+                'if [ "$RETAIN_STORE_UNITS" = true ]; then',
+                '  echo "command=python3 -m validation.qualification_unit_continuation --compile-units store_contract" >> "$GITHUB_OUTPUT"',
+                "  python3 -m validation.qualification_unit_continuation --compile-units store_contract 2>&1 | tee target/validation/cluster-store.log",
+                "else",
+                '  echo "command=make cluster-store-check" >> "$GITHUB_OUTPUT"',
+                "  make cluster-store-check 2>&1 | tee target/validation/cluster-store.log",
+                "fi",
             ],
         )
 
@@ -2722,7 +2741,8 @@ assert.equal(context.ACT_TIMER, null);
             "LANE_RESULT: ${{ steps.store_contracts.outcome }}", store_receipt
         )
         self.assertIn('--result "$LANE_RESULT"', store_receipt)
-        self.assertIn('--command "make cluster-store-check"', store_receipt)
+        self.assertIn('LANE_COMMAND: ${{ steps.store_contracts.outputs.command }}', store_receipt)
+        self.assertIn('--command "$LANE_COMMAND"', store_receipt)
         store_upload = store["Retain the Store lane log and receipt"]
         self.assertEqual(workflow_step_scalar(store_upload, "if"), "always()")
         self.assertIn("target/validation/cluster-store.log", store_upload)
@@ -2750,7 +2770,12 @@ assert.equal(context.ACT_TIMER, null);
                 "{",
                 '  if [ "$RUN_CLUSTER_AUTH" = true ]; then',
                 "    make hiqlite-vendor-clippy",
-                "    make cluster-harness-check",
+                '    if [ "$RETAIN_TOPOLOGY_UNITS" = true ]; then',
+                "      python3 -m validation.qualification_unit_continuation --compile-units topology",
+                "      make cluster-harness-nonunit-check",
+                "    else",
+                "      make cluster-harness-check",
+                "    fi",
                 "  fi",
                 '  if [ "$RUN_HIQLITE_SPIKE" = true ]; then',
                 "    cargo clippy --locked --manifest-path "
@@ -2769,6 +2794,19 @@ assert.equal(context.ACT_TIMER, null);
             topology_receipt,
         )
         self.assertIn('--result "$LANE_RESULT"', topology_receipt)
+        self.assertIn("RETAIN_TOPOLOGY_UNITS: ${{ needs.scope.outputs.retain_topology_units }}", topology_receipt)
+        self.assertIn(
+            '          if [ "$RUN_CLUSTER_AUTH" = true ]; then\n'
+            '            receipt+=(--command "make hiqlite-vendor-clippy")\n'
+            '            if [ "$RETAIN_TOPOLOGY_UNITS" = true ]; then\n'
+            '              receipt+=(--command "python3 -m validation.qualification_unit_continuation --compile-units topology")\n'
+            '              receipt+=(--command "make cluster-harness-nonunit-check")\n'
+            '            else\n'
+            '              receipt+=(--command "make cluster-harness-check")\n'
+            '            fi\n'
+            '          fi\n',
+            topology_receipt,
+        )
         for command in (
             "make hiqlite-vendor-clippy",
             "make cluster-harness-check",
@@ -3234,7 +3272,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("cluster-topology-receipt.json", topology)
         self.assertIn("if: always()", store)
         self.assertIn("if: always()", topology)
-        self.assertIn("run: make cluster-wal-check", wal)
+        wal_run = workflow_step_blocks(wal)["Run exact Hiqlite and WAL recovery regressions"]
+        self.assertEqual(workflow_step_literal(wal_run, "run"), [
+            'if [ "$RETAIN_WAL_UNITS" = true ]; then',
+            "  python3 -m validation.qualification_unit_continuation --compile-units wal",
+            "else", "  make cluster-wal-check", "fi",
+        ])
         self.assertIn("run: make cluster-daemon-check", daemon)
         self.assertIn("name: Verify the cluster fixture generator", daemon)
         self.assertIn("command -v ffmpeg", daemon)
