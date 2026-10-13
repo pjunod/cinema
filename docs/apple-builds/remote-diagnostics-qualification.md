@@ -1,9 +1,9 @@
 # Offline incident UI qualification
 
-**Status:** open — archive export and recovery qualification active.
+**Status:** built — TV ZIP download, phone export and recovery have software qualification.
 
-Build: 236
-Issue: #1066
+Build: 238
+Issue: #1081
 
 Registers the diagnostics reporting UI regression in the iOS test target.
 Preserves local history during incident recovery and resets the form scroll
@@ -15,6 +15,21 @@ variant uses the real remote API and the exact focused SwiftUI action cell.
 
 The [canonical ledger](../features/REMOTE-DIAGNOSTICS-STATUS.md) records actual
 results and fixture failures. The archive-first follow-up also verifies the actual exported ZIP and system
-share-sheet action. Native TV transfer is unfinished; hosted delivery is
+share-sheet action. Native TV local archive transfer is built and software-qualified; hosted delivery is
 deferred. No physical-device or signed
 release qualification follows from simulator execution.
+
+Build238 adds a physically selected, temporary local download for the TV's
+own immutable ZIP. The QR opens a phone page; Download consumes the link once.
+Closing/background/authorization retirement revokes it. The UI warns about
+unencrypted trusted Wi-Fi. Actual tvOS remote UI passes selected archive and
+close revocation; iOS/tvOS capture/wire suites each pass eleven cases. The three final-review findings are corrected. Required
+fast gate and the exact follow-up source are in the canonical ledger.
+
+
+The playback landing required a fresh Apple238 claim and regenerated project.
+Combined-source focused tests pass60 iOS and54 tvOS cases. A populated TV
+capture exposed a remote-focus gap across the long preview: the preview now
+follows report/history actions and accepts row focus. The actual selected-ZIP
+and close-revocation check passes after this correction. Full report-screen
+export/recovery qualification is recorded in the canonical ledger and #1081.

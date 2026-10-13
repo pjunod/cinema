@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "android.shared-library-fixture-platform-ownership"
+commits = ["937bfc7000269015cde95c18130694a5c862ffe7"]
+source = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+source_anchor = "Net.authenticatedClient { System.nanoTime() / 1_000_000 }"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+test_anchor = "actualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt"
+
+[[fixes]]
 id = "subtitles.available-count-includes-selection"
 commits = ["884614df1b58c2878c30c758d21adbeb973f60c9"]
 source = "crates/plurxd/src/web/detail/watch-browser.js"
@@ -6398,6 +6406,39 @@ test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt
 test_anchor = "actualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt"
 
 [[fixes]]
+id = "diagnostics.android-tv-local-archive"
+commits = ["77ae6118660031fb8f6871a2e8fd57e68974db7e", "8c80b9a81ca18a6564e7ce8352215bbc60b3a785"]
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticRuntime.kt"
+source_anchor = "fun shareOnLocalNetwork()"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/DiagnosticReportNavigationTest.kt"
+test_anchor = "televisionExportsItsOwnArchiveAndClosingRevokesTheLink"
+
+[[fixes]]
+id = "diagnostics.cancelled-tv-export-creation"
+commits = ["d0f0df4d9311ae7317ab53d41385b92e2417a94b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticLocalExport.kt"
+source_anchor = "suspend fun createOwned"
+test = "clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticLocalExportTest.kt"
+test_anchor = "cancellationDuringCreationClosesTheUnadoptedListener"
+
+[[fixes]]
+id = "diagnostics.tv-form-input-adapter"
+commits = ["ef1b9436db4193ed9117d063fa334c147a6d192c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AuthScreens.kt"
+source_anchor = "downFocus: FocusRequester? = null"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/DiagnosticReportNavigationTest.kt"
+test_anchor = "televisionDescriptionDpadReachesPrivacyWithoutStartingUpload"
+
+[[fixes]]
+id = "diagnostics.bounded-consent-focus-input-fence"
+commits = ["91d00f579bf0617b68f2c7de77c108c5be784681"]
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticReportScreen.kt"
+source_anchor = "// diagnostic-consent-navigation-adapter:begin"
+test = "tests/operations/test_player_input_fence.py"
+test_anchor = "test_diagnostic_consent_adapter_does_not_exempt_other_handlers"
+
+
+[[fixes]]
 id = "apple.growing-playlist-before-native-attachment"
 commits = ["94124323d9439c92c78d2d36d0e1dc3a6cc6fcce"]
 source = "clients/apple/Sources/PlayerController.swift"
@@ -6430,3 +6471,12 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "let successor = Session.shared.nextMediaFailoverURL(path,"
 test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
 test_anchor = "func testGrowingPreparationRecoversIngressAndCannotAttachAfterStop()"
+
+
+[[fixes]]
+id = "diagnostics.tv-preview-follows-report-actions"
+commits = ["f777976ce4a044e0e6a0da14e6d50d04fb43b9f9"]
+source = "clients/apple/Sources/DiagnosticReportView.swift"
+source_anchor = 'Section("Recent safe events")'
+test = "clients/apple/UITests/DiagnosticReportingTests.swift"
+test_anchor = "testTVZIPDownloadsSelectedIncidentAndCloseRevokesNewLink"

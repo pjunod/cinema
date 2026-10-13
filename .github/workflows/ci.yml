@@ -391,6 +391,7 @@ jobs:
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: rustfmt, clippy
+      - uses: ./.github/actions/rust-native-deps
       - uses: ./.github/actions/ffmpeg
         with:
           major: "8"
@@ -1087,6 +1088,7 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: cluster-daemon
+      - uses: ./.github/actions/rust-native-deps
       - uses: ./.github/actions/ffmpeg
         with:
           major: "8"
@@ -1195,6 +1197,7 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-1.62.0
+      - uses: ./.github/actions/rust-native-deps
       - uses: ./.github/actions/ffmpeg
         with:
           major: "8"
@@ -1328,6 +1331,7 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-1.62.0
+      - uses: ./.github/actions/rust-native-deps
       - uses: ./.github/actions/ffmpeg
         with:
           major: "8"

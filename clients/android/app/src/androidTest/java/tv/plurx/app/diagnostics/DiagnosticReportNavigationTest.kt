@@ -27,6 +27,58 @@ class DiagnosticReportNavigationTest {
     val compose = createAndroidComposeRule<MainActivity>()
 
     @Test
+    fun televisionExportsItsOwnArchiveAndClosingRevokesTheLink() {
+        org.junit.Assume.assumeTrue(tv.plurx.app.player.isTelevision(compose.activity))
+        compose.onNodeWithTag("diagnostics-open").performClick()
+        compose.waitUntil(timeoutMillis=20_000) { DiagnosticRuntime.state.value.draft != null && !DiagnosticRuntime.state.value.busy }
+        lateinit var incident: DiagnosticDraft
+        compose.runOnIdle {
+            incident=requireNotNull(DiagnosticRuntime.state.value.draft)
+            DiagnosticRuntime.edit(description="TV archive attachment qualification")
+        }
+        compose.onNodeWithTag("diagnostics-export-tv").performScrollTo().assertIsEnabled().performClick()
+        compose.waitUntil(timeoutMillis=20_000) { DiagnosticRuntime.state.value.localExportURL != null && !DiagnosticRuntime.state.value.busy }
+        val url=requireNotNull(DiagnosticRuntime.state.value.localExportURL)
+        val bitmap=diagnosticExportQR(url)
+        val pixels=IntArray(bitmap.width*bitmap.height); bitmap.getPixels(pixels,0,bitmap.width,0,0,bitmap.width,bitmap.height)
+        val decoded=com.google.zxing.MultiFormatReader().decode(com.google.zxing.BinaryBitmap(com.google.zxing.common.HybridBinarizer(com.google.zxing.RGBLuminanceSource(bitmap.width,bitmap.height,pixels))))
+        assertEquals(url,decoded.text)
+        fun download(method: String): ByteArray {
+            val connection=java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            connection.requestMethod=method; connection.connectTimeout=3000; connection.readTimeout=3000
+            try { assertEquals(200,connection.responseCode); return connection.inputStream.readBytes() } finally { connection.disconnect() }
+        }
+        assertTrue(String(download("GET")).contains("Download diagnostic ZIP"))
+        val bytes=download("POST"); val text=bytes.toString(Charsets.UTF_8)
+        assertTrue(bytes.take(4) == listOf<Byte>(0x50,0x4b,3,4))
+        assertTrue(text.contains(incident.id)); assertTrue(text.contains("TV archive attachment qualification"))
+        assertTrue(text.contains("manifest.json")); assertTrue(text.contains("summary.txt"))
+        compose.waitUntil(timeoutMillis=5000) { DiagnosticRuntime.state.value.localExportURL == null }
+        compose.runOnIdle {
+            assertEquals(incident.id,DiagnosticRuntime.state.value.draft?.id)
+            assertTrue(DiagnosticRuntime.state.value.draft?.consented == false)
+        }
+        compose.runOnIdle {
+            val description=DiagnosticRuntime.state.value.draft?.description
+            DiagnosticRuntime.shareOnLocalNetwork()
+            assertTrue(DiagnosticRuntime.state.value.busy)
+            DiagnosticRuntime.edit(description="Must not replace locked export content",category="other")
+            assertEquals(description,DiagnosticRuntime.state.value.draft?.description)
+        }
+        compose.waitUntil(timeoutMillis=20_000) { DiagnosticRuntime.state.value.localExportURL != null && !DiagnosticRuntime.state.value.busy }
+        val edited=requireNotNull(DiagnosticRuntime.state.value.localExportURL)
+        compose.runOnIdle { DiagnosticRuntime.edit(description="Edited after offering") }
+        assertEquals(null,DiagnosticRuntime.state.value.localExportURL)
+        assertTrue(runCatching { java.net.URL(edited).openStream().use { it.readBytes() } }.isFailure)
+        compose.onNodeWithTag("diagnostics-export-tv").performScrollTo().performClick()
+        compose.waitUntil(timeoutMillis=20_000) { DiagnosticRuntime.state.value.localExportURL != null && !DiagnosticRuntime.state.value.busy }
+        val cancelled=requireNotNull(DiagnosticRuntime.state.value.localExportURL)
+        compose.onNodeWithText("Close").performScrollTo().performClick()
+        assertTrue(runCatching { java.net.URL(cancelled).openStream().use { it.readBytes() } }.isFailure)
+        assertEquals(null,DiagnosticRuntime.state.value.localExportURL)
+    }
+
+    @Test
     fun anonymousReportButtonClearsSystemNavigationAndOpensReport() {
         val report = compose.onNodeWithTag("diagnostics-open").assertIsDisplayed()
         val bounds = report.fetchSemanticsNode().boundsInWindow
@@ -59,8 +111,7 @@ class DiagnosticReportNavigationTest {
         }
         compose.onNodeWithTag("diagnostics-open").performClick()
         compose.waitUntil(timeoutMillis = 20_000) { !DiagnosticRuntime.state.value.busy }
-        val resumeLabel = "Resume ${original.capture.capturedAt} · ${original.state}"
-        compose.onNodeWithText(resumeLabel).performScrollTo().performClick()
+        compose.onNodeWithTag("diagnostics-resume-${original.id}").performScrollTo().performClick()
         compose.waitUntil(timeoutMillis = 20_000) { !DiagnosticRuntime.state.value.busy }
         compose.onNodeWithText("Recovered local report", substring = true).assertIsDisplayed()
         compose.runOnIdle {
@@ -68,7 +119,7 @@ class DiagnosticReportNavigationTest {
             assertTrue(DiagnosticRuntime.state.value.pending.any { it.id == original.id })
         }
         compose.onNodeWithText("Send report").assertDoesNotExist()
-        compose.onNodeWithText(resumeLabel).performScrollTo().assertIsEnabled()
+        compose.onNodeWithTag("diagnostics-resume-${original.id}").performScrollTo().assertIsEnabled()
     }
     @Test
     fun staleHistoryKeepsFrozenPrivacyAndDeletingSelectedReportDoesNotRecoverIt() {

@@ -112,6 +112,37 @@ final class DiagnosticCaptureTests: XCTestCase {
         XCTAssertNil(model.draft?.origin); XCTAssertNil(model.draft?.binding)
         XCTAssertTrue(model.message.contains("Attach it to your bug or issue report"))
     }
+    func testLocalDownloadRequiresExplicitPOSTAndReturnsExactArchiveOnce() async throws {
+        let bytes = Data([0x50, 0x4b, 3, 4, 10, 0, 99])
+        let export = try DiagnosticLocalExport(bytes: bytes, reportID: UUID().uuidString.lowercased(), host: "127.0.0.1")
+        defer { export.stop() }
+        let url = try await export.start()
+        let configuration = URLSessionConfiguration.ephemeral; configuration.timeoutIntervalForRequest = 3
+        let session = URLSession(configuration: configuration); defer { session.invalidateAndCancel() }
+        let (wrong, rejected) = try await session.data(from: url.deletingLastPathComponent().appendingPathComponent("wrong"))
+        XCTAssertEqual((rejected as? HTTPURLResponse)?.statusCode, 404); XCTAssertTrue(wrong.isEmpty)
+        var crossOrigin = URLRequest(url: url); crossOrigin.httpMethod = "POST"; crossOrigin.setValue("http://attacker.invalid", forHTTPHeaderField: "Origin")
+        let (_, crossRejected) = try await session.data(for: crossOrigin); XCTAssertEqual((crossRejected as? HTTPURLResponse)?.statusCode, 403)
+        let (page, response) = try await session.data(from: url)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200); XCTAssertTrue(String(decoding: page, as: UTF8.self).contains("Download diagnostic ZIP"))
+        XCTAssertNotEqual(page, bytes)
+        var download = URLRequest(url: url); download.httpMethod = "POST"
+        let (actual, attachment) = try await session.data(for: download)
+        XCTAssertEqual(actual, bytes); XCTAssertEqual((attachment as? HTTPURLResponse)?.mimeType, "application/zip")
+        XCTAssertTrue((attachment as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Disposition")?.contains("attachment") == true)
+        do { _ = try await session.data(for: download); XCTFail("The capability must be single-download") } catch {}
+    }
+    func testLocalDownloadExpiryAndCancellationRevokeListener() async throws {
+        let expired = try DiagnosticLocalExport(bytes: Data([1]), reportID: UUID().uuidString, host: "127.0.0.1", lifetime: 0.1)
+        let expiredURL = try await expired.start()
+        try await Task.sleep(for: .milliseconds(250))
+        let session = URLSession(configuration: .ephemeral); defer { session.invalidateAndCancel() }
+        do { _ = try await session.data(from: expiredURL); XCTFail("Expired URL must not serve") } catch {}
+        let stopped = try DiagnosticLocalExport(bytes: Data([1]), reportID: UUID().uuidString, host: "127.0.0.1")
+        let stoppedURL = try await stopped.start(); stopped.stop()
+        try await Task.sleep(for: .milliseconds(50))
+        do { _ = try await session.data(from: stoppedURL); XCTFail("Closed report must not serve") } catch {}
+    }
     func testSupportDestinationRefusesCredentialsPathsAndUnapprovedPlaintext() {
         for origin in ["https://user:secret@support.example", "https://support.example/a", "https://support.example?secret=canary", "http://support.example", "file:///tmp/report"] { XCTAssertThrowsError(try DiagnosticTransport.origin(origin)) }
         XCTAssertEqual(try DiagnosticTransport.origin("https://support.example/"), "https://support.example")
