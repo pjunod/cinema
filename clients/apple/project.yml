@@ -203,6 +203,7 @@ targets:
     platform: iOS
     sources:
       - path: UITests/LibraryRowsNavigationTests.swift
+      - path: UITests/DiagnosticReportingTests.swift
     dependencies:
       - target: plurx-iOS
     settings:
