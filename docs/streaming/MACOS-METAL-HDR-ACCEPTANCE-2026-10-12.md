@@ -161,3 +161,16 @@ Successful HDR10 comparison closes this acceptance slice. It does not close the
 [continuous-quality](../playback-control/CONTINUOUS-QUALITY-BUILD.md),
 [playback lifecycle](../playback-control/PLAYBACK-LIFECYCLE-STATUS.md) or
 [HDR fidelity](../performance/HDR-REFERENCE-SCORING.md) work.
+
+## 7. October 13 renewed-access and paused-reopen rerun
+
+Renewed NAS access permits real Air Chrome HDR10-to-1080p-SDR sessions through
+the Metal and CPU Hable graphs. Local unbuffered paused targets present; the
+forced paused replacement exposed a preparation overlay that remained after
+the frame arrived. The exact reviewed surface correction clears it from current
+owned target-frame proof without Play. The original failed picture and corrected
+paused five-minute picture are both preserved. The
+[dated physical rerun](../playback-control/MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md#october-13-physical-rerun--renewed-nas-access-and-paused-surface-completion)
+records source/binary provenance, timing, limits and current completion state.
+Standard Screen Sharing carries SDR pixels; this is ordinary HDR10-to-SDR
+hls.js acceptance, not calibrated HDR-display or native HLS qualification.

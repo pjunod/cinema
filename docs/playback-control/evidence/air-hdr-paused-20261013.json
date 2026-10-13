@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "date": "2026-10-13",
+  "source_baseline": "5dabb22a31297527d34e1399b19e60d91c06cc7e",
+  "surface_fix_commit": "f7f8939d6d45c9ef97f09a5b6175c30031a2a599",
+  "main_pr": 1068,
+  "acceptance_source": "credential-free git archive of healthy baseline plus exact reviewed two-file fix",
+  "installed_binary_sha256": "9ebc6fc20e72a46b86da5fc5e86a57f0d9778c2f1f0a51c64eb10344ce52c6df",
+  "served_player_sha256": "42772cc914bc2c3cc198fd2e31ba4095cff66cf35df4d78b70a1ea3745ab6b07",
+  "parser_sha256": "36f7e0298eac14d1a664dfc083702bab812f6c83d196c651420af92f1080f21c",
+  "fixed_paused_reopen": {
+    "from_ms": 600000,
+    "target_ms": 300000,
+    "paused": true,
+    "play_pressed": false,
+    "session": "25a85ea4-23fa-4efa-b3a8-0e9693f8683a",
+    "hls_startup_ms": 161,
+    "preparing_surface": "cleared by owned presenting transition",
+    "screenshot": "surface-metal-paused-reopen-300.jpg"
+  },
+  "new_negatives_preserved": [
+    "air-metal-paused-reopen-scrim.jpg",
+    "air-quality-request.jpg"
+  ],
+  "clipboard": {
+    "shared": "off",
+    "proof": "functional manual-transfer baseline followed by no automatic second-marker transfer",
+    "receipt": "clipboard-off-receipt.txt"
+  },
+  "scope_limit": "Ordinary HDR10 to 1080p SDR on Air Chrome hls.js. Standard Screen Sharing captures SDR pixels; no calibrated HDR-display fidelity or native HLS qualification.",
+  "state": "physical Metal pass; final CPU capture and resume reset pending local unlock",
+  "source_landing": "69d3311dd82e23aa869578442e9f1bc903cc6804",
+  "qualified_head": "9af79b079cb3e0511b0fbf17fd69d339edda298a",
+  "qualification": {
+    "repository_run": 4992,
+    "global_run": 5018,
+    "main_promotion": "passed"
+  },
+  "restoration": {
+    "clipboard_shared": "OFF, functional positive/negative transfer proof",
+    "mac_processing": "ON saved and verified checked, Save disabled, Saved",
+    "backend": "Auto saved; final service restart pending",
+    "quality": "1080p temporary, Auto restoration pending",
+    "movie_resume": "zero still pending; live player must close first"
+  },
+  "cpu_control": {
+    "session": "00c436d1-1e32-4003-9eeb-7d520ad7d00e",
+    "ttff_ms": 3856,
+    "hls_startup_ms": 1692,
+    "started_utc": "2026-10-13T14:37:30.635822Z",
+    "observed_progress": "9:33 at ~14:42 UTC from 5:00 start; final five-minute capture outstanding"
+  },
+  "preserved_archive": {
+    "uuid": "4606c9d1-6bbb-4dda-a629-e6ffaacda016",
+    "url": "http://forge.lan:3000/attachments/4606c9d1-6bbb-4dda-a629-e6ffaacda016",
+    "sha256": "5d200472b0b11b8774aa1a03f7dc829ce02541bb4349a4854c297e2bde209419",
+    "bytes": 6783558,
+    "members": 50,
+    "state": "preserved interim; original failures unchanged; final CPU/restoration pending"
+  }
+}
