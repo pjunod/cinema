@@ -140,6 +140,95 @@ final class PreparedCommitRendezvousTests: XCTestCase {
                        PreparedReplacementBounds.alignmentMs * 2)
     }
 
+    func testClockAnchorMapsFilmLeadThroughPlaybackRateWithoutChangingOrigin() throws {
+        let plan = PreparedCommitRendezvous.plan(stagedFilmPositionMs: 30_000,
+            incumbentFilmPositionMs: 42_000, mediaOriginMs: 30_000, leadMs: 2_000)
+        for (rate, wallLead) in [(0.5, 4.0), (1.0, 2.0), (2.0, 1.0)] {
+            let anchor = try XCTUnwrap(plan.clockAnchor(incumbentFilmMs: 42_000,
+                hostSeconds: 100, rate: rate, frameDurationSeconds: 1 / 24,
+                overlapRemainingMs: 10_000))
+            XCTAssertEqual(anchor.hostSeconds, 100 + wallLead, accuracy: 0.000_001)
+            XCTAssertEqual(anchor.earliestItemMs, 12_000, accuracy: 0.000_001,
+                "the lower item bound follows film origin, independently of playback rate")
+        }
+    }
+
+    func testClockAnchorRefusesConsumedLeadAndPreservesPostSwapDeadline() {
+        let plan = PreparedCommitRendezvous(filmPositionMs: 44_000, itemPositionMs: 14_000)
+        XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 44_000, hostSeconds: 100,
+            rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: 10_000))
+        XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 44_020, hostSeconds: 100,
+            rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: 10_000))
+        XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 43_980, hostSeconds: 100,
+            rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: 10_000),
+            "less than one actual frame of lead cannot schedule a safe rendezvous")
+        let required = PreparedCommitRendezvous.postSwapReserveMs + 2_000
+        XCTAssertNotNil(plan.clockAnchor(incumbentFilmMs: 42_000, hostSeconds: 100,
+            rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: required))
+        XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 42_000, hostSeconds: 100,
+            rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: required - 1))
+        XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 42_000, hostSeconds: 100,
+            rate: 0.5, frameDurationSeconds: 1 / 24, overlapRemainingMs: required),
+            "the overlap pays wall time rather than unscaled film milliseconds")
+    }
+
+    func testClockAnchorRejectsInvalidClocksRatesAndHostTimeOverflow() {
+        let plan = PreparedCommitRendezvous(filmPositionMs: 44_000, itemPositionMs: 14_000)
+        for invalid in [Double.nan, .infinity, -.infinity, -1] {
+            XCTAssertNil(plan.clockAnchor(incumbentFilmMs: invalid, hostSeconds: 100,
+                rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: 10_000))
+            XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 42_000, hostSeconds: invalid,
+                rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: 10_000))
+        }
+        for invalid in [Double.nan, .infinity, -.infinity, -1, 0] {
+            XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 42_000, hostSeconds: 100,
+                rate: invalid, frameDurationSeconds: 1 / 24, overlapRemainingMs: 10_000))
+            XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 42_000, hostSeconds: 100,
+                rate: 1, frameDurationSeconds: invalid, overlapRemainingMs: 10_000))
+        }
+        XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 42_000,
+            hostSeconds: Double(Int64.max) / 1_000_000_000,
+            rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: 10_000))
+        XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 42_000, hostSeconds: 100,
+            rate: 1, frameDurationSeconds: 1.01, overlapRemainingMs: 10_000))
+        XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 42_000, hostSeconds: 100,
+            rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: 0))
+        let invalidOrigin = PreparedCommitRendezvous(filmPositionMs: 44_000, itemPositionMs: 1_000)
+        XCTAssertNil(invalidOrigin.clockAnchor(incumbentFilmMs: 42_000, hostSeconds: 100,
+            rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: 10_000))
+    }
+
+    func testMatchingClocksUseActualCadenceAndRejectBackwardStartupClock() {
+        let plan = PreparedCommitRendezvous(filmPositionMs: 44_000, itemPositionMs: 14_000)
+        XCTAssertTrue(plan.clocksMatch(incumbentFilmMs: 44_020,
+            successorItemMs: 14_000, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(plan.clocksMatch(incumbentFilmMs: 44_020,
+            successorItemMs: 14_000, frameDurationSeconds: 1 / 60),
+            "a 60 fps stream cannot borrow a 24 fps clock tolerance")
+        XCTAssertFalse(plan.clocksMatch(incumbentFilmMs: 44_050,
+            successorItemMs: 14_050, frameDurationSeconds: 1 / 24),
+            "matching each other is insufficient after the rendezvous has passed")
+        XCTAssertTrue(plan.acceptsDecodedAlignment(displaySeconds: 14,
+            width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(plan.clocksMatch(incumbentFilmMs: 44_000,
+            successorItemMs: 13_930, frameDurationSeconds: 1 / 24),
+            "an aligned parked sample does not prove a running clock that rebased backward")
+    }
+
+    func testMatchingClocksRejectInvalidObservations() {
+        let plan = PreparedCommitRendezvous(filmPositionMs: 44_000, itemPositionMs: 14_000)
+        for invalid in [Double.nan, .infinity, -.infinity, -1] {
+            XCTAssertFalse(plan.clocksMatch(incumbentFilmMs: invalid,
+                successorItemMs: 14_000, frameDurationSeconds: 1 / 24))
+            XCTAssertFalse(plan.clocksMatch(incumbentFilmMs: 44_000,
+                successorItemMs: invalid, frameDurationSeconds: 1 / 24))
+        }
+        for invalid in [Double.nan, .infinity, -.infinity, -1, 0, 1.01] {
+            XCTAssertFalse(plan.clocksMatch(incumbentFilmMs: 44_000,
+                successorItemMs: 14_000, frameDurationSeconds: invalid))
+        }
+    }
+
     func testTheSharedCommitPlansItsSwitchPointBeforeInspectingIt() throws {
         let source = try playerControllerSource()
         let shared = try XCTUnwrap(source.range(of: "final class SharedPlayerController"))

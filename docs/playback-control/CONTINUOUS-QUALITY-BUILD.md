@@ -10696,3 +10696,34 @@ three-thread incumbent under budget five, then verifies prepared-only
 refusal, unrelated Live admission, detachment, exact promotion and trial
 restrictions. It is written for the final fast lane, with no unit execution
 during this implementation pass.
+
+
+**Scoped admission runtime proof and synchronized Apple clock correction.**
+Exact server `e796a2ed71da858d3b728bd908897203e21e6f81` compiles with
+pinned Rust 1.97.1. Its bounded API-order probe reaches the second1080
+prepared offer with Speculative admission, with53 owned processes retired
+and no residuals. This is ordering evidence, not native acceptance.
+
+On that server, the phone and TV focused captures fail the unchanged decoded
+continuity limit at114.464ms and203.257ms respectively. Both record zero
+media503/410 responses and zero deltas in all eight cancellation reasons.
+The phone retires50 owned processes and the TV53; both unique QA apps exit.
+The TV's first720 frame arrives0.605ms after play, but its item clock then
+moves backward69.042ms before advancing to the next frame. The observer was
+attached7.962seconds earlier, and the cross-item gap was46.749ms. Preserve
+this startup failure rather than attribute it to an attachment blind spot.
+
+The Apple correction schedules the muted hidden successor against the
+incumbent's current clock using AVPlayer's host-clock synchronization API.
+It requires contiguous loaded media from the scheduled immediate start
+through the unchanged target and switch runway. If the loaded interval
+starts ahead of the incumbent, it waits within the original overlap for
+the incumbent to enter it; it never moves the target or extends the deadline.
+Exposure requires both players actually playing at the captured rate with
+film clocks agreeing within measured frame cadence. It does not restart
+the successor at exposure. Apple's precise scheduling API requires temporary
+`automaticallyWaitsToMinimizeStalling = false`; the successor's original
+policy is restored after the proof or refusal. Five numeric regressions
+cover rate/origin mapping, exhausted lead/reserve, invalid clocks, cadence
+and backward-startup refusal. Units remain deferred. Hardware qualification
+of this correction remains due.

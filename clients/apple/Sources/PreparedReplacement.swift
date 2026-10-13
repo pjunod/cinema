@@ -464,6 +464,48 @@ struct PreparedCommitRendezvous: Equatable {
         )
     }
 
+    struct ClockAnchor: Equatable {
+        let hostSeconds: Double
+        let earliestItemMs: Double
+    }
+
+    /// Bind the already aligned successor to the incumbent's current film
+    /// clock. Reject a consumed lead rather than inventing another rendezvous.
+    func clockAnchor(
+        incumbentFilmMs: Double, hostSeconds: Double, rate: Double,
+        frameDurationSeconds: Double, overlapRemainingMs: Int
+    ) -> ClockAnchor? {
+        guard incumbentFilmMs.isFinite, incumbentFilmMs >= 0,
+              hostSeconds.isFinite, hostSeconds >= 0,
+              rate.isFinite, rate > 0,
+              frameDurationSeconds.isFinite, frameDurationSeconds > 0,
+              frameDurationSeconds <= 1, overlapRemainingMs > 0 else { return nil }
+        let leadFilmMs = Double(filmPositionMs) - incumbentFilmMs
+        let leadWallMs = leadFilmMs / rate
+        let anchor = hostSeconds + leadWallMs / 1_000
+        let earliestItemMs = Double(itemPositionMs) - leadFilmMs
+        guard leadFilmMs > frameDurationSeconds * 1_000,
+              leadWallMs + Double(Self.postSwapReserveMs) <= Double(overlapRemainingMs),
+              earliestItemMs.isFinite, earliestItemMs >= 0,
+              anchor.isFinite, anchor > hostSeconds,
+              anchor < Double(Int64.max) / 1_000_000_000 else { return nil }
+        return ClockAnchor(hostSeconds: anchor, earliestItemMs: earliestItemMs)
+    }
+
+    func clocksMatch(
+        incumbentFilmMs: Double, successorItemMs: Double,
+        frameDurationSeconds: Double
+    ) -> Bool {
+        guard incumbentFilmMs.isFinite, incumbentFilmMs >= 0,
+              successorItemMs.isFinite, successorItemMs >= 0,
+              frameDurationSeconds.isFinite, frameDurationSeconds > 0,
+              frameDurationSeconds <= 1 else { return false }
+        let successorFilmMs = successorItemMs + Double(filmPositionMs) - Double(itemPositionMs)
+        let toleranceMs = frameDurationSeconds * 1_000
+        return abs(incumbentFilmMs - Double(filmPositionMs)) <= toleranceMs
+            && abs(successorFilmMs - incumbentFilmMs) <= toleranceMs
+    }
+
     /// A completed seek and a layer's old ready bit do not identify its new
     /// decoded sample. Require finite item-local time and an actual raster.
     /// A decoded frame covers its timestamp through its actual sample duration.

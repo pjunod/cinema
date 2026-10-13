@@ -12037,10 +12037,39 @@ extension PlayerController: PreparedSuccessorHost {
             return preparedCommitFailure(at: "decoded-alignment")
         }
 
-        guard await awaitPreparedRendezvous(
+        let originalAutomaticWaiting = successor.automaticallyWaitsToMinimizeStalling
+        var scheduledHiddenClock = false
+        defer {
+            successor.automaticallyWaitsToMinimizeStalling = originalAutomaticWaiting
+            if scheduledHiddenClock && player !== successor { successor.pause() }
+        }
+        guard preparedCommitStillOwned(commitAttempt), preparedItem === item,
+              preparedPlayer === successor, successor.currentItem === item,
+              wantsPlayback, preferredRate == rendezvousRate,
+              successor.status == .readyToPlay, successor.rate == 0, successor.isMuted,
+              player.rate == rendezvousRate, player.timeControlStatus == .playing else {
+            return preparedCommitFailure(at: "clock-ownership")
+        }
+        guard let anchor = await awaitPreparedClockRunway(
             item: item, successor: successor, rendezvous: rendezvous,
             frameDurationSeconds: frameDurationSeconds, rate: rendezvousRate,
             commit: commitAttempt
+        ) else {
+            return preparedCommitFailure(at: "clock-anchor")
+        }
+        // Apple requires this policy only for the precise host-clock API.
+        // The captured successor's original policy is restored after proof,
+        // rollback or pre-exposure refusal; ordinary playback is unchanged.
+        successor.automaticallyWaitsToMinimizeStalling = false
+        successor.setRate(rendezvousRate,
+            time: CMTime(value: CMTimeValue(rendezvous.itemPositionMs), timescale: 1_000),
+            atHostTime: CMTime(seconds: anchor.hostSeconds, preferredTimescale: 1_000_000_000))
+        scheduledHiddenClock = true
+
+        guard await awaitPreparedRendezvous(
+            item: item, successor: successor, rendezvous: rendezvous,
+            frameDurationSeconds: frameDurationSeconds, rate: rendezvousRate,
+            anchor: anchor, commit: commitAttempt
         ) else {
             return preparedCommitFailure(at: "rendezvous", deltaMs: realPositionMs() - rendezvous.filmPositionMs)
         }
@@ -12153,7 +12182,9 @@ extension PlayerController: PreparedSuccessorHost {
         // alignment. Exposing its layer must not introduce an async pause.
         applyDisplayCriteria(for: item, generation: openGeneration)
         startRecoveryEvidencePoll()
-        if wantsPlayback { player.playImmediately(atRate: preferredRate) } else { player.pause() }
+        // The hidden successor is already running on the shared host clock.
+        // Resetting its rate here would reintroduce startup clock settlement.
+        if !wantsPlayback { player.pause() }
         isPlaying = wantsPlayback
         refreshPGSOverlayWindow(at: boundaryMs, reason: .force)
         ttffMeasurement.rebasePosition(at: realPositionMs())
@@ -12408,11 +12439,60 @@ extension PlayerController: PreparedSuccessorHost {
         attemptStillCurrent(commit, fence: .preparedCommit)
     }
 
+    /// Seeking the future rendezvous may load a segment that starts ahead
+    /// of the incumbent. Keep the incumbent visible until its clock enters
+    /// that contiguous range, without changing the target or overlap deadline.
+    private func awaitPreparedClockRunway(
+        item: AVPlayerItem, successor: AVPlayer, rendezvous: PreparedCommitRendezvous,
+        frameDurationSeconds: Double, rate: Float, commit: Attempt
+    ) async -> PreparedCommitRendezvous.ClockAnchor? {
+        while preparedOverlapRemainingMs > 0 {
+            guard !Task.isCancelled, preparedCommitStillOwned(commit),
+                  preparedItem === item, preparedPlayer === successor,
+                  successor.currentItem === item, wantsPlayback, preferredRate == rate,
+                  UIApplication.shared.applicationState == .active,
+                  !pictureInPictureIsActive, !player.isExternalPlaybackActive,
+                  item.status == .readyToPlay, successor.status == .readyToPlay,
+                  successor.rate == 0, successor.isMuted,
+                  player.rate == rate, player.timeControlStatus == .playing else { return nil }
+            let hostNow = CMClockGetTime(CMClockGetHostTimeClock())
+            guard hostNow.isValid, hostNow.isNumeric,
+                  let anchor = rendezvous.clockAnchor(
+                    incumbentFilmMs: player.currentTime().seconds * 1_000 + Double(baseMs),
+                    hostSeconds: hostNow.seconds, rate: Double(rate),
+                    frameDurationSeconds: frameDurationSeconds,
+                    overlapRemainingMs: preparedOverlapRemainingMs
+                  ) else { return nil }
+            if preparedClockRunway(item, rendezvous: rendezvous, anchor: anchor) {
+                return anchor
+            }
+            try? await Task.sleep(nanoseconds: 8_000_000)
+        }
+        return nil
+    }
+
+    private func preparedClockRunway(
+        _ item: AVPlayerItem, rendezvous: PreparedCommitRendezvous,
+        anchor: PreparedCommitRendezvous.ClockAnchor
+    ) -> Bool {
+        let ranges = item.loadedTimeRanges.compactMap { value -> ClosedRange<Double>? in
+            let range = value.timeRangeValue
+            let start = range.start.seconds, end = CMTimeRangeGetEnd(range).seconds
+            guard start.isFinite, end.isFinite, start >= 0, end >= start else { return nil }
+            return start...end
+        }
+        let earliestSeconds = anchor.earliestItemMs / 1_000
+        let runway = Self.bufferedRunwaySeconds(playheadSeconds: earliestSeconds, ranges: ranges)
+        let requiredEndMs = Double(rendezvous.itemPositionMs) + Double(PreparedReplacementBounds.switchRunwayMs)
+        return earliestSeconds + runway >= requiredEndMs / 1_000
+    }
+
     /// The successor waits at a future film instant while the incumbent
     /// advances to it. Seeking the moving incumbent clock chases seek latency.
     private func awaitPreparedRendezvous(
         item: AVPlayerItem, successor: AVPlayer, rendezvous: PreparedCommitRendezvous,
-        frameDurationSeconds: Double, rate: Float, commit: Attempt
+        frameDurationSeconds: Double, rate: Float,
+        anchor: PreparedCommitRendezvous.ClockAnchor, commit: Attempt
     ) async -> Bool {
         let began = Int(ProcessInfo.processInfo.systemUptime * 1_000)
         // A fixed future rendezvous can be farther away when inspection/seek
@@ -12426,9 +12506,20 @@ extension PlayerController: PreparedSuccessorHost {
                   UIApplication.shared.applicationState == .active,
                   !pictureInPictureIsActive, !player.isExternalPlaybackActive,
                   item.status == .readyToPlay else { return false }
-            let drift = Double(realPositionMs()) - Double(rendezvous.filmPositionMs)
-            if abs(drift) <= frameDurationSeconds * 1_000 { return true }
-            if drift > 0 { return false }
+            let incumbentMs = player.currentTime().seconds * 1_000 + Double(baseMs)
+            let successorMs = successor.currentTime().seconds * 1_000
+            let hostSeconds = CMClockGetTime(CMClockGetHostTimeClock()).seconds
+            if hostSeconds >= anchor.hostSeconds,
+               player.rate == rate, player.timeControlStatus == .playing,
+               successor.rate == rate, successor.timeControlStatus == .playing,
+               rendezvous.clocksMatch(incumbentFilmMs: incumbentMs,
+                   successorItemMs: successorMs, frameDurationSeconds: frameDurationSeconds) {
+                return true
+            }
+            if !incumbentMs.isFinite || !successorMs.isFinite || !hostSeconds.isFinite
+                || incumbentMs > Double(rendezvous.filmPositionMs) + frameDurationSeconds * 1_000 {
+                return false
+            }
             try? await Task.sleep(nanoseconds: 8_000_000)
         }
         return false
