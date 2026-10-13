@@ -2227,3 +2227,32 @@ class CatalogRoutingScopeCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NamedRustOutcomeGuardCase(unittest.TestCase):
+    def run_guard(self, lines):
+        environment = dict(os.environ)
+        environment["PLURX_EXPECT_TEST_COUNT"] = "1"
+        environment["PLURX_EXPECT_TEST_NAMES"] = "contract::required_regression"
+        environment.pop("PLURX_EXPECT_TEST_COUNT_AT_LEAST", None)
+        return subprocess.run(
+            [str(ROOT / "scripts/require-test-count"), sys.executable, "-c", "print(" + repr(lines) + ")"],
+            env=environment, text=True, capture_output=True,
+        )
+
+    def test_matching_total_cannot_substitute_another_named_regression(self):
+        summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        matching = self.run_guard("test contract::required_regression ... ok\n" + summary)
+        self.assertEqual(matching.returncode, 0, matching.stderr)
+        substituted = self.run_guard("test contract::another_regression ... ok\n" + summary)
+        self.assertNotEqual(substituted.returncode, 0)
+        self.assertIn("required_regression", substituted.stderr)
+
+    def test_named_regression_cannot_be_counted_twice(self):
+        result = self.run_guard(
+            "test contract::required_regression ... ok\n"
+            "test contract::required_regression ... ok\n"
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("observed 2", result.stderr)

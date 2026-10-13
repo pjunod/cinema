@@ -1155,29 +1155,10 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-contracts
 cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=67 scripts/require-test-count $(CARGO) test --locked \
+	PLURX_EXPECT_TEST_COUNT=70 \
+	  PLURX_EXPECT_TEST_NAMES='transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly,transport_recovery::tests::two_early_acknowledgements_cannot_hide_a_long_recovery_gap,transport_recovery::tests::writer_must_cover_the_end_of_recovery,transport_recovery::tests::whole_recovery_duration_cannot_exceed_the_absolute_deadline,transport_recovery::tests::worst_transfer_duration_covers_the_complete_source_series,transport_recovery::tests::artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result,transport_recovery::tests::owned_async_task_growth_has_no_resource_slack' \
+	  scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery --lib
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly \
-	  --lib -- --exact
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::two_early_acknowledgements_cannot_hide_a_long_recovery_gap \
-	  --lib -- --exact
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::writer_must_cover_the_end_of_recovery \
-	  --lib -- --exact
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::whole_recovery_duration_cannot_exceed_the_absolute_deadline \
-	  --lib -- --exact
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::worst_transfer_duration_covers_the_complete_source_series \
-	  --lib -- --exact
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result \
-	  --lib -- --exact
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::owned_async_task_growth_has_no_resource_slack \
-	  --lib -- --exact
 	scripts/require-test-count $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  transport_status::tests::owned_async_task_guard_tracks_abort_safe_lifetime \
