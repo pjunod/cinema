@@ -1088,3 +1088,42 @@ the explicit stack setting now recorded by R14. This evidence does not claim
 a successful complete WAL lane or a promotion receipt. Remaining Source
 fixtures, other qualification cohorts, deployment and physical acceptance are
 still open.
+
+R12 landed as #1082 on effort `2d0d58648` after all seven checks in task gate
+5081 passed on its exact head. Its 44 new controls ran once on that effort:
+43 passed and one errored because its negative fixture updated a path-map key
+instead of the nested hash. The correction is committed for failed-only
+continuation. Fourteen source-dependent existing controls and three incoming
+main ownership-count checks also passed once. Original failures remain in the
+private capture set; these results are not a final qualification receipt.
+
+R26 adds typed Python/JVM source cohorts and independent current compiled JVM
+discovery. Compiled membership is explicitly separate from historical runtime
+outcomes. The collector uses the pinned Android built-in Kotlin output and
+the Java source-set output. A parser-only check reads the actual warm compiled
+files and discovers their 1,145 methods; final current-source discovery remains
+required. It retains the original opaque full-command successes, measured
+named overlays, source-impact reviews and failure chronology. Default test
+recipes still run normally; adoption requires a complete authenticated proof.
+The original JVM XML gaps remain opaque. Eight finite original JVM capture
+adapters preserve reviewed source equivalence separately from unknown execution
+SHAs and runtime/image fingerprints. The latest 19 actual native XML passes
+cover the incoming build-171 diagnostics and shared-library fixtures, with the
+original three-test failure retained as a separate witness. Original Python
+157-case evidence retains its explicit error and the exact one-case repair;
+opaque successful membership never becomes named historical outcomes. That
+repair closes only its original source variant. Current coverage still requires
+the separately applicable effort fixture result.
+
+Astra's original 51 pending Python source readers reduce to 32 after narrow
+input review of the recovered original cohort. The 31 new protocol and collector
+controls, corrected previously failed fixture and freshly invalidated YAML
+check remain effort-only obligations. The failed task gate 5089 executed no
+unit bodies or compilers: live main was not an ancestor of the effort base.
+Main through the build-171 diagnostics landing is now integrated normally into
+the effort; a fresh exact-head task gate is required. Gate 5092 then found
+eight malformed class-prefixed Python regression references in the immutable
+R12 landing. Their canonical methods resolve in that exact original tree; the
+required permanent erratum records the mistake without changing the resolver
+or boundary. Current task references are checked locally before another gate. Complete authenticated
+qualification, fleet deployment and physical HDR ON/OFF acceptance remain open.

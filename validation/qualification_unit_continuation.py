@@ -2,8 +2,9 @@
 
 This adapter does not turn a failed historical job into a passing lane. Its
 commands come from the current committed repository, never from a receipt.
-Python/JVM parsers are preparatory only: enrollment stays refused until their
-execution and environment provenance are implemented in a separate follow-up.
+Non-Rust adoption uses a separately typed source cohort with authenticated
+original completion and measured local overlays; compiled discovery is not a
+historical runtime outcome.
 """
 from __future__ import annotations
 
@@ -1094,7 +1095,8 @@ def authenticate(api, proof, document, repository):
                              and jobs[0]['run_id'] == run_id and jobs[0]['repo_id'] == repository
                              and jobs[0]['status'] in {'success','failure'}, 'Historical command job identity mismatch')
             execution=origin['execution']
-            receipts.require(execution.get('mode')=='cargo-command' and execution.get('job_status')==jobs[0]['status'],
+            expected_mode = 'source-cohort-v1' if item.get('protocol') == 'source-cohort-v1' else 'cargo-command'
+            receipts.require(execution.get('mode') == expected_mode and execution.get('job_status')==jobs[0]['status'],
                              'Declared historical job disposition differs from live authority')
             event = receipts.bounded_json(run['event_payload'].encode())
             inputs = event['inputs']
@@ -1132,8 +1134,19 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
     claims = proof['commands']
     receipts.require(isinstance(claims, list) and claims and len(claims) <= 512,
                      'Empty or oversized command enrollment')
-    seen, by_kind, native_inventories, validated = set(), {}, {}, {}
+    seen, by_kind, native_inventories, validated, source_cohorts = set(), {}, {}, {}, {}
     for item in claims:
+        if item.get('protocol') == 'source-cohort-v1':
+            from validation import nonrust_unit_cohort as cohort
+            name = item['name']
+            receipts.require(name in canonical_commands and name in cohort.KINDS and name not in seen
+                             and item['invocation'] == canonical_commands[name]
+                             and not (name == 'android_jvm' and name in existing),
+                             'Unknown or repeated non-Rust source-cohort command')
+            seen.add(name)
+            source_cohorts[name] = cohort.validate(item, proof, candidate, discovery,
+                                                  changed_inputs, clean_log, source_archive_digest)
+            continue
         receipts.require(set(item) in ({'name', 'invocation', 'environment', 'inventory', 'records', 'obligations'}, {'name', 'invocation', 'environment', 'inventory', 'records', 'obligations','references'}),
                          'Unknown command unit fields')
         name = item['name'];kind = name.split(':')[0]
@@ -1235,9 +1248,9 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
     for kind, names in by_kind.items():
         receipts.require(set(names) == {name for name in canonical_commands if name.split(':')[0] == kind},
                          'Incomplete canonical command cohort')
-    return {kind: {'mode': 'retained-complete-command-union', 'commands': sorted(names),
+    return {**source_cohorts, **{kind: {'mode': 'retained-complete-command-union', 'commands': sorted(names),
                    'native_inventories': {name: native_inventories[name] for name in names if name in native_inventories},
-                   'validator': retention.digest(Path(__file__).read_bytes())} for kind, names in by_kind.items()}
+                   'validator': retention.digest(Path(__file__).read_bytes())} for kind, names in by_kind.items()}}
 
 
 def compile_commands(kind, candidate):

@@ -155,7 +155,7 @@ class CompleteCommandUnitCase(unittest.TestCase):
         with patch.object(q.retention,'changed',return_value={'input.rs'}),patch.object(q.retention,'git_bytes',return_value=b'input'),patch.object(q.retention,'digest',side_effect=lambda raw: hashlib.sha256(raw).hexdigest() if raw.startswith(b'{') else 'd'*64):
             # Exact old/current content hashes are still verified after deduplication.
             with self.assertRaises(receipts.ReceiptError):q.changed_inputs(record,CANDIDATE,{blob['sha256']:blob})
-            changes['after']='d'*64;blob=log(json.dumps(manifest));record['changes']={'sha256_ref':blob['sha256']}
+            changes['input.rs']['after']='d'*64;blob=log(json.dumps(manifest));record['changes']={'sha256_ref':blob['sha256']}
             self.assertEqual(q.changed_inputs(record,CANDIDATE,{blob['sha256']:blob}),{'a'})
             alias=copy.deepcopy(manifest);alias['changes']['input.rs']['affected_ids']=[];aliased=log(json.dumps(alias))
             with self.assertRaises(receipts.ReceiptError):q.changed_inputs(record,CANDIDATE,{blob['sha256']:aliased})
