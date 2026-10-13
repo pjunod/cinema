@@ -219,6 +219,7 @@ function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry
     if(p.controlSeek.seekTelemetry!==seekTelemetry)
       finishPlaybackSeekTelemetry(p,p.controlSeek,"seek_abandoned");
     p.controlSeek.seekTelemetry?.cleanup?.();
+    p.controlSeek.localVodSeekCleanup?.();
     playbackSurfaceStep({intent_superseded:p.controlSeek.sequence});
   }
   p.controlSeekSequence=sequence;
@@ -1241,6 +1242,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     const cleanup=()=>{
       if(timer!=null) clearTimeout(timer);
       if(vod) seekIntent.localVodSeekFallbackPending=false;
+      seekIntent.pausedLoadCleanup?.(); seekIntent.pausedLoadCleanup=null;
       try{v.removeEventListener('seeked',onSeeked);}catch(e){}
     };
     // `seeked` proves the element finished seeking, not that it went where it
@@ -1278,6 +1280,8 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     me.continuousQuality?.noteSeek?.(targetSec);
     markPlaybackControlSeekExecuted(me,targetSec,v);
     try{ v.currentTime=Math.max(0,atMs/1000-(me.offset||0)); }catch(e){}
+    if(vod&&me.wantsPlayback===false)
+      resumePausedVodSeek(v,me,seekIntent);
     notifyPlaybackControl();
     clientLog({level:'info',event:'seek_local',
       detail:`${me.copyHls?'copy_hls':me.method||'unknown'}:${route.basis}`,
@@ -1288,7 +1292,9 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
     if(vod&&seekIntent.localVodPresented) { cleanup(); return; }
     timer=setTimeout(()=>{
       if(settled||!current()||vod&&seekIntent.localVodPresented) { cleanup(); return; }
-      if(playbackSeekBufferCovers(v,me,atMs)) { cleanup(); return; }
+      // A paused VOD seek needs its target frame, even after the bytes arrive.
+      // Coverage alone must not retire the only bounded recovery deadline.
+      if(playbackSeekBufferCovers(v,me,atMs)&&!(vod&&me.wantsPlayback===false)) { cleanup(); return; }
       fallback('unsettled');
     },vod?PlaybackPolicy.HLS_STARTUP.seek_deadline_ms:PlaybackPolicy.SEEK_LOCAL_SETTLE_MS);
     return;
