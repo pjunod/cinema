@@ -269,6 +269,12 @@ async fn completed_copy_preparation_does_not_spill_into_live_playback() {
     prepared_copy_consumer(4).await;
 }
 
+#[tokio::test]
+async fn private_output_preparation_publishes_when_ordinary_completed_cache_is_disabled() { prepared_copy_consumer(16).await; }
+
+#[tokio::test]
+async fn private_output_preparation_refuses_an_explicit_zero_output_budget() { prepared_copy_consumer(17).await; }
+
 #[allow(clippy::disallowed_methods)]
 async fn prepared_copy_consumer(control: u8) {
     use plurx_core::store::background_jobs::*;
@@ -290,6 +296,14 @@ async fn prepared_copy_consumer(control: u8) {
     assert_eq!(store.upsert_file(item, &file.path.to_string_lossy(), file.size, file.mtime,
         &plurx_core::domain::ProbeResult::default()).await.expect("source row"), file.id);
     let mut playback_settings = settings();
+    let mut preparation_settings = settings();
+    if control == 16 {
+        playback_settings.completed_cache_bytes = 0;
+        preparation_settings.completed_cache_bytes = 0;
+        preparation_settings.output_budget_bytes = 64 << 20;
+    } else if control == 17 {
+        preparation_settings.output_budget_bytes = 0;
+    }
     let mut owed = None;
     let viewer_pause = (control == 4).then(|| serve.shared.test_hooks().ordinary_materialize.arm("owed foreground media"));
     let mut viewer_held = None;
@@ -421,11 +435,21 @@ async fn prepared_copy_consumer(control: u8) {
         failures.insert("link_after_init".into()); failures.insert("unlink".into());
     }
     let prepared_result = tokio::time::timeout(Duration::from_secs(15), serve.prepare_copy_output(
-        (&incoming).into(), &file, &settings(), &object, 64 << 20,
+        (&incoming).into(), &file, &preparation_settings, &object, 64 << 20,
         active.fence(), Instant::now() + Duration::from_secs(15), crate::admission::Admissions::new(),
         (Arc::new(crate::ffmpeg::EncodedExecutable::capture().await.expect("executable")),
          crate::ffmpeg::EncodedEngine::capture(None).await.expect("engine")), || true,
     )).await.expect("bounded preparation");
+    if control == 17 {
+        assert!(matches!(prepared_result, Err(crate::background_jobs::PreparationError::Yield("retention_capacity"))), "an explicit zero output budget cannot borrow ordinary cache capacity");
+        assert!(serve.shared.renditions.lock().await.values().all(|rendition| rendition.private_storage.is_none()), "refusal occurs before private media production");
+        assert_ne!(store.background_job(&id).await.expect("job").expect("row").state, JobState::Succeeded);
+        assert_eq!(serve.shared.preparation_media.load(Relaxed), 0);
+        assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 0);
+        serve.end("incumbent", Terminal::Deleted).await;
+        active.finish().await;
+        return;
+    }
     if control == 6 {
         assert!(prepared_result.is_err(), "partial link failure is a refused preparation");
         serve.shared.preparation_storage.maintain(&serve.shared).await;
@@ -444,6 +468,13 @@ async fn prepared_copy_consumer(control: u8) {
         return;
     }
     let prepared = prepared_result.expect("actual completed copy body");
+    if control == 16 {
+        assert_eq!(incumbent.completed_cache_budget, 0, "ordinary playback retains its disabled completed cache");
+        assert!(!incumbent.manifest.lock().await.is_admitted(), "private preparation cannot admit the ordinary rendition");
+        let private = serve.shared.renditions.lock().await.values().find(|rendition| rendition.private_storage.is_some()).cloned().expect("actual private output owner");
+        assert_eq!(private.completed_cache_budget, preparation_settings.output_budget_bytes);
+        assert!(private.completed_cache_budget > 0);
+    }
     let wire_bytes = prepared.private_wire_bytes();
     let facts = prepared.private_facts();
     assert!(facts.valid());

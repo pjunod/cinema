@@ -10939,3 +10939,20 @@ metadata, capacity, linking and staging refusals. They report fixed reasons
 and bounded accounting facts without identifiers or paths. The next isolated
 attempt stops at its first failure so repeated full encodes do not hide the
 cause. No unit suite runs before final review and batched qualification.
+
+
+**Preparation budget ownership.** Source inspection finds a mismatch when
+`cache.max_gb` is absent: complete-output preparation reserves against its
+50GiB default budget, but rendition assembly uses the ordinary admission
+budget, which deliberately remains zero when unset. Consequently a real
+full-title encode can be admitted and then refused only at assembly.
+The isolated actor does not configure this setting. A read-only fresh-server
+probe checks its actual absence before another expensive encode.
+
+Private full-output renditions now retain the budget that admitted their
+preparation. Ordinary rendition admission keeps its existing zero-when-unset
+policy and never admits private preparation storage. The focused regression
+uses actual complete-copy preparation with ordinary admission zero and a
+positive preparation budget, requiring a real measured retained result.
+Explicit zero preparation budget remains refused. Units are written but
+deferred to the final review and batched fast lane.
