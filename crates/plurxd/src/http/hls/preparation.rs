@@ -1814,7 +1814,7 @@ pub(super) async fn successor_owner_captures_output(
         // The rolling-upgrade path: the peer does not advertise capture, or
         // its advertisement expired. It primes the ordinary attachment, so
         // this prime's output is not captured for reuse.
-        tracing::debug!(
+        tracing::debug!(target: "plurxd::http::hls",
             owner = successor_owner,
             "prepared VOD successor primes without output capture on a peer that does not advertise it"
         );

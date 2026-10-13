@@ -329,7 +329,22 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             );
             acquired
         }
-        _ => panic!("one acquire and one exact in-flight replay"),
+        (first, duplicate) => {
+            let outcome = |value: &SourceClaimOutcome| match value {
+                SourceClaimOutcome::Acquired(_) => "Acquired".to_owned(),
+                SourceClaimOutcome::InFlight(_) => "InFlight".to_owned(),
+                SourceClaimOutcome::Resolved { .. } => "Resolved".to_owned(),
+                SourceClaimOutcome::Retired(_) => "Retired".to_owned(),
+                SourceClaimOutcome::Conflict => "Conflict".to_owned(),
+                SourceClaimOutcome::Unavailable => "Unavailable".to_owned(),
+                SourceClaimOutcome::Capacity(capacity) => format!("Capacity({capacity:?})"),
+            };
+            panic!(
+                "one acquire and one exact in-flight replay; first={}, duplicate={}",
+                outcome(&first),
+                outcome(&duplicate)
+            );
+        }
     };
     assert!(matches!(
         store

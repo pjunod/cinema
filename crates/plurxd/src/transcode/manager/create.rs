@@ -30,7 +30,7 @@ fn trace_prepared_capture(
     owner_current: Option<bool>,
     ready: bool,
 ) {
-    if !tracing::enabled!(target: "plurxd::retained_reuse", tracing::Level::DEBUG) {
+    if !tracing::enabled!(target: "plurxd::transcode", tracing::Level::DEBUG) {
         return;
     }
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -77,10 +77,10 @@ fn trace_prepared_capture(
         "ready": ready,
     });
     if owner_current.is_some() {
-        tracing::debug!(target: "plurxd::retained_reuse", capture_facts = %facts,
+        tracing::debug!(target: "plurxd::transcode", capture_facts = %facts,
             "Prepared retained output capture sealed");
     } else {
-        tracing::debug!(target: "plurxd::retained_reuse", capture_facts = %facts,
+        tracing::debug!(target: "plurxd::transcode", capture_facts = %facts,
             "Prepared retained output caller ready");
     }
 }
