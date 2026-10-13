@@ -6419,3 +6419,11 @@ source_anchor = "let successor = Session.shared.nextMediaFailoverURL(path,"
 test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
 test_anchor = "func testGrowingPreparationRecoversIngressAndCannotAttachAfterStop()"
 
+
+[[fixes]]
+id = "diagnostics.tv-preview-follows-report-actions"
+commits = ["f777976ce4a044e0e6a0da14e6d50d04fb43b9f9"]
+source = "clients/apple/Sources/DiagnosticReportView.swift"
+source_anchor = 'Section("Recent safe events")'
+test = "clients/apple/UITests/DiagnosticReportingTests.swift"
+test_anchor = "testTVZIPDownloadsSelectedIncidentAndCloseRevokesNewLink"

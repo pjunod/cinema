@@ -831,7 +831,7 @@ The green candidate `575126ae1` passed all eight checks on run5046. Before
 merge, main advanced to the qualified playback landing `b35eebb6b`. The
 combined source preserves both regression catalogs and documentation entries;
 Apple build238 replaces the colliding claim237. The new Apple and Rust inputs
-are being qualified before another push. Android171 and the archive protocol
+were qualified before another push. Android171 and the archive protocol
 source are unchanged; the existing executed Android and browser receipts
 remain applicable. No hardware or fleet installation is part of this step.
 
@@ -843,6 +843,14 @@ A subsequent actual TV report check reproduced remote focus stopping before
 ZIP export when the captured preview has many nonfocusable rows. The TV now
 puts that preview after every report/history action, and its rows accept remote
 focus so the content remains readable. The same populated-report download
-check passes after the correction; export and relaunch recovery are being
-checked together before committing the final receipt. The failed run is kept
+check passes after the correction; export and relaunch recovery pass together on the corrected source. The failed run is kept
 as a failure, including its zero-test runner restart.
+
+
+The final TV preview correction is `f777976ce`. Its failed fixture contains
+all30 preview rows. The final tvOS report-screen class executes export/close
+revocation and offline same-incident relaunch recovery: two passes, one
+phone-share-only skip, zero failures. The corrected source passes the normal
+pinned compiler hook. Apple238/Android171 are the final claims. The13 original
+landing regression fields plus the TV recovery field remain mandatory; #1081
+records the exact final gate and landing. Signed/physical sampling is separate.
