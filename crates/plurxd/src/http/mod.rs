@@ -579,7 +579,8 @@ fn http_route_group(path: &str) -> usize {
         | "/internal/media/cache-copy/{recipe}/{digest}/{object}"
         | "/internal/media/fragment-index/{cache_key}"
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
-        internal_activity::PATH
+        crate::diagnostics::PEER_PATH
+        | internal_activity::PATH
         | internal_clock::PATH
         | cluster_operations::INTERNAL_PATH
         | internal_auth_revocation::PATH
@@ -2257,6 +2258,8 @@ pub fn router(state: AppState) -> Router {
         .without_v07_checks()
         .nest("/api/v1", api)
         .merge(remote::router())
+        .merge(crate::diagnostics::router())
+        .merge(crate::diagnostics_delivery::router())
         .merge(jellyfin_json)
         .merge(plex_routes)
         .merge(public_short)
@@ -2438,7 +2441,10 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
 /// admitted only through the existing serving fence, so a learner also needs
 /// a fresh quorum/apply proof before any node-local work starts.
 fn learner_route_eligible(method: &Method, path: &str) -> bool {
-    if remote::eligible(method, path) {
+    if remote::eligible(method, path)
+        || crate::diagnostics::eligible(method, path)
+        || crate::diagnostics_delivery::eligible(method, path)
+    {
         return true;
     }
     if method == Method::GET

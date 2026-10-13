@@ -40,7 +40,17 @@ object Net {
             } else {
                 req
             }
-            chain.proceed(out)
+            val authorization = Session.playbackAuthorization()
+            val started = android.os.SystemClock.elapsedRealtime()
+            val path = out.url.encodedPath
+            val route = when { path.startsWith("/api/v1/auth/") -> "auth"; path.startsWith("/api/v1/diagnostics/") -> "diagnostics"; path.contains("/sessions") || path.endsWith("/decision") -> "playback"; else -> "browse" }
+            fun observe(status: Int, failure: String? = null) {
+                if (authorization.generation != Session.playbackAuthorization().generation || authorization.token != token) return
+                val facts = mutableMapOf("route" to kotlinx.serialization.json.JsonPrimitive(route), "method" to kotlinx.serialization.json.JsonPrimitive(out.method), "status" to kotlinx.serialization.json.JsonPrimitive(status), "duration_ms" to kotlinx.serialization.json.JsonPrimitive((android.os.SystemClock.elapsedRealtime()-started).coerceIn(0,604800000)))
+                if (failure != null) facts["failure"] = kotlinx.serialization.json.JsonPrimitive(failure)
+                tv.plurx.app.diagnostics.DiagnosticRuntime.record("network","request",facts,authorization.generation)
+            }
+            try { chain.proceed(out).also { observe(it.code) } } catch (error: java.io.IOException) { observe(0,"network"); throw error }
         }
         .build()
 

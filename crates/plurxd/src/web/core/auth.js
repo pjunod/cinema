@@ -26,6 +26,7 @@ function clearLocalSession(expectedGeneration,notice){
   LOGS_RUN=null; CLUSTER_LOGS_RUN=null;
   CLUSTER_LOADED=false; CLUSTER_LEAVING=false; forgetJoinToken();
   const protectedMain=document.getElementById("main"); if(protectedMain) protectedMain.innerHTML="";
+  window.CinemaDiagnostics?.clear();
   TOKEN=null; AUTH_GENERATION++; ME=null;
   refreshClientErrorReporterAuth();
   AUTH_NOTICE=notice||"";
@@ -40,6 +41,7 @@ function clearLocalSession(expectedGeneration,notice){
 async function logout({revoke=true,notice=""}={}){
   const token=TOKEN, authGeneration=AUTH_GENERATION;
   if(SIGN_OUT_RUN&&SIGN_OUT_RUN.generation===authGeneration) return SIGN_OUT_RUN.promise;
+  const enrollmentRevocation=typeof diagnosticRevokeEnrollment==="function"?diagnosticRevokeEnrollment(token):Promise.resolve();
   if(!revoke||!token){
     clearLocalSession(authGeneration,notice);
     return false;
@@ -52,6 +54,7 @@ async function logout({revoke=true,notice=""}={}){
   const run=(async()=>{
     let confirmed=false;
     try{
+      await enrollmentRevocation;
       const response=await fetch(location.origin+API+"/auth/logout",{
         method:"POST",headers:{authorization:"Bearer "+token},signal:controller.signal
       });
@@ -104,7 +107,7 @@ async function boot(){
   try{ await PLAY_CAPS_READY; }catch(e){}
   let server;
   try{ server=await api("/server"); SERVER=server; }catch(e){
-    document.getElementById("app").innerHTML=`<div class="center"><div class="card">Server unreachable.</div></div>`;
+    document.getElementById("app").innerHTML=`<div class="center"><div class="card">Server unreachable.<button type="button" onclick="showDiagnostics()">Report a problem</button></div></div>`;
     markBootReady();
     if(NATIVE_READER_BOOT) nativeReaderPost("error","Cinema server unreachable.");
     return;
@@ -118,6 +121,7 @@ async function boot(){
     return renderLogin(server);
   }
   try{ ME=await api("/me"); }catch(e){ return NATIVE_READER_BOOT?undefined:renderLogin(server); }
+  if(typeof diagnosticProvisionForCurrentAccount==="function")void diagnosticProvisionForCurrentAccount();
   // Before the first chrome paint, so a disabled section never flashes in
   // the nav. Never throws: a failed read leaves every section showing.
   await loadFeatures();
@@ -130,7 +134,7 @@ function authShell(title, sub, fields, btn, onsubmit){
     <h1>${title}</h1><p class="muted" style="margin-top:0">${sub}</p>
     ${fields}<div class="err" id="aerr"></div>
     <button style="width:100%;margin-top:16px" id="ab">${btn}</button>
-    <div class="versionstamp">Version ${esc(buildLabel())}</div></form></div>`;
+    <button type="button" onclick="showDiagnostics()">Help · Report a problem</button><div class="versionstamp">Version ${esc(buildLabel())}</div></form></div>`;
   document.getElementById("af").addEventListener("submit",async e=>{
     e.preventDefault(); const b=document.getElementById("ab"); b.disabled=true;
     try{ await onsubmit(); }catch(err){ document.getElementById("aerr").textContent=err.message; b.disabled=false; }

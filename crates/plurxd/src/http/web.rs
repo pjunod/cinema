@@ -5,7 +5,7 @@
 //! non-API GET path.
 //!
 //! The app is not one file. `index.html` is a 97-line shell of markup and tags;
-//! the CSS and the JavaScript live in the eighty-two files of [`WEB_ASSETS`],
+//! the CSS and the JavaScript live in the eighty-nine files of [`WEB_ASSETS`],
 //! which is also their load order. There is no bundler and no build step —
 //! `docs/clients/WEB-SHELL-LAYOUT.md` is the map, and adding a file means a row
 //! there, a row here, and a tag in the shell, or the tests below say so.
@@ -60,6 +60,12 @@ pub enum WebAsset {
 pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("app.css",                                WebAsset::HeadStyle,   include_str!("../web/app.css")),
     ("core/theme.js",                          WebAsset::HeadScript,  include_str!("../web/core/theme.js")),
+    ("core/diagnostics-wire.js",               WebAsset::HeadScript,  include_str!("../web/core/diagnostics-wire.js")),
+    ("core/diagnostics-hash.js",                    WebAsset::HeadScript,  include_str!("../web/core/diagnostics-hash.js")),
+    ("core/diagnostics-store.js",                   WebAsset::HeadScript,  include_str!("../web/core/diagnostics-store.js")),
+    ("core/diagnostics-recorder.js",                WebAsset::HeadScript,  include_str!("../web/core/diagnostics-recorder.js")),
+    ("core/diagnostics-export.js",                  WebAsset::HeadScript,  include_str!("../web/core/diagnostics-export.js")),
+    ("core/diagnostics-delivery.js",            WebAsset::HeadScript,  include_str!("../web/core/diagnostics-delivery.js")),
     ("core/errors.js",                         WebAsset::HeadScript,  include_str!("../web/core/errors.js")),
     ("hls.min.js",                             WebAsset::BodyScript,  include_str!("../web/hls.min.js")),
     ("core/app.js",                            WebAsset::BodyScript,  include_str!("../web/core/app.js")),
@@ -139,6 +145,7 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("pages/remote-pairing.js", WebAsset::BodyScript, include_str!("../web/pages/remote-pairing.js")),
     ("pages/settings-remote.js", WebAsset::BodyScript, include_str!("../web/pages/settings-remote.js")),
     ("pages/remote.js", WebAsset::BodyScript, include_str!("../web/pages/remote.js")),
+    ("pages/diagnostics.js",                   WebAsset::BodyScript,  include_str!("../web/pages/diagnostics.js")),
     ("router.js",                              WebAsset::BodyScript,  include_str!("../web/router.js")),
 ];
 

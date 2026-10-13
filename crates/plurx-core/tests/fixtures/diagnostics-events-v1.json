@@ -1,0 +1,115 @@
+{
+  "version": "cinema.diagnostics.v1",
+  "cases": [
+    {
+      "name": "minimal event",
+      "valid": true,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{}}"
+    },
+    {
+      "name": "distinct source delivery renderer and audio codecs",
+      "valid": true,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"source_codec\":\"hevc\",\"delivered_codec\":\"h264\",\"render_codec\":\"unknown\",\"audio_codec\":\"aac\"}}"
+    },
+    {
+      "name": "exact maximum frame counters",
+      "valid": true,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"frame_count\":\"18446744073709551615\",\"dropped_frames\":\"9007199254740993\"}}"
+    },
+    {
+      "name": "raw URL canary refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"url\":\"https://CANARY_HOST/?token=CANARY_SECRET\"}}"
+    },
+    {
+      "name": "title is never an event fact",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"title\":\"CANARY_TITLE\"}}"
+    },
+    {
+      "name": "sequence leading zero refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"00\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{}}"
+    },
+    {
+      "name": "integer counter refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"dropped_frames\":1}}"
+    },
+    {
+      "name": "overflow counter refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"frame_count\":\"18446744073709551616\"}}"
+    },
+    {
+      "name": "invalid calendar refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2025-02-29T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{}}"
+    },
+    {
+      "name": "foreign route refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"route\":\"CANARY_HOST\"}}"
+    },
+    {
+      "name": "unknown event field refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{},\"url\":\"CANARY_SECRET\"}"
+    },
+    {
+      "name": "non-HTTP status refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"status\":1}}"
+    },
+    {
+      "name": "unknown HTTP outcome is zero",
+      "valid": true,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"status\":0}}"
+    },
+    {
+      "name": "unknown source codec refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"source_codec\":\"CANARY_PRIVATE_ENCODER\"}}"
+    },
+    {
+      "name": "null fact refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"observed\":null}}"
+    },
+    {
+      "name": "boolean cannot alias integer",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"duration_ms\":true}}"
+    },
+    {
+      "name": "negative duration refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"duration_ms\":-1}}"
+    },
+    {
+      "name": "floating lexeme refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"duration_ms\":1.0}}"
+    },
+    {
+      "name": "duplicate fact refused",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"duration_ms\":1,\"duration_ms\":2}}"
+    },
+    {
+      "name": "diagnostic-origin-build",
+      "valid": true,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"build\":\"234\",\"app_version\":\"0.3.0\"}}"
+    },
+    {
+      "name": "private-build-label",
+      "valid": false,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"build\":\"operator@private.lan\"}}"
+    },
+    {
+      "name": "bounded measured clock and admin admission",
+      "valid": true,
+      "json": "{\"run_id\":\"00000000-0000-4000-8000-000000000001\",\"sequence\":\"0\",\"utc\":\"2026-10-12T16:00:00Z\",\"elapsed_ms\":0,\"domain\":\"playback\",\"kind\":\"sample\",\"facts\":{\"clock_ahead_ms\":123,\"clock_behind_ms\":0,\"clock_uncertainty_ms\":31,\"active_producers\":2,\"hw_slots\":1,\"hw_max\":4}}"
+    }
+  ]
+}

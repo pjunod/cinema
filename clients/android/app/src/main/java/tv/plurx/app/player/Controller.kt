@@ -146,6 +146,7 @@ class Controller internal constructor(
     retainedSubtitle: SubtitleChoice? = null,
     private val replan: (Long, String, PlaybackQuality) -> Unit,
 ) {
+    internal val diagnosticAuthorizationGeneration = Session.playbackAuthorization().generation
     private val fileContext = plan.fileContext.also { it.localId(plan.fileId) }
 
     /**
@@ -768,7 +769,10 @@ class Controller internal constructor(
                 sessionId = sessionId,
             )
         },
-        emit = vm::postPlaybackDiagnostic,
+        emit = { event ->
+            tv.plurx.app.diagnostics.DiagnosticRuntime.playback(event,diagnosticAuthorizationGeneration)
+            vm.postPlaybackDiagnostic(event)
+        },
     )
     private val stallWatchdogJob: Job
     private val targetPresentationWatchdogJob: Job
@@ -4090,6 +4094,7 @@ class Controller internal constructor(
             val detail = attachment.probeDetail() ?: return@runCatching
             val counters = continuousPlayer.videoDecoderCounters
             val dropped = counters?.droppedBufferCount?.takeIf { it >= 0 }
+
             val decoderEpoch = counters?.let { System.identityHashCode(it).toLong() and 0xffffffffL }
             val mode = when (playbackControlSelection().quality) {
                 QualitySelection.Auto, is QualitySelection.AutoCandidate -> "auto"
@@ -4104,7 +4109,24 @@ class Controller internal constructor(
         }
     }
 
+    private var diagnosticSampleLastMs: Long? = null
+    private fun recordPrivateDiagnosticSample() {
+        if (diagnosticAuthorizationGeneration != Session.playbackAuthorization().generation) return
+        val now=monotonicNowMs()
+        if (diagnosticSampleLastMs?.let { now >= it && now-it < 2000 } == true) return
+        diagnosticSampleLastMs=now
+        runCatching {
+            val counters=player.videoDecoderCounters
+            val facts=mutableMapOf("state" to kotlinx.serialization.json.JsonPrimitive(if (player.isPlaying) "playing" else if (player.playWhenReady) "waiting" else "paused"),
+                "playhead_ms" to kotlinx.serialization.json.JsonPrimitive(realPosition().coerceIn(0,604800000)),
+                "delivered_codec" to kotlinx.serialization.json.JsonPrimitive("unknown"), "render_codec" to kotlinx.serialization.json.JsonPrimitive("unknown"))
+            counters?.renderedOutputBufferCount?.takeIf { it >= 0 }?.let { facts["frame_count"]=kotlinx.serialization.json.JsonPrimitive(it.toString()) }
+            counters?.droppedBufferCount?.takeIf { it >= 0 }?.let { facts["dropped_frames"]=kotlinx.serialization.json.JsonPrimitive(it.toString()) }
+            tv.plurx.app.diagnostics.DiagnosticRuntime.record("playback","sample",facts,diagnosticAuthorizationGeneration)
+        }
+    }
     private fun playbackControlPlayerChanged() {
+        recordPrivateDiagnosticSample()
         reportContinuousReadOnlyProbe()
         tickDisplayAwareAuto()
         refreshControlWaiting()

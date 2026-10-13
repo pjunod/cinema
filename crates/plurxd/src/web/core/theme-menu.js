@@ -89,7 +89,7 @@ function profileMenuHtml(){
   const settings = ME&&ME.is_admin ? `<button onclick="location.hash='#/settings';closeMenus()">Settings</button>`:"";
   return `<div class="pident"><span class="pavatar">${esc((name[0]||"?").toUpperCase())}</span>`
     +`<span><b>${esc(name||"—")}</b><small>${role}</small></span></div>`
-    +`<button onclick="showConnectQr()">Show server QR code</button>`
+    +`<button onclick="showConnectQr()">Show server QR code</button><button onclick="showDiagnostics()">Help · Report a problem</button>`
     +settings
     +`<button onclick="location.hash='#/settings/developer';closeMenus()">Device preferences</button><button onclick="location.hash='#/remote';closeMenus()">Phone remote</button>`
     +`<button onclick="logout()">Sign out</button>`;
@@ -141,6 +141,7 @@ function liveTvPopoverOpen(){
 // handlers is how a key ends up closing two things.
 window.addEventListener("keydown",e=>{
   if(e.key!=="Escape") return;
+  if(document.getElementById("diagnostic-dialog")){e.preventDefault();e.stopImmediatePropagation();closeDiagnostics();return;}
   if(connectQrOpen()){ e.preventDefault(); e.stopImmediatePropagation(); closeConnectQr(); return; }
   if(document.getElementById("editwrap")){ e.preventDefault(); e.stopImmediatePropagation(); closeEdit(); return; }
   if(liveTvPopoverOpen()){ e.preventDefault(); e.stopImmediatePropagation(); liveTvPopover(null); }

@@ -6,17 +6,16 @@ require. Full license texts that are not Apache-2.0 live in
 [`licenses/`](licenses/); Apache-2.0 components are covered by the root
 [LICENSE](LICENSE).
 
-plurx is Apache-2.0. Nothing it ships is copyleft, so nothing here imposes a
-copyleft obligation on plurx or on anything built with it. Two things sit
-close enough to that line to be worth stating plainly: ffmpeg, which plurx
-invokes but never links (§1), and JUnit, which is copyleft but test-scoped
-and never reaches a shipped artifact (§5).
+plurx is Apache-2.0. The independently built support service includes
+MPL-2.0 libraries for passkey validation (§4); their upstream source and
+license notices are identified below. ffmpeg is invoked rather than linked
+(§1), and JUnit is test-scoped and does not reach shipped artifacts (§5).
 
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 546 source-bearing crates in the root workspace · license fields
-verified 2026-09-17; the graph itself re-checked against `Cargo.lock`
+the work. 563 source-bearing crates in the root workspace · license fields
+verified 2026-10-12; the graph itself re-checked against `Cargo.lock`
 on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
 enabling S3 and fourteen crates reached only through it left the
 resolution, and on 2026-09-24, when `ring` became the only rustls provider
@@ -26,7 +25,9 @@ crate counts and the §4 license summary were recomputed from `cargo metadata`
 on 2026-09-25 and 2026-10-03, when the sharing transport added
 `hickory-proto` and its `critical-section` / `portable-atomic` dependencies;
 `tests/operations/test_license_notices.py` holds the summary,
-the counts and the full list to one another.
+the counts and the full list to one another. The graph and declared SPDX
+expressions were rechecked with pinned, locked `cargo metadata` on 2026-10-12
+for the independent support service dependencies.
 
 ---
 
@@ -146,20 +147,22 @@ such requirement applies.
 
 ## 4. Rust dependencies
 
-546 source-bearing crates resolve into a plurx build, excluding the five
+563 source-bearing crates resolve into a plurx build, excluding the eight
 first-party crates and the vendored ones above (`s3-simple` resolves only in
-the fork's optional backup graph, never in this one). Every one is permissive:
+the fork's optional backup graph, never in this one). The independently built support service adds five MPL-2.0 libraries for
+passkey validation; the other selected license terms are permissive:
 
 | License expression | Crates |
 |---|---:|
-| `MIT OR Apache-2.0` | 273 |
-| `MIT` | 115 |
+| `MIT OR Apache-2.0` | 279 |
+| `MIT` | 116 |
 | `Apache-2.0 OR MIT` | 28 |
 | `Apache-2.0 WITH LLVM-exception` | 27 |
+| `MIT/Apache-2.0` | 21 |
 | `Unicode-3.0` | 18 |
-| `MIT/Apache-2.0` | 17 |
+| `Apache-2.0` | 12 |
 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 12 |
-| `Apache-2.0` | 11 |
+| `MPL-2.0` | 5 |
 | `Unlicense OR MIT` | 5 |
 | `Unlicense/MIT` | 4 |
 | `Apache-2.0 OR ISC OR MIT` | 3 |
@@ -186,10 +189,26 @@ the fork's optional backup graph, never in this one). Every one is permissive:
 | `MIT-0` | 1 |
 | `Zlib` | 1 |
 
-`r-efi` is the only crate whose license expression names a copyleft license
-at all (`MIT OR Apache-2.0 OR LGPL-2.1-or-later`). It is a disjunction, so
+`r-efi` also offers a copyleft license option (`MIT OR Apache-2.0 OR LGPL-2.1-or-later`). It is a disjunction, so
 plurx takes it under MIT — and the crate is a UEFI-target shim that does not
 compile for Linux or macOS.
+
+
+The support service's `base64urlsafedata`, `webauthn-attestation-ca`,
+`webauthn-rs`, `webauthn-rs-core` and `webauthn-rs-proto` are unmodified
+MPL-2.0 v0.5.5 libraries. The full license accompanies the service in
+[licenses/MPL-2.0.txt](licenses/MPL-2.0.txt). Recipients can obtain their exact
+Source Code Form under MPL-2.0 from the corresponding crates.io source archives:
+
+- [base64urlsafedata 0.5.5](https://static.crates.io/crates/base64urlsafedata/base64urlsafedata-0.5.5.crate).
+- [webauthn-attestation-ca 0.5.5](https://static.crates.io/crates/webauthn-attestation-ca/webauthn-attestation-ca-0.5.5.crate).
+- [webauthn-rs 0.5.5](https://static.crates.io/crates/webauthn-rs/webauthn-rs-0.5.5.crate).
+- [webauthn-rs-core 0.5.5](https://static.crates.io/crates/webauthn-rs-core/webauthn-rs-core-0.5.5.crate).
+- [webauthn-rs-proto 0.5.5](https://static.crates.io/crates/webauthn-rs-proto/webauthn-rs-proto-0.5.5.crate).
+
+`Cargo.lock` records each resolved source/checksum. `cargo vendor --locked`
+obtains those same sources. Preserve this notice and license with support
+distributions.
 
 Crates under `Unicode-3.0` (18) and `CDLA-Permissive-2.0` (2, the webpki root
 stores) are permissive with attribution requirements, satisfied by this file.
@@ -208,7 +227,7 @@ workspaces ships in any artifact, so they are out of scope for distribution,
 but they are not covered by the table above.
 
 <details>
-<summary>Full crate list (546)</summary>
+<summary>Full crate list (563)</summary>
 
 | Crate | Version | License |
 |---|---|---|
@@ -230,7 +249,9 @@ but they are not covered by the table above.
 | `arc-swap` | 1.9.2 | MIT OR Apache-2.0 |
 | `argon2` | 0.5.3 | MIT OR Apache-2.0 |
 | `arrayvec` | 0.7.8 | MIT OR Apache-2.0 |
+| `asn1-rs` | 0.6.2 | MIT OR Apache-2.0 |
 | `asn1-rs` | 0.7.2 | MIT OR Apache-2.0 |
+| `asn1-rs-derive` | 0.5.1 | MIT OR Apache-2.0 |
 | `asn1-rs-derive` | 0.6.0 | MIT OR Apache-2.0 |
 | `asn1-rs-impl` | 0.2.0 | MIT/Apache-2.0 |
 | `async-stream` | 0.3.6 | MIT |
@@ -245,6 +266,7 @@ but they are not covered by the table above.
 | `base64` | 0.21.7 | MIT OR Apache-2.0 |
 | `base64` | 0.22.1 | MIT OR Apache-2.0 |
 | `base64ct` | 1.8.3 | Apache-2.0 OR MIT |
+| `base64urlsafedata` | 0.5.5 | MPL-2.0 |
 | `bincode` | 2.0.1 | MIT |
 | `bincode_derive` | 2.0.1 | MIT |
 | `bit-set` | 0.8.0 | Apache-2.0 OR MIT |
@@ -329,6 +351,7 @@ but they are not covered by the table above.
 | `deadpool` | 0.13.0 | MIT OR Apache-2.0 |
 | `deadpool-runtime` | 0.3.1 | MIT OR Apache-2.0 |
 | `der-parser` | 10.0.0 | MIT OR Apache-2.0 |
+| `der-parser` | 9.0.0 | MIT/Apache-2.0 |
 | `deranged` | 0.5.8 | MIT OR Apache-2.0 |
 | `derive_builder` | 0.20.2 | MIT OR Apache-2.0 |
 | `derive_builder_core` | 0.20.2 | MIT OR Apache-2.0 |
@@ -364,6 +387,8 @@ but they are not covered by the table above.
 | `flume` | 0.12.0 | Apache-2.0/MIT |
 | `fnv` | 1.0.7 | Apache-2.0 / MIT |
 | `foldhash` | 0.2.0 | Zlib |
+| `foreign-types` | 0.3.2 | MIT/Apache-2.0 |
+| `foreign-types-shared` | 0.1.1 | MIT/Apache-2.0 |
 | `form_urlencoded` | 1.2.2 | MIT OR Apache-2.0 |
 | `fraction` | 0.16.0 | MIT OR Apache-2.0 |
 | `fs-err` | 3.3.1 | MIT OR Apache-2.0 |
@@ -485,6 +510,7 @@ but they are not covered by the table above.
 | `num-traits` | 0.2.19 | MIT OR Apache-2.0 |
 | `num_cpus` | 1.17.0 | MIT OR Apache-2.0 |
 | `object` | 0.40.0 | Apache-2.0 OR MIT |
+| `oid-registry` | 0.7.1 | MIT OR Apache-2.0 |
 | `oid-registry` | 0.8.1 | MIT OR Apache-2.0 |
 | `once_cell` | 1.21.4 | MIT OR Apache-2.0 |
 | `once_cell_polyfill` | 1.70.2 | MIT OR Apache-2.0 |
@@ -493,12 +519,16 @@ but they are not covered by the table above.
 | `opaque-debug` | 0.3.1 | MIT OR Apache-2.0 |
 | `openraft` | 0.9.25 | MIT OR Apache-2.0 |
 | `openraft-macros` | 0.9.25 | MIT OR Apache-2.0 |
+| `openssl` | 0.10.81 | Apache-2.0 |
+| `openssl-macros` | 0.1.1 | MIT/Apache-2.0 |
 | `openssl-probe` | 0.2.1 | MIT OR Apache-2.0 |
+| `openssl-sys` | 0.9.117 | MIT |
 | `outref` | 0.5.2 | MIT |
 | `parking_lot` | 0.12.5 | MIT OR Apache-2.0 |
 | `parking_lot_core` | 0.9.12 | MIT OR Apache-2.0 |
 | `password-hash` | 0.5.0 | MIT OR Apache-2.0 |
 | `paste` | 1.0.15 | MIT OR Apache-2.0 |
+| `pastey` | 0.1.1 | MIT OR Apache-2.0 |
 | `pastey` | 0.2.3 | MIT OR Apache-2.0 |
 | `pem` | 3.0.6 | MIT |
 | `percent-encoding` | 2.3.2 | MIT OR Apache-2.0 |
@@ -582,6 +612,7 @@ but they are not covered by the table above.
 | `semver` | 1.0.28 | MIT OR Apache-2.0 |
 | `seq-macro` | 0.3.6 | MIT OR Apache-2.0 |
 | `serde` | 1.0.229 | MIT OR Apache-2.0 |
+| `serde_cbor_2` | 0.13.0 | MIT OR Apache-2.0 |
 | `serde_core` | 1.0.229 | MIT OR Apache-2.0 |
 | `serde_derive` | 1.0.229 | MIT OR Apache-2.0 |
 | `serde_json` | 1.0.151 | MIT OR Apache-2.0 |
@@ -712,6 +743,10 @@ but they are not covered by the table above.
 | `wat` | 1.261.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `web-sys` | 0.3.103 | MIT OR Apache-2.0 |
 | `web-time` | 1.1.0 | MIT OR Apache-2.0 |
+| `webauthn-attestation-ca` | 0.5.5 | MPL-2.0 |
+| `webauthn-rs` | 0.5.5 | MPL-2.0 |
+| `webauthn-rs-core` | 0.5.5 | MPL-2.0 |
+| `webauthn-rs-proto` | 0.5.5 | MPL-2.0 |
 | `webpki-root-certs` | 1.0.9 | CDLA-Permissive-2.0 |
 | `webpki-roots` | 1.0.9 | CDLA-Permissive-2.0 |
 | `widestring` | 1.2.1 | MIT OR Apache-2.0 |
@@ -744,6 +779,7 @@ but they are not covered by the table above.
 | `wit-bindgen` | 0.57.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | `writeable` | 0.6.3 | Unicode-3.0 |
 | `wyz` | 0.5.1 | MIT |
+| `x509-parser` | 0.16.0 | MIT OR Apache-2.0 |
 | `x509-parser` | 0.18.1 | MIT OR Apache-2.0 |
 | `yasna` | 0.6.0 | MIT OR Apache-2.0 |
 | `yoke` | 0.8.3 | Unicode-3.0 |

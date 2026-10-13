@@ -24,6 +24,7 @@ benchmark = "1.5.0"
 uiAutomator = "2.4.0"
 
 [libraries]
+zxing-core = { module = "com.google.zxing:core", version = "3.5.4" }
 firebase-messaging = { module = "com.google.firebase:firebase-messaging", version.ref = "firebaseMessaging" }
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }

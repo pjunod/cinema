@@ -12,6 +12,11 @@ struct LiveTvDeveloperView: View {
 
     var body: some View {
         Form {
+            Section("Remote diagnostics · advisory readiness") {
+                DiagnosticReportButton()
+                Text("Local history, capture, sharing and support delivery are available from Help. Platform crash evidence may be delayed or unavailable.").font(.caption)
+                Text("Awaiting privacy/resource qualification and physical phone, iPad and Apple TV approval-flow acceptance. This advisory leaves Developer after those checks pass; local history remains a privacy choice in Help.").font(.caption)
+            }
             SharedSharingDeveloperCard()
             Section("Cinema remotes · advisory enablement") {
                 Toggle("Enable Cinema remotes on this installation", isOn: $cinemaRemoteEnabled)
