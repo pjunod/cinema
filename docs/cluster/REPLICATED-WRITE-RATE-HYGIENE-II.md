@@ -11,6 +11,15 @@ follow-on
 on `main`) · **Board:** K-10 on the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md)
 
+**October 13 qualification ruling:** no twelve-hour uninterrupted window or
+deployment freeze. Use K-03's bounded, deployment-aware protocol in
+[§5.5](REPLICATED-WRITE-RATE-HYGIENE.md#55-m4--after-measurement-and-doc).
+Retain timer/lease/wakeup regressions and report per-source segments within
+one 30-minute wall-clock cap; never restart the allowance at a deployment.
+Historical M0 and failed/lost captures remain distinct. Explicit bounded
+sampler/evaluator tooling has offline controls; actual admitted fleet
+evidence is still owed. This is not a fleet pass.
+
 K-03 took the watched-outbox claim (28.9% of replicated entries) off the idle
 cluster. Its M0 attribution found two larger or comparable loops it was not
 scoped for: the `metadata-classification` lease cycle, **41.6%** of all
@@ -422,12 +431,16 @@ media1 and lab3:
    offline claimed+empty_claim grows by about 10 per voter (one per 30 s) and
    skipped_hint by more; classification hinted_pass+forced_pass grows on at
    most one voter, the others grow idle or not_owner.
-2. Reuse the K-03 M4 capture (or start one the same way): after a qualifying
-   12-hour idle window, run `scripts/replicated-write-capture evaluate
-   <dir>/samples.tsv --fleet <voters.fleet.json> --json` and report proposals/day beside
-   docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-M0.md §2.
+2. Reuse admitted K-03 bounded segments. Report actual elapsed time,
+   numerator and day-normalized proposals per source-bound segment beside
+   docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-M0.md §2. The legacy evaluator's
+   twelve-hour gate is superseded, not a reason to freeze deployments.
+   Use the explicit `evaluate-bounded-after` command with retained evidence
+   and the independently admitted full-source/build tuple; report excluded
+   ticks and boundaries, not just its scoped cost boolean.
 3. Copy (read-only, cp) the learner lab3's /srv/plurx/hiqlite/logs/*.wal to
-   /tmp and run `scripts/replicated-write-capture attribute <copies>`; report
+   persistent owned evidence storage and run
+   `scripts/replicated-write-capture attribute <copies>`; report
    the shares of `metadata-classification` lease writes and `UPDATE
    offline_packages` claims.
 Acceptance (§5.3): each of those two shares is below 2% of replicated
