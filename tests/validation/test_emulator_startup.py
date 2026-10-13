@@ -53,6 +53,7 @@ class EmulatorStartupCase(unittest.TestCase):
         result = self.simulate('''
         prepareDevice(5554, {}, {now: () => time, wait: async ms => {time += ms;},
           run: async (port, args, limit) => {calls.push({args, limit, before: time});
+            if (args[1] !== 'input') {time += 5000; return {ok: true, stdout: ready(args)};}
             time += limit; return {ok: false, stdout: '', diagnostic: 'child timeout'};}
         }).then(() => {throw Error('accepted deadline');}, error =>
           console.log(JSON.stringify({calls, time, error: error.message})));
@@ -66,15 +67,20 @@ class EmulatorStartupCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / 'platform-tools/adb'
             binary.parent.mkdir()
-            binary.write_text('#!/bin/sh\necho $$\nexec sleep 60\n')
+            binary.write_text('#!/bin/sh\nexec sleep 60\n')
             binary.chmod(0o755)
             environment = dict(os.environ, ANDROID_HOME=directory)
-            script = 'require(process.argv[1]).runAdb(5554, ["get-state"], 100).then(r => console.log(JSON.stringify(r)))'
+            script = """const cp = require('node:child_process');
+            let pid; const actual = cp.execFile;
+            cp.execFile = (...args) => {const child = actual(...args); pid = child.pid; return child;};
+            require(process.argv[1]).runAdb(5554, ["get-state"], 100)
+              .then(r => console.log(JSON.stringify({...r, pid})));"""
             result = subprocess.run(['node', '-e', script, str(MODULE)], env=environment,
                                     capture_output=True, text=True, timeout=5, check=True)
             outcome = json.loads(result.stdout)
             self.assertFalse(outcome['ok'])
-            child = int(outcome['stdout'].strip())
+            child = outcome['pid']
+            self.assertIsInstance(child, int)
             with self.assertRaises(ProcessLookupError):
                 os.kill(child, 0)
 

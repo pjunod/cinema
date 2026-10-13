@@ -17,6 +17,7 @@
     "lib/emulator-manager.js"
   ],
   "added": [
-    "lib/startup-readiness.js"
+    "lib/startup-readiness.js",
+    ".gitignore"
   ]
 }
