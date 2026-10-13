@@ -3298,6 +3298,36 @@ assert.equal(context.ACT_TIMER, null);
         contract_commands = make_dry_run_commands(
             "cluster-transport-recovery-contracts"
         )
+        contract_run = workflow_step_blocks(contracts)["Run recovery schemas, validators, and focused regressions"]
+        self.assertEqual(workflow_step_literal(contract_run, "run"), [
+            "set -euo pipefail", "mkdir -p target/validation", "{",
+            '  test "$(uname -s)" = Linux',
+            '  if [ "$RETAIN_TRANSPORT_UNITS" = true ]; then',
+            "    python3 -m validation.qualification_unit_continuation --compile-units transport",
+            "  else", "    make cluster-transport-recovery-contracts", "  fi",
+            "} 2>&1 | tee target/validation/cluster-transport-recovery-contracts.log",
+        ])
+        self.assertIn("PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}", contract_run)
+        receipt = workflow_step_blocks(recovery)["Record the transport recovery lane result"]
+        self.assertIn("RETAIN_TRANSPORT_UNITS: ${{ needs.scope.outputs.retain_transport_units }}", receipt)
+        self.assertEqual(workflow_step_literal(receipt, "run"), [
+            'set -euo pipefail',
+            'unit_command="make cluster-transport-recovery-contracts"',
+            'if [ "$RETAIN_TRANSPORT_UNITS" = true ]; then',
+            '  unit_command="python3 -m validation.qualification_unit_continuation --compile-units transport"',
+            'fi',
+            'python3 -m validation.ci_lane_receipt \\',
+            '  --output target/validation/cluster-transport-recovery-receipt.json \\',
+            '  --log target/validation/cluster-transport-recovery.log \\',
+            '  --evidence target/validation/cluster-transport-recovery.json \\',
+            '  --evidence-validator "$EVIDENCE_VALIDATOR" \\',
+            '  --lane cluster-transport-recovery \\',
+            '  --result "$LANE_RESULT" \\',
+            '  --command "$unit_command" \\',
+            '  --command "make cluster-transport-recovery-voter-check" \\',
+            '  --command "make cluster-transport-recovery-learner-check" \\',
+            '  --command "transport-recovery-assemble"',
+        ])
 
         self.assertEqual(len(contract_commands), 7)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')

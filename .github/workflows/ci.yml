@@ -940,18 +940,24 @@ jobs:
         env:
           LANE_RESULT: ${{ steps.transport_recovery.outcome }}
           EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/transport-recovery/plurx-cluster-check
-        run: >-
-          python3 -m validation.ci_lane_receipt
-          --output target/validation/cluster-transport-recovery-receipt.json
-          --log target/validation/cluster-transport-recovery.log
-          --evidence target/validation/cluster-transport-recovery.json
-          --evidence-validator "$EVIDENCE_VALIDATOR"
-          --lane cluster-transport-recovery
-          --result "$LANE_RESULT"
-          --command "make cluster-transport-recovery-contracts"
-          --command "make cluster-transport-recovery-voter-check"
-          --command "make cluster-transport-recovery-learner-check"
-          --command "transport-recovery-assemble"
+          RETAIN_TRANSPORT_UNITS: ${{ needs.scope.outputs.retain_transport_units }}
+        run: |
+          set -euo pipefail
+          unit_command="make cluster-transport-recovery-contracts"
+          if [ "$RETAIN_TRANSPORT_UNITS" = true ]; then
+            unit_command="python3 -m validation.qualification_unit_continuation --compile-units transport"
+          fi
+          python3 -m validation.ci_lane_receipt \
+            --output target/validation/cluster-transport-recovery-receipt.json \
+            --log target/validation/cluster-transport-recovery.log \
+            --evidence target/validation/cluster-transport-recovery.json \
+            --evidence-validator "$EVIDENCE_VALIDATOR" \
+            --lane cluster-transport-recovery \
+            --result "$LANE_RESULT" \
+            --command "$unit_command" \
+            --command "make cluster-transport-recovery-voter-check" \
+            --command "make cluster-transport-recovery-learner-check" \
+            --command "transport-recovery-assemble"
       - name: Retain transport recovery log, receipt, and evidence
         if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
