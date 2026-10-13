@@ -24,6 +24,7 @@ function harness(options={}){
     playbackContext:()=>({attempt:'a1',method:p.method,file_id:p.fileId}),
     clientLog:r=>posts.push(JSON.parse(JSON.stringify(r))),
     playbackOwnsAttachedMedia:owner=>owner===c.PLAYER,
+    playbackAttemptTerminallyStopped:()=>false,
     supersedePlaybackControlIntent:owner=>++owner.controlIntentGeneration,
     playbackSurfaceStep:()=>{},notifyPlaybackControl:()=>false,
     pbTotalSec:()=>120,playbackChangeAlreadyInFlight:()=>false,endWait:()=>{},
@@ -37,11 +38,12 @@ function harness(options={}){
   for(const name of ['dispatchPlaybackSeekTelemetry','playbackSeekTraceRanges',
     'recordPlaybackSeekRoute','finishPlaybackSeekTelemetry','watchPlaybackSeekTelemetry',
     'beginPlaybackControlSeek','markPlaybackControlSeekExecuted','samplePlaybackPresentationClock',
+    'hlsStartupCurrent','pauseHlsStartup','resumePausedVodSeek','resumeHlsStartup',
     'settlePlaybackControlSeek','seekTo','clearEffectiveProcessing'])vm.runInContext(source(name),c);
   function emit(name){for(const fn of [...(listeners.get(name)||[])])fn();}
   function present(at=clock.ms+50){clock.ms=at;video.seeking=false;emit('seeked');
     return c.settlePlaybackControlSeek(video,c.PLAYER,video.currentTime,++c.PLAYER.controlPresentedFrames,{epoch:c.PLAYER.controlPresentationEpoch,attachment:c.PLAYER.mediaAttachment,intent:c.PLAYER.controlSeek?.sequence});}
-  async function dispatch(target){const promise=c.seekTo(target);const timer=timers.shift();assert.equal(timer.ms,100);
+  async function dispatch(target){const promise=c.seekTo(target);const at=timers.findIndex(timer=>timer.ms===100);const [timer]=timers.splice(at,1);assert.equal(timer.ms,100);
     clock.ms+=100;timer.fn();await promise;return c.PLAYER.controlSeek;}
   return {c,p,video,posts,timers,clock,emit,present,dispatch};
 }
@@ -231,4 +233,69 @@ test('ready paused successor settles its only frame before any playing event',as
   const identity={epoch:h.p.controlPresentationEpoch,attachment:h.p.mediaAttachment,intent:h.p.controlSeek.sequence};
   assert.equal(h.c.settlePlaybackControlSeek(h.video,h.p,30,1,identity),true);
   assert.equal(h.p.controlSeek,null);assert.equal(h.video.paused,true);assert.equal(h.p.started,false);
+});
+
+function pausedVodHarness(covered=false){
+  const h=harness(),loads=[];
+  h.p.vod=true;h.p.method='transcode';h.p.wantsPlayback=false;h.video.paused=true;
+  h.c.PlaybackPolicy.seekRoute=({targetMs})=>({route:'local',basis:'vod',atMs:targetMs});
+  h.c.playbackSeekBufferCovers=()=>covered;
+  h.p.hls={stopLoad(){loads.push(['stop']);},startLoad(at){loads.push(['start',at]);}};
+  h.p.hlsStartup={player:h.p,hls:h.p.hls,state:'presenting',
+    attachment:{current:()=>h.c.PLAYER===h.p},retry:{state:'unused',timer:null}};
+  h.p.controlIntentGeneration=1;
+  h.c.pauseHlsStartup(h.p);
+  return {...h,loads};
+}
+test('paused unbuffered VOD seek fetches its target without Play and suspends after the target frame',async()=>{
+  const h=pausedVodHarness();await h.dispatch(30);
+  assert.deepEqual(h.loads,[['stop'],['start',30]],'Pause stopped the loader; the seek must issue fresh target loading');
+  assert.equal(h.video.paused,true);assert.equal(h.p.wantsPlayback,false);
+  assert.ok(h.p.controlSeek,'clock assignment cannot settle the seek');
+  h.present();
+  assert.equal(h.p.controlSeek,null);assert.deepEqual(h.loads.at(-1),['stop']);
+  assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,1);
+  h.p.wantsPlayback=true;h.p.controlIntentGeneration++;
+  assert.equal(h.c.resumeHlsStartup(h.video,h.p),true,'Play after a landed paused seek must restart the loader');
+  assert.deepEqual(h.loads.at(-1),['start',30]);
+});
+
+test('buffered paused VOD seek preserves suspension and permits the next Play',async()=>{
+  const h=pausedVodHarness(true);await h.dispatch(30);
+  assert.deepEqual(h.loads,[['stop']],'already buffered target needs no download');
+  h.present();h.p.wantsPlayback=true;h.p.controlIntentGeneration++;
+  assert.equal(h.c.resumeHlsStartup(h.video,h.p),true);
+  assert.deepEqual(h.loads.at(-1),['start',30]);
+});
+test('a superseding paused VOD seek retires old loading and cannot be stopped by its old cleanup',async()=>{
+  const h=pausedVodHarness();const old=await h.dispatch(30),cleanup=old.localVodSeekCleanup;
+  await h.dispatch(60);const count=h.loads.length;
+  assert.deepEqual(h.loads,[['stop'],['start',30],['stop'],['start',60]]);
+  cleanup();assert.equal(h.loads.length,count,'stale cleanup cannot stop current target loading');
+  h.present();assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,1);
+  assert.equal(h.posts.filter(x=>x.event==='seek_abandoned').length,1);
+});
+test('Play during paused target loading retains the loader after settlement',async()=>{
+  const h=pausedVodHarness();await h.dispatch(30);
+  h.p.wantsPlayback=true;h.p.controlIntentGeneration++;h.video.paused=false;
+  h.present();assert.deepEqual(h.loads,[['stop'],['start',30]]);
+  assert.equal(h.p.hlsStartup.pausedSeek,null);
+});
+test('retired paused seek cleanup cannot stop a replacement attachment loader',async()=>{
+  const h=pausedVodHarness();const pending=await h.dispatch(30),count=h.loads.length;
+  h.p.mediaAttachment={id:2};pending.localVodSeekCleanup();
+  assert.equal(h.loads.length,count);
+});
+test('unbuffered paused VOD seek deadline suspends target loading before bounded reopen',async()=>{
+  const h=pausedVodHarness();await h.dispatch(30);
+  const deadline=h.timers.find(timer=>timer.ms===h.c.PlaybackPolicy.HLS_STARTUP.seek_deadline_ms);
+  assert.ok(deadline);h.c.seekTo=(target,force)=>{h.reopen={target,force};};deadline.fn();
+  assert.deepEqual(h.reopen,{target:30,force:true});assert.deepEqual(h.loads.at(-1),['stop']);
+});
+
+test('Pause during an unbuffered VOD seek keeps fetching only the pending target',async()=>{
+  const h=pausedVodHarness();h.p.wantsPlayback=true;h.video.paused=false;await h.dispatch(30);
+  h.p.wantsPlayback=false;h.p.controlIntentGeneration++;h.video.paused=true;
+  h.c.pauseHlsStartup(h.p);assert.deepEqual(h.loads.at(-1),['start',30]);
+  h.present();assert.deepEqual(h.loads.at(-1),['stop']);assert.equal(h.p.hlsStartup.pausedSeek,null);
 });
