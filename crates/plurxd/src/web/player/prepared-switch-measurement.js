@@ -713,6 +713,13 @@ function supersedePlaybackControlIntent(p,{preserveHlsStartup=false,preserveCont
     }
     if(startup.retry?.intentGeneration===previous)
       startup.retry.intentGeneration=p.controlIntentGeneration;
+    const positioned=startup.pausedSeek;
+    if(positioned?.positioned&&positioned.intentGeneration===previous
+      &&positioned.attachment===p.mediaAttachment&&p.controlSeek===null
+      &&positioned.pending.element===document.getElementById("video")){
+      positioned.intentGeneration=p.controlIntentGeneration;
+      startup.intentGeneration=p.controlIntentGeneration;
+    }
   }
   if(!keepStartup&&startup&&startup.retry&&startup.retry.state==='reserved'){
     clearTimeout(startup.retry.timer); startup.retry.timer=null;
