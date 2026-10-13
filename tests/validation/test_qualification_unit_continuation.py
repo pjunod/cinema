@@ -142,6 +142,71 @@ class CompleteCommandUnitCase(unittest.TestCase):
             for text in [raw.replace('diagnostic_exit_code 0','diagnostic_exit_code 101'),raw.replace('367 filtered','366 filtered')]:
                 with self.assertRaises(receipts.ReceiptError):q.bound_execution(record,item,text)
 
+    def test_original_sidecar_target_exit_and_bulk_selection_are_checked(self):
+        import json
+        argv=['/owned/store_contract-0123456789abcdef','a','--exact','--test-threads=1']
+        raw='COMMAND '+json.dumps(argv)+'\nrunning 1 test\ntest a ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 367 filtered out; finished in 1.00s\nNATIVE_EXIT 0\n'
+        digest=log(raw)['sha256'];record=fixture()['commands'][0]['records'][0]
+        record['log']={'sha256_ref':digest};record['coverage']['outcomes']={'a':'pass'};record['origin']['command']=shlex.join(argv)
+        fp={'rustc':q.RUSTC_FINGERPRINT,'profile':q.TEST_PROFILE_FINGERPRINTS[0],'compile_kind':0,'rustflags':[],
+            'features':json.dumps(record['environment']['features']),
+            'local':[{'CheckDepInfo':{'dep_info':'debug/.fingerprint/plurx-core-0123456789abcdef/dep-test-integration-test-store_contract'}}]}
+        side={'source_commit':CANDIDATE,'branch':'effort/dv-hdr-repair','records':[{'command':argv,'exit_code':0}],
+              'fingerprint':fp,'binary_sha256':'c'*64,'binary_sha256_after':'c'*64,'rust_min_stack':8388608,'test_threads':1}
+        item={'name':'store_contract:1','invocation':COMMAND}
+        def inspect(data,text=raw,form='blocks'):
+            binding=log(json.dumps(data));raw_digest=log(text)['sha256']
+            altered=copy.deepcopy(record);altered['log']={'sha256_ref':raw_digest}
+            observed={key:data.get(key) for key in ['archive_sha256','binary_sha256','binary_sha256_after','fingerprint','features','profile','rust_min_stack','test_threads']}
+            observed['exit_code']=data['records'][0]['exit_code'] if form=='blocks' else data.get('exit_code')
+            altered['origin']['execution']={'mode':'local-original-capture','first_line':1,'ordinal':0,'binding':binding,
+                'observed':observed,'compatibility':'reviewed-original-linux-store-v1'}
+            with patch.dict(q.ORIGINAL_CAPTURES,{raw_digest:{'source':CANDIDATE,'binding':binding['sha256'],'form':form,'blocks':1}},clear=True):
+                return q.bound_execution(altered,item,text)
+        self.assertIn('test a ... ok',inspect(side))
+        for field,value in [('rustc',0),('profile',0),('features','[]'),('rustflags',['--cfg','hidden']),('compile_kind',1),
+                            ('local',[{'CheckDepInfo':{'dep_info':'debug/.fingerprint/plurx-core-0123456789abcdef/dep-test-integration-test-other'}}])]:
+            changed=copy.deepcopy(side);changed['fingerprint'][field]=value
+            with self.assertRaises(receipts.ReceiptError):inspect(changed)
+        changed=copy.deepcopy(side);changed['records'][0]['exit_code']=101
+        with self.assertRaises(receipts.ReceiptError):inspect(changed)
+        changed=copy.deepcopy(side);changed['records'][0]['command'][1]='other'
+        with self.assertRaises(receipts.ReceiptError):inspect(changed)
+        bulk='running 1 test\ntest a ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.00s\n'
+        data={'source_commit':CANDIDATE,'branch':'effort/dv-hdr-repair','command':[argv[0],'--exact','--test-threads=1','--skip','b'],
+              'inventory':['a','b'],'exit_code':0}
+        # Bound argv remains the original observed command, including exact skips.
+        original=record['origin']['command'];record['origin']['command']=shlex.join(data['command'])
+        self.assertIn('test a ... ok',inspect(data,bulk,'bulk'))
+        with self.assertRaises(receipts.ReceiptError):inspect(data,bulk.replace('1 filtered out','2 filtered out'),'bulk')
+        changed=copy.deepcopy(data);changed['command']+=['--skip','b'];record['origin']['command']=shlex.join(changed['command'])
+        with self.assertRaises(receipts.ReceiptError):inspect(changed,bulk,'bulk')
+        record['origin']['command']=shlex.join(data['command'])
+        changed=copy.deepcopy(data);changed['inventory'].append('c')
+        with self.assertRaises(receipts.ReceiptError):inspect(changed,bulk,'bulk')
+        changed=copy.deepcopy(data);changed['command'][-1]='a';record['origin']['command']=shlex.join(changed['command'])
+        with self.assertRaises(receipts.ReceiptError):inspect(changed,bulk,'bulk')
+        record['origin']['command']=original
+
+    def test_original_unknown_exit_failure_needs_its_exact_obligation(self):
+        record=fixture()['commands'][0]['records'][0];record['exit_code']=None
+        record['origin']['execution']['mode']='local-original-capture'
+        record['log']={'sha256_ref':'810a808e88213d60a1ff5647dda57cf36a93f46cdb26acab0629db5bf67a0f04'}
+        record['coverage']['outcomes']={'a':'fail'}
+        item={'invocation':COMMAND,'obligations':[{'sequence':record['sequence'],'category':'native-failure-exit-unrecorded'}]}
+        body='test a ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;'
+        q.completion_obligations(item,[record],{'a':'pass'},{record['sequence']:body})
+        for category in ['native-failure','executor-interrupted','arbitrary waiver']:
+            altered=copy.deepcopy(item);altered['obligations'][0]['category']=category
+            with self.assertRaises(receipts.ReceiptError):q.completion_obligations(altered,[record],{'a':'pass'},{record['sequence']:body})
+        for value in [0,101]:
+            altered=copy.deepcopy(record);altered['exit_code']=value
+            with self.assertRaises(receipts.ReceiptError):q.completion_obligations(item,[altered],{'a':'pass'},{record['sequence']:body})
+        altered=copy.deepcopy(record);altered['log']['sha256_ref']='c'*64
+        with self.assertRaises(receipts.ReceiptError):q.completion_obligations(item,[altered],{'a':'pass'},{record['sequence']:body})
+        altered=copy.deepcopy(item);altered['obligations']=[]
+        with self.assertRaises(receipts.ReceiptError):q.completion_obligations(altered,[record],{'a':'pass'},{record['sequence']:body})
+
     def test_original_cohort_cannot_omit_failure_capture_or_reorder_ordinals(self):
         rows=[];ordered=list(q.ORIGINAL_CAPTURES);ordered[1],ordered[2]=ordered[2],ordered[1]
         lineage={'39ed30d207e8b03c52b5401103f880a54960a552c4167ce9fcbbed57a68fb919',
@@ -153,6 +218,11 @@ class CompleteCommandUnitCase(unittest.TestCase):
             for ordinal in range(q.ORIGINAL_CAPTURES[digest]['blocks']):
                 rows.append({'sequence':len(rows)+1,'log':{'sha256_ref':digest},
                     'origin':{'execution':{'mode':'local-original-capture','ordinal':ordinal}}})
+        lineage_rows=[{'sequence':index+1,'log':{'sha256_ref':digest},
+            'origin':{'execution':{'mode':'local-original-capture','ordinal':0}}}
+            for index,digest in enumerate([digest for digest in ordered if digest in lineage])]
+        q.complete_original_capture_ordinals(lineage_rows)
+        with self.assertRaises(receipts.ReceiptError):q.complete_original_capture_ordinals(rows+lineage_rows)
         q.complete_original_capture_ordinals(rows)
         for altered in [rows[:2]+rows[3:],rows[:1]+rows[2:],rows[1:]]:
             with self.assertRaises(receipts.ReceiptError):q.complete_original_capture_ordinals(altered)
