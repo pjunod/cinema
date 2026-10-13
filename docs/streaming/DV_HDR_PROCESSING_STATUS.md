@@ -1121,5 +1121,9 @@ controls, corrected previously failed fixture and freshly invalidated YAML
 check remain effort-only obligations. The failed task gate 5089 executed no
 unit bodies or compilers: live main was not an ancestor of the effort base.
 Main through the build-171 diagnostics landing is now integrated normally into
-the effort; a fresh exact-head task gate is required. Complete authenticated
+the effort; a fresh exact-head task gate is required. Gate 5092 then found
+eight malformed class-prefixed Python regression references in the immutable
+R12 landing. Their canonical methods resolve in that exact original tree; the
+required permanent erratum records the mistake without changing the resolver
+or boundary. Current task references are checked locally before another gate. Complete authenticated
 qualification, fleet deployment and physical HDR ON/OFF acceptance remain open.
