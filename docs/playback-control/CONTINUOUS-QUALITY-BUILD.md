@@ -10947,7 +10947,8 @@ cause. No unit suite runs before final review and batched qualification.
 budget, which deliberately remains zero when unset. Consequently a real
 full-title encode can be admitted and then refused only at assembly.
 The isolated actor does not configure this setting. A read-only fresh-server
-probe checks its actual absence before another expensive encode.
+probe confirms its actual absence before another expensive encode: no encode
+starts, and all44 owned processes retire with zero residuals.
 
 Private full-output renditions now retain the budget that admitted their
 preparation. Ordinary rendition admission keeps its existing zero-when-unset
@@ -10956,3 +10957,73 @@ uses actual complete-copy preparation with ordinary admission zero and a
 positive preparation budget, requiring a real measured retained result.
 Explicit zero preparation budget remains refused. Units are written but
 deferred to the final review and batched fast lane.
+
+
+**Isolated storage headroom.** The corrected-budget attempt reaches the
+first1080 completion boundary, then the isolated node reports disk quota
+exceeded. No completed proof or native pass is claimed. The remote
+supervisor cannot finish its birth-ledger receipt, so only the later bounded
+process census is retained: no owned actor, backend, supervisor, fixture
+encoder or probe remains. Twelve obsolete verifier binaries are removed,
+reclaiming5.94GB; the current server and diagnostic binary, source, actual
+capabilities and evidence remain. The rerun waits for adequate scratch
+headroom and adds the separate3Mb/s down/recovery check after the unchanged
+15-manual/five-Auto series, preserving both verdicts independently.
+
+
+**First genuine completed proof on the corrected budget.** After reclaiming
+6.92GB of obsolete owned verifier copies, the fresh isolated node has
+10.19GB of headroom. Exact656d2532d publishes its canonical1080 complete
+full-mux proof on the first attempt after239.412s: unique proof, measured
+average8,161,655bps and RFC peak8,811,808bps. This crosses the previous
+assembly-failure boundary. The720 and480 costs and both native campaigns
+remain outstanding; this server result is not a hardware qualification.
+
+
+**Three genuine measured costs before native launch.** The fresh corrected
+server completes all three canonical jobs on their first attempts in
+530.723s. Each candidate has exactly one qualified complete full-mux proof:
+
+| Rung | Actual average (bps) | Actual RFC peak (bps) |
+| --- | ---: | ---: |
+|1080 |8,161,655 |8,811,808 |
+|720 |4,160,929 |4,557,460 |
+|480 |2,159,853 |2,434,764 |
+
+The measured480 output fits3Mb/s. The1080 output's1.8× upgrade headroom
+fits25Mb/s. Preparation restores the original setting and ends its own
+sessions before exposing the native bootstrap. The phone SDK launches
+promptly after an unlocked preflight, with the unchanged15-manual/five-Auto
+scorer followed by a separate3Mb/s down-and-recovery verdict. Actual
+capabilities, identities and joins stay private on the isolated node.
+
+
+**Preserved strict phone failure after genuine costs.** The combined phone
+run completes three manual landings, then fails during the fourth switch
+to1080:109.379ms decoded-output gap,92.682ms callback gap, all eight
+server cancellation deltas zero. Auto and the supplemental low-link bar
+never start. The interval stays on the same1080 item with rate1 and moving
+film/host clocks. This does not prove optical continuity or pass the100ms
+bar. Promotion occurs before the interval; measured predecessor teardown
+and policy restoration each take less than1ms, ruling them out as its
+long delay. All218 owned backend processes retire, zero residuals; the
+SDK wrapper closes, and both owned bootstraps are removed.
+
+A separate private QA build moves JSON serialization and console writes
+onto a bounded ordered writer, with explicit evidence invalidation on
+overflow. Row timestamps, decoded-pixel criteria and the strict scorer
+remain unchanged. Fixed numeric spans measure native observation getters
+and any observer call taking10ms or longer. Build, signing and installation
+pass without units. The focused capture completes all four manual landings
+with no errors: maximum decoded gap94.8355ms and callback gap71.269ms.
+All eight cancellation deltas remain zero; all78 owned backend processes
+retire with zero residuals. This short diagnostic contains no Auto or
+low-link acceptance. Both owned bootstraps and the SDK wrapper are closed.
+
+The104 getter snapshots identify four access-log reads lasting36–56ms.
+Those reads overlap the four longest callback silences; the maximum
+access-log read is55.927ms within a56.192ms snapshot. Every other getter
+stays below0.4ms. This measured correlation motivates asynchronous,
+item-owned throughput sampling rather than speculative teardown changes.
+The public fix is in progress; the exact656 server remains unchanged.
+Unit regressions remain deferred to final review and batched merge.
