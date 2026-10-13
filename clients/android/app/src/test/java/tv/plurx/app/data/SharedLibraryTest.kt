@@ -1,6 +1,11 @@
 package tv.plurx.app.data
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.test.resetMain
 import kotlinx.serialization.json.*
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -32,34 +37,41 @@ class SharedLibraryTest {
             .apply { commitIndex?.let { header("X-Plurx-Commit-Index", it) } }.body(body.toString().toResponseBody()).build()
     }.build())
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     @Test fun actualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt(): Unit = runBlocking {
-        handler = { request ->
-            assertEquals("POST", request.method); assertTrue(request.url.encodedPath.endsWith("/watched"))
-            200 to buildJsonObject {
-                put("updated", 1); put("watch", buildJsonObject {
-                    put("watched", true); put("position_ms", 0); put("sequence", 1); put("updated_at_ms", 1)
-                })
+        // Retain production observers while supplying only JVM platform time/dispatch.
+        Dispatchers.setMain(StandardTestDispatcher())
+        try {
+            handler = { request ->
+                assertEquals("POST", request.method); assertTrue(request.url.encodedPath.endsWith("/watched"))
+                200 to buildJsonObject {
+                    put("updated", 1); put("watch", buildJsonObject {
+                        put("watched", true); put("position_ms", 0); put("sequence", 1); put("updated_at_ms", 1)
+                    })
+                }
             }
+            val account = client()
+            fun floor(): String? {
+                var result: String? = null
+                val owned = Net.authenticatedClient { 0L }.newBuilder().dispatcher(okhttp3.Dispatcher()).connectionPool(okhttp3.ConnectionPool())
+                    .eventListener(okhttp3.EventListener.NONE).addInterceptor { chain ->
+                        result = chain.request().header("X-Plurx-Read-After")
+                        Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")
+                            .body("[]".toResponseBody()).build()
+                    }.build()
+                try { owned.newCall(Request.Builder().url("https://b.test/api/v1/libraries").build()).execute().close() }
+                finally { owned.connectionPool.evictAll(); owned.dispatcher.executorService.shutdown() }
+                return result
+            }
+            commitIndex = "41"; account.setWatched(first.reference(item), true); assertEquals("41", floor())
+            commitIndex = null; account.setWatched(first.reference(item), true); assertNull(floor())
+            commitIndex = "42"; account.setWatched(first.reference(item), true); assertEquals("42", floor())
+            transportFailure = true
+            try { account.setWatched(first.reference(item), true); fail("accepted failed write") } catch (_: java.io.IOException) {}
+            assertNull(floor())
+        } finally {
+            Dispatchers.resetMain()
         }
-        val account = client()
-        fun floor(): String? {
-            var result: String? = null
-            val owned = Net.client.newBuilder().dispatcher(okhttp3.Dispatcher()).connectionPool(okhttp3.ConnectionPool())
-                .eventListener(okhttp3.EventListener.NONE).addInterceptor { chain ->
-                    result = chain.request().header("X-Plurx-Read-After")
-                    Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")
-                        .body("[]".toResponseBody()).build()
-                }.build()
-            try { owned.newCall(Request.Builder().url("https://b.test/api/v1/libraries").build()).execute().close() }
-            finally { owned.connectionPool.evictAll(); owned.dispatcher.executorService.shutdown() }
-            return result
-        }
-        commitIndex = "41"; account.setWatched(first.reference(item), true); assertEquals("41", floor())
-        commitIndex = null; account.setWatched(first.reference(item), true); assertNull(floor())
-        commitIndex = "42"; account.setWatched(first.reference(item), true); assertEquals("42", floor())
-        transportFailure = true
-        try { account.setWatched(first.reference(item), true); fail("accepted failed write") } catch (_: java.io.IOException) {}
-        assertNull(floor())
     }
     private fun assignment(source: SharedLibraryIdentity) = JsonObject(Json.encodeToJsonElement(source).jsonObject + mapOf("source_name" to JsonPrimitive(if (source == first) "Source A" else "Source C"), "availability" to JsonPrimitive("unverified")))
     private fun wireItem(source: SharedLibraryIdentity, id: String = item) = buildJsonObject {

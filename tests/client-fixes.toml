@@ -6388,3 +6388,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticR
 source_anchor = "fun share() = perform"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/DiagnosticReportNavigationTest.kt"
 test_anchor = "exportedZipCanBeAttachedWithoutSupportEnrollment"
+
+[[fixes]]
+id = "dv.watched-receipt-jvm-platform-fixture"
+commits = ["a220bf7a0a0be4ee3d6a72a41b28ad599ee772db"]
+source = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+source_anchor = "Net.authenticatedClient { 0L }"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+test_anchor = "actualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt"
