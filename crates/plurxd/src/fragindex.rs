@@ -821,6 +821,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     // and refuse a varying title here rather than mid-playback.
     let mut promotion: Option<PromotionInputs> = None;
     let mut parameter_sets_constant = true;
+    let mut hdr10 = fmp4::Hdr10IndexMetadata::default();
     let mut buf = vec![0u8; READ_CHUNK];
 
     loop {
@@ -946,8 +947,15 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     // clean fragment can ever be a generation's first — which
                     // makes these the only fragments whose promotion inputs
                     // could ever differ from the stored ones.
+                    // CLL is a per-sequence maximum, not a decoder parameter.
+                    // Scan every sample so even a non-clean fragment contributes
+                    // to the immutable title-wide metadata. In-band SEIs stay.
+                    if hdr10.observe_fragment(&fragment, init).is_err() {
+                        parameter_sets_constant = false;
+                    }
                     if class.is_clean() {
-                        let here = PromotionInputs::from_fragment(&fragment, init);
+                        let mut here = PromotionInputs::from_fragment(&fragment, init);
+                        here.hdr10_sei.clear();
                         match promotion {
                             None => promotion = Some(here),
                             Some(ref canonical) => {
@@ -1123,6 +1131,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
         );
     }
     let mut promotion = promotion.unwrap_or_default();
+    promotion.hdr10_sei = hdr10.promotion_nals();
     // The record cannot come out of a fragment: what the muxer wrote describes
     // the source, not the converted stream, which is the whole reason plurx
     // supplies its own. It rides in the stored promotion inputs so the served
@@ -1215,6 +1224,10 @@ fn identity_for_transform(
 ) -> SourceIdentity {
     let mut recipe = transcode::copy_video_args(file, video);
     if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+        recipe.push(format!(
+            "--plurx-hdr10-index={}",
+            fmp4::HDR10_INDEX_METADATA_REVISION
+        ));
         recipe.push(format!(
             "--plurx-hevc-proof={}",
             plurx_core::hevc_configuration::REVISION
@@ -3163,6 +3176,83 @@ mod tests {
     use super::*;
     use plurx_core::segplan::{self, SEGPLAN_VERSION};
     use plurx_core::testfixtures;
+
+    #[tokio::test]
+    async fn changing_content_light_keeps_indexed_copy_and_scans_nonkey_samples() {
+        let input = index_pipe_bytes("closed-gop");
+        let mut reader = fmp4::FragmentReader::new();
+        reader.push(&input);
+        let Some(fmp4::Unit::Init(init)) = reader.next_unit().expect("init") else {
+            panic!("init first");
+        };
+        let video = init.video().expect("video");
+        assert_eq!(video.nal_length_size, 4);
+        let mut feed = init.bytes.clone();
+        let mut fragment_count = 0;
+        while let Some(unit) = reader.next_unit().expect("fixture stream") {
+            if let fmp4::Unit::Fragment(mut fragment) = unit {
+                let mut sample = 0;
+                fmp4::rewrite_video_samples(&mut fragment, &init.tracks, video.id, |bytes| {
+                    let values: [u16; 2] = if fragment_count == 1 && sample == 1 {
+                        [1200, 500]
+                    } else if fragment_count == 0 {
+                        [230, 197]
+                    } else {
+                        [283, 200]
+                    };
+                    sample += 1;
+                    let mut nal = vec![0x4e, 1, 144, 4];
+                    for value in values {
+                        nal.extend_from_slice(&value.to_be_bytes());
+                    }
+                    nal.push(0x80);
+                    let mut output = (nal.len() as u32).to_be_bytes().to_vec();
+                    output.extend(nal);
+                    output.extend_from_slice(bytes);
+                    Ok(output)
+                })
+                .expect("insert changing CLL without changing video");
+                feed.extend_from_slice(&fragment.bytes);
+                fragment_count += 1;
+            }
+        }
+        assert!(fragment_count > 2);
+        let IndexOutcome::Built(index) = index_stream(
+            std::io::Cursor::new(feed),
+            identity(),
+            None,
+            DolbyVisionPass::Untouched,
+        )
+        .await
+        else {
+            panic!("index must build");
+        };
+        assert!(
+            index.parameter_sets_constant,
+            "changing light levels are not changing codec parameters"
+        );
+        let light = &index.promotion.hdr10_sei;
+        assert_eq!(light.len(), 1);
+        assert_eq!(
+            light[0],
+            vec![0x4e, 1, 144, 4, 4, 176, 1, 244, 0x80],
+            "non-keyframe maximum must reach the immutable init"
+        );
+    }
+    #[test]
+    fn hdr10_metadata_revision_invalidates_local_copy_indexes() {
+        let file = hevc_file(Some("hdr10"), Some("HDR10"));
+        let video = transcode::CopyVideoOptions::new(true, false);
+        let mut old_recipe = transcode::copy_video_args(&file, video);
+        old_recipe.push(format!(
+            "--plurx-hevc-proof={}",
+            plurx_core::hevc_configuration::REVISION
+        ));
+        assert_ne!(
+            identity_for(&file, video).argv_fingerprint,
+            plurx_core::segplan::argv_fingerprint(&old_recipe)
+        );
+    }
 
     /// The record a converting pass supplies — and, being `Some`, the way a
     /// caller says that this pass converts at all.

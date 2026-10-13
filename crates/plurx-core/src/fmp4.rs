@@ -1769,6 +1769,12 @@ fn write_be_u32(bytes: &mut [u8], at: usize, value: u32) -> Result<(), Fmp4Error
     Ok(())
 }
 
+#[path = "fmp4/hdr10_index.rs"]
+mod hdr10_index;
+pub use hdr10_index::{
+    normalize_hdr10_content_light, Hdr10IndexMetadata, HDR10_INDEX_METADATA_REVISION,
+};
+
 /// Promote an init from captured inputs — the planned generation's path.
 ///
 /// Answers whether anything changed. Applying this to a muxer init that is
@@ -1808,6 +1814,7 @@ pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, F
     } else {
         false
     };
+    let content_light = normalize_hdr10_content_light(init, &inputs.hdr10_sei)?;
     let hdr10 = promote_hdr10_static_metadata_from(init, &inputs.hdr10_sei)?;
     // Last, and deliberately so. The HDR10 promotion above refuses to run on a
     // sample entry that already carries a Dolby Vision configuration, and
@@ -1823,7 +1830,7 @@ pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, F
         // still the union of all three.
         None => removed,
     };
-    Ok(collapsed || hevc || hdr10 || dolby_vision)
+    Ok(collapsed || hevc || content_light || hdr10 || dolby_vision)
 }
 
 pub fn promote_hevc_parameter_sets(init: &mut Init, first: &Fragment) -> Result<bool, Fmp4Error> {
