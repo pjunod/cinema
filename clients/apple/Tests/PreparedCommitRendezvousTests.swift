@@ -110,6 +110,34 @@ final class PreparedCommitRendezvousTests: XCTestCase {
             rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: 10_000))
     }
 
+    func testStaticOriginalRunwayWaitsForMovingIncumbentFutureCoverage() throws {
+        let original = 5_416
+        let initiallyLoaded = [4.0...7.989333333333334]
+        XCTAssertTrue(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: original, mediaOriginMs: 0, ranges: initiallyLoaded))
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: original, incumbentFilmPositionMs: 7_944,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 10_579,
+            loadedItemRanges: initiallyLoaded),
+            "the measured original runway cannot admit the advancing incumbent's future point")
+        // Bytes published after another second must cover the then-current
+        // clock, rather than admitting the stale earlier readiness sample.
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: original, incumbentFilmPositionMs: 8_944,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 9_579,
+            loadedItemRanges: [4...11.5]))
+        let expanded = try XCTUnwrap(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: original, incumbentFilmPositionMs: 8_944,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 9_579,
+            loadedItemRanges: [4...12]))
+        XCTAssertEqual(expanded.filmPositionMs, 10_000)
+        XCTAssertEqual(expanded.itemPositionMs, 10_000)
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: original, incumbentFilmPositionMs: 8_944,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 5_000,
+            loadedItemRanges: [4...12]), "new bytes cannot extend the physical overlap reserve")
+    }
+
     func testLoadedRendezvousMapsOriginAndActualPlaybackRate() throws {
         let plan = try XCTUnwrap(PreparedCommitRendezvous.planLoaded(
             stagedFilmPositionMs: 610_000, incumbentFilmPositionMs: 610_000,

@@ -3014,7 +3014,8 @@ final class PlayerController: ObservableObject {
     /// The whole client-side transaction: which staging is live, what is owed
     /// about it, and whether an offered one is a replay. `lazy` because it
     /// holds this controller as its host.
-    private(set) lazy var preparedReplacement = PreparedReplacementCoordinator(host: self)
+    private(set) lazy var preparedReplacement = PreparedReplacementCoordinator(
+        host: self, now: PlaybackControlSession.monotonicMs)
     /// A completed media-segment transaction, never an access-log average.
     struct AutoCompletedTransfer: Sendable {
         let bodyBytes: Int64
@@ -12164,7 +12165,10 @@ extension PlayerController: PreparedSuccessorHost {
                               throughMs >= self.preparedFilmPositionMs
                                   + PreparedReplacementBounds.switchRunwayMs,
                               self.preparedOriginalTargetHasRunway(item),
-                              self.preparedReplacement.activeAction.map({ self.autoStagedProductionAllowsCommit($0) && self.autoStagedOriginalAllowsCommit($0) }) == true {
+                              self.preparedReplacement.activeAction.map({
+                                  self.autoStagedProductionAllowsCommit($0) && self.autoStagedOriginalAllowsCommit($0) &&
+                                      self.preparedLoadedRendezvous(item, action: $0, rate: self.preferredRate) != nil
+                              }) == true {
                         self.preparedReplacement.successorIsBuffered(throughMs: throughMs)
                         await self.preparedReplacement.commit()
                         return
@@ -12217,6 +12221,28 @@ extension PlayerController: PreparedSuccessorHost {
             ranges: ranges)
     }
 
+    /// Readiness and commit admit the same loaded future point. The incumbent
+    /// keeps moving while the successor is paused, so original-target runway
+    /// alone cannot prove a handoff the commit can still reach.
+    private func preparedLoadedRendezvous(_ item: AVPlayerItem,
+                                         action: PreparedReplacementAction,
+                                         rate: Float) -> PreparedCommitRendezvous? {
+        let seconds = player.currentTime().seconds
+        guard rate.isFinite, rate > 0, seconds.isFinite, seconds >= 0, baseMs >= 0,
+              seconds * 1_000 + Double(baseMs) < Double(Int.max) else { return nil }
+        let ranges = item.loadedTimeRanges.compactMap { value -> ClosedRange<Double>? in
+            let range = value.timeRangeValue
+            let start = range.start.seconds, end = CMTimeRangeGetEnd(range).seconds
+            guard start.isFinite, end.isFinite, start >= 0, end >= start else { return nil }
+            return start...end
+        }
+        return PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: preparedFilmPositionMs,
+            incumbentFilmPositionMs: realPositionMs(), mediaOriginMs: action.mediaOriginMs,
+            playbackRate: Double(rate), overlapRemainingMs: preparedOverlapRemainingMs,
+            loadedItemRanges: ranges)
+    }
+
     /// Promote the primed player and its retained layer after item-specific
     /// decoded alignment. The item and decoder output stay bound throughout;
     /// physical display and audio qualification remains a separate observation.
@@ -12224,6 +12250,11 @@ extension PlayerController: PreparedSuccessorHost {
         _ action: PreparedReplacementAction
     ) async -> PreparedCommitOutcome {
         let automaticTrial = autoPreparing
+        // Switching changes the coordinator's phase, not the original opening
+        // timestamp. Capture its existing readiness deadline before any await;
+        // layer and selection waits must never restart that clock.
+        guard let openedAtMs = preparedReplacement.openedAtMs else { return .refused }
+        let readinessDeadlineMs = openedAtMs + PreparedReplacementBounds.readinessMs
         // The viewer action this commit began under. Every step below, and the
         // rendezvous and decoded-alignment waits it hands this to, asks
         // `preparedCommitStillOwned` rather than comparing the epoch by hand.
@@ -12268,7 +12299,8 @@ extension PlayerController: PreparedSuccessorHost {
         // staging. Early disposal here erases the item's typed error and
         // original overlap budget before that failure journal can read them.
         let layerReady = await awaitBoundedValue(
-            boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs),
+            boundMs: max(0, min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs,
+                readinessDeadlineMs - PlaybackControlSession.monotonicMs())),
             pollMs: PreparedReplacementBounds.pollMs,
             now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
             sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
@@ -12284,7 +12316,8 @@ extension PlayerController: PreparedSuccessorHost {
             return preparedCommitFailure(at: "surface")
         }
         guard await reconcilePreparedMediaSelections(to: item, successor: successor,
-                commit: commitAttempt, overlapStartedAtMs: overlapStartedAtMs) else {
+                commit: commitAttempt, overlapStartedAtMs: overlapStartedAtMs,
+                readinessDeadlineMs: readinessDeadlineMs) else {
             return preparedCommitFailure(at: "media-selection")
         }
         let rendezvousRate = preferredRate
@@ -12300,20 +12333,30 @@ extension PlayerController: PreparedSuccessorHost {
               incumbentSeconds * 1_000 + Double(baseMs) < Double(Int.max) else {
             return preparedCommitFailure(at: "rate-or-overlap")
         }
-        let loadedItemRanges = item.loadedTimeRanges.compactMap { value -> ClosedRange<Double>? in
-            let range = value.timeRangeValue
-            let start = range.start.seconds, end = CMTimeRangeGetEnd(range).seconds
-            guard start.isFinite, end.isFinite, start >= 0, end >= start else { return nil }
-            return start...end
+        // Layer readiness and media selection may consume the lead that
+        // admitted readiness. Await actual expansion within the original
+        // deadline, then freeze one target before cadence and exact alignment.
+        var loadedRendezvous: PreparedCommitRendezvous?
+        while PlaybackControlSession.monotonicMs() < readinessDeadlineMs,
+              preparedOverlapRemainingMs > 0 {
+            guard !Task.isCancelled, preparedCommitStillOwned(commitAttempt),
+                  preparedItem === item, preparedPlayer === successor,
+                  started, player.currentItem != nil, playbackSurface != nil, !isChangingStream,
+                  wantsPlayback, preferredRate == rendezvousRate,
+                  !pictureInPictureIsActive, !player.isExternalPlaybackActive,
+                  item.status == .readyToPlay,
+                  autoStagedProductionAllowsCommit(action), autoStagedOriginalAllowsCommit(action)
+            else { return .refused }
+            if let plan = preparedLoadedRendezvous(item, action: action, rate: rendezvousRate) {
+                loadedRendezvous = plan
+                break
+            }
+            let remainingMs = min(readinessDeadlineMs - PlaybackControlSession.monotonicMs(),
+                                  preparedOverlapRemainingMs)
+            guard remainingMs > 0 else { return .refused }
+            try? await Task.sleep(nanoseconds: UInt64(min(PreparedReplacementBounds.pollMs, remainingMs)) * 1_000_000)
         }
-        guard let rendezvous = PreparedCommitRendezvous.planLoaded(
-            stagedFilmPositionMs: preparedFilmPositionMs,
-            incumbentFilmPositionMs: realPositionMs(),
-            mediaOriginMs: action.mediaOriginMs,
-            playbackRate: Double(rendezvousRate),
-            overlapRemainingMs: preparedOverlapRemainingMs,
-            loadedItemRanges: loadedItemRanges
-        ) else { return .refused }
+        guard let rendezvous = loadedRendezvous else { return .refused }
         guard let cadence = await awaitPreparedFrameDuration(of: item,
                 targetItemSeconds: Double(rendezvous.itemPositionMs) / 1000),
               preparedItem === item, preparedPlayer === successor,
@@ -12609,9 +12652,10 @@ extension PlayerController: PreparedSuccessorHost {
     /// Asset track loading may ignore task cancellation. Return at the original
     /// overlap deadline and fence any eventual selection from the cancelled task.
     private func reconcilePreparedMediaSelections(to item: AVPlayerItem, successor: AVPlayer,
-            commit: Attempt, overlapStartedAtMs: Int) async -> Bool {
-        let now = Int(ProcessInfo.processInfo.systemUptime * 1_000)
-        let remaining = max(0, PreparedReplacementBounds.overlapMs - max(0, now - overlapStartedAtMs))
+            commit: Attempt, overlapStartedAtMs: Int, readinessDeadlineMs: Int) async -> Bool {
+        let now = PlaybackControlSession.monotonicMs()
+        let remaining = max(0, min(readinessDeadlineMs - now,
+            PreparedReplacementBounds.overlapMs - max(0, now - overlapStartedAtMs)))
         guard remaining > 0 else { return false }
         var completed: Bool?
         let task = Task { @MainActor [weak self] in

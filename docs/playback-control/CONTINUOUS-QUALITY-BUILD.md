@@ -11187,3 +11187,43 @@ macOS Safari evidence retains its original source and scope. Safari iOS
 settings, independent physical display/audio, broader source/pressure cases
 and unreachable installations remain explicit limits. No new native full pass
 or whole-matrix acceptance is claimed.
+
+
+The combined current-main candidate `ec15fe629` compiles on pinned Rust1.97.1
+and both public Apple build-for-testing targets without executing units.
+The exact signed QA artifacts preserve the private instrumentation. Four
+real completed full-mux costs remain finite; in this candidate's new fixture,
+480p peaks near2.44Mb/s and360p near1.54Mb/s, both below3Mb/s. These new facts
+do not rewrite the earlier fixture whose480p cost exceeded3Mb/s.
+
+A short phone diagnostic exposed a private acquisition defect: the launcher
+merged SDK stderr into stdout, allowing a system log to interrupt an original
+frame-packet envelope. The private launcher now keeps stdout bytes untouched,
+drains stderr into bounded terminal facts, and invalidates capture if CQ
+bytes appear there. Its source-bound60-second smoke closes with zero malformed
+or oversized stdout records, zero CQ records on stderr, and successful bridge
+and collector exits. The supervisor closes65 owned processes with zero
+residuals. This proves the bounded transport smoke, not full phone acceptance.
+
+A fresh TV diagnostic provides the missing loaded-plan evidence. All playback
+and ownership guards allow the first manual change. The original target is
+5,416ms and its contiguous loaded interval is4,000–7,989.333ms. The incumbent
+has advanced to7,944ms; a future target with one-second lead and two-second
+runway needs coverage through10,944ms. Readiness admitted the original target,
+then commit refused that future plan before the final exact seek. The repair
+aligns readiness admission with the actual future-plan predicate and waits
+for that predicate after media-selection work within the original readiness
+and physical-overlap deadlines. Neither the target lead, runway, exact seek
+nor the exposure proof is relaxed. Both public Apple build-for-testing
+targets compile the correction and its numeric regression without executing
+units. Physical qualification of this additional correction remains pending.
+
+The preceding short TV attempt fails earlier following audio-device and
+foreground loss. Its playlist response is410 for an already ended session,
+not503. The successor is replaced before that GET and the incumbent is
+superseded; those bounded facts do not establish a separate server defect.
+Cold admission contention remains recorded without attributing that teardown
+to a codec or hiding it with an application retry. The two short TV attempts
+close68 and52 owned processes with zero residuals. Failed attempts remain
+failed. The full corrected15-manual/five-Auto and3Mb/s recovery/rebound
+campaigns, formal adversarial review and Fable checkpoint remain open.
