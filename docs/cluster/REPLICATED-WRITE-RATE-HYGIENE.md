@@ -4,7 +4,9 @@
 ([readout](REPLICATED-WRITE-RATE-HYGIENE-M0.md)); M1–M3 (#405) and the M4
 tooling on `main` since 2026-10-04 (#793); the M4 after-measurement on the
 fleet is owed; the 2026-10-04 close-out PR moves the observer's node list
-into a git-ignored fleet file ·
+into a git-ignored fleet file. **October 13 ruling:** the twelve-hour M4
+requirement is withdrawn; use the bounded protocol below, without a fleet
+freeze. The original M0 readout remains historical evidence ·
 **Executes:** S3, F-sc-3 and the takeover-loop
 audit from S3's row in
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
@@ -247,7 +249,8 @@ when the feature is on stays at the 2 s tick.
 
 ### 3.5 Measurement
 
-Before/after, per voter, 12 h each (Paul, 2026-09-25; the plan said 24 h):
+Before/after, per voter, using the bounded protocol in §5.5 (Paul withdrew
+the twelve-hour requirement on 2026-10-13):
 Δ`plurx_raft_commit_index` (proposals per
 day), `plurx_store_operations_total{class="authority_read"}` rate,
 `plurx_store_operations_total{class="write"}` rate, snapshot builds per day
@@ -256,7 +259,8 @@ outbox's share falls from ~86,400 proposals/node/day to ≤ 8,640 (30 s forced
 claims on one node) plus real work; the takeover loop's authority reads fall
 from ~86,400/node/day to the reads its switch saves cause (zero on an idle
 node, whichever state the switches are in). The number that matters is the
-commit-index delta on an idle fleet overnight.
+commit-index delta over the reported eligible observations. Day-normalized
+rates describe those observations, not a witnessed day of operation.
 
 New series: `plurx_watched_outbox_ticks_total{outcome="skipped_hint"|
 "skipped_unconfigured"|"claimed"|"empty_claim"|"not_owner"}` (five fixed
@@ -288,8 +292,8 @@ same change signals, so on/on is no longer above the bar by construction
 (paused-clock test
 `an_idle_takeover_gate_takes_no_consistent_reads_after_its_first_proof`), and
 the observer and evaluator below admit every boolean pair, on/on included,
-reading out per node each pair it ran under. Over a fresh admitted, continuously idle 12-hour
-window compute `Δstarted × 86,400 / actual_elapsed_seconds` per node. Require
+reading out per node each pair it ran under. For each fresh admitted, bound
+segment compute `Δstarted × 86,400 / actual_elapsed_seconds` per node. Require
 the deployed attribution source, stable build/role, uptime/counter continuity
 and unsaturated counters; a missing series is not zero. Starts already
 include attempts in flight at the endpoint. Outcome deltas may include an
@@ -401,6 +405,43 @@ with both on, cadence is 2 s and the existing takeover contract tests in
 
 ### 5.5 M4 — after-measurement and doc
 
+**Current protocol — bounded checks, no deployment reservation (2026-10-13).**
+Paul withdrew the twelve-hour requirement: other sessions keep deploying.
+The older strict-AFTER commands below describe the retained legacy tooling,
+not the current duration requirement or permission to launch it. Its hardcoded
+43,200-second eligibility check must not be used as a completion gate for
+this protocol; shorter data must not be relabeled as a legacy pass.
+
+1. Retain applicable focused regressions for timer bounds, one-owner claims,
+   retries, wakeups and takeover-read attribution. Use deterministic clock
+   controls for long timer intervals; do not wait hours to rediscover them.
+2. When separately admitted against source-bound running software, collect
+   one read-only campaign with a **30-minute total wall-clock cap**. Retain
+   raw sanitized samples and manifests in persistent owned storage. Do not
+   deploy, toggle settings, stop viewers or ask anyone to reserve the fleet.
+3. Split observations at deployment/build/source, role, uptime, counter,
+   switch-state, activity or reachability boundaries. A boundary neither
+   erases earlier evidence nor extends the original deadline. Do not stitch
+   across it. A source without independently verified provenance stays
+   unattributed; a build label is not source proof.
+4. Report each eligible segment separately, with at least two complete
+   bound voter observations, positive actual elapsed time and the existing
+   gap/hash/counter/idle checks. Keep numerator and denominator explicit.
+   Compare the unchanged cost targets only over that segment; annotate
+   short-span rate quantization. Do not pool different deployed sources or
+   report a 30-minute campaign as 30 continuous idle minutes.
+5. Stop at the original cap and report coverage, observed failures and
+   unavailable evidence. No automatic retry/reset-until-pass loop. This is
+   bounded cost and correctness qualification, not soak/uptime qualification.
+   Outbox proposal attribution remains separate: aggregate counters alone
+   cannot supply its numerator or copied-WAL integrity.
+
+The segmented evaluator is an implementation follow-up; the legacy evaluator
+currently refuses these interrupted inputs. Until that follow-up is verified,
+the duration requirement is removed but no new fleet pass is claimed. Neither
+this plan nor the user ruling authorizes deployment, credential access,
+previously refused WAL operations or a new live capture.
+
 Re-run §5.1's readout; update
 [CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.5's retained
 recurring-write inventory with rows for the outbox claim and the takeover
@@ -410,7 +451,7 @@ Acceptance: the before/after table in the PR body shows the outbox's
 proposals/day below 10,000 per cluster and the takeover loop's authority
 reads below 1,500 per node per day on an idle fleet.
 
-#### Strict AFTER input and readout protocol
+#### Legacy strict AFTER tooling — retained, not the current duration gate
 
 The historical default sampler/evaluator remains M0 tooling. It cannot
 retroactively supply the takeover-start numerator or establish M4 from a
@@ -553,7 +594,9 @@ The coordinator recorded the delegated decisions on 2026-09-20:
 
 Paul decided on 2026-09-25:
 
-4. The M0 (and M4) capture gate is **12 hours**, not 24.
+4. The historical M0 (and then-M4) capture gate was **12 hours**, not 24.
+   Paul superseded the M4 duration on 2026-10-13 with bounded,
+   deployment-aware checks (§5.5). No fleet freeze or uninterrupted window.
 
 The executing session (claude-opus-5-5) read two lines of §3 as follows and
 records them here so review can overrule them:
@@ -610,6 +653,9 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 ```text
 GPT prompt (fleet, K-03 M4). This is a separately admitted post-deploy
 measurement, not permission to deploy or start a capture from this document.
+Duration correction, 2026-10-13: follow §5.5's 30-minute total cap and
+deployment-aware segments. The legacy twelve-hour sampler/evaluator below
+is not the current gate; do not run it to demand an uninterrupted window.
 After the exact source carrying K-03 M1–M3 and the takeover-start attribution
 is deployed and independently build/source-bound on lab4, lab6, media1 and lab3:
 1. On each voter, `curl -s http://<ip>:32400/metrics | grep
@@ -630,7 +676,8 @@ is deployed and independently build/source-bound on lab4, lab6, media1 and lab3:
    plurx_watched_outbox_ticks_total claimed +
    empty_claim delta over the same window scaled to a day.
 4. Copy (read-only, cp) the learner lab3's /srv/plurx/hiqlite/logs/*.wal to
-   /tmp and run `scripts/replicated-write-capture attribute <copies>`; report
+   persistent owned evidence storage and run
+   `scripts/replicated-write-capture attribute <copies>`; report
    the `UPDATE watched_outbox` and `job_leases ... watched:outbox` shares.
    Independently retain bounded-copy identity, window span and WAL integrity
    evidence before using those diagnostic classifications for acceptance;
