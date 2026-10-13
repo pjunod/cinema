@@ -11069,3 +11069,53 @@ removed by normal cleanup and successful idle retirement emits no trace.
 The next private diagnostic prepares only a genuine1080p proof and records
 exact chooser exits, per-rung matching proof counts, runway and timer ages.
 It cannot claim the full manual/Auto or low-link acceptance bars.
+
+
+**Cold Auto capacity refusal and scoped bootstrap purpose.** The next short
+phone diagnostic freshly prepares one genuine1080 complete full-mux proof.
+The client sees exactly one matching qualified descriptor at8,815,772bps;
+720 and480 have no completed proofs. The diagnostic completes its manual720
+landing but never reaches a canonical Auto incumbent. All28 chooser ticks
+stop at the initial guard;22 report the missing incumbent candidate, with
+manual retention and no active preparation. Runway, fitting and upgrade
+quiet/headroom checks have not run. Their absent fields are not failed
+thresholds and cannot justify changing those thresholds.
+
+The exact Auto720 preparation is planned with its canonical binding and
+activated after257ms. The client receives two failed acknowledgements at
+6,091.112ms and6,317.234ms after the first offer, before metadata-ready,
+hidden output, alignment or commit. No HTTP refusal is observed. The server
+join finds the target waiting for three software threads while its
+predecessor holds three and the budget is five. Speculative admission
+registers no live waiter. Its handoff reason is `not_prepared`; there is no
+producer spawn or init/fragment body before the original six-second native
+readiness bound. A playlist200 does not prove playable successor bytes.
+
+The source assigns `nonpreemptive_trial` to every automatic candidate
+recipe. This includes an actual bounded manual-to-Auto bootstrap, although
+its predecessor still owns the only usable capacity. Attachment correctly
+preserves incoming consumer purpose across cache resolution, but that
+purpose consequently forbids the bootstrap's predecessor handoff.
+
+Public `aec293fc1` derives bounded bootstrap purpose from the validated
+first-prime ledger, exact durable manual predecessor and staged canonical
+VOD successor. Source, principal and playback must match; decoder authority
+and canonical candidate identity must exist; successor height cannot exceed
+the manual incumbent. Local and remote first primes share this derivation.
+The private purpose reaches only the exact session's attached readers,
+including a replayed first prime. Cached encoding identity and another
+reader's voluntary trial remain unchanged. Existing incarnation, exclusive
+predecessor and capacity-fit checks still decide the handoff. The native
+six-second deadline, encoder budget and strict continuity scorer are unchanged.
+
+The shared-cache regression covers three-thread incumbent and target demand
+against a five-thread budget, a voluntary reader sharing the target Arc, and
+an unrelated predecessor reader that prevents exclusive handoff. The
+classifier regression in `d075287ee` separately rejects voluntary/upward
+proposals, foreign principal/playback/source, missing decoder authority and
+unbound or mismatched canonical identity. Pinned Rust1.97.1 all-target
+compilation, strict Clippy, formatting and both normal commit hooks pass.
+These regressions are compiled, not executed. Exact Linux compilation and
+post-fix native binding/upgrade evidence are pending. The prepared next
+120-second diagnostic preserves the one-manual720/unnamed-Auto sequence and
+fresh1080 proof; it is not a full15-manual/five-Auto or low-link campaign.
