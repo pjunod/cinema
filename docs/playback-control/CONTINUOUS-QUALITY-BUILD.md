@@ -10897,3 +10897,29 @@ attachment, proves no attachment-context mutation, and refuses foreign,
 missing, disabled, incompatible or forged ownership. Pinned all-target
 compilation and denied-warning Clippy pass without executing units. Genuine
 full-mux jobs and exact native verification remain next.
+
+
+**Actual audio authority for completed output costs.** Exact000f352ee
+API-only setup now offers a canonical1080 Auto successor when given the
+existing unnamed height hint, and separately accepts exact named creation.
+Both attempts refuse setup success because no matching output job appears.
+The video-only capability reconstruction supplies no audio sink claim;
+encoded-output publication requires one. No missing job or proof is hidden.
+All setup processes retire; failed records remain.
+
+A focused physical phone capture obtains the actual full planning caps with
+five audio sinks and the actual decoder snapshot. Both stay on the isolated
+node with private permissions; only capture/count facts are exported. It is
+a capability capture, not playback qualification. All63 owned processes
+retire, and its owned bootstrap is removed.
+
+Prepared replanning now restores audio decoders/sinks from the validated
+predecessor claim into an existing negotiated video capability context.
+Absent claims stay absent, invalid claims refuse preparation, and empty
+legacy capability paths stay unchanged. This preserves actual audio
+authority and output recipe without inventing a sink. The existing bootstrap
+regression now covers real stereoAAC source/typed sink claims, equal output
+audio and canonical context, alongside absent/invalid claim boundaries.
+Pinned all-target compilation, denied-warning Clippy and formatting pass;
+units remain deferred. Private prewarm uses the actual full planning caps
+and exact production identities, with full-mux proof still required.

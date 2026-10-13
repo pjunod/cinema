@@ -1011,6 +1011,27 @@ async fn plan_preparation_with_candidate(
             "Auto bootstrap requires a VOD candidate presentation",
         ));
     }
+    // Runtime decoder snapshots refresh video/display authority only. Their
+    // reconstructed caps omit audio sinks; retain the accepted incumbent audio
+    // claim rather than silently planning an unattributed audio recipe.
+    let mut planning_caps = planning_caps.cloned();
+    if let Some(claim) = &predecessor.request.audio_claim {
+        if !claim.valid_snapshot() {
+            return Err(ApiError::typed(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "prepared_output_unsupported",
+                "the incumbent audio capability claim is invalid",
+            ));
+        }
+        if let Some(caps) = planning_caps
+            .as_mut()
+            .filter(|caps| caps.v == plurx_core::playback::DeviceCaps::VERSION && !caps.is_empty())
+        {
+            caps.audio = claim.decoders.clone();
+            caps.audio_sinks = claim.sinks.clone();
+        }
+    }
+    let planning_caps = planning_caps.as_ref();
     if let Some(caps) = planning_caps {
         super::super::stream::validate_device_caps(caps)?;
     }
