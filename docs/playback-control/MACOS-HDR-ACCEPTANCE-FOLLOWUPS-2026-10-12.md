@@ -1,6 +1,6 @@
 # Mac HDR acceptance — playback follow-ups
 
-**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; current hardware qualification remains open · **Recorded:** 2026-10-12.
+**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; ordinary Metal paused reopen passes; final CPU capture and restoration remain open · **Recorded:** 2026-10-12.
 
 The [full acceptance report](../streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 closes the ordinary HDR10 Metal/CPU comparison. This document specifies the
@@ -252,6 +252,66 @@ permission diagnostic, checksums, review and qualification/merge receipts; its
 SHA-256 is `5cf7a855b62ecf2ad59627737df5020712190cb3435cb71413212f9fe78569d7`. The first qualification attempt failed at
 `spike-lock-check` because its runner could not resolve crates.io; retry 4953
 passed. Original HDR captures and failures remain unchanged.
+
+### October 13 physical rerun — renewed NAS access and paused surface completion
+
+The renewed network-volume grant permits real Air playback. Source `5dabb22a3`
+starts a fresh forced-1080p Metal session in 1,813 ms and runs continuously for
+more than five minutes. Paused unbuffered local VOD seeks land on actual target
+frames at 600,000 ms (194 ms) and 300,000 ms (157 ms). The CPU control starts in
+3,816 ms and lands at 300,000 ms in 185 ms while paused. Actual producer commands
+identify the Metal Hable/max/desat=0 graph with peak=117.9 and CPU Hable/desat=0
+with peak=11.79; these use different peak units. Original screenshots and logs
+remain retained, including a safely refused voluntary quality trial.
+
+A forced paused reopen on that source presents the five-minute frame but leaves
+“Preparing the stream…” over it for more than three minutes. This is a separate
+missing surface transition after the repaired startup-loading lease. The new
+regression executes the real surface reducer and fails on the previous code.
+The correction publishes presenting only after current owned target-frame proof
+successfully completes HLS startup. Stale epoch/attachment, off-target,
+positioned-only and cancelled-startup cases cannot clear preparation. Both
+seek/frame event orderings pass, and a later paused progress tick does not
+resurrect the scrim. Astra approved the correction; 40 focused tests and the
+full web checks pass, along with pinned Rust 1.97.1 workspace all-target Clippy,
+formatting and served-script syntax.
+
+The corrected physical acceptance binary uses a credential-free archive of the
+healthy `5dabb22a3` baseline plus the exact reviewed patch `f7f8939d6`. Its SHA-256
+is `9ebc6fc20e72a46b86da5fc5e86a57f0d9778c2f1f0a51c64eb10344ce52c6df`.
+The served player matches the source digest
+`42772cc914bc2c3cc198fd2e31ba4095cff66cf35df4d78b70a1ea3745ab6b07`.
+This isolated hardware tree avoids unrelated contemporaneous main router
+changes; the main-bound patch is separately integrated and qualified in
+PR #1068. The installed parser retains digest
+`36f7e0298eac14d1a664dfc083702bab812f6c83d196c651420af92f1080f21c`.
+The corrected boot Metal parity probe passes at 2.26×. Its fresh Metal session
+starts in 3,036 ms; an unbuffered paused local seek lands at 600,000 ms in
+1,503 ms. Forced paused replacement at 300,000 ms completes HLS startup in
+161 ms, clears preparation by the current presenting event, and stays paused
+without Play. The retained screenshot displays the actual five-minute picture
+and the Play triangle with no preparation overlay.
+
+The capture transport is standard Screen Sharing, which carries SDR pixels.
+These receipts qualify ordinary HDR10-to-SDR hls.js behavior; they do not
+establish calibrated HDR-display fidelity, native HLS acceptance, Heretic
+reliability, successful voluntary quality switching or the broader Mac matrix.
+F2–F7 remain separate follow-ups. Preserve all prior failure archives and
+source-qualified receipts; do not relabel a safely refused switch as applied.
+
+**Active completion state:** PR #1068 passed Main promotion on run 4992 and merged as
+`69d3311dd82e23aa869578442e9f1bc903cc6804`. The final CPU
+capture and resume-to-zero await unlocking the controlling Mac. Clipboard
+sharing is verified off; Mac processing is saved on and backend Auto is saved.
+The earlier access/restoration block above remains historical evidence, not a
+new observation.
+
+The [October 13 receipt](evidence/air-hdr-paused-20261013.json) links the
+[50-member raw archive](http://forge.lan:3000/attachments/4606c9d1-6bbb-4dda-a629-e6ffaacda016) (SHA-256
+`5d200472b0b11b8774aa1a03f7dc829ce02541bb4349a4854c297e2bde209419`). It retains the original overlay failure, corrected
+frame, safely refused quality change, local checks and qualification/landing
+receipts. The snapshot is explicitly incomplete for the last CPU capture and
+resume reset; no five-minute pass is inferred from elapsed wall time.
 
 ## 4. F2 — manual SDR quality change loses alignment
 
