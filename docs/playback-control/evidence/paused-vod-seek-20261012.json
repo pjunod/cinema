@@ -1,7 +1,7 @@
 {
   "version": 1,
   "baseline_commit": "6dc03138724c856128fa8569c8d790b5cafe1de0",
-  "scope": "Generated HLS Chrome diagnostic plus shipped seek/loader regressions; genuine HDR-on-Air repair acceptance remains open.",
+  "scope": "Generated HLS Chrome diagnostic, shipped seek/loader regressions and bounded ordinary HDR10-to-SDR Air Chrome hls.js physical target/reopen acceptance; native HLS and broader hardware matrix remain separate.",
   "browser": {
     "baseline": {
       "repaired": false,
@@ -802,7 +802,7 @@
     "source_pr": 1068,
     "source_landing": "69d3311dd82e23aa869578442e9f1bc903cc6804",
     "ordinary_metal_paused_reopen": "passed",
-    "final_cpu_capture_and_restoration": "pending local Mac unlock",
+    "final_cpu_capture_and_restoration": "complete; see linked completion receipt and immutable archive",
     "historical_evidence_unchanged": true
   }
 }
