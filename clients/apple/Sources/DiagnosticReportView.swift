@@ -18,6 +18,9 @@ final class DiagnosticReportModel: ObservableObject {
     @Published var includePlatform = false
     @Published var comparison: String?
     @Published var handoffState = ""
+    @Published var localExportURL: URL?
+    private var localExportRevision: UInt64 = 0
+    private var localExport: DiagnosticLocalExport?
     @Published var shareURL: URL?
     @Published var history = DiagnosticRecorder.shared.historyEnabled
     private let store: DiagnosticStore
@@ -40,6 +43,7 @@ final class DiagnosticReportModel: ObservableObject {
         DiagnosticRecorder.shared.record("lifecycle", "state", ["state": .text("starting")])
     }
     private func retire() {
+        stopLocalExport()
         workRevision &+= 1
         operation?.cancel(); polling?.cancel(); transport?.cancel(); operation = nil; polling = nil; transport = nil
         draft = nil; pending = []; comparison = nil; handoffState = ""; presented = false; busy = false
@@ -58,6 +62,7 @@ final class DiagnosticReportModel: ObservableObject {
         pending = restored
     }
     func open(category: String = "other", title: String? = nil, owner: String = "root", newIncident: Bool = false) {
+        stopLocalExport()
         workRevision &+= 1
         operation?.cancel(); polling?.cancel(); transport?.cancel(); cleanupShare()
         if newIncident { DiagnosticRecorder.shared.forgetReproduction() }
@@ -88,6 +93,7 @@ final class DiagnosticReportModel: ObservableObject {
         }
     }
     func resume(_ row: DiagnosticStore.Draft) {
+        stopLocalExport()
         guard !busy, row.capture.namespace == scope else { return }
         let previousWork = operation; let previousPoll = polling
         previousWork?.cancel(); previousPoll?.cancel(); transport?.cancel(); cleanupShare()
@@ -122,6 +128,7 @@ final class DiagnosticReportModel: ObservableObject {
         pending = rows
     }
     func close() {
+        stopLocalExport()
         workRevision &+= 1
         if let draft, !draft.consented { Task { await store.save(draft) } }
         operation?.cancel(); polling?.cancel(); transport?.cancel(); transport = nil; busy = false; presented = false; cleanupShare()
@@ -132,6 +139,7 @@ final class DiagnosticReportModel: ObservableObject {
         Task { await store.clear(previous) }
     }
     func suspend() {
+        stopLocalExport()
         workRevision &+= 1
         operation?.cancel(); polling?.cancel(); transport?.cancel(); transport = nil; busy = false
         if let draft, !draft.consented { Task { await store.save(draft) } }
@@ -140,12 +148,15 @@ final class DiagnosticReportModel: ObservableObject {
     func cleanupShare() { if let shareURL { try? FileManager.default.removeItem(at: shareURL.deletingLastPathComponent()) }; shareURL = nil }
     func setHistory(_ enabled: Bool) { history = enabled; Task { await DiagnosticRecorder.shared.setHistory(enabled) } }
     private func perform(_ action: @escaping (DiagnosticTransport, inout DiagnosticStore.Draft) async throws -> Void) {
-        guard !busy, var value = draft, value.capture.generation == Session.shared.playbackAuthorization.generation else { return }; operation?.cancel(); transport?.cancel(); busy = true; message = "Working…"
+        guard !busy, var value = draft, value.capture.generation == Session.shared.playbackAuthorization.generation else { return }; stopLocalExport(); operation?.cancel(); transport?.cancel(); busy = true; message = "Working…"
         workRevision &+= 1; let revision = workRevision
         let client = DiagnosticTransport(scope: value.capture.namespace); transport = client
         operation = Task {
             do { try await action(client, &value); try client.current(); guard !Task.isCancelled, workRevision == revision, draft?.id == value.id else { return }; draft = value; await persist(value) }
-            catch { if !Task.isCancelled, workRevision == revision, draft?.id == value.id { draft = value; await persist(value); message = (error as? LocalizedError)?.errorDescription ?? "The connection failed. Retry or save this local report." } }
+            catch { if !Task.isCancelled, workRevision == revision, draft?.id == value.id {
+                if error is CancellationError { stopLocalExport(); message = "The report changed. Save its ZIP again when ready." }
+                else { draft = value; await persist(value); message = (error as? LocalizedError)?.errorDescription ?? "The connection failed. Retry or save this local report." }
+            } }
             if !Task.isCancelled, workRevision == revision { busy = false }
         }
     }
@@ -168,6 +179,23 @@ final class DiagnosticReportModel: ObservableObject {
             await persist(value)
         }
         return result
+    }
+    func stopLocalExport() { localExportRevision &+= 1; localExport?.stop(); localExport = nil; localExportURL = nil }
+    func shareOnLocalNetwork() {
+        stopLocalExport()
+        perform { [weak self] _, value in
+            guard let self else { return }
+            let offerRevision = self.localExportRevision
+            let report = try await self.archive(&value); let revision = self.workRevision
+            guard offerRevision == self.localExportRevision else { throw CancellationError() }
+            let transfer = try DiagnosticLocalExport(bytes: report.bytes, reportID: value.id, ended: { [weak self] in
+                Task { @MainActor in if self?.workRevision == revision { self?.stopLocalExport() } }
+            })
+            self.localExport = transfer
+            let url = try await transfer.start()
+            guard !Task.isCancelled, self.workRevision == revision, self.localExportRevision == offerRevision, self.presented else { transfer.stop(); throw CancellationError() }
+            self.localExportURL = url; self.message = "Scan on a phone on the same network, then download the TV's ZIP. Keep this screen open."
+        }
     }
     func export() {
         perform { [weak self] _, value in
@@ -240,6 +268,7 @@ final class DiagnosticReportModel: ObservableObject {
         }
     }
     func startReproduction() {
+        stopLocalExport()
         guard let capture = draft?.capture, draft?.binding == nil else { return }
         if DiagnosticRecorder.shared.startReproduction(capture) { message = "Recording for up to five minutes. Reproduce the issue, then reopen Help and stop. Recording ends on background." }
     }
@@ -260,9 +289,11 @@ final class DiagnosticReportModel: ObservableObject {
         }
     }
     func stopReproduction() {
+        stopLocalExport()
         if let capture = DiagnosticRecorder.shared.stopReproduction() { draft?.capture = capture; message = "Reproduction stopped and frozen locally." }
     }
     func deleteLocal(_ row: DiagnosticStore.Draft) {
+        stopLocalExport()
         guard row.capture.namespace == scope else { return }
         let selected = draft?.id == row.id
         let previousWork = selected ? operation : nil; let previousPoll = selected ? polling : nil
@@ -300,6 +331,12 @@ struct DiagnosticReportView: View {
             Form {
                 incidentSection
                 pendingSection
+                #if os(tvOS)
+                if let draft = reports.draft {
+                    // Keep every report action reachable before the long preview.
+                    Section("Recent safe events") { eventPreview(draft) }
+                }
+                #endif
             }
             // Each selected incident starts at its coverage and privacy
             // summary, instead of retaining another incident's scroll offset.
@@ -338,29 +375,26 @@ struct DiagnosticReportView: View {
     private func incidentDescription(_ draft: DiagnosticStore.Draft) -> some View {
         Group {
             Text("Report " + draft.id).font(.caption)
-                        Picker("Category", selection: Binding(get: { reports.draft?.category ?? "other" }, set: { reports.draft?.category = $0 })) {
+                        Picker("Category", selection: Binding(get: { reports.draft?.category ?? "other" }, set: { reports.stopLocalExport(); reports.draft?.category = $0 })) {
                             Text("Playback").tag("playback"); Text("Connection / sign-in").tag("connection"); Text("Interface / interrupted run").tag("interface"); Text("Other").tag("other")
-                        }.disabled(draft.consented)
+                        }.disabled(draft.consented || reports.busy)
                         #if os(iOS)
-                        TextEditor(text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.draft?.description = String($0.prefix(4_000)) })).frame(minHeight: 100).accessibilityLabel("What happened? Description is user content")
-                            .disabled(draft.consented)
+                        TextEditor(text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.stopLocalExport(); reports.draft?.description = String($0.prefix(4_000)) })).frame(minHeight: 100).accessibilityLabel("What happened? Description is user content")
+                            .disabled(draft.consented || reports.busy)
                         #else
-                        TextField("Optional description", text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.draft?.description = String($0.prefix(4_000)) })).disabled(draft.consented)
+                        TextField("Optional description", text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.stopLocalExport(); reports.draft?.description = String($0.prefix(4_000)) })).disabled(draft.consented || reports.busy)
                         #endif
         }
     }
     private func incidentPrivacy(_ draft: DiagnosticStore.Draft) -> some View {
         Group {
-            Toggle("Include the current title", isOn: $reports.includeTitle).disabled(draft.consented)
-                        Toggle("Include available platform diagnostics", isOn: $reports.includePlatform).disabled(draft.consented || draft.platform?.isEmpty != false)
+            Toggle("Include the current title", isOn: $reports.includeTitle).disabled(draft.consented || reports.busy).onChange(of: reports.includeTitle) { _, _ in reports.stopLocalExport() }
+                        Toggle("Include available platform diagnostics", isOn: $reports.includePlatform).disabled(draft.consented || reports.busy || draft.platform?.isEmpty != false).onChange(of: reports.includePlatform) { _, _ in reports.stopLocalExport() }
                         Text("No passwords, addresses, request bodies, media or raw stream identifiers are collected. Your description and an optional title are private content.").font(.caption)
                         Text("Client: " + (draft.capture.historyEnabled ? (draft.capture.dropped > 0 ? "partial (overflow)" : "bounded history") : "history disabled") + "; persistence: " + draft.capture.persistence).font(.caption)
                         ForEach(draft.serverComponents, id: \.name) { component in Text("\(component.name): \(component.state) \(component.reason ?? "")").font(.caption) }
                         Text("Platform diagnostics: " + (draft.platformReason ?? "normalized evidence available") + ". Clock alignment: unavailable.").font(.caption)
-                        #if os(tvOS)
-                        Text("Recent safe events").font(.headline)
-                        eventPreview(draft)
-                        #else
+                        #if os(iOS)
                         DisclosureGroup("Preview safe event fields") { eventPreview(draft) }
                         #endif
         }
@@ -368,6 +402,9 @@ struct DiagnosticReportView: View {
     private func eventPreview(_ draft: DiagnosticStore.Draft) -> some View {
         ForEach(Array(draft.capture.events.suffix(30).enumerated()), id: \.offset) { _, event in
             Text(event.utc + " " + event.domain + "/" + event.kind + " " + event.facts.keys.sorted().joined(separator: ", ")).font(.caption)
+                #if os(tvOS)
+                .focusable()
+                #endif
         }
     }
     private func incidentActions(_ draft: DiagnosticStore.Draft) -> some View {
@@ -376,7 +413,12 @@ struct DiagnosticReportView: View {
                         Button("Save / share diagnostic ZIP") { reports.export() }.disabled(reports.busy).accessibilityIdentifier("diagnostics-export")
                         Text("Attach the ZIP to your bug or issue report. Saving does not submit it.").font(.caption)
                         #else
-                        Text("This TV keeps the report locally. Transferring the TV's ZIP to a phone is not available yet.").font(.caption)
+                        Text("Use trusted Wi-Fi. This local download is unencrypted; anyone with its link can download the ZIP. It ends after one download or five minutes.").font(.caption)
+                        Button("Save TV ZIP on a phone") { reports.shareOnLocalNetwork() }.disabled(reports.busy).accessibilityIdentifier("diagnostics-export-tv")
+                        if let url = reports.localExportURL {
+                            DiagnosticLocalExportView(url: url)
+                            Button("Stop local download") { reports.stopLocalExport() }.accessibilityIdentifier("diagnostics-stop-export")
+                        }
                         #endif
                         if DiagnosticRecorder.shared.recording { Button("Stop reproduction recording") { reports.stopReproduction() } }
                         else { Button("Record reproduction (five minutes)") { reports.startReproduction() }.disabled(draft.consented || reports.busy) }
@@ -397,6 +439,20 @@ struct DiagnosticReportView: View {
                 }
     }
 
+}
+
+private struct DiagnosticLocalExportView: View {
+    let url: URL
+    private var qr: UIImage? {
+        let filter = CIFilter.qrCodeGenerator(); filter.message = Data(url.absoluteString.utf8)
+        guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)), let image = CIContext().createCGImage(output, from: output.extent) else { return nil }
+        return UIImage(cgImage: image)
+    }
+    var body: some View {
+        if let qr { Image(uiImage: qr).interpolation(.none).resizable().scaledToFit().frame(width: 256, height: 256).accessibilityLabel("Scan to save this TV's diagnostic ZIP") }
+        Text(url.absoluteString).font(.caption).accessibilityIdentifier("diagnostics-export-url")
+        Text("Your phone must be on the same local network. Save the ZIP, then attach it to an issue.").font(.caption)
+    }
 }
 
 struct DiagnosticHandoffView: View {

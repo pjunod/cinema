@@ -781,6 +781,6 @@ DV final bounded serving evidence: [HTTP summary](evidence/dv-processing-2026-10
 
 | [Remote diagnostics Apple wire](apple-builds/remote-diagnostics-wire.md) | What is added to the Apple report format contract? | built |
 | [Remote diagnostics Apple capture](apple-builds/remote-diagnostics-capture.md) | What changes in native private report capture, share, send and TV approval? | open |
+| [remote-diagnostics-qualification.md](apple-builds/remote-diagnostics-qualification.md) | Qualifies offline phone ZIP export, native TV local downloads and same-incident relaunch recovery. | built |
 
 Apple growing playlist attachment: [preparation and failover correction](apple-builds/914-growing-playlist-attachment.md) — **built; physical acceptance open**.
-| [remote-diagnostics-qualification.md](apple-builds/remote-diagnostics-qualification.md) | Registers and qualifies the actual offline report UI, explicit upload boundary and same-incident relaunch recovery. | open |

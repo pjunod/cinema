@@ -36,6 +36,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -308,6 +309,7 @@ internal fun AuthTextField(
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     leadingIcon: (@Composable () -> Unit)? = null,
     trailingIcon: (@Composable () -> Unit)? = null,
+    downFocus: FocusRequester? = null,
 ) {
     val television = currentFormFactor() == FormFactor.Television
     var editing by remember { mutableStateOf(false) }
@@ -332,6 +334,11 @@ internal fun AuthTextField(
                 }
             }
             .onPreviewKeyEvent { event ->
+                // Non-player forms can name an explicit next control. Keep
+                // physical key decoding in this shared form adapter.
+                if (television && downFocus != null && event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN && event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    downFocus.requestFocus(); return@onPreviewKeyEvent true
+                }
                 if (!television || !event.nativeKeyEvent.isTvSelectKey()) {
                     return@onPreviewKeyEvent false
                 }

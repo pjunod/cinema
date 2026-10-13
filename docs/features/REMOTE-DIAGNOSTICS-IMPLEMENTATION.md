@@ -3,7 +3,7 @@
 **Status:** open — archive export is the current release scope; device acceptance pending ·
 **Written:** 2026-10-12 · **Source baseline:** `8d7bc723e` ·
 **Executes:** Paul's request for remote diagnostics on web, Apple and Android,
-with TV phone handoff and the upload inbox in the first release ·
+with archive attachments, including the TV’s own archive on a phone ·
 **Builder:** GPT-6.1 Sol.
 
 This is the implementation contract. Read the
@@ -31,11 +31,25 @@ contact a support service. A ZIP contains `summary.txt`, `manifest.json`, the
 user's `description.txt`, bounded structured client events, and available
 user-scoped server evidence. Title and platform attachments stay opt-in.
 
-Native TVs retain local capture and history, but transferring their actual
-archive to a phone without a hosted inbox remains unfinished. Do not represent
-an export from a different device as the TV's report. Physical file sharing and
-TV transfer need their own acceptance evidence. The execution ledger records
-the current qualified subset and remaining work.
+Native TVs expose their selected ZIP only after the physically controlled
+report screen's “Save TV ZIP on a phone” action. A temporary listener binds a
+private IPv4 interface, uses a random capability with at least 128 bits of
+entropy, expires after five minutes and permits one explicit download. The QR
+opens a minimal phone page; only its Download button's POST consumes the
+archive, so previews do not consume it. No support service, enrollment, DNS or
+TLS configuration is required. Cinema may be unavailable.
+
+The screen warns that local HTTP is unencrypted and requires trusted Wi-Fi;
+anyone possessing the link can download its optional private content. The ZIP
+is frozen from the TV's selected incident and privacy choices, not captured on
+the phone. Closing, backgrounding, changing incident/privacy/description,
+deleting or changing authorization revokes the listener and active sockets.
+The endpoint accepts no file path or playback command. Requests, connections,
+headers and archive bytes are bounded; cross-origin forms, body framing and
+wrong capabilities are refused. A stopped or expired download can be restarted
+with a fresh link. Transfer requires phone-to-TV LAN reachability; guest-network
+isolation can block it. Physical and signed-device evidence stays distinct from
+owned simulator/emulator evidence in the execution ledger.
 
 The sections below retain the original implementation design and receipts.
 Hosted delivery requirements are historical until a new user instruction
