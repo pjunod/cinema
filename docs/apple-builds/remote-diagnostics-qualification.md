@@ -15,7 +15,7 @@ variant uses the real remote API and the exact focused SwiftUI action cell.
 
 The [canonical ledger](../features/REMOTE-DIAGNOSTICS-STATUS.md) records actual
 results and fixture failures. The archive-first follow-up also verifies the actual exported ZIP and system
-share-sheet action. Native TV local archive transfer is built and being qualified; hosted delivery is
+share-sheet action. Native TV local archive transfer is built and software-qualified; hosted delivery is
 deferred. No physical-device or signed
 release qualification follows from simulator execution.
 
@@ -25,3 +25,11 @@ Closing/background/authorization retirement revokes it. The UI warns about
 unencrypted trusted Wi-Fi. Actual tvOS remote UI passes selected archive and
 close revocation; iOS/tvOS capture/wire suites each pass eleven cases. The three final-review findings are corrected. Required
 fast gate and the exact follow-up source are in the canonical ledger.
+
+
+The playback landing required a fresh Apple238 claim and regenerated project.
+Combined-source focused tests pass60 iOS and54 tvOS cases. A populated TV
+capture exposed a remote-focus gap across the long preview: the preview now
+follows report/history actions and accepts row focus. The actual selected-ZIP
+and close-revocation check passes after this correction. Full report-screen
+export/recovery qualification is recorded in the canonical ledger and #1081.

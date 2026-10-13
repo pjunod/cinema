@@ -22,7 +22,7 @@ duplicating its evidence.
 | Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
 | Plan review | Original review: 12 findings corrected; history follow-up: two findings corrected. One final TV-archive review found three issues, all corrected with focused regressions in §26; no repeated review cycle. |
 | Promotion/deployment | #1037 and archive-first #1066 merged. #1066 landing `569678f2513695bb9f7b1923ed2c39af6dd19043`, eight required passes. Hosted/private service rollout cancelled by the archive direction; no production changes by this chat. |
-| Current checks | #1066 merged with eight required passes. TV download source compiles on Apple TV and Android; focused single-download/expiry/cancellation tests pass. Apple TV shipped remote UI passes selected-incident download and close revocation; Android TV export/QR, D-pad and recovery pass three tests. iOS/tvOS capture/wire suites each pass eleven cases; Android capture/wire/download suites pass twelve. One final review complete; three findings corrected and focused qualification repeated. The exact required gate and landing receipt are maintained in #1081. |
+| Current checks | #1066 merged with eight required passes. TV download source compiles on Apple TV and Android; focused single-download/expiry/cancellation tests pass. Apple TV shipped remote UI passes selected-incident download and close revocation; Android TV export/QR, D-pad, recovery and default Select-to-edit pass four tests. iOS/tvOS capture/wire suites each pass eleven cases; Android capture/wire/download suites pass twelve. One final review complete; three findings corrected and focused qualification repeated. The exact required gate and landing receipt are maintained in #1081. |
 | Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
 | Next action | Software archive work is complete. #1081 carries its authoritative required-gate and landing receipt; signed/physical sampling is separate acceptance work. Hosted delivery remains deferred; no service or fleet installation. |
 
@@ -834,3 +834,15 @@ Apple build238 replaces the colliding claim237. The new Apple and Rust inputs
 are being qualified before another push. Android171 and the archive protocol
 source are unchanged; the existing executed Android and browser receipts
 remain applicable. No hardware or fleet installation is part of this step.
+
+
+The playback-base source passes 60 iOS and 54 tvOS focused tests, the pinned
+all-target Clippy/format hook, 22 focused Rust playback regressions and all81
+contracts. The history audit passes with both projects’ client witnesses.
+A subsequent actual TV report check reproduced remote focus stopping before
+ZIP export when the captured preview has many nonfocusable rows. The TV now
+puts that preview after every report/history action, and its rows accept remote
+focus so the content remains readable. The same populated-report download
+check passes after the correction; export and relaunch recovery are being
+checked together before committing the final receipt. The failed run is kept
+as a failure, including its zero-test runner restart.

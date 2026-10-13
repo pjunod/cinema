@@ -45,7 +45,7 @@ final class DiagnosticReportingTests: XCTestCase {
 
     func testDiagnosticZIPOpensSystemShareSheetWithoutSupport() throws {
         #if os(tvOS)
-        throw XCTSkip("Native TV archive transfer is not implemented")
+        throw XCTSkip("TV exports through its local download action")
         #else
         continueAfterFailure = false
         let app = XCUIApplication()

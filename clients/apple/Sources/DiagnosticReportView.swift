@@ -331,6 +331,12 @@ struct DiagnosticReportView: View {
             Form {
                 incidentSection
                 pendingSection
+                #if os(tvOS)
+                if let draft = reports.draft {
+                    // Keep every report action reachable before the long preview.
+                    Section("Recent safe events") { eventPreview(draft) }
+                }
+                #endif
             }
             // Each selected incident starts at its coverage and privacy
             // summary, instead of retaining another incident's scroll offset.
@@ -388,10 +394,7 @@ struct DiagnosticReportView: View {
                         Text("Client: " + (draft.capture.historyEnabled ? (draft.capture.dropped > 0 ? "partial (overflow)" : "bounded history") : "history disabled") + "; persistence: " + draft.capture.persistence).font(.caption)
                         ForEach(draft.serverComponents, id: \.name) { component in Text("\(component.name): \(component.state) \(component.reason ?? "")").font(.caption) }
                         Text("Platform diagnostics: " + (draft.platformReason ?? "normalized evidence available") + ". Clock alignment: unavailable.").font(.caption)
-                        #if os(tvOS)
-                        Text("Recent safe events").font(.headline)
-                        eventPreview(draft)
-                        #else
+                        #if os(iOS)
                         DisclosureGroup("Preview safe event fields") { eventPreview(draft) }
                         #endif
         }
@@ -399,6 +402,9 @@ struct DiagnosticReportView: View {
     private func eventPreview(_ draft: DiagnosticStore.Draft) -> some View {
         ForEach(Array(draft.capture.events.suffix(30).enumerated()), id: \.offset) { _, event in
             Text(event.utc + " " + event.domain + "/" + event.kind + " " + event.facts.keys.sorted().joined(separator: ", ")).font(.caption)
+                #if os(tvOS)
+                .focusable()
+                #endif
         }
     }
     private func incidentActions(_ draft: DiagnosticStore.Draft) -> some View {
