@@ -2647,6 +2647,7 @@ assert.equal(context.ACT_TIMER, null);
 
         clustered_store_tests = (
             "clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure",
+            "login_token_insert_requires_the_verified_password_version",
         )
         for test_name in clustered_store_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -2657,6 +2658,7 @@ assert.equal(context.ACT_TIMER, null);
                 command,
             )
             self.assertIn("--test store_contract", command)
+            self.assertIn("RUST_MIN_STACK=8388608", command)
             self.assertIn("-- --exact --test-threads=1", command)
 
         proxy_writer_test = (
@@ -2690,7 +2692,7 @@ assert.equal(context.ACT_TIMER, null);
             if " snapshot_metrics --lib -- --test-threads=1" in command
         ]
         self.assertEqual(len(snapshot_metrics), 1)
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=10", snapshot_metrics[0])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=13", snapshot_metrics[0])
         self.assertIn("run: make cluster-daemon-check", workflow)
 
     def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):
