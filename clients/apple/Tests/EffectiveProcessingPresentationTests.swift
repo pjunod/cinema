@@ -59,7 +59,7 @@ final class EffectiveProcessingPresentationTests: XCTestCase {
             model.autoSkip = true
             let controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in
                 (decision, model.caps())
-            }, requestHlsSession: { _, _, _ in
+            }, prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, _, _ in
                 throw APIError.transport("fixture stops before network attachment")
             })
             controller.start(model: model, itemId: 1, fileId: 1, startMs: 0,
