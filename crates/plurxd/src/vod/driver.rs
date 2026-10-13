@@ -105,7 +105,16 @@ async fn retire_failed_rendition(shared: &Shared, rendition: &Arc<Rendition>) {
 fn record_performed_step(shared: &Shared, rendition: &Rendition, step: Step) {
     if let Some(encoding) = &rendition.recipe.encoding {
         match step {
-            Step::Start { .. } | Step::Restart { .. } | Step::Resume => {
+            Step::Start { .. } | Step::Restart { .. } => {
+                #[cfg(target_os = "linux")]
+                if encoding.dv_runtime.is_some() {
+                    // spawn_generation checks exact credit and contiguous
+                    // entry before continuing the logical processing episode.
+                    return record_performed_step_metrics(shared, rendition, step);
+                }
+                encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), true)
+            }
+            Step::Resume => {
                 encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), true)
             }
             Step::Stop | Step::Terminate { .. } => {
@@ -114,6 +123,10 @@ fn record_performed_step(shared: &Shared, rendition: &Rendition, step: Step) {
             _ => {}
         }
     }
+    record_performed_step_metrics(shared, rendition, step);
+}
+
+fn record_performed_step_metrics(shared: &Shared, rendition: &Rendition, step: Step) {
     match step {
         Step::Stop => rendition.ahead_hold.store(true, Release),
         Step::Resume | Step::Start { .. } | Step::Restart { .. } => {
@@ -523,7 +536,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             let demands = playback_demands(&shared.pool, rendition, &readers, &manifest);
             let ledgers = readers
                 .values()
-                .filter(|reader| !reader.authority_only)
+                .filter(|reader| !reader.authority_only && reader.processing_probe.is_none())
                 .map(|reader| Arc::clone(&reader.marker_prewarm))
                 .collect::<Vec<_>>();
             (demands, ledgers)
@@ -568,6 +581,19 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             decision.action = manifest
                 .next_gap(0)
                 .map_or(Action::Idle, |next| Action::Produce { next });
+        }
+        // Between bounded helpers there may be no child to stop. Reader
+        // pacing and capacity still end the measured production episode.
+        if let Some(encoding) = &rendition.recipe.encoding {
+            #[cfg(target_os = "linux")]
+            let bounded_processing = encoding.dv_runtime.is_some();
+            #[cfg(not(target_os = "linux"))]
+            let bounded_processing = false;
+            if matches!(decision.action, Action::Idle | Action::Suspend { .. })
+                || (bounded_processing && matches!(decision.action, Action::MakeRoom { .. }))
+            {
+                encoding.reset_active_production(epoch, false);
+            }
         }
         // Record only this pass's decision. A later non-capacity decision
         // clears the reason, so the status cannot outlive the condition that
@@ -916,7 +942,7 @@ pub(super) fn playback_demands(
         .filter(|request| {
             !readers
                 .get(&request.session)
-                .is_some_and(|reader| reader.authority_only)
+                .is_some_and(|reader| reader.authority_only || reader.processing_probe.is_some())
         })
         .collect::<Vec<_>>();
     let mut nearest = HashMap::new();
@@ -975,7 +1001,7 @@ pub(super) fn playback_demands(
     demands.extend(
         readers
             .values()
-            .filter(|reader| !reader.authority_only)
+            .filter(|reader| !reader.authority_only && reader.processing_probe.is_none())
             .map(|reader| match reader.preparation_frontier {
                 Some(frontier) => {
                     // Admission records an actual bounded Prepare request,
@@ -992,6 +1018,19 @@ pub(super) fn playback_demands(
                 None => Demand::idle_at(reader.frontier),
             }),
     );
+    demands.extend(readers.values().filter_map(|reader| {
+        let probe = reader.processing_probe.as_ref()?;
+        if !probe.live() || probe.sampler.qualified() {
+            return None;
+        }
+        let next = manifest
+            .next_gap(probe.sampler.next_entry())
+            .filter(|next| *next <= probe.through)?;
+        let mut demand = Demand::waiting_on(next);
+        demand.foreground = true;
+        demand.bounded_preparation = true;
+        Some(demand)
+    }));
     demands
 }
 

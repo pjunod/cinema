@@ -1,5 +1,113 @@
 
 
+#[tokio::test]
+async fn processed_instance_cleanup_keeps_failed_unlink_charged_and_protects_live_parent() {
+    let base = crate::test_tempdir().expect("processed cleanup");
+    let serve = bare_serve(base.path());
+    let mut rendition = synthetic_rendition(base.path()).await;
+    Arc::get_mut(&mut rendition).expect("unpublished instance").ephemeral_processing = true;
+    let slots = Arc::new(Semaphore::new(1));
+    Arc::get_mut(&mut rendition).expect("unpublished instance")._processed_instance_allowance =
+        Some(Arc::new(Arc::clone(&slots).try_acquire_owned().expect("instance slot")));
+    insert_control_session(&serve, "processed-cleanup", Arc::clone(&rendition), Instant::now()).await;
+    {
+        let mut manifest = rendition.manifest.lock().await;
+        rendition.dir.materialize(&mut manifest, 0, b"0123456789", now_ms())
+            .await.expect("instance member");
+    }
+    serve.shared.working_set.fetch_add(10, Relaxed);
+    *rendition.dormant_since.lock().expect("dormant") = Some(Instant::now() - Duration::from_secs(1));
+    let failure = format!("processed_directory:{}", rendition.key);
+    serve.shared.test_hooks().private_failures.lock().expect("cleanup seam").insert(failure.clone());
+    serve.shared.purge_if_dormant(&rendition.key, Duration::ZERO).await;
+    assert!(!rendition.closed.load(Relaxed), "active parent survives cleanup");
+    assert!(serve.end("processed-cleanup", Terminal::Deleted).await);
+    assert!(rendition.closed.load(Relaxed));
+    assert!(serve.shared.renditions.lock().await.get(&rendition.key)
+        .is_some_and(|current| Arc::ptr_eq(current, &rendition)));
+    assert_eq!(serve.shared.working_set.load(Relaxed), 10, "failed deletion remains charged");
+    assert!(Arc::clone(&slots).try_acquire_owned().is_err(), "failed cleanup holds instance bound");
+    assert!(rendition.dir.path().exists());
+    serve.shared.test_hooks().private_failures.lock().expect("cleanup seam").remove(&failure);
+    serve.maintain().await;
+    assert!(!serve.shared.renditions.lock().await.contains_key(&rendition.key));
+    assert!(!rendition.dir.path().exists());
+    assert_eq!(serve.shared.working_set.load(Relaxed), 0);
+    serve.maintain().await;
+    assert_eq!(serve.shared.working_set.load(Relaxed), 0, "settlement charges once");
+    drop(rendition);
+    assert_eq!(slots.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn processed_instance_abandoned_before_reader_attachment_is_reaped() {
+    let base = crate::test_tempdir().expect("abandoned processed cleanup");
+    let serve = bare_serve(base.path());
+    let mut rendition = synthetic_rendition(base.path()).await;
+    Arc::get_mut(&mut rendition).expect("unpublished instance").ephemeral_processing = true;
+    *rendition.dormant_since.lock().expect("dormant") = Some(Instant::now() - Duration::from_secs(1));
+    serve.shared.renditions.lock().await.insert(rendition.key.clone(), Arc::clone(&rendition));
+    serve.maintain().await;
+    assert!(rendition.closed.load(Relaxed));
+    assert!(!rendition.dir.path().exists());
+    assert!(!serve.shared.renditions.lock().await.contains_key(&rendition.key));
+}
+
+#[tokio::test]
+async fn prepared_root_cancelled_end_keeps_capacity_through_detach_and_worker_reap() {
+    let base = crate::test_tempdir().expect("root cleanup");
+    let serve = bare_serve(base.path());
+    let rendition = synthetic_rendition(base.path()).await;
+    insert_control_session(&serve, "prepared-root-cleanup", Arc::clone(&rendition), Instant::now()).await;
+    let admissions = crate::admission::Admissions::new();
+    let bundle = admissions.try_admit_bundle(1, 2, &crate::admission::TranscodeResourceEstimate {
+        hardware_slot: true, cpu_threads: 2, decoder_threads: None,
+    }, crate::admission::Priority::Live).expect("root bundle");
+    let root = rendition.retained_admission.bind(bundle.into());
+    let worker = root.clone().try_claim_worker().expect("exclusive unreaped worker");
+    serve.shared.sessions.lock().await.get_mut("prepared-root-cleanup")
+        .expect("parent").root_admission = Some(root);
+    let pause = serve.arm_terminal_detach_pause_for_test();
+    let waiter = {
+        let serve = Arc::clone(&serve);
+        tokio::spawn(async move { serve.end("prepared-root-cleanup", Terminal::Deleted).await })
+    };
+    let held = pause.reached().await;
+    waiter.abort();
+    assert_eq!(admissions.snapshot().hardware_used, 1);
+    assert_eq!(rendition.readers.lock().await.len(), 1);
+    held.release();
+    assert!(serve.end("prepared-root-cleanup", Terminal::Deleted).await);
+    assert!(rendition.readers.lock().await.is_empty());
+    assert!(serve.shared.sessions.lock().await["prepared-root-cleanup"].root_admission.is_none());
+    assert_eq!(admissions.software_in_use(), 2, "unreaped worker still owns its clone");
+    drop(worker);
+    assert_eq!(admissions.software_in_use(), 0);
+    assert!(rendition.retained_admission.current().is_none());
+}
+
+#[tokio::test]
+async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capacity() {
+    let base = crate::test_tempdir().expect("root expiry");
+    let serve = bare_serve(base.path());
+    let rendition = synthetic_rendition(base.path()).await;
+    insert_control_session(&serve, "prepared-root-expiry", Arc::clone(&rendition),
+        Instant::now() - SESSION_IDLE_TTL - Duration::from_secs(1)).await;
+    let admissions = crate::admission::Admissions::new();
+    let bundle = admissions.try_admit_bundle(1, 2, &crate::admission::TranscodeResourceEstimate {
+        hardware_slot: true, cpu_threads: 2, decoder_threads: None,
+    }, crate::admission::Priority::Live).expect("root bundle");
+    let root = rendition.retained_admission.bind(bundle.into());
+    serve.shared.sessions.lock().await.get_mut("prepared-root-expiry")
+        .expect("parent").root_admission = Some(root);
+    serve.maintain().await;
+    assert!(!serve.shared.sessions.lock().await.contains_key("prepared-root-expiry"));
+    assert!(rendition.readers.lock().await.is_empty());
+    assert_eq!(admissions.snapshot().hardware_used, 0);
+    assert_eq!(admissions.software_in_use(), 0);
+    assert!(rendition.retained_admission.current().is_none());
+}
+
     #[tokio::test]
     async fn a05_real_vod_staged_observation_is_not_commit_authority_and_cannot_follow_replacement() {
         let base = crate::test_tempdir().expect("base");
@@ -53,6 +161,9 @@
             "sess-a".into(),
             Session {
                 children: Vec::new(),
+                root_admission: None,
+                processed_reuse_scope: None,
+                processed_probes: Vec::new(),
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
@@ -104,6 +215,9 @@
             "sess-a".into(),
             Session {
                 children: Vec::new(),
+                root_admission: None,
+                processed_reuse_scope: None,
+                processed_probes: Vec::new(),
                 passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key: replacement_key,
@@ -3322,6 +3436,9 @@
             "sess-a".into(),
             Session {
                 children: Vec::new(),
+                root_admission: None,
+                processed_reuse_scope: None,
+                processed_probes: Vec::new(),
                 passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key,

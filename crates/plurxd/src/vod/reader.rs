@@ -34,6 +34,7 @@ pub(super) struct Reader {
     /// Optional target work stays at its append boundary while ordinary
     /// control continues to report the incumbent playback anchor.
     pub(super) preparation_frontier: Option<u32>,
+    pub(super) processing_probe: Option<Arc<ProcessedRootProbe>>,
     pub(super) control_sequence: Option<u64>,
     /// The last segment actually served. Telemetry only: the observed runway
     /// the status publishes is measured from here, while both the eviction
@@ -54,6 +55,7 @@ impl Reader {
             authority_only: false,
             frontier,
             preparation_frontier: None,
+            processing_probe: None,
             control_sequence: None,
             last_served: None,
             marker_prewarm: Arc::new(StdMutex::new(MarkerPrewarmLedger::default())),

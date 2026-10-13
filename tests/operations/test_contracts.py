@@ -2098,6 +2098,31 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("if: always()", cleanup)
         self.assertIn('chown -R "$owner" "$GITHUB_WORKSPACE"', cleanup)
 
+    def test_effort_compile_only_policy_preserves_required_checks_and_claims_no_units(self):
+        workflow = read(".github/workflows/effort-ci.yml")
+        inputs = workflow.split("    inputs:\n", 1)[1].split("\nenv:\n", 1)[0]
+        self.assertRegex(inputs, r"compile_only:[\s\S]*type: boolean[\s\S]*default: false")
+        jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
+        steps = workflow_step_blocks(jobs["preflight"])
+        for name in (
+            "Restore attributable Python successes",
+            "Publish Python attempt-start marker",
+            "Provision checksummed public K08 oracle sources",
+            "Check CI, deploy, and shipping contracts",
+        ):
+            with self.subTest(unit_step=name):
+                self.assertIn("if: ${{ !inputs.compile_only }}", steps[name])
+        self.assertIn("steps.receipts.outcome == 'success'", steps["Preserve Python success journal even on unit failure"])
+        self.assertNotIn("compile_only", steps["Audit corrective-history evidence"])
+        catalog_step = steps["Check validation catalog and contract unit tests"].split("      - uses:", 1)[0]
+        self.assertIn("make validation-lint", catalog_step)
+        self.assertNotIn("compile_only", catalog_step)
+        for job in ("rust_compile", "web_static", "apple_compile", "android_compile", "effort_gate"):
+            with self.subTest(required_job=job):
+                self.assertNotIn("compile_only", jobs[job])
+        for path in (".github/workflows/ci.yml", ".github/workflows/main-fast-lane.yml"):
+            self.assertNotIn("compile_only", read(path), "main qualification has no task-unit bypass")
+
     def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
         fast_lane = read(".github/workflows/main-fast-lane.yml")

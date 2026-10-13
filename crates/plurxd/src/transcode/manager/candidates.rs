@@ -1,6 +1,178 @@
 use super::*;
 use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
 
+/// Descriptions only: no source descriptor, executable, parent or admission.
+/// A query can retain several full recipe identities at distinct rung ceilings.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Default)]
+pub(super) struct ProcessedCandidateHints {
+    rows: std::sync::Mutex<VecDeque<ProcessedCandidateHint>>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+struct ProcessedCandidateHint {
+    query: [u8; 32],
+    candidate: QualityCandidate,
+    qualified_at: Instant,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl ProcessedCandidateHints {
+    fn remember(&self, query: [u8; 32], candidate: &QualityCandidate) {
+        if !candidate.processed_hdr10 || !candidate.identity_matches() || !candidate.playable() {
+            return;
+        }
+        let now = Instant::now();
+        let mut rows = self.rows.lock().expect("processed candidate descriptions");
+        rows.retain(|row| {
+            row.qualified_at.elapsed() < Duration::from_secs(7200)
+                && !(row.query == query && row.candidate.recipe_digest == candidate.recipe_digest)
+        });
+        while rows.len() >= 64 {
+            rows.pop_front();
+        }
+        rows.push_back(ProcessedCandidateHint {
+            query,
+            candidate: candidate.clone(),
+            qualified_at: now,
+        });
+    }
+
+    fn project(
+        &self,
+        query: [u8; 32],
+        proofs: &crate::vodencode::CandidateProductionProofs,
+    ) -> Vec<QualityCandidate> {
+        let mut rows = self.rows.lock().expect("processed candidate descriptions");
+        rows.retain(|row| row.qualified_at.elapsed() < Duration::from_secs(7200));
+        rows.iter()
+            .rev()
+            .filter(|row| row.query == query)
+            .take(8)
+            .map(|row| {
+                let mut candidate = row.candidate.clone();
+                candidate.complete_cache = false;
+                candidate.sustainable = proofs.get(candidate.recipe_digest).is_some_and(|proof| {
+                    proof.milli_realtime >= 1150
+                        && proof.active_ms >= 2000
+                        && proof.completed_segments >= 2
+                });
+                candidate
+            })
+            .collect()
+    }
+}
+
+impl TranscodeManager {
+    pub(crate) async fn before_quality_catalog_ordinary(&self) {
+        self.hooks.get().before_quality_catalog_ordinary().await;
+    }
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn processed_hint_key(
+        &self,
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        query: &crate::media_pool::QualityCatalogRequest,
+    ) -> Option<[u8; 32]> {
+        query.validate().ok()?;
+        if query.file_id != snapshot.file.id
+            || query.source_size != snapshot.file.size
+            || query.source_mtime != snapshot.file.mtime
+            || query.subtitle_burn.is_some()
+            || query.presentation != Presentation::Vod
+            || query.copy_contract.is_some_and(|(_, preserve, _)| preserve)
+            || !Self::vod_dv_preferences_from_snapshot(snapshot).hdr_processing
+        {
+            return None;
+        }
+        let mut canonical = query.clone();
+        canonical.audio_index = Self::candidate_audio_from_snapshot(snapshot, query.audio_index);
+        canonical.audio_claim = query
+            .audio_claim
+            .clone()
+            .or(plurx_core::playback::audio::AudioClaim::from_caps(&query.caps).ok()?);
+        if let Some(retained) = canonical.audio_delivery.as_ref() {
+            if !retained.is_encoded_vod_compatible() {
+                return None;
+            }
+        } else if let Some(claim) = canonical.audio_claim.as_ref() {
+            let selected = canonical.audio_index.map_or_else(
+                || snapshot.file.audio_streams.first(),
+                |index| {
+                    snapshot
+                        .file
+                        .audio_streams
+                        .iter()
+                        .find(|stream| stream.index == index)
+                },
+            );
+            canonical.audio_delivery = Some(plurx_core::playback::audio::resolve_audio(
+                selected,
+                &claim.profile(),
+                plurx_core::playback::audio::AudioRoute::EncodedVod,
+                canonical.audio_offset_ms,
+            ));
+        }
+        if let Some(audio) = canonical.audio_delivery.as_mut() {
+            // Match byte_identity's established semantics, not explanatory
+            // text, while retaining codec/rate/layout/downmix distinctions.
+            audio.reason.clear();
+        }
+        let runtime = format!(
+            "{:?}:{:?}:{:?}",
+            self.caps,
+            self.pipeline,
+            *self.rate_control.read().expect("rate control snapshot")
+        );
+        let bytes = serde_json::to_vec(&(
+            "plurx:processed-catalog-description:v1",
+            crate::media_pool::PlanningBinding::from_snapshot(snapshot),
+            canonical,
+            crate::ffmpeg::encoded_process_identity(),
+            self.cache_location().map(|(_, node)| node),
+            runtime,
+        ))
+        .ok()?;
+        Some(Sha256::digest(bytes).into())
+    }
+
+    pub(crate) fn remember_processed_candidate(&self, request: &SessionRequest) {
+        #[cfg(any(target_os = "linux", test))]
+        if let Some(context) = request.candidate_context.as_ref() {
+            if let Some((snapshot, query)) = context
+                .planning_snapshot
+                .as_deref()
+                .zip(context.catalog_query.as_ref())
+            {
+                if let Some(key) = self.processed_hint_key(snapshot, query) {
+                    self.processed_candidate_hints
+                        .remember(key, &context.selected_candidate);
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "linux", test)))]
+        let _ = request;
+    }
+
+    pub(crate) fn processed_quality_descriptions(
+        &self,
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        query: &crate::media_pool::QualityCatalogRequest,
+    ) -> Vec<QualityCandidate> {
+        #[cfg(any(target_os = "linux", test))]
+        return self
+            .processed_hint_key(snapshot, query)
+            .map_or_else(Vec::new, |key| {
+                self.processed_candidate_hints
+                    .project(key, &self.candidate_production_proofs)
+            });
+        #[cfg(not(any(target_os = "linux", test)))]
+        {
+            let _ = (snapshot, query);
+            Vec::new()
+        }
+    }
+}
+
 pub(crate) struct ResolvedQualityCatalog {
     pub(crate) candidates: Vec<QualityCandidate>,
     pub(crate) measured_candidate_outputs: Vec<crate::vodserve::retained::MeasuredCandidateOutput>,
@@ -327,6 +499,23 @@ impl TranscodeManager {
         let scan_deadline = crate::media_pool::create_stage_deadline(
             crate::media_pool::QUALITY_CATALOG_DEADLINE.min(DECODE_PLAN_PROBE_BUDGET),
         );
+        #[cfg(any(target_os = "linux", test))]
+        let processed_hint_key = self.processed_hint_key(
+            snapshot,
+            &crate::media_pool::QualityCatalogRequest {
+                file_id: snapshot.file.id,
+                source_size: snapshot.file.size,
+                source_mtime: snapshot.file.mtime,
+                caps: caps.clone(),
+                audio_index: audio,
+                audio_offset_ms,
+                subtitle_burn: subtitle,
+                presentation,
+                copy_contract: retained_copy,
+                audio_claim: retained_claim.cloned(),
+                audio_delivery: retained_audio.cloned(),
+            },
+        );
         let mut catalog_file = snapshot.file.clone();
         catalog_file.audio_offset_ms = audio_offset_ms;
         let file = &catalog_file;
@@ -479,6 +668,7 @@ impl TranscodeManager {
                     (width, height),
                 );
                 let candidate = QualityCandidate {
+                    processed_hdr10: false,
                     id: CandidateId::for_recipe_digest(recipe_digest),
                     recipe_digest,
                     route: CandidateRoute::Remux,
@@ -702,6 +892,7 @@ impl TranscodeManager {
                 plurx_core::transcode::vbv_maxrate_bps(plan.options().video_bitrate_kbps)
                     + u64::from(audio_budget) * 1000;
             let candidate = QualityCandidate {
+                processed_hdr10: false,
                 id: CandidateId::for_recipe_digest(recipe_digest),
                 recipe_digest,
                 route: CandidateRoute::Encode,
@@ -818,6 +1009,25 @@ impl TranscodeManager {
                 if measured_candidate_outputs.len() < 64 {
                     measured_candidate_outputs.push(measured);
                 }
+            }
+        }
+        #[cfg(any(target_os = "linux", test))]
+        if let Some(key) = processed_hint_key {
+            let hints = self
+                .processed_candidate_hints
+                .project(key, &self.candidate_production_proofs);
+            if !hints.is_empty() {
+                // Reserve the bounded worker projection's prefix for known
+                // processed identities. Stale descriptions cannot be Auto
+                // fallback, but remain available for explicit requalification.
+                if let Some(progress) = progress {
+                    let mut progress = progress
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    progress.retain(|row| !hints.iter().any(|hint| row.id == hint.id));
+                    progress.splice(0..0, hints.iter().cloned());
+                }
+                result.splice(0..0, hints);
             }
         }
         ResolvedQualityCatalog {
@@ -1117,6 +1327,11 @@ impl TranscodeManager {
         decoder: Option<&crate::playback_control::DecoderCapsSnapshot>,
         deadline: tokio::time::Instant,
     ) -> Result<CandidateExecutionContext, CandidateRestoreError> {
+        if catalog.candidate.processed_hdr10 {
+            return Err(CandidateRestoreError::Unavailable(
+                "processed candidate requires fresh admitted owner qualification".into(),
+            ));
+        }
         if tokio::time::Instant::now() >= deadline {
             return Err(CandidateRestoreError::Unavailable(
                 "candidate restoration deadline".into(),
@@ -1216,6 +1431,7 @@ impl TranscodeManager {
                     candidate.id == id
                         && candidate.decoder_compatible
                         && candidate.recipe_digest == selected.recipe_digest
+                        && candidate.processed_hdr10 == selected.processed_hdr10
                         && candidate.route == selected.route
                         && candidate.grade == selected.grade
                         && candidate.width == selected.width
@@ -1297,6 +1513,7 @@ impl TranscodeManager {
             || selected.recipe_digest != actual.recipe_digest
             || selected.route != actual.route
             || selected.planned_codec != actual.planned_codec
+            || selected.processed_hdr10 != actual.processed_hdr10
             || selected.grade != actual.grade
             || selected.width != actual.width
             || selected.height != actual.height
@@ -1324,6 +1541,8 @@ impl TranscodeManager {
 
     pub(crate) fn candidate_context(candidate: &QualityCandidate) -> CandidateExecutionContext {
         CandidateExecutionContext {
+            catalog_query: None,
+            prepared_processing: None,
             retained_output: None,
             canonical_caps: None,
             selected_candidate: candidate.clone(),
@@ -1353,7 +1572,7 @@ impl TranscodeManager {
     }
 }
 
-fn encoded_client_compatible(
+pub(super) fn encoded_client_compatible(
     caps: &plurx_core::playback::DeviceCaps,
     plan: &ResolvedTranscode,
     facts: &DecodeFacts,
@@ -1506,6 +1725,255 @@ mod tests {
 #[cfg(test)]
 mod snapshot_catalog_regression {
     use super::*;
+
+    #[tokio::test]
+    async fn processed_catalog_scope_canonicalizes_audio_without_aliasing_changed_contracts() {
+        let base = crate::test_tempdir().expect("processed query scope");
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let (file, _) = macos_test_sdr_source(&store).await;
+        store
+            .put_setting(keys::DV_HDR_PROCESSING, "1")
+            .await
+            .expect("processing preference");
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            base.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let mut snapshot = store
+            .playback_planning_snapshot(file.id, &QUALITY_PLANNING_KEYS)
+            .await
+            .expect("snapshot")
+            .expect("file");
+        snapshot.file.audio_streams = vec![plurx_core::domain::AudioStream {
+            index: 0,
+            codec: "ac3".into(),
+            channels: Some(6),
+            sample_rate: Some(48_000),
+            channel_layout: Some("5.1".into()),
+            language: None,
+            title: None,
+            default: true,
+        }];
+        let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+            "v":2, "video":[{"codec":"hevc","profiles":["main10"],"present":["hdr10"]}],
+            "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],"audio":["aac"]
+        })).expect("caps");
+        let mut query = crate::media_pool::QualityCatalogRequest {
+            audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(&caps).expect("claim"),
+            audio_delivery: None,
+            copy_contract: None,
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            caps,
+            audio_index: Some(0),
+            audio_offset_ms: 0,
+            subtitle_burn: None,
+            presentation: Presentation::Vod,
+        };
+        let baseline = manager
+            .processed_hint_key(&snapshot, &query)
+            .expect("canonical scope");
+        let delivery = plurx_core::playback::audio::resolve_audio(
+            snapshot.file.audio_streams.first(),
+            &query.audio_claim.as_ref().expect("claim").profile(),
+            plurx_core::playback::audio::AudioRoute::EncodedVod,
+            0,
+        );
+        query.audio_delivery = Some(delivery);
+        query.audio_delivery.as_mut().expect("resolved").reason = "same byte contract".into();
+        assert_eq!(
+            manager.processed_hint_key(&snapshot, &query),
+            Some(baseline)
+        );
+        if let plurx_core::playback::audio::AudioAction::Encode { bitrate_kbps, .. } =
+            &mut query.audio_delivery.as_mut().expect("resolved").action
+        {
+            *bitrate_kbps += 32;
+        } else {
+            panic!("fixture must resolve encoded AAC");
+        }
+        assert_ne!(
+            manager.processed_hint_key(&snapshot, &query),
+            Some(baseline),
+            "changed retained bytes cannot alias"
+        );
+        query.audio_delivery = None;
+        query
+            .audio_claim
+            .as_mut()
+            .expect("claim")
+            .decoders
+            .push("ac3".into());
+        assert_ne!(
+            manager.processed_hint_key(&snapshot, &query),
+            Some(baseline),
+            "changed claim stays bound"
+        );
+        query.copy_contract = Some((false, true, false));
+        assert!(
+            manager.processed_hint_key(&snapshot, &query).is_none(),
+            "native DV cannot gain a processed HDR10 descriptor"
+        );
+        query.copy_contract = None;
+        snapshot
+            .settings
+            .insert(keys::DV_HDR_PROCESSING.into(), "0".into());
+        assert!(
+            manager.processed_hint_key(&snapshot, &query).is_none(),
+            "saved off preference removes projection"
+        );
+    }
+
+    #[test]
+    fn processed_descriptions_keep_rung_identities_and_require_fresh_exact_production() {
+        let hints = ProcessedCandidateHints::default();
+        let proofs = crate::vodencode::CandidateProductionProofs::default();
+        let make = |digest, height| {
+            let mut candidate = crate::transcode::continuous_test_candidate_context(
+                CandidateId::for_recipe_digest(digest),
+                digest,
+                height,
+            )
+            .selected_candidate;
+            candidate.processed_hdr10 = true;
+            candidate.planned_codec = Some("hevc".into());
+            candidate.grade = OutputGrade::Hdr10;
+            candidate
+        };
+        let first = make([3; 32], 480);
+        let second = make([4; 32], 720);
+        hints.remember([1; 32], &first);
+        hints.remember([1; 32], &second);
+        let cold = hints.project([1; 32], &proofs);
+        assert_eq!(
+            cold.len(),
+            2,
+            "one query keeps both qualified recipe identities"
+        );
+        assert!(cold
+            .iter()
+            .all(|row| !row.playable() && !row.complete_cache));
+        assert!(cold.iter().any(|row| row.id == first.id));
+        assert!(cold.iter().any(|row| row.id == second.id));
+        assert!(
+            hints.project([2; 32], &proofs).is_empty(),
+            "different query has no descriptor"
+        );
+        proofs.record_for_test(
+            second.recipe_digest,
+            crate::vodencode::ActiveProductionEvidence {
+                milli_realtime: 1220,
+                active_ms: 3282,
+                completed_segments: 2,
+                observed_at: Instant::now(),
+            },
+        );
+        let warm = hints.project([1; 32], &proofs);
+        assert!(warm
+            .iter()
+            .find(|row| row.id == second.id)
+            .expect("second identity")
+            .playable());
+        assert!(!warm
+            .iter()
+            .find(|row| row.id == first.id)
+            .expect("first identity")
+            .playable());
+        proofs.record_for_test(
+            second.recipe_digest,
+            crate::vodencode::ActiveProductionEvidence {
+                milli_realtime: 1220,
+                active_ms: 3282,
+                completed_segments: 2,
+                observed_at: Instant::now() - Duration::from_secs(16),
+            },
+        );
+        assert!(hints
+            .project([1; 32], &proofs)
+            .iter()
+            .all(|row| !row.playable()));
+        for value in 5..80 {
+            hints.remember([value; 32], &make([value; 32], 720));
+        }
+        assert_eq!(hints.rows.lock().expect("bounded descriptors").len(), 64);
+        assert!(
+            hints.project([1; 32], &proofs).is_empty(),
+            "old descriptors evict without keeping resources"
+        );
+        hints
+            .rows
+            .lock()
+            .expect("bounded descriptors")
+            .back_mut()
+            .expect("latest")
+            .qualified_at = Instant::now() - Duration::from_secs(7201);
+        assert!(
+            hints.project([79; 32], &proofs).is_empty(),
+            "read cannot renew descriptive expiry"
+        );
+    }
+
+    #[tokio::test]
+    async fn serialized_processed_candidate_requires_new_admitted_qualification() {
+        let base = crate::test_tempdir().expect("processed restore");
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            base.path().join("work"),
+            plurx_core::transcode::EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let request: SessionRequest = serde_json::from_value(serde_json::json!({
+            "file_id": 1, "playback_id": "processed-restore", "automatic": true,
+            "kind": {"kind": "transcode", "height": 720}, "start_seconds": 0.0,
+            "audio_offset_ms": 0, "hdr10": true, "presentation": "vod"
+        }))
+        .expect("bounded request");
+        let mut candidate = crate::transcode::continuous_test_candidate_context(
+            CandidateId::for_recipe_digest([4; 32]),
+            [4; 32],
+            720,
+        )
+        .selected_candidate;
+        candidate.processed_hdr10 = true;
+        candidate.planned_codec = Some("hevc".into());
+        candidate.grade = OutputGrade::Hdr10;
+        let catalog = crate::media_sessions::CandidateCatalogContext {
+            caps: serde_json::from_value(serde_json::json!({"v": 2})).expect("caps"),
+            candidate,
+            binding: crate::media_pool::PlanningBinding {
+                generation: 1,
+                source_digest: "source".into(),
+            },
+        };
+        let restored =
+            serde_json::from_slice(&serde_json::to_vec(&catalog).expect("durable descriptor"))
+                .expect("restored descriptor");
+        let error = manager
+            .restore_catalog_context(
+                &request,
+                &restored,
+                catalog.candidate.id,
+                1,
+                1,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("description cannot restore an executable credit");
+        assert!(
+            !error.is_incompatible(),
+            "absence of live owner qualification is unavailable"
+        );
+        assert!(error
+            .to_string()
+            .contains("fresh admitted owner qualification"));
+    }
     fn macos_test_sdr_document() -> serde_json::Value {
         serde_json::json!({"format":{"duration":"1.0"}, "streams":[{"index":0,"codec_type":"video","codec_name":"hevc","profile":"Main","width":320,"height":180,"pix_fmt":"yuv420p","field_order":"progressive","sample_aspect_ratio":"1:1","avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","color_primaries":"bt709","color_space":"bt709","color_range":"tv","side_data_list":[{"side_data_type":"Display Matrix","rotation":0,"displaymatrix":"00000000: 65536 0 0\n00000001: 0 65536 0\n00000002: 0 0 1073741824\n"}]}]})
     }
@@ -2138,6 +2606,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             .candidate_recipe_digest(&exact, Presentation::Vod, false)
             .expect("digest");
         let candidate = QualityCandidate {
+            processed_hdr10: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Encode,

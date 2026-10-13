@@ -1232,6 +1232,42 @@ pub(crate) async fn filter_catalog(
         .collect()
 }
 
+/// A new processed recipe cannot turn a timed-out negative read into a grant.
+/// This is the caller's reserved post-qualification stage, not a renewed
+/// ordinary advisory allowance.
+pub(crate) async fn processed_candidate_admissible(
+    state: &AppState,
+    network: Option<&NetworkIdentity>,
+    file: &MediaFile,
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+    deadline: tokio::time::Instant,
+) -> bool {
+    let Some(network) = network else {
+        return true;
+    };
+    let read = async {
+        let enabled = state
+            .store
+            .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+            .await
+            .map_err(|_| ())?
+            .is_some_and(|value| value.trim() == "1");
+        if !enabled {
+            return Ok::<_, ()>(true);
+        }
+        // Qualification may outlive the ordinary request-scoped advisory
+        // snapshot. Fence the source again before granting this new recipe.
+        let source = SourceLinkIdentity::capture(network, file).await.ok_or(())?;
+        let prior = state
+            .store
+            .candidate_link_prior(&source.candidate(candidate.recipe_digest, candidate.route))
+            .await
+            .map_err(|_| ())?;
+        Ok(!prior.is_some_and(|prior| prior.negative_active(crate::media_sessions::unix_ms())))
+    };
+    matches!(tokio::time::timeout_at(deadline, read).await, Ok(Ok(true)))
+}
+
 /// Public advisory projection from the exact existing local resolver. Remote
 /// worker responses remain strict and cannot supply private measured authority.
 pub(crate) async fn measured_outputs(
@@ -1481,6 +1517,7 @@ mod tests {
         // The incumbent's published response names its candidate: the
         // measured-Link verdict records that candidate's rung.
         let incumbent = QualityCandidate {
+            processed_hdr10: false,
             id: CandidateId::for_recipe_digest([4; 32]),
             recipe_digest: [4; 32],
             route: CandidateRoute::Encode,
@@ -2548,6 +2585,7 @@ mod tests {
         let row = |height: u32| {
             let digest = [height as u8; 32];
             QualityCandidate {
+                processed_hdr10: false,
                 id: CandidateId::for_recipe_digest(digest),
                 recipe_digest: digest,
                 route: CandidateRoute::Encode,
@@ -2906,6 +2944,7 @@ mod tests {
         use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
         let digest = [12; 32];
         let original = QualityCandidate {
+            processed_hdr10: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Remux,
@@ -2978,6 +3017,7 @@ mod tests {
         use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
         let digest = [4; 32];
         let candidate = QualityCandidate {
+            processed_hdr10: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Encode,
@@ -3379,6 +3419,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn known_processed_descriptor_survives_unrelated_ordinary_catalog_timeout() {
+        let (state, _user, file, _root) = actual_intake_state().await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::DV_HDR_PROCESSING, "1")
+            .await
+            .expect("processing preference");
+        let snapshot = state
+            .store
+            .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
+            .await
+            .expect("snapshot")
+            .expect("source");
+        let caps = serde_json::from_value(serde_json::json!({"v":2,
+            "video":[{"codec":"hevc","profiles":["main10"],"present":["hdr10"]}],
+            "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"]
+        }))
+        .expect("caps");
+        let query = crate::media_pool::QualityCatalogRequest {
+            caps,
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            audio_claim: None,
+            audio_delivery: None,
+            copy_contract: None,
+            audio_index: None,
+            audio_offset_ms: 0,
+            subtitle_burn: None,
+            presentation: crate::transcode::Presentation::Vod,
+        };
+        let mut context = crate::transcode::continuous_test_candidate_context(
+            plurx_core::playback::candidate::CandidateId::for_recipe_digest([6; 32]),
+            [6; 32],
+            720,
+        );
+        context.selected_candidate.processed_hdr10 = true;
+        context.selected_candidate.planned_codec = Some("hevc".into());
+        context.selected_candidate.grade = plurx_core::transcode::OutputGrade::Hdr10;
+        context.catalog_query = Some(query.clone());
+        context.planning_snapshot = Some(Arc::new(snapshot));
+        let selected = context.selected_candidate.id;
+        let mut request: crate::transcode::SessionRequest =
+            serde_json::from_value(serde_json::json!({
+                "file_id":file.id,"playback_id":"known-processed","automatic":true,
+                "kind":{"kind":"transcode","height":720},"start_seconds":0.0,
+                "audio_offset_ms":0,"hdr10":true,"presentation":"vod"
+            }))
+            .expect("request");
+        request.candidate_context = Some(Box::new(context));
+        state.transcode.remember_processed_candidate(&request);
+        let pause = state
+            .transcode
+            .test_hooks()
+            .quality_catalog_ordinary
+            .arm("ordinary catalogue pending");
+        let work = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                crate::media_pool::local_quality_catalog(
+                    &state,
+                    &query,
+                    tokio::time::Instant::now() + Duration::from_millis(500),
+                    None,
+                )
+                .await
+            })
+        };
+        let held = pause.reached().await;
+        let result = work.await.expect("bounded catalogue");
+        held.release();
+        assert!(!result.complete);
+        assert!(result
+            .causes
+            .contains(&crate::media_pool::CatalogCause::LocalDeadline));
+        let matching = result
+            .candidates
+            .iter()
+            .filter(|row| row.candidate.id == selected)
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1);
+        assert!(
+            !matching[0].partial,
+            "known description has independent completeness"
+        );
+        assert!(
+            !matching[0].candidate.sustainable,
+            "a description cannot inherit production permission"
+        );
+        assert!(matching[0].dispatch_supported && matching[0].binding.is_some());
+        assert!(request
+            .candidate_context
+            .as_ref()
+            .expect("context")
+            .prepared_processing
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn filter_catalog_fences_once_and_drops_only_exact_negatives() {
         use axum::{
             extract::{Path, Query, State},
@@ -3490,6 +3629,30 @@ mod tests {
             filtered.len(),
             catalog.iter().filter(|&row| !same_recipe(row)).count(),
             "every candidate without a negative stays offered"
+        );
+
+        // A slow qualification has exhausted the ordinary allowance. Its
+        // reserved post-qualification read must still reject this exact
+        // recipe, and an exhausted reserved allowance must never grant it.
+        assert!(
+            !processed_candidate_admissible(
+                &state,
+                Some(&network),
+                &file,
+                &negative,
+                tokio::time::Instant::now() + Duration::from_millis(500),
+            )
+            .await
+        );
+        assert!(
+            !processed_candidate_admissible(
+                &state,
+                Some(&network),
+                &file,
+                &negative,
+                tokio::time::Instant::now() - Duration::from_secs(2),
+            )
+            .await
         );
 
         // No requester identity is Unknown, never a refusal.

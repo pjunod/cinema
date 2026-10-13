@@ -148,7 +148,7 @@ impl VodServe {
         tokio::spawn(async move {
             let _completion = TerminalCleanupGuard(Arc::clone(&cleanup));
             shared.hooks.get().before_terminal_detach().await;
-            let children = {
+            let (children, root_admission) = {
                 let mut sessions = shared.sessions.lock().await;
                 sessions
                     .get_mut(&session_id)
@@ -163,7 +163,12 @@ impl VodServe {
                                 .as_ref()
                                 .is_some_and(|current| Arc::ptr_eq(current, &rendition))
                     })
-                    .map(|session| std::mem::take(&mut session.children))
+                    .map(|session| {
+                        (
+                            std::mem::take(&mut session.children),
+                            session.root_admission.take(),
+                        )
+                    })
                     .unwrap_or_default()
             };
             // End drains every child before releasing the parent caption
@@ -173,6 +178,7 @@ impl VodServe {
                 child.detach(&shared.pool).await;
             }
             rendition.detach_reader(&shared.pool, &session_id).await;
+            drop(root_admission);
             rendition.kick();
             let serve = VodServe { shared };
             serve.emit_lifecycle(
@@ -214,6 +220,12 @@ impl VodServe {
                 }
             }
             drop(sessions);
+            if rendition.ephemeral_processing {
+                serve
+                    .shared
+                    .purge_if_dormant(&rendition.key, Duration::ZERO)
+                    .await;
+            }
             // `TerminalCleanupGuard` publishes completion on drop. Release
             // the task's own heavyweight captures first so a waiter that
             // observes completion cannot still race this future's teardown.

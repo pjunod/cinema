@@ -1,3 +1,26 @@
+# R03 task on main-synchronized effort 2b7fd17fc: compose the existing
+# 949 task/1740 timer sites with R03's reviewed +7 task/+8 timer sites.
+# The scan deadline stays captured at catalogue entry alongside the metadata
+# description key; no extra timer or ownership scope is introduced here.
+
+# R03 processed Auto/reopen ownership reconciliation (b647b151f):
+# +7 namespaced task sites: the weak one-shot expiry timer, the weak finite
+# probe expiry timer, cancellation-independent exact probe-reader detach, the
+# bounded ten-second abandoned-instance cleanup, and three test-only owners
+# (catalogue timeout fixture, joined one-shot race threads, joined/cancelled
+# terminal waiter). Timers hold weak graph/token links; the instance allowance
+# bounds physical graphs, and terminal/cancel/expiry retire probe waits before
+# detached cleanup. No new OS child is launched.
+# +8 timer constructors: two strict recovery/link reads within the inherited
+# create deadline, the whole finite refresh on that same deadline, three weak
+# expiry/abandoned-cleanup timers, and two bounded test observations (one-shot
+# expiry and scheduler hold). No timeout supplies completion evidence.
+# The expanded transcode source counts one of those task sites (+1).
+# +1 exact-capture rendition build-gate reference pins only the captured Arc.
+# +4 dormant purge references settle terminal, idle and abandoned private
+# instances plus the unlink/retry fixture; failed physical unlink stays charged.
+# +2 broad lifecycle-method matches are joined test-only Barrier.wait calls;
+# they launch no process. Scan scopes, patterns and equality bars are unchanged.
 # HDR effort main synchronization (main 0da656d3a + effort 998083c85):
 # Preserve R01's joined/cancelled admission owner and three test-only deadline
 # observations alongside main's cluster and HEVC catalog owner changes.
@@ -449,7 +472,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # kill_on_drop and registered through output_job_owned. A panic is caught and
 # answers Inconclusive; the verdict and the flight-slot removal are one locked
 # step, so the task always ends its flight and settles every waiter.
-expected_occurrences = 115
+expected_occurrences = 116
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
@@ -1894,7 +1917,7 @@ pattern = "rendition_build_gate"
 # PR #947 after integrating main 1088d7529: base 30; repair delta +2.
 # Cleanup and conservative cold revalidation take the existing exact-key gate;
 # neither creates a competing build owner.
-expected_occurrences = 32
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -1989,7 +2012,7 @@ pattern = "purge_if_dormant"
 # `dormant_purge_point_precedes_producer_termination` calls `purge_if_dormant` once, test-only,
 # from a task it awaits within a five-second bound. No production caller was added; the
 # settlement owner is unchanged.
-expected_occurrences = 10
+expected_occurrences = 14
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
@@ -2943,7 +2966,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # walk's own bounded AvailabilityCache, never item detail's.
 # R01 HDR admission regression: +1 test-owned tokio task, aborted and
 # awaited before capacity/yield assertions; no detached production owner.
-expected_occurrences = 949
+expected_occurrences = 956
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4551,7 +4574,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # until kill-and-reap finishes. Production retains the catalog deadline
 # captured at request entry.
 
-expected_occurrences = 1740
+expected_occurrences = 1748
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -5892,7 +5915,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # #844: +1 false positive. end_for_owner awaits `cleanup.wait()` on the
 # existing TerminalCleanup; it is not a child-process wait.
 # P-02 zombie read-back (process/priority.rs): +1, test-only: the same child's reaping `wait()`.
-expected_occurrences = 326
+expected_occurrences = 328
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

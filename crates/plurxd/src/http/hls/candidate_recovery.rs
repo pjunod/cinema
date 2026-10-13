@@ -403,6 +403,60 @@ pub(crate) async fn auto_catalog(
         .collect()
 }
 
+pub(crate) async fn processed_candidate_admissible(
+    state: &AppState,
+    network: Option<&NetworkIdentity>,
+    file: &MediaFile,
+    playback: &str,
+    candidate: &QualityCandidate,
+    predecessor: Option<&MediaSessionRoute>,
+    deadline: tokio::time::Instant,
+) -> bool {
+    let Some(predecessor) = predecessor.filter(|route| route.state == "active") else {
+        return true;
+    };
+    let Some(network) = network else {
+        return false;
+    };
+    let read = async {
+        let bound = incumbent(
+            state,
+            network,
+            file,
+            playback,
+            Some(&predecessor.session_id),
+            deadline,
+        )
+        .await
+        .ok_or(())?;
+        if bound.route.incarnation_id != predecessor.incarnation_id {
+            return Err(());
+        }
+        let memory = state
+            .store
+            .candidate_recovery_memory(&bound.scope)
+            .await
+            .map_err(|_| ())?;
+        let current = incumbent(
+            state,
+            network,
+            file,
+            playback,
+            Some(&predecessor.session_id),
+            deadline,
+        )
+        .await
+        .ok_or(())?;
+        Ok::<_, ()>(
+            current.scope == bound.scope
+                && current.route.incarnation_id == bound.route.incarnation_id
+                && current.candidate.id == bound.candidate.id
+                && !memory.rejected_recipes.contains(&candidate.recipe_digest),
+        )
+    };
+    matches!(tokio::time::timeout_at(deadline, read).await, Ok(Ok(true)))
+}
+
 /// A Decision has no playback identity in its public intent. Only its exact
 /// installed-incumbent receipt may identify the lifetime to read; absent live
 /// proof keeps the ordinary catalog, never borrows a namespace's latest player.

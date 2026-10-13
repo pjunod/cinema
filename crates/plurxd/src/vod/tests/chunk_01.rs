@@ -751,6 +751,9 @@ async fn insert_control_session(
         session_id.to_owned(),
         Session {
             children: Vec::new(),
+                root_admission: None,
+                processed_reuse_scope: None,
+                processed_probes: Vec::new(),
             passive_grant: None,
             rendition: Some(rendition),
             retained_output: None,
@@ -804,6 +807,9 @@ async fn insert_terminal_session(
         session_id.to_owned(),
         Session {
             children: Vec::new(),
+                root_admission: None,
+                processed_reuse_scope: None,
+                processed_probes: Vec::new(),
             passive_grant: None,
             rendition: None,
             retained_output: None,
@@ -879,6 +885,8 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
     dir.create().await.expect("create rendition dir");
     let plan_len = plan.len();
     Arc::new(Rendition {
+        ephemeral_processing: false,
+        _processed_instance_allowance: None,
         key: "synthetic-rendition".to_string(),
         dir,
         recipe: Recipe {
