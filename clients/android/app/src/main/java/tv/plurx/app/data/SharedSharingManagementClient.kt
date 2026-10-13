@@ -146,11 +146,11 @@ internal class SharedSharingManagementClient private constructor(private val aut
         private val json = Json { ignoreUnknownKeys = true }
         fun create(): SharedSharingManagementClient {
             val auth = Session.playbackAuthorization(); require(Session.canonicalOrigin(auth.origin) != null && !auth.token.isNullOrEmpty())
-            return SharedSharingManagementClient(auth, Net.profileClient(requireNotNull(auth.token)))
+            return SharedSharingManagementClient(auth, Net.capturedReceiptClient(auth, Net.profileClient(requireNotNull(auth.token))))
         }
         fun forTest(transport: OkHttpClient): SharedSharingManagementClient {
             check(BuildConfig.DEBUG); val auth = Session.playbackAuthorization()
-            require(Session.canonicalOrigin(auth.origin) != null && !auth.token.isNullOrEmpty()); return SharedSharingManagementClient(auth, transport)
+            require(Session.canonicalOrigin(auth.origin) != null && !auth.token.isNullOrEmpty()); return SharedSharingManagementClient(auth, Net.capturedReceiptClient(auth, transport))
         }
     }
 }

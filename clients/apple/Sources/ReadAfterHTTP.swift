@@ -88,9 +88,9 @@ final class ReadAfterHTTP: @unchecked Sendable {
         }
     }
 
-    func data(for original: URLRequest, using session: URLSession) async throws -> (Data, URLResponse) {
+    func data(for original: URLRequest, using session: URLSession, refuseRedirects: Bool = false) async throws -> (Data, URLResponse) {
         let exchange = prepare(for: original)
-        let redirect = ReadAfterRedirect()
+        let redirect = ReadAfterRedirect(refuse: refuseRedirects)
         let result: (Data, URLResponse)
         do { result = try await session.data(for: exchange.request, delegate: redirect) }
         catch { failed(exchange); throw error }
@@ -126,6 +126,8 @@ final class ReadAfterHTTP: @unchecked Sendable {
 /// URLSession ordinarily forwards custom headers on redirects. Never forward
 /// this per-account floor, even if the destination happens to share a host.
 private final class ReadAfterRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let refuse: Bool
+    init(refuse: Bool) { self.refuse = refuse; super.init() }
     private let lock = NSLock()
     private var redirected = false
     var wasRedirected: Bool { lock.lock(); defer { lock.unlock() }; return redirected }
@@ -136,6 +138,6 @@ private final class ReadAfterRedirect: NSObject, URLSessionTaskDelegate, @unchec
         lock.lock(); redirected = true; lock.unlock()
         var redirectedRequest = request
         redirectedRequest.setValue(nil, forHTTPHeaderField: "X-Plurx-Read-After")
-        completionHandler(redirectedRequest)
+        completionHandler(refuse ? nil : redirectedRequest)
     }
 }

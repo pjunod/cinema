@@ -76,6 +76,24 @@ object Net {
         }
         .build()
 
+    /** Opt in only clients that already captured and fence the full account
+     * generation. Ordinary background profile/capability clients stay opaque;
+     * this never replaces their bearer or adopts a later login. */
+    internal fun capturedReceiptClient(auth: Session.PlaybackAuthorization, transport: OkHttpClient): OkHttpClient =
+        transport.newBuilder().apply {
+            // Wrap existing interceptors as well: a test/cache interceptor
+            // may answer without reaching the network or later interceptors.
+            interceptors().add(0, okhttp3.Interceptor { chain ->
+                val original = chain.request()
+                val current = Session.readAfterAuthorization()
+                val peers = if (current.generation == auth.generation && current.origin == auth.origin && current.token == auth.token) current.peers else emptyList()
+                val captured = ReadAfterAuthorization(auth.origin, auth.token, auth.generation, peers)
+                chain.proceed(original.newBuilder().tag(ReadAfterAuthorization::class.java, captured).build())
+            })
+            interceptors().add(1, ReadAfterNetworking.interceptor)
+            addNetworkInterceptor(ReadAfterNetworking.interceptor.redirectGuard)
+        }.build()
+
     private val contentType = "application/json".toMediaType()
 
     /** Build an API bound to a server origin (`http://host:32400`). */

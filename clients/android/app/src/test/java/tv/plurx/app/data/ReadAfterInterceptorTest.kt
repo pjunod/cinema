@@ -226,4 +226,27 @@ class ReadAfterInterceptorTest {
             owned.connectionPool.evictAll(); owned.dispatcher.executorService.shutdown()
         }
     }
+
+    @Test fun capturedDvrWriteRetiresOnlyItsOwnAccountGeneration() = runBlocking {
+        val saved = Session.playbackAuthorization()
+        Session.origin = primary.origin; Session.token = "fixture-cohort"
+        val owned = Net.client.newBuilder().dispatcher(Dispatcher()).connectionPool(ConnectionPool())
+            .eventListener(EventListener.NONE).build()
+        try {
+            val api = Net.api(primary.origin, owned)
+            val captured = tv.plurx.app.livetv.DvrApi(primary.origin, "fixture-cohort")
+            primary.enqueue(Reply(204, listOf("41"))); api.progress(7, ProgressReq(position_ms = 10))
+            primary.enqueue(Reply(204)); captured.deleteRule("rule-fixture")
+            assertEquals("41", primary.last().echo)
+            primary.enqueue(Reply(body = "[]")); api.libraries(); assertNull(primary.last().echo)
+            Session.token = "new-fixture"
+            primary.enqueue(Reply(204, listOf("44"))); api.progress(7, ProgressReq(position_ms = 20))
+            primary.enqueue(Reply(204)); captured.deleteRule("rule-fixture")
+            assertEquals("Bearer fixture-cohort", primary.last().bearer); assertNull(primary.last().echo)
+            primary.enqueue(Reply(body = "[]")); api.libraries(); assertEquals("44", primary.last().echo)
+        } finally {
+            Session.origin = saved.origin; Session.token = saved.token
+            owned.connectionPool.evictAll(); owned.dispatcher.executorService.shutdown()
+        }
+    }
 }

@@ -19,14 +19,48 @@ class SharedLibraryTest {
     private val revision = "a".repeat(64)
     private val requests = mutableListOf<Request>()
     private var handler: (Request) -> Pair<Int, JsonObject> = { 500 to buildJsonObject {} }
+    private var commitIndex: String? = null
+    private var transportFailure = false
     @Before fun setup() { Session.origin = "https://b.test"; Session.token = "fixture-bearer" }
     @After fun teardown() { Session.token = null; Session.origin = "" }
     private fun client(): SharedLibraryClient = SharedLibraryClient.forTest(OkHttpClient.Builder().addInterceptor { chain ->
         val request = chain.request(); requests += request
+        if (transportFailure) throw java.io.IOException("owned failed-write fixture")
         assertEquals("b.test", request.url.host); assertEquals("Bearer fixture-bearer", request.header("Authorization"))
         val (status, body) = handler(request)
-        Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(status).message("Fixture").body(body.toString().toResponseBody()).build()
+        Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(status).message("Fixture")
+            .apply { commitIndex?.let { header("X-Plurx-Commit-Index", it) } }.body(body.toString().toResponseBody()).build()
     }.build())
+
+    @Test fun actualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt(): Unit = runBlocking {
+        handler = { request ->
+            assertEquals("POST", request.method); assertTrue(request.url.encodedPath.endsWith("/watched"))
+            200 to buildJsonObject {
+                put("updated", 1); put("watch", buildJsonObject {
+                    put("watched", true); put("position_ms", 0); put("sequence", 1); put("updated_at_ms", 1)
+                })
+            }
+        }
+        val account = client()
+        fun floor(): String? {
+            var result: String? = null
+            val owned = Net.client.newBuilder().dispatcher(okhttp3.Dispatcher()).connectionPool(okhttp3.ConnectionPool())
+                .eventListener(okhttp3.EventListener.NONE).addInterceptor { chain ->
+                    result = chain.request().header("X-Plurx-Read-After")
+                    Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")
+                        .body("[]".toResponseBody()).build()
+                }.build()
+            try { owned.newCall(Request.Builder().url("https://b.test/api/v1/libraries").build()).execute().close() }
+            finally { owned.connectionPool.evictAll(); owned.dispatcher.executorService.shutdown() }
+            return result
+        }
+        commitIndex = "41"; account.setWatched(first.reference(item), true); assertEquals("41", floor())
+        commitIndex = null; account.setWatched(first.reference(item), true); assertNull(floor())
+        commitIndex = "42"; account.setWatched(first.reference(item), true); assertEquals("42", floor())
+        transportFailure = true
+        try { account.setWatched(first.reference(item), true); fail("accepted failed write") } catch (_: java.io.IOException) {}
+        assertNull(floor())
+    }
     private fun assignment(source: SharedLibraryIdentity) = JsonObject(Json.encodeToJsonElement(source).jsonObject + mapOf("source_name" to JsonPrimitive(if (source == first) "Source A" else "Source C"), "availability" to JsonPrimitive("unverified")))
     private fun wireItem(source: SharedLibraryIdentity, id: String = item) = buildJsonObject {
         put("source", "shared"); put("reference", Json.encodeToJsonElement(source.reference(id))); put("title", "Distinct Source title"); put("kind", "movie"); put("genres", buildJsonArray {})

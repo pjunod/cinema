@@ -21,6 +21,43 @@ private final class ReceiptAPIProtocol: URLProtocol {
 }
 
 final class ReadAfterAPITests: XCTestCase {
+    func testCapturedDvrWriteRetiresOnlyItsOwnAccountGeneration() async throws {
+        let saved = Session.shared.credentials
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ReceiptAPIProtocol.self]
+        let session = URLSession(configuration: config)
+        defer {
+            session.invalidateAndCancel(); ReceiptAPIProtocol.answer = nil
+            Session.shared.setCredentials(origin: saved.origin, token: saved.token)
+        }
+        Session.shared.setCredentials(origin: "https://api.test", token: "api-fixture")
+        let api = PlurxAPI(origin: "https://api.test", testTransport: session)
+        let captured = DvrAPI(origin: "https://api.test", token: "api-fixture", session: session)
+        ReceiptAPIProtocol.answer = { _ in (204, "41") }
+        try await api.progress(itemId: 7, positionMs: 10, durationMs: 100)
+        ReceiptAPIProtocol.answer = { request in
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Plurx-Read-After"), "41")
+            return (204, nil)
+        }
+        try await captured.deleteRule("rule-fixture")
+        ReceiptAPIProtocol.answer = { request in
+            XCTAssertNil(request.value(forHTTPHeaderField: "X-Plurx-Read-After")); return (200, nil)
+        }
+        _ = try await api.libraries()
+        Session.shared.setCredentials(origin: "https://api.test", token: "new-fixture")
+        ReceiptAPIProtocol.answer = { _ in (204, "44") }
+        try await api.progress(itemId: 7, positionMs: 20, durationMs: 100)
+        ReceiptAPIProtocol.answer = { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer api-fixture")
+            XCTAssertNil(request.value(forHTTPHeaderField: "X-Plurx-Read-After")); return (204, nil)
+        }
+        try await captured.deleteRule("rule-fixture")
+        ReceiptAPIProtocol.answer = { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Plurx-Read-After"), "44"); return (200, nil)
+        }
+        _ = try await api.libraries()
+    }
+
     func testActualNoContentProgressAndLibrariesShareTheUnsignedReceipt() async throws {
         let saved = Session.shared.credentials
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ReceiptAPIProtocol.self]

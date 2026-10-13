@@ -581,6 +581,13 @@ acceptance.
    transports cannot borrow a receipt. Apple control and bounded shared-write
    delegates use the same unknown-write retirement without changing body
    ceilings, redirect refusal or cancellation.
+   The sole candidate review found current-account shared watched/progress
+   writers outside the ordinary transports. Their captured generation now opts
+   into the common floor explicitly, including sharing management and the
+   captured Live TV/DVR account clients; generic background-profile clients
+   and media capability clients remain receipt-free. Watched-write fixtures
+   cover known receipt advancement and unknown/failed retirement, while a
+   captured DVR write cannot retire a later account generation's floor.
    Focused proofs cover the actual no-content API paths, cross-voter receipt
    sharing, stale ingress and reused-bearer generations, control writes and
    shared transport refusal/cancellation. These are synthetic native HTTP and
