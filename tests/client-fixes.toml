@@ -6236,7 +6236,8 @@ test_anchor = "processedHdr10PreferenceRequiresQualifiedProductionAndCodec"
 
 [[fixes]]
 id = "apple.processed-hdr10-qualified-auto"
-commits = ["8d6008c903bf644c223c7abcbd7c766d64e736fa"]
+commits = []
+supplements = "android.processed-hdr10-qualified-auto"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "let processed = candidates.filter { $0.processedHdr10 == true && $0.hasValidIdentity &&"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
@@ -6244,7 +6245,8 @@ test_anchor = "testProcessedHdr10PreferenceRequiresQualifiedProductionAndCodec"
 
 [[fixes]]
 id = "web.processed-hdr10-qualified-auto"
-commits = ["8d6008c903bf644c223c7abcbd7c766d64e736fa"]
+commits = []
+supplements = "android.processed-hdr10-qualified-auto"
 source = "crates/plurxd/src/web/playback-policy.js"
 source_anchor = "const processed = eligible.filter(candidate => candidate.processed_hdr10 === true"
 test = "tests/web/continuous-adapter.test.js"
