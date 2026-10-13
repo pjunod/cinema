@@ -88,6 +88,14 @@ private final class SubtitleCallbackQueue: @unchecked Sendable {
         callbacks.append(callback)
     }
 
+    func takeAll() -> [@MainActor @Sendable () -> Void] {
+        lock.lock()
+        defer { lock.unlock() }
+        let batch = callbacks
+        callbacks.removeAll()
+        return batch
+    }
+
     func take() -> (@MainActor @Sendable () -> Void)? {
         lock.lock()
         defer { lock.unlock() }
@@ -128,6 +136,51 @@ private final class ControlGate: @unchecked Sendable {
 }
 
 private let controlGate = ControlGate()
+
+/// Arm only while delivering the terminal response under test, after every
+/// earlier exchange has finished scheduling its complete callback batch.
+private final class TerminalPublicationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var enabled = false
+    private var armed = false
+    private var consumed = false
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+
+    func enable(_ value: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        enabled = value
+        armed = false
+        if value {
+            consumed = false
+            while entered.wait(timeout: .now()) == .success {}
+            while release.wait(timeout: .now()) == .success {}
+        }
+    }
+
+    func arm(for response: ControlResponse) {
+        lock.lock()
+        defer { lock.unlock() }
+        if enabled, !consumed, response.action.type == "terminal" {
+            armed = true
+            consumed = true
+        }
+    }
+
+    func holdIfArmed() {
+        lock.lock()
+        let hold = armed
+        armed = false
+        lock.unlock()
+        if hold {
+            entered.signal()
+            _ = release.wait(timeout: .now() + 5)
+        }
+    }
+}
+
+private let terminalPublicationGate = TerminalPublicationGate()
 
 /// One-shot owner handoff used to prove an ask does not wait on the new
 /// owner's unrelated sequence space.
@@ -195,6 +248,7 @@ private final class ControlExchangeURLProtocol: URLProtocol {
         // Encoded first, so a held response carries the answer that was
         // current when the request arrived rather than when it was released.
         controlGate.waitIfArmed()
+        terminalPublicationGate.arm(for: response)
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
@@ -469,19 +523,18 @@ final class PlaybackControlSessionTests: XCTestCase {
         controlExchanges.reset()
         controlAnswer.set(ControlAction(type: "none"))
         controlAnswer.setReadiness("pending")
-        let publicationHeld = DispatchSemaphore(value: 0)
-        let release = DispatchSemaphore(value: 0)
+        terminalPublicationGate.enable(true)
         let session = PlaybackControlSession(scheduleSubtitleReady: { _ in
-            // onExchange has validated the capture, but has not yet stored
-            // its terminal verdict. Hold that real cross-actor boundary.
-            publicationHeld.signal()
-            _ = release.wait(timeout: .now() + 5)
+            // Processing updates also use this scheduler. Only the matching
+            // terminal response arms the barrier; baseline callbacks pass.
+            terminalPublicationGate.holdIfArmed()
         })
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         tearDownTransport(session, urlSession)
         defer {
-            release.signal()
+            terminalPublicationGate.release.signal()
+            terminalPublicationGate.enable(false)
             controlAnswer.set(ControlAction(type: "none")); controlAnswer.setReadiness(nil)
         }
         session.begin(bootstrap: sessionBootstrap(), transport: transport,
@@ -493,13 +546,13 @@ final class PlaybackControlSessionTests: XCTestCase {
         let deadline = Date().addingTimeInterval(5)
         var held = false
         while !held, Date() < deadline {
-            held = publicationHeld.wait(timeout: .now()) == .success
+            held = terminalPublicationGate.entered.wait(timeout: .now()) == .success
             if !held { try await Task.sleep(nanoseconds: 10_000_000) }
         }
         XCTAssertTrue(held)
         session.end()
-        release.signal()
-        try await Task.sleep(nanoseconds: 100_000_000)
+        terminalPublicationGate.release.signal()
+        await session.endAndWait()
         XCTAssertNil(session.terminalVerdict, "End revokes publication even after its outer guard passed")
     }
 
@@ -526,14 +579,14 @@ final class PlaybackControlSessionTests: XCTestCase {
         // consumed before the readiness edge is introduced.
         _ = try await waitForExchange { $0.sequence == 2 }
         controlAnswer.setReadiness(unavailable ? "unavailable" : "ready")
-        session.playerChanged()
-        let deadline = Date().addingTimeInterval(5)
-        var queued: (@MainActor @Sendable () -> Void)?
-        while queued == nil, Date() < deadline {
-            queued = callbacks.take()
-            if queued == nil { try await Task.sleep(nanoseconds: 20_000_000) }
-        }
-        let staleReady = try XCTUnwrap(queued, "the real session must schedule a readiness callback")
+        let requestFloor = await session.reportIntent()
+        let floor = try XCTUnwrap(requestFloor)
+        // onExchange schedules every callback synchronously before another
+        // request starts. N+1 therefore fences the complete response batch
+        // for N, including processing updates before the subtitle edge.
+        _ = try await waitForExchange { $0.sequence >= floor + 1 }
+        let queuedBatch = callbacks.takeAll()
+        XCTAssertFalse(queuedBatch.isEmpty, "the real session must schedule its response batch")
 
         if replaceSession == true {
             var next = sessionBootstrap()
@@ -549,7 +602,7 @@ final class PlaybackControlSessionTests: XCTestCase {
             session.end()
         }
         if newIntent { session.clearVerdict() }
-        staleReady()
+        for callback in queuedBatch { callback() }
         XCTAssertEqual(deliveries, replaceSession == nil && !newIntent ? 1 : 0,
                        "a queued response loses its authority when its reporting session ends")
         if newIntent {
