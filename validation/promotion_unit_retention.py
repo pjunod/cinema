@@ -148,12 +148,16 @@ def validate(document, candidate, source=git_bytes, differences=changed):
     obtain applicable passing evidence; no unknown path or outcome is adopted.
     Raw logs, environment, inventory and original failures remain in the proof.
     """
-    r.require(set(document) == {'version', 'repository', 'pr', 'branch', 'base_sha',
-        'source_commit', 'lanes', 'windows_waiver'}, 'Unknown retention proof fields')
-    r.require(document['version'] == 1 and isinstance(document['lanes'], dict)
+    keys = {'version', 'repository', 'pr', 'branch', 'base_sha', 'source_commit', 'lanes', 'windows_waiver'}
+    if document.get('version') == 2:
+        keys.add('command_units')
+    r.require(set(document) == keys, 'Unknown retention proof fields')
+    r.require(document['version'] in {1, 2} and isinstance(document['lanes'], dict)
               and document['lanes'] and set(document['lanes']) <= LANES,
               'Invalid retained lane inventory')
     frozen = r.sha(document['source_commit'])
+    if document['version'] == 2:
+        r.require(frozen == candidate, 'Command adoption binds the exact candidate')
     protocol_paths = set(PROTOCOL_PATHS)
     r.require(differences(frozen, candidate) <= protocol_paths,
               'Candidate changed beyond reviewed retention protocol')
@@ -280,6 +284,10 @@ def validate(document, candidate, source=git_bytes, differences=changed):
         'Unknown Windows waiver')
     if waiver:
         adopted['windows_compile'] = {'mode': 'explicit-human-waiver', **waiver}
+    if document['version'] == 2:
+        from validation import qualification_unit_continuation as commands
+        adopted_commands = commands.validate(document['command_units'], candidate, existing=document['lanes'])
+        return adopted, adopted_commands
     return adopted
 
 
@@ -403,11 +411,20 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
                     raw_log = api.bytes(f'/actions/jobs/{job_id}/logs')
                     r.require(digest(raw_log) == record['log']['sha256'],
                               'Authenticated CI log contradicts retained origin')
-    adopted = validate(document, candidate)
-    return {'version': 1, 'candidate_sha': candidate, 'base_sha': binding['base_sha'],
+    command_units = None
+    if document.get('version') == 2:
+        from validation import qualification_unit_continuation as commands
+        commands.authenticate(api, document['command_units'], document, repository)
+        adopted, command_units = validate(document, candidate)
+    else:
+        adopted = validate(document, candidate)
+    proof = {'version': 1, 'candidate_sha': candidate, 'base_sha': binding['base_sha'],
             'pull_request': pull['number'], 'sha256': expected_digest,
             'attestation_comments': sorted(attested), 'lanes': adopted,
             'attachment_id': attachment_id, 'attachment_uuid': attachment_uuid}
+    if command_units is not None:
+        proof['command_units'] = command_units
+    return proof
 
 
 def main():
@@ -431,6 +448,8 @@ def main():
     print('retained_units=' + json.dumps(proof, separators=(',', ':')))
     for lane in sorted(LANES):
         print('retain_' + lane + '=' + str(lane in proof['lanes']).lower())
+    for kind in ['validation', 'operations', 'store_contract', 'wal', 'android_jvm','topology','transport']:
+        print('retain_' + kind + '_units=' + str(kind in proof.get('command_units', {})).lower())
 
 
 if __name__ == '__main__':

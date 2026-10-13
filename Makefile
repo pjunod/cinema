@@ -1132,8 +1132,8 @@ cluster-store-check: ## Run the Store contracts against SQLite and three voters
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test schema_lineage_upgrade -- --test-threads=1
 
-.PHONY: cluster-harness-check
-cluster-harness-check: ## Run replicated growth and topology harness contracts
+.PHONY: cluster-harness-unit-check
+cluster-harness-unit-check: ## Run the embedded replicated harness unit contracts
 	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
 	  tests::a_legacy_launch_retains_the_production_snapshot_policy \
 	  --lib -- --exact
@@ -1154,9 +1154,16 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  storage_evidence::retained_p5_privileged_storage_evidence_matches_the_closed_schema \
 	  --lib -- --exact
+.PHONY: cluster-harness-nonunit-check
+cluster-harness-nonunit-check: ## Run actual replicated harness semantic campaigns
 	$(CARGO) run --locked -p plurx-cluster-check -- check
 	$(CARGO) run --locked -p plurx-cluster-check -- \
 	  topology target/validation/cluster-topology-semantic.json 3,4
+
+.PHONY: cluster-harness-check
+cluster-harness-check: ## Run replicated growth and topology harness contracts
+	$(MAKE) cluster-harness-unit-check CARGO="$(CARGO)"
+	$(MAKE) cluster-harness-nonunit-check CARGO="$(CARGO)"
 
 .PHONY: cluster-transport-recovery-contracts
 cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
@@ -1906,6 +1913,14 @@ android-test: android-image ## Run Android JVM unit tests + lint in the pinned i
 	  -e GRADLE_USER_HOME=/workspace/clients/android/.gradle-validation \
 	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
 	  $(ANDROID_IMAGE) ./gradlew --no-daemon testDebugUnitTest lintDebug
+
+.PHONY: android-unit-compile-lint
+android-unit-compile-lint: android-image ## Compile every JVM test source and lint after authenticated unit adoption
+	docker run --rm --platform $(ANDROID_PLATFORM) \
+	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
+	  -e GRADLE_USER_HOME=/workspace/clients/android/.gradle-validation \
+	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
+	  $(ANDROID_IMAGE) ./gradlew --no-daemon compileDebugUnitTestKotlin compileDebugUnitTestJavaWithJavac lintDebug
 
 .PHONY: android-instrumentation-build
 android-instrumentation-build: android-image ## Build app + test APKs for an emulator/device run
