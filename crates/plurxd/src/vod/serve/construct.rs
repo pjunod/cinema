@@ -14,6 +14,9 @@ impl VodServe {
                 return;
             };
             session.prepared_incarnation = Some(incarnation.to_owned());
+            session
+                .set_reader_admission_priority(session_id, crate::admission::Priority::Speculative)
+                .await;
             session.rendition.clone()
         };
         if let Some(rendition) = rendition {
@@ -36,6 +39,9 @@ impl VodServe {
             let Some(root) = session.rendition.as_ref() else {
                 return false;
             };
+            session
+                .set_reader_admission_priority(session_id, crate::admission::Priority::Live)
+                .await;
             std::iter::once(Arc::clone(root))
                 .chain(
                     session

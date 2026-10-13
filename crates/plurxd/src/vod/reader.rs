@@ -25,6 +25,10 @@ pub(super) struct Recipe {
 /// One attached reader, in plan indexes.
 #[derive(Debug, Clone)]
 pub(super) struct Reader {
+    /// Admission purpose belongs to this consumer, not the cached recipe.
+    pub(super) admission_priority: crate::admission::Priority,
+    /// Voluntary Auto trials must not borrow the incumbent's permit.
+    pub(super) nonpreemptive_trial: bool,
     /// A parent authority, cold controlled child or verified retained-output
     /// attachment keeps control identity without producing or an eviction window.
     pub(super) authority_only: bool,
@@ -54,7 +58,16 @@ pub(super) struct Reader {
 
 impl Reader {
     pub(super) fn new(frontier: u32) -> Self {
+        Self::with_priority(frontier, crate::admission::Priority::Live)
+    }
+
+    pub(super) fn with_priority(
+        frontier: u32,
+        admission_priority: crate::admission::Priority,
+    ) -> Self {
         Self {
+            admission_priority,
+            nonpreemptive_trial: false,
             authority_only: false,
             draining_after_prepared_commit: false,
             frontier,
@@ -63,6 +76,12 @@ impl Reader {
             last_served: None,
             marker_prewarm: Arc::new(StdMutex::new(MarkerPrewarmLedger::default())),
         }
+    }
+
+    pub(super) fn may_request_predecessor_handoff(&self) -> bool {
+        !self.draining_after_prepared_commit
+            && self.admission_priority == crate::admission::Priority::Speculative
+            && !self.nonpreemptive_trial
     }
 
     pub(super) fn accept_control(&mut self, sequence: u64, index: u32) {

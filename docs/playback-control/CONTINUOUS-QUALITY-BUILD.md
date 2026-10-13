@@ -10657,3 +10657,42 @@ cancellation and late native success after ownership changes. This targets
 the measured successor startup wait; it does not change automatic waiting,
 frame scoring or the100ms qualification limit. Hardware evidence remains
 owed after compilation.
+
+**Exact corrected probe and native cached-successor proof.** The bounded
+API-order probe now retries the same packet through425 owner transition,
+preserving sequence one and acknowledgement timestamp. It subsequently
+accepts47 control packets with23 transition refusals and no409; this is
+synthetic ordering evidence only. Its second1080 preparation reuses the
+initial cached rendition and asks as Live, then ends as replaced without an
+offer. The58 owned processes retire without residuals.
+
+The phone independently reproduces that defect on committed server8ca2487b6
+and the exact private app carrying bounded preroll: one manual720 landing,
+no Auto series, maximum decoded gap97.518ms and callback64.172ms. The
+second1080 preparation is created at06:37:58.619UTC and ends as replaced
+at06:37:58.815UTC, with cache identity reuse confirmed by an on-node join.
+The foreground_claimed cancellation delta is one; the other seven remain
+zero. All49 owned processes retire without residuals and the exact QA app
+exits. The first-switch pass has only2.482ms margin; startup waiting and the
+requested-time backward jump remain observable. It neither proves preroll
+eliminates startup waiting nor claims optical/audio continuity. The scoped
+cached-reader admission-purpose correction now has independent native and
+synthetic cause evidence; full campaigns wait for that correction.
+
+**Scoped cache admission correction, compiling.** Consumer priority and
+nonpreemptive trial purpose are captured before a healthy cached rendition
+can replace the incoming recipe. Root and private child readers retain that
+purpose; family reservation uses it explicitly. The driver aggregates actual
+current reader and admitted-GET purpose after the policy read, under the
+reader guard. Only genuine Live demand registers foreground pressure;
+prepared-only reuse cannot inherit an obsolete Live wait. Exact commit
+promotes only its own root and child readers. A handoff requires the exact
+incarnation still named by a live predecessor slot; historical committed
+markers and nonpreemptive trials cannot claim it. Cached encoder identity
+and unrelated viewer priority remain independent.
+
+The focused regression recreates four requested threads beside a committed
+three-thread incumbent under budget five, then verifies prepared-only
+refusal, unrelated Live admission, detachment, exact promotion and trial
+restrictions. It is written for the final fast lane, with no unit execution
+during this implementation pass.

@@ -846,7 +846,7 @@ impl Encoding {
     /// guard remains held while registering the queue and attempting admission.
     pub(crate) async fn try_permit_guarded<G>(
         &self,
-        demand: impl std::future::Future<Output = Option<G>>,
+        demand: impl std::future::Future<Output = Option<(Priority, G)>>,
     ) -> Option<EncodePermit> {
         self.hooks.before_admission().await;
         self.try_permit_with_priority(
@@ -855,7 +855,11 @@ impl Encoding {
                 plurx_core::store::keys::SW_POOL_THREADS,
             ),
             None,
-            demand,
+            async {
+                demand
+                    .await
+                    .map(|(priority, guard)| (Some(priority), guard))
+            },
         )
         .await
     }
@@ -868,7 +872,7 @@ impl Encoding {
             Output = Result<(Option<String>, Option<String>), plurx_core::error::StoreError>,
         >,
     ) -> Option<EncodePermit> {
-        self.try_permit_with_priority(policy, None, async { Some(()) })
+        self.try_permit_with_priority(policy, None, async { Some((None, ())) })
             .await
     }
 
@@ -881,7 +885,7 @@ impl Encoding {
                 plurx_core::store::keys::SW_POOL_THREADS,
             ),
             Some(Priority::Background),
-            async { Some(()) },
+            async { Some((None, ())) },
         )
         .await
     }
@@ -892,7 +896,7 @@ impl Encoding {
             Output = Result<(Option<String>, Option<String>), plurx_core::error::StoreError>,
         >,
         preparation_priority: Option<Priority>,
-        demand: impl std::future::Future<Output = Option<G>>,
+        demand: impl std::future::Future<Output = Option<(Option<Priority>, G)>>,
     ) -> Option<EncodePermit> {
         // Pool policy is current node state, not immutable media identity.
         // A failed policy read closes admission; an existing child's permit
@@ -909,7 +913,7 @@ impl Encoding {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             return None;
         };
-        let Some(_demand_guard) = demand.await else {
+        let Some((demand_priority, _demand_guard)) = demand.await else {
             self.cancel_wait();
             self.last_refusal
                 .lock()
@@ -927,9 +931,15 @@ impl Encoding {
             .unwrap_or_else(crate::admission::software_budget);
         let mut queued = self.queued.lock().expect("VOD encoder admission");
         // Preserve ordinary promotion's post-policy-read observation.
-        let priority = preparation_priority.unwrap_or_else(|| self.priority());
+        let priority = demand_priority
+            .or(preparation_priority)
+            .unwrap_or_else(|| self.priority());
         if priority == Priority::Live {
             queued.get_or_insert_with(|| self.admissions.queue_for_slot());
+        } else {
+            // A previous consumer may have left a Live wait on this cached
+            // encoding. Its replacement's preparation must not inherit it.
+            queued.take();
         }
         let refuse = |over_budget: bool| {
             *self.last_refusal.lock().expect("VOD encoder refusal") = Some(PermitRefusal {

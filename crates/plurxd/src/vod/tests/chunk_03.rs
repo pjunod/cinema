@@ -2679,6 +2679,161 @@
         .await;
     }
 
+    /// Reusing a formerly Live cached recipe does not grant a prepared
+    /// consumer foreground admission. Real Live readers retain that authority.
+    #[tokio::test]
+    async fn cached_live_recipe_uses_scoped_prepared_reader_admission() {
+        use crate::admission::{Priority, TranscodeResourceEstimate};
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let (_, source) = encoded_fixture(base.path()).await;
+        let mut encoding = source
+            .clone_with_admissions_for_test(source.admissions.clone())
+            .await;
+        {
+            let encoding = Arc::get_mut(&mut encoding).expect("unshared recipe");
+            encoding.resources = TranscodeResourceEstimate {
+                hardware_slot: false,
+                cpu_threads: 4,
+                decoder_threads: None,
+            };
+            encoding.options.software_threads = Some(4);
+        }
+        encoding
+            .store
+            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "5")
+            .await
+            .expect("bounded pool");
+        let incumbent = encoding
+            .admissions
+            .try_admit_bundle(
+                2,
+                5,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: 3,
+                    decoder_threads: None,
+                },
+                Priority::Live,
+            )
+            .expect("committed 720 occupies three threads");
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition)
+            .expect("unshared cache")
+            .recipe
+            .encoding = Some(Arc::clone(&encoding));
+        assert!(
+            !encoding.is_speculative(),
+            "the cached original 1080 recipe remains Live"
+        );
+        insert_control_session(&serve, "target", Arc::clone(&rendition), Instant::now()).await;
+        serve
+            .mark_prepared_incarnation("target", STAGED_SUCCESSOR)
+            .await;
+        rendition.readers.lock().await.insert(
+            "other-preparation".into(),
+            Reader::with_priority(6, Priority::Speculative),
+        );
+        async fn admit(
+            serve: &VodServe,
+            rendition: &Rendition,
+            encoding: &crate::vodencode::Encoding,
+        ) -> Option<crate::vodencode::EncodePermit> {
+            encoding
+                .try_permit_guarded(async {
+                    let readers = rendition.readers.lock().await;
+                    reader_admission_priority(&serve.shared.pool, rendition, &readers)
+                        .map(|priority| (priority, readers))
+                })
+                .await
+        }
+        assert!(admit(&serve, &rendition, &encoding).await.is_none());
+        assert_eq!(
+            encoding.last_refusal().expect("capacity refusal").priority,
+            Priority::Speculative
+        );
+        assert!(
+            !encoding.has_live_wait(),
+            "cached identity cannot publish a Live wait for preparation"
+        );
+        {
+            let mut readers = rendition.readers.lock().await;
+            let target = readers.get_mut("target").expect("prepared reader");
+            assert!(target.may_request_predecessor_handoff());
+            target.nonpreemptive_trial = true;
+            assert!(!target.may_request_predecessor_handoff(), "cached manual purpose cannot turn an Auto trial into a preemptive preparation");
+            target.nonpreemptive_trial = false;
+        }
+        rendition.attach_reader("unrelated-live", 9).await;
+        assert!(admit(&serve, &rendition, &encoding).await.is_none());
+        assert!(
+            encoding.has_live_wait(),
+            "another actual Live viewer keeps foreground authority"
+        );
+        rendition
+            .detach_media_reader(&serve.shared.pool, "unrelated-live")
+            .await;
+        assert!(admit(&serve, &rendition, &encoding).await.is_none());
+        assert!(
+            !encoding.has_live_wait(),
+            "detachment removes only the departed authority"
+        );
+        assert!(serve.promote_prepared_session("target").await);
+        {
+            let readers = rendition.readers.lock().await;
+            assert_eq!(readers["target"].admission_priority, Priority::Live);
+            assert_eq!(
+                readers["other-preparation"].admission_priority,
+                Priority::Speculative,
+                "one commit does not promote another preparation sharing the Arc"
+            );
+        }
+        assert!(admit(&serve, &rendition, &encoding).await.is_none());
+        assert!(encoding.has_live_wait());
+        rendition
+            .detach_media_reader(&serve.shared.pool, "target")
+            .await;
+        assert!(admit(&serve, &rendition, &encoding).await.is_none());
+        assert!(!encoding.has_live_wait());
+        rendition
+            .detach_media_reader(&serve.shared.pool, "other-preparation")
+            .await;
+        assert!(admit(&serve, &rendition, &encoding).await.is_none());
+        assert!(
+            encoding.last_refusal().is_none(),
+            "aborted/detached consumers leave no admission demand"
+        );
+        {
+            let mut readers = rendition.readers.lock().await;
+            let mut authority = Reader::with_priority(6, Priority::Speculative);
+            authority.authority_only = true;
+            readers.insert("target".into(), authority);
+            readers.insert("owned-child".into(), Reader::with_priority(6, Priority::Speculative));
+            readers.insert("unowned-child".into(), Reader::with_priority(6, Priority::Speculative));
+        }
+        {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let parent = sessions.get_mut("target").expect("prepared family");
+            parent.children.push(ParentMediaReader {
+                controlled: true, candidate_id: None, reader_id: "owned-child".into(),
+                rendition: Arc::clone(&rendition), _reservation: None,
+            });
+            assert!(parent.has_prepared_reader_on("target", &rendition).await,
+                "an authority-only parent retains its exact media child handoff");
+            rendition.readers.lock().await.get_mut("owned-child").expect("child").authority_only = true;
+            assert!(!parent.has_prepared_reader_on("target", &rendition).await,
+                "an unrelated preparation cannot stand in for this family's own child");
+            rendition.readers.lock().await.get_mut("owned-child").expect("child").authority_only = false;
+        }
+        assert!(serve.promote_prepared_session("target").await);
+        {
+            let readers = rendition.readers.lock().await;
+            assert_eq!(readers["owned-child"].admission_priority, Priority::Live);
+            assert_eq!(readers["unowned-child"].admission_priority, Priority::Speculative);
+        }
+        drop(incumbent);
+    }
+
     /// A committed predecessor keeps its protected bytes and already admitted
     /// GETs during projection, without proactively loading an obsolete anchor.
     #[tokio::test]

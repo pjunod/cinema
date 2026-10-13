@@ -398,10 +398,17 @@ impl Rendition {
 
     #[cfg(test)]
     pub(super) async fn attach_reader(&self, session_id: &str, frontier: u32) {
+        let mut reader = Reader::new(frontier);
+        if let Some(encoding) = self.recipe.encoding.as_ref() {
+            if encoding.is_speculative() || encoding.nonpreemptive_trial {
+                reader.admission_priority = crate::admission::Priority::Speculative;
+            }
+            reader.nonpreemptive_trial = encoding.nonpreemptive_trial;
+        }
         self.readers
             .lock()
             .await
-            .insert(session_id.to_string(), Reader::new(frontier));
+            .insert(session_id.to_string(), reader);
         *self.dormant_since.lock().expect("dormant lock") = None;
     }
 
@@ -837,6 +844,55 @@ pub(super) struct Session {
 }
 
 impl Session {
+    /// Find preparation demand owned by this exact parent/child attachment,
+    /// including families whose public root is authority-only.
+    pub(super) async fn has_prepared_reader_on(
+        &self,
+        session_id: &str,
+        rendition: &Arc<Rendition>,
+    ) -> bool {
+        let readers = rendition.readers.lock().await;
+        let eligible = |id: &str| {
+            readers.get(id).is_some_and(|reader| {
+                !reader.authority_only && reader.may_request_predecessor_handoff()
+            })
+        };
+        (self
+            .rendition
+            .as_ref()
+            .is_some_and(|root| Arc::ptr_eq(root, rendition))
+            && eligible(session_id))
+            || self
+                .children
+                .iter()
+                .any(|child| Arc::ptr_eq(&child.rendition, rendition) && eligible(&child.reader_id))
+    }
+
+    /// Change only this attachment's consumer purpose. Cached rendition
+    /// identity and other viewers' admission authority remain independent.
+    pub(super) async fn set_reader_admission_priority(
+        &self,
+        session_id: &str,
+        priority: crate::admission::Priority,
+    ) {
+        if let Some(root) = self.rendition.as_ref() {
+            if let Some(reader) = root.readers.lock().await.get_mut(session_id) {
+                reader.admission_priority = priority;
+            }
+        }
+        for child in &self.children {
+            if let Some(reader) = child
+                .rendition
+                .readers
+                .lock()
+                .await
+                .get_mut(&child.reader_id)
+            {
+                reader.admission_priority = priority;
+            }
+        }
+    }
+
     /// An immutable retained response keeps the viewer's control identity,
     /// but has no missing bytes for this rendition's producer to generate.
     pub(super) fn attachment_reader(&self, frontier: u32) -> Reader {
