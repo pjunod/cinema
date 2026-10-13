@@ -1,10 +1,10 @@
 # Remote diagnostics status — ownership, implementation and release evidence
 
-**Status:** built — web/phone ZIP export merged; native TV local transfer passes owned device qualification; review and gate pending.
+**Status:** open — archive software is built and qualified; promotion receipt is in #1081, physical/signed sampling remains separate.
 **Updated:** 2026-10-13 · **Planning baseline:** `8d7bc723e`.
 
 The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md#current-direction--attach-a-zip-to-a-bug-report) defines the current archive-attachment release.
-Hosted submission is deferred; native TV file transfer is built and being qualified. This file is the canonical execution ledger.
+Hosted submission is deferred; web/phone export and native TV transfer have current software qualification. This file is the canonical execution ledger.
 The [project backlog](PROJECT-BACKLOG.md) indexes the effort rather than
 duplicating its evidence.
 
@@ -20,11 +20,11 @@ duplicating its evidence.
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
 | Implementation workspace/base | Independent owned clone; current main base `4366a32dc`, archive landing `569678f25` (#1066). TV product commits `8c80b9a81` and `77ae61186`, native witnesses `5616f0f4b`; review correction `d0f0df4d9`; focused qualification passes and all three final-review findings are corrected. User checkouts untouched. |
 | Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
-| Plan review | Original review: 12 findings corrected. One follow-up review complete: two P1 history findings corrected; focused qualification recorded in §24. |
+| Plan review | Original review: 12 findings corrected; history follow-up: two findings corrected. One final TV-archive review found three issues, all corrected with focused regressions in §26; no repeated review cycle. |
 | Promotion/deployment | #1037 and archive-first #1066 merged. #1066 landing `569678f2513695bb9f7b1923ed2c39af6dd19043`, eight required passes. Hosted/private service rollout cancelled by the archive direction; no production changes by this chat. |
-| Current checks | #1066 merged with eight required passes. TV download source compiles on Apple TV and Android; focused single-download/expiry/cancellation tests pass. Apple TV shipped remote UI passes selected-incident download and close revocation; Android TV export/QR, D-pad and recovery pass three tests. iOS/tvOS capture/wire suites each pass eleven cases; Android capture/wire/download suites pass eleven. One final review complete; three findings corrected and focused qualification repeated. Required fast gate pending. |
+| Current checks | #1066 merged with eight required passes. TV download source compiles on Apple TV and Android; focused single-download/expiry/cancellation tests pass. Apple TV shipped remote UI passes selected-incident download and close revocation; Android TV export/QR, D-pad and recovery pass three tests. iOS/tvOS capture/wire suites each pass eleven cases; Android capture/wire/download suites pass twelve. One final review complete; three findings corrected and focused qualification repeated. The exact required gate and landing receipt are maintained in #1081. |
 | Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
-| Next action | The final reviewed corrections and repeatable browser regression are qualified. Pass every required fast check and merge #1081 at its exact qualified head. No service or fleet installation. |
+| Next action | Software archive work is complete. #1081 carries its authoritative required-gate and landing receipt; signed/physical sampling is separate acceptance work. Hosted delivery remains deferred; no service or fleet installation. |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
 shared checkout and preserve unrelated `Claude outputs/` artifacts.
@@ -60,8 +60,8 @@ from regressions. Record test absence as absence, not a passing check.
 | Web desktop/mobile | Merged #1066 | Actual anonymous/authenticated ZIP downloads, selected identity, inventory hashes and no support calls passed | Physical browser/device sampling |
 | iPhone/iPad | Merged #1066 | Exact ZIP file, real system share sheet and retained incident recovery passed | Signed/physical file sharing |
 | Android phone | Merged #1066 | Actual readable ZIP share URI, selected incident and recovery passed | Signed/physical recipient sampling |
-| Apple TV | Local HTTP archive transfer built in follow-up | Current-source bounded download/expiry/cancellation tests and shipped remote UI pass | Final review/green gate, signed/physical QR and LAN sampling |
-| Android/Google TV | Local HTTP archive transfer built in follow-up | Current-source socket/expiry/cancellation/identity tests and shipped TV UI pass | Final review/green gate, signed/physical D-pad and LAN sampling |
+| Apple TV | Local HTTP archive transfer built in follow-up | Current-source bounded download/expiry/cancellation tests and shipped remote UI pass | Promotion receipt in #1081; signed/physical QR and LAN sampling |
+| Android/Google TV | Local HTTP archive transfer built in follow-up | Current-source socket/expiry/cancellation/identity tests and shipped TV UI pass | Promotion receipt in #1081; signed/physical D-pad and LAN sampling |
 | Capture, privacy and recovery | Merged #1037/#1066 | Shared wire fixtures, bounded typed events, title opt-in, frozen history and deletion regressions passed | Real provider evidence and native overhead sampling |
 | Hosted upload/inbox | Deferred | Historical #1037 software receipts retained | Outside current archive release; no deployment required |
 
@@ -797,3 +797,15 @@ optional `CINEMA_BROWSER_EXECUTABLE`. It exercises the real compiled local
 endpoint and a phone-sized browser form, then compares the downloaded file byte
 for byte. One executed case passes on the corrected source. It is focused local
 evidence; the fast lane does not run this browser/native bridge.
+
+The first ready fast gate caught two policy mismatches, not compiler errors:
+the Apple qualification fragment's index still said open while its header said
+built, and the existing diagnostic description's physical-key handling lived
+outside the allowed shared form adapter. The index now matches built; the
+unchanged Down-to-privacy behavior is decoded inside `AuthTextField`, with a
+nullable explicit focus target that preserves other forms' defaults. The fence
+itself is unchanged. Its focused contract, TV D-pad and existing Select-to-edit
+regressions are required before the corrected candidate is pushed. The current
+source iPhone UI class executes two passes (share sheet and recovery) plus one
+TV-only skip; the earlier single-method zero-test receipt is not a pass.
+Android phone actual attachment and recovery execute two passing cases.
