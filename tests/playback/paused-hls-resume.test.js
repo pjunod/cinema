@@ -12,7 +12,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
 
 function harness({state="active"}={}){
   let now=0,nextTimer=0,current=true,diagnoses=0;
-  const timers=new Map(),sends=[],loaders=[],loads=[],surfaces=[];
+  const timers=new Map(),sends=[],loaders=[],loads=[],loadTargets=[],surfaces=[];
   const video={currentTime:0,paused:true,seeking:false,readyState:0,ended:false,playbackRate:1,addEventListener(){},removeEventListener(){}};
   class XHR{
     constructor(){this.readyState=0;this.status=0;}
@@ -46,7 +46,7 @@ function harness({state="active"}={}){
   vm.runInContext("PLAYER=player",ctx);
   const {startup}=ctx.hlsStartupEpisode(player,{current:()=>current},"/fixture/master.m3u8",0);
   startup.state=state;
-  const hls={loadSource:loadManifest,startLoad(){loads.push("start");},stopLoad(){loads.push("stop");for(const loader of [...loaders])loader.destroy();}};
+  const hls={loadSource:loadManifest,startLoad(at){loads.push("start");loadTargets.push(at);},stopLoad(){loads.push("stop");for(const loader of [...loaders])loader.destroy();}};
   startup.hls=hls;player.hls=hls;
   const Loader=ctx.createHlsStartupLoader(StockLoader,startup);
   function loadManifest(){
@@ -56,7 +56,7 @@ function harness({state="active"}={}){
       {onSuccess(){},onProgress(){},onAbort(){},onError(){},onTimeout(){}});
   }
   loadManifest();
-  return {ctx,player,startup,sends,loaders,loads,surfaces,video,manifest:loadManifest,
+  return {ctx,player,startup,sends,loaders,loads,loadTargets,surfaces,video,manifest:loadManifest,
     seek(target=30){player.controlSeek={sequence:1,targetMs:target*1000};return ctx.markPlaybackControlSeekExecuted(player,target,video);},
     present(target=30){video.readyState=4;video.currentTime=target;return ctx.settlePlaybackControlSeek(video,player,target,1,{epoch:player.controlPresentationEpoch,attachment:player.mediaAttachment,intent:player.controlSeek?.sequence});},
     useRealDiagnosis(){const at=diagnosisSource.indexOf("async function stallDiagnose(");vm.runInContext(diagnosisSource.slice(at,diagnosisSource.indexOf("\n}",at)+2),ctx);},
@@ -232,4 +232,102 @@ test("detaching or cancelling a paused startup lease fences its deadline and req
       h.advance(policy.HLS_STARTUP.cold_deadline_ms);await flush();assert.equal(h.diagnoses,0);
     }finally{h.close();}
   }
+});
+
+
+function positionPausedTarget(h){
+  h.player.controlHasFrameCallbacks=false;
+  h.ctx.playbackSeekBufferCovers=()=>true;
+  h.video.readyState=4;h.video.currentTime=30;
+  return h.ctx.settlePlaybackControlSeek(h.video,h.player,null,null,null);
+}
+
+test("paused positioned reopened target resumes loading on Play without claiming a frame",async()=>{
+  const h=harness();
+  try{
+    h.seek();await flush();h.startup.manifestState="parsed";
+    const deadline=h.startup.deadlineMs,pending=h.player.controlSeek;
+    assert.equal(positionPausedTarget(h),true);
+    assert.equal(pending.presentationProvenance,"positioned");
+    assert.equal(pending.localVodPresented,false);
+    assert.equal(h.player.controlSeek,null);assert.equal(h.startup.state,"paused");
+    assert.equal(h.loads.at(-1),"stop");
+    assert.equal(h.resume(),true);assert.equal(h.loads.at(-1),"start");
+    assert.equal(h.startup.state,"active","positioning is not presentation");
+    assert.equal(h.startup.deadlineMs,deadline);
+    h.ctx.completeHlsStartup(h.player);
+    assert.equal(h.startup.state,"presenting");assert.equal(h.startup.pausedSeek,null);
+    h.advance(policy.HLS_STARTUP.cold_deadline_ms);await flush();assert.equal(h.diagnoses,0);
+  }finally{h.close();}
+});
+
+test("paused positioned reopened target retains its original startup deadline",async()=>{
+  const h=harness();
+  try{
+    h.useRealDiagnosis();h.seek();await flush();h.startup.manifestState="parsed";
+    const deadline=h.startup.deadlineMs;
+    assert.equal(positionPausedTarget(h),true);
+    h.advance(100);assert.equal(h.resume(),true);
+    assert.equal(h.startup.deadlineMs,deadline);
+    h.advance(policy.HLS_STARTUP.cold_deadline_ms-100);await flush();
+    assert.equal(h.startup.state,"exhausted");assert.equal(h.surfaces[0].source,"startup_exhausted");
+  }finally{h.close();}
+});
+
+test("paused positioned reopened target cannot revive a detached or superseded loader",async()=>{
+  for(const action of ["detach","supersede","cancel"]){
+    const h=harness();
+    try{
+      h.seek();await flush();h.startup.manifestState="parsed";
+      assert.equal(positionPausedTarget(h),true);
+      if(action==="detach")h.detach();
+      else if(action==="supersede")h.player.controlIntentGeneration++;
+      else h.ctx.cancelHlsStartup(h.player,"closed");
+      const count=h.loads.length;assert.equal(h.resume(),false);assert.equal(h.loads.length,count);
+    }finally{h.close();}
+  }
+});
+
+
+test("positioned startup ownership survives a consecutive Play Pause Play without renewing its deadline",async()=>{
+  const h=harness();
+  try{
+    h.seek();await flush();h.startup.manifestState="parsed";
+    const deadline=h.startup.deadlineMs;assert.equal(positionPausedTarget(h),true);
+    assert.equal(h.resume(),true);
+    h.player.wantsPlayback=false;h.player.controlIntentGeneration++;
+    assert.equal(h.ctx.pauseHlsStartup(h.player),true);assert.equal(h.loads.at(-1),"stop");
+    assert.equal(h.resume(),true);assert.equal(h.loads.at(-1),"start");
+    assert.equal(h.startup.state,"active");assert.equal(h.startup.deadlineMs,deadline);
+  }finally{h.close();}
+});
+
+
+test("positioned startup lease follows a tightened absolute seek deadline",async()=>{
+  const h=harness();
+  try{
+    h.useRealDiagnosis();h.seek();await flush();h.startup.manifestState="parsed";
+    h.ctx.configureHlsStartupDeadline(h.player,20000);
+    assert.equal(positionPausedTarget(h),true);assert.equal(h.startup.deadlineMs,20000);
+    h.advance(20000);await flush();
+    assert.equal(h.startup.state,"exhausted");assert.equal(h.surfaces[0].source,"startup_exhausted");
+  }finally{h.close();}
+});
+
+test("Play during a coalesced seek replaces positioned loader custody only when the new target executes",async()=>{
+  const h=harness();
+  try{
+    h.seek();await flush();h.startup.manifestState="parsed";
+    const deadline=h.startup.deadlineMs;
+    assert.equal(positionPausedTarget(h),true);
+    h.ctx.beginPlaybackControlSeek(h.player,40);
+    const count=h.loads.length;assert.equal(h.resume(),false);
+    assert.equal(h.loads.length,count,"Play cannot load the superseded target");
+    h.advance(100);
+    assert.equal(h.ctx.markPlaybackControlSeekExecuted(h.player,40,h.video),true);
+    assert.equal(h.loads.at(-1),"start");assert.equal(h.loadTargets.at(-1),40);
+    assert.equal(h.startup.state,"active");assert.equal(h.startup.deadlineMs,deadline);
+    assert.equal(h.startup.pausedSeek.pending,h.player.controlSeek);
+    assert.notEqual(h.startup.pausedSeek.positioned,true);
+  }finally{h.close();}
 });
