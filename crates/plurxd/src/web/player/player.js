@@ -731,7 +731,11 @@ function resumePausedStartupSeek(video,player,pending){
     if(episode.pausedSeek!==lease) return;
     episode.pausedSeek=null;
     if(!hlsStartupCurrent(player,episode)) return;
-    if(presented) completeHlsStartup(player);
+    if(presented&&completeHlsStartup(player)){
+      // The owned target frame proves this attachment ready under Pause.
+      // A paused clock never advances to clear preparation in the normal tick.
+      playbackSurfaceStep({presenting:true,attached:playbackSurfaceGeneration(player)});
+    }
     if(player.wantsPlayback===false&&!keepLoading){
       if(episode.state==='presenting') episode.establishedSuspension={
         attachment:player.mediaAttachment,intentGeneration:player.controlIntentGeneration||0};
