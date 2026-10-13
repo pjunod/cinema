@@ -73,6 +73,66 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         }
     }
 
+    func testPreparedPrerollTimeoutCancelsNativeRequestAndIgnoresLateSuccess() async throws {
+        try await checkPreparedPrerollInterruption(cancelTask: false, loseOwner: false)
+    }
+
+    func testPreparedPrerollTaskCancellationDisposesItsNativeRequest() async throws {
+        try await checkPreparedPrerollInterruption(cancelTask: true, loseOwner: false)
+    }
+
+    func testPreparedPrerollSuccessCannotPublishAfterOwnerChanges() async throws {
+        try await checkPreparedPrerollInterruption(cancelTask: false, loseOwner: true)
+    }
+
+    private func checkPreparedPrerollInterruption(cancelTask: Bool, loseOwner: Bool) async throws {
+        let entered = expectation(description: "native preroll suspended")
+        let deadlineEntered = expectation(description: "original overlap deadline suspended")
+        let returned = expectation(description: "bounded preroll returned")
+        var nativeCompletion: CheckedContinuation<Bool, Never>?
+        var deadline: CheckedContinuation<Void, Error>?
+        var owned = true
+        var cancelledRequests = 0
+        let operation = Task {
+            let result = await PlayerSeekCompletion.runOwned(operation: {
+                await withCheckedContinuation {
+                    nativeCompletion = $0
+                    entered.fulfill()
+                }
+            }, cancelOperation: {
+                cancelledRequests += 1
+            }, ownsOperation: { owned }, waitForDeadline: {
+                try await withCheckedThrowingContinuation {
+                    deadline = $0
+                    deadlineEntered.fulfill()
+                }
+            })
+            returned.fulfill()
+            return result
+        }
+        await fulfillment(of: [entered, deadlineEntered], timeout: 3)
+        if cancelTask {
+            operation.cancel()
+        } else if loseOwner {
+            owned = false
+            try XCTUnwrap(nativeCompletion).resume(returning: true)
+            nativeCompletion = nil
+        } else {
+            try XCTUnwrap(deadline).resume()
+            deadline = nil
+        }
+        await fulfillment(of: [returned], timeout: 3)
+        let result = await operation.value
+        XCTAssertEqual(result, cancelTask || loseOwner ? .cancelled : .timedOut)
+        XCTAssertEqual(cancelledRequests, 1, "dispose the exact native preroll even when its adapter ignores cancellation")
+        // A native completion may arrive after the original deadline. It must
+        // not grant exposure or resume the already-returned owner a second time.
+        nativeCompletion?.resume(returning: true)
+        deadline?.resume()
+        await Task.yield()
+        XCTAssertEqual(cancelledRequests, 1)
+    }
+
     func testStartStopStartRestoresOnlyTheNewTitlesPlaybackIntent() {
         let controller = PlayerController()
         let model = AppModel()

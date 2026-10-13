@@ -10645,3 +10645,15 @@ in-flight policy-read race without globally changing cached encoder priority.
 Two focused regressions cover exact ownership, abort, protected bytes,
 admitted response drain and a paused admission crossing commit; they are
 written and compiled only, with execution deferred to the final fast lane.
+
+**Aligned Apple pipeline priming, implementation in progress.** After final
+selection and seek alignment, the hidden paused successor now prerolls at
+the captured intended rate before decoded alignment and rendezvous. Native
+priming consumes the existing overlap allowance, requires ready player and
+item status, and retains exact player/item/viewer/rate ownership. Timeout,
+cancellation or owner loss cancels the pending preroll and preserves the
+incumbent. Three focused regressions exercise deadline disposal, task
+cancellation and late native success after ownership changes. This targets
+the measured successor startup wait; it does not change automatic waiting,
+frame scoring or the100ms qualification limit. Hardware evidence remains
+owed after compilation.

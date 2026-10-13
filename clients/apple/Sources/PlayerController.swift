@@ -11754,6 +11754,7 @@ extension PlayerController: PreparedSuccessorHost {
             preparedItem?.remove(output)
         }
         preparedVideoOutput = nil
+        preparedPlayer?.cancelPendingPrerolls()
         preparedPlayer?.replaceCurrentItem(with: nil)
         preparedPlayer = nil
         if let previous = warmPredecessor, previous !== player {
@@ -12023,6 +12024,10 @@ extension PlayerController: PreparedSuccessorHost {
         // already claimed it and suppressed the in-place reopen.
         guard await awaitPreparedAlignment(of: item, to: rendezvous.itemPositionMs) else {
             return automaticTrial ? preparedCommitFailure(at: "seek") : PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
+        }
+        guard await awaitPreparedPreroll(item: item, successor: successor,
+                rate: rendezvousRate, commit: commitAttempt) else {
+            return preparedCommitFailure(at: "preroll")
         }
         guard let alignedOutput = preparedVideoOutput,
               await awaitPreparedDecodedAlignment(
@@ -12340,6 +12345,49 @@ extension PlayerController: PreparedSuccessorHost {
         seek.cancel()
         if landed == nil { item.cancelPendingSeeks() }
         return landed ?? false
+    }
+
+    /// Prime the aligned paused successor without exposing it or granting a
+    /// new overlap budget. A successful callback belongs only to this item,
+    /// player, viewer action and rate; native cancellation releases late callbacks.
+    private func awaitPreparedPreroll(
+        item: AVPlayerItem, successor: AVPlayer, rate: Float, commit: Attempt
+    ) async -> Bool {
+        let remaining = min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs)
+        let beganAtMs = Int(ProcessInfo.processInfo.systemUptime * 1_000)
+        let ownsPreroll = { [weak self] in
+            guard let self else { return false }
+            return self.preparedItem === item && self.preparedPlayer === successor
+                && successor.currentItem === item && self.preparedCommitStillOwned(commit)
+                && self.wantsPlayback && self.preferredRate == rate
+                && self.preparedOverlapRemainingMs > 0
+                && UIApplication.shared.applicationState == .active
+                && !self.pictureInPictureIsActive && !self.player.isExternalPlaybackActive
+                && item.status == .readyToPlay && successor.status == .readyToPlay
+                && successor.rate == 0
+        }
+        guard remaining > 0, rate.isFinite, rate > 0, ownsPreroll() else { return false }
+        let result = await PlayerSeekCompletion.runOwned(
+            operation: {
+                await withCheckedContinuation { continuation in
+                    successor.preroll(atRate: rate) { finished in
+                        continuation.resume(returning: finished)
+                    }
+                }
+            },
+            cancelOperation: { successor.cancelPendingPrerolls() },
+            ownsOperation: ownsPreroll,
+            waitForDeadline: {
+                while ownsPreroll(), !Task.isCancelled {
+                    let elapsed = Int(ProcessInfo.processInfo.systemUptime * 1_000) - beganAtMs
+                    guard elapsed < remaining else { return }
+                    try await Task.sleep(for: .milliseconds(min(
+                        PreparedReplacementBounds.pollMs, remaining - elapsed
+                    )))
+                }
+            }
+        )
+        return result == .finished(true) && ownsPreroll()
     }
 
     /// Load cadence from the actual successor track, within the original
