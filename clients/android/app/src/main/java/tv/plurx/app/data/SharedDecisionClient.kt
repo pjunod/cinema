@@ -209,13 +209,13 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
         fun create(): SharedDecisionClient {
             val auth = Session.playbackAuthorization()
             require(Session.canonicalOrigin(auth.origin) != null && !auth.token.isNullOrEmpty())
-            return SharedDecisionClient(auth, Net.profileClient(requireNotNull(auth.token)))
+            return SharedDecisionClient(auth, Net.capturedReceiptClient(auth, Net.profileClient(requireNotNull(auth.token))))
         }
         fun forTest(transport: OkHttpClient): SharedDecisionClient {
             check(BuildConfig.DEBUG)
             val auth = Session.playbackAuthorization()
             require(Session.canonicalOrigin(auth.origin) != null && !auth.token.isNullOrEmpty())
-            return SharedDecisionClient(auth, transport)
+            return SharedDecisionClient(auth, Net.capturedReceiptClient(auth, transport))
         }
         internal suspend fun detail(reference: SharedPlaybackReference, auth: Session.PlaybackAuthorization, transport: OkHttpClient): String {
             reference.validate()

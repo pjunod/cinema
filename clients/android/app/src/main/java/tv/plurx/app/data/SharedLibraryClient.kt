@@ -169,13 +169,13 @@ internal class SharedLibraryClient private constructor(private val auth: Session
         fun create(): SharedLibraryClient {
             val auth = Session.playbackAuthorization()
             require(Session.canonicalOrigin(auth.origin) != null && !auth.token.isNullOrEmpty())
-            return SharedLibraryClient(auth, Net.profileClient(requireNotNull(auth.token)))
+            return SharedLibraryClient(auth, Net.capturedReceiptClient(auth, Net.profileClient(requireNotNull(auth.token))))
         }
         fun forTest(transport: OkHttpClient): SharedLibraryClient {
             check(BuildConfig.DEBUG)
             val auth = Session.playbackAuthorization()
             require(Session.canonicalOrigin(auth.origin) != null && !auth.token.isNullOrEmpty())
-            return SharedLibraryClient(auth, transport)
+            return SharedLibraryClient(auth, Net.capturedReceiptClient(auth, transport))
         }
         private fun JsonObject.string(key: String): String = getValue(key).jsonPrimitive.let { require(it.isString); it.content }
         private fun strictReference(item: JsonObject) { listOf("import_id", "server_id", "catalogue_epoch", "library_id", "item_id").forEach { item.string(it) } }

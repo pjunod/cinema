@@ -3,15 +3,19 @@ import XCTest
 @testable import plurx
 
 private final class SharedBrowseHTTP: URLProtocol {
+    static var commitIndex: String?
+    static var transportFailure: URLError?
     static var respond: ((URLRequest) throws -> (Int, [String: Any]))!
     static var requests: [URLRequest] = []
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         do {
+            if let error = Self.transportFailure { throw error }
             Self.requests.append(request)
             let (status, object) = try Self.respond(request)
-            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+            let headers = Self.commitIndex.map { ["X-Plurx-Commit-Index": $0] }
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: headers)!, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: try JSONSerialization.data(withJSONObject: object))
             client?.urlProtocolDidFinishLoading(self)
         } catch { client?.urlProtocol(self, didFailWithError: error) }
@@ -20,6 +24,31 @@ private final class SharedBrowseHTTP: URLProtocol {
 }
 
 final class SharedLibraryTests: XCTestCase {
+    func testActualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt() async throws {
+        SharedBrowseHTTP.commitIndex = "41"
+        defer { SharedBrowseHTTP.commitIndex = nil; SharedBrowseHTTP.transportFailure = nil }
+        SharedBrowseHTTP.respond = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertTrue(request.url!.path.hasSuffix("/watched"))
+            return (200, ["updated": 1, "watch": ["watched": true, "position_ms": 0, "sequence": 1, "updated_at_ms": 1]])
+        }
+        let account = try client()
+        let reference = first.reference("9223372036854775807")
+        func floor() -> String? {
+            var req = URLRequest(url: URL(string: "https://b.test/api/v1/libraries")!)
+            Session.shared.authorize(&req)
+            return ReadAfterHTTP.shared.prepare(for: req).request.value(forHTTPHeaderField: "X-Plurx-Read-After")
+        }
+        _ = try await account.setWatched(reference, watched: true); XCTAssertEqual(floor(), "41")
+        SharedBrowseHTTP.commitIndex = nil
+        _ = try await account.setWatched(reference, watched: true); XCTAssertNil(floor())
+        SharedBrowseHTTP.commitIndex = "42"
+        _ = try await account.setWatched(reference, watched: true); XCTAssertEqual(floor(), "42")
+        SharedBrowseHTTP.transportFailure = URLError(.timedOut)
+        do { _ = try await account.setWatched(reference, watched: true); XCTFail("accepted failed write") } catch {}
+        XCTAssertNil(floor())
+    }
+
     private let first = SharedLibraryIdentity(importId: "11111111-1111-4111-8111-111111111111", serverId: "22222222-2222-4222-8222-222222222222",
         catalogueEpoch: "33333333-3333-4333-8333-333333333333", libraryId: "9007199254740993")
     private let other = SharedLibraryIdentity(importId: "44444444-4444-4444-8444-444444444444", serverId: "55555555-5555-4555-8555-555555555555",

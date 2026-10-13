@@ -445,12 +445,15 @@ enum DvrRuleChange {
 final class DvrAPI: @unchecked Sendable {
     let origin: String
     private let token: String?
+    private let receiptAuthorization: ReadAfterHTTP.Authorization?
     private let control: URLSession
     private let redirects = LiveTvNoRedirects()
 
     init(origin: String, token: String?, session: URLSession? = nil) {
         self.origin = origin
         self.token = token
+        let captured = Session.shared.readAfterAuthorization
+        receiptAuthorization = captured.origin == origin && captured.token == token ? captured : nil
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 15
@@ -477,7 +480,8 @@ final class DvrAPI: @unchecked Sendable {
         if let timeout { request.timeoutInterval = timeout }
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        let (data, response) = try await control.data(for: request)
+        if let receiptAuthorization { ReadAfterHTTP.bind(receiptAuthorization, to: &request) }
+        let (data, response) = try await ReadAfterHTTP.shared.data(for: request, using: control, refuseRedirects: true)
         guard let response = response as? HTTPURLResponse else { throw DvrFailure(code: "dvr_unavailable") }
         guard (200..<300).contains(response.statusCode) else {
             struct WireFailure: Decodable { let code: String }
