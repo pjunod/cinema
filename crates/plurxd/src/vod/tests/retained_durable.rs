@@ -164,7 +164,7 @@ async fn durable_completion_requires_actual_trailer_and_refuses_mixed_or_repeate
     let cut = trailer.expect("real FFmpeg normal trailer");
     let sink = RenditionSink { retirement: tokio_util::sync::CancellationToken::new(), shared: Arc::clone(&serve.shared), rendition: Arc::clone(&rendition), epoch: 0 };
     let outcome = crate::vodgen::run(&output.stdout[..cut], crate::vodgen::Generation {
-        plan: rendition.plan.clone(), index: Some(index), encoded_audio_anchor: None,
+        plan: rendition.plan.clone(), index: Some(index), landing_clock: None, encoded_audio_anchor: None,
         encoded_frame_ticks: None,
         encoded_video_origin: None,
         identity: identity.clone(), convert_dolby_vision: false,

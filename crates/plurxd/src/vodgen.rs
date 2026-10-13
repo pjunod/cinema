@@ -31,12 +31,15 @@
 //! boundary is counted, and only then is
 //! the segmenter built and fed. `-noaccurate_seek -ss` lands at the RAP
 //! at-or-before the boundary by design, so the discard only ever runs
-//! forward.
+//! forward. When the byte sequence repeats — every fragment of a static
+//! picture weighs the same — the generation asks its [`LandingClock`] where
+//! the demuxer landed and places the landing by that time instead
+//! ([`match_landing_at`]); the bytes must still agree with it.
 
 use plurx_core::fmp4::{CutPolicy, Fragment, FragmentReader, Init, Published, Segmenter, Unit};
 use plurx_core::segplan::{
-    entry_row, match_landing, FragmentIndex, LandingError, PlanEntryKind, SegmentPlan,
-    LANDING_WINDOW,
+    entry_row, match_landing, match_landing_at, FragmentIndex, LandingError, PlanEntryKind,
+    SegmentPlan, LANDING_WINDOW,
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -70,6 +73,17 @@ pub enum Failure {
     InitDrift(String),
     /// The stream could not be located against the fragment index.
     Landing(String),
+    /// The landing at this generation's start position is undetermined:
+    /// its fragments' bytes repeat from more than one row, and the landing
+    /// time could not settle it. A statement about this one seek position,
+    /// not about the rendition — a generation positioned anywhere else lands
+    /// on its own evidence — so the serving layer scopes it to the start
+    /// entry rather than failing the rendition.
+    ///
+    /// `transient` when the landing time was never measured (the probe failed
+    /// or timed out): the bytes alone did not settle it, but a later attempt
+    /// at the same entry may get its time, so the refusal is not kept.
+    Unplaced { why: String, transient: bool },
     /// The pipe broke or was unparseable mid-generation.
     Stream(String),
     /// The sink refused a write.
@@ -97,12 +111,68 @@ pub enum Outcome {
     Failed(Failure),
 }
 
+/// Where a repositioned copy generation's demuxer landed, in index ticks.
+///
+/// Measured by the caller with the generation's own seek: the producer's
+/// output cannot say, because `-avoid_negative_ts make_zero` rebases every
+/// generation to zero. Asked at most once, and only when the fragments' byte
+/// sequence leaves more than one landing possible.
+pub type LandingClock = Box<
+    dyn FnOnce() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<LandingTime, String>> + Send>,
+        > + Send,
+>;
+
+/// A [`LandingClock`]'s answer: the landing keyframe's time counted from the
+/// film's first video keyframe — the index's own zero — and one frame's
+/// duration, the most the two clocks may disagree by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LandingTime {
+    pub ticks: u64,
+    pub frame_ticks: u64,
+}
+
+/// Why the landing time did not place an ambiguous landing.
+#[derive(Debug, Clone)]
+enum TimeRefusal {
+    /// The time was measured and named no row the bytes agree with.
+    Disagrees(String),
+    /// The time could not be measured.
+    Unmeasured(String),
+}
+
+impl std::fmt::Display for TimeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimeRefusal::Disagrees(why) => write!(f, "the landing time disagrees: {why}"),
+            TimeRefusal::Unmeasured(why) => {
+                write!(f, "the landing time could not be measured: {why}")
+            }
+        }
+    }
+}
+
+/// An undetermined landing, scoped to its start entry. Transient only when
+/// the time that could have settled it was never measured.
+fn unplaced(ambiguous: &LandingError, refusal: Option<&TimeRefusal>) -> Outcome {
+    Outcome::Failed(Failure::Unplaced {
+        why: match refusal {
+            Some(refusal) => format!("{ambiguous}; {refusal}"),
+            None => ambiguous.to_string(),
+        },
+        transient: matches!(refusal, Some(TimeRefusal::Unmeasured(_))),
+    })
+}
+
 /// Everything a generation needs to know, owned so the task is `'static`.
 pub struct Generation {
     pub plan: SegmentPlan,
     /// Copy pipes locate their demuxer landing against the indexed source.
     /// Encoded pipes start on the exact frame grid and have no copy index.
     pub index: Option<FragmentIndex>,
+    /// The demuxer's landing time, for a byte sequence that repeats. `None`
+    /// leaves the byte sequence as the only evidence.
+    pub landing_clock: Option<LandingClock>,
     /// Encoded AAC begins before video so its transform/overlap state is
     /// warm at the cut. Its origin is a film-global 1024-sample boundary.
     pub encoded_audio_anchor: Option<u64>,
@@ -171,15 +241,23 @@ fn session_gone(error: &std::io::Error) -> bool {
 ///
 /// Generic over the source so the tests can drive a whole generation from a
 /// byte slice, exactly as [`crate::copyseg::run`] is.
-pub async fn run<R, S>(mut src: R, generation: Generation, sink: &S, session_log: &str) -> Outcome
+pub async fn run<R, S>(
+    mut src: R,
+    mut generation: Generation,
+    sink: &S,
+    session_log: &str,
+) -> Outcome
 where
     R: AsyncRead + Unpin,
     S: Sink,
 {
     let mut reader = FragmentReader::new();
     let encoded_entry = generation.start_entry;
+    let landing_clock = generation.landing_clock.take();
     let mut state = GenerationRun {
         generation,
+        landing_clock,
+        time_refusal: None,
         sink,
         session_log,
         served: None,
@@ -269,6 +347,11 @@ struct GenerationRun<'a, S> {
     /// this generation converts. Held so every fragment is rewritten with the
     /// same NAL framing the init declared.
     converter: Option<crate::dvpipe::Converter>,
+    /// Taken from the generation; consumed by the first ambiguous landing.
+    landing_clock: Option<LandingClock>,
+    /// What the landing time said when it could not place the landing, kept
+    /// for the refusal should the bytes not settle it either.
+    time_refusal: Option<TimeRefusal>,
     /// Fragments buffered while the landing is undecided.
     landing: Vec<Fragment>,
     landing_bytes: usize,
@@ -599,11 +682,14 @@ impl<S: Sink> GenerationRun<'_, S> {
     /// forward to the target entry's boundary, and start cutting on the
     /// plan's boundaries from there.
     ///
-    /// An ambiguous landing before the end of the pipe is not an answer yet:
-    /// the buffer is kept and the next fragment asks again with one more
-    /// fragment of evidence, while the buffer holds less than one segment's
-    /// byte ceiling — the memory the segmenter is entitled to hold pending
-    /// anyway. Past that, or at the end of the pipe, it is the typed failure.
+    /// An ambiguous landing is first put to the [`LandingClock`]: the time
+    /// the demuxer landed at names the row, and the bytes must agree with it.
+    /// Without a clock, or when it cannot answer, an ambiguous landing before
+    /// the end of the pipe is not an answer yet: the buffer is kept and the
+    /// next fragment asks again with one more fragment of evidence, while the
+    /// buffer holds less than one segment's byte ceiling — the memory the
+    /// segmenter is entitled to hold pending anyway. Past that, or at the end
+    /// of the pipe, it is the typed failure.
     async fn engage(&mut self, at_end: bool) -> Result<(), Outcome> {
         let start_entry = self.generation.start_entry;
         let Some(entry) = self.generation.plan.entry(start_entry) else {
@@ -624,12 +710,41 @@ impl<S: Sink> GenerationRun<'_, S> {
             };
             // Copy's demuxer may land before, but never after, the plan RAP,
             // so the target row bounds every possible landing.
+            let readable = !at_end && self.landing_bytes < self.generation.policy.max_bytes;
             let row = match match_landing(index, &self.observed, target) {
                 Ok(row) => row,
-                Err(LandingError::Ambiguous { .. })
-                    if !at_end && self.landing_bytes < self.generation.policy.max_bytes =>
-                {
-                    return Ok(());
+                Err(ambiguous @ LandingError::Ambiguous { .. }) if self.landing_clock.is_some() => {
+                    let clock = self.landing_clock.take().expect("checked by the guard");
+                    let placed = match clock().await {
+                        Ok(time) => match_landing_at(
+                            index,
+                            &self.observed,
+                            target,
+                            time.ticks,
+                            time.frame_ticks,
+                        )
+                        .map_err(|error| TimeRefusal::Disagrees(error.to_string())),
+                        Err(why) => Err(TimeRefusal::Unmeasured(why)),
+                    };
+                    match placed {
+                        Ok(row) => row,
+                        // The time is one more piece of evidence, not a
+                        // verdict on the rendition: a repeat the next
+                        // fragments settle still lands by its bytes.
+                        Err(refusal) if readable => {
+                            tracing::warn!(
+                                session = %crate::transcode::session_log_id(self.session_log),
+                                "{refusal}; reading further"
+                            );
+                            self.time_refusal = Some(refusal);
+                            return Ok(());
+                        }
+                        Err(refusal) => return Err(unplaced(&ambiguous, Some(&refusal))),
+                    }
+                }
+                Err(LandingError::Ambiguous { .. }) if readable => return Ok(()),
+                Err(ambiguous @ LandingError::Ambiguous { .. }) => {
+                    return Err(unplaced(&ambiguous, self.time_refusal.as_ref()))
                 }
                 Err(error) => return Err(landing_failed(error.to_string())),
             };
@@ -996,6 +1111,7 @@ mod tests {
         let generation = Generation {
             plan: grid.plan(4_000, 0),
             index: None,
+            landing_clock: None,
             encoded_frame_ticks: Some(1),
             encoded_audio_anchor: Some(0),
             encoded_video_origin: Some(48),
@@ -1134,6 +1250,7 @@ mod tests {
         let generation = Generation {
             plan: grid.plan(125, 0),
             index: None,
+            landing_clock: None,
             encoded_frame_ticks: Some(1001),
             encoded_audio_anchor: None,
             encoded_video_origin: Some(48048),
@@ -1502,6 +1619,7 @@ mod tests {
             retain_hevc_parameter_sets: false,
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
+            landing_clock: None,
             encoded_audio_anchor: None,
             encoded_frame_ticks: None,
             encoded_video_origin: None,
@@ -1989,6 +2107,7 @@ mod tests {
             retain_hevc_parameter_sets: false,
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
+            landing_clock: None,
             encoded_audio_anchor: None,
             encoded_frame_ticks: None,
             encoded_video_origin: None,
@@ -2212,10 +2331,72 @@ mod tests {
         generation.policy.max_bytes = 1;
         let sink = MemSink::default();
         let outcome = run(&film.feed[..], generation, &sink, "f1").await;
-        let Outcome::Failed(Failure::Landing(why)) = &outcome else {
+        let Outcome::Failed(Failure::Unplaced { why, transient }) = &outcome else {
             panic!("an unresolved landing must fail typed: {outcome:?}");
         };
         assert!(why.contains("undetermined"), "{why}");
+        assert!(!transient, "nothing could change the same bytes' answer");
         assert!(sink.taken().is_empty());
+    }
+
+    /// A clock that answers `answer` once.
+    fn clock(answer: Result<LandingTime, String>) -> Option<LandingClock> {
+        Some(Box::new(move || Box::pin(async move { answer })))
+    }
+
+    /// A time between two fragment starts: it names no row.
+    fn off_index(film: &Film) -> LandingTime {
+        let row = &film.index.rows[1];
+        LandingTime {
+            ticks: row.dts + row.duration / 2,
+            frame_ticks: 1,
+        }
+    }
+
+    /// Review of F1: the first ambiguity went straight to the landing time,
+    /// and a time the index refused failed the whole rendition — where before
+    /// a repeat the next fragment settles landed by its bytes. The time is
+    /// now one more piece of evidence: refused or unmeasured, the producer
+    /// reads further.
+    #[tokio::test]
+    async fn a_landing_time_that_does_not_place_it_leaves_the_bytes_to_settle_it() {
+        let (film, start_entry) = film_with_an_early_repeat().await;
+        for answer in [Ok(off_index(&film)), Err("probe timed out".to_owned())] {
+            let mut generation = generation(&film, start_entry);
+            generation.landing_clock = clock(answer.clone());
+            let sink = MemSink::default();
+            let outcome = run(&film.feed[..], generation, &sink, "f1").await;
+            assert!(
+                matches!(outcome, Outcome::Ran { .. }),
+                "{answer:?} must not fail the landing: {outcome:?}"
+            );
+            assert_eq!(
+                sink.taken().first().map(|(entry, _)| *entry),
+                Some(start_entry)
+            );
+        }
+    }
+
+    /// Past the reading ceiling an unsettled landing is entry-scoped, and only
+    /// a time that was never measured leaves it open to another try.
+    #[tokio::test]
+    async fn an_unsettled_landing_names_what_the_time_said() {
+        let (film, start_entry) = film_with_an_early_repeat().await;
+        for (answer, expect_transient) in [
+            (Ok(off_index(&film)), false),
+            (Err("probe timed out".to_owned()), true),
+        ] {
+            let mut generation = generation(&film, start_entry);
+            generation.policy.max_bytes = 1;
+            generation.landing_clock = clock(answer);
+            let sink = MemSink::default();
+            let outcome = run(&film.feed[..], generation, &sink, "f1").await;
+            let Outcome::Failed(Failure::Unplaced { why, transient }) = &outcome else {
+                panic!("an unsettled landing is entry-scoped: {outcome:?}");
+            };
+            assert_eq!(*transient, expect_transient, "{why}");
+            assert!(why.contains("landing time"), "{why}");
+            assert!(sink.taken().is_empty());
+        }
     }
 }

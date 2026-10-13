@@ -55,6 +55,25 @@ remain acceptance-open; no row closes from this pass. The 2026-10-11 notes
 also correct stale text on S-13, S-14, C-05, S-02, K-06, P-02 and A-05 and
 remove PR600 batch notes copied onto rows they did not describe.
 
+**F1/N2 source follow-up, 2026-10-12:** Paul supplied Claude's stopped-session
+handoff and authorized root to continue and merge directly. Root
+`none:openai:2026-10-12`,
+`codex://threads/01a0c165-d718-73a1-93e9-e81380017705`, owns only the coherent
+copy-landing repair on `codex/copy-landing-origin`: core matching,
+`vodgen.rs`, the VOD generation/rendition constructors, focused tests, their
+ownership ledger and the existing [VOD plan §13](../streaming/VOD-PRESENTATION-PLAN.md#13-f1n2-copy-landing-repair--source-proof-not-device-acceptance)
+with its index/backlog pointers. This is not a new claim on another session's
+whole plan. Original Claude author/WIP and newer main tests are preserved.
+The actual audio-leading negative reproduced before the shared-zero fix;
+focused corrected source tests and the sole adversarial source review pass.
+Draft [#1041](http://forge.lan:3000/noirr/plurx/pulls/1041) opened 23:33 UTC
+on current-main composition `ba023d773`. All 22 declared regression IDs,
+current-base pinned compiler/static/normal hooks and sole review pass;
+current-head fast lane and landing remain owed. Rust inputs are unchanged
+by the tracking-only claim commit, so applicable passes are retained.
+Four bounded closures / 45 acceptance-open remain unchanged. No deployment,
+physical-device action, sampler interruption or production fault campaign.
+
 **C-02 bounded source follow-up, 2026-10-12:** Paul's stopped-Claude handoff
 names the remaining AniList single-blip defect separately from the retained
 F1/N2 landing WIP. Root continuation
@@ -77,6 +96,13 @@ check, strict Clippy, format, catalog, 25 static contracts and tracked commit
 hooks passed before publication. Current-head fast lane and landing remain
 unproven. No source-only closure,
 provider traffic, production deployment or change to the four/45 counts.
+**Root post-merge receipt, 23:18 UTC:** #1040 landed as `290346685` after
+run4866 scope/preflight/Rust/Main promotion passed. Current-main `0da656d3a`
+plus unchanged head `78da930a58` was locally compiled and strictly linted;
+actual landing tree matches that composition and all eight Regression-Test
+fields match the body. The unchanged unit inputs were retained, not replayed.
+This supersedes the earlier unproven-gate sentence; C-02 fleet acceptance is
+still open, with no deployment or new closure.
 
 **Fleet source boundary, 2026-09-26 00:04 UTC:** PR #533 advanced `main` to
 `0915b3ee9e62` at 21:52 UTC; PRs #528, #511, #530 and #405 then
