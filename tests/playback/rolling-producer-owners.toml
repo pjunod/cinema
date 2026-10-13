@@ -4539,7 +4539,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # cleanup can outlive the timed-out waiter and retains child/source ownership
 # until kill-and-reap finishes. Production retains the catalog deadline
 # captured at request entry.
-expected_occurrences = 1737
+# PR #1051 foreground family admission: 1737 -> 1740 (+3).
+# One production tokio::time::sleep is awaited by reserve_media_group under
+# the existing five-second admission deadline and its RAII live-waiter guard.
+# Each atomic attempt drops binding locks and temporary permit references
+# before sleeping; request cancellation drops the sleep and live waiter.
+# Two cfg(test) timeout calls bound cancellation and background-yield evidence
+# in continuous_family_start_preempts_background_and_cleans_up_cancelled_wait.
+# The test joins its futures in place. No detached task, producer, process,
+# resource owner, or deadline-as-completion proof is introduced. The adversarial
+# review traced the real start caller, atomic reservations and cancellation.
+expected_occurrences = 1740
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
