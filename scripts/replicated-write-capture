@@ -8,6 +8,12 @@ Read-only tooling for docs/cluster/REPLICATED-WRITE-RATE-HYGIENE.md §5.1.
       continuous idle window, which ones meet the gate, and the M0 readout
       (per-voter deltas and per-day rates) for each qualifying window.
 
+  replicated-write-capture evaluate-bounded-after SAMPLES.tsv
+      --evidence-dir OWNED --expected-build BUILD --source-commit FULL_SHA
+      Report separately bound segments within a 30-minute campaign; never
+      join across deployment, activity, role, switch or counter boundaries.
+      This is bounded cost evidence, not a long-duration stability result.
+
   replicated-write-capture roster --fleet FLEET.json
       Print the validated voter roster as node<TAB>metrics-url lines; the
       sampler reads its voters through this, so both apply one validation.
@@ -54,6 +60,9 @@ import urllib.request
 from collections import Counter, OrderedDict
 
 GATE_HOURS = 12
+# The original M0/strict evaluator remains historical, byte-compatible data.
+# Paul's 2026-10-13 ruling replaces M4's duration, not its cost/provenance bar.
+BOUNDED_MAX_SECONDS = 30 * 60
 # Set from the fleet file by use_fleet(); empty until then, so nothing that
 # needs the roster can run against a roster nobody supplied.
 NODES: tuple[str, ...] = ()
@@ -514,6 +523,132 @@ def evaluate_after(lines, evidence_dir, expected_build, source):
             "per_node": per_node, "outbox_wal_proposal_bound": "not assessed; attributed WAL proof remains required"}
 
 
+def evaluate_bounded_after(lines, evidence_dir, expected_build, source):
+    """Validate every supplied byte; partition valid observations, never stitch."""
+    after_source(expected_build, source)
+    text = lines.read(AFTER_MAX_TSV + 1)
+    if len(text.encode()) > AFTER_MAX_TSV:
+        raise ValueError("bounded samples exceed 8 MiB")
+    reader = csv.DictReader(text.splitlines(), delimiter="\t")
+    if tuple(reader.fieldnames or ()) != AFTER_FIELDS:
+        raise ValueError("bounded AFTER header missing/changed")
+    ticks = OrderedDict()
+    facts = {}
+    epochs = []
+    row_count = 0
+    previous_tick = None
+    for row in reader:
+        row_count += 1
+        if row_count > 16384 or None in row or any(value is None for value in row.values()):
+            raise ValueError("incomplete/oversized bounded row")
+        tick = after_integer(row["epoch"], "epoch")
+        node = row["node"]
+        if previous_tick is not None and tick < previous_tick:
+            raise ValueError("bounded tick order violation")
+        previous_tick = tick
+        if node not in NODES or row["reachable"] != "1" or row["url"] != AFTER_URLS[node]:
+            raise ValueError("unbound bounded observation")
+        rows = ticks.setdefault(tick, {})
+        if node in rows:
+            raise ValueError("duplicate bounded node/tick")
+        observed = after_integer(row["observed_epoch"], "observed epoch")
+        if not 0 <= observed - tick <= 20 or row["timestamp_utc"] != iso(observed):
+            raise ValueError("bounded observation timestamp mismatch")
+        metrics, _ = after_metrics(after_evidence(evidence_dir, row["metrics_sha256"], ".prom"))
+        if any(row[field] != value for field, value in metrics.items()):
+            raise ValueError("bounded row differs from retained metrics")
+        acquisition = after_evidence(evidence_dir, row["acquisition_sha256"], ".json")
+        # Validate the actual tuple before deciding whether it is within the
+        # independently admitted binding. A new build never earns provenance
+        # merely because its label or a self-authored manifest looks plausible.
+        data = json.loads(acquisition)
+        observations = data.get("observations") if isinstance(data, dict) else None
+        if not isinstance(observations, list):
+            raise ValueError("bounded acquisition observations missing")
+        matching = [fact for fact in observations if isinstance(fact, dict) and fact.get("node") == node]
+        if len(matching) != 1:
+            raise ValueError("bounded acquisition node missing/duplicate")
+        actual_source = matching[0].get("source_commit")
+        after_source(metrics["build"], actual_source)
+        fact = after_acquisition(acquisition, observed, node, metrics["build"], actual_source)
+        for field in (*AFTER_MONOTONIC, "uptime_seconds", *IDLE_ZERO, "local_is_voter"):
+            after_integer(row[field], field)
+        facts[(tick, node)] = fact
+        rows[node] = row
+        epochs.append(observed)
+    if not epochs:
+        raise ValueError("no bounded observations")
+    span = max(epochs) - min(epochs)
+    if span > BOUNDED_MAX_SECONDS:
+        raise ValueError("bounded campaign exceeds the original 30-minute allowance")
+
+    segments, excluded, boundaries = [], [], []
+    current = []
+    prior = None
+    prior_pairs = None
+
+    def finish():
+        if not current:
+            return
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=AFTER_FIELDS, delimiter="\t")
+        writer.writeheader()
+        for rows in current:
+            writer.writerows(rows.values())
+        buffer.seek(0)
+        result = evaluate_after(buffer, evidence_dir, expected_build, source)
+        # Retain the exact integer numerator/denominator and all legacy
+        # byte/provenance checks, but do not fabricate a legacy 12-hour pass.
+        eligible = len(current) >= 2 and result["overlap_seconds"] > 0
+        result.update(mode="bounded_after_segment", measurement_eligible=eligible,
+                      takeover_bound_met=eligible and all(
+                          rates["takeover_below_1500_per_day"] for rates in result["per_node"].values()),
+                      start_tick=int(current[0][NODES[0]]["epoch"]),
+                      end_tick=int(current[-1][NODES[0]]["epoch"]))
+        segments.append(result)
+        current.clear()
+
+    for tick, rows in ticks.items():
+        reason = None
+        if set(rows) != set(NODES):
+            reason = "incomplete_tick_roster"
+        elif any(row["build"] != expected_build or facts[(tick, node)]["source_commit"] != source
+                 for node, row in rows.items()):
+            reason = "outside_admitted_source_binding"
+        elif any(row["local_is_voter"] != "1" or any(row[field] != "0" for field in IDLE_ZERO)
+                 for row in rows.values()):
+            reason = "activity_or_nonvoter"
+        if reason:
+            finish()
+            excluded.append({"tick": tick, "reason": reason, "observed_nodes": sorted(rows)})
+            prior = prior_pairs = None
+            continue
+        pairs = {node: (facts[(tick, node)]["cluster_media_pool_enabled"],
+                        facts[(tick, node)]["cluster_session_takeover_enabled"]) for node in NODES}
+        if prior is not None:
+            reason = "switch_pair_changed" if pairs != prior_pairs else None
+            if reason is None:
+                try:
+                    for node in NODES:
+                        after_continuity(rows[node], prior[node])
+                except ValueError:
+                    reason = "counter_uptime_or_gap_boundary"
+            if reason:
+                finish()
+                boundaries.append({"tick": tick, "reason": reason})
+        current.append(rows)
+        prior, prior_pairs = rows, pairs
+    finish()
+    eligible = [segment for segment in segments if segment["measurement_eligible"]]
+    return {"mode": "bounded_after", "campaign_span_seconds": span,
+            "wall_clock_cap_seconds": BOUNDED_MAX_SECONDS, "segments": segments,
+            "excluded_ticks": excluded, "boundaries": boundaries,
+            "bounded_cost_observations_met": bool(eligible) and all(
+                segment["takeover_bound_met"] for segment in eligible),
+            "full_acceptance": False, "long_duration_stability": "not assessed",
+            "outbox_wal_proposal_bound": "not assessed; attributed WAL proof remains required"}
+
+
 class _NoAfterRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, response, code, message, headers, new_url):
         raise ValueError("AFTER metrics redirects are forbidden")
@@ -638,11 +773,13 @@ def observe_after(output_dir, deployment_path, deployment_digest, credentials_pa
         signal.signal(signal.SIGALRM, previous)
 
 
-def sample_after(output_dir, acquisition_path, expected_build, source, max_seconds):
+def sample_after(output_dir, acquisition_path, expected_build, source, max_seconds, *, bounded=False):
     """One finite POSIX owner; external observer is explicitly not this tool."""
     after_source(expected_build, source)
     if not 1 <= max_seconds <= AFTER_MAX_SECONDS:
         raise ValueError("AFTER requires an explicit 1..90000 second allowance")
+    if bounded and max_seconds > BOUNDED_MAX_SECONDS:
+        raise ValueError("bounded sampler requires an explicit 1..1800 second allowance")
     if not hasattr(signal, "setitimer") or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
         raise ValueError("AFTER requires a dedicated POSIX process with no existing timer")
     root = Path(output_dir)
@@ -742,14 +879,19 @@ def sample_after(output_dir, acquisition_path, expected_build, source, max_secon
                     first_observed.setdefault(node, observed)
                     last_observed[node] = observed
                 overlap = min(last_observed.values()) - max(first_observed.values())
-                if overlap >= 43200:
+                if not bounded and overlap >= 43200:
                     break
                 arm()
-                time.sleep(max(0, 60 - (time.time() - tick)))
+                delay = max(0, 60 - (time.time() - tick))
+                if bounded and deadline - time.monotonic() <= delay:
+                    break
+                time.sleep(delay)
         text = after_read_regular(root / "samples.tsv", AFTER_MAX_TSV).decode("utf-8")
-        result = evaluate_after(io.StringIO(text), evidence, expected_build, source)
+        evaluator = evaluate_bounded_after if bounded else evaluate_after
+        result = evaluator(io.StringIO(text), evidence, expected_build, source)
         print(json.dumps(result, indent=2))
-        return 0 if result["takeover_bound_met"] else 1
+        passed = result["bounded_cost_observations_met"] if bounded else result["takeover_bound_met"]
+        return 0 if passed else 1
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
@@ -835,13 +977,20 @@ def main(argv=None) -> int:
     ev.add_argument("--source-commit")
     fleet_help = f"voter roster ({FLEET_SCHEMA} JSON) kept outside the repository; default ${FLEET_ENV}"
     ev.add_argument("--fleet", default=os.environ.get(FLEET_ENV) or None, help=fleet_help)
-    sample = sub.add_parser("sample-after")
-    sample.add_argument("--output-dir", required=True)
-    sample.add_argument("--acquisition-manifest", required=True)
-    sample.add_argument("--expected-build", required=True)
-    sample.add_argument("--source-commit", required=True)
-    sample.add_argument("--max-seconds", type=int, required=True)
-    sample.add_argument("--fleet", default=os.environ.get(FLEET_ENV) or None, help=fleet_help)
+    bounded_ev = sub.add_parser("evaluate-bounded-after", help="source-bound segments; no twelve-hour gate")
+    bounded_ev.add_argument("samples")
+    bounded_ev.add_argument("--evidence-dir", required=True)
+    bounded_ev.add_argument("--expected-build", required=True)
+    bounded_ev.add_argument("--source-commit", required=True)
+    bounded_ev.add_argument("--fleet", default=os.environ.get(FLEET_ENV) or None, help=fleet_help)
+    for command in ("sample-after", "sample-bounded-after"):
+        sample = sub.add_parser(command)
+        sample.add_argument("--output-dir", required=True)
+        sample.add_argument("--acquisition-manifest", required=True)
+        sample.add_argument("--expected-build", required=True)
+        sample.add_argument("--source-commit", required=True)
+        sample.add_argument("--max-seconds", type=int, required=True)
+        sample.add_argument("--fleet", default=os.environ.get(FLEET_ENV) or None, help=fleet_help)
     observer = sub.add_parser("observe-after")
     observer.add_argument("--output-dir", required=True)
     observer.add_argument("--deployment-receipt", required=True)
@@ -878,13 +1027,24 @@ def main(argv=None) -> int:
             print("AFTER observer refused; sanitized partial evidence retained", file=sys.stderr)
             return 1
 
-    if args.command == "sample-after":
+    if args.command in ("sample-after", "sample-bounded-after"):
         try:
             return sample_after(args.output_dir, args.acquisition_manifest, args.expected_build,
-                                args.source_commit, args.max_seconds)
+                                args.source_commit, args.max_seconds,
+                                bounded=args.command == "sample-bounded-after")
         except (ValueError, OSError, TimeoutError) as error:
             print(f"AFTER capture refused; partial owned evidence retained: {error}", file=sys.stderr)
             return 1
+    if args.command == "evaluate-bounded-after":
+        try:
+            raw = after_read_regular(args.samples, AFTER_MAX_TSV).decode("utf-8")
+            result = evaluate_bounded_after(io.StringIO(raw), args.evidence_dir,
+                                            args.expected_build, args.source_commit)
+        except (ValueError, OSError) as error:
+            print(f"bounded AFTER evidence refused: {error}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, indent=2))
+        return 0 if result["bounded_cost_observations_met"] else 1
     if args.command == "evaluate":
         if args.after:
             if not all((args.evidence_dir, args.expected_build, args.source_commit)) or args.gate_hours != GATE_HOURS:

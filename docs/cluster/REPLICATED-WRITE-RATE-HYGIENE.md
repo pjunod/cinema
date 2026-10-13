@@ -436,11 +436,47 @@ this protocol; shorter data must not be relabeled as a legacy pass.
    Outbox proposal attribution remains separate: aggregate counters alone
    cannot supply its numerator or copied-WAL integrity.
 
-The segmented evaluator is an implementation follow-up; the legacy evaluator
-currently refuses these interrupted inputs. Until that follow-up is verified,
-the duration requirement is removed but no new fleet pass is claimed. Neither
-this plan nor the user ruling authorizes deployment, credential access,
-previously refused WAL operations or a new live capture.
+The explicit `evaluate-bounded-after` command implements this readout and
+validates every supplied row's retained metrics/acquisition bytes before
+partitioning it. Activity/non-voter, incomplete-roster and outside-admission
+ticks are excluded and reported; malformed or tampered data refuses the
+readout. Counter/uptime/gap and switch changes split segments, never bridge
+them. Different sources do not acquire provenance from a manifest: only the
+independently admitted expected tuple can produce eligible cost evidence.
+
+`sample-bounded-after` has one create-only owner and an explicit allowance
+of at most1,800 seconds. It stops normally before the next polling interval
+would exhaust the original deadline. A changed build, stale observer, activity
+or acquisition failure stops collection and preserves partial evidence; it
+does not restart. Evaluate that preserved input separately to retain earlier
+complete segments and report the incomplete final tick. The external
+`observe-after` command also needs an explicit allowance no greater than
+1,800 seconds for this campaign. Do not start the legacy M0 sampler.
+
+```bash
+# Only after separate capture admission and authenticated deployment binding.
+scripts/replicated-write-capture sample-bounded-after \
+  --fleet "$K03_FLEET" --output-dir "$K03_OWNER" \
+  --acquisition-manifest "$K03_MANIFEST" \
+  --expected-build "$K03_BUILD" --source-commit "$K03_SOURCE_SHA" \
+  --max-seconds 1800
+scripts/replicated-write-capture evaluate-bounded-after "$K03_OWNER/samples.tsv" \
+  --fleet "$K03_FLEET" --evidence-dir "$K03_OWNER/evidence" \
+  --expected-build "$K03_BUILD" --source-commit "$K03_SOURCE_SHA"
+```
+
+Read `segments`, `excluded_ticks` and `boundaries`, not just the exit status.
+`bounded_cost_observations_met` applies only to eligible, admitted segments;
+the result always says `full_acceptance: false` and long-duration stability
+not assessed. Per-node rates retain exact integer numerator/denominator.
+The collector enforces a monotonic wall allowance; the offline evaluator
+checks the supplied observed span, not independently authenticated wall time.
+No new fleet pass is claimed. Neither this plan nor the user ruling authorizes
+deployment, credential access, previously refused WAL operations or a new
+live capture. Four synthetic offline controls in
+[`test_bounded_write_capture.py`](../../tests/operations/test_bounded_write_capture.py)
+pin the actual command, boundary arithmetic, invalid inputs and collector
+deadline/create-only/close behavior; they are not a fleet campaign.
 
 Re-run §5.1's readout; update
 [CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.5's retained

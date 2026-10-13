@@ -16,8 +16,9 @@ deployment freeze. Use K-03's bounded, deployment-aware protocol in
 [§5.5](REPLICATED-WRITE-RATE-HYGIENE.md#55-m4--after-measurement-and-doc).
 Retain timer/lease/wakeup regressions and report per-source segments within
 one 30-minute wall-clock cap; never restart the allowance at a deployment.
-Historical M0 and failed/lost captures remain distinct. Segmented tooling
-and actual admitted fleet evidence are still owed; this is not a pass.
+Historical M0 and failed/lost captures remain distinct. Explicit bounded
+sampler/evaluator tooling has offline controls; actual admitted fleet
+evidence is still owed. This is not a fleet pass.
 
 K-03 took the watched-outbox claim (28.9% of replicated entries) off the idle
 cluster. Its M0 attribution found two larger or comparable loops it was not
@@ -434,7 +435,9 @@ media1 and lab3:
    numerator and day-normalized proposals per source-bound segment beside
    docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-M0.md §2. The legacy evaluator's
    twelve-hour gate is superseded, not a reason to freeze deployments.
-   Do not claim a segmented tooling pass until that follow-up is verified.
+   Use the explicit `evaluate-bounded-after` command with retained evidence
+   and the independently admitted full-source/build tuple; report excluded
+   ticks and boundaries, not just its scoped cost boolean.
 3. Copy (read-only, cp) the learner lab3's /srv/plurx/hiqlite/logs/*.wal to
    persistent owned evidence storage and run
    `scripts/replicated-write-capture attribute <copies>`; report
