@@ -13,6 +13,11 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
 function harness({state="active"}={}){
   let now=0,nextTimer=0,current=true,diagnoses=0;
   const timers=new Map(),sends=[],loaders=[],loads=[],surfaces=[];
+  let surfaceState=policy.initialSurfaceState(),surface=null;
+  function surfaceStep(event){
+    const result=policy.presentSurface(surfaceState,{t:now,...event});
+    surfaceState=result.state;surface=result.surface;return surface;
+  }
   const video={currentTime:0,paused:true,seeking:false,readyState:0,ended:false,playbackRate:1,addEventListener(){},removeEventListener(){}};
   class XHR{
     constructor(){this.readyState=0;this.status=0;}
@@ -22,16 +27,21 @@ function harness({state="active"}={}){
     send(){sends.push(this);}
     abort(){this.aborted=true;}
   }
-  const player={started:true,wantsPlayback:false,controlIntentGeneration:1,mediaAttachment:{},source:{video_codec:"h264"},controlHasFrameCallbacks:true};
+  const player={attemptId:"a3",started:true,wantsPlayback:false,controlIntentGeneration:1,mediaAttachment:{},source:{video_codec:"h264"},controlHasFrameCallbacks:true};
+  surfaceStep({attach:player.attemptId});
   const ctx=vm.createContext({module:{exports:{}},exports:{},console,player,PlaybackPolicy:policy,
     performance:{now:()=>now},XMLHttpRequest:XHR,TOKEN:null,
     setTimeout(fn,ms){const id=++nextTimer;timers.set(id,{fn,at:now+ms});return id;},
     clearTimeout(id){timers.delete(id);},bufferTargets:()=>({}),
-    document:{hidden:false,getElementById:()=>video},playbackSurfaceStep(){},notifyPlaybackControl(){},
+    document:{hidden:false,getElementById:()=>video},playbackSurfaceStep:surfaceStep,playbackSurfaceGeneration:p=>p.attemptId,
+    samplePreparedSwitchFrames(){},notifyPlaybackControl(){},
     playbackOwnsAttachedMedia:()=>current,playbackSeekBufferCovers:()=>false,
     currentStreamFailureOverlay:()=>null,finishStallRecovery(){},clearEffectiveProcessing(){},
     cancelNextEpisodePreparation(){},clearAutoplayNextPreparation(){},clearPlaybackControlWaiters(){},stopPlayerForExhaustion(){loads.push("terminal_stop");},
-    raisePlaybackSurface:(source,facts)=>surfaces.push({source,...facts}),toast(){},
+    raisePlaybackSurface(source,facts){
+      surfaces.push({source,...facts});
+      return surfaceStep({raise:source,context:"start",attached:player.attemptId,...facts});
+    },toast(){},
     clientLog(){},playbackContext:()=>({}),reportTtff(){},
     stallDiagnose(){diagnoses++;return Promise.resolve();}});
   ctx.self=ctx;
@@ -61,6 +71,7 @@ function harness({state="active"}={}){
     present(target=30){video.readyState=4;video.currentTime=target;return ctx.settlePlaybackControlSeek(video,player,target,1,{epoch:player.controlPresentationEpoch,attachment:player.mediaAttachment,intent:player.controlSeek?.sequence});},
     useRealDiagnosis(){const at=diagnosisSource.indexOf("async function stallDiagnose(");vm.runInContext(diagnosisSource.slice(at,diagnosisSource.indexOf("\n}",at)+2),ctx);},
     get diagnoses(){return diagnoses;},
+    get surface(){return surface;},
     detach(){current=false;},
     resume(){player.wantsPlayback=true;ctx.supersedePlaybackControlIntent(player);return ctx.resumeHlsStartup(video,player);},
     advance(ms){
@@ -230,6 +241,52 @@ test("detaching or cancelling a paused startup lease fences its deadline and req
       h.manifest();await flush();assert.equal(h.sends.length,1);
       const count=h.loads.length;old();assert.equal(h.loads.length,count);
       h.advance(policy.HLS_STARTUP.cold_deadline_ms);await flush();assert.equal(h.diagnoses,0);
+    }finally{h.close();}
+  }
+});
+
+// Exercise the real surface reducer: a loader completion alone does not remove
+// preparation, and a paused viewer will never produce advancing-clock samples.
+test("paused reopened target presentation clears preparation without Play",async()=>{
+  for(const frameBeforeSeeked of [false,true]){
+    const h=harness();
+    try{
+      h.ctx.raisePlaybackSurface("client_preparing",{title:"Preparing the stream…"});
+      h.seek();await flush();assert.equal(h.surface.kind,"blocking");
+      h.video.seeking=frameBeforeSeeked;
+      assert.equal(h.present(),!frameBeforeSeeked);
+      if(frameBeforeSeeked){
+        assert.equal(h.surface.kind,"blocking","a frame does not finish an outstanding seek");
+        h.video.seeking=false;assert.equal(h.ctx.settlePlaybackControlSeek(h.video,h.player),true);
+      }
+      assert.equal(h.startup.state,"presenting");assert.equal(h.surface.kind,"none");
+      assert.equal(h.video.paused,true);assert.equal(h.player.wantsPlayback,false);
+      h.ctx.playbackProgressTick(h.video,h.player);
+      assert.equal(h.surface.kind,"none","a later paused tick cannot recreate preparation");
+    }finally{h.close();}
+  }
+});
+test("paused reopened preparation requires current target-frame proof",async()=>{
+  for(const invalid of ["off_target","stale","positioned","cancelled"]){
+    const h=harness();
+    try{
+      h.ctx.raisePlaybackSurface("client_preparing",{title:"Preparing the stream…"});
+      h.seek();await flush();
+      if(invalid==="off_target")assert.equal(h.present(1),false);
+      if(invalid==="stale"){
+        h.player.controlPresentationEpoch++;
+        assert.equal(h.ctx.settlePlaybackControlSeek(h.video,h.player,30,1,
+          {epoch:h.player.controlPresentationEpoch-1,attachment:h.player.mediaAttachment,intent:1}),false);
+      }
+      if(invalid==="positioned"){
+        h.player.controlHasFrameCallbacks=false;h.video.currentTime=30;
+        h.ctx.playbackSeekBufferCovers=()=>true;
+        assert.equal(h.ctx.settlePlaybackControlSeek(h.video,h.player),true);
+      }
+      if(invalid==="cancelled"){
+        h.startup.state="cancelled";h.present();
+      }
+      assert.equal(h.surface.kind,"blocking",invalid+" cannot claim startup presentation");
     }finally{h.close();}
   }
 });
