@@ -55,6 +55,35 @@ remain acceptance-open; no row closes from this pass. The 2026-10-11 notes
 also correct stale text on S-13, S-14, C-05, S-02, K-06, P-02 and A-05 and
 remove PR600 batch notes copied onto rows they did not describe.
 
+**K-03/K-10 and K-04 correction, 2026-10-13:** Paul withdrew the
+twelve-hour uninterrupted/deployment-free qualification requirement. The
+[K-03 protocol](../cluster/REPLICATED-WRITE-RATE-HYGIENE.md) and
+[K-10 follow-up](../cluster/REPLICATED-WRITE-RATE-HYGIENE-II.md) now specify
+bounded, deployment-aware observations with a 30-minute total wall cap,
+not 30 continuous idle minutes. There is no fleet reservation or automatic
+reset-until-pass campaign. Historical interrupted captures are not passes
+and shorter observations do not establish long-duration stability. Root's
+published [#1073](http://forge.lan:3000/noirr/plurx/pulls/1073) implements
+the bounded sampler and evaluator. Its sole source review found mixed-node
+deployment and request-offset/tick-gap defects; both were reproduced and
+repaired with focused regressions. Current-candidate promotion and landing,
+independently admitted runtime provenance and actual fleet measurements
+remain owed. No deployment, installation or live campaign is authorized by
+the duration ruling.
+
+K-04 native echo source landed as `e4b6c1c6d` in
+[#1049](http://forge.lan:3000/noirr/plurx/pulls/1049), after exact-tree run5007
+and Main promotion passed. All 48 landing regression fields byte-match the
+validated body; qualified tree `b96915659be3dd52711f0c1c252d87a0ea8ccab9`
+and ordered parents are verified. Apple and Android source now adopt the
+existing echo, preserving the original read-cost target. This does not
+update installed clients or establish controlled fleet read-cost,
+cross-node fallback or rolling-version acceptance. See the
+[K-04 ledger](../cluster/BOUNDED-REPLICA-READS-ROLLOUT.md#7-open-questions).
+These facts supersede the rows' older native-header and duration next
+actions, not their original authorship or raw negative receipts. Four
+bounded closures / 45 acceptance-open remains unchanged.
+
 **F1/N2 source follow-up, 2026-10-12:** Paul supplied Claude's stopped-session
 handoff and authorized root to continue and merge directly. Root
 `none:openai:2026-10-12`,
