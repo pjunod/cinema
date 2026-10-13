@@ -11119,3 +11119,71 @@ These regressions are compiled, not executed. Exact Linux compilation and
 post-fix native binding/upgrade evidence are pending. The prepared next
 120-second diagnostic preserves the one-manual720/unnamed-Auto sequence and
 fresh1080 proof; it is not a full15-manual/five-Auto or low-link campaign.
+
+
+### 10.312 Validated retained costs and loaded native rendezvous
+
+**Implementation is built; native acceptance remains open.** Draft PR #1048
+contains the retained-cost repair and the native preparation correction.
+The final adversarial review, external Fable review checkpoint and batched
+merge coordinator's fast lane have not run.
+
+A source-bound diagnostic captured the exact qualified1080p artifact retiring
+through idle expiry after300,006ms without a lease. Valid measured-cost reads
+had not refreshed its use. Public `7018bf615` validates the same retained
+entry's artifact facts before refreshing its use and clearing idle state.
+Invalid or foreign reads extend nothing; pins, expiry, accounting and retained
+budget remain unchanged. Pinned Rust1.97.1 compilation, strict Clippy and the
+exact Linux build pass. The two retention regressions are compiled, not run.
+The fixed-server phone campaign keeps all three genuine cost proofs valid
+through389seconds of Auto after15 manual changes and one1080p Auto upgrade.
+Its78.91ms maximum decoded gap is partial evidence, not the full acceptance.
+
+The private qualification tools needed separate corrections. Console transport
+now verifies ordered original-byte packets before unchanged scoring. A strict
+fixed-link fixture removes250ms idle burst credit: the earlier nominal10Mb/s
+phone link actually measured11.6–12Mb/s and could not prove downshift. A later
+phone run credited12 manual changes; its actual13th accepted, healthy native
+commit was rejected by the observer after repeated offers overwrote the first
+binding. Immutable first-offer retention fixes that observer. A deliberate
+empty manual-route candidate string remains valid. These private corrections
+do not add application503 retries or relax wire, owner or frame checks.
+
+The strict TV campaign completes15 manual changes and one Auto upgrade below
+79ms, then fails the lower replacements. A focused late-position diagnostic
+captures the cause:720p target372,082ms has loaded media only through361,961ms
+at its four-second seek bound;480p target383,107ms has loaded media only through
+377,961ms. Both targets are seekable. The successor serially fetches13–14seconds
+of earlier fragments while sharing10Mb/s with its incumbent. This is absent
+target media, not a proven seek hang despite a loaded target.
+
+A private preceding-only initial-parking experiment removes that backward
+fetch, but does not complete recovery. Its480p initial target386,065ms parks at
+386,000ms. The final exact target393,966ms lies beyond its loaded386,000–390,011ms
+window and again times out. The production correction therefore separates
+initial parking from final exact alignment and chooses one fixed future
+rendezvous within the actual contiguous loaded window that admitted the
+original target. It preserves the original target and media origin, two-second
+runway, original overlap and four-second bounds, exact final seeking, decoded
+alignment, clock matching and display ownership. A later buffer island cannot
+supply the missing runway. Consumption of the future lead still refuses
+exposure. Both Apple targets compile with build-for-testing; no units execute.
+The new numeric regressions cover source position, gaps, lead, rate and invalid
+facts. The corrected full physical campaigns remain to be qualified.
+
+Low-link qualification now prepares a genuine360p full-mux output in addition
+to1080p,720p and480p. The actual480p peak exceeded3Mb/s and could not establish
+a fitting lower choice. Production already offers lower candidates; the
+private harness had omitted their measurements. Only an exact qualified
+output cost and actual accepted landing can close the3Mb/s recovery/rebound
+bar. Its thresholds and the15-manual/five-Auto series remain unchanged.
+
+The two late TV diagnostics close213 and222 owned processes respectively,
+with zero residuals and closed SDK wrappers. The rejected new diagnostic
+field was caught before launch and removed; that preparation closes71 owned
+processes with zero residuals. Failed and incomplete captures remain failed
+or incomplete. Existing Chrome, Firefox, Android TV, wireless Android and
+macOS Safari evidence retains its original source and scope. Safari iOS
+settings, independent physical display/audio, broader source/pressure cases
+and unreachable installations remain explicit limits. No new native full pass
+or whole-matrix acceptance is claimed.
