@@ -278,27 +278,35 @@ def compiled_roster(workspace):
         if not root.exists():
             continue  # Gradle NO-SOURCE is permitted for the empty Java set.
         require(root.is_dir(), 'Compiled source-set root is not a directory')
-        for path in root.rglob('*'):
-            entries += 1
-            require(entries <= 8192, 'Compiled source-set entry count outside bound')
-            require(not path.is_symlink(), 'Compiled class tree contains a symlink')
-            if path.is_dir():
-                continue
-            require(path.is_file(), 'Compiled class tree contains an irregular file')
-            if path.suffix != '.class':
-                require(path.name.endswith('.kotlin_module'), 'Unknown compiled test artifact')
-                continue
-            name = path.relative_to(root).as_posix()
-            require(name not in classfiles, 'Repeated class across compiled source sets')
-            size = path.stat().st_size
-            require(len(classfiles) < 4096 and size <= 8 * 1024 * 1024
-                    and total_bytes + size <= 16 * 1024 * 1024, 'Compiled class roster outside bound')
-            allowance = min(8 * 1024 * 1024, 16 * 1024 * 1024 - total_bytes)
-            with path.open('rb') as stream:
-                raw = stream.read(allowance + 1)
-            require(len(raw) == size and len(raw) <= allowance, 'Compiled artifact grew or changed during bounded read')
-            total_bytes += len(raw)
-            classfiles[name] = raw
+        import os
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as iterator:
+                for entry in iterator:
+                    entries += 1
+                    require(entries <= 8192, 'Compiled source-set entry count outside bound')
+                    path = Path(entry.path)
+                    require(not entry.is_symlink(), 'Compiled class tree contains a symlink')
+                    if entry.is_dir(follow_symlinks=False):
+                        require(len(path.relative_to(root).parts) <= 32, 'Compiled class tree depth outside bound')
+                        pending.append(path)
+                        continue
+                    require(entry.is_file(follow_symlinks=False), 'Compiled class tree contains an irregular file')
+                    if path.suffix != '.class':
+                        require(path.name.endswith('.kotlin_module'), 'Unknown compiled test artifact')
+                        continue
+                    name = path.relative_to(root).as_posix()
+                    require(name not in classfiles, 'Repeated class across compiled source sets')
+                    size = entry.stat(follow_symlinks=False).st_size
+                    require(len(classfiles) < 4096 and size <= 8 * 1024 * 1024
+                            and total_bytes + size <= 16 * 1024 * 1024, 'Compiled class roster outside bound')
+                    allowance = min(8 * 1024 * 1024, 16 * 1024 * 1024 - total_bytes)
+                    with path.open('rb') as stream:
+                        raw = stream.read(allowance + 1)
+                    require(len(raw) == size and len(raw) <= allowance, 'Compiled artifact grew or changed during bounded read')
+                    total_bytes += len(raw)
+                    classfiles[name] = raw
     require(classfiles, 'No current compiled JVM test classes')
     return classfiles
 

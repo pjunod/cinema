@@ -134,7 +134,7 @@ class CurrentCompiledRosterCase(unittest.TestCase):
             workspace, _, path = self.workspace(root)
             with path.open('wb') as stream:
                 stream.truncate(8 * 1024 * 1024 + 1)
-            with patch.object(Path, 'read_bytes', side_effect=AssertionError('Must refuse before reading')):
+            with patch.object(Path, 'open', side_effect=AssertionError('Must refuse before reading')):
                 with self.assertRaises(discovery.InventoryError):
                     discovery.compiled_roster(workspace)
 
@@ -162,12 +162,28 @@ class CurrentCompiledRosterCase(unittest.TestCase):
 
     def test_streaming_entry_bound_refuses_an_unbounded_directory_walk(self):
         import tempfile
+        from contextlib import contextmanager
+        from types import SimpleNamespace
         with tempfile.TemporaryDirectory() as root:
             workspace, classes, _ = self.workspace(root)
-            from pathlib import Path
-            with patch.object(Path, 'rglob', return_value=iter([classes] * 8193)):
+            consumed = []
+            retired = []
+            def entries():
+                for index in range(100000):
+                    consumed.append(index)
+                    yield SimpleNamespace(path=str(classes / ('filler_' + str(index))),
+                                          is_symlink=lambda: False, is_dir=lambda **kwargs: True)
+            @contextmanager
+            def scan(directory):
+                try:
+                    yield entries()
+                finally:
+                    retired.append(True)
+            with patch('os.scandir', side_effect=scan):
                 with self.assertRaises(discovery.InventoryError):
                     discovery.compiled_roster(workspace)
+            self.assertEqual(len(consumed), 8193)
+            self.assertEqual(retired, [True])
 
     def test_bounded_read_refuses_growth_after_the_stat_measurement(self):
         import io
