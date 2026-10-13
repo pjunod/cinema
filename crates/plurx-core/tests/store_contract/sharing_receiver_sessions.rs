@@ -11,6 +11,38 @@ use plurx_core::{
 use sha2::Digest;
 use uuid::Uuid;
 
+/// Metadata-only empty ingress fence; this fixture starts no Source worker
+/// and does not claim a physical Source End receipt.
+async fn seal_metadata_receiver_ingress(store: &HiqliteAuthStore, incarnation: &str) {
+    use plurx_core::store::SharingReceiverIngressStore;
+    let route = store
+        .media_session_route_by_incarnation(incarnation)
+        .await
+        .expect("current model receiver route")
+        .expect("model route retained");
+    assert!(store
+        .receiver_ingress_snapshot(&route)
+        .await
+        .expect("initial model ingress custody")
+        .is_none());
+    let identity = plurx_core::auth::hash_token(&format!(
+        "plurx.metadata-only.receiver.fence\0{incarnation}"
+    ));
+    let sealed = store
+        .seal_receiver_ingress_route(&route, &identity)
+        .await
+        .expect("seal empty metadata ingress")
+        .expect("sealed current route");
+    assert!(sealed.state.is_sealed());
+    assert!(sealed.state.settled(), "no physical ingress was registered");
+    let stored = store
+        .receiver_ingress_snapshot(&route)
+        .await
+        .expect("read sealed model ingress")
+        .expect("durable sealed fence");
+    assert!(stored.state.settled());
+}
+
 #[test]
 fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention() {
     startup_observer::run_full_hiqlite_fixture(
@@ -1004,6 +1036,14 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                 attachment: attachment.clone(),
                 confirmation: "a".repeat(64),
             };
+            assert_eq!(
+                store
+                    .retire_receiver_session(&witness)
+                    .await
+                    .expect("absent ingress custody stays refused"),
+                ReceiverRetirementOutcome::Refused
+            );
+            seal_metadata_receiver_ingress(&store, &activation.incarnation_id).await;
             client.execute("UPDATE sharing_delivery_grants SET state='active' WHERE token_hash=? AND incarnation_id=?",hiqlite::params![delivery.token_hash.clone(),attachment.owner.incarnation_id]).await.expect("retained grant corruption fixture");
             client.execute("CREATE TRIGGER retirement_ignore_grant BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignored grant revocation");
             assert_eq!(
@@ -1638,6 +1678,18 @@ async fn sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirme
             .expect("record"),
         ReceiverSourceWrite::Refused
     );
+    let unsealed_witness = OrphanNeverDispatched {
+        intent: won.intent().clone(),
+        owner: won.owner().clone(),
+    };
+    assert_eq!(
+        store
+            .retire_receiver_session(&unsealed_witness)
+            .await
+            .expect("absent ingress cannot authorize orphan retirement"),
+        ReceiverRetirementOutcome::Refused
+    );
+    seal_metadata_receiver_ingress(&store, &inc).await;
     let mut old_owner = won.owner().clone();
     old_owner.owner_node_id = "B-dead".into();
     old_owner.owner_epoch = route.owner_epoch;
