@@ -1029,6 +1029,78 @@ fn library_path_call(expression: &str) -> Option<String> {
     Some(super::library_paths_are_sql(&arguments[1], &arguments[2]))
 }
 
+/// A completed reviewed SQL operation is not a predicate binding for a later
+/// statement. Admit only the exact format expression, or the first argument of
+/// the observed SQLite query_row wrapper. Every helper occurrence must belong
+/// to that independently modeled format expression.
+fn completed_library_path_statement(
+    source: &str,
+    start: usize,
+    end: usize,
+    literals: &[Literal],
+    is_code: &[bool],
+) -> bool {
+    let expression = &source[start..end];
+    let trimmed = expression.trim_start();
+    let begin = start + expression.len() - trimmed.len();
+    let (format_start, format_end) = if trimmed.starts_with("format!(") {
+        (begin, end)
+    } else if let Some(rest) = trimmed.strip_prefix("conn.query_row") {
+        let rest = rest.trim_start();
+        if !rest.starts_with('(') {
+            return false;
+        }
+        let open = end - rest.len();
+        let (arguments, close) = parenthesis_arguments(source, is_code, open + 1);
+        if close >= end || arguments.len() != 3 || source[close + 1..end].trim() != "?" {
+            return false;
+        }
+        let first = arguments[0];
+        let argument = first.trim();
+        if !argument.starts_with("&format!(") {
+            return false;
+        }
+        let argument_start = open + 1 + first.len() - first.trim_start().len();
+        (argument_start + 1, argument_start + argument.len())
+    } else {
+        return false;
+    };
+    let (arguments, close) =
+        parenthesis_arguments(source, is_code, format_start + "format!(".len());
+    if close >= format_end || !source[close + 1..format_end].trim().is_empty() {
+        return false;
+    }
+    let Some(first) = arguments.first() else {
+        return false;
+    };
+    let literal_start = format_start + "format!(".len() + first.len() - first.trim_start().len();
+    let Some(own_sql) = literals
+        .iter()
+        .find(|literal| literal.start == literal_start)
+    else {
+        return false;
+    };
+    if &source[own_sql.start..own_sql.end] != first.trim() || !is_sql_shaped(&own_sql.text) {
+        return false;
+    }
+    let helper_occurrences = expression
+        .match_indices("library_paths_are_sql")
+        .filter(|(at, _)| is_code[start + at])
+        .map(|(at, _)| start + at)
+        .collect::<Vec<_>>();
+    if helper_occurrences.is_empty()
+        || helper_occurrences
+            .iter()
+            .any(|at| *at < format_start || *at >= close)
+    {
+        return false;
+    }
+    let (_, _, resolved) = library_path_template(source, own_sql, literals, is_code);
+    resolved
+        && (is_sql_candidate(&own_sql.text)
+            || composed_library_path_candidate(source, own_sql, literals, is_code))
+}
+
 /// Resolve the actual helper in positional format arguments and local named
 /// bindings. The constructor's output is judged by the ordinary SQL validators.
 fn library_path_template(
@@ -1139,25 +1211,15 @@ fn library_path_template(
         if !is_code[at] {
             continue;
         }
-        // Its SQL literal was independently modeled when scanned. A completed
-        // format expression is not a direct path-predicate binding for this
-        // later statement; treating it as one would reject ordinary follow-up
-        // reads in the same function.
-        if capture[2].trim().starts_with("format!(") {
-            let expression = capture.get(2).expect("binding expression");
-            let start = function_start + expression.start();
-            let end = function_start + expression.end();
-            if let Some(own_sql) = literals
-                .iter()
-                .find(|literal| literal.start >= start && literal.end <= end)
-            {
-                if is_sql_shaped(&own_sql.text)
-                    && (is_sql_candidate(&own_sql.text)
-                        || composed_library_path_candidate(source, own_sql, literals, is_code))
-                {
-                    continue;
-                }
-            }
+        let expression = capture.get(2).expect("binding expression");
+        if completed_library_path_statement(
+            source,
+            function_start + expression.start(),
+            function_start + expression.end(),
+            literals,
+            is_code,
+        ) {
+            continue;
         }
         if let Some(value) = library_path_call(&capture[2]) {
             assert_eq!(
@@ -1200,14 +1262,14 @@ fn library_path_template(
                 format!("let {}", &capture[1]),
                 "library path SQL requires one immutable direct untyped binding"
             );
+            if !template.contains(&format!("{{{}}}", &capture[1])) {
+                continue;
+            }
             assert_eq!(
                 block_at(at),
                 block_at(literal.start),
                 "library path SQL binding must belong to the enclosing live lexical block"
             );
-            if !template.contains(&format!("{{{}}}", &capture[1])) {
-                continue;
-            }
             assert!(
                 arguments.is_empty(),
                 "library path SQL local binding cannot have explicit format arguments"
@@ -1989,8 +2051,8 @@ fn the_census_covers_every_slice_exactly_once() {
 
 mod scanner {
     use super::{
-        composed_library_path_candidate, is_sql_candidate, is_statement, literals_and_code_mask,
-        positional_format_arguments, principal_templates, resolve_template,
+        composed_library_path_candidate, is_sql_candidate, is_sql_shaped, is_statement,
+        literals_and_code_mask, positional_format_arguments, principal_templates, resolve_template,
         same_statement_binding_arity, string_bindings, string_constants, test_item_ranges,
         validate_sql, validate_sqlite_placeholders,
     };
@@ -2192,6 +2254,80 @@ mod scanner {
             assert_eq!(variants.len(), 1);
             validate_sql(&variants[0])
                 .expect("both independently composed statements retain their own parameters");
+        }
+    }
+
+    #[test]
+    fn named_path_predicate_does_not_own_unrelated_nested_lease_sql() {
+        let source = r#"fn query() {
+            let paths_are = super::library_paths_are_sql("$1", "$2");
+            let sql = format!("INSERT INTO guards SELECT $1 WHERE {paths_are}");
+            if let Some(lease) = lease {
+                let sql = format!("SELECT id FROM jobs WHERE lease = $1");
+            }
+        }"#;
+        let (literals, mask) = literals_and_code_mask(source);
+        for sql in literals
+            .iter()
+            .filter(|literal| is_sql_shaped(&literal.text))
+        {
+            let variants =
+                principal_templates("hiqlite_media.rs", source, sql, &literals, &mask, &[]);
+            assert_eq!(variants.len(), 1);
+            validate_sql(&variants[0]).expect("each SQL statement keeps its own binding scope");
+        }
+    }
+
+    #[test]
+    fn completed_sqlite_path_query_does_not_own_later_mutation_or_read() {
+        let source = r#"fn query() {
+            let current: bool = conn.query_row(
+                &format!("SELECT {}", crate::store::library_paths_are_sql("?1", "?2")),
+                params![library, paths], |row| row.get(0),
+            )?;
+            let deleted = conn.execute("DELETE FROM files WHERE id = ?1", params![file])?;
+            let inserted = conn.execute("INSERT INTO roots VALUES (?1, ?2)", params![library, fingerprint])?;
+            let rows = conn.query_row("SELECT fingerprint FROM roots WHERE id = ?1", params![library], |row| row.get(0))?;
+        }"#;
+        let (literals, mask) = literals_and_code_mask(source);
+        for sql in literals
+            .iter()
+            .filter(|literal| is_sql_shaped(&literal.text))
+        {
+            let variants =
+                principal_templates("publication.rs", source, sql, &literals, &mask, &[]);
+            assert_eq!(variants.len(), 1);
+            let maximum =
+                validate_sqlite_placeholders(&variants[0]).expect("sequential SQLite parameters");
+            assert_eq!(
+                same_statement_binding_arity(source, &mask, sql.end),
+                Some(maximum)
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_sql_literal_cannot_admit_an_unmodeled_helper_wrapper() {
+        for expression in [
+            r#"wrapper("SELECT ?1", crate::store::library_paths_are_sql("?1", "?2"))"#,
+            r#"conn.query_row(&format!("SELECT ?1", crate::store::library_paths_are_sql("?1", "?2")), params![library], |row| row.get(0))?"#,
+            r#"conn.query_row(&format!("SELECT ?1"), params![crate::store::library_paths_are_sql("?1", "?2")], |row| row.get(0))?"#,
+        ] {
+            let source = format!(
+                r#"fn query() {{ let prior = {expression}; let rows = conn.query_row("SELECT id FROM roots WHERE id = ?1", params![library], |row| row.get(0)); }}"#
+            );
+            let refused = std::panic::catch_unwind(|| {
+                let (literals, mask) = literals_and_code_mask(&source);
+                let sql = literals
+                    .iter()
+                    .find(|literal| literal.text.starts_with("SELECT id"))
+                    .expect("later query");
+                principal_templates("publication.rs", &source, sql, &literals, &mask, &[])
+            });
+            assert!(
+                refused.is_err(),
+                "unmodeled helper remains refused: {expression}"
+            );
         }
     }
 
