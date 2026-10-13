@@ -374,7 +374,7 @@ def after_metrics(raw):
     return row, ("\n".join(retained) + "\n").encode()
 
 
-def after_acquisition(raw, epoch, node, expected_build, source):
+def after_acquisition(raw, epoch, node, expected_build, source, *, per_node=False):
     if len(raw) > 16 * 1024:
         raise ValueError("acquisition exceeds 16 KiB")
     def unique_pairs(pairs):
@@ -398,8 +398,11 @@ def after_acquisition(raw, epoch, node, expected_build, source):
         identity = observation["node"]
         if identity not in NODES or identity in facts:
             raise ValueError("duplicate/unknown acquisition node")
-        if observation["build"] != expected_build or observation["source_commit"] != source:
-            raise ValueError("acquisition build/source mismatch")
+        if per_node:
+            after_source(observation["build"], observation["source_commit"])
+        if not per_node or identity == node:
+            if observation["build"] != expected_build or observation["source_commit"] != source:
+                raise ValueError("acquisition build/source mismatch")
         observed = observation["epoch"]
         if type(observed) is not int or not 0 <= epoch - observed <= AFTER_TTL:
             raise ValueError("stale/future acquisition")
@@ -570,7 +573,7 @@ def evaluate_bounded_after(lines, evidence_dir, expected_build, source):
             raise ValueError("bounded acquisition node missing/duplicate")
         actual_source = matching[0].get("source_commit")
         after_source(metrics["build"], actual_source)
-        fact = after_acquisition(acquisition, observed, node, metrics["build"], actual_source)
+        fact = after_acquisition(acquisition, observed, node, metrics["build"], actual_source, per_node=True)
         for field in (*AFTER_MONOTONIC, "uptime_seconds", *IDLE_ZERO, "local_is_voter"):
             after_integer(row[field], field)
         facts[(tick, node)] = fact
@@ -627,6 +630,8 @@ def evaluate_bounded_after(lines, evidence_dir, expected_build, source):
                         facts[(tick, node)]["cluster_session_takeover_enabled"]) for node in NODES}
         if prior is not None:
             reason = "switch_pair_changed" if pairs != prior_pairs else None
+            if reason is None and tick - int(prior[NODES[0]]["epoch"]) > AFTER_TTL:
+                reason = "counter_uptime_or_gap_boundary"
             if reason is None:
                 try:
                     for node in NODES:

@@ -473,10 +473,13 @@ The collector enforces a monotonic wall allowance; the offline evaluator
 checks the supplied observed span, not independently authenticated wall time.
 No new fleet pass is claimed. Neither this plan nor the user ruling authorizes
 deployment, credential access, previously refused WAL operations or a new
-live capture. Four synthetic offline controls in
+live capture. Six synthetic offline controls in
 [`test_bounded_write_capture.py`](../../tests/operations/test_bounded_write_capture.py)
 pin the actual command, boundary arithmetic, invalid inputs and collector
-deadline/create-only/close behavior; they are not a fleet campaign.
+deadline/create-only/close behavior, including mixed-node rolling deployment
+and changing request offsets hiding a tick gap. The latter two controls fail
+on the pre-repair source and pass on the corrected source; no second review
+is required or claimed. These controls are not a fleet campaign.
 
 Re-run §5.1's readout; update
 [CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.5's retained

@@ -58,11 +58,14 @@ class BoundedCaptureCase(unittest.TestCase):
              "cluster_session_takeover_enabled": False} for node in capture.NODES
         ]}).encode()
 
-    def tick(self, second, *, source=None, enabled=False, **metrics_options):
+    def tick(self, second, *, source=None, enabled=False, observation_offset=None, **metrics_options):
         acquisition = self.retain(self.acquisition(second, source=source, enabled=enabled,
                                                  build=metrics_options.get("build")), ".json")
         rows = []
         for offset, node in enumerate(capture.NODES):
+            if observation_offset is not None:
+                offset = observation_offset
+                metrics_options.setdefault("uptime", 1000 + second + offset)
             parsed, raw = capture.after_metrics(self.metrics(second, **metrics_options))
             observed = self.epoch + second + offset
             rows.append(dict(parsed, timestamp_utc=capture.iso(observed), epoch=str(self.epoch + second),
@@ -129,6 +132,41 @@ class BoundedCaptureCase(unittest.TestCase):
         path.write_bytes(path.read_bytes() + b"# tampered\n")
         with self.assertRaises(ValueError):
             self.evaluate(rows)
+
+    def test_rolling_deployment_excludes_only_the_mixed_tick_and_retains_both_sides(self):
+        mixed = self.tick(120)
+        acquisition = json.loads((self.evidence / (mixed[0]["acquisition_sha256"] + ".json")).read_bytes())
+        new_build, new_source = "v0.3.0-1-gbbbbbbbbb", "b" * 40
+        acquisition["observations"][0].update(build=new_build, source_commit=new_source)
+        digest = self.retain(json.dumps(acquisition).encode(), ".json")
+        for row in mixed:
+            row["acquisition_sha256"] = digest
+        parsed, raw = capture.after_metrics(self.metrics(120, build=new_build))
+        mixed[0].update(parsed, metrics_sha256=self.retain(raw, ".prom"))
+        result = self.evaluate(self.tick(0) + self.tick(60) + mixed + self.tick(180) + self.tick(240))
+        self.assertEqual([(s["start_tick"] - self.epoch, s["end_tick"] - self.epoch)
+                          for s in result["segments"]], [(0, 60), (180, 240)])
+        self.assertEqual(result["excluded_ticks"], [{"tick": self.epoch + 120,
+                         "reason": "outside_admitted_source_binding", "observed_nodes": sorted(capture.NODES)}])
+        self.assertTrue(result["bounded_cost_observations_met"])
+        self.assertFalse(result["full_acceptance"])
+        # Mixed tuples are not permission to mismatch the actual node's bytes.
+        bad = copy.deepcopy(mixed)
+        bad[0].update(capture.after_metrics(self.metrics(120))[0],
+                      metrics_sha256=self.retain(capture.after_metrics(self.metrics(120))[1], ".prom"))
+        with self.assertRaises(ValueError):
+            self.evaluate(self.tick(0) + self.tick(60) + bad)
+
+    def test_tick_gap_splits_even_when_request_offsets_hide_the_observed_gap(self):
+        rows = self.tick(0, observation_offset=20) + self.tick(60, observation_offset=20)
+        rows += self.tick(160, observation_offset=0) + self.tick(220, observation_offset=0)
+        result = self.evaluate(rows)
+        self.assertEqual([(s["start_tick"] - self.epoch, s["end_tick"] - self.epoch)
+                          for s in result["segments"]], [(0, 60), (160, 220)])
+        self.assertEqual(result["boundaries"], [{"tick": self.epoch + 160,
+                                               "reason": "counter_uptime_or_gap_boundary"}])
+        self.assertTrue(result["bounded_cost_observations_met"])
+        self.assertEqual([s["overlap_seconds"] for s in result["segments"]], [60, 60])
 
     def test_actual_cli_reports_bounded_cost_without_a_twelve_hour_gate(self):
         rows = self.tick(0) + self.tick(60) + self.tick(120)
