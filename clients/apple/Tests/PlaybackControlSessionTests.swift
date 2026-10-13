@@ -12,11 +12,13 @@ import XCTest
 private final class ControlExchangeLog: @unchecked Sendable {
     private let lock = NSLock()
     private var requests: [ControlRequest] = []
+    private var echoes: [String?] = []
 
-    func append(_ request: ControlRequest) {
+    func append(_ request: ControlRequest, echo: String?) {
         lock.lock()
         defer { lock.unlock() }
         requests.append(request)
+        echoes.append(echo)
     }
 
     func all() -> [ControlRequest] {
@@ -24,11 +26,13 @@ private final class ControlExchangeLog: @unchecked Sendable {
         defer { lock.unlock() }
         return requests
     }
+    func firstEcho() -> String? { lock.lock(); defer { lock.unlock() }; return echoes.first ?? nil }
 
     func reset() {
         lock.lock()
         defer { lock.unlock() }
         requests = []
+        echoes = []
     }
 }
 
@@ -169,7 +173,7 @@ private final class ControlExchangeURLProtocol: URLProtocol {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
         }
-        controlExchanges.append(decoded)
+        controlExchanges.append(decoded, echo: request.value(forHTTPHeaderField: "X-Plurx-Read-After"))
         if controlOwnerChange.take(sequence: decoded.sequence) {
             let failure = #"{"code":"owner_changed","generation":"44444444-4444-4444-8444-444444444444","control_epoch":9,"retry_after_ms":250}"#
             let changed = HTTPURLResponse(
@@ -308,6 +312,28 @@ private let serverNextExchangeMs = 5_000
 /// through the real actor.
 @MainActor
 final class PlaybackControlSessionTests: XCTestCase {
+    func testActualControlTransportEchoesAndRetiresUnknownWriteReceipt() async throws {
+        let saved = Session.shared.credentials
+        defer { Session.shared.setCredentials(origin: saved.origin, token: saved.token) }
+        Session.shared.setCredentials(origin: "https://cinema.example", token: "control-fixture")
+        var write = URLRequest(url: URL(string: "https://cinema.example/api/v1/items/7/progress")!)
+        write.httpMethod = "POST"; Session.shared.authorize(&write)
+        let exchange = ReadAfterHTTP.shared.prepare(for: write)
+        ReadAfterHTTP.shared.received(HTTPURLResponse(url: write.url!, statusCode: 204, httpVersion: nil,
+            headerFields: ["X-Plurx-Commit-Index": "41"])!, exchange: exchange)
+        controlExchanges.reset()
+        let (base, urlSession) = makeTransport()
+        var transport = base; transport.authorize = { Session.shared.authorize(&$0) }
+        let control = PlaybackControlSession(); let player = PlayerStub()
+        control.begin(bootstrap: sessionBootstrap(), transport: transport, observe: { player.observation() })
+        _ = try await waitForExchange { $0.sequence == 1 }
+        await control.endAndWait(); urlSession.invalidateAndCancel()
+        XCTAssertEqual(controlExchanges.firstEcho(), "41")
+        var read = URLRequest(url: URL(string: "https://cinema.example/api/v1/libraries")!)
+        Session.shared.authorize(&read)
+        XCTAssertNil(ReadAfterHTTP.shared.prepare(for: read).request.value(forHTTPHeaderField: "X-Plurx-Read-After"))
+    }
+
     private func makeTransport() -> (PlaybackControlTransport, URLSession) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ControlExchangeURLProtocol.self]

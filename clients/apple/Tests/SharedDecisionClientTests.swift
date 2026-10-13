@@ -132,6 +132,10 @@ final class SharedDecisionClientTests: XCTestCase {
     // this is client protocol evidence, not physical Source playback.
     func testAuthenticatedInitialStartRetainsWholeRequestAndBContext() async throws {
         let context = try await context("9223372036854775807"), session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        var receiptWrite = URLRequest(url: URL(string: "https://b.test/api/v1/items/7/progress")!)
+        receiptWrite.httpMethod = "POST"; Session.shared.authorize(&receiptWrite)
+        ReadAfterHTTP.shared.received(HTTPURLResponse(url: receiptWrite.url!, statusCode: 204, httpVersion: nil,
+            headerFields: ["X-Plurx-Commit-Index": "41"])!, exchange: ReadAfterHTTP.shared.prepare(for: receiptWrite))
         let reply: [String: Any] = ["session_id": session, "playlist_url": "/api/v1/hls/\(session)/master.m3u8?native=1&subtitle=2", "vod": true,
             "start_seconds": 0.0, "duration_ms": 90_000, "control": ["protocol": "plurx-playback-control-v1", "url": "/api/v1/hls/\(session)/control",
             "generation": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "control_epoch": 1, "next_exchange_ms": 5_000, "lease_timeout_ms": 300_000],
@@ -140,11 +144,15 @@ final class SharedDecisionClientTests: XCTestCase {
         var sent: Data?
         DecisionHTTP.answer = { request in
             XCTAssertEqual(request.url?.path, self.base + "/hls/sessions"); XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer decision-bearer")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Plurx-Read-After"), "41")
             XCTAssertEqual(request.timeoutInterval, 310); sent = try self.body(request)
             return (request.url!, 200, [:], bytes)
         }
         let request = CreateSessionRequest(playbackId: "shared-browser", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", height: 720, start: 12.5, audio: 2, copy: true, caps: Caps.snapshot().document)
         let result = try await SharedDecisionClient(testConfiguration: configuration).start(context: context, request: request)
+        var receiptRead = URLRequest(url: URL(string: "https://b.test/api/v1/libraries")!)
+        Session.shared.authorize(&receiptRead)
+        XCTAssertNil(ReadAfterHTTP.shared.prepare(for: receiptRead).request.value(forHTTPHeaderField: "X-Plurx-Read-After"), "bounded shared delegate must retire an unknown mutating reply")
         let subject = SharedPlaybackSubject(context: context, title: "Shared film", resumeMs: 12_500, watchSequence: 7)
         let sdrDecision = try SharedDecision.decode(wire("9223372036854775807") { $0["delivered_dynamic_range"] = "sdr"; $0["preserve_dolby_vision"] = false })
         let plan = try SharedPlaybackPlan(subject: subject, decision: sdrDecision, caps: request.caps!, request: request)

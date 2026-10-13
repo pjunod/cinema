@@ -1,6 +1,6 @@
 # Mac HDR acceptance — playback follow-ups
 
-**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; ordinary Metal paused reopen passes; final CPU capture and restoration remain open · **Recorded:** 2026-10-12.
+**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; ordinary Air hls.js F1 acceptance and restoration complete; F2 source correction qualified and merged, physical transition pending; F3–F7 remain open · **Recorded:** 2026-10-12.
 
 The [full acceptance report](../streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 closes the ordinary HDR10 Metal/CPU comparison. This document specifies the
@@ -299,7 +299,7 @@ reliability, successful voluntary quality switching or the broader Mac matrix.
 F2–F7 remain separate follow-ups. Preserve all prior failure archives and
 source-qualified receipts; do not relabel a safely refused switch as applied.
 
-**Active completion state:** PR #1068 passed Main promotion on run 4992 and merged as
+**#1070 snapshot before the controlling Mac was unlocked:** PR #1068 passed Main promotion on run 4992 and merged as
 `69d3311dd82e23aa869578442e9f1bc903cc6804`. The final CPU
 capture and resume-to-zero await unlocking the controlling Mac. Clipboard
 sharing is verified off; Mac processing is saved on and backend Auto is saved.
@@ -312,6 +312,38 @@ The [October 13 receipt](evidence/air-hdr-paused-20261013.json) links the
 frame, safely refused quality change, local checks and qualification/landing
 receipts. The snapshot is explicitly incomplete for the last CPU capture and
 resume reset; no five-minute pass is inferred from elapsed wall time.
+
+### October 13 completion — CPU control and restoration verified
+
+The same corrected hardware binary completes the switch-off CPU control.
+At 15:36:04 UTC, the intrinsic picture is 1920×1080 at film position
+3,813.913 seconds, after 3,513.913 seconds (58½ minutes) of continuous play
+from 300 seconds. The player reports zero stalls and zero dropped frames out
+of 84,255. This is a player-counter receipt, not a calibrated frame-gap series.
+While paused at 3,822.165 seconds with buffer 3,791.788–3,882.325 seconds,
+the unbuffered backward target at 300,000 ms presents in 150 ms. Its actual
+five-minute picture and Play triangle are retained without a preparation scrim.
+Together with the Metal targets/reopen above, this closes the ordinary Air
+Chrome hls.js acceptance of F1 and its reopened-startup/surface follow-ups.
+Native HLS and the broader lifecycle/device matrix remain separate.
+
+Cleanup is complete. The Air browser's quality returns to Auto through its
+normal menu. Playback closes and its owned session is deleted before the exact
+string item ID's progress is reset to zero; the authenticated read records
+`position_ms: 0` and `watched: false`. After the service restart, the fresh
+physical movie page offers **Play**, with no Resume. Backend Auto is active
+and selects CPU/x264 at the startup benchmark (512 fps CPU, 359 fps
+VideoToolbox); Mac processing stays saved **on**. Shared clipboard stays
+**off**, with its prior functional transfer proof preserved unchanged.
+The restored Auto backend intentionally uses the CPU tone-map, rather than
+extending the temporary VideoToolbox acceptance preference.
+
+The [13-member completion archive](http://forge.lan:3000/attachments/b6ecdca8-6885-4b71-883a-4e92bfc44cd2) retains the CPU soak and
+paused frame, quality restoration, exact resume read, restarted Auto and saved
+processing screenshots. Its SHA-256 is `5d412aed66cf5f2c3c69d2554f52c21704bb9849c3e982c7cc9d2a4605be9fa0`; size is 3912376 bytes.
+The prior 50-member archive and every earlier failed receipt remain unchanged.
+The previously pending state above is the #1070 snapshot; this completion
+supersedes its outstanding capture and cleanup obligations. F2–F7 remain open.
 
 ## 4. F2 — manual SDR quality change loses alignment
 
@@ -362,6 +394,68 @@ independent frame/audio evidence for the physical transition. Existing Chrome
 campaign successes remain valid for their own rows. A full restart only
 qualifies an explicitly requested restart operation; it cannot stand in for
 a claimed continuous transition.
+
+### October 13 repair — compare both decoder callbacks
+
+F2 is claimed by `codex/f2-prepared-alignment`, based on `016a0c59f`.
+The physical Air reproduces the same HDR rolling-remux to 1080p SDR refusal
+at 16:03:09 UTC. Preparation `21eaa26e-0495-4acd-a79f-60676410cff0`
+has 21.5 seconds of runway, decoded advancing target frames and target
+coverage. The rejected pair is incumbent film 17.976 seconds at expected
+display 86,542 ms and target film 17.892875 seconds at 86,508.6 ms.
+Projecting the target to that display instant leaves 49.725 ms of drift,
+above the measured 41.709 ms frame cadence. Immediate exposure would be
+unsafe. The retained October 12 refusal is not relabelled as success.
+
+The first proposed repair kept observing until the existing 800 ms deadline,
+but still compared only on incumbent callbacks. Its physical trial also fails:
+preparation `b012715d-df09-4fa2-bb02-60bea3ae699d` receives 18 successor
+callbacks before a truthful deadline refusal. Independent decoders deliver
+their callbacks in different order; every incumbent-side comparison in that
+trial uses the preceding successor picture. Preserve that failed proposal.
+
+The revised repair caches the latest incumbent observation and evaluates the
+pair when either decoder supplies an advancing picture. Both observations
+must be at most 50 ms old. The decoded one-frame tolerance and original
+800 ms deadline remain unchanged. Ownership, viewer intent, rate and target
+buffer coverage are checked before exposure; the incumbent remains visible
+and audible during proof. Nine regressions execute the shipped owner,
+including an aligned later successor callback, sustained drift, expired
+incumbent evidence, pause, supersession, and rate/buffer loss. Independent
+review approves this revised source. At PR opening, physical qualification and
+main-bound promotion were pending; the source landing below supersedes the
+promotion wait. These source results do not close the physical matrix.
+
+### Source qualification and landing — physical acceptance pending
+
+[PR #1074](http://forge.lan:3000/noirr/plurx/pulls/1074) merged as
+`96e4c49e92818f8f3e6b01e4786492b1c37a97d7` at 17:05:35 UTC.
+Its qualified head is `fcac7a4ec6482d6f9b10aa39b02d390bc6771c78`, after
+integrating current main `e4b6c1c6d`. Run 5015 (global 5041) passed policy,
+web, Rust and Main promotion; matching preflight receipts were downloaded.
+All nine regression references are in the landing message. Current-candidate
+local compiler, Clippy, web-unit/static and docs checks also pass.
+
+The [source receipt](evidence/f2-decoded-alignment-20261013.json) binds the
+installed binary digest, served JavaScript digest, review, negative controls,
+qualification and landing. Its private
+[31-member qualification archive](http://forge.lan:3000/attachments/f6639fb2-2bb0-475a-b066-c7a24c79f967)
+has SHA-256 `24895b8ff899e0002fa7c3e1815d3e8d51992a0a53372a6d5ec013b334ebb4f0`.
+The separate [18-member failure archive](http://forge.lan:3000/attachments/09349205-d671-4076-b585-7f1c5335bb2f)
+has SHA-256 `1d47578cc247e4016d5b7e9352c3303bb9519077a22723ce23fc582cd975690a`.
+The original three HDR logs and that failure archive were rechecked unchanged.
+The rejected immediate pair and failed wait-only proposal remain failures.
+
+The qualified binary is installed and the service answers ready. The physical
+Air is locked at Touch ID/password, so no installed-source transition success,
+audible seam, or applied-quality pass is claimed. The next receipt must run
+the actual HDR remux → 1080p SDR prepared transition on this served source,
+retain actual frame/quality and audio-ownership facts, and distinguish any
+unmeasured physical audio output. Close the owned player, restore client
+quality Auto and the exact movie's resume to zero, and verify the fresh page.
+Shared clipboard remains off; backend Auto and Mac processing on were not
+changed by this source correction. Resume cleanup remains owed after the F2
+trials; the prior F1 zero-resume receipt remains a historical successful reset.
 
 ## 5. F3 — abandoned preparation occupies VOD capacity
 

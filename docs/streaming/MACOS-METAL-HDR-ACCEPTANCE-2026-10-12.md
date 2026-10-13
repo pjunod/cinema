@@ -150,7 +150,7 @@ specifies F1–F7 evidence, investigation order, reproduction and closure criter
 | Observation | Status and next investigation | Evidence member |
 |---|---|---|
 | Paused seek outside buffered video stalls about 20 seconds; timeline can show an old picture at5:00 | Open: qualify presented-frame completion and paused unbuffered-seek recovery under the playback lifecycle work. | air-4e-final-playback.log; air-94-cpu-5m-proof.log |
-| Manual1080p switch loses alignment51ms and retainsHDRremux | Open: reproduce prepared quality-switch alignment; kept-incumbent playback is not an applied1080p switch. | air-94-metal-startup.log; air-94-metal-5m-proof.log |
+| Manual1080p switch loses alignment51ms and retainsHDRremux | Source correction qualified and merged in #1074; installed-source physical transition remains pending in [F2](../playback-control/MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md#4-f2--manual-sdr-quality-change-loses-alignment). Kept-incumbent playback is not an applied1080p switch. | air-94-metal-startup.log; air-94-metal-5m-proof.log |
 | Laptop cold/remux start stalls or exceeds placement deadline | Open: warmed Heretic success does not qualify cold-start reliability. | laptop-heretic-20261012-failure.txt; laptop-heretic-warm-retry.txt |
 | Cached PlaybackInfo lacks renderer/encoded-raster rows; dynamic-range badge disagrees with SDR delivery | Open: reconcile displayed metadata with the delivered rendition. Actualproducer/intrinsic raster supplies acceptance proof here. | air-94-metal-5m-presented-info.jpg; laptop-heretic-diagnostics.txt |
 | Abandoned own staging holds VOD capacity and causes two500 refusals | Cleared by stopping only this test session; investigate abandoned-preparation cleanup under playback lifecycle reliability. | air-94-metal-startup-error.log; air-94-metal-retry.log |
@@ -174,3 +174,13 @@ paused five-minute picture are both preserved. The
 records source/binary provenance, timing, limits and current completion state.
 Standard Screen Sharing carries SDR pixels; this is ordinary HDR10-to-SDR
 hls.js acceptance, not calibrated HDR-display or native HLS qualification.
+
+The October 13 completion now retains a 58½-minute CPU control at 1920×1080
+with zero recorded stalls and zero dropped frames out of 84,255, plus a 150 ms
+actual paused unbuffered target at 300,000 ms. Ordinary Air hls.js paused
+seek/reopen acceptance is complete. The movie is reset to zero and freshly
+shows Play after restart; client quality and backend are Auto, Mac processing
+is on and clipboard sharing is off. The
+[completion receipt](../playback-control/evidence/air-hdr-paused-20261013.json)
+links the separate immutable completion archive; the original failures remain
+unchanged. F2–F7 and the broader native/device matrix remain separate.

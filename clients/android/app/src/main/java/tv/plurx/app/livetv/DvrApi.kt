@@ -434,7 +434,10 @@ class DvrApi(origin: String, private val token: String) {
     private val base = (Session.canonicalOrigin(origin) ?: throw DvrFailure("invalid_settings")).toHttpUrl()
     private val client: OkHttpClient = Net.capabilityClient.newBuilder()
         .connectTimeout(8, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
-        .callTimeout(20, TimeUnit.SECONDS).build()
+        .callTimeout(20, TimeUnit.SECONDS).build().let { transport ->
+            val captured = Session.playbackAuthorization()
+            if (captured.origin == origin && captured.token == token) Net.capturedReceiptClient(captured, transport) else transport
+        }
 
     private fun url(vararg parts: String): HttpUrl = base.newBuilder()
         .addPathSegments("api/v1/dvr").apply { parts.forEach(::addPathSegment) }.build()
