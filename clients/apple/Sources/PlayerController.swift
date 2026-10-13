@@ -6253,7 +6253,7 @@ final class PlayerController: ObservableObject {
             startRecoveryEvidencePoll()
         }
 
-        guard let url else {
+        guard var url else {
             restoreAfterFailedChange(session: superseded)
             throw APIError.badURL
         }
@@ -6276,7 +6276,26 @@ final class PlayerController: ObservableObject {
             return
         }
         if sessionId != nil && !isVOD {
-            try await prepareGrowingPlaylist(url)
+            while true {
+                do {
+                    try await prepareGrowingPlaylist(url)
+                    break
+                } catch {
+                    guard !isSuperseded(generation), started, !Task.isCancelled else { return }
+                    let httpStatus: Int?
+                    if case let APIError.http(status) = error { httpStatus = status }
+                    else { httpStatus = nil }
+                    // Preparation owns the resource before AVPlayer does, so
+                    // it must preserve the same bounded ingress recovery that
+                    // native transport errors receive after attachment.
+                    guard Self.isTransportPlaybackFailure(error: error as NSError,
+                              eventDomain: nil, eventStatus: httpStatus),
+                          let path = activeMediaPath,
+                          let successor = Session.shared.nextMediaFailoverURL(path,
+                              authenticated: activeMediaAuthenticated) else { throw error }
+                    url = successor
+                }
+            }
             // The viewer may stop or replace this open during server
             // preparation. Its completed playlist cannot resurrect the item.
             guard !isSuperseded(generation), started, !Task.isCancelled else { return }

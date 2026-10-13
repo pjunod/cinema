@@ -780,6 +780,51 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         }
     }
 
+    func testGrowingPreparationRecoversIngressAndCannotAttachAfterStop() async throws {
+        let prior = Session.shared.credentials
+        Session.shared.setCredentials(origin: "http://127.0.0.1:8769", token: nil)
+        defer {
+            Session.shared.configureNodeOrigins([], primary: prior.origin)
+            Session.shared.setCredentials(origin: prior.origin, token: prior.token)
+        }
+        let decision = try coldDecision()
+        let hls = try JSONDecoder().decode(HlsStart.self, from: Data("""
+        {"sessionId":"growing","playlistUrl":"/hls/growing/master.m3u8","mediaOriginMs":813730,"vod":false}
+        """.utf8))
+        for stopDuringRecovery in [false, true] {
+            Session.shared.configureNodeOrigins(["http://127.0.0.1:8770"], primary: "http://127.0.0.1:8769")
+            var recovery: CheckedContinuation<Void, Error>?
+            var requests: [URL] = []
+            var attached: [URL] = []
+            var controller: PlayerController!
+            controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in (decision, self.caps) },
+                itemPreparation: .init(ready: { item, _ in
+                    attached.append(try XCTUnwrap((item.asset as? AVURLAsset)?.url))
+                }, seek: { _, _ in controller.stop() }), releaseHlsSession: { _, _ in },
+                prepareGrowingPlaylist: { url in
+                    requests.append(url)
+                    if requests.count == 1 { throw URLError(.networkConnectionLost) }
+                    try await withCheckedThrowingContinuation { recovery = $0 }
+                }, requestHlsSession: { _, _, _ in hls }, requestHlsStatus: { _, id in
+                    PlaybackSessionStatus(id: id)
+                })
+            let model = AppModel()
+            controller.start(model: model, itemId: 1, fileId: 1, startMs: 814_473,
+                             durationMs: 900_000, title: "Ingress preparation fixture")
+            let load = try XCTUnwrap(controller.loadingTask)
+            do { try await waitUntil("second ingress preparation entered") { recovery != nil } }
+            catch { controller.stop(); await load.value; throw error }
+            XCTAssertNil(controller.player.currentItem)
+            if stopDuringRecovery { controller.stop() }
+            recovery?.resume()
+            await load.value
+            XCTAssertEqual(requests.map(\.port), [8769, 8770])
+            XCTAssertEqual(attached.map(\.port), stopDuringRecovery ? [] : [8770])
+            XCTAssertNil(controller.player.currentItem)
+            controller.stop()
+        }
+    }
+
     func testGrowingKeyframeCorrectionUsesSessionPreparationAndSeeksOnce() async throws {
         let prior = Session.shared.credentials
         Session.shared.setCredentials(origin: "http://127.0.0.1:8769", token: nil)

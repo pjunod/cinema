@@ -4,7 +4,8 @@ Build: 237
 Issue: #914
 
 Growing playback now waits for the first successful playlist response before
-handing its URL to AVPlayer. This prevents the native 20-second resource wait
+handing its URL to AVPlayer. Master playlists also wait for their media
+children; transport failures retain bounded ingress recovery before attachment. This prevents the native 20-second resource wait
 from expiring during valid server preparation. Stop and replacement still
 retire pending attachment. Ingress failover also retires the previous native
 item's surface faults, preventing an old preparation error from covering

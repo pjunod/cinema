@@ -1,6 +1,6 @@
 # Playback startup failures on October 13
 
-**Status:** fixes built; review, deployment and physical acceptance open.
+**Status:** fixes built; one adversarial review addressed; promotion, deployment and physical acceptance open.
 
 This record separates the standalone reader contention, native playlist wait,
 stale preparation evidence and Apple TV audio failures. Rebooting the Apple TV
@@ -70,7 +70,17 @@ native decoder still reports its own errors normally. Running the production
 helper against that fixture completed preparation in 27.020 seconds, then
 rendered 35 sampled frames over 34.57 seconds without a native failure.
 Controller tests cover the attachment boundary and stop during preparation;
-HTTP tests reject error responses and non-playlist success bodies.
+HTTP tests reject error responses, empty media playlists and non-playlist success bodies.
+
+The single independent adversarial review found two preparation gaps: a
+master can precede its media child, and moving the resource request out of
+AVPlayer can bypass ingress failover. Preparation now resolves variant media
+playlists under one bounded request budget before native attachment. A
+transport failure walks the existing advertised ingress list, preserving the
+session and recipe, and attaches using the ingress that prepared successfully.
+The new regressions failed before these changes and cover an immediate master
+with a pending child, cancellation of that child, first-ingress connection
+failure, successor attachment, and stopping during ingress recovery.
 
 **Error ownership across failover.** Same-session ingress failover replaced
 the native item without publishing its new attachment generation to the
@@ -108,3 +118,13 @@ The native delayed-resource check ran on macOS, not the physical Apple TV.
 The Apple TV and lab5 must be exercised after the reviewed server and Apple
 build are installed. The 48-second server publication cushion and media
 recipes are unchanged. No production settings were changed for these fixes.
+
+The full local operations sweep ran 1,018 tests with one failure and two
+skips: the unchanged macOS installer test compared a `/var` temporary path
+with its resolved `/private/var` form. The same test passed with a canonical
+temporary root; neither installer nor test was changed. This full sweep is
+not claimed green. iOS and tvOS Release simulator builds passed before review;
+the integrated review corrections passed 43 tvOS and 49 iOS focused tests,
+plus the current-base Rust publication and indexing regressions. The updated
+production helper also waited for a synthetic master's child delayed by 27
+seconds and then rendered 35 sampled native frames without an error.
