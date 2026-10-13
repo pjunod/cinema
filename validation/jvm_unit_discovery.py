@@ -266,7 +266,7 @@ def compiled_roster(workspace):
     from pathlib import Path
     workspace = Path(workspace)
     build = workspace / 'clients/android/app/build'
-    roots = [build / 'tmp/kotlin-classes/debugUnitTest',
+    roots = [build / 'intermediates/built_in_kotlinc/debugUnitTest/compileDebugUnitTestKotlin/classes',
              build / 'intermediates/javac/debugUnitTest/compileDebugUnitTestJavaWithJavac/classes']
     classfiles = {}
     total_bytes = 0

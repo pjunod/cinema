@@ -104,7 +104,7 @@ class CurrentCompiledRosterCase(unittest.TestCase):
     def workspace(self, root):
         from pathlib import Path
         workspace = Path(root)
-        classes = workspace / 'clients/android/app/build/tmp/kotlin-classes/debugUnitTest'
+        classes = workspace / 'clients/android/app/build/intermediates/built_in_kotlinc/debugUnitTest/compileDebugUnitTestKotlin/classes'
         classes.mkdir(parents=True)
         path = classes / PATH
         path.parent.mkdir(parents=True)

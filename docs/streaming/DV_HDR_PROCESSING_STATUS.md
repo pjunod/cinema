@@ -1099,7 +1099,10 @@ private capture set; these results are not a final qualification receipt.
 
 R26 adds typed Python/JVM source cohorts and independent current compiled JVM
 discovery. Compiled membership is explicitly separate from historical runtime
-outcomes. It retains the original opaque full-command successes, measured
+outcomes. The collector uses the pinned Android built-in Kotlin output and
+the Java source-set output. A parser-only check reads the actual warm compiled
+files and discovers their 1,145 methods; final current-source discovery remains
+required. It retains the original opaque full-command successes, measured
 named overlays, source-impact reviews and failure chronology. Default test
 recipes still run normally; adoption requires a complete authenticated proof.
 The original JVM XML gaps remain opaque. Eight finite original JVM capture
