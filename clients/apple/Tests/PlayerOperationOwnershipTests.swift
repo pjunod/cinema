@@ -50,6 +50,80 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         XCTAssertNil(validatedAutoCostCatalog([candidate, candidate], outputs: [complete], current: candidate.id))
     }
 
+    func testAccessLogSamplingRemainsSingleFlightAndRejectsReplacedOwners() async throws {
+        let clock = AccessLogTestClock()
+        let sampler = PlayerAccessLogSampler(now: { clock.read() })
+        let oldItem = AVPlayerItem(url: URL(fileURLWithPath: "/old-access-log"))
+        let newItem = AVPlayerItem(url: URL(fileURLWithPath: "/new-access-log"))
+        let first = PlayerAccessLogOwner(item: ObjectIdentifier(oldItem), session: "first", lifecycle: 1)
+        let second = PlayerAccessLogOwner(item: ObjectIdentifier(newItem), session: "second", lifecycle: 2)
+        let entered = expectation(description: "worker entered")
+        let returned = expectation(description: "worker returned")
+        let release = DispatchSemaphore(value: 0)
+        let facts = accessLogTestValues(rate: 8_000_000)
+        XCTAssertNil(sampler.value(for: first) {
+            entered.fulfill(); release.wait(); returned.fulfill(); return facts
+        })
+        await fulfillment(of: [entered], timeout: 3)
+        // These publications must return while the native operation remains
+        // blocked, and cannot create another worker for a replacement item.
+        for owner in [first, second, PlayerAccessLogOwner(item: second.item, session: "third", lifecycle: 2)] {
+            XCTAssertNil(sampler.value(for: owner) { XCTFail("overlapping native read"); return facts })
+        }
+        sampler.invalidate()
+        release.signal()
+        await fulfillment(of: [returned], timeout: 3)
+        for _ in 0..<20 { await Task.yield() }
+        let fresh = accessLogTestValues(rate: 4_000_000)
+        var accepted: PlayerAccessLogSample?
+        for _ in 0..<600 {
+            accepted = sampler.value(for: second) { fresh }
+            if accepted != nil { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(try XCTUnwrap(accepted).values.observedBitrate, 4_000_000)
+    }
+
+    func testAccessLogSamplingRejectsLateReadsAndExpiresRealFacts() async throws {
+        let clock = AccessLogTestClock()
+        let sampler = PlayerAccessLogSampler(now: { clock.read() })
+        let item = AVPlayerItem(url: URL(fileURLWithPath: "/bounded-access-log"))
+        let owner = PlayerAccessLogOwner(item: ObjectIdentifier(item), session: "same", lifecycle: 1)
+        let entered = expectation(description: "late worker entered")
+        let returned = expectation(description: "late worker returned")
+        let release = DispatchSemaphore(value: 0)
+        let facts = accessLogTestValues(rate: 8_000_000)
+        XCTAssertNil(sampler.value(for: owner) {
+            entered.fulfill(); release.wait(); returned.fulfill(); return facts
+        })
+        await fulfillment(of: [entered], timeout: 3)
+        clock.set(3_000)
+        XCTAssertNil(sampler.value(for: owner) { XCTFail("timeout spawned duplicate read"); return facts })
+        release.signal()
+        await fulfillment(of: [returned], timeout: 3)
+        for _ in 0..<20 { await Task.yield() }
+        let fresh = accessLogTestValues(rate: 4_000_000)
+        var actual: PlayerAccessLogSample?
+        for _ in 0..<600 {
+            actual = sampler.value(for: owner) { fresh }
+            if actual != nil { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(try XCTUnwrap(actual).sampledAtMs, 3_000)
+        XCTAssertEqual(actual?.values.observedBitrate, 4_000_000)
+        clock.set(7_001)
+        XCTAssertNil(sampler.value(for: owner) { nil })
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNil(sampler.value(for: owner) { nil })
+        sampler.invalidate()
+    }
+
+    private func accessLogTestValues(rate: Double) -> PlayerAccessLogValues {
+        PlayerAccessLogValues(observedBitrate: rate, indicatedBitrate: 6_000_000,
+            numberOfStalls: 0, numberOfDroppedVideoFrames: 0, numberOfMediaRequests: 1,
+            segmentsDownloadedDuration: 6, numberOfBytesTransferred: 6_000_000, transferDuration: 1)
+    }
+
     private let caps = DeviceCaps(
         client: ClientInfo(kind: "ios", build: "test", ua: "test"),
         video: [], audio: [], containers: [], transports: [], dvTransport: "none",
@@ -1472,4 +1546,11 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         XCTAssertNil(controller.player.currentItem)
     }
     #endif
+}
+
+private final class AccessLogTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func read() -> Int { lock.lock(); defer { lock.unlock() }; return value }
+    func set(_ next: Int) { lock.lock(); defer { lock.unlock() }; value = next }
 }

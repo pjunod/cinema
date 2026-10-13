@@ -3,6 +3,100 @@ import Combine
 import Foundation
 import MediaPlayer
 
+/// Immutable AVFoundation access-log facts; no event or item crosses back to
+/// the main actor. These are advisory measurements, never delivery receipts.
+struct PlayerAccessLogValues: Sendable {
+    let observedBitrate: Double
+    let indicatedBitrate: Double
+    let numberOfStalls: Int
+    let numberOfDroppedVideoFrames: Int
+    let numberOfMediaRequests: Int
+    let segmentsDownloadedDuration: Double
+    let numberOfBytesTransferred: Int64
+    let transferDuration: Double
+}
+
+struct PlayerAccessLogOwner: Equatable {
+    let item: ObjectIdentifier
+    let session: String?
+    let lifecycle: Int
+}
+
+struct PlayerAccessLogSample {
+    let values: PlayerAccessLogValues
+    let sequence: Int
+    let sampledAtMs: Int
+}
+
+/// Retains one exact item for a read-only AVFoundation operation on a worker.
+/// The worker never mutates the item or accesses controller/UI state.
+private final class PlayerAccessLogItem: @unchecked Sendable {
+    let item: AVPlayerItem
+    init(_ item: AVPlayerItem) { self.item = item }
+    func read() -> PlayerAccessLogValues? {
+        guard let event = item.accessLog()?.events.last else { return nil }
+        return PlayerAccessLogValues(observedBitrate: event.observedBitrate,
+            indicatedBitrate: event.indicatedBitrate, numberOfStalls: event.numberOfStalls,
+            numberOfDroppedVideoFrames: event.numberOfDroppedVideoFrames,
+            numberOfMediaRequests: event.numberOfMediaRequests,
+            segmentsDownloadedDuration: event.segmentsDownloadedDuration,
+            numberOfBytesTransferred: event.numberOfBytesTransferred,
+            transferDuration: event.transferDuration)
+    }
+}
+
+@MainActor
+final class PlayerAccessLogSampler {
+    // Match the existing two-second status poll. Keep at most two poll periods
+    // of real facts, and reject a native read that outlives one poll period.
+    static let pollMs = 2_000
+    static let maximumAgeMs = 4_000
+    private let now: @Sendable () -> Int
+    private var owner: PlayerAccessLogOwner?
+    private var generation = 0
+    private var sequence = 0
+    private var nextReadMs = 0
+    private var sample: PlayerAccessLogSample?
+    private var reading: Task<Void, Never>?
+
+    init(now: @escaping @Sendable () -> Int = { Int(ProcessInfo.processInfo.systemUptime * 1_000) }) {
+        self.now = now
+    }
+
+    func invalidate() {
+        generation &+= 1
+        owner = nil
+        sample = nil
+        nextReadMs = 0
+        // A synchronous native read cannot be interrupted. Retain its slot
+        // until it returns, preventing cancellation from multiplying workers.
+    }
+
+    func value(for requested: PlayerAccessLogOwner,
+               read: @escaping @Sendable () -> PlayerAccessLogValues?) -> PlayerAccessLogSample? {
+        if owner != requested { invalidate(); owner = requested }
+        let currentMs = now()
+        if reading == nil, currentMs >= nextReadMs {
+            nextReadMs = currentMs + Self.pollMs
+            sequence &+= 1
+            let serial = sequence, capturedGeneration = generation, clock = now
+            let worker = Task.detached(priority: .utility) { (read(), clock()) }
+            reading = Task { @MainActor [weak self] in
+                let (values, sampledAtMs) = await worker.value
+                guard let self else { return }
+                self.reading = nil
+                guard self.owner == requested, self.generation == capturedGeneration,
+                      sampledAtMs >= currentMs, sampledAtMs - currentMs <= Self.pollMs,
+                      self.now() >= sampledAtMs, self.now() - sampledAtMs <= Self.maximumAgeMs else { return }
+                self.sample = values.map { PlayerAccessLogSample(values: $0, sequence: serial, sampledAtMs: sampledAtMs) }
+            }
+        }
+        guard let sample, currentMs >= sample.sampledAtMs,
+              currentMs - sample.sampledAtMs <= Self.maximumAgeMs else { return nil }
+        return sample
+    }
+}
+
 /// Render loss needs two real progressing, well-supplied intervals. Waiting,
 /// seek, pause, counter reset and another installed item are not decode proof.
 struct AutoDecodePressureEvidence {
@@ -2812,6 +2906,8 @@ final class PlayerController: ObservableObject {
     private var initialDecisionDeadlineTask: Task<Void, Never>?
     private weak var model: AppModel?
     private var timeObserver: Any?
+    private let accessLogSampler = PlayerAccessLogSampler()
+    private var lastPreparedAccessLogSequence: Int?
     private var interactiveSeekTask: Task<Void, Never>?
     private var seekPresentationTask: Task<Void, Never>?
     private var resumeIntentTask: Task<Void, Never>?
@@ -3421,14 +3517,18 @@ final class PlayerController: ObservableObject {
     /// The three rows the info panel shows, computed on demand.
     var preparedSwitchReading: PreparedSwitchMeasurement.Reading { preparedSwitch.reading() }
 
-    /// One reading of the item currently on the layer. A log read and two
-    /// appends; called from the status poll and from either end of the commit,
-    /// never from a render pass.
+    /// Consume each real worker sample at most once, without reading a native
+    /// access log on the main actor. Host time, film position and eligibility
+    /// describe this poll together; the shared cache separately bounds age.
     private func sampleThePreparedSwitch() {
-        guard let item = player.currentItem, let event = item.accessLog()?.events.last else { return }
+        guard let item = player.currentItem, let sample = accessLogSample(for: item),
+              lastPreparedAccessLogSequence != sample.sequence else { return }
+        lastPreparedAccessLogSequence = sample.sequence
+        let event = sample.values
+        let observedAtMs = PlaybackControlSession.monotonicMs()
         let decodePressure = autoDecodePressure.observe(
             attachment: ObjectIdentifier(item), candidate: autoActiveCandidateId,
-            nowMs: PlaybackControlSession.monotonicMs(), positionMs: realPositionMs(),
+            nowMs: observedAtMs, positionMs: realPositionMs(),
             cumulativeDropped: event.numberOfDroppedVideoFrames,
             eligible: wantsPlayback && surface.presenting && player.rate > 0 &&
                 seekState.pendingMs == nil && !isChangingStream &&
@@ -3446,7 +3546,7 @@ final class PlayerController: ObservableObject {
             }
         }
         preparedSwitch.note(
-            atMs: PlaybackControlSession.monotonicMs(),
+            atMs: observedAtMs,
             droppedFrames: event.numberOfDroppedVideoFrames >= 0
                 ? event.numberOfDroppedVideoFrames : nil,
             stalls: event.numberOfStalls >= 0 ? event.numberOfStalls : nil
@@ -3634,15 +3734,15 @@ final class PlayerController: ObservableObject {
     }
 
     var observedBitrate: Double? {
-        player.currentItem?.accessLog()?.events.last?.observedBitrate
+        player.currentItem.flatMap { accessLogSample(for: $0)?.values.observedBitrate }
     }
 
     var indicatedBitrate: Double? {
-        player.currentItem?.accessLog()?.events.last?.indicatedBitrate
+        player.currentItem.flatMap { accessLogSample(for: $0)?.values.indicatedBitrate }
     }
 
     var stalls: Int? {
-        player.currentItem?.accessLog()?.events.last?.numberOfStalls
+        player.currentItem.flatMap { accessLogSample(for: $0)?.values.numberOfStalls }
     }
 
     /// A live snapshot for the on-device Debug stats view. This is the same
@@ -3721,7 +3821,7 @@ final class PlayerController: ObservableObject {
             snapshot.playbackBufferEmpty = item.isPlaybackBufferEmpty
             snapshot.playbackLikelyToKeepUp = item.isPlaybackLikelyToKeepUp
             snapshot.playbackBufferFull = item.isPlaybackBufferFull
-            if let event = item.accessLog()?.events.last {
+            if let event = accessLogSample(for: item)?.values {
                 snapshot.mediaRequests = Self.nonnegative(event.numberOfMediaRequests)
                 snapshot.downloadedDuration = Self.nonnegative(event.segmentsDownloadedDuration)
                 snapshot.bytesTransferred = event.numberOfBytesTransferred >= 0
@@ -5356,8 +5456,15 @@ final class PlayerController: ObservableObject {
     /// `-1` for "unknown". The server retains the reading as advisory
     /// telemetry; inventing a rate would make the observation dishonest even
     /// though missing or low values no longer gate prepared handoff.
+    private func accessLogSample(for item: AVPlayerItem) -> PlayerAccessLogSample? {
+        guard started, player.currentItem === item else { return nil }
+        let owner = PlayerAccessLogOwner(item: ObjectIdentifier(item), session: sessionId, lifecycle: lifecycleGeneration)
+        let source = PlayerAccessLogItem(item)
+        return accessLogSampler.value(for: owner) { source.read() }
+    }
+
     private func observedDownloadBitsPerSecond(_ item: AVPlayerItem) -> Int64? {
-        guard let event = item.accessLog()?.events.last else { return nil }
+        guard let event = accessLogSample(for: item)?.values else { return nil }
         return Self.observedDownloadBps(fromObservedBitrate: event.observedBitrate)
     }
 
@@ -5496,6 +5603,8 @@ final class PlayerController: ObservableObject {
 
     func stop(deactivateAudioSession: Bool = true) {
         cancelAutoCostCatalogRefresh()
+        accessLogSampler.invalidate()
+        lastPreparedAccessLogSequence = nil
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
         retireAutoTransferMetrics()
@@ -5749,6 +5858,8 @@ final class PlayerController: ObservableObject {
         guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
               initialDecisionGeneration == generation, let model else { return }
         cancelAutoCostCatalogRefresh()
+        accessLogSampler.invalidate()
+        lastPreparedAccessLogSequence = nil
         let layoutAttempt = snapshotAttempt()
         do {
             // Allow the mounted surface to report its first layout; no panel/model
