@@ -5807,3 +5807,96 @@ fn subtitle_playlist_keeps_takeover_and_sliding_discontinuity_epochs() {
                    video.matches("#EXT-X-DISCONTINUITY\n").count());
     }
 }
+
+#[test]
+fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    let row = |seed: u8, target, height| crate::media_pool::WorkerQualityCandidate {
+        node_id: "worker".into(),
+        binding: None,
+        partial: false,
+        dispatch_supported: true,
+        candidate: QualityCandidate {
+            id: CandidateId::for_recipe_digest([seed; 32]),
+            recipe_digest: [seed; 32],
+            route: CandidateRoute::Encode,
+            planned_codec: None,
+            normalized_geometry: true,
+            width: 1280,
+            height,
+            target_height: target,
+            average_bps: None,
+            peak_bps: None,
+            grade: plurx_core::transcode::OutputGrade::Sdr,
+            decoder_compatible: true,
+            complete_cache: false,
+            sustainable: true,
+        },
+    };
+    let safe = row(1, 720, 720);
+    let larger_actual = row(2, 720, 1080);
+    let larger_recipe = row(3, 1080, 720);
+    let mut partial = row(4, 720, 720);
+    partial.partial = true;
+    let mut parser_only = row(5, 720, 720);
+    parser_only.dispatch_supported = false;
+    let mut incompatible = row(6, 720, 720);
+    incompatible.candidate.decoder_compatible = false;
+    let mut forged = row(7, 720, 720);
+    forged.candidate.recipe_digest = [8; 32];
+    let mut unsustainable = row(9, 720, 720);
+    unsustainable.candidate.sustainable = false;
+    let refusals = vec![
+        larger_actual,
+        larger_recipe,
+        partial,
+        parser_only,
+        incompatible,
+        forged,
+        unsustainable,
+    ];
+    assert!(manual_auto_bootstrap_candidate(&refusals, 720).is_none());
+    let mut catalog = refusals;
+    catalog.push(row(10, 480, 480));
+    catalog.push(safe.clone());
+    assert_eq!(
+        manual_auto_bootstrap_candidate(&catalog, 720)
+            .expect("safe bootstrap")
+            .id,
+        safe.candidate.id
+    );
+    assert!(
+        manual_auto_bootstrap_candidate(&catalog, 479).is_none(),
+        "bootstrap never borrows implicit upgrade authority"
+    );
+}
+
+#[tokio::test]
+async fn legacy_manual_to_auto_preparation_binds_a_real_non_upgrading_candidate() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    let state = resolver_state();
+    state.store.put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1").await.expect("Auto policy");
+    let library = state.store.create_library(&NewLibrary { name: "Auto bootstrap".into(), kind: LibraryKind::Movies, paths: vec![], anime: false }).await.expect("library");
+    let item = state.store.insert_item(&NewItem { library_id: library.id, kind: ItemKind::Movie, parent_id: None, title: "Auto bootstrap".into(), year: None, season_number: None, episode_number: None }).await.expect("item");
+    let id = state.store.upsert_file(item, "/media/bootstrap.mkv", 4096, 1, &ProbeResult {
+        container: Some("mkv".into()), video_codec: Some("h264".into()), width: Some(1920), height: Some(1080), bit_depth: Some(8),
+        raw_json: Some(serde_json::json!({"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","width":1920,"height":1080,"pix_fmt":"yuv420p","sample_aspect_ratio":"1:1","r_frame_rate":"24/1","avg_frame_rate":"24/1"}]}).to_string()), ..Default::default()
+    }).await.expect("file");
+    let source = state.store.get_file(id).await.expect("read").expect("source");
+    let route = crate::media_sessions::takeover_eligible_route("bootstrap-old", "00000000-0000-4000-8000-0000000000a1");
+    let mut predecessor = staged_predecessor_recipe(&route);
+    predecessor.request.file_id = id;
+    predecessor.request.automatic = false;
+    predecessor.request.kind = crate::transcode::SessionKind::Transcode { height: 720 };
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"]}"#);
+    predecessor.decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).expect("decoder"));
+    let selection = crate::playback_control::ClientSelection { quality: crate::playback_control::QualitySelection::Auto { height: None, candidate_id: None }, audio_track: None, subtitle: crate::playback_control::SubtitleSelection { mode: crate::playback_control::SubtitleMode::Off, track: None }, audio_offset_ms: 0, codec: crate::playback_control::CodecPolicy::Auto, dynamic_range: crate::playback_control::DynamicRangePolicy::Auto };
+    let request = plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, 720).await.expect("authoritative bootstrap");
+    assert!(request.automatic);
+    let context = request.candidate_context.as_ref().expect("actual route binding");
+    let selected = request.quality_catalog.as_ref().expect("canonical catalog").candidates.iter().find(|entry| entry.candidate.id == context.candidate_id).expect("bound catalog identity");
+    assert!(selected.candidate.identity_matches());
+    assert!(selected.candidate.height <= 720 && selected.candidate.target_height <= 720, "a manual body is not upgrade proof");
+    assert_eq!(context.recipe_digest, selected.candidate.recipe_digest);
+    assert!(predecessor.candidate_id.is_none(), "the incumbent remains honestly unattributed");
+}

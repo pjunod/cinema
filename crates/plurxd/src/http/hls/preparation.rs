@@ -967,7 +967,133 @@ pub(super) async fn plan_preparation_candidate(
     .map(|(request, _)| request)
 }
 
+/// Entering Auto needs a real output identity before its bodies can supply
+/// upgrade evidence. Bootstrap at or below the manual incumbent; the ordinary
+/// explicit-candidate planner still validates and constructs the actual route.
 async fn plan_preparation_with_candidate(
+    state: &AppState,
+    predecessor: &RemoteStartRequest,
+    planning_caps: Option<&plurx_core::playback::DeviceCaps>,
+    planning_overrides: Option<&CreateOverrides>,
+    selection: &crate::playback_control::ClientSelection,
+    source: &MediaFile,
+    delivered_height: i64,
+) -> Result<
+    (
+        crate::transcode::SessionRequest,
+        Option<plurx_core::playback::candidate::QualityCandidate>,
+    ),
+    ApiError,
+> {
+    use crate::playback_control::QualitySelection;
+    let planned = plan_preparation_raw(
+        state,
+        predecessor,
+        planning_caps,
+        planning_overrides,
+        selection,
+        source,
+        delivered_height,
+    )
+    .await?;
+    let bootstrap = !predecessor.request.automatic
+        && predecessor.candidate_id.is_none()
+        && predecessor.decoder_caps.is_some()
+        && matches!(
+            selection.quality,
+            QualitySelection::Auto {
+                height: None,
+                candidate_id: None
+            }
+        );
+    if !bootstrap {
+        return Ok(planned);
+    }
+    let (request, selected) = planned;
+    // The raw planner retains a request-local canonical catalog even when
+    // ordinary copy negotiation produces no candidate context. It does so
+    // using this predecessor's decoder snapshot, required above.
+    let chosen = request
+        .quality_catalog
+        .as_ref()
+        .and_then(|catalog| manual_auto_bootstrap_candidate(&catalog.candidates, delivered_height))
+        .ok_or_else(|| {
+            ApiError::typed(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "prepared_output_unsupported",
+                "no authoritative Auto bootstrap fits the manual incumbent",
+            )
+        })?;
+    if request
+        .candidate_context
+        .as_ref()
+        .is_some_and(|context| context.candidate_id == chosen.id)
+        && selected.as_ref().is_some_and(|candidate| {
+            candidate.id == chosen.id
+                && i64::from(candidate.height) <= delivered_height
+                && i64::from(candidate.target_height) <= delivered_height
+        })
+    {
+        return Ok((request, selected));
+    }
+    let mut bound = selection.clone();
+    bound.quality = QualitySelection::Auto {
+        height: Some(i64::from(chosen.target_height)),
+        candidate_id: Some(chosen.id),
+    };
+    let replanned = plan_preparation_raw(
+        state,
+        predecessor,
+        planning_caps,
+        planning_overrides,
+        &bound,
+        source,
+        delivered_height,
+    )
+    .await?;
+    if !replanned
+        .0
+        .candidate_context
+        .as_ref()
+        .is_some_and(|context| context.candidate_id == chosen.id)
+        || !replanned.1.as_ref().is_some_and(|candidate| {
+            candidate.id == chosen.id
+                && i64::from(candidate.height) <= delivered_height
+                && i64::from(candidate.target_height) <= delivered_height
+        })
+    {
+        return Err(ApiError::typed(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "prepared_output_unsupported",
+            "Auto bootstrap did not bind its admitted output",
+        ));
+    }
+    Ok(replanned)
+}
+
+pub(super) fn manual_auto_bootstrap_candidate(
+    candidates: &[crate::media_pool::WorkerQualityCandidate],
+    delivered_height: i64,
+) -> Option<plurx_core::playback::candidate::QualityCandidate> {
+    candidates
+        .iter()
+        .filter(|entry| {
+            entry.dispatch_supported
+                && !entry.partial
+                && entry.candidate.playable()
+                && i64::from(entry.candidate.height) <= delivered_height
+                && i64::from(entry.candidate.target_height) <= delivered_height
+        })
+        .max_by_key(|entry| {
+            (
+                entry.candidate.target_height,
+                u64::from(entry.candidate.width) * u64::from(entry.candidate.height),
+            )
+        })
+        .map(|entry| entry.candidate.clone())
+}
+
+async fn plan_preparation_raw(
     state: &AppState,
     predecessor: &RemoteStartRequest,
     planning_caps: Option<&plurx_core::playback::DeviceCaps>,
@@ -1518,7 +1644,12 @@ pub(super) async fn process_preparation_candidate(
                 caps.video = snapshot.device_caps().video;
             }
         }
-        if recipe.candidate_id.is_some() {
+        if recipe.candidate_id.is_some()
+            || matches!(
+                selection.quality,
+                crate::playback_control::QualitySelection::Auto { .. }
+            )
+        {
             if let Some(caps) = planning_caps.as_mut() {
                 if let Some(display) = caps.display.as_mut() {
                     display.presentation_target = runtime.presentation_target;

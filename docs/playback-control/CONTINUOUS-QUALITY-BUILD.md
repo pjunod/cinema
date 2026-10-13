@@ -10759,3 +10759,50 @@ reserve, and still refuses one millisecond below it. This prevents a
 mathematically brittle anchor; it does not claim to explain the unmeasured
 inputs of historical refusals or eliminate the callback pause. Compilation
 and exact updated hardware qualification remain due; units are deferred.
+
+
+**Updated phone campaign and Auto bootstrap diagnosis.** Public Apple source
+`a150efc31`, with the unchanged isolated server `e796a2ed7`, accepts all15
+manual changes in the full campaign. Maximum decoded gap is98.9769ms and
+maximum callback gap86.2850ms; all82 owned backend processes retire, with
+zero residuals. The first Auto action reaches its deadline without an actual
+Auto commit. This is a manual-only pass, not full native acceptance.
+
+A bounded private diagnostic applies manual720 followed by Auto through the
+same controller action. It confirms saved Auto, a retained manual incumbent,
+no active candidate binding, and no transfer receipt. All three protocol
+readiness checks pass; six catalog candidates are valid. The completed body
+is a fresh network200 with an ETag, but cannot authorize adaptation without
+its candidate binding and receipt. The actual portrait presentation target
+is1125×2436; the full campaign's1080/720 Auto series also needs a real
+landscape presentation before that series is meaningful. The diagnostic
+records frame gaps above100ms and remains explicitly unqualified. Earlier
+short attempts stopped on a frame gap or the private command validator;
+neither proves an Auto result. The completed bounded capture retires all68
+owned backend processes. No admission, receipt or scoring threshold is waived.
+
+**TV cancellation identified.** A private transport diagnostic records
+AVAudioSession `oldDeviceUnavailable` (raw2), followed by transport pause,
+viewer epoch1→2 and prepared-action abandonment. The app is inactive at that
+boundary. This is audio-route loss rather than a measured prepared-clock
+refusal. Existing route-removal pause behavior remains intact; a visible,
+awake display/app is needed for further TV acceptance. All51 owned backend
+processes retire with no residuals. This evidence does not establish why the
+OS changed foreground or audio route, and does not qualify the TV campaign.
+
+
+**Authoritative manual-to-Auto bootstrap repair.** Prepared planning now
+negotiates a real, complete and dispatchable candidate at or below the manual
+incumbent when unnamed Auto has no current binding. It uses the existing
+ordinary explicit-candidate planner to construct the actual successor and
+checks its returned candidate identity and raster/rung ceiling. The incumbent
+is not relabeled. Fresh runtime display/decoder capabilities participate in
+Auto planning. Existing receipt registration may measure the new candidate's
+own bodies; an upward implicit switch still requires transition admission.
+
+An actual planner regression covers the legacy720-to-Auto binding and keeps
+the predecessor unattributed. A negative catalog regression refuses larger
+actual/recipe outputs, partial/parser-only entries, incompatible/forged and
+unsustainable candidates. Pinned Rust1.97.1 all-target compilation and Clippy
+with denied warnings pass; units are written/compiled but remain deferred.
+Exact isolated-server hardware proof is next; no Auto pass is claimed yet.
