@@ -939,7 +939,16 @@ fn positional_format_arguments<'a>(
 fn parenthesis_arguments<'a>(
     source: &'a str,
     is_code: &[bool],
+    at: usize,
+) -> (Vec<&'a str>, usize) {
+    delimited_arguments(source, is_code, at, b')')
+}
+
+fn delimited_arguments<'a>(
+    source: &'a str,
+    is_code: &[bool],
     mut at: usize,
+    closing: u8,
 ) -> (Vec<&'a str>, usize) {
     let bytes = source.as_bytes();
     let mut start = at;
@@ -949,7 +958,7 @@ fn parenthesis_arguments<'a>(
         if is_code[at] {
             match bytes[at] {
                 b'(' | b'[' | b'{' => depth += 1,
-                b')' if depth == 0 => {
+                byte if byte == closing && depth == 0 => {
                     if !source[start..at].trim().is_empty() {
                         arguments.push(&source[start..at]);
                     }
@@ -1029,6 +1038,115 @@ fn library_path_call(expression: &str) -> Option<String> {
     Some(super::library_paths_are_sql(&arguments[1], &arguments[2]))
 }
 
+/// The observed publication wrapper returns result counts after executing its
+/// explicit SQL/params tuples. Only a helper inside an independently modeled
+/// SQL format is admitted; helpers in routing, parameters or unknown wrappers
+/// still fail the ordinary constructor grammar.
+fn completed_library_path_publication(
+    source: &str,
+    start: usize,
+    end: usize,
+    literals: &[Literal],
+    is_code: &[bool],
+) -> bool {
+    static CALL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let grammar = CALL.get_or_init(|| {
+        regex::Regex::new(r"^\s*self\s*\.\s*atomic_publication\s*\(")
+            .expect("completed publication receiver grammar")
+    });
+    let Some(call) = grammar.find(&source[start..end]) else {
+        return false;
+    };
+    let open = start + call.end() - 1;
+    let (arguments, close) = parenthesis_arguments(source, is_code, open + 1);
+    if close >= end
+        || arguments.len() != 3
+        || arguments[0].trim() != "lease"
+        || arguments[1].trim() != "replacement"
+        || source[close + 1..end]
+            .split_whitespace()
+            .collect::<String>()
+            != ".await?"
+    {
+        return false;
+    }
+    let vector = arguments[2].trim();
+    if !vector.starts_with("vec![") {
+        return false;
+    }
+    let vector_start =
+        open + 1 + arguments[0].len() + 1 + arguments[1].len() + 1 + arguments[2].len()
+            - arguments[2].trim_start().len();
+    let (entries, vector_close) = delimited_arguments(source, is_code, vector_start + 5, b']');
+    if entries.is_empty()
+        || vector_close >= close
+        || !source[vector_close + 1..vector_start + vector.len()]
+            .trim()
+            .is_empty()
+    {
+        return false;
+    }
+    let mut at = vector_start + 5;
+    let mut formats = Vec::new();
+    for entry in entries {
+        let tuple_start = at + entry.len() - entry.trim_start().len();
+        let tuple_end = tuple_start + entry.trim().len();
+        if !entry.trim().starts_with('(') {
+            return false;
+        }
+        let (fields, tuple_close) = parenthesis_arguments(source, is_code, tuple_start + 1);
+        if fields.len() != 2
+            || tuple_close >= tuple_end
+            || !source[tuple_close + 1..tuple_end].trim().is_empty()
+        {
+            return false;
+        }
+        let sql_start = tuple_start + 1 + fields[0].len() - fields[0].trim_start().len();
+        let sql_end = sql_start + fields[0].trim().len();
+        if fields[0].trim().starts_with("format!(") {
+            if !completed_library_path_statement(source, sql_start, sql_end, literals, is_code) {
+                return false;
+            }
+            formats.push((sql_start, sql_end));
+        } else {
+            let Some(sql) = literals.iter().find(|literal| literal.start == sql_start) else {
+                return false;
+            };
+            if sql.end > sql_end
+                || !is_sql_candidate(&sql.text)
+                || source[sql.end..sql_end].trim() != ".to_owned()"
+            {
+                return false;
+            }
+        }
+        let params_start =
+            tuple_start + 1 + fields[0].len() + 1 + fields[1].len() - fields[1].trim_start().len();
+        if !fields[1].trim().starts_with("params!(") {
+            return false;
+        }
+        let (_, params_close) = parenthesis_arguments(source, is_code, params_start + 8);
+        if params_close >= tuple_close
+            || !source[params_close + 1..params_start + fields[1].trim().len()]
+                .trim()
+                .is_empty()
+        {
+            return false;
+        }
+        at += entry.len() + 1;
+    }
+    let helpers = source[start..end]
+        .match_indices("library_paths_are_sql")
+        .filter(|(at, _)| is_code[start + at])
+        .map(|(at, _)| start + at)
+        .collect::<Vec<_>>();
+    !helpers.is_empty()
+        && helpers.iter().all(|at| {
+            formats
+                .iter()
+                .any(|(begin, finish)| *at >= *begin && *at < *finish)
+        })
+}
+
 /// A completed reviewed SQL operation is not a predicate binding for a later
 /// statement. Admit only the exact format expression, or the first argument of
 /// the observed SQLite query_row wrapper. Every helper occurrence must belong
@@ -1040,6 +1158,9 @@ fn completed_library_path_statement(
     literals: &[Literal],
     is_code: &[bool],
 ) -> bool {
+    if completed_library_path_publication(source, start, end, literals, is_code) {
+        return true;
+    }
     let expression = &source[start..end];
     let trimmed = expression.trim_start();
     let begin = start + expression.len() - trimmed.len();
@@ -2304,6 +2425,94 @@ mod scanner {
                 Some(maximum)
             );
         }
+    }
+
+    #[test]
+    fn completed_atomic_publication_does_not_own_later_path_reads() {
+        let source = r#"fn query() {
+            let results = self.atomic_publication(lease, replacement, vec![
+                (format!("INSERT INTO roots SELECT $1, $2 WHERE $3 AND {}",
+                    crate::store::library_paths_are_sql("$1", "$4")),
+                    params!(library, fingerprint, establish, paths)),
+                ("UPDATE roots SET fingerprint = fingerprint WHERE library_id = $1".to_owned(),
+                    params!(library)),
+            ]).await?;
+            let rows = self.client().query("SELECT fingerprint FROM roots WHERE library_id = $1");
+        }"#;
+        let (literals, mask) = literals_and_code_mask(source);
+        for sql in literals.iter().filter(|sql| is_sql_shaped(&sql.text)) {
+            let variants =
+                principal_templates("hiqlite_publication.rs", source, sql, &literals, &mask, &[]);
+            assert_eq!(variants.len(), 1);
+            validate_sql(&variants[0])
+                .expect("each publication statement keeps its own parameters");
+            if sql.text.starts_with("INSERT") {
+                assert!(
+                    variants[0].contains("$4"),
+                    "composed path-set placeholder stays required"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn atomic_publication_completion_refuses_helpers_outside_modeled_sql() {
+        for expression in [
+            r#"self.atomic_publication(crate::store::library_paths_are_sql("$1", "$2"), replacement, vec![("SELECT $1".to_owned(), params!(library))]).await?"#,
+            r#"self.atomic_publication(lease, replacement, vec![("SELECT $1".to_owned(), params!(crate::store::library_paths_are_sql("$1", "$2")))]).await?"#,
+            r#"self.atomic_publication(lease, replacement, vec![(format!("not SQL {}", crate::store::library_paths_are_sql("$1", "$2")), params!(library, paths))]).await?"#,
+            r#"other.atomic_publication(lease, replacement, vec![(format!("SELECT {}", crate::store::library_paths_are_sql("$1", "$2")), params!(library, paths))]).await?"#,
+            r#"self.atomic_publication(lease, replacement, vec![(wrapper(format!("SELECT {}", crate::store::library_paths_are_sql("$1", "$2"))), params!(library, paths))]).await?"#,
+        ] {
+            let source = format!(
+                r#"fn query() {{ let results = {expression}; let rows = self.client().query("SELECT id FROM roots WHERE id = $1"); }}"#
+            );
+            assert!(
+                std::panic::catch_unwind(|| {
+                    let (literals, mask) = literals_and_code_mask(&source);
+                    let later = literals
+                        .iter()
+                        .find(|sql| sql.text.starts_with("SELECT id"))
+                        .expect("later read");
+                    principal_templates(
+                        "hiqlite_publication.rs",
+                        &source,
+                        later,
+                        &literals,
+                        &mask,
+                        &[],
+                    )
+                })
+                .is_err(),
+                "unreviewed helper location stays refused: {expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_publication_completion_refuses_dynamic_path_placeholders() {
+        let source = r#"fn query() {
+            let results = self.atomic_publication(lease, replacement, vec![
+                (format!("SELECT {}", crate::store::library_paths_are_sql(slot, "$2")), params!(library, paths)),
+            ]).await?;
+            let rows = self.client().query("SELECT id FROM roots WHERE id = $1");
+        }"#;
+        assert!(std::panic::catch_unwind(|| {
+            let (literals, mask) = literals_and_code_mask(source);
+            let later = literals
+                .iter()
+                .find(|sql| sql.text.starts_with("SELECT id"))
+                .expect("later read");
+            principal_templates(
+                "hiqlite_publication.rs",
+                source,
+                later,
+                &literals,
+                &mask,
+                &[],
+            )
+        })
+        .is_err());
     }
 
     #[test]
