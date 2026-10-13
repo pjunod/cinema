@@ -190,7 +190,7 @@ pub(super) async fn execute_prepublication_transcode_retry(
                 // checkpoint and yield; without it the pool refuses a live
                 // caller outright while background work runs, and this failure
                 // arrives after the predecessor is already gone.
-                let _queued = retry.software_pool.wait_for_capacity();
+                let mut queued = retry.software_pool.queue_for_capacity();
                 let deadline = Instant::now() + MIXED_RECOVERY_CAPACITY_WAIT;
                 let permit = loop {
                     if let Some(permit) = retry
@@ -199,6 +199,7 @@ pub(super) async fn execute_prepublication_transcode_retry(
                     {
                         break permit;
                     }
+                    queued.mark_capacity_blocked();
                     let now = Instant::now();
                     if now >= deadline {
                         return Err(format!(

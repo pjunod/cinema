@@ -612,11 +612,18 @@ impl EncodePermit {
         admissions: &Admissions,
         store: &dyn plurx_core::store::Store,
     ) -> SourceCopyPermitRead {
-        let _waiting = admissions.wait_for_slot();
+        let mut waiting = admissions.queue_for_slot();
         let Some((hardware_limit, software_budget)) = source_copy_policy(store).await else {
             return SourceCopyPermitRead::Unavailable;
         };
-        Self::try_source_copy_under(admissions, hardware_limit, software_budget)
+        if software_budget < SOURCE_COPY_CPU_THREADS {
+            return SourceCopyPermitRead::Capacity;
+        }
+        let result = Self::try_source_copy_under(admissions, hardware_limit, software_budget);
+        if matches!(result, SourceCopyPermitRead::Capacity) {
+            waiting.mark_capacity_blocked();
+        }
+        result
     }
 
     /// Wait for a Source copy permit until `deadline`, as a live start.
@@ -634,7 +641,7 @@ impl EncodePermit {
         store: &dyn plurx_core::store::Store,
         deadline: Instant,
     ) -> SourceCopyPermitRead {
-        let _waiting = admissions.wait_for_slot();
+        let mut waiting = admissions.queue_for_slot();
         let Some((hardware_limit, software_budget)) = source_copy_policy(store).await else {
             return SourceCopyPermitRead::Unavailable;
         };
@@ -647,6 +654,7 @@ impl EncodePermit {
             {
                 return admitted;
             }
+            waiting.mark_capacity_blocked();
             let now = Instant::now();
             if now >= deadline {
                 return SourceCopyPermitRead::Capacity;
@@ -885,7 +893,7 @@ impl Encoding {
         // Preserve ordinary promotion's post-policy-read observation.
         let priority = preparation_priority.unwrap_or_else(|| self.priority());
         if priority == Priority::Live {
-            queued.get_or_insert_with(|| self.admissions.wait_for_slot());
+            queued.get_or_insert_with(|| self.admissions.queue_for_slot());
         }
         let refuse = |over_budget: bool| {
             *self.last_refusal.lock().expect("VOD encoder refusal") = Some(PermitRefusal {
@@ -912,7 +920,14 @@ impl Encoding {
             claim,
         ) {
             Ok(bundle) => bundle,
-            Err(over_budget) => return refuse(over_budget),
+            Err(over_budget) => {
+                if !over_budget {
+                    if let Some(waiting) = queued.as_mut() {
+                        waiting.mark_capacity_blocked();
+                    }
+                }
+                return refuse(over_budget);
+            }
         };
         let permit = EncodePermit::from(bundle);
         queued.take();
@@ -1427,6 +1442,10 @@ mod source_copy_admission_tests {
         // Several refused attempts later, it is still the one queued start.
         tokio::time::sleep(crate::transcode::ADMISSION_POLL * 3).await;
         assert_eq!(admissions.snapshot().live_waiting, 1);
+        assert!(
+            admissions.live_capacity_is_waiting(),
+            "a genuinely blocked source copy still preempts preparation"
+        );
         assert!(!waiting.is_finished());
         drop(held);
         let admitted = tokio::time::timeout(Duration::from_secs(5), waiting)
@@ -1435,6 +1454,10 @@ mod source_copy_admission_tests {
             .expect("admission task");
         assert!(matches!(admitted, SourceCopyPermitRead::Admitted(_)));
         assert_eq!(admissions.snapshot().live_waiting, 0);
+        assert!(
+            !admissions.live_capacity_is_waiting(),
+            "grant releases capacity pressure"
+        );
         assert_eq!(admissions.software_in_use(), SOURCE_COPY_CPU_THREADS);
         drop(admitted);
         assert_eq!(admissions.software_in_use(), 0);

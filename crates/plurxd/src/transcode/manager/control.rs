@@ -1181,7 +1181,7 @@ impl TranscodeManager {
     }
 
     pub(crate) fn foreground_media_waiting(&self) -> bool {
-        self.admissions.live_is_waiting()
+        self.admissions.live_capacity_is_waiting()
     }
 
     /// Record that the durable row now names this ask.
