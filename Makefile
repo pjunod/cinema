@@ -1921,6 +1921,14 @@ android-unit-compile-lint: android-image ## Compile every JVM test source and li
 	  -e GRADLE_USER_HOME=/workspace/clients/android/.gradle-validation \
 	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
 	  $(ANDROID_IMAGE) ./gradlew --no-daemon compileDebugUnitTestKotlin compileDebugUnitTestJavaWithJavac lintDebug
+	@if [ "$${RETAIN_JVM_UNITS:-}" = true ]; then \
+	  docker run --rm --platform $(ANDROID_PLATFORM) \
+	    -u $$(id -u):$$(id -g) -e HOME=/tmp \
+	    -e GITHUB_SHA -e PLURX_RETAINED_UNITS \
+	    -v "$(CURDIR)":/workspace -w /workspace \
+	    $(ANDROID_IMAGE) python3 -m validation.jvm_unit_discovery --verify-adopted \
+	      --source-commit "$$(git rev-parse HEAD)"; \
+	fi
 
 .PHONY: android-instrumentation-build
 android-instrumentation-build: android-image ## Build app + test APKs for an emulator/device run

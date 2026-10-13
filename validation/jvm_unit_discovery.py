@@ -259,3 +259,87 @@ def modified_utf8(raw):
         return value.encode('utf-16-le', errors='surrogatepass').decode('utf-16-le', errors='surrogatepass')
     except UnicodeError as error:
         raise InventoryError('Malformed JVM modified UTF8') from error
+
+
+def compiled_roster(workspace):
+    """Read every debug JVM test class from the two compiled source sets."""
+    from pathlib import Path
+    workspace = Path(workspace)
+    build = workspace / 'clients/android/app/build'
+    roots = [build / 'tmp/kotlin-classes/debugUnitTest',
+             build / 'intermediates/javac/debugUnitTest/compileDebugUnitTestJavaWithJavac/classes']
+    classfiles = {}
+    total_bytes = 0
+    for root in roots:
+        require(all(not parent.is_symlink() for parent in [root, *root.parents]
+                    if parent == workspace or workspace in parent.parents),
+                'Compiled source-set ancestry contains a symlink')
+        if not root.exists():
+            continue  # Gradle NO-SOURCE is permitted for the empty Java set.
+        require(root.is_dir(), 'Compiled source-set root is not a directory')
+        for path in sorted(root.rglob('*')):
+            require(not path.is_symlink(), 'Compiled class tree contains a symlink')
+            if path.is_dir():
+                continue
+            require(path.is_file(), 'Compiled class tree contains an irregular file')
+            if path.suffix != '.class':
+                require(path.name.endswith('.kotlin_module'), 'Unknown compiled test artifact')
+                continue
+            name = path.relative_to(root).as_posix()
+            require(name not in classfiles, 'Repeated class across compiled source sets')
+            size = path.stat().st_size
+            require(len(classfiles) < 4096 and size <= 8 * 1024 * 1024
+                    and total_bytes + size <= 16 * 1024 * 1024, 'Compiled class roster outside bound')
+            total_bytes += size
+            classfiles[name] = path.read_bytes()
+    require(classfiles, 'No current compiled JVM test classes')
+    return classfiles
+
+
+def verify_adopted(workspace, adopted):
+    """Independently compare current compiled discovery with adopted membership."""
+    inventory = native_junit4_inventory(compiled_roster(workspace))
+    ids = sorted(row['class'] + '/' + method[len(row['class']) + 1:]
+                 for row in inventory['classes'] for method in row['ids'])
+    import hashlib
+    import json
+    require(adopted['mode'] == 'retained-source-cohort-v1' and adopted['ids_count'] == len(ids)
+            and adopted['ids_sha256'] == hashlib.sha256(json.dumps(ids, separators=(',', ':')).encode()).hexdigest(),
+            'Current compiled JVM discovery differs from adopted source cohort')
+    owners = []
+    for row in inventory['classes']:
+        package = row['class'].rsplit('.', 1)[0].replace('.', '/')
+        candidates = [workspace / 'clients/android/app/src/test' / directory / package / row['source_file']
+                      for directory in ('java', 'kotlin')]
+        sources = [path for path in candidates if path.is_file() and not path.is_symlink()]
+        require(len(sources) == 1, 'Current compiled test class has no unique source owner')
+        path = sources[0]
+        require(not any(parent.is_symlink() for parent in path.parents if parent == workspace or workspace in parent.parents),
+                'Current JVM source ancestry contains a symlink')
+        owners.append([row['class'], path.relative_to(workspace).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()])
+    require(adopted['jvm_source_owners_sha256'] == hashlib.sha256(json.dumps(sorted(owners), separators=(',', ':')).encode()).hexdigest(),
+            'Current compiled JVM source owners differ from adopted evidence')
+    require(inventory['unit_runtime_outcomes'] is None, 'Discovery asserted a runtime result')
+    return ids
+
+
+def main():
+    import argparse
+    import json
+    import os
+    from pathlib import Path
+    from validation import python_unit_receipts as receipts
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--verify-adopted', action='store_true', required=True)
+    parser.add_argument('--source-commit', required=True)
+    args = parser.parse_args()
+    candidate = receipts.sha(args.source_commit)
+    require(candidate == os.environ['GITHUB_SHA'], 'Current JVM checkout differs from qualification source')
+    proof = receipts.bounded_json(os.environ['PLURX_RETAINED_UNITS'].encode())
+    require(proof['candidate_sha'] == candidate, 'JVM adoption belongs to another source')
+    ids = verify_adopted(Path.cwd(), proof['command_units']['android_jvm'])
+    print('Current compiled JVM source cohort verified: ' + str(len(ids)) + ' methods; zero bodies executed')
+
+
+if __name__ == '__main__':
+    main()

@@ -98,3 +98,64 @@ class CompiledJvmDiscoveryCase(unittest.TestCase):
         self.assertEqual(discovery.modified_utf8(b"\xed\xa0\xbd\xed\xb8\x80"), "\U0001f600")
         with self.assertRaises(discovery.InventoryError):
             discovery.modified_utf8(b"\xff")
+
+
+class CurrentCompiledRosterCase(unittest.TestCase):
+    def workspace(self, root):
+        from pathlib import Path
+        workspace = Path(root)
+        classes = workspace / 'clients/android/app/build/tmp/kotlin-classes/debugUnitTest'
+        classes.mkdir(parents=True)
+        path = classes / PATH
+        path.parent.mkdir(parents=True)
+        path.write_bytes(FIXTURE)
+        return workspace, classes, path
+
+    def test_duplicate_source_sets_and_symlinked_ancestry_refuse(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            workspace, classes, path = self.workspace(root)
+            java = workspace / 'clients/android/app/build/intermediates/javac/debugUnitTest/compileDebugUnitTestJavaWithJavac/classes'
+            duplicate = java / PATH
+            duplicate.parent.mkdir(parents=True)
+            duplicate.write_bytes(FIXTURE)
+            with self.assertRaises(discovery.InventoryError):
+                discovery.compiled_roster(workspace)
+            duplicate.unlink()
+            path.unlink()
+            path.symlink_to(duplicate)
+            with self.assertRaises(discovery.InventoryError):
+                discovery.compiled_roster(workspace)
+
+    def test_collector_refuses_oversize_before_reading_bytes(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as root:
+            workspace, _, path = self.workspace(root)
+            with path.open('wb') as stream:
+                stream.truncate(8 * 1024 * 1024 + 1)
+            with patch.object(Path, 'read_bytes', side_effect=AssertionError('Must refuse before reading')):
+                with self.assertRaises(discovery.InventoryError):
+                    discovery.compiled_roster(workspace)
+
+    def test_current_compiled_identity_and_source_owner_both_bind_adoption(self):
+        import hashlib
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            workspace, _, _ = self.workspace(root)
+            source = workspace / 'clients/android/app/src/test/java/fixture/CohortFixture.java'
+            source.parent.mkdir(parents=True)
+            source.write_text('original test source')
+            ids = ['fixture.CohortFixture/neverExecuteThisBody']
+            owners = [['fixture.CohortFixture', source.relative_to(workspace).as_posix(), hashlib.sha256(source.read_bytes()).hexdigest()]]
+            adopted = {'mode': 'retained-source-cohort-v1', 'ids_count': 1,
+                       'ids_sha256': hashlib.sha256(json.dumps(ids, separators=(',', ':')).encode()).hexdigest(),
+                       'jvm_source_owners_sha256': hashlib.sha256(json.dumps(owners, separators=(',', ':')).encode()).hexdigest()}
+            self.assertEqual(discovery.verify_adopted(workspace, adopted), ids)
+            source.write_text('changed source')
+            with self.assertRaises(discovery.InventoryError):
+                discovery.verify_adopted(workspace, adopted)
+            adopted['ids_count'] = 2
+            with self.assertRaises(discovery.InventoryError):
+                discovery.verify_adopted(workspace, adopted)

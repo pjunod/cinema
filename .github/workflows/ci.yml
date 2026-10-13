@@ -1407,6 +1407,7 @@ jobs:
         env:
           RETAIN_JVM_LANE: ${{ needs.scope.outputs.retain_android_jvm }}
           RETAIN_JVM_UNITS: ${{ needs.scope.outputs.retain_android_jvm_units }}
+          PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}
         run: |
           mkdir -p target/validation/buildx
           if [ "$RETAIN_JVM_LANE" = true ] || [ "$RETAIN_JVM_UNITS" = true ]; then

@@ -1088,3 +1088,23 @@ the explicit stack setting now recorded by R14. This evidence does not claim
 a successful complete WAL lane or a promotion receipt. Remaining Source
 fixtures, other qualification cohorts, deployment and physical acceptance are
 still open.
+
+R12 landed as #1082 on effort `2d0d58648` after all seven checks in task gate
+5081 passed on its exact head. Its 44 new controls ran once on that effort:
+43 passed and one errored because its negative fixture updated a path-map key
+instead of the nested hash. The correction is committed for failed-only
+continuation. Fourteen source-dependent existing controls and three incoming
+main ownership-count checks also passed once. Original failures remain in the
+private capture set; these results are not a final qualification receipt.
+
+R26 adds typed Python/JVM source cohorts and independent current compiled JVM
+discovery. Compiled membership is explicitly separate from historical runtime
+outcomes. It retains the original opaque full-command successes, measured
+named overlays, source-impact reviews and failure chronology. Default test
+recipes still run normally; adoption requires a complete authenticated proof.
+The original JVM XML gaps remain opaque and the legacy capture adapters are
+still being completed. Astra identified 51 additional existing Python checks
+whose real repository inputs changed; only those invalidated bodies, new
+controls and the one failed fixture require effort execution. New protocol and
+collector controls have not yet run. Fleet deployment and physical HDR ON/OFF
+acceptance remain open.
