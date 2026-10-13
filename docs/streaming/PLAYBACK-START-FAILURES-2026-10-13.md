@@ -107,6 +107,12 @@ is claimed fixed by these changes.
 
 ## 4. Qualification boundary
 
+PR #1077 carries the fixes. The single review covered `31633075d..94124323d`;
+its two findings are corrected by `e690c27bb` after integration with main
+`4366a32dc`. The review corrections passed the current-base checks below.
+Promotion and physical acceptance must still name their actual landing and
+installed builds; local green checks do not imply either happened.
+
 Pinned Rust 1.97.1 compilation and Clippy, focused real-FFmpeg indexing,
 prepublication inventory, publication scheduling, and Apple controller/HTTP
 regressions provide local evidence. One existing capacity test initially
