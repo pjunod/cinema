@@ -149,13 +149,14 @@ internal object DiagnosticRuntime {
         if (namespace == value.capture.namespace && Session.playbackAuthorization().generation == value.capture.generation) mutable.update { it.copy(pending=rows) }
     }
     fun edit(description: String? = null, category: String? = null) {
+        if (mutable.value.busy) return
         stopLocalExport()
         mutable.update { value -> val draft=value.draft; if (draft == null || draft.consented) value else value.copy(draft=draft.copy(description=description?.let { text -> String(text.codePoints().limit(4000).toArray(),0,minOf(text.codePointCount(0,text.length),4000)) } ?: draft.description,category=category ?: draft.category)) }
     }
     fun destination(value: String) { mutable.update { if (it.draft?.consented == true) it else it.copy(destination=value.take(1024)) } }
     fun consent(value: Boolean) { mutable.update { it.copy(consent=value) } }
-    fun includeTitle(value: Boolean) { stopLocalExport(); mutable.update { if (it.draft?.consented == true) it else it.copy(includeTitle=value) } }
-    fun includePlatform(value: Boolean) { stopLocalExport(); mutable.update { if (it.draft?.consented == true) it else it.copy(includePlatform=value) } }
+    fun includeTitle(value: Boolean) { if (mutable.value.busy) return; stopLocalExport(); mutable.update { if (it.draft?.consented == true) it else it.copy(includeTitle=value) } }
+    fun includePlatform(value: Boolean) { if (mutable.value.busy) return; stopLocalExport(); mutable.update { if (it.draft?.consented == true) it else it.copy(includePlatform=value) } }
     fun invitation(value: String) { mutable.update { it.copy(invitation=value.take(10)) } }
     fun history(value: Boolean) {
         preferences.edit().putBoolean("history",value).apply(); mutable.update { it.copy(history=value) }
@@ -224,7 +225,7 @@ internal object DiagnosticRuntime {
             val (draft,archive)=archive(original)
             val revision=workRevision
             if (offerRevision != localExportRevision) { mutable.update { it.copy(message="The report changed. Save its ZIP again when ready.") }; throw CancellationException() }
-            val transfer=withContext(Dispatchers.IO + NonCancellable) {
+            val transfer=DiagnosticLocalExport.createOwned {
                 DiagnosticLocalExport(archive.bytes,draft.id,ended={
                     owner.launch { if (workRevision == revision) stopLocalExport() }
                 })

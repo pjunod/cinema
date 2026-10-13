@@ -2,6 +2,8 @@ package tv.plurx.app.diagnostics
 
 import org.junit.Assert.*
 import org.junit.Test
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancel
 import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.URL
@@ -13,6 +15,23 @@ class DiagnosticLocalExportTest {
         connection.connectTimeout=2000; connection.readTimeout=2000; connection.requestMethod=method
         try { val status=connection.responseCode; return status to (if (status < 400) connection.inputStream.readBytes() else ByteArray(0)) }
         finally { connection.disconnect() }
+    }
+    @Test fun cancellationDuringCreationClosesTheUnadoptedListener() = kotlinx.coroutines.runBlocking {
+        val created=java.util.concurrent.CountDownLatch(1); val release=java.util.concurrent.CountDownLatch(1)
+        val url=java.util.concurrent.atomic.AtomicReference<String>()
+        val owner=kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob()+kotlinx.coroutines.Dispatchers.Default)
+        val operation=owner.launch {
+            DiagnosticLocalExport.createOwned {
+                DiagnosticLocalExport(byteArrayOf(1),UUID.randomUUID().toString(),InetAddress.getLoopbackAddress()).also {
+                    url.set(it.url); created.countDown(); release.await(3,java.util.concurrent.TimeUnit.SECONDS)
+                }
+            }.close()
+        }
+        try {
+            assertTrue(created.await(3,java.util.concurrent.TimeUnit.SECONDS))
+            operation.cancel(); release.countDown(); operation.join()
+            assertTrue("Cancellation must close a created but unadopted listener immediately",runCatching { request(requireNotNull(url.get())) }.isFailure)
+        } finally { release.countDown(); owner.cancel() }
     }
     @Test fun onlyExplicitDownloadReceivesExactArchiveOnce() {
         val bytes=byteArrayOf(0x50,0x4b,3,4,10,0,99)

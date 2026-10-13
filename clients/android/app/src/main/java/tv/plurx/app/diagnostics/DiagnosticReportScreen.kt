@@ -105,23 +105,23 @@ private fun DiagnosticIncidentFields(state: DiagnosticUI,draft: DiagnosticDraft)
     Text("Report ${draft.id}",style=MaterialTheme.typography.bodySmall)
     Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
         listOf("playback" to "Playback","connection" to "Connection","interface" to "Interface","other" to "Other").forEach { (value,label) ->
-            FilterChip(selected=draft.category == value,onClick={ DiagnosticRuntime.edit(category=value) },label={ Text(label) },enabled=!draft.consented)
+            FilterChip(selected=draft.category == value,onClick={ DiagnosticRuntime.edit(category=value) },label={ Text(label) },enabled=!draft.consented && !state.busy)
         }
     }
-    if (isTelevision(LocalContext.current) && !draft.consented) {
+    if (isTelevision(LocalContext.current) && !draft.consented && !state.busy) {
         // Reuse the TV select-to-edit field: D-pad traversal must reach privacy
         // controls instead of becoming cursor movement in a multiline editor.
         AuthTextField(value=draft.description,onValueChange={ DiagnosticRuntime.edit(description=it) },label="What happened? Optional user content",modifier=Modifier.fillMaxWidth().testTag("diagnostics-description").onPreviewKeyEvent { event ->
             if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) { titleFocus.requestFocus(); true } else false
         })
-    } else OutlinedTextField(value=draft.description,onValueChange={ DiagnosticRuntime.edit(description=it) },label={ Text("What happened? Optional user content") },enabled=!draft.consented,modifier=Modifier.fillMaxWidth().testTag("diagnostics-description"),minLines=2,maxLines=6)
+    } else OutlinedTextField(value=draft.description,onValueChange={ DiagnosticRuntime.edit(description=it) },label={ Text("What happened? Optional user content") },enabled=!draft.consented && !state.busy,modifier=Modifier.fillMaxWidth().testTag("diagnostics-description"),minLines=2,maxLines=6)
     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
         Text("Include the current title",Modifier.weight(1f))
-        Switch(checked=state.includeTitle,onCheckedChange={ DiagnosticRuntime.includeTitle(it) },enabled=!draft.consented,modifier=Modifier.focusRequester(titleFocus).testTag("diagnostics-title-consent"))
+        Switch(checked=state.includeTitle,onCheckedChange={ DiagnosticRuntime.includeTitle(it) },enabled=!draft.consented && !state.busy,modifier=Modifier.focusRequester(titleFocus).testTag("diagnostics-title-consent"))
     }
     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
         Text("Include available platform diagnostics",Modifier.weight(1f))
-        Switch(checked=state.includePlatform,onCheckedChange={ DiagnosticRuntime.includePlatform(it) },enabled=!draft.consented && draft.platform.isNotEmpty())
+        Switch(checked=state.includePlatform,onCheckedChange={ DiagnosticRuntime.includePlatform(it) },enabled=!draft.consented && !state.busy && draft.platform.isNotEmpty())
     }
     Text("No passwords, addresses, request bodies, media or raw stream identifiers are collected. A description and an optional title are private content.",style=MaterialTheme.typography.bodySmall)
     Text("Client: ${if (!draft.capture.historyEnabled) "history disabled" else if (draft.capture.dropped != "0") "partial (overflow)" else "bounded history"}; persistence: ${draft.capture.persistence}",style=MaterialTheme.typography.bodySmall)

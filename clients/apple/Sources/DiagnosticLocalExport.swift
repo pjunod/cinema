@@ -105,7 +105,7 @@ final class DiagnosticLocalExport: @unchecked Sendable {
         reply(peer, status: 200, type: "application/zip", body: archive, attachment: filename)
     }
     private func reply(_ peer: NWConnection, status: Int, type: String, body: Data, attachment: String? = nil) {
-        var header = "HTTP/1.1 \(status) \(status == 200 ? "OK" : "Rejected")\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; form-action 'self'; frame-ancestors 'none'\r\n"
+        var header = "HTTP/1.1 \(status) \(status == 200 ? "OK" : "Rejected")\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: same-origin\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; form-action 'self'; frame-ancestors 'none'\r\n"
         if let attachment { header += "Content-Disposition: attachment; filename=\"\(attachment)\"\r\n" }
         var response = Data((header + "\r\n").utf8); response.append(body)
         peer.send(content: response, completion: .contentProcessed { [weak self] _ in

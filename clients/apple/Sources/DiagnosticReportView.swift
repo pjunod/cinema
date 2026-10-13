@@ -371,19 +371,19 @@ struct DiagnosticReportView: View {
             Text("Report " + draft.id).font(.caption)
                         Picker("Category", selection: Binding(get: { reports.draft?.category ?? "other" }, set: { reports.stopLocalExport(); reports.draft?.category = $0 })) {
                             Text("Playback").tag("playback"); Text("Connection / sign-in").tag("connection"); Text("Interface / interrupted run").tag("interface"); Text("Other").tag("other")
-                        }.disabled(draft.consented)
+                        }.disabled(draft.consented || reports.busy)
                         #if os(iOS)
                         TextEditor(text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.stopLocalExport(); reports.draft?.description = String($0.prefix(4_000)) })).frame(minHeight: 100).accessibilityLabel("What happened? Description is user content")
-                            .disabled(draft.consented)
+                            .disabled(draft.consented || reports.busy)
                         #else
-                        TextField("Optional description", text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.stopLocalExport(); reports.draft?.description = String($0.prefix(4_000)) })).disabled(draft.consented)
+                        TextField("Optional description", text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.stopLocalExport(); reports.draft?.description = String($0.prefix(4_000)) })).disabled(draft.consented || reports.busy)
                         #endif
         }
     }
     private func incidentPrivacy(_ draft: DiagnosticStore.Draft) -> some View {
         Group {
-            Toggle("Include the current title", isOn: $reports.includeTitle).disabled(draft.consented).onChange(of: reports.includeTitle) { _, _ in reports.stopLocalExport() }
-                        Toggle("Include available platform diagnostics", isOn: $reports.includePlatform).disabled(draft.consented || draft.platform?.isEmpty != false).onChange(of: reports.includePlatform) { _, _ in reports.stopLocalExport() }
+            Toggle("Include the current title", isOn: $reports.includeTitle).disabled(draft.consented || reports.busy).onChange(of: reports.includeTitle) { _, _ in reports.stopLocalExport() }
+                        Toggle("Include available platform diagnostics", isOn: $reports.includePlatform).disabled(draft.consented || reports.busy || draft.platform?.isEmpty != false).onChange(of: reports.includePlatform) { _, _ in reports.stopLocalExport() }
                         Text("No passwords, addresses, request bodies, media or raw stream identifiers are collected. Your description and an optional title are private content.").font(.caption)
                         Text("Client: " + (draft.capture.historyEnabled ? (draft.capture.dropped > 0 ? "partial (overflow)" : "bounded history") : "history disabled") + "; persistence: " + draft.capture.persistence).font(.caption)
                         ForEach(draft.serverComponents, id: \.name) { component in Text("\(component.name): \(component.state) \(component.reason ?? "")").font(.caption) }

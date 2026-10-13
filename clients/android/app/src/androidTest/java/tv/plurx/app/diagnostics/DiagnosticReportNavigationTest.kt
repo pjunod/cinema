@@ -58,7 +58,13 @@ class DiagnosticReportNavigationTest {
             assertEquals(incident.id,DiagnosticRuntime.state.value.draft?.id)
             assertTrue(DiagnosticRuntime.state.value.draft?.consented == false)
         }
-        compose.onNodeWithTag("diagnostics-export-tv").performScrollTo().performClick()
+        compose.runOnIdle {
+            val description=DiagnosticRuntime.state.value.draft?.description
+            DiagnosticRuntime.shareOnLocalNetwork()
+            assertTrue(DiagnosticRuntime.state.value.busy)
+            DiagnosticRuntime.edit(description="Must not replace locked export content",category="other")
+            assertEquals(description,DiagnosticRuntime.state.value.draft?.description)
+        }
         compose.waitUntil(timeoutMillis=20_000) { DiagnosticRuntime.state.value.localExportURL != null && !DiagnosticRuntime.state.value.busy }
         val edited=requireNotNull(DiagnosticRuntime.state.value.localExportURL)
         compose.runOnIdle { DiagnosticRuntime.edit(description="Edited after offering") }

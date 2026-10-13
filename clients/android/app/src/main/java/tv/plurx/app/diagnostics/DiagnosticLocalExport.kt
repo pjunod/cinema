@@ -1,5 +1,9 @@
 package tv.plurx.app.diagnostics
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.currentCoroutineContext
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.NetworkInterface
@@ -68,7 +72,7 @@ internal class DiagnosticLocalExport(
         reply(peer,200,"application/zip",archive,filename)
     }
     private fun reply(peer: Socket, status: Int, type: String, body: ByteArray, attachment: String? = null) {
-        val headers = "HTTP/1.1 $status ${if (status == 200) "OK" else "Rejected"}\r\nContent-Type: $type\r\nContent-Length: ${body.size}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; form-action 'self'; frame-ancestors 'none'\r\n" + (attachment?.let { "Content-Disposition: attachment; filename=\"$it\"\r\n" } ?: "") + "\r\n"
+        val headers = "HTTP/1.1 $status ${if (status == 200) "OK" else "Rejected"}\r\nContent-Type: $type\r\nContent-Length: ${body.size}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: same-origin\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; form-action 'self'; frame-ancestors 'none'\r\n" + (attachment?.let { "Content-Disposition: attachment; filename=\"$it\"\r\n" } ?: "") + "\r\n"
         peer.getOutputStream().apply { write(headers.toByteArray(Charsets.US_ASCII)); write(body); flush() }
     }
     override fun close() {
@@ -78,6 +82,16 @@ internal class DiagnosticLocalExport(
         archive = ByteArray(0)
     }
     companion object {
+        /** Ownership stays in the caller's frame even if the IO dispatcher
+         * return is cancelled before its result can be delivered. */
+        suspend fun createOwned(factory: () -> DiagnosticLocalExport): DiagnosticLocalExport {
+            var prepared: DiagnosticLocalExport? = null
+            try {
+                withContext(Dispatchers.IO) { prepared = factory() }
+                currentCoroutineContext().ensureActive()
+                return requireNotNull(prepared).also { prepared = null }
+            } finally { prepared?.close() }
+        }
         fun localAddress(): InetAddress = NetworkInterface.getNetworkInterfaces().toList()
             .filter { it.isUp && !it.isLoopback && !it.isVirtual && !it.name.startsWith("tun") }
             .flatMap { it.inetAddresses.toList() }.firstOrNull { it is Inet4Address && it.isSiteLocalAddress }

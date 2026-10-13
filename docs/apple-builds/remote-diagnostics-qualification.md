@@ -3,7 +3,7 @@
 **Status:** built — TV ZIP download, phone export and recovery have software qualification.
 
 Build: 237
-Issue: #1066
+Issue: #1081
 
 Registers the diagnostics reporting UI regression in the iOS test target.
 Preserves local history during incident recovery and resets the form scroll

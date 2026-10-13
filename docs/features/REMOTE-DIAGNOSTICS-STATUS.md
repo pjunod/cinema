@@ -14,17 +14,17 @@ duplicating its evidence.
 |---|---|
 | User authorization | 2026-10-13: produce a diagnostic ZIP users can attach to bug/issue reports. This supersedes hosted rollout and the private-pilot approval. Normal qualification and green merge continue; no production service changes. |
 | Implementation owner | GPT-6.1 Sol · chat `01a13167-0996-7723-a0fb-fa64421a384d` |
-| Qualification pull request | TV archive follow-up not opened yet; #1066 merged |
+| Qualification pull request | #1081 |
 | Intended effort | Archive implementation merged into `main`; remaining TV transfer on `codex/diagnostics-tv-archive` |
 | Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent owned clone; current main base `4366a32dc`, archive landing `569678f25` (#1066). TV transfer changes are uncommitted while focused qualification runs. User checkouts untouched. |
+| Implementation workspace/base | Independent owned clone; current main base `4366a32dc`, archive landing `569678f25` (#1066). TV product commits `8c80b9a81` and `77ae61186`, native witnesses `5616f0f4b`; focused qualification passes, final review in progress. User checkouts untouched. |
 | Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
 | Plan review | Original review: 12 findings corrected. One follow-up review complete: two P1 history findings corrected; focused qualification recorded in §24. |
 | Promotion/deployment | #1037 and archive-first #1066 merged. #1066 landing `569678f2513695bb9f7b1923ed2c39af6dd19043`, eight required passes. Hosted/private service rollout cancelled by the archive direction; no production changes by this chat. |
-| Current checks | #1066 merged with eight required passes. TV download source compiles on Apple TV and Android; focused single-download/expiry/cancellation tests pass. Apple TV shipped remote UI passes selected-incident download and close revocation; Android TV export/QR, D-pad and recovery pass three tests. iOS/tvOS capture/wire suites each pass eleven cases; Android capture/wire/download suites pass eleven. Final review/gate pending. |
+| Current checks | #1066 merged with eight required passes. TV download source compiles on Apple TV and Android; focused single-download/expiry/cancellation tests pass. Apple TV shipped remote UI passes selected-incident download and close revocation; Android TV export/QR, D-pad and recovery pass three tests. iOS/tvOS capture/wire suites each pass eleven cases; Android capture/wire/download suites pass eleven. One final review complete; three findings corrected and focused qualification repeated. Required fast gate pending. |
 | Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
-| Next action | Finish actual TV archive/QR/close qualification, commit normally, obtain one final adversarial review and merge only after every required fast check passes. No service or fleet installation. |
+| Next action | Commit the three final-review corrections normally, register their unique history witness, then pass every required fast check and merge #1081 at its exact qualified head. No service or fleet installation. |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
 shared checkout and preserve unrelated `Claude outputs/` artifacts.
@@ -754,7 +754,7 @@ unencrypted. Privacy choices and incident changes revoke the active link.
 The endpoint binds a private IPv4 interface, has a five-minute wall/monotonic
 lifetime, accepts at most 32 bounded requests with an 8 KiB header ceiling,
 and closes sockets on report/background/authorization retirement. It serves
-only the frozen in-memory ZIP, with attachment/no-store/no-referrer headers.
+only the frozen in-memory ZIP, with attachment/no-store headers and no cross-origin referrer disclosure.
 Focused tests cover exact bytes, rejected capabilities/cross-origin/body
 framing, one-download use, expiry and cancellation. Final source, UI results,
 review and gate receipts will be recorded before merge. Apple237/Android171
@@ -771,3 +771,21 @@ instrumentation passes. A timestamp-only recovery selector matched two saved
 incidents; it now uses the report's unique ID. Failed receipts are retained,
 not counted as passes. Owned software devices prove neither signed physical
 installs nor guest-network reachability.
+
+The single final adversarial review of #1081 found three issues, all corrected:
+Android dispatcher-return cancellation could discard an unowned listener;
+cleanup now retains the handle in the caller frame and a forced cancellation
+regression proves immediate socket retirement. Inputs remained editable during
+final persistence; both native forms now lock category/description/privacy
+while busy, and Android ignores edits during that window. The actual browser
+POST returned 403 because no-referrer produced an incompatible Origin. Both
+local pages now use same-origin referrer policy, with no cross-origin referrer
+disclosure. The real compiled Android endpoint plus a phone-sized Chromium form
+now returns GET200/POST200 and the exact ZIP attachment; the retained failing
+GET200/POST403 receipt is not qualification. Android capture/wire/local download
+now passes twelve tests, including creation cancellation. Actual Android TV UI
+passes three cases including locked export input and later edit/close revocation;
+Apple TV actual remote UI passes one selected archive/close case. iOS/tvOS
+capture/wire suites each pass eleven on the corrected source. The local history
+check caught duplicate witness rows; one witness per corrective commit is the
+repository policy and the catalog is corrected before the ready gate.
