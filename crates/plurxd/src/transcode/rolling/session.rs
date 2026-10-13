@@ -875,7 +875,13 @@ impl Session {
         {
             return Err(reason);
         }
-        let _ = self.refresh_scratch_bytes().await;
+        // Preparation status must observe completed writer media before the
+        // first served snapshot exists. Waiting for a fetch or the reaper's
+        // fifteen-second repair pass leaves an actively preparing session
+        // reporting no inventory to clients deciding whether to keep waiting.
+        // This refresh retains the normal attempt/revision fences and does
+        // not authorize publication before its cushion is ready.
+        self.refresh_segments().await;
         if self.replacing_child.load(Acquire) {
             return Ok(());
         }

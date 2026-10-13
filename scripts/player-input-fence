@@ -43,6 +43,9 @@ WHOLE_FILE_ALLOWLIST = {
         "what each one does is LiveTvInputPolicy's answer, from the fixture.",
     Path("clients/android/app/src/main/java/tv/plurx/app/ui/AuthScreens.kt"):
         "The sign-in form uses Select/Enter to begin editing; it is not a player.",
+    Path("clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticReportScreen.kt"):
+        "The modal report form moves D-pad focus from its description to title consent; "
+        "companion navigation is restricted while visible, and no playback command is decoded.",
     Path("clients/apple/Sources/PlayerRemoteAdapter.swift"):
         "Apple remote commands are decoded into contract inputs here.",
     Path("crates/plurxd/src/web/reader.js"):
