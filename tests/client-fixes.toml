@@ -6376,3 +6376,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticL
 source_anchor = "suspend fun createOwned"
 test = "clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticLocalExportTest.kt"
 test_anchor = "cancellationDuringCreationClosesTheUnadoptedListener"
+
+[[fixes]]
+id = "diagnostics.tv-form-input-adapter"
+commits = ["ef1b9436db4193ed9117d063fa334c147a6d192c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AuthScreens.kt"
+source_anchor = "downFocus: FocusRequester? = null"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/DiagnosticReportNavigationTest.kt"
+test_anchor = "televisionDescriptionDpadReachesPrivacyWithoutStartingUpload"

@@ -15,7 +15,7 @@ duplicating its evidence.
 | User authorization | 2026-10-13: produce a diagnostic ZIP users can attach to bug/issue reports. This supersedes hosted rollout and the private-pilot approval. Normal qualification and green merge continue; no production service changes. |
 | Implementation owner | GPT-6.1 Sol · chat `01a13167-0996-7723-a0fb-fa64421a384d` |
 | Qualification pull request | #1081 |
-| Intended effort | Archive implementation merged into `main`; remaining TV transfer on `codex/diagnostics-tv-archive` |
+| Intended effort | Archive implementation merged into `main`; TV follow-up #1081 on `codex/diagnostics-tv-archive` |
 | Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
 | Implementation workspace/base | Independent owned clone; current main base `4366a32dc`, archive landing `569678f25` (#1066). TV product commits `8c80b9a81` and `77ae61186`, native witnesses `5616f0f4b`; review correction `d0f0df4d9`; focused qualification passes and all three final-review findings are corrected. User checkouts untouched. |
@@ -809,3 +809,11 @@ regressions are required before the corrected candidate is pushed. The current
 source iPhone UI class executes two passes (share sheet and recovery) plus one
 TV-only skip; the earlier single-method zero-test receipt is not a pass.
 Android phone actual attachment and recovery execute two passing cases.
+
+Both failed gate contracts now pass in a focused 75-test docs/build/fence run.
+The corrected Android app/test APKs compile; actual Android TV qualification
+passes four cases including the shared form’s default Select-to-edit behavior.
+The field adapter movement changes no archive protocol, Apple source, capture,
+wire or storage inputs; their recorded current-source results remain applicable.
+The final required gate and exact landing are in #1081. No production service,
+proxy or real-device installation is part of this archive release.
