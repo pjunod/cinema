@@ -187,6 +187,7 @@ list.
 | [M6-WEB-CLIENT.md](playback-control/M6-WEB-CLIENT.md) | Historical web implementation record; its throughput qualification prose is not current admission policy. | superseded |
 | [M6-SERVER-PRIME-HANDOFF.md](playback-control/M6-SERVER-PRIME-HANDOFF.md) | Phase 3 — the reserve/prime constraints and the implementation that now attaches the staged VOD worker. | built |
 | [CONTINUOUS-QUALITY-STATUS.html](playback-control/CONTINUOUS-QUALITY-STATUS.html) | Current continuous-quality build progress, retained evidence and ownership dependencies. | open |
+| [CONTINUOUS-FOREGROUND-ADMISSION.md](playback-control/CONTINUOUS-FOREGROUND-ADMISSION.md) | Why background indexing refused continuous starts, and the bounded foreground admission repair. | open |
 | [CONTINUOUS-QUALITY-BUILD.md](playback-control/CONTINUOUS-QUALITY-BUILD.md) | The next quality-switch build: safe failed changes, continuous HLS renditions, shared audio, bounded JIT production, web-first execution and native/device acceptance. | open |
 | [CONTINUOUS-QUALITY-REVIEW.md](playback-control/CONTINUOUS-QUALITY-REVIEW.md) | Adversarial findings and dispositions for the continuous-quality build contract. | open |
 | [CONTINUOUS-QUALITY-MATRIX.md](playback-control/CONTINUOUS-QUALITY-MATRIX.md) | Which source/lifecycle/pressure rows have current, older or missing evidence, and how to read the focused lifecycle helper. | open |
@@ -265,6 +266,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [PLAYBACK-STARTUP-LATENCY-M0-20261002.md](streaming/PLAYBACK-STARTUP-LATENCY-M0-20261002.md) | Native Safari preparation/publication incident and review-reported index backlog, with evidence limits. | done |
 | [PLAYBACK-STARTUP-LATENCY-M0-20261002.json](streaming/PLAYBACK-STARTUP-LATENCY-M0-20261002.json) | Sanitized retained phase receipt for the native Safari incident; no successful presentation claim. | done |
 | [PLAYBACK-STARTUP-LATENCY-REVIEW-20261002.md](streaming/PLAYBACK-STARTUP-LATENCY-REVIEW-20261002.md) | Supplied proposal review, single final implementation review and conservative admission disposition. | done |
+| [HDR-CONTENT-LIGHT-INDEX.md](streaming/HDR-CONTENT-LIGHT-INDEX.md) | Why changing HDR light-level metadata forced rolling startup, and the indexed-copy metadata repair. | open |
 | [PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md](streaming/PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md) | Monotonic phase origins, exact incident replay, repeated index/resource observations, transport measurement limits, and the A-M0 target/bootstrap startup lab with its decision rule. | open |
 | [PLAYBACK-STARTUP-LATENCY-BUILD.md](streaming/PLAYBACK-STARTUP-LATENCY-BUILD.md) | Sol execution handoff: isolated clone, latest user CI/CD rulings, milestone deliverables, one reviewed PR, fast lane, merge and cleanup. | open |
 | [PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md](streaming/PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md) | Reviewed runtime build contract for the measured 14.2-second start, index availability, qualified publication policy and cross-client acceptance. | open |
