@@ -1663,9 +1663,16 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
         self.assertEqual(
             production.count("recovery_epoch: recovery_epoch.clone(),"),
-            2,
-            "the session identity and the durable activation, and nothing else",
+            3,
+            "processed qualification, worker identity and durable activation share one epoch",
         )
+        # Processed Auto qualification borrows the same admitted identity;
+        # it must not mint a second recovery allowance before worker creation.
+        qualification = production.split(
+            "let recovery = crate::transcode::SessionRecoveryIdentity {", 1
+        )[1].split(".qualify_processed_hdr10_auto(", 1)[0]
+        self.assertIn("recovery_epoch: recovery_epoch.clone(),", qualification)
+        self.assertNotIn("recovery_epoch_for(", qualification)
         self.assertIn(
             "fn one_start_mints_one_recovery_epoch_for_both_the_session_and_the_row",
             module_tests(HTTP_HLS_TESTS),
