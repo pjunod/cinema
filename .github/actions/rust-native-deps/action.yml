@@ -1,0 +1,21 @@
+name: Rust native dependencies
+description: Supply and verify the OpenSSL headers and libraries required by WebAuthn
+runs:
+  using: composite
+  steps:
+    - name: Verify native OpenSSL build support
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The retained immutable CI image predates WebAuthn. New CI images
+        # include libssl-dev; provision the same dependency on retained ones.
+        if ! pkg-config --exists openssl; then
+          apt-get -o Acquire::Retries=3 update
+          DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends libssl-dev
+        fi
+        pkg-config --modversion openssl
+        probe="$(mktemp -d)"
+        trap 'rm -rf "$probe"' EXIT
+        printf '#include <openssl/ssl.h>\nint main(void) { return OPENSSL_init_ssl(0, 0) != 1; }\n' > "$probe/openssl.c"
+        cc "$probe/openssl.c" $(pkg-config --cflags --libs openssl) -o "$probe/openssl"
+        "$probe/openssl"
