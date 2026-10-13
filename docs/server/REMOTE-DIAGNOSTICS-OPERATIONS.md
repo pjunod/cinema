@@ -1,6 +1,10 @@
 # Remote diagnostics — operating the independent support service
 
-**Status:** open · **Updated:** 2026-10-13 · **Implementation:** merged #1037.
+**Status:** deferred — archive-first release does not require deployment · **Updated:** 2026-10-13 · **Implementation:** merged #1037.
+
+Paul superseded the private-pilot rollout with user-exported ZIP attachments on
+2026-10-13. These instructions describe retained source for future hosted
+delivery; they are not current deployment work.
 
 The support executable receives fixed-format Cinema reports and serves a
 passkey-authenticated operator inbox. It has no Cinema playback, household

@@ -18,13 +18,12 @@ final class DiagnosticReportingTests: XCTestCase {
         reveal(identity, in: app)
         let originalIdentity = identity.label
         #if os(iOS)
-        let export = app.buttons["Save / share local report"]
+        let export = app.buttons["diagnostics-export"]
         reveal(export, in: app)
         XCTAssertTrue(export.isEnabled, "Missing server evidence must not block local export")
         #endif
         let send = app.buttons["Send report"]
-        reveal(send, in: app)
-        XCTAssertFalse(send.isEnabled, "A fresh report must not imply upload consent")
+        XCTAssertFalse(send.exists, "The ordinary report flow exports an attachment")
         select(app.buttons["Close"], in: app)
         app.terminate()
         app.launch()
@@ -38,11 +37,28 @@ final class DiagnosticReportingTests: XCTestCase {
         XCTAssertTrue(recovered.label.contains("Recovered local report"), app.debugDescription)
         reveal(identity, in: app)
         XCTAssertEqual(identity.label, originalIdentity, "Recovery must open the incident saved before relaunch")
-        reveal(send, in: app)
-        XCTAssertFalse(send.isEnabled, "Recovery must not imply upload consent")
+        XCTAssertFalse(send.exists, "Recovery must keep the archive-only flow")
         let savedHistory = app.buttons["diagnostics-resume-" + savedID]
         reveal(savedHistory, in: app)
         XCTAssertTrue(savedHistory.isEnabled, "Resuming an incident must preserve accessible local history")
+    }
+
+    func testDiagnosticZIPOpensSystemShareSheetWithoutSupport() throws {
+        #if os(tvOS)
+        throw XCTSkip("Native TV archive transfer is not implemented")
+        #else
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["-plurx.origin", "http://127.0.0.1:9"]
+        app.launch(); defer { app.terminate() }
+        openReport(app)
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "Frozen local report"), object: app.staticTexts["diagnostics-status"])
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 20), .completed)
+        let export = app.buttons["diagnostics-export"]
+        reveal(export, in: app); XCTAssertTrue(export.isEnabled); export.tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Save to Files")).firstMatch.waitForExistence(timeout: 15), "The export action must open the actual system share sheet: " + app.debugDescription)
+        XCTAssertFalse(app.buttons["Send report"].exists)
+        #endif
     }
 
     private func reveal(_ element: XCUIElement, in app: XCUIApplication, towardStart: Bool = false) {

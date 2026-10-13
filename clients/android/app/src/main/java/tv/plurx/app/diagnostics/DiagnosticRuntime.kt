@@ -73,9 +73,6 @@ internal object DiagnosticRuntime {
         val pending = store.drafts(next)
         if (Session.playbackAuthorization().generation != auth.generation || namespace != next) return
         mutable.update { it.copy(pending=pending) }
-        if (next != "anonymous") {
-            val provisioning = DiagnosticTransport(app,next,auth); try { runCatching { provisioning.provision() } } finally { provisioning.cancel() }
-        }
     }
     fun record(domain: String, kind: String, facts: Map<String,JsonPrimitive> = emptyMap(), generation: Long? = null) {
         if (::recorder.isInitialized) runCatching { recorder.record(domain,kind,facts,generation) }
@@ -138,8 +135,7 @@ internal object DiagnosticRuntime {
             if (restored == null) { mutable.update { it.copy(message="This local report expired or was deleted.") }; return@launch }
             // A retained row supplies identity, never an old consent or grant.
             val value=restored.copy(capture=restored.capture.copy(generation=auth.generation)); title=value.title
-            mutable.update { it.copy(visible=true,draft=value,destination=value.origin.orEmpty(),consent=value.consented,includeTitle=value.title != null,includePlatform=value.includePlatform,selectionRevision=it.selectionRevision+1,comparison=null,handoffState="",message="Recovered local report. Sending resumes the same immutable archive.") }
-            if (value.handoff != null) pollHandoff()
+            mutable.update { it.copy(visible=true,draft=value,destination=value.origin.orEmpty(),consent=value.consented,includeTitle=value.title != null,includePlatform=value.includePlatform,selectionRevision=it.selectionRevision+1,comparison=null,handoffState="",message="Recovered local report. Save its diagnostic ZIP to attach it to an issue.") }
         }
     }
     private suspend fun persist(value: DiagnosticDraft) {
@@ -218,8 +214,8 @@ internal object DiagnosticRuntime {
         currentCoroutineContext().ensureActive()
         val intent=Intent(Intent.ACTION_SEND).setType("application/zip").putExtra(Intent.EXTRA_STREAM,uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         intent.clipData=ClipData.newUri(app.contentResolver,"Cinema diagnostic report",uri)
-        app.startActivity(Intent.createChooser(intent,"Share local report").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        mutable.update { it.copy(message="Shared locally. No support upload was started.") }; draft
+        app.startActivity(Intent.createChooser(intent,"Save or share diagnostic ZIP").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        mutable.update { it.copy(message="Diagnostic ZIP ready. Attach it to your bug or issue report.") }; draft
     }
     fun send(phone: Boolean = false) {
         if (recorder.recording) { mutable.update { it.copy(message="Stop reproduction before sending this frozen report.") }; return }

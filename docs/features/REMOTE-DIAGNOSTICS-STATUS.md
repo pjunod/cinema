@@ -1,11 +1,10 @@
 # Remote diagnostics status — ownership, implementation and release evidence
 
-**Status:** open — implementation merged; native qualification recorded; production acceptance open.
+**Status:** open — archive export qualification; hosted delivery deferred.
 **Updated:** 2026-10-13 · **Planning baseline:** `8d7bc723e`.
 
-The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) defines the first
-release: web, Apple and Android, including both native TV handoffs and the
-independent upload inbox. This file is the canonical execution ledger.
+The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md#current-direction--attach-a-zip-to-a-bug-report) defines the current archive-attachment release.
+Hosted submission is deferred; native TV file transfer is unfinished. This file is the canonical execution ledger.
 The [project backlog](PROJECT-BACKLOG.md) indexes the effort rather than
 duplicating its evidence.
 
@@ -13,7 +12,7 @@ duplicating its evidence.
 
 | Field | Current value |
 |---|---|
-| User authorization | 2026-10-13: merge #1037, update status and continue qualification/rollout preparation; production changes require approval of the concrete rollout. |
+| User authorization | 2026-10-13: produce a diagnostic ZIP users can attach to bug/issue reports. This supersedes hosted rollout and the private-pilot approval. Normal qualification and green merge continue; no production service changes. |
 | Implementation owner | GPT-6.1 Sol · chat `01a13167-0996-7723-a0fb-fa64421a384d` |
 | Qualification pull request | #1066 |
 | Intended effort | Implementation merged into `main`; qualification follows on `codex/remote-diagnostics-qualification` |
@@ -25,7 +24,7 @@ duplicating its evidence.
 | Promotion/deployment | PR #1037 merged 2026-10-13, all eight checks passed on `6bc7235a0`; no production changes by this chat. Another rollout placed the landing on two nodes and exposed a router startup failure; recovery owner is recorded in §22. Isolated qualification continues. |
 | Current checks | Original #1037: eight checks passed and all 32 landing anchors verified. Follow-up: normal hooks, affected native compilation and focused regressions passed; all-target pinned check and composed startup passed on integrated `468a06545`. Follow-up fast gate/landing receipt is in #1066. |
 | Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
-| Next action | Continue remaining physical/delivery and durability qualification; deploy the prepared private hosting pilot only after Paul’s installs settle and concrete approval. #1066 carries the current code gate/landing receipt. |
+| Next action | Make portable ZIP export the ordinary web/phone flow and verify saved files; finish #1066 only on a green gate. Native TV archive transfer remains open. Hosted delivery and the approved private pilot are superseded by Paul’s archive-first direction. |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
 shared checkout and preserve unrelated `Claude outputs/` artifacts.
@@ -696,3 +695,43 @@ witnesses. Both now have exact commit/source/test rows, and local
 regressions; they do not add or waive runtime evidence. The corrected head
 must pass the gate before merge. Paul took ownership of fleet installs;
 this chat keeps all fleet/network/service writes held.
+
+## 25. Archive-first direction — 2026-10-13
+
+Paul requested a diagnostic archive that users attach to bug or issue reports,
+in place of wiring up hosted submission. This supersedes the private-pilot
+approval: no service, proxy or Tailnet mapping will be installed by this chat.
+The existing ZIP generators are reused; ordinary upload and invitation controls
+are removed, and account setup no longer provisions support enrollments.
+
+Web downloads and native phone share sheets are the release path. Native TVs
+keep capture/history; transferring the TV archive without the hosted service
+is still missing implementation, separate from physical acceptance. The original
+B00–B10 delivery receipts above remain historical evidence, not completion of
+the new archive scope. PR #1066 records the exact source, focused file-export
+checks, required gate and landing status.
+
+Archive qualification uses real downloaded/exported files: the shipped browser
+report dialog produced anonymous and signed-in ZIPs without support requests;
+selected incident IDs, summary, description and every manifest file hash were
+verified. Android's actual share intent exposes a readable `application/zip`
+attachment with a scoped URI grant and the selected incident, without consent,
+binding, origin or enrollment. The Apple report model wrote the exact selected
+archive and retained an unconsented local draft. Phone and native TV relaunch
+recovery passed on owned simulators/emulators. These are software fixtures,
+not physical-device or signed-release acceptance.
+
+Android TV description traversal failed a real Down-key assertion before the
+fix. The existing select-to-edit text field plus an explicit Down focus target
+now reaches the privacy switch; the focused navigation and select-to-edit cases
+passed two tests. An initial test-clock timeout was corrected by freezing the
+caret animation clock, exposing the actual focus assertion before the product
+fix. Failed and zero-test receipts are retained privately, never counted as
+passes. The required gate and precise landing remain in #1066.
+
+The actual iOS share-sheet case passed one executed test after matching the
+observed Save to Files action cell. A URL-bound presentation keeps the exported
+file alive until dismissal. Earlier button-selector failures and the zero-test
+receipt remain failures, not qualification. This batch claims Apple236 and
+Android170 above current main’s Apple235/Android169; current-base compilation
+and the required fast gate remain recorded in #1066.

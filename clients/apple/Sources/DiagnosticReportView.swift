@@ -56,8 +56,6 @@ final class DiagnosticReportModel: ObservableObject {
         let restored = await store.drafts(next)
         guard Session.shared.playbackAuthorization.generation == auth.generation, scope == next else { return }
         pending = restored
-        let provisioning = DiagnosticTransport(scope: next, authorization: auth)
-        if next != "anonymous" { try? await provisioning.provision() }; provisioning.cancel()
     }
     func open(category: String = "other", title: String? = nil, owner: String = "root", newIncident: Bool = false) {
         workRevision &+= 1
@@ -114,8 +112,7 @@ final class DiagnosticReportModel: ObservableObject {
             selectionRevision &+= 1
             draft = resumed; destination = resumed.origin ?? ""; uploadConsent = resumed.consented; includeTitle = resumed.title != nil
             title = resumed.title; includePlatform = resumed.includePlatform == true; presented = true; transport = DiagnosticTransport(scope: namespace)
-            message = "Recovered local report. Sending resumes this same frozen archive."
-            if resumed.handoff != nil { pollHandoff() }
+            message = "Recovered local report. Save its diagnostic ZIP to attach it to an issue."
         }
     }
     private func persist(_ value: DiagnosticStore.Draft) async {
@@ -183,7 +180,7 @@ final class DiagnosticReportModel: ObservableObject {
                 try bytes.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]); return url
             }
             let url = try await worker.value; guard !Task.isCancelled else { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()); return }
-            self.shareURL = url; self.message = "Saved locally. Share only with someone you trust; no upload occurred."
+            self.shareURL = url; self.message = "Diagnostic ZIP ready. Attach it to your bug or issue report."
         }
     }
     func send(phone: Bool = false) {
@@ -298,12 +295,10 @@ struct DiagnosticReportView: View {
     @ObservedObject var reports = DiagnosticReportModel.shared
     @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
     @State private var block = UUID()
-    @State private var sharing = false
     var body: some View {
         NavigationStack {
             Form {
                 incidentSection
-                sendingSection
                 pendingSection
             }
             // Each selected incident starts at its coverage and privacy
@@ -317,9 +312,15 @@ struct DiagnosticReportView: View {
         }
         .remoteRestricted()
         .onAppear { remoteNavigation.setBlocked(block, true) }
-        .onDisappear { remoteNavigation.setBlocked(block, false); reports.close() }
+        .onDisappear {
+            // Presenting the system share sheet must not retire the report or
+            // delete the ZIP while the system still owns its file URL.
+            if reports.shareURL == nil { remoteNavigation.setBlocked(block, false); reports.close() }
+        }
         #if os(iOS)
-        .sheet(isPresented: $sharing, onDismiss: { reports.cleanupShare() }) { if let url = reports.shareURL { DiagnosticShareView(url: url) } }
+        .sheet(item: Binding(get: { reports.shareURL.map { DiagnosticShareItem(url: $0) } }, set: { if $0 == nil { reports.cleanupShare() } })) { item in
+            DiagnosticShareView(url: item.url)
+        }
         #endif
     }
     private var incidentSection: some View {
@@ -344,7 +345,7 @@ struct DiagnosticReportView: View {
                         TextEditor(text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.draft?.description = String($0.prefix(4_000)) })).frame(minHeight: 100).accessibilityLabel("What happened? Description is user content")
                             .disabled(draft.consented)
                         #else
-                        TextField("Optional description; phone can finish it", text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.draft?.description = String($0.prefix(4_000)) })).disabled(draft.consented)
+                        TextField("Optional description", text: Binding(get: { reports.draft?.description ?? "" }, set: { reports.draft?.description = String($0.prefix(4_000)) })).disabled(draft.consented)
                         #endif
         }
     }
@@ -372,8 +373,10 @@ struct DiagnosticReportView: View {
     private func incidentActions(_ draft: DiagnosticStore.Draft) -> some View {
         Group {
             #if os(iOS)
-                        Button("Save / share local report") { reports.export() }.disabled(reports.busy)
-                        if reports.shareURL != nil { Button("Open share sheet") { sharing = true } }
+                        Button("Save / share diagnostic ZIP") { reports.export() }.disabled(reports.busy).accessibilityIdentifier("diagnostics-export")
+                        Text("Attach the ZIP to your bug or issue report. Saving does not submit it.").font(.caption)
+                        #else
+                        Text("This TV keeps the report locally. Transferring the TV's ZIP to a phone is not available yet.").font(.caption)
                         #endif
                         if DiagnosticRecorder.shared.recording { Button("Stop reproduction recording") { reports.stopReproduction() } }
                         else { Button("Record reproduction (five minutes)") { reports.startReproduction() }.disabled(draft.consented || reports.busy) }
@@ -382,20 +385,6 @@ struct DiagnosticReportView: View {
                         Text("Requires a Cinema administrator account.").font(.caption)
                         Text("Checks contact only the configured Cinema endpoint, with a total 2 MiB reply ceiling. No media or cellular transfer probe is started.").font(.caption)
         }
-    }
-    private var sendingSection: some View {
-        Section("Send to support") {
-                    TextField("HTTPS support origin", text: $reports.destination).disabled(reports.draft?.consented == true)
-                    Toggle("I approve uploading to " + (reports.destination.isEmpty ? "this destination" : reports.destination), isOn: $reports.uploadConsent)
-                    TextField("Optional one-use support invitation", text: $reports.invitationCode).disabled(reports.draft?.consented == true)
-                    Button("Use invitation") { reports.redeemInvitation() }.disabled(reports.busy || !reports.uploadConsent || reports.invitationCode.isEmpty)
-                    Text("Upload is separate from Cinema. A disconnected enrollment expires within 24 hours. Revocation cannot be confirmed while Cinema is unreachable.").font(.caption)
-                    Button("Send report") { reports.send() }.disabled(reports.busy || !reports.uploadConsent || reports.draft == nil)
-                    Button("Finish on a phone") { reports.send(phone: true) }.disabled(reports.busy || !reports.uploadConsent || reports.draft == nil)
-                    if let draft = reports.draft, draft.handoff != nil { DiagnosticHandoffView(draft: draft) }
-                    Button("Cancel handoff / delete staged draft", role: .destructive) { reports.discard() }.disabled(reports.busy || reports.draft == nil)
-                    if reports.draft?.handoff != nil { Button("Cancel handoff and keep staged draft") { reports.discard(keep: true) }.disabled(reports.busy) }
-                }
     }
     private var pendingSection: some View {
         Section("Local history and pending reports") {
@@ -435,6 +424,11 @@ struct DiagnosticHandoffView: View {
 }
 
 #if os(iOS)
+private struct DiagnosticShareItem: Identifiable {
+    let url: URL
+    var id: String { url.path }
+}
+
 struct DiagnosticShareView: UIViewControllerRepresentable {
     let url: URL
     func makeUIViewController(context: Context) -> UIActivityViewController {
