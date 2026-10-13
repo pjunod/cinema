@@ -18,7 +18,7 @@ duplicating its evidence.
 | Intended effort | Archive implementation merged into `main`; TV follow-up #1081 on `codex/diagnostics-tv-archive` |
 | Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent owned clone; current main base `201313f58`, archive landing `569678f25` (#1066). TV product commits `8c80b9a81` and `77ae61186`, native witnesses `5616f0f4b`; review correction `d0f0df4d9`; focused qualification passes and all three final-review findings are corrected. User checkouts untouched. |
+| Implementation workspace/base | Independent owned clone; current main base `b35eebb6b`, archive landing `569678f25` (#1066). TV product commits `8c80b9a81` and `77ae61186`, native witnesses `5616f0f4b`; review correction `d0f0df4d9`; focused qualification passes and all three final-review findings are corrected. User checkouts untouched. |
 | Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
 | Plan review | Original review: 12 findings corrected; history follow-up: two findings corrected. One final TV-archive review found three issues, all corrected with focused regressions in §26; no repeated review cycle. |
 | Promotion/deployment | #1037 and archive-first #1066 merged. #1066 landing `569678f2513695bb9f7b1923ed2c39af6dd19043`, eight required passes. Hosted/private service rollout cancelled by the archive direction; no production changes by this chat. |
@@ -825,3 +825,12 @@ inputs changed. Both projects’ index/backlog rows are preserved. The source
 comparison retains the applicable native/browser/archive receipts; the focused
 current-base docs/fence and bounded-observation contracts run again, and the
 normal pinned hook checks the exact merged source before publication.
+
+
+The green candidate `575126ae1` passed all eight checks on run5046. Before
+merge, main advanced to the qualified playback landing `b35eebb6b`. The
+combined source preserves both regression catalogs and documentation entries;
+Apple build238 replaces the colliding claim237. The new Apple and Rust inputs
+are being qualified before another push. Android171 and the archive protocol
+source are unchanged; the existing executed Android and browser receipts
+remain applicable. No hardware or fleet installation is part of this step.

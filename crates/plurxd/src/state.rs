@@ -2310,6 +2310,25 @@ fn index_file_budget(duration_ms: Option<i64>) -> Duration {
     )
 }
 
+/// A local whole-file read owes viewers the same preemption as a queued
+/// cluster pass. Dropping the losing build kills its child and removes its
+/// partial subtitle stage; callers must return without recording a refusal
+/// or advancing the cursor so the interrupted file remains due.
+pub(crate) async fn local_index_until_foreground<T>(
+    transcode: &TranscodeManager,
+    build: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = async {
+            while transcode.pretranscode_worker_idle() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        } => None,
+        result = build => Some(result),
+    }
+}
+
 /// Stable, wrapping order for one bounded pass. The cursor is the last file a
 /// prior pass examined, successful or not; starting after it prevents a few
 /// permanently slow/unsupported rows from starving every later title.
@@ -8318,15 +8337,25 @@ impl JobManager {
                         reporter(progress);
                     }
                 });
-            let mut builds = crate::fragindex::build_riding_shared(
-                &file,
-                &missing.iter().map(|(video, _)| *video).collect::<Vec<_>>(),
-                &runtime_cache,
-                index_file_budget(file.duration_ms),
-                ride_along.as_ref(),
-                Some(reporter),
+            let Some(mut builds) = local_index_until_foreground(
+                &transcode,
+                crate::fragindex::build_riding_shared(
+                    &file,
+                    &missing.iter().map(|(video, _)| *video).collect::<Vec<_>>(),
+                    &runtime_cache,
+                    index_file_budget(file.duration_ms),
+                    ride_along.as_ref(),
+                    Some(reporter),
+                ),
             )
-            .await;
+            .await
+            else {
+                tracing::info!(
+                    file_id,
+                    "local fragment index yielded to foreground playback"
+                );
+                return;
+            };
             // §5.6 for the local pass: a shared read that failed as a pass —
             // the child failed or the budget ran out — says nothing about what
             // each identity does alone, so each of those is read again on its
@@ -8353,15 +8382,26 @@ impl JobManager {
                         return;
                     }
                     attempted += 1;
-                    builds[slot] = crate::fragindex::build_riding(
-                        &file,
-                        *video,
-                        &runtime_cache,
-                        index_file_budget(file.duration_ms),
-                        None,
-                        Some(self.index_pass_reporter(&progress_jobs[slot], &node_id)),
+                    let Some(build) = local_index_until_foreground(
+                        &transcode,
+                        crate::fragindex::build_riding(
+                            &file,
+                            *video,
+                            &runtime_cache,
+                            index_file_budget(file.duration_ms),
+                            None,
+                            Some(self.index_pass_reporter(&progress_jobs[slot], &node_id)),
+                        ),
                     )
-                    .await;
+                    .await
+                    else {
+                        tracing::info!(
+                            file_id,
+                            "local fragment index retry yielded to foreground playback"
+                        );
+                        return;
+                    };
+                    builds[slot] = build;
                 }
             }
             for ((_, identity), build) in missing.iter().zip(builds) {

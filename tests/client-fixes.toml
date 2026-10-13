@@ -6384,3 +6384,38 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/AuthScreens.kt"
 source_anchor = "downFocus: FocusRequester? = null"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/DiagnosticReportNavigationTest.kt"
 test_anchor = "televisionDescriptionDpadReachesPrivacyWithoutStartingUpload"
+
+[[fixes]]
+id = "apple.growing-playlist-before-native-attachment"
+commits = ["94124323d9439c92c78d2d36d0e1dc3a6cc6fcce"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "try await prepareGrowingPlaylist(url)"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testGrowingPlaylistMustBePublishedBeforeNativeAttachment()"
+
+[[fixes]]
+id = "apple.failover-retires-predecessor-preparation-error"
+commits = []
+supplements = "apple.growing-playlist-before-native-attachment"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func retryMediaOnNextNode(_ failedItem: AVPlayerItem)"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testFailoverAttachmentRetiresThePredecessorsPreparationError()"
+
+[[fixes]]
+id = "apple.growing-master-waits-for-media-child"
+commits = ["e690c27bb1c0c4a2949a566e030a46cf5fbd4b50"]
+source = "clients/apple/Sources/GrowingPlaylistPreparation.swift"
+source_anchor = "while !pending.isEmpty"
+test = "clients/apple/Tests/GrowingPlaylistPreparationTests.swift"
+test_anchor = "func testImmediateMasterWaitsForPublishedChildAndCancelsItsRequest()"
+
+[[fixes]]
+id = "apple.growing-preparation-retains-ingress-recovery"
+commits = []
+supplements = "apple.growing-master-waits-for-media-child"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let successor = Session.shared.nextMediaFailoverURL(path,"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testGrowingPreparationRecoversIngressAndCannotAttachAfterStop()"
+

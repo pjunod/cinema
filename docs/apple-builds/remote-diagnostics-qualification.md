@@ -2,7 +2,7 @@
 
 **Status:** built — TV ZIP download, phone export and recovery have software qualification.
 
-Build: 237
+Build: 238
 Issue: #1081
 
 Registers the diagnostics reporting UI regression in the iOS test target.
@@ -19,7 +19,7 @@ share-sheet action. Native TV local archive transfer is built and being qualifie
 deferred. No physical-device or signed
 release qualification follows from simulator execution.
 
-Build237 adds a physically selected, temporary local download for the TV's
+Build238 adds a physically selected, temporary local download for the TV's
 own immutable ZIP. The QR opens a phone page; Download consumes the link once.
 Closing/background/authorization retirement revokes it. The UI warns about
 unencrypted trusted Wi-Fi. Actual tvOS remote UI passes selected archive and

@@ -217,6 +217,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md](streaming/TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md) | Why TCL Auto rejects Android capability counts, the catalog read-budget failure, and the reviewed plan for one catalog per create with legacy-client compatibility. | open |
 | [TCL-CATALOG-REPAIR-STATUS.md](streaming/TCL-CATALOG-REPAIR-STATUS.md) | Implementation decisions, commit milestones, compile and review evidence, and remaining physical TCL acceptance. | open |
 | [PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md](streaming/PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md) | Bounded October 1 repair: periodic quorum-loss diagnosis, startup/retirement/recovery correctness, VOD delivery truth, agent/Opus review dispositions, and one fast-lane PR. | open |
+| [PLAYBACK-START-FAILURES-2026-10-13.md](streaming/PLAYBACK-START-FAILURES-2026-10-13.md) | Standalone reader contention, unpublished native attachment, stale inventory/error ownership and separate Apple TV audio evidence; fixes built, deployment and physical acceptance open. | open |
 | [BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md](streaming/BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md) | Why a 79.5 GB remux on the Apple TV was interrupted five times in 20 minutes: deploy restarts, two leader-caused quorum fences, a rolling retirement on resume, and the whole-file attestation that restarted from byte 0 on every preemption (fixed). | open |
 | [HEATED-RIVALRY-S1E5-QUORUM-RCA-AND-FIX.md](streaming/HEATED-RIVALRY-S1E5-QUORUM-RCA-AND-FIX.md) | S1E5 outage: WAL correlations and SQL reproduction establish the missing lookup index; reviewed proposal covers migrations, cadence, and web recovery. | open |
 | [Heated Rivalry quorum build status](streaming/HEATED-RIVALRY-S1E5-QUORUM-STATUS.html) | Current implementation phase, review, validation, PR, decisions, and cleanup for the quorum repair. | open |
@@ -781,3 +782,5 @@ DV final bounded serving evidence: [HTTP summary](evidence/dv-processing-2026-10
 | [Remote diagnostics Apple wire](apple-builds/remote-diagnostics-wire.md) | What is added to the Apple report format contract? | built |
 | [Remote diagnostics Apple capture](apple-builds/remote-diagnostics-capture.md) | What changes in native private report capture, share, send and TV approval? | open |
 | [remote-diagnostics-qualification.md](apple-builds/remote-diagnostics-qualification.md) | Qualifies offline phone ZIP export, native TV local downloads and same-incident relaunch recovery. | built |
+
+Apple growing playlist attachment: [preparation and failover correction](apple-builds/914-growing-playlist-attachment.md) — **built; physical acceptance open**.
