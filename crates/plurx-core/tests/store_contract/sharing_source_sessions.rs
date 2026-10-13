@@ -1,4 +1,4 @@
-//! Real three-voter candidate Source reservation; no worker is dispatched.
+//! Candidate reservation and installed Source lifecycle contracts; no worker is dispatched.
 use super::*;
 use plurx_core::{
     cluster::membership::{
@@ -24,8 +24,12 @@ async fn exec(client: &Client, sql: &str) {
         .await
         .expect("replicated fixture mutation");
 }
-async fn observation(client: &Client, credential: &CredentialKey) -> SourceAdmissionMembers {
-    observe_source_admission_members_for_contract(client, 1, credential)
+async fn observation(
+    client: &Client,
+    credential: &CredentialKey,
+    raft_id: u64,
+) -> SourceAdmissionMembers {
+    observe_source_admission_members_for_contract(client, raft_id, credential)
         .await
         .expect("actual quorum factory")
         .expect("both floors ready")
@@ -98,6 +102,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let store = open_contract_hiqlite_store(&cluster).await;
+    let local_raft_id = 1;
     let client = Client::remote(
         cluster.addresses.clone(),
         true,
@@ -271,7 +276,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     }
     let first = intent(&store, grant, &credential, &key, "first").await;
     let second = intent(&store, grant, &credential, &key, "second").await;
-    let old = observation(&client, &credential).await;
+    let old = observation(&client, &credential, local_raft_id).await;
     exec(
         &client,
         "UPDATE cluster_nodes SET role='learner' WHERE node_id='node-1'",
@@ -329,7 +334,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         .expect("zero Source rows after stale proof");
     assert_eq!(rows[0].value, "0");
     let duplicate = intent(&store, grant, &credential, &key, "first").await;
-    let proof = observation(&client, &credential).await;
+    let proof = observation(&client, &credential, local_raft_id).await;
     let (a, b) = tokio::join!(
         store.claim_source_media_session(&first, &proof),
         store.claim_source_media_session(&duplicate, &proof)
@@ -363,7 +368,10 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     };
     assert!(matches!(
         store
-            .claim_source_media_session(&second, &observation(&client, &credential).await)
+            .claim_source_media_session(
+                &second,
+                &observation(&client, &credential, local_raft_id).await
+            )
             .await
             .expect("second distinct request"),
         SourceClaimOutcome::Acquired(_)
@@ -371,14 +379,20 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     let third = intent(&store, grant, &credential, &key, "third").await;
     assert!(matches!(
         store
-            .claim_source_media_session(&third, &observation(&client, &credential).await)
+            .claim_source_media_session(
+                &third,
+                &observation(&client, &credential, local_raft_id).await
+            )
             .await
             .expect("Source candidate fixture operation"),
         SourceClaimOutcome::Capacity(SourceCapacity::PendingStarts)
     ));
     let retry = intent(&store, grant, &credential, &key, "first").await;
     match store
-        .claim_source_media_session(&retry, &observation(&client, &credential).await)
+        .claim_source_media_session(
+            &retry,
+            &observation(&client, &credential, local_raft_id).await,
+        )
         .await
         .expect("Source candidate fixture operation")
     {
@@ -407,7 +421,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         "DELETE FROM cache_consumer_pins WHERE storage_id='foreign'",
     )
     .await;
-    let before = observation(&client, &credential).await;
+    let before = observation(&client, &credential, local_raft_id).await;
     exec(
         &client,
         "UPDATE settings SET value='false' WHERE key='sharing_enabled'",
@@ -441,7 +455,10 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     .await;
     assert!(matches!(
         store
-            .claim_source_media_session(&retry, &observation(&client, &credential).await)
+            .claim_source_media_session(
+                &retry,
+                &observation(&client, &credential, local_raft_id).await
+            )
             .await
             .expect("Source candidate fixture operation"),
         SourceClaimOutcome::Retired(_)
@@ -453,7 +470,10 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     .await;
     assert!(matches!(
         store
-            .claim_source_media_session(&third, &observation(&client, &credential).await)
+            .claim_source_media_session(
+                &third,
+                &observation(&client, &credential, local_raft_id).await
+            )
             .await
             .expect("Source candidate fixture operation"),
         SourceClaimOutcome::Unavailable
@@ -463,8 +483,11 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         "UPDATE files SET path='/private/synthetic.mkv' WHERE id=1",
     )
     .await;
-    let SourceClaimOutcome::Acquired(third_binding) = store
-        .claim_source_media_session(&third, &observation(&client, &credential).await)
+    let SourceClaimOutcome::Acquired(_third_binding) = store
+        .claim_source_media_session(
+            &third,
+            &observation(&client, &credential, local_raft_id).await,
+        )
         .await
         .expect("third actual claim")
     else {
@@ -496,7 +519,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
                 hash,
             )
             .await;
-            let proof = observation(&client, &credential).await;
+            let proof = observation(&client, &credential, local_raft_id).await;
             let (x, y) = tokio::join!(
                 store.claim_source_media_session(&x, &proof),
                 store.claim_source_media_session(&y, &proof)
@@ -513,7 +536,10 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             let ninth = intent_hash(&store, other, &credential, &key, "ninth", hash).await;
             assert!(matches!(
                 store
-                    .claim_source_media_session(&ninth, &observation(&client, &credential).await)
+                    .claim_source_media_session(
+                        &ninth,
+                        &observation(&client, &credential, local_raft_id).await
+                    )
                     .await
                     .expect("Source candidate fixture operation"),
                 SourceClaimOutcome::Capacity(SourceCapacity::SourceSlots)
@@ -522,8 +548,170 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     }
     let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("Source candidate fixture operation");
     assert_eq!(rows[0].value, "8");
+    let marker = client
+        .query_consistent_map::<SchemaText, _>(
+            "SELECT CAST(schema_version AS TEXT) AS value FROM cluster_meta WHERE singleton=1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("candidate marker retained");
+    assert_eq!(marker[0].value, AUTH_SCHEMA_BASELINE_VERSION.to_string());
+    let routes = client
+        .query_consistent_map::<SchemaText, _>(
+            "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("candidate never activates an ordinary session");
+    assert_eq!(routes[0].value, "0");
+}
+
+#[test]
+fn sharing_source_installed_three_voters_activation_publication_and_terminal_release() {
+    startup_observer::run_full_hiqlite_fixture(
+        "sharing_source_installed_three_voters_activation_publication_and_terminal_release",
+        || async {
+            let _case = HIQLITE_CASE.lock().await;
+            source_contract::with_cluster(|cluster| Box::pin(installed_source_lifecycle(cluster)))
+                .await;
+        },
+    );
+}
+
+async fn installed_source_lifecycle(cluster: &source_contract::SourceContractCluster) {
+    let store = cluster.open_store().await;
+    let client = cluster.client();
+    cluster.install_source().await;
+    let boot = Uuid::parse_str("01a1128a-944d-4f11-9bf2-c7599d355213")
+        .expect("metadata-only fixture boot");
+    cluster.publish_metadata_ingress_boot(boot).await;
+    let (owner_node_id, local_raft_id, credential) = cluster.selected_member(0).await;
+    let (_, other_raft_id, _) = cluster.selected_member(1).await;
+    let marker = client
+        .query_consistent_map::<SchemaText, _>(
+            "SELECT CAST(schema_version AS TEXT) AS value FROM cluster_meta WHERE singleton=1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("actual installed marker");
+    assert_eq!(marker[0].value, AUTH_SCHEMA_VERSION.to_string());
+    let identity = store
+        .sharing_identity(1000)
+        .await
+        .expect("Source candidate fixture operation");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Source".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from("/synthetic")],
+            anime: false,
+        })
+        .await
+        .expect("Source candidate fixture operation")
+        .id;
+    let grant = Uuid::new_v4();
+    let invitation = Uuid::new_v4();
+    store
+        .create_share_invitation(InvitationRecord {
+            id: invitation,
+            token_hash: "a".repeat(64),
+            library_ids: vec![library],
+            created_at_ms: 1000,
+            expires_at_ms: 2000,
+        })
+        .await
+        .expect("Source candidate fixture operation");
+    store
+        .claim_share(ShareClaim {
+            invitation_id: invitation,
+            invitation_hash: "a".repeat(64),
+            claim_id: Uuid::new_v4(),
+            grant_id: grant,
+            recipient_server_id: Uuid::new_v4(),
+            recipient_name: "synthetic".into(),
+            credential_hash: "b".repeat(64),
+            now_ms: 1001,
+        })
+        .await
+        .expect("Source candidate fixture operation");
+    store
+        .approve_share(grant, 1, 1002)
+        .await
+        .expect("Source candidate fixture operation");
+    let envelope = store
+        .source_catalogue_revision_key(identity.server_id, identity.catalogue_epoch)
+        .await
+        .expect("read installer-owned revision key")
+        .expect("installer published key");
+    let key = CatalogueRevisionKey::open(&credential, identity, &envelope)
+        .expect("open actual selected purpose material");
+    client.execute("INSERT INTO items(id,library_id,kind,title,sort_title,added_at,updated_at) VALUES(1,$1,'movie','Movie','movie',1000,1000)",hiqlite::params!(library)).await.expect("Source candidate fixture operation");
+    exec(&client,"INSERT INTO files(id,item_id,path,size,mtime,scanned_at) VALUES(1,1,'/private/synthetic.mkv',20,1000,1000)").await;
+    // Reconstruct only the held runtime state through actual public admission.
+    // Candidate races, stale membership and capacity refusal remain above.
+    let second = intent(&store, grant, &credential, &key, "second").await;
+    let third = intent(&store, grant, &credential, &key, "third").await;
+    let mut bindings = Vec::new();
+    for request in [&second, &third] {
+        let SourceClaimOutcome::Acquired(binding) = store
+            .claim_source_media_session(
+                request,
+                &observation(&client, &credential, local_raft_id).await,
+            )
+            .await
+            .expect("installed admission")
+        else {
+            panic!("installed actual claim");
+        };
+        bindings.push(binding);
+    }
+    let third_binding = bindings.pop().expect("third held runtime binding");
+    for index in 1..=3 {
+        let other = Uuid::new_v4();
+        let invitation = Uuid::new_v4();
+        let hash = format!("{:064x}", index + 100);
+        client.execute("INSERT INTO sharing_invitations SELECT $1,$2,library_ids_json,created_at_ms,expires_at_ms,'consumed',NULL,NULL FROM sharing_invitations LIMIT 1",hiqlite::params!(invitation.to_string(),format!("{index:064x}"))).await.expect("Source candidate fixture operation");
+        client.execute("INSERT INTO sharing_exports SELECT $1,$2,recipient_server_id,recipient_name,$3,scope_generation,credential_generation,catalogue_generation,mutation_generation,state,pending_expires_at_ms,created_at_ms,updated_at_ms FROM sharing_exports WHERE id=$4",hiqlite::params!(other.to_string(),invitation.to_string(),hash.clone(),grant.to_string())).await.expect("Source candidate fixture operation");
+        client.execute("INSERT INTO sharing_export_libraries SELECT $1,library_id FROM sharing_export_libraries WHERE grant_id=$2",hiqlite::params!(other.to_string(),grant.to_string())).await.expect("Source candidate fixture operation");
+        {
+            let x = intent_hash(
+                &store,
+                other,
+                &credential,
+                &key,
+                &format!("g-{index}-a"),
+                hash.clone(),
+            )
+            .await;
+            let y = intent_hash(
+                &store,
+                other,
+                &credential,
+                &key,
+                &format!("g-{index}-b"),
+                hash,
+            )
+            .await;
+            let proof = observation(&client, &credential, local_raft_id).await;
+            let (x, y) = tokio::join!(
+                store.claim_source_media_session(&x, &proof),
+                store.claim_source_media_session(&y, &proof)
+            );
+            assert!(matches!(
+                x.expect("Source candidate fixture operation"),
+                SourceClaimOutcome::Acquired(_)
+            ));
+            assert!(matches!(
+                y.expect("Source candidate fixture operation"),
+                SourceClaimOutcome::Acquired(_)
+            ));
+        }
+    }
     let second_binding = match store
-        .claim_source_media_session(&second, &observation(&client, &credential).await)
+        .claim_source_media_session(
+            &second,
+            &observation(&client, &credential, local_raft_id).await,
+        )
         .await
         .expect("Source candidate fixture operation")
     {
@@ -539,7 +727,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         )
         .await
         .expect("rotate current fixture credential");
-    let local = observation(&client, &credential).await;
+    let local = observation(&client, &credential, local_raft_id).await;
     let (first_assignment, retry_assignment) = tokio::join!(
         store.assign_source_dispatch(&second_binding, &credential, &local),
         store.assign_source_dispatch(&second_binding, &credential, &local)
@@ -548,17 +736,18 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         let assignment = assignment
             .expect("atomic assignment")
             .expect("same actual local worker");
-        assert_eq!(assignment.owner_node_id(), "node-1");
+        assert_eq!(assignment.owner_node_id(), owner_node_id);
         assert_eq!(assignment.dispatch_generation(), 1);
         assert_eq!(
             assignment.binding().incarnation_id(),
             second_binding.incarnation_id()
         );
     }
-    let other_worker = observe_source_admission_members_for_contract(&client, 2, &credential)
-        .await
-        .expect("second worker full floor")
-        .expect("second actual voter");
+    let other_worker =
+        observe_source_admission_members_for_contract(&client, other_raft_id, &credential)
+            .await
+            .expect("second worker full floor")
+            .expect("second actual voter");
     assert!(store
         .assign_source_dispatch(&second_binding, &credential, &other_worker)
         .await
@@ -577,7 +766,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         .assign_source_dispatch(
             &second_binding,
             &credential,
-            &observation(&client, &credential).await,
+            &observation(&client, &credential, local_raft_id).await,
         )
         .await
         .expect("activation assignment")
@@ -586,7 +775,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         .prepare_source_activation_authority(
             &assignment,
             &credential,
-            &observation(&client, &credential).await,
+            &observation(&client, &credential, local_raft_id).await,
         )
         .await
         .expect("fresh activation witness")
@@ -607,7 +796,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         fence_predecessor: true,
         request_id: Some("second".into()),
         request_fingerprint: "d".repeat(64),
-        owner_node_id: "node-1".into(),
+        owner_node_id: owner_node_id.clone(),
         recipe_json: "{}".into(),
         response_json: "{}".into(),
         publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
@@ -629,7 +818,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             .prepare_source_activation_authority(
                 &assignment,
                 &credential,
-                &observation(&client, &credential).await
+                &observation(&client, &credential, local_raft_id).await
             )
             .await
             .expect("foreign actor lineage refuses mint"),
@@ -702,7 +891,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         .prepare_source_activation_authority(
             &assignment,
             &credential,
-            &observation(&client, &credential).await,
+            &observation(&client, &credential, local_raft_id).await,
         )
         .await
         .expect("fresh retry authority")
@@ -730,7 +919,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         .route;
     assert_eq!(route.principal, activation.principal);
     assert_eq!(route.session_id, activation.session_id);
-    assert_eq!(route.owner_node_id, "node-1");
+    assert_eq!(route.owner_node_id, owner_node_id);
     assert_eq!(
         route.publication_ready_at_ms,
         MEDIA_SESSION_PUBLICATION_BLOCKED
@@ -748,19 +937,19 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             .prepare_source_owned_route_authority(
                 &assignment,
                 &credential,
-                &observation(&client, &credential).await
+                &observation(&client, &credential, local_raft_id).await
             )
             .await
             .expect("unresolved owned refusal"),
         SourceOwnedRouteAuthorityRead::Unavailable
     ));
-    // Actual coupled Store publication; this candidate SQL receipt does not
+    // Actual coupled Store publication; this installed SQL receipt does not
     // allocate a producer or qualify physical readiness.
     let SourcePublicationAuthorityRead::Ready(publication) = store
         .prepare_source_publication_authority(
             &assignment,
             &credential,
-            &observation(&client, &credential).await,
+            &observation(&client, &credential, local_raft_id).await,
         )
         .await
         .expect("actual voter publication permission")
@@ -807,7 +996,10 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     assert_eq!(published.session_id, activation.session_id);
     assert!(matches!(
         store
-            .claim_source_media_session(&second, &observation(&client, &credential).await)
+            .claim_source_media_session(
+                &second,
+                &observation(&client, &credential, local_raft_id).await
+            )
             .await
             .expect("old rotated peer credential refuses"),
         SourceClaimOutcome::Unavailable
@@ -815,13 +1007,13 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     let current_replay =
         intent_hash(&store, grant, &credential, &key, "second", "f".repeat(64)).await;
     assert!(
-        matches!(store.claim_source_media_session(&current_replay,&observation(&client, &credential).await).await.expect("ready-zero replay before full Source cap"),SourceClaimOutcome::Resolved{binding,..} if binding.same_identity(&second_binding))
+        matches!(store.claim_source_media_session(&current_replay,&observation(&client, &credential, local_raft_id).await).await.expect("ready-zero replay before full Source cap"),SourceClaimOutcome::Resolved{binding,..} if binding.same_identity(&second_binding))
     );
     let SourcePublicationAuthorityRead::Ready(publication_replay) = store
         .prepare_source_publication_authority(
             &assignment,
             &credential,
-            &observation(&client, &credential).await,
+            &observation(&client, &credential, local_raft_id).await,
         )
         .await
         .expect("exact publication permission")
@@ -841,7 +1033,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         .prepare_source_owned_route_authority(
             &assignment,
             &credential,
-            &observation(&client, &credential).await,
+            &observation(&client, &credential, local_raft_id).await,
         )
         .await
         .expect("actual voter owned witness")
@@ -861,7 +1053,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         .as_millis() as i64;
     let expiry = route.lease_expires_at_ms + 60000;
     assert!(store
-        .renew_media_sessions("node-1", std::slice::from_ref(&renewal), at, expiry)
+        .renew_media_sessions(&owner_node_id, std::slice::from_ref(&renewal), at, expiry)
         .await
         .expect("ordinary Shared refuses")
         .is_empty());
@@ -906,7 +1098,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             .prepare_source_owned_route_authority(
                 &assignment,
                 &credential,
-                &observation(&client, &credential).await
+                &observation(&client, &credential, local_raft_id).await
             )
             .await
             .expect("refreshed owned witness"),
@@ -925,7 +1117,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         .assign_source_dispatch(
             &third_binding,
             &credential,
-            &observation(&client, &credential).await,
+            &observation(&client, &credential, local_raft_id).await,
         )
         .await
         .expect("actual assigned no-spawn worker")
