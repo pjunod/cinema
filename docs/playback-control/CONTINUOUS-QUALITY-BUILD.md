@@ -10846,3 +10846,20 @@ and whitespace checks pass. Units remain unexecuted. The catalog boundary
 regression also covers forged identities, incompatible decoders, larger
 actual/rung geometry, unsustainable and parser-only rows. Runtime proof of
 the corrected ordinary negotiation remains next.
+
+
+**Apple refresh of completed Auto costs.** A prepared canonical attachment can
+be valid before its complete encoded output measurements exist. Apple now
+refreshes missing measurements through the existing playback-decision API,
+with one request per thirty seconds and a five-second cancellation deadline.
+The response must still own the lifecycle, viewer action, recipe, source,
+file, attached session/candidate, item and real presentation target. It
+updates only the candidate catalog and measured outputs; it does not rename
+the attachment or reset Auto evidence, cooldown or switch budget. Invalid
+catalog identity and duplicate candidate IDs are refused. Conflicting output
+proofs remain duplicated so the existing unique-proof check refuses them.
+
+iOS and tvOS build-for-testing pass, including the two ownership/proof
+regressions, without executing units. Real cost proof still requires completed
+production full-mux output jobs; partial preparation and advertised bitrate
+remain insufficient. Native runtime verification remains outstanding.

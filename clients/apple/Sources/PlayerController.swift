@@ -1150,6 +1150,42 @@ struct PlayerReopenRequest: Equatable {
     var intent: PlayerOpenIntent = .normal
 }
 
+/// A cost response describes one recipe, display and attached presentation.
+/// A plan is never allowed to rename that presentation while refreshing costs.
+struct AutoCostCatalogOwner: Equatable {
+    var lifecycle: Int
+    var viewerAction: Int
+    var recipe: Int
+    var file: Int
+    var source: String
+    var session: String
+    var candidate: String
+    var target: PresentationTarget
+
+    func owns(_ current: AutoCostCatalogOwner?, sameItem: Bool) -> Bool {
+        sameItem && current == self
+    }
+}
+
+func autoNeedsEncodedCostRefresh(_ candidates: [QualityCandidate], outputs: [MeasuredCandidateOutput]?, current: String) -> Bool {
+    guard let incumbent = candidates.first(where: { $0.hasValidIdentity && $0.id == current }) else { return false }
+    return candidates.contains {
+        $0.hasValidIdentity && $0.decoderCompatible && $0.route == "encode" && $0.grade == incumbent.grade
+            && measuredCandidatePeak($0, outputs: outputs) == nil
+    }
+}
+
+func validatedAutoCostCatalog(_ candidates: [QualityCandidate]?, outputs: [MeasuredCandidateOutput]?, current: String)
+    -> (candidates: [QualityCandidate], outputs: [MeasuredCandidateOutput])? {
+    guard let candidates, !candidates.isEmpty, candidates.count <= 64,
+          candidates.allSatisfy({ $0.hasValidIdentity }),
+          Set(candidates.map(\.id)).count == candidates.count,
+          candidates.contains(where: { $0.id == current }), (outputs?.count ?? 0) <= 64 else { return nil }
+    // Preserve duplicate descriptors: the existing unique-proof check refuses
+    // them. Filtering never turns two conflicting proofs into one good proof.
+    return (candidates, (outputs ?? []).filter { output in candidates.contains { output.matches($0) } })
+}
+
 /// Desired recipe and attached media have different lifetimes. A later seek
 /// must carry an unpublished quality/audio change, not seek the old recipe.
 struct PlayerRecipeRevision: Equatable {
@@ -2506,6 +2542,10 @@ final class PlayerController: ObservableObject {
     private var autoActiveCandidateId: String?
     private var autoRouteProtocol: String?
     private var autoNextTickMs = 0
+    private var autoCostRefreshTask: Task<Void, Never>?
+    private var autoCostRefreshDeadlineTask: Task<Void, Never>?
+    private var autoCostRefreshGeneration = 0
+    private var autoCostRefreshNextMs = 0
     private var autoUpgradeSinceMs: Int?
     private var autoUpgradeEvidence = AutoUpgradeEvidenceWindow()
     private var autoLastSwitchMs: Int?
@@ -5455,6 +5495,7 @@ final class PlayerController: ObservableObject {
     }
 
     func stop(deactivateAudioSession: Bool = true) {
+        cancelAutoCostCatalogRefresh()
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
         retireAutoTransferMetrics()
@@ -5707,6 +5748,7 @@ final class PlayerController: ObservableObject {
     ) async {
         guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
               initialDecisionGeneration == generation, let model else { return }
+        cancelAutoCostCatalogRefresh()
         let layoutAttempt = snapshotAttempt()
         do {
             // Allow the mounted surface to report its first layout; no panel/model
@@ -11171,6 +11213,77 @@ extension PlayerController {
         if autoPreparing { autoDesiredCandidate = nil; autoPreparing = false }
     }
 
+    private func cancelAutoCostCatalogRefresh() {
+        autoCostRefreshGeneration &+= 1
+        autoCostRefreshTask?.cancel()
+        autoCostRefreshTask = nil
+        autoCostRefreshDeadlineTask?.cancel()
+        autoCostRefreshDeadlineTask = nil
+        autoCostRefreshNextMs = 0
+    }
+
+    private func autoCostCatalogOwner() -> AutoCostCatalogOwner? {
+        guard started, selectedHeight == nil, !selectedQualityIsOriginal,
+              let file = decision?.fileId, let context = fileContext,
+              let session = sessionId, let candidate = autoActiveCandidateId,
+              let target = presentationTarget else { return nil }
+        return AutoCostCatalogOwner(lifecycle: lifecycleGeneration, viewerAction: viewerActionEpoch,
+            recipe: recipeRevision.desired, file: file, source: context.sourceKey,
+            session: session, candidate: candidate, target: target)
+    }
+
+    /// Refresh advisory full-output measurements without restarting Auto or
+    /// replacing the installed identity. One bounded fetch may run per 30s.
+    private func refreshMissingAutoCosts(now: Int) {
+        guard autoCostRefreshTask == nil, now >= autoCostRefreshNextMs,
+              !autoPreparing, preparedPlayer == nil,
+              let model, model.displayAwareAuto, model.autoAbr,
+              model.displayAwareAutoProtocol == "route-v1", autoRouteProtocol == "route-v1",
+              let owner = autoCostCatalogOwner(), let context = fileContext,
+              (try? context.localID(expected: owner.file)) != nil,
+              let item = player.currentItem,
+              autoNeedsEncodedCostRefresh(decision?.qualityCandidates ?? [],
+                  outputs: decision?.measuredCandidateOutputs, current: owner.candidate) else { return }
+        autoCostRefreshNextMs = now + 30_000
+        autoCostRefreshGeneration &+= 1
+        let generation = autoCostRefreshGeneration
+        let attempt = snapshotAttempt()
+        let selection = PrePlaySelection(audioIndex: selectedAudio,
+            subtitleIndex: selectedSubtitle ?? PrePlaySelection.subtitleOff)
+        let receipt = currentLinkReceipt()
+        let refresh = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.autoCostRefreshGeneration == generation {
+                    self.autoCostRefreshTask = nil
+                    self.autoCostRefreshDeadlineTask?.cancel()
+                    self.autoCostRefreshDeadlineTask = nil
+                }
+            }
+            let fresh = try? await Caps.PresentationContext.$target.withValue(owner.target) {
+                try await PlaybackLinkRequestContext.$receipt.withValue(receipt) {
+                    try await model.playbackDecision(fileId: owner.file, selection: selection,
+                        quality: .auto, audioOffsetMs: 0, fileContext: context)
+                }
+            }
+            guard !Task.isCancelled, self.autoCostRefreshGeneration == generation,
+                  !self.autoPreparing, self.preparedPlayer == nil,
+                  self.attemptStillCurrent(attempt, fence: .autoCatalogRefresh),
+                  owner.owns(self.autoCostCatalogOwner(), sameItem: self.player.currentItem === item),
+                  let fresh, fresh.decision.fileId == owner.file,
+                  fresh.decision.displayAwareAutoProtocol == "route-v1",
+                  let catalog = validatedAutoCostCatalog(fresh.decision.qualityCandidates,
+                      outputs: fresh.decision.measuredCandidateOutputs, current: owner.candidate) else { return }
+            self.decision?.qualityCandidates = catalog.candidates
+            self.decision?.measuredCandidateOutputs = catalog.outputs
+        }
+        autoCostRefreshTask = refresh
+        autoCostRefreshDeadlineTask = Task { @MainActor in
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            refresh.cancel()
+        }
+    }
+
     private func measuredCostCatalog(_ offered: [QualityCandidate]) -> [QualityCandidate] {
         offered.map { candidate in
             var measured = candidate
@@ -11427,6 +11540,7 @@ extension PlayerController {
         autoUpgradeEvidence.bind(attachment: player.currentItem.map(ObjectIdentifier.init), attempt: playbackAttemptId, nowMs: now)
         guard now >= autoNextTickMs else { return }
         autoNextTickMs = now + 5_000
+        refreshMissingAutoCosts(now: now)
         guard model?.displayAwareAuto == true, model?.autoAbr == true,
               model?.displayAwareAutoProtocol == "route-v1",
               decision?.displayAwareAutoProtocol == "route-v1", autoRouteProtocol == "route-v1",

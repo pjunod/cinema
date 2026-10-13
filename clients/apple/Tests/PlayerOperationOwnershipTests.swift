@@ -4,6 +4,52 @@ import XCTest
 
 @MainActor
 final class PlayerOperationOwnershipTests: XCTestCase {
+    func testAutoCostRefreshRejectsLateRecipeDisplayAndAttachmentResponses() async {
+        let target = PresentationTarget(widthPx: 1_920, heightPx: 1_080, revision: 1)
+        let captured = AutoCostCatalogOwner(lifecycle: 1, viewerAction: 2, recipe: 3,
+            file: 4, source: "local-source", session: "attached-session", candidate: "attached-candidate", target: target)
+        var current = captured
+        let pending = Task { @MainActor in
+            await Task.yield()
+            return captured.owns(current, sameItem: true)
+        }
+        current.recipe += 1
+        let accepted = await pending.value
+        XCTAssertFalse(accepted)
+        current = captured
+        current.target = PresentationTarget(widthPx: 1_920, heightPx: 1_080, revision: 2)
+        XCTAssertFalse(captured.owns(current, sameItem: true))
+        current = captured
+        current.session = "successor-session"
+        XCTAssertFalse(captured.owns(current, sameItem: true))
+        current = captured
+        current.source = "replacement-source"
+        XCTAssertFalse(captured.owns(current, sameItem: true))
+        current = captured
+        current.viewerAction += 1
+        XCTAssertFalse(captured.owns(current, sameItem: true))
+        XCTAssertFalse(captured.owns(captured, sameItem: false))
+        XCTAssertTrue(captured.owns(captured, sameItem: true))
+    }
+
+    func testAutoCostRefreshRequiresUniqueCompleteOutputRatherThanAdvertisedPeak() throws {
+        let candidate = QualityCandidate(id: "0a7ba9bab6fbdd31bab5e5e362a3fac7", recipeDigest: Array(repeating: 0, count: 32),
+            route: "encode", width: 1_920, height: 1_080, targetHeight: 1_080,
+            averageBps: 3_000_000, peakBps: 4_000_000, grade: "sdr", decoderCompatible: true,
+            completeCache: false, sustainable: false)
+        let complete = MeasuredCandidateOutput(candidateId: candidate.id, recipeDigest: candidate.recipeDigest,
+            route: candidate.route, artifactId: "00000000-0000-0000-0000-000000000001",
+            outputIdentity: String(repeating: "0", count: 64), qualification: "complete_full_mux_rfc8216_v1",
+            averageBps: 3_000_000, peakBps: 4_000_000)
+        XCTAssertTrue(autoNeedsEncodedCostRefresh([candidate], outputs: nil, current: candidate.id))
+        XCTAssertFalse(autoNeedsEncodedCostRefresh([candidate], outputs: [complete], current: candidate.id))
+        XCTAssertTrue(autoNeedsEncodedCostRefresh([candidate], outputs: [complete, complete], current: candidate.id))
+        let catalog = try XCTUnwrap(validatedAutoCostCatalog([candidate], outputs: [complete, complete], current: candidate.id))
+        XCTAssertNil(measuredCandidatePeak(candidate, outputs: catalog.outputs))
+        XCTAssertNil(validatedAutoCostCatalog([candidate], outputs: [complete], current: "different-attached-candidate"))
+        XCTAssertNil(validatedAutoCostCatalog([candidate, candidate], outputs: [complete], current: candidate.id))
+    }
+
     private let caps = DeviceCaps(
         client: ClientInfo(kind: "ios", build: "test", ua: "test"),
         video: [], audio: [], containers: [], transports: [], dvTransport: "none",
