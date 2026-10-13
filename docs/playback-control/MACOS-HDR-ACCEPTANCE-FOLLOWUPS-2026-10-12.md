@@ -1,7 +1,6 @@
 # Mac HDR acceptance — playback follow-ups
 
-**Status:** open — observed failures and bounded investigations; no follow-up
-repair or new hardware qualification is claimed · **Recorded:** 2026-10-12.
+**Status:** open — observed failures and bounded investigations; F1 repairs are built; new hardware qualification remains open · **Recorded:** 2026-10-12.
 
 The [full acceptance report](../streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 closes the ordinary HDR10 Metal/CPU comparison. This document specifies the
@@ -156,7 +155,7 @@ the observed 20-second wait is not an approved tolerance. Add a regression at
 the identified demand/loader/settlement boundary, plus a real browser receipt
 for frame presentation. A test that only updates the timeline is insufficient.
 
-### Repair progress — source reviewed; PR qualification and HDR hardware acceptance open
+### Repair progress — local VOD repair merged; reopened-startup repair reviewed; HDR acceptance open
 
 F1 is claimed by the paused-seek repair branch. On the October 12 main
 baseline `6dc031387`, Pause suspends the established HLS loader with
@@ -210,6 +209,25 @@ needs; this local VOD loader repair does not claim to close them. In particular,
 a forced reopen while still paused suppresses its fresh startup manifest. The
 deadline test proves a bounded reopen attempt, not autonomous settlement or
 terminal failure on that replacement.
+
+The local VOD repair merged in [PR #1047](http://forge.lan:3000/noirr/plurx/pulls/1047)
+as `b2adc5f789f981e189ad72bfbe48383355b5b272`; run 4935 passed the current
+candidate's policy, web, Rust and Main promotion gates. The earlier statements
+about qualification describe the retained pre-merge evidence.
+
+The October 13 follow-up gives an executed paused hls.js replacement seek its
+own startup loading lease. It can send the first playlist without Play and
+complete startup on the actual target frame, then restore suspension. Its
+original deadline remains active while paused; the real diagnosis raises
+`startup_exhausted` with Close/Retry if no frame arrives. A suppressed or
+interrupted unparsed playlist uses the existing single corrective reload.
+Play carries a reserved reload to the current intent; Pause during the pending
+seek preserves target loading. Supersession and cancellation fence old work.
+Three initial regressions fail before the repair; 51 focused tests now pass.
+Astra found and verified corrections to renewal, retry handoff and unparsed
+supersession. Normal follow-up qualification and genuine HDR-on-Air acceptance
+are pending. Native HLS remains unchanged and is not newly qualified. The
+existing repair receipt retains the source identities and failed controls.
 
 ## 4. F2 — manual SDR quality change loses alignment
 

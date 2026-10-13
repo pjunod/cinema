@@ -704,5 +704,48 @@
         "archive_sha256": "2d4467e8fbf2e56a99df326cdc1ebc3edc0426b452944010310fa7802a2301a1"
       }
     }
+  },
+  "local_vod_landing": {
+    "pr": 1047,
+    "head": "936b944216b7fb55ea38095f2588a0213a50370e",
+    "base": "2cbf7c39e617977eb002ebadde5f7fc016b07678",
+    "run_id": 4935,
+    "promotion_gate": "passed",
+    "merge": "b2adc5f789f981e189ad72bfbe48383355b5b272"
+  },
+  "paused_reopened_startup": {
+    "recorded": "2026-10-13",
+    "base": "b2adc5f789f981e189ad72bfbe48383355b5b272",
+    "scope": "Executed paused hls.js replacement seek; native HLS unchanged",
+    "before": {
+      "passed": 5,
+      "failed": 3
+    },
+    "after": {
+      "focused_passed": 51,
+      "failed": 0
+    },
+    "review": {
+      "reviewer": "Astra",
+      "verdict": "approve",
+      "corrected": [
+        "renewal stopped loading without restarting",
+        "Play cancelled reserved corrective manifest reload",
+        "supersession before manifest parse interrupted loading without reload"
+      ]
+    },
+    "behavior": "Current executed target owns first manifest and target loading under Pause. Actual target frame completes startup and restores suspension. Missing frame retains original startup deadline and real terminal diagnosis. Existing single corrective reload credit is retained.",
+    "qualification": "pending",
+    "hardware": "pending",
+    "evidence_limits": [
+      "Generated and unit evidence does not qualify HDR hardware",
+      "First review-before supersession test had missing clearEffectiveProcessing harness stub; retained as invalid until corrected",
+      "Detach fixture destroys its network loader to model teardown; no backend fault inferred from fixture status ReferenceError"
+    ],
+    "source_sha256": {
+      "crates/plurxd/src/web/player/player.js": "37a7d5dbe17edef153a95a16fcce31caf630e9297ee73eb94f485cffa7374eaa",
+      "crates/plurxd/src/web/player/transport.js": "674112c0ea4d620a3799b6312ecda7e25812c4f0ae5889dec4bb3492b5d0d0df",
+      "tests/playback/paused-hls-resume.test.js": "4f92ce48bb101ae7251e802bf3139efdecc394b41daa5028c93365cb0299943c"
+    }
   }
 }
