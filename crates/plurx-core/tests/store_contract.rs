@@ -12494,8 +12494,72 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 /// in its v22 shape before v27's column can be dropped. v41 and v35-v39 are
 /// `IF NOT EXISTS`, so their objects are left in place and replay cleanly.
 /// One list, so the next non-idempotent migration is reversed in one place.
+/// Historical baseline fixtures have no sharing rows or Source activation.
+/// Rewind only the later empty sharing objects before lowering their marker;
+/// production correctly refuses an old marker that still carries this lineage.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn drop_baseline_sharing_schema(client: &Client) {
+    assert_eq!(
+        replicated_schema_marker(client).await,
+        AUTH_SCHEMA_BASELINE_VERSION,
+        "only a disposable unactivated baseline may be rewound"
+    );
+    let source_objects: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT (SELECT COUNT(*) FROM sqlite_master WHERE name = 'sharing_source_schema_installation') + (SELECT COUNT(*) FROM pragma_table_info('media_sessions') WHERE name = 'principal_kind') AS value",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read fixture Source activation shape");
+    assert_eq!(
+        source_objects[0].value, 0,
+        "Source activation cannot be rewound"
+    );
+    let tables = [
+        include_str!("../src/store/sharing_schema.sql"),
+        include_str!("../src/store/sharing_ingress_custody_schema.sql"),
+    ]
+    .into_iter()
+    .flat_map(str::lines)
+    .filter_map(|line| line.strip_prefix("CREATE TABLE "))
+    .map(|line| line.split_whitespace().next().expect("declared table name"))
+    .collect::<Vec<_>>();
+    assert!(
+        !tables.is_empty(),
+        "baseline sharing schema must be inventoried"
+    );
+    for table in &tables {
+        assert!(table.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                format!("SELECT COUNT(*) AS value FROM {table}"),
+                hiqlite::params!(),
+            )
+            .await
+            .expect("read disposable sharing fixture rows");
+        assert_eq!(
+            rows[0].value, 0,
+            "populated sharing table {table} cannot be rewound"
+        );
+    }
+    client
+        .txn(
+            tables
+                .into_iter()
+                .rev()
+                .map(|table| (format!("DROP TABLE {table}"), hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("rewind empty baseline sharing objects")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit baseline sharing rewind");
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn downgrade_dv_request_provenance(client: &Client) {
+    drop_baseline_sharing_schema(client).await;
     client
         .txn([
             (
@@ -22129,6 +22193,7 @@ async fn fragment_prune_worst_case_keeps_three_voter_proofs_and_playback_mutatio
     {
         result.expect("workload statement");
     }
+    drop_baseline_sharing_schema(&client).await;
     client
         .txn(vec![
             (
@@ -32989,7 +33054,10 @@ async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixt
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("offline audio contract operation");
-    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_schema_marker(&client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
     let stored = migrated
         .offline_package_for_user(&legacy.id, user_id)
         .await
@@ -33016,7 +33084,10 @@ async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixt
     HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("additive column replay");
-    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_schema_marker(&client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
 }
 
 #[tokio::test]
@@ -37628,7 +37699,10 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v47 through v48 read-index migration");
-    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_schema_marker(&client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
     assert_eq!(
         replicated_read_index_count(&client).await,
         3,
@@ -37650,7 +37724,10 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     let reopened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("an idempotent step forgives a repeated attempt");
-    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_schema_marker(&client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
     assert_eq!(replicated_read_index_count(&client).await, 3);
     assert_read_index_movie(&reopened, "hiqlite replayed v48", library_id, movie).await;
 }
