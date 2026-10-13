@@ -10182,64 +10182,27 @@ async fn handle_request(
             .map(|urls| Response::ArtworkPeerUrls { urls })
             .or_else(|error| Ok(membership_error_response(error))),
         Request::RejectDuplicateArtworkUrl { public_http_url } => {
-            membership_manager_with_artwork_url(
+            validate_artwork_url_claim(
                 client,
-                replication,
-                store
-                    .as_ref()
-                    .cloned()
-                    .context("auth store has not been opened")?,
+                membership_ref(membership)?,
                 launch,
-                public_http_url,
+                &public_http_url,
+                None,
             )
             .await
-            .map(|_| Response::Ok)
-            .or_else(|error| Ok(membership_error_response(error)))
         }
         Request::ReuseRemovedArtworkUrl {
             removed_node_id,
             public_http_url,
         } => {
-            let rejoined_node_id = format!("rejoined-{removed_node_id}");
-            let rejoined_raft_id = launch
-                .nodes
-                .iter()
-                .map(|node| node.id)
-                .max()
-                .unwrap_or_default()
-                .saturating_add(100);
-            match membership_manager_with_identity_artwork_url(
+            validate_artwork_url_claim(
                 client,
-                replication,
-                store
-                    .as_ref()
-                    .cloned()
-                    .context("auth store has not been opened")?,
+                membership_ref(membership)?,
                 launch,
-                rejoined_node_id.clone(),
-                rejoined_raft_id,
-                public_http_url,
+                &public_http_url,
+                Some(&removed_node_id),
             )
             .await
-            {
-                Ok(_) => {
-                    for statement in [
-                        "DELETE FROM cluster_node_hostnames WHERE node_id = $1",
-                        "DELETE FROM cluster_node_http WHERE node_id = $1",
-                        "DELETE FROM cluster_node_activity_keys WHERE node_id = $1",
-                        "DELETE FROM cluster_nodes WHERE node_id = $1",
-                    ] {
-                        client
-                            .execute(
-                                statement,
-                                hiqlite::macros::params!(rejoined_node_id.as_str()),
-                            )
-                            .await?;
-                    }
-                    Ok(Response::Ok)
-                }
-                Err(error) => Ok(membership_error_response(error)),
-            }
         }
         Request::ArtworkPeerAuth { ref filename } => membership_ref(membership)?
             .artwork_peer_auth(filename)
@@ -11635,6 +11598,97 @@ impl From<&mut Row<'_>> for MembershipTombstoneRow {
             removed_at: row.get("removed_at"),
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct HarnessArtworkClaimRow {
+    published: Option<String>,
+    claimed: Option<String>,
+    removed_at: Option<i64>,
+}
+
+impl From<&mut Row<'_>> for HarnessArtworkClaimRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            published: row.get("published"),
+            claimed: row.get("claimed"),
+            removed_at: row.get("removed_at"),
+        }
+    }
+}
+
+async fn read_artwork_claim(client: &Client, node_id: &str) -> Result<HarnessArtworkClaimRow> {
+    let mut rows = client
+        .query_consistent_map::<HarnessArtworkClaimRow, _>(
+            "SELECT http.public_http_url AS published, claim.public_http_url AS claimed, \
+             node.removed_at FROM cluster_nodes node \
+             LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
+             LEFT JOIN cluster_node_http_claims claim ON claim.node_id = node.node_id \
+             WHERE node.node_id = $1",
+            params!(node_id),
+        )
+        .await?;
+    if rows.len() != 1 {
+        bail!("artwork claim fixture requires exactly one existing node: {node_id}");
+    }
+    Ok(rows.remove(0))
+}
+
+async fn validate_artwork_url_claim(
+    client: &Client,
+    membership: &MembershipManager,
+    launch: &NodeLaunch,
+    public_http_url: &str,
+    removed_node_id: Option<&str>,
+) -> Result<Response> {
+    let node_id = format!("node-{}", launch.node_id);
+    let before = read_artwork_claim(client, &node_id).await?;
+    let original = before
+        .published
+        .as_deref()
+        .context("active node has no published URL")?;
+    if before.claimed.as_deref() != Some(original) || before.removed_at.is_some() {
+        bail!("active artwork fixture has inconsistent publication/claim: {before:?}");
+    }
+    if let Some(removed_node_id) = removed_node_id {
+        if removed_node_id == node_id {
+            bail!("removed artwork owner must be distinct from the active observer");
+        }
+        let removed = read_artwork_claim(client, removed_node_id).await?;
+        if removed.removed_at.is_none() || removed.published.as_deref() != Some(public_http_url) {
+            bail!("artwork URL reuse requires its historical owner to be tombstoned: {removed:?}");
+        }
+    }
+    let attempt = async {
+        let result = membership
+            .validation_publish_artwork_url(public_http_url)
+            .await;
+        let after = read_artwork_claim(client, &node_id).await?;
+        if removed_node_id.is_some() && result.is_ok() {
+            if after.published.as_deref() != Some(public_http_url)
+                || after.claimed.as_deref() != Some(public_http_url)
+            {
+                bail!("removed URL was not atomically published and claimed: {after:?}");
+            }
+        } else if removed_node_id.is_none() && after != before {
+            bail!("duplicate URL attempt changed publication or durable claim: {after:?}");
+        }
+        Ok(result
+            .map(|()| Response::Ok)
+            .unwrap_or_else(membership_error_response))
+    }
+    .await;
+    // Restore through the production transaction after every mutation attempt,
+    // including failed claims or verification reads. Both rows must be restored.
+    membership
+        .validation_publish_artwork_url(original)
+        .await
+        .context("restore original artwork URL after claim validation")?;
+    let restored = read_artwork_claim(client, &node_id).await?;
+    if restored != before {
+        bail!("artwork claim restoration changed the fixture: {restored:?}");
+    }
+    attempt
 }
 
 fn store_ref(store: &Option<Arc<HiqliteAuthStore>>) -> Result<&HiqliteAuthStore> {

@@ -485,12 +485,13 @@ assert.equal(context.ACT_TIMER, null);
         contract = runpy.run_path(
             str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_port_contract"
         )
-        ports = contract["free_ports"](0, 3)
+        ports = contract["free_ports"](0, 4)
 
-        self.assertEqual(len(ports), 3)
-        self.assertEqual(len(set(ports)), 3)
+        self.assertEqual(len(ports), 4)
+        self.assertEqual(len(set(ports)), 4)
         self.assertTrue(all(port > 0 for port in ports))
-        self.assertIn("self.port, self.raft_port, self.api_port = free_ports", script)
+        self.assertIn("self.port, self.raft_port, self.api_port, self.jellyfin_port = free_ports", script)
+        self.assertIn('jellyfin_port = {self.jellyfin_port}', script)
         self.assertIn('raft_bind = "127.0.0.1:{self.raft_port}"', script)
         self.assertIn('api_bind = "127.0.0.1:{self.api_port}"', script)
 
@@ -3253,9 +3254,10 @@ assert.equal(context.ACT_TIMER, null);
             "cluster-transport-recovery-contracts"
         )
 
-        self.assertEqual(len(contract_commands), 14)
+        self.assertEqual(len(contract_commands), 7)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=67", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=70", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_NAMES=", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
         exact_regressions = (
@@ -3272,11 +3274,13 @@ assert.equal(context.ACT_TIMER, null);
             "recovery_series_counts_every_replacement_client_connection_attempt",
             "production_snapshot_executor_worker_is_counted_until_joined",
         )
-        for offset, regression in enumerate(exact_regressions, start=2):
+        for regression in exact_regressions[:7]:
+            self.assertIn("transport_recovery::tests::" + regression, contract_commands[1])
+            self.assertTrue(all(regression not in command for command in contract_commands[2:]))
+        for offset, regression in enumerate(exact_regressions[7:], start=2):
             self.assertIn(regression, contract_commands[offset])
             self.assertIn("scripts/require-test-count", contract_commands[offset])
             self.assertIn("--lib -- --exact", contract_commands[offset])
-        for offset in range(9, 14):
             self.assertIn("vendor/hiqlite/Cargo.toml", contract_commands[offset])
 
         voter_commands = make_dry_run_commands(
