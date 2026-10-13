@@ -498,6 +498,121 @@ def install_shipping_package(package, destination):
     shutil.copy2(package / "sealed-ffprobe", Path("/usr/local/lib/plurx/ffprobe"))
 
 
+def git_source_scratch_bytes(scratch, *, live):
+    """Git can atomically rename pack/lock entries while a fetch is running."""
+    total = 0
+    for path in scratch.rglob("*"):
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            if live:
+                continue
+            raise
+        if stat.S_ISREG(metadata.st_mode):
+            total += metadata.st_size
+        elif not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("Git source scratch contains a link or special file")
+    return total
+
+
+def bounded_git_source_command(arguments, scratch, deadline, output=None):
+    """Bound the public fetch's process group, output and private object store."""
+    import signal
+    import subprocess
+    if time.monotonic() >= deadline:
+        raise ValueError("Git source acquisition deadline exceeded before spawn")
+    git = shutil.which("git")
+    if git is None:
+        raise ValueError("Git is required for the declared source acquisition")
+    environment = {
+        "PATH": os.defpath, "HOME": str(scratch / "home"), "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0", "GIT_ATTR_NOSYSTEM": "1",
+    }
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy"):
+        if name in os.environ:
+            environment[name] = os.environ[name]
+    stdout = output or scratch / "command.stdout"
+    stderr = scratch / "command.stderr"
+    with stdout.open("xb" if output else "wb") as out, stderr.open("wb") as err:
+        if time.monotonic() >= deadline:
+            raise ValueError("Git source acquisition deadline exceeded before spawn")
+        process = subprocess.Popen(
+            [git, "-c", "credential.helper=", "-c", "http.extraHeader=", *arguments],
+            cwd=scratch, env=environment, stdout=out, stderr=err,
+            start_new_session=True,
+        )
+        try:
+            while True:
+                size = git_source_scratch_bytes(scratch, live=True)
+                archive_size = output.stat().st_size if output else 0
+                if size > 256 * 1024**2 or archive_size > 256 * 1024**2:
+                    raise ValueError("Git source acquisition exceeds bounded scratch/archive storage")
+                if time.monotonic() >= deadline:
+                    raise ValueError("Git source acquisition deadline exceeded")
+                if process.poll() is not None:
+                    break
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+            if process.returncode:
+                raise ValueError("Git source acquisition failed: " + stderr.read_text(errors="replace")[-2048:])
+        finally:
+            # Fetch can spawn remote-https/index-pack children. Retire the entire
+            # group and reap its direct owner before retry/cleanup can proceed.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+    if git_source_scratch_bytes(scratch, live=False) > 256 * 1024**2:
+        raise ValueError("Git source acquisition exceeds bounded scratch storage")
+    if time.monotonic() >= deadline:
+        raise ValueError("Git source acquisition deadline exceeded after retirement")
+    if output:
+        return b""
+    if stdout.stat().st_size > 65536:
+        raise ValueError("Git source identity output exceeds bound")
+    return stdout.read_bytes()
+
+
+def acquire_git_source_archive(role, path, deadline):
+    """Reproduce an explicit pinned Git archive; never fall back after HTTP failure."""
+    import tempfile
+    from urllib.parse import urlsplit
+    acquisition = role.get("archive_acquisition", {})
+    commit = role.get("commit")
+    url = urlsplit(role.get("url", ""))
+    if (acquisition != {"kind": "git-archive", "commit": commit}
+            or role.get("kind") != "git" or not isinstance(commit, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", commit)
+            or url.scheme != "https" or not url.hostname or not url.path
+            or url.username or url.password or url.query or url.fragment):
+        raise ValueError("declared Git archive requires the exact public pinned commit")
+    try:
+        with tempfile.TemporaryDirectory(prefix=".source-git-", dir=path.parent) as temporary:
+            scratch = Path(temporary)
+            (scratch / "home").mkdir()
+            bounded_git_source_command(["init", "--bare", "--template=", "repo"], scratch, deadline)
+            bounded_git_source_command([
+                "--git-dir=repo", "fetch", "--quiet", "--depth=1", "--no-tags",
+                "--no-recurse-submodules", role["url"], commit,
+            ], scratch, deadline)
+            observed = bounded_git_source_command([
+                "--git-dir=repo", "rev-parse", "FETCH_HEAD^{commit}",
+            ], scratch, deadline).decode().strip()
+            if observed != commit:
+                raise ValueError("fetched Git source commit differs from immutable pin")
+            bounded_git_source_command([
+                "--git-dir=repo", "archive", "--format=tar.gz", commit,
+            ], scratch, deadline, output=path)
+        if path.stat().st_size > 256 * 1024**2 or sha(path) != role["archive_sha256"]:
+            raise ValueError("Git archive bytes differ from immutable source checksum")
+        if time.monotonic() >= deadline:
+            raise ValueError("Git source acquisition deadline exceeded during verification")
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
 def package_pipeline(root, jobs, seconds):
     """Real Bookworm export owner; nothing is emitted from declarations."""
     import subprocess
@@ -511,7 +626,7 @@ def package_pipeline(root, jobs, seconds):
     inputs.mkdir()
     lock_path = Path(__file__).with_name("linux-video-ffmpeg-sdk-sources.json")
     lock = json.loads(lock_path.read_text())
-    downloads, embedded_patches = {}, {}
+    downloads, embedded_patches, git_acquisitions = {}, {}, {}
     def add(name, url, digest):
         if Path(name).name != name or not url.startswith("https://"):
             raise ValueError("public source role must use a plain name and HTTPS")
@@ -521,6 +636,8 @@ def package_pipeline(root, jobs, seconds):
         downloads[name] = claim
     for role in [*lock["sources"].values(), *lock.get("build_tools", {}).values()]:
         add(role["archive"], role["url"], role["archive_sha256"])
+        if role.get("archive_acquisition"):
+            git_acquisitions[role["archive"]] = role
         if role.get("submodule_tree_evidence"):
             evidence = role["submodule_tree_evidence"]
             add(evidence["archive"], evidence["url"], evidence["sha256"])
@@ -545,16 +662,23 @@ def package_pipeline(root, jobs, seconds):
         if time.monotonic() >= deadline:
             raise ValueError("immutable source download deadline exceeded")
         path = inputs / name
-        with urllib.request.urlopen(url, timeout=min(60, max(1, deadline-time.monotonic()))) as response, path.open("xb") as output:
-            size = 0
-            while chunk := response.read(1024 * 1024):
-                size += len(chunk)
-                total += len(chunk)
-                if size > 256 * 1024**2 or total > 2 * 1024**3 or time.monotonic() >= deadline:
-                    raise ValueError("immutable input download exceeds bounded source budget")
-                output.write(chunk)
+        print(f"Acquiring immutable source {name}", flush=True)
+        if name in git_acquisitions:
+            acquire_git_source_archive(git_acquisitions[name], path, deadline)
+            total += path.stat().st_size
+            if total > 2 * 1024**3:
+                raise ValueError("immutable input download exceeds bounded source budget")
+        else:
+            with urllib.request.urlopen(url, timeout=min(60, max(1, deadline-time.monotonic()))) as response, path.open("xb") as output:
+                size = 0
+                while chunk := response.read(1024 * 1024):
+                    size += len(chunk)
+                    total += len(chunk)
+                    if size > 256 * 1024**2 or total > 2 * 1024**3 or time.monotonic() >= deadline:
+                        raise ValueError("immutable input download exceeds bounded source budget")
+                    output.write(chunk)
         if sha(path) != expected:
-            raise ValueError("immutable source download checksum mismatch")
+            raise ValueError(f"immutable source download checksum mismatch: {name}; expected {expected}; observed {sha(path)}")
     helper = load("prepare-linux-dolby-sdk")
     source_members, _ = helper.tar_members((inputs / "jellyfin-source.tar.gz").read_bytes())
     for name, patch in embedded_patches.items():
@@ -563,6 +687,9 @@ def package_pipeline(root, jobs, seconds):
             raise ValueError("embedded pinned recipe patch differs from authenticated source")
         (inputs / name).write_bytes(contents)
     (inputs / "download-manifest.json").write_text(json.dumps(downloads, sort_keys=True, indent=2) + "\n")
+    (inputs / "git-acquisition-manifest.json").write_text(json.dumps({
+        name: role["archive_acquisition"] for name, role in git_acquisitions.items()
+    }, sort_keys=True, indent=2) + "\n")
     # This is the authenticated official binary from runtime-assets, before
     # replacement. Observe its full configuration instead of manufacturing it.
     buildconf = root / "official-buildconf.txt"
