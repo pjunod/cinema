@@ -31,12 +31,15 @@ NODELESS_MODERN_CAPTURES = {
 MODERN_JVM_BINARY = 'b6adf75c6ce0d3666da6eced72b5ca9359e175e2aa958812919bb7b547e4a201'
 MODERN_JVM_ORIGINAL_BINDING = '127ce14386b206d0c140d67d6d876c0b6e2a44a27b07951434a736cb6a8cb6f8'
 MODERN_JVM_ORIGINAL_ENVIRONMENT = '7e937df7e09182c234d801fc1b4a9d37149a8d678f8a28f0ffe3475a5979ded7'
-JVM_BUILD_INPUTS = {
+ORIGINAL40_JVM_BUILD_INPUTS = {
     'clients/android/gradle/wrapper/gradle-wrapper.properties': 'd01b41913834fb3cb14e71f69a08898e6a47e663b08f5c9b8c7e0772c38889d2',
     'clients/android/gradle/libs.versions.toml': 'ced36ebe0658327618e6b959982f31acc1baae352a46ee2b8cc23b15250f00c2',
     'clients/android/app/build.gradle.kts': '7780da0bd369665d9dd71d73efdf9246efdeaee21fe03cf7cc98688314a885c8',
     'clients/android/build.gradle.kts': '0aec8d2e01e88e3abdd6b4690201ddd107b10c05b6e86a4014315cc4ab64fd46',
     'clients/android/settings.gradle.kts': '5891ed8c25e4412da6dd0fff31d21626fa2bb3dde4cc6326e62d39eb9db79055',
+}
+CURRENT_JVM_BUILD_INPUTS = {**ORIGINAL40_JVM_BUILD_INPUTS,
+    'clients/android/app/build.gradle.kts': '976150cce61cc8292d5710768dfa059e2c4c640e5bc13385d389900ac824177d',
 }
 CONTRACTS = {'validation': 'python-source-cohort-v1',
              'operations': 'python-source-cohort-v1',
@@ -45,6 +48,24 @@ CONTRACTS = {'validation': 'python-source-cohort-v1',
 # Finite original local captures. Unknown historical patch/binary measurements
 # remain unknown. These exact log/source/tool identities authorize no new run.
 LEGACY_PYTHON = {
+    '7222aea9ea9fa174d94c877d61a5162719f4589528ce053a09caaa20bed99797': {
+        'source': '584d72a3453ae2350cde760d01122db70520da29',
+        'tool': 'exec-a003587b-d684-4167-a978-4d82381ad0aa',
+        'count': 157, 'mode': 'python-selected-partial', 'exit_code': 1,
+        'actual_execution_source_commit': None,
+        'selectors': ['test_contracts', 'test_player_input_fence', 'test_doc_status_audit',
+                      'test_docs_index', 'test_remote_diagnostics_status', 'test_apple_build_claims',
+                      'test_mobile_build_claims', 'test_mobile_versions'],
+        'failed_ids': ['test_contracts.OperationsContractCase.test_ui_baseline_reserves_distinct_http_raft_and_api_ports'],
+        'python_patch': None, 'interpreter_sha256': None},
+    '26a2157691aecf52871e13521306b611618cafe5bfc90d41154d52b360a51897': {
+        'source': '584d72a3453ae2350cde760d01122db70520da29',
+        'tool': 'exec-fca8a650-0139-46fe-84f7-2629a26f08d2',
+        'count': 1, 'mode': 'python-selected', 'exit_code': 0,
+        'actual_execution_source_commit': None,
+        'selectors': ['test_contracts.OperationsContractCase.test_ui_baseline_reserves_distinct_http_raft_and_api_ports'],
+        'exact_selected_repair': ['test_contracts.OperationsContractCase.test_ui_baseline_reserves_distinct_http_raft_and_api_ports'],
+        'python_patch': None, 'interpreter_sha256': None},
     '92b4fe6722bf85c03fd7dadaf6cb631402c0d926664a9235d10904bcaca0f77b': {
         'source': 'a7fa0053e6089d77bb2ad31539ea3c7be723ec5c',
         'tool': 'exec-a7f4a0f5-4eaf-4514-9b61-f1b54db2c609',
@@ -79,6 +100,15 @@ LEGACY_PYTHON = {
             'test_bounded_write_capture', 'test_player_input_fence',
             'test_rolling_producer_ownership_inventory'],
         'python_patch': None, 'interpreter_sha256': None},
+}
+
+
+ORIGINAL_PYTHON_REPAIR_EDGES = {
+    '7222aea9ea9fa174d94c877d61a5162719f4589528ce053a09caaa20bed99797': {
+        'source': '584d72a3453ae2350cde760d01122db70520da29',
+        'id': 'test_contracts.OperationsContractCase.test_ui_baseline_reserves_distinct_http_raft_and_api_ports',
+        'repair': '26a2157691aecf52871e13521306b611618cafe5bfc90d41154d52b360a51897',
+    },
 }
 
 
@@ -127,6 +157,38 @@ def python_rows(text, kind, universe, other=()):
     receipts.require(len(summaries) == 1 and int(summaries[0]) == len(all_ids),
                      'Named Python outcomes differ from actual outer count')
     return result
+
+
+def selected_python_outcomes(text, capture, selected):
+    """Opaque selected cohort with only actual explicit failure identities."""
+    expected = capture['count']
+    receipts.require(len(selected) == expected, 'Original selected source membership differs from native count')
+    if capture['mode'] == 'python-selected-partial':
+        headings = re.findall(r'^(?:ERROR|FAIL): (\w+) \(([^)]+)\)$', text, re.M)
+        failed = {test_id.removeprefix('tests.validation.').removeprefix('tests.operations.')
+                  for _, test_id in headings}
+        receipts.require(headings and len(headings) == len(failed)
+                         and failed == set(capture['failed_ids']) and failed <= selected
+                         and len(re.findall(r'^Ran ' + str(expected) + r' tests? in [0-9.]+s\n\s*\nFAILED \(errors=' + str(len(failed)) + r'\)$', text, re.M)) == 1,
+                         'Original explicit error cohort differs or hides failures/skips')
+        return {test_id: 'fail' if test_id in failed else 'opaque-pass' for test_id in selected}
+    receipts.require(capture['mode'] == 'python-selected'
+                     and len(re.findall(r'^Ran ' + str(expected) + r' tests? in [0-9.]+s\n\s*\nOK$', text, re.M)) == 1,
+                     'Original selected command did not reach unique outer plain-OK')
+    if capture.get('exact_selected_repair'):
+        receipts.require(expected == 1 and selected == set(capture['selectors']) == set(capture['exact_selected_repair']),
+                         'A repair requires one exact actual selector and native one-case OK')
+    return {test_id: 'opaque-pass' for test_id in selected}
+
+
+
+def require_source_bound_repairs(failures, repairs):
+    """Finite original exact selector closes its historical event only."""
+    for (source, test_id, failed_log), sequence in failures.items():
+        edge = ORIGINAL_PYTHON_REPAIR_EDGES.get(failed_log)
+        receipts.require(edge is not None and edge['source'] == source and edge['id'] == test_id
+                         and repairs.get((source, test_id, edge['repair']), 0) > sequence,
+                         'Original source-variant failure lacks later exact same-source repair')
 
 
 def junit_rows(raw, universe):
@@ -278,6 +340,29 @@ def current_binding(proof, record, raw, candidate, archive_digest):
     return command, binding
 
 
+
+def original_jvm_failure_witness(proof, capture):
+    """An original failed command is a witness, never inferred passing rows."""
+    witness = capture['prior_failure']
+    text = blob(proof, {'sha256_ref': witness['log_sha256']}).decode()
+    klass, method = witness['id'].rsplit('/', 1)
+    receipts.require(re.search(r'^> Task :app:testDebugUnitTest FAILED[ \t]*$', text, re.M)
+                     and re.search(r'^' + re.escape(klass.rsplit('.', 1)[1] + ' > ' + method) + r' FAILED$', text, re.M)
+                     and re.search(r'^' + str(witness['native_count']) + r' tests completed, '
+                                   + str(witness['native_failures']) + r' failed$', text, re.M)
+                     and witness['native_failures'] == 1
+                     and re.search(r'^BUILD FAILED in ', text, re.M),
+                     'Original explicit JVM failure witness differs')
+    commands = receipts.bounded_json(blob(proof, {'sha256_ref': witness['original_commands_sha256']}))['items']
+    failed = [(index, row) for index, row in enumerate(commands) if row['id'] == witness['tool']]
+    repaired = [(index, row) for index, row in enumerate(commands) if row['id'] == capture['tool']]
+    receipts.require(len(failed) == len(repaired) == 1 and failed[0][0] < repaired[0][0]
+                     and failed[0][1]['exitCode'] == 1 and repaired[0][1]['exitCode'] == 0
+                     and failed[0][1]['source_turn'] == repaired[0][1]['source_turn'],
+                     'Original JVM failure and native repair command chronology differs')
+    return witness['id']
+
+
 def legacy_jvm_outcomes(proof, record, capture, raw, universe):
     """Retain finite source equivalence without inventing execution measurements."""
     origin, coverage = record['origin'], record['coverage']
@@ -323,6 +408,9 @@ def legacy_jvm_outcomes(proof, record, capture, raw, universe):
     receipts.require(set(result) == membership
                      and (record['exit_code'] == 0) == all(value == 'pass' for value in result.values()),
                      'Legacy XML membership or native disposition contradicts original execution')
+    if capture.get('prior_failure'):
+        failed_id = original_jvm_failure_witness(proof, capture)
+        receipts.require(result.get(failed_id) == 'pass', 'Original named JVM failure lacks native XML repair')
     return result
 
 
@@ -343,7 +431,7 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
     kind = item['name']
     if kind == 'android_jvm':
         receipts.require(all(retention.digest(retention.git_bytes(candidate, path) or b'') == digest
-                             for path, digest in JVM_BUILD_INPUTS.items()),
+                             for path, digest in CURRENT_JVM_BUILD_INPUTS.items()),
                          'Current JVM toolchain, dependency or discovery configuration differs')
         receipts.require(set(item['inventory']) == {'metadata'}, 'Unknown JVM inventory fields')
         ids = jvm_metadata(proof, item['inventory']['metadata'], candidate)
@@ -354,6 +442,8 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
     receipts.require(isinstance(item['records'], list) and item['records'], 'No actual source-cohort executions')
     sequences, retained, owners, failures, passes, opaque_sources = set(), {}, {}, {}, {}, []
     legacy_sequences = {}
+    source_failures, source_repairs = {}, {}
+    original_jvm_failures = set()
     for record in sorted(item['records'], key=lambda row: row['sequence']):
         receipts.require(set(record) == {'sequence', 'source_commit', 'origin', 'changes', 'log', 'coverage', 'exit_code'},
                          'Unknown source-cohort execution fields')
@@ -374,16 +464,20 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
         raw = blob(proof, record['log']); text = clean_log(raw.decode())
         coverage = record['coverage']; mode = coverage['mode']
         opaque = mode in {'python-discovery', 'jvm-whole-command'}
+        exact_selected_repairs = set()
+        source_variant_failure = False
         legacy = execution.get('legacy_capture')
         if legacy is not None and kind == 'android_jvm':
             capture = LEGACY_JVM.get(legacy)
             receipts.require(capture is not None, 'Unreviewed original JVM capture')
             actual = legacy_jvm_outcomes(proof, record, capture, raw, universe)
+            if capture.get('prior_failure'):
+                original_jvm_failures.add(capture['prior_failure']['id'])
             receipts.require(legacy not in legacy_sequences, 'Original JVM capture enrolled twice')
             legacy_sequences[legacy] = sequence
             if capture['mode'] == 'jvm-selected':
                 opaque_sources.append({'sequence': sequence, 'source_commit': record['source_commit'],
-                                       'log_sha256': legacy, 'membership_ids': sorted(set(actual) - invalid),
+                                       'log_sha256': legacy, 'membership_ids': sorted(test_id for test_id in set(actual) - invalid if actual[test_id] == 'opaque-pass'),
                                        'runtime_named_outcomes': None})
         elif legacy is not None:
             capture = LEGACY_PYTHON.get(legacy)
@@ -391,8 +485,9 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
                              and record['log']['sha256_ref'] == legacy
                              and record['source_commit'] == capture['source']
                              and origin['kind'] == 'attested-local' and origin['identity'] == capture['tool']
-                             and record['exit_code'] == 0 and origin['command'] is None
-                             and execution == {'mode': 'source-cohort-v1', 'kind': kind, 'legacy_capture': legacy}
+                             and record['exit_code'] == capture.get('exit_code', 0) and origin['command'] is None
+                             and execution == {'mode': 'source-cohort-v1', 'kind': kind, 'legacy_capture': legacy,
+                                               **({'actual_execution_source_commit': None} if 'actual_execution_source_commit' in capture else {})}
                              and coverage == {'mode': capture['mode']},
                              'Historical local capture differs from finite original authority')
             originals = {suite: set(discovery(record['source_commit'], suite))
@@ -403,7 +498,7 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
                 receipts.require(all(value == 'pass' for value in actual.values()),
                                  'Original named capture did not pass')
             else:
-                receipts.require(mode == 'python-selected', 'Unknown finite Python capture format')
+                receipts.require(mode in {'python-selected', 'python-selected-partial'}, 'Unknown finite Python capture format')
                 all_originals = own | other
                 selected = set()
                 for selector in capture['selectors']:
@@ -411,12 +506,12 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
                                 if test_id == selector or test_id.startswith(selector + '.')}
                     receipts.require(matching, 'Original selector has no source-archived membership')
                     selected.update(matching)
-                summaries = re.findall(r'^Ran (\d+) tests? in [0-9.]+s\n\s*\nOK$', text, re.M)
-                receipts.require(len(summaries) == 1 and int(summaries[0]) == capture['count'] == len(selected),
-                                 'Original selected cohort differs from actual outer count')
-                actual = {test_id: 'opaque-pass' for test_id in selected & own}
+                selected_outcomes = selected_python_outcomes(text, capture, selected)
+                actual = {test_id: value for test_id, value in selected_outcomes.items() if test_id in own}
+                exact_selected_repairs = set(capture.get('exact_selected_repair', []))
+                source_variant_failure = mode == 'python-selected-partial'
                 opaque_sources.append({'sequence': sequence, 'source_commit': record['source_commit'],
-                                       'log_sha256': legacy, 'membership_ids': sorted(set(actual) - invalid),
+                                       'log_sha256': legacy, 'membership_ids': sorted(test_id for test_id in set(actual) - invalid if actual[test_id] == 'opaque-pass'),
                                        'runtime_named_outcomes': None})
             receipts.require(set(actual) <= universe, 'Original Python capture contains removed unit')
             if mode == 'python-named':
@@ -474,7 +569,7 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
                 receipts.require(kind == 'android_jvm' and mode == 'junit-xml'
                                  and set(coverage) == {'mode', 'xml_archive'}, 'Unknown actual JVM coverage')
                 receipts.require(all(retention.digest(retention.git_bytes(record['source_commit'], path) or b'') == digest
-                                     for path, digest in JVM_BUILD_INPUTS.items()),
+                                     for path, digest in ORIGINAL40_JVM_BUILD_INPUTS.items()),
                                  'Original JVM build configuration differs from reviewed contract')
                 actual = junit_archive(proof, coverage['xml_archive'], binding['xml_archive_sha256'], universe)
                 selectors = modern_jvm_argv(command)
@@ -490,14 +585,21 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
                              and (record['exit_code'] == 0) == all(value == 'pass' for value in actual.values()),
                              'Actual local command disposition contradicts native outcomes')
         for test_id, outcome in actual.items():
-            if outcome == 'fail':
+            if source_variant_failure and outcome == 'fail':
+                source_failures[(record['source_commit'], test_id, legacy)] = sequence
+            elif outcome == 'fail':
                 failures[test_id] = sequence
+            if outcome == 'opaque-pass' and test_id in exact_selected_repairs:
+                source_repairs[(record['source_commit'], test_id, legacy)] = sequence
             if test_id in invalid:
                 continue
             retained[test_id] = outcome
             owners[test_id] = sequence
-            if outcome == 'pass':
+            if outcome == 'pass' or (outcome == 'opaque-pass' and test_id in exact_selected_repairs):
                 passes[test_id] = sequence
+    require_source_bound_repairs(source_failures, source_repairs)
+    receipts.require(all(test_id in passes for test_id in original_jvm_failures),
+                     'Original named JVM failure lacks a current-applicable native pass')
     if kind == 'android_jvm':
         require_legacy_chronology(legacy_sequences)
     receipts.require(set(retained) == universe and all(value in {'pass', 'opaque-pass'} for value in retained.values())

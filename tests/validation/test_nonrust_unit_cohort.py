@@ -185,6 +185,103 @@ class NonRustSourceCohortCase(unittest.TestCase):
             with self.assertRaises(receipts.ReceiptError):
                 cohort.require_legacy_chronology(sequences)
 
+    def test_partial_selected_python_keeps_explicit_error_and_opaque_success_membership(self):
+        capture = {'mode': 'python-selected-partial', 'count': 2, 'failed_ids': ['test_b.Case.test_bad']}
+        selected = {'test_a.Case.test_ok', 'test_b.Case.test_bad'}
+        raw = ('ERROR: test_bad (tests.operations.test_b.Case.test_bad)\n'
+               'Ran 2 tests in 0.001s\n\nFAILED (errors=1)')
+        self.assertEqual(cohort.selected_python_outcomes(raw, capture, selected),
+                         {'test_a.Case.test_ok': 'opaque-pass', 'test_b.Case.test_bad': 'fail'})
+        for bad in [raw.replace('Ran 2', 'Ran 1'), raw.replace('errors=1', 'errors=1, skipped=1'),
+                    raw.replace('test_b.Case.test_bad', 'test_b.Case.unknown'),
+                    raw + '\nFAIL: test_ok (tests.operations.test_a.Case.test_ok)']:
+            with self.subTest(bad=bad), self.assertRaises(receipts.ReceiptError):
+                cohort.selected_python_outcomes(bad, capture, selected)
+
+    def test_exact_single_selected_repair_is_typed_without_invented_named_output(self):
+        identity = 'test_b.Case.test_bad'
+        capture = {'mode': 'python-selected', 'count': 1, 'selectors': [identity], 'exact_selected_repair': [identity]}
+        raw = 'Ran 1 test in 0.001s\n\nOK'
+        self.assertEqual(cohort.selected_python_outcomes(raw, capture, {identity}), {identity: 'opaque-pass'})
+        capture['count'] = 2
+        with self.assertRaises(receipts.ReceiptError):
+            cohort.selected_python_outcomes('Ran 2 tests in 0.001s\n\nOK', capture, {identity, 'test_a.Case.test_ok'})
+
+    def test_original_error_requires_later_exact_repair_of_the_same_source_variant(self):
+        edge = {'source': 'a' * 40, 'id': 'test_port.Case.test_port', 'repair': 'c' * 64}
+        key = (edge['source'], edge['id'], 'd' * 64)
+        repair = (edge['source'], edge['id'], edge['repair'])
+        with mock.patch.object(cohort, 'ORIGINAL_PYTHON_REPAIR_EDGES', {key[2]: edge}):
+            cohort.require_source_bound_repairs({key: 5}, {repair: 6})
+            for repairs in [{}, {repair: 4}, {('b' * 40, key[1], repair[2]): 6},
+                            {(key[0], 'test_other.Case.test_other', repair[2]): 6},
+                            {(key[0], key[1], 'e' * 64): 6}]:
+                with self.subTest(repairs=repairs), self.assertRaises(receipts.ReceiptError):
+                    cohort.require_source_bound_repairs({key: 5}, repairs)
+
+    def test_closed_old_variant_never_supplies_missing_current_applicable_coverage(self):
+        item, proof, ids, raw, _ = self.fixture()
+        old_source = 'a' * 40
+        failed_raw = ('ERROR: test_0 (' + ids[0] + ')\n'
+                      'Ran 2 tests in 0.001s\n\nFAILED (errors=1)\n').encode()
+        repaired_raw = b'Ran 1 test in 0.001s\n\nOK\n'
+        failed_ref, repaired_ref = self.blob(proof, failed_raw), self.blob(proof, repaired_raw)
+        registry, records = {}, []
+        for sequence, ref, mode, count, selectors, exit_code in [
+                (3, failed_ref, 'python-selected-partial', 2, ids[:2], 1),
+                (4, repaired_ref, 'python-selected', 1, ids[:1], 0)]:
+            capture = {'source': old_source, 'tool': 'actual-original-' + str(sequence),
+                       'mode': mode, 'count': count, 'selectors': selectors, 'exit_code': exit_code}
+            capture['failed_ids' if exit_code else 'exact_selected_repair'] = ids[:1]
+            registry[ref['sha256_ref']] = capture
+            records.append({'sequence': sequence, 'source_commit': old_source, 'exit_code': exit_code,
+                            'origin': {'kind': 'attested-local', 'identity': capture['tool'], 'command': None,
+                                       'execution': {'mode': 'source-cohort-v1', 'kind': 'validation',
+                                                     'legacy_capture': ref['sha256_ref']}},
+                            'changes': ids[:2], 'log': ref, 'coverage': {'mode': mode}})
+        edge = {'source': old_source, 'id': ids[0], 'repair': repaired_ref['sha256_ref']}
+        item['records'].extend(records)
+        with mock.patch.object(cohort, 'LEGACY_PYTHON', registry), \
+                mock.patch.object(cohort, 'ORIGINAL_PYTHON_REPAIR_EDGES', {failed_ref['sha256_ref']: edge}):
+            self.assertEqual(self.validate(item, proof, ids, raw)['actual_named_pass_count'], 1)
+            later = copy.deepcopy(item['records'][1])
+            later['sequence'], later['exit_code'] = 5, 1
+            later_raw = ('test_0 (' + ids[0] + ') ... FAIL\n\nRan 1 test in 0.001s\n\nFAILED (failures=1)\n').encode()
+            later['log'] = self.blob(proof, later_raw)
+            binding = json.loads(cohort.blob(proof, later['origin']['execution']['binding']))
+            binding.update(exit_code=1, log_sha256= later['log']['sha256_ref'])
+            later['origin']['execution']['binding'] = self.blob(proof, json.dumps(binding).encode())
+            item['records'].append(later)
+            with self.assertRaises(receipts.ReceiptError):
+                self.validate(item, proof, ids, raw)
+            item['records'].pop()
+            item['records'].remove(item['records'][1])
+            with self.assertRaises(receipts.ReceiptError):
+                self.validate(item, proof, ids, raw)
+
+    def test_original_jvm_failed_command_witness_requires_exact_ordered_native_repair(self):
+        proof = {'logs': {}}
+        raw = (b'> Task :app:testDebugUnitTest FAILED\nCase > bad FAILED\n'
+               b'3 tests completed, 1 failed\nBUILD FAILED in 1s\n')
+        ref = self.blob(proof, raw)
+        commands = {'items': [{'id': 'failed-tool', 'exitCode': 1, 'source_turn': 'same-turn'},
+                              {'id': 'passed-tool', 'exitCode': 0, 'source_turn': 'same-turn'}]}
+        commands_ref = self.blob(proof, json.dumps(commands).encode())
+        capture = {'tool': 'passed-tool', 'prior_failure': {
+            'log_sha256': ref['sha256_ref'], 'tool': 'failed-tool', 'id': 'a.Case/bad',
+            'native_count': 3, 'native_failures': 1, 'original_commands_sha256': commands_ref['sha256_ref']}}
+        self.assertEqual(cohort.original_jvm_failure_witness(proof, capture), 'a.Case/bad')
+        for bad in [raw.replace(b'3 tests', b'4 tests'), raw.replace(b'bad FAILED', b'other FAILED'),
+                    raw.replace(b'BUILD FAILED', b'BUILD SUCCESSFUL')]:
+            capture['prior_failure']['log_sha256'] = self.blob(proof, bad)['sha256_ref']
+            with self.assertRaises(receipts.ReceiptError):
+                cohort.original_jvm_failure_witness(proof, capture)
+        capture['prior_failure']['log_sha256'] = ref['sha256_ref']
+        commands['items'].reverse()
+        capture['prior_failure']['original_commands_sha256'] = self.blob(proof, json.dumps(commands).encode())['sha256_ref']
+        with self.assertRaises(receipts.ReceiptError):
+            cohort.original_jvm_failure_witness(proof, capture)
+
     def test_finite_legacy_capture_cannot_authorize_different_log_or_source(self):
         item, proof, ids, raw, _ = self.fixture()
         record = item['records'][1]

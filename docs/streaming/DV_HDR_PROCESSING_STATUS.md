@@ -1102,11 +1102,21 @@ discovery. Compiled membership is explicitly separate from historical runtime
 outcomes. It retains the original opaque full-command successes, measured
 named overlays, source-impact reviews and failure chronology. Default test
 recipes still run normally; adoption requires a complete authenticated proof.
-The original JVM XML gaps remain opaque. Seven finite original JVM capture
+The original JVM XML gaps remain opaque. Eight finite original JVM capture
 adapters preserve reviewed source equivalence separately from unknown execution
-SHAs and runtime/image fingerprints. A parser-only check accepts those original
-captures and the existing 40-case run without executing unit bodies. Astra identified 51 additional existing Python checks
-whose real repository inputs changed; only those invalidated bodies, new
-controls and the one failed fixture require effort execution. The 26 new protocol and collector controls have not yet run. The workflow
-change also invalidates the previously passed YAML duplicate-key check. Fleet deployment and physical HDR ON/OFF
-acceptance remain open.
+SHAs and runtime/image fingerprints. The latest 19 actual native XML passes
+cover the incoming build-171 diagnostics and shared-library fixtures, with the
+original three-test failure retained as a separate witness. Original Python
+157-case evidence retains its explicit error and the exact one-case repair;
+opaque successful membership never becomes named historical outcomes. That
+repair closes only its original source variant. Current coverage still requires
+the separately applicable effort fixture result.
+
+Astra's original 51 pending Python source readers reduce to 32 after narrow
+input review of the recovered original cohort. The 31 new protocol and collector
+controls, corrected previously failed fixture and freshly invalidated YAML
+check remain effort-only obligations. The failed task gate 5089 executed no
+unit bodies or compilers: live main was not an ancestor of the effort base.
+Main through the build-171 diagnostics landing is now integrated normally into
+the effort; a fresh exact-head task gate is required. Complete authenticated
+qualification, fleet deployment and physical HDR ON/OFF acceptance remain open.
