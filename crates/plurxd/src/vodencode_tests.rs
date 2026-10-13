@@ -3784,3 +3784,39 @@ async fn copy_and_encoded_vod_refuse_missing_or_nonpositive_duration_without_att
         }
     }
 }
+
+#[tokio::test]
+async fn continuous_family_start_preempts_background_and_cleans_up_cancelled_wait() {
+    let base = crate::test_tempdir().expect("family admission");
+    let (_, encoding) = encoded_fixture(base.path()).await;
+    let pool = encoding.admissions.clone();
+    let mut rendition = synthetic_rendition(base.path()).await;
+    Arc::get_mut(&mut rendition).expect("unshared rendition").recipe.encoding = Some(encoding);
+    let media = vec![rendition];
+    let background = pool.try_admit_software(64, 1, crate::admission::Priority::Background)
+        .expect("background index owns capacity");
+    // Speculative work must remain an immediate, non-preempting attempt.
+    assert!(VodServe::reserve_media_group(&media, Some(crate::admission::Priority::Speculative)).await.is_err());
+    assert!(!pool.live_is_waiting());
+    let cancelled = tokio::time::timeout(Duration::from_millis(50), VodServe::reserve_media_group(&media, None)).await;
+    assert!(cancelled.is_err(), "a foreground start must wait for the background owner");
+    assert!(!pool.live_is_waiting(), "cancellation releases the foreground waiter");
+    assert_eq!(pool.software_in_use(), 1, "no partial family reservation leaked");
+    let observer = pool.clone();
+    let yield_background = async move {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !observer.live_is_waiting() {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("foreground signals the background worker");
+        drop(background);
+        assert!(observer.try_admit_software(64, 1, crate::admission::Priority::Background).is_none(),
+            "background cannot reclaim capacity while the viewer waits");
+    };
+    let (permits, ()) = tokio::join!(VodServe::reserve_media_group(&media, None), yield_background);
+    let permits = permits.expect("foreground family starts after background yields");
+    assert!(!pool.live_is_waiting());
+    assert!(pool.software_in_use() > 0);
+    drop(permits);
+    assert_eq!(pool.software_in_use(), 0);
+}

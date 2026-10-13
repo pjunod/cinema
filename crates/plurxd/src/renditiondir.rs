@@ -32,8 +32,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use plurx_core::fmp4::{
-    collapse_equivalent_hevc_sample_entries, promote_from, segment_name, Fmp4Error, Init,
-    PromotionInputs,
+    collapse_equivalent_hevc_sample_entries, normalize_indexed_hdr10_metadata, promote_from,
+    segment_name, Fmp4Error, Init, PromotionInputs,
 };
 use sha2::{Digest, Sha256};
 
@@ -48,8 +48,8 @@ pub const INIT_NAME: &str = "init.mp4";
 /// Two, not one, because they detect different things and only one of them can
 /// be compared across generations at all.
 ///
-/// - `muxer_init` is ffmpeg's `ftyp`+`moov`, after the one normalization that
-///   is not promotion: repeated decoder-equivalent HEVC descriptions collapse
+/// - `muxer_init` is ffmpeg's `ftyp`+`moov`, after normalization: scene content-light levels use the
+///   stored title-wide values, and repeated decoder-equivalent HEVC descriptions collapse
 ///   to one ([`collapse_equivalent_hevc_sample_entries`]) — ffmpeg 8 fills
 ///   them from whichever keyframe led the generation. It is byte-identical across
 ///   generations including `-ss`-started ones — M0-P0 clause (d), 9/9 — so a
@@ -120,7 +120,7 @@ impl std::fmt::Display for InitRefused {
 impl InitIdentity {
     /// Establish a rendition's identity from its first generation.
     pub fn establish(muxer: &Init, promotion: PromotionInputs) -> Result<InitIdentity, Fmp4Error> {
-        let muxer = normalized_muxer(muxer)?;
+        let muxer = normalized_muxer(muxer, &promotion)?;
         let mut served = muxer.clone();
         promote_from(&mut served, &promotion)?;
         Ok(InitIdentity {
@@ -136,10 +136,11 @@ impl InitIdentity {
     /// This is plan §2.2's check. It runs at generation start, against the
     /// muxer init the pipe just emitted, before a single segment is written.
     pub fn served_init_for(&self, muxer: &Init) -> Result<Init, InitRefused> {
-        let muxer = &normalized_muxer(muxer).map_err(|_| InitRefused::MuxerDrift {
-            stored: self.muxer_init.clone(),
-            found: "unreadable".to_owned(),
-        })?;
+        let muxer =
+            &normalized_muxer(muxer, &self.promotion).map_err(|_| InitRefused::MuxerDrift {
+                stored: self.muxer_init.clone(),
+                found: "unreadable".to_owned(),
+            })?;
         let found = digest(&muxer.bytes);
         if found != self.muxer_init {
             return Err(InitRefused::MuxerDrift {
@@ -181,9 +182,12 @@ fn parse_segment_name(name: &str) -> Option<u64> {
 /// The muxer init as the identity digests it (see [`InitIdentity`]). A single
 /// description, or descriptions that differ, pass through unchanged, so every
 /// identity recorded before this normalization still matches.
-fn normalized_muxer(muxer: &Init) -> Result<Init, Fmp4Error> {
+fn normalized_muxer(muxer: &Init, promotion: &PromotionInputs) -> Result<Init, Fmp4Error> {
     let mut normalized = muxer.clone();
     collapse_equivalent_hevc_sample_entries(&mut normalized)?;
+    if promotion.indexed_hdr10_metadata {
+        normalize_indexed_hdr10_metadata(&mut normalized, &promotion.hdr10_sei)?;
+    }
     Ok(normalized)
 }
 
@@ -974,6 +978,124 @@ mod tests {
     }
 
     #[test]
+    fn title_light_metadata_allows_seek_without_hiding_other_muxer_drift() {
+        use plurx_core::fmp4::{promote_hdr10_static_metadata_from, FragmentReader, Unit};
+        fn light(max: u16, average: u16) -> Vec<u8> {
+            let mut nal = vec![0x4e, 1, 144, 4];
+            nal.extend(max.to_be_bytes());
+            nal.extend(average.to_be_bytes());
+            nal.push(0x80);
+            nal
+        }
+        let mut reader = FragmentReader::new();
+        reader.push(&plurx_core::testfixtures::pipe("closed-gop"));
+        let Some(Unit::Init(mut early)) = reader.next_unit().expect("valid HDR fixture") else {
+            panic!("fixture init");
+        };
+        let mut late = early.clone();
+        promote_hdr10_static_metadata_from(&mut early, &[light(230, 197)])
+            .expect("valid HDR fixture");
+        promote_hdr10_static_metadata_from(&mut late, &[light(283, 200)])
+            .expect("valid HDR fixture");
+        let promotion = PromotionInputs {
+            indexed_hdr10_metadata: true,
+            hdr10_sei: vec![light(283, 200)],
+            ..Default::default()
+        };
+        let identity = InitIdentity::establish(&early, promotion).expect("valid HDR fixture");
+        assert_eq!(
+            identity
+                .served_init_for(&early)
+                .expect("valid HDR fixture")
+                .bytes,
+            identity
+                .served_init_for(&late)
+                .expect("valid HDR fixture")
+                .bytes
+        );
+        // A valid but different ftyp major brand remains pipeline drift.
+        late.bytes[8..12].copy_from_slice(b"iso6");
+        assert!(matches!(
+            identity.served_init_for(&late),
+            Err(InitRefused::MuxerDrift { .. })
+        ));
+    }
+
+    #[test]
+    fn title_light_metadata_presence_and_grouping_are_stable_in_both_seek_directions() {
+        use plurx_core::fmp4::{promote_hdr10_static_metadata_from, FragmentReader, Unit};
+        let mut reader = FragmentReader::new();
+        reader.push(&plurx_core::testfixtures::pipe("closed-gop"));
+        let Some(Unit::Init(absent)) = reader.next_unit().expect("fixture init") else {
+            panic!("fixture init");
+        };
+        let light = vec![0x4e, 1, 144, 4, 1, 27, 0, 200, 0x80];
+        let mut mastering = vec![0x4e, 1, 137, 24];
+        mastering.extend([1; 24]);
+        mastering.push(0x80);
+        let mut combined = mastering[..mastering.len() - 1].to_vec();
+        combined.extend_from_slice(&light[2..]);
+        let mut separate = absent.clone();
+        promote_hdr10_static_metadata_from(&mut separate, &[mastering.clone(), light.clone()])
+            .expect("separate metadata");
+        let mut grouped = absent.clone();
+        promote_hdr10_static_metadata_from(&mut grouped, &[combined]).expect("grouped metadata");
+        let promotion = PromotionInputs {
+            indexed_hdr10_metadata: true,
+            hdr10_sei: vec![mastering, light],
+            ..Default::default()
+        };
+        let inits = [absent, separate, grouped];
+        for first in &inits {
+            let identity = InitIdentity::establish(first, promotion.clone()).expect("establish");
+            for later in &inits {
+                let served = identity
+                    .served_init_for(later)
+                    .expect("metadata presence is not drift");
+                assert_eq!(digest(&served.bytes), identity.served_init);
+            }
+        }
+    }
+
+    #[test]
+    fn title_light_metadata_legacy_record_keeps_its_original_identity_and_bytes() {
+        use plurx_core::fmp4::{promote_hdr10_static_metadata_from, FragmentReader, Unit};
+        let mut reader = FragmentReader::new();
+        reader.push(&plurx_core::testfixtures::pipe("closed-gop"));
+        let Some(Unit::Init(mut muxer)) = reader.next_unit().expect("fixture init") else {
+            panic!("fixture init");
+        };
+        let existing = vec![0x4e, 1, 144, 4, 1, 27, 0, 200, 0x80];
+        promote_hdr10_static_metadata_from(&mut muxer, &[existing]).expect("old muxer CLL");
+        let captured = vec![0x4e, 1, 144, 4, 0, 230, 0, 197, 0x80];
+        // This is the old serialized shape, deliberately missing the policy.
+        let promotion: PromotionInputs = serde_json::from_value(serde_json::json!({
+            "parameter_sets": [], "hdr10_sei": [captured]
+        }))
+        .expect("old promotion record");
+        assert!(!promotion.indexed_hdr10_metadata);
+        let mut old_served = muxer.clone();
+        promote_hdr10_static_metadata_from(&mut old_served, &promotion.hdr10_sei)
+            .expect("old fill-only promotion");
+        let identity = InitIdentity {
+            muxer_init: digest(&muxer.bytes),
+            served_init: digest(&old_served.bytes),
+            promotion,
+        };
+        assert_eq!(
+            identity
+                .served_init_for(&muxer)
+                .expect("legacy resume")
+                .bytes,
+            old_served.bytes
+        );
+        assert_eq!(
+            InitIdentity::establish(&muxer, identity.promotion.clone()).expect("legacy establish"),
+            identity
+        );
+    }
+
+    #[test]
     fn a_changed_video_pipeline_is_refused_before_a_segment_is_written() {
         // The `producer_failed` case, and the one this check is really for: a
         // different ffmpeg or a different argv under a rendition whose
@@ -997,6 +1119,7 @@ mod tests {
         // which is exactly what M0-P0 clause (d) turned out to have measured.
         let (first, _) = two_generations();
         let promoting = PromotionInputs {
+            indexed_hdr10_metadata: false,
             hevc_configuration: None,
             strip_dolby_vision: false,
             dolby_vision: None,
