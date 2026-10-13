@@ -12119,7 +12119,7 @@ extension PlayerController: PreparedSuccessorHost {
                         // choosing, and asserting main-actor isolation inside
                         // one is what killed every play on build 90.
                         self.preparedSeekMs = nil
-                        let aligned = await self.awaitPreparedAlignment(of: item, to: seekMs)
+                        let aligned = await self.awaitPreparedAlignment(of: item, to: seekMs, policy: .initialParking)
                         guard !Task.isCancelled, self.preparedItem === item,
                               self.preparedPlayer === successor else { return }
                         if !aligned {
@@ -12130,6 +12130,7 @@ extension PlayerController: PreparedSuccessorHost {
                     } else if let throughMs = self.preparedBufferedThroughMs(item),
                               throughMs >= self.preparedFilmPositionMs
                                   + PreparedReplacementBounds.switchRunwayMs,
+                              self.preparedOriginalTargetHasRunway(item),
                               self.preparedReplacement.activeAction.map({ self.autoStagedProductionAllowsCommit($0) && self.autoStagedOriginalAllowsCommit($0) }) == true {
                         self.preparedReplacement.successorIsBuffered(throughMs: throughMs)
                         await self.preparedReplacement.commit()
@@ -12166,6 +12167,21 @@ extension PlayerController: PreparedSuccessorHost {
         let runway = Self.bufferedRunwaySeconds(playheadSeconds: playhead, ranges: ranges)
         guard runway > 0 else { return nil }
         return action.mediaOriginMs + Int(((playhead + runway) * 1_000).rounded())
+    }
+
+    /// Loaded media must cover the original target, not merely the earlier
+    /// coarse landing. A later island or any positive gap cannot prove runway.
+    private func preparedOriginalTargetHasRunway(_ item: AVPlayerItem) -> Bool {
+        guard let action = preparedReplacement.activeAction else { return false }
+        let ranges = item.loadedTimeRanges.compactMap { value -> ClosedRange<Double>? in
+            let range = value.timeRangeValue
+            let start = range.start.seconds, end = CMTimeRangeGetEnd(range).seconds
+            guard start.isFinite, end.isFinite, start >= 0, end >= start else { return nil }
+            return start...end
+        }
+        return PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: preparedFilmPositionMs, mediaOriginMs: action.mediaOriginMs,
+            ranges: ranges)
     }
 
     /// Promote the primed player and its retained layer after item-specific
@@ -12242,18 +12258,29 @@ extension PlayerController: PreparedSuccessorHost {
         // Inspection and alignment can each consume their existing bounded
         // allowance. Pick one future instant before either suspension, rather
         // than inspecting one fragment then moving the rendezvous beyond it.
-        // The lead keeps the post-swap reserve of the overlap for the
-        // first-frame proof; track selection is already complete.
+        // Cap that lead at loaded media with two seconds of strict runway,
+        // keeping the post-swap reserve of the original overlap. Track
+        // selection is already complete; no target moves after this choice.
+        let incumbentSeconds = player.currentTime().seconds
         guard rendezvousRate.isFinite, rendezvousRate > 0,
-              let leadWallMs = PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: preparedOverlapRemainingMs) else {
+              incumbentSeconds.isFinite, incumbentSeconds >= 0, baseMs >= 0,
+              incumbentSeconds * 1_000 + Double(baseMs) < Double(Int.max) else {
             return preparedCommitFailure(at: "rate-or-overlap")
         }
-        let rendezvous = PreparedCommitRendezvous.plan(
+        let loadedItemRanges = item.loadedTimeRanges.compactMap { value -> ClosedRange<Double>? in
+            let range = value.timeRangeValue
+            let start = range.start.seconds, end = CMTimeRangeGetEnd(range).seconds
+            guard start.isFinite, end.isFinite, start >= 0, end >= start else { return nil }
+            return start...end
+        }
+        guard let rendezvous = PreparedCommitRendezvous.planLoaded(
             stagedFilmPositionMs: preparedFilmPositionMs,
             incumbentFilmPositionMs: realPositionMs(),
             mediaOriginMs: action.mediaOriginMs,
-            leadMs: Int(min(16, Double(rendezvousRate)) * Double(leadWallMs))
-        )
+            playbackRate: Double(rendezvousRate),
+            overlapRemainingMs: preparedOverlapRemainingMs,
+            loadedItemRanges: loadedItemRanges
+        ) else { return .refused }
         guard let cadence = await awaitPreparedFrameDuration(of: item,
                 targetItemSeconds: Double(rendezvous.itemPositionMs) / 1000),
               preparedItem === item, preparedPlayer === successor,
@@ -12275,7 +12302,7 @@ extension PlayerController: PreparedSuccessorHost {
         // deadline because no acknowledgement is queued in `.switching`; and
         // the viewer's tap produces nothing at all, because the prepared path
         // already claimed it and suppressed the in-place reopen.
-        guard await awaitPreparedAlignment(of: item, to: rendezvous.itemPositionMs) else {
+        guard await awaitPreparedAlignment(of: item, to: rendezvous.itemPositionMs, policy: .exactAlignment) else {
             return automaticTrial ? preparedCommitFailure(at: "seek") : PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
         }
         guard await awaitPreparedPreroll(item: item, successor: successor,
@@ -12602,7 +12629,7 @@ extension PlayerController: PreparedSuccessorHost {
     /// otherwise own this work was dropped before the commit began. The
     /// abandoned seek is left to resolve or not; the generation check is what
     /// stops it reporting into a commit that has moved on.
-    private func awaitPreparedAlignment(of item: AVPlayerItem, to itemMs: Int) async -> Bool {
+    private func awaitPreparedAlignment(of item: AVPlayerItem, to itemMs: Int, policy: PreparedSeekPolicy = .exactAlignment) async -> Bool {
         let remaining = min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs)
         guard remaining > 0 else { return false }
         preparedAlignmentGeneration &+= 1
@@ -12611,8 +12638,8 @@ extension PlayerController: PreparedSuccessorHost {
         let seek = Task { @MainActor [weak self] in
             let landed = await item.seek(
                 to: CMTime(value: CMTimeValue(max(0, itemMs)), timescale: 1_000),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
+                toleranceBefore: CMTime(value: CMTimeValue(policy.toleranceBeforeMs), timescale: 1_000),
+                toleranceAfter: CMTime(value: CMTimeValue(policy.toleranceAfterMs), timescale: 1_000)
             )
             guard let self, self.preparedAlignmentGeneration == generation else { return }
             self.preparedAlignmentOutcome = landed

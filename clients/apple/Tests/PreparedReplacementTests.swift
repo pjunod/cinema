@@ -799,6 +799,48 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.phase, .building)
     }
 
+    func testInitialParkingAllowsOnlyPrecedingTolerance() {
+        XCTAssertEqual(PreparedSeekPolicy.initialParking.toleranceBeforeMs, 2_000)
+        XCTAssertEqual(PreparedSeekPolicy.initialParking.toleranceAfterMs, 0)
+        XCTAssertEqual(PreparedSeekPolicy.exactAlignment.toleranceBeforeMs, 0)
+        XCTAssertEqual(PreparedSeekPolicy.exactAlignment.toleranceAfterMs, 0)
+    }
+
+    func testInitialParkingRetainsOriginalTargetWithNonzeroOrigin() {
+        XCTAssertTrue(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 632_082, mediaOriginMs: 600_000, ranges: [30...35]))
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 632_082, mediaOriginMs: 600_000, ranges: [30...34]))
+    }
+
+    func testInitialParkingCallbackRequiresOriginalTargetRunway() {
+        // Parking at 370 s has runway, but the original 372.082 s target does not.
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 372_082, mediaOriginMs: 0, ranges: [370...373]))
+        XCTAssertTrue(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 372_082, mediaOriginMs: 0, ranges: [370...374.082]))
+    }
+
+    func testInitialParkingRejectsBufferedIslandAndPositiveGap() {
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 10_000, mediaOriginMs: 0, ranges: [0...9, 11...20]))
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 10_000, mediaOriginMs: 0, ranges: [9...11, 11.001...13]))
+        XCTAssertTrue(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 10_000, mediaOriginMs: 0, ranges: [11...13, 9...11]))
+    }
+
+    func testInitialParkingRejectsInvalidTargetAndRangeFacts() {
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: -1, mediaOriginMs: 0, ranges: [0...20]))
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 10_000, mediaOriginMs: -1, ranges: [0...20]))
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 10_000, mediaOriginMs: 0, ranges: [0...Double.infinity]))
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 10_000, mediaOriginMs: 0, ranges: [-1...20]))
+    }
+
     func testStalledInitialSeekConsumesRemainingReadinessAndSettlesFailed() async {
         var nowMs = 0
         let host = RecordingHost()

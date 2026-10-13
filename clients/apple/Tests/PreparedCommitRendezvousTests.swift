@@ -97,6 +97,98 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         )
     }
 
+    func testLoadedRendezvousCapsTheFuturePointAtActualRunway() throws {
+        let plan = try XCTUnwrap(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: 386_065, incumbentFilmPositionMs: 385_966,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 12_000,
+            loadedItemRanges: [386...390.010]))
+        XCTAssertEqual(plan.filmPositionMs, 388_010)
+        XCTAssertEqual(plan.itemPositionMs, 388_010)
+        XCTAssertLessThan(plan.filmPositionMs, 393_866,
+            "the maximum lead must not force an exact seek beyond loaded target media")
+        XCTAssertNotNil(plan.clockAnchor(incumbentFilmMs: 386_000, hostSeconds: 100,
+            rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: 10_000))
+    }
+
+    func testLoadedRendezvousMapsOriginAndActualPlaybackRate() throws {
+        let plan = try XCTUnwrap(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: 610_000, incumbentFilmPositionMs: 610_000,
+            mediaOriginMs: 600_000, playbackRate: 2, overlapRemainingMs: 9_000,
+            loadedItemRanges: [10...15]))
+        XCTAssertEqual(plan.filmPositionMs, 613_000)
+        XCTAssertEqual(plan.itemPositionMs, 13_000)
+        XCTAssertEqual(Double(plan.filmPositionMs - 610_000) / 2, 1_500)
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: 610_000, incumbentFilmPositionMs: 610_000,
+            mediaOriginMs: 600_000, playbackRate: 2, overlapRemainingMs: 9_000,
+            loadedItemRanges: [10...13.999]))
+    }
+
+    func testLoadedRendezvousRefusesHolesAndInsufficientFutureLead() {
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: 10_000, incumbentFilmPositionMs: 10_000,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 12_000,
+            loadedItemRanges: [10...11.5, 11.501...13]))
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: 10_000, incumbentFilmPositionMs: 10_000,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 12_000,
+            loadedItemRanges: [10...12.999]))
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: 20_000, incumbentFilmPositionMs: 10_000,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 12_000,
+            loadedItemRanges: [10...30]), "original staging is above the existing maximum lead")
+    }
+
+    func testLoadedRendezvousRejectsDisconnectedFutureIsland() {
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: 10_000, incumbentFilmPositionMs: 10_000,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 12_000,
+            loadedItemRanges: [9...11, 12...20]),
+            "the original interval is short; the later island cannot supply its runway")
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: 10_000, incumbentFilmPositionMs: 10_000,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 12_000,
+            loadedItemRanges: [12...20]),
+            "the original target must still belong to the loaded interval")
+    }
+
+    func testLoadedRendezvousMergesTouchingRangesWithoutIncreasingLead() throws {
+        let plan = try XCTUnwrap(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: 10_000, incumbentFilmPositionMs: 10_000,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 9_000,
+            loadedItemRanges: [14...20, 10...14]))
+        XCTAssertEqual(plan.filmPositionMs, 14_900,
+            "loaded media cannot extend the original lead or consume the four-second reserve")
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: 10_000, incumbentFilmPositionMs: 10_000,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 5_000,
+            loadedItemRanges: [10...20]))
+    }
+
+    func testLoadedRendezvousRejectsInvalidClocksRatesAndOverflow() {
+        for rate in [0, -1, Double.infinity, Double.nan, Double.greatestFiniteMagnitude] {
+            XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+                stagedFilmPositionMs: 0, incumbentFilmPositionMs: 10_000,
+                mediaOriginMs: 0, playbackRate: rate, overlapRemainingMs: 12_000,
+                loadedItemRanges: [0...20]))
+        }
+        for invalid in [
+            (staged: -1, current: 10_000, origin: 0),
+            (staged: 0, current: -1, origin: 0),
+            (staged: 0, current: 10_000, origin: -1),
+            (staged: 0, current: Int.max, origin: 0)
+        ] {
+            XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+                stagedFilmPositionMs: invalid.staged, incumbentFilmPositionMs: invalid.current,
+                mediaOriginMs: invalid.origin, playbackRate: 1, overlapRemainingMs: 12_000,
+                loadedItemRanges: [0...20]))
+        }
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: 0, incumbentFilmPositionMs: 10_000,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 12_000,
+            loadedItemRanges: [0...Double.infinity, -1...20]))
+    }
+
     func testFutureRendezvousParksAheadWithoutChangingTheSuccessorOrigin() {
         let plan = PreparedCommitRendezvous.plan(stagedFilmPositionMs: 30_000,
             incumbentFilmPositionMs: 42_000, mediaOriginMs: 30_000, leadMs: 2_000)
