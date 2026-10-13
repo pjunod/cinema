@@ -1,7 +1,7 @@
 {
   "schema": "plurx-f2-decoded-alignment-v1",
   "date": "2026-10-13",
-  "state": "source fix reviewed, qualified, merged and installed; physical Air transition pending unlock",
+  "state": "source fix reviewed, qualified, merged and installed; physical Air transition blocked before decoding by renewed NAS permission denial",
   "scope": "F2 HDR rolling remux to encoded 1080p SDR decoded-frame alignment",
   "source_head": "fcac7a4ec6482d6f9b10aa39b02d390bc6771c78",
   "base": "e4b6c1c6daff0ceef3d80cec3bafbeb544b56f24",
@@ -98,8 +98,13 @@
     "qualified_head": "fcac7a4ec6482d6f9b10aa39b02d390bc6771c78"
   },
   "physical": {
-    "state": "pending Air unlock",
-    "runtime_patch": "none planned; installed production source is the reviewed fix"
+    "state": "installed-source startup blocked before decoding by macOS network-volume denial",
+    "utc": "2026-10-13T17:38:43Z",
+    "browser_session": "9129dc49-d565-4a5c-9433-0cbd47d6030f",
+    "producer_session": "s-5cdbbb1e916af2131cd688ba9765873fedde5b719c1c2b667b3347f952e8ba24",
+    "result": "FFmpeg source open returns Operation not permitted; producer_failed before moov or frames; no F2 comparison or applied-quality outcome",
+    "runtime_patch": "none; only a comparison wrapper logs the original return value",
+    "access_state": "existing plurxd Full Disk Access shown ON; refresh awaits local Touch ID/password"
   },
   "acceptance_limits": [
     "No calibrated physical HDR-display measurement",
@@ -107,11 +112,13 @@
     "Full platform continuous-quality matrix remains open"
   ],
   "restoration": {
-    "client_quality": "Auto set before installation; verify again after capture",
+    "client_quality": "Auto verified from fresh browser localStorage",
     "shared_clipboard": "OFF unchanged",
     "backend": "Auto unchanged",
     "mac_processing": "ON unchanged",
-    "movie_resume": "zero restoration still owed after test"
+    "movie_resume": "position_ms 0 and watched false verified through authenticated item read after progress committed; fresh movie page offers Play without Resume",
+    "owned_player": "closed before progress reset; no active browser session after reload",
+    "utc": "2026-10-13T17:49Z"
   },
   "source_merge": "96e4c49e92818f8f3e6b01e4786492b1c37a97d7",
   "merged_at": "2026-10-13T17:05:35Z",
@@ -131,5 +138,21 @@
     "unused_binary": "task-created unused prefix binary moved into recoverable temporary staging after exact digest check",
     "actual_service": "ready on qualified binary; served JavaScript digest verified",
     "source_binding": "binary built from qualified head after current main integrated; committed source archive preserved"
+  },
+  "installed_startup_archive": {
+    "uuid": "22ebe6e5-f5cd-4baf-a10a-26c3d5dc39dd",
+    "url": "http://forge.lan:3000/attachments/22ebe6e5-f5cd-4baf-a10a-26c3d5dc39dd",
+    "sha256": "59555bbf49760a37c1845db742e6b7141769a8b3099212bdb67498965d3ed20f",
+    "bytes": 958246,
+    "members": 4,
+    "state": "installed-source NAS access denied before decoding, not an F2 outcome"
+  },
+  "restoration_archive": {
+    "uuid": "dfd38c6f-aba3-4109-bc41-209eb829a05a",
+    "url": "http://forge.lan:3000/attachments/dfd38c6f-aba3-4109-bc41-209eb829a05a",
+    "sha256": "5d931248692a957e71ec577a8315557861b28410ddb9fc72e03a04723d6b922c",
+    "bytes": 2270297,
+    "members": 4,
+    "state": "authenticated persisted zero-resume and Auto quality; fresh Play-only page"
   }
 }
