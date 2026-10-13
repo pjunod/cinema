@@ -2382,6 +2382,7 @@ final class PlayerController: ObservableObject {
     private let reportPlaybackIntent: @MainActor (PlaybackControlSession) async -> UInt64?
     private let mediaSelectionPreparation: MediaSelectionPreparation
     private let itemPreparation: ItemPreparation
+    private let prepareGrowingPlaylist: @MainActor (URL) async throws -> Void
     private let nativeSeek: @MainActor (AVPlayer, Int) async -> Bool
     private let waitNativeSeekDeadline: @MainActor () async throws -> Void
     private let canPlayOffline: (AVURLAsset) -> Bool
@@ -2422,6 +2423,9 @@ final class PlayerController: ObservableObject {
         releaseHlsSession: @escaping @MainActor (AppModel, String) async -> Void = {
             await $0.endHlsSession($1)
         },
+        prepareGrowingPlaylist: @escaping @MainActor (URL) async throws -> Void = {
+            try await GrowingPlaylistPreparation.wait(for: $0)
+        },
         requestHlsSession: (@MainActor (AppModel, Int, CreateSessionRequest) async throws -> HlsStart)? = nil,
         requestHlsStatus: @escaping @MainActor (AppModel, String) async throws -> PlaybackSessionStatus = {
             try await $0.hlsStatus($1)
@@ -2449,6 +2453,7 @@ final class PlayerController: ObservableObject {
         }
         self.mediaSelectionPreparation = mediaSelectionPreparation
         self.itemPreparation = itemPreparation
+        self.prepareGrowingPlaylist = prepareGrowingPlaylist
         self.nativeSeek = nativeSeek
         self.waitNativeSeekDeadline = waitNativeSeekDeadline
         self.canPlayOffline = canPlayOffline
@@ -6401,7 +6406,7 @@ final class PlayerController: ObservableObject {
             startRecoveryEvidencePoll()
         }
 
-        guard let url else {
+        guard var url else {
             restoreAfterFailedChange(session: superseded)
             throw APIError.badURL
         }
@@ -6422,6 +6427,31 @@ final class PlayerController: ObservableObject {
         guard started else {
             isChangingStream = false
             return
+        }
+        if sessionId != nil && !isVOD {
+            while true {
+                do {
+                    try await prepareGrowingPlaylist(url)
+                    break
+                } catch {
+                    guard !isSuperseded(generation), started, !Task.isCancelled else { return }
+                    let httpStatus: Int?
+                    if case let APIError.http(status) = error { httpStatus = status }
+                    else { httpStatus = nil }
+                    // Preparation owns the resource before AVPlayer does, so
+                    // it must preserve the same bounded ingress recovery that
+                    // native transport errors receive after attachment.
+                    guard Self.isTransportPlaybackFailure(error: error as NSError,
+                              eventDomain: nil, eventStatus: httpStatus),
+                          let path = activeMediaPath,
+                          let successor = Session.shared.nextMediaFailoverURL(path,
+                              authenticated: activeMediaAuthenticated) else { throw error }
+                    url = successor
+                }
+            }
+            // The viewer may stop or replace this open during server
+            // preparation. Its completed playlist cannot resurrect the item.
+            guard !isSuperseded(generation), started, !Task.isCancelled else { return }
         }
         let item = AVPlayerItem(url: url)
         Self.configureBuffering(item, growingHLS: sessionId != nil && !isVOD)
@@ -9194,6 +9224,9 @@ final class PlayerController: ObservableObject {
         pgsOverlayWindow = nil
         player.replaceCurrentItem(with: item)
         installItemObserver(for: item)
+        // Failover replaces the native item just as open() does. Faults from
+        // its predecessor cannot remain over the successor's recovered video.
+        present(.attach(generation))
         if resumeAttempt?.repairAdmitted == true {
             bindResumeRepairSuccessor(item, generation: generation)
         }

@@ -20,7 +20,12 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `168` — Private incident capture, protected account
+> Status: **v0.3.0**, build `170` — Authenticated current-account requests
+> echo bounded read-after receipts across the advertised voter cohort;
+> unknown writes retire the floor (#1049). Source qualification only, not yet
+> installed on hardware or qualified against the fleet read-cost target.
+>
+> Build `168` — Private incident capture, protected account
 > storage, local ZIP sharing, resumed support delivery and physical-only TV
 > phone approval are implemented. Debug app and regression-source compilation
 > pass; release, runtime/privacy/resource and physical acceptance remain open.

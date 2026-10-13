@@ -650,7 +650,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
             },
             waitCreateRetry: { ms in try await waits.wait(ms) },
             releaseHlsSession: { _, sessionId in released.append(sessionId) },
-            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+            prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
         )
         let model = AppModel()
         defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
@@ -696,7 +696,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
                 try await decisions.request(file: file, selection: selection, quality: quality)
             },
             waitCreateRetry: { ms in try await waits.wait(ms) },
-            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+            prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
         )
         let model = AppModel()
         defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
@@ -789,7 +789,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
             },
             waitCreateRetry: { ms in try await waits.wait(ms) },
             releaseHlsSession: { _, sessionId in released.append(sessionId) },
-            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+            prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
         )
         let model = AppModel()
         defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
@@ -841,7 +841,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
                 try await decisions.request(file: file, selection: selection, quality: quality)
             },
             waitCreateRetry: { ms in try await waits.wait(ms) },
-            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+            prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
         )
         let model = AppModel()
         defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
@@ -896,7 +896,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
                 try await decisions.request(file: file, selection: selection, quality: quality)
             },
             waitCreateRetry: { ms in try await waits.wait(ms) },
-            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+            prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
         )
         let model = AppModel()
         defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
@@ -982,6 +982,87 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         throw APIError.transport(message)
     }
 
+    func testGrowingPlaylistMustBePublishedBeforeNativeAttachment() async throws {
+        let prior = Session.shared.credentials
+        Session.shared.setCredentials(origin: "http://127.0.0.1:8769", token: nil)
+        defer { Session.shared.setCredentials(origin: prior.origin, token: prior.token) }
+        let decision = try coldDecision()
+        let hls = try JSONDecoder().decode(HlsStart.self, from: Data("""
+        {"sessionId":"growing","playlistUrl":"/hls/growing/index.m3u8","mediaOriginMs":813730,"vod":false}
+        """.utf8))
+        for stopBeforePublication in [false, true] {
+            var publication: CheckedContinuation<Void, Error>?
+            var seeks: [Int] = []
+            var controller: PlayerController!
+            controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in (decision, self.caps) },
+                itemPreparation: .init(ready: { _, _ in }, seek: { _, ms in
+                    seeks.append(ms)
+                    controller.stop()
+                }), releaseHlsSession: { _, _ in }, prepareGrowingPlaylist: { _ in
+                    try await withCheckedThrowingContinuation { publication = $0 }
+                }, requestHlsSession: { _, _, _ in hls }, requestHlsStatus: { _, id in
+                    PlaybackSessionStatus(id: id)
+                })
+            let model = AppModel()
+            controller.start(model: model, itemId: 1, fileId: 1, startMs: 814_473,
+                             durationMs: 900_000, title: "Unpublished growing fixture")
+            let load = try XCTUnwrap(controller.loadingTask)
+            try await waitUntil("playlist preparation entered") { publication != nil }
+            XCTAssertNil(controller.player.currentItem, "AVPlayer must not own an unpublished resource")
+            if stopBeforePublication { controller.stop() }
+            publication?.resume()
+            await load.value
+            XCTAssertEqual(seeks, stopBeforePublication ? [] : [743])
+            XCTAssertNil(controller.player.currentItem, "late preparation must not resurrect stopped playback")
+            controller.stop()
+        }
+    }
+
+    func testGrowingPreparationRecoversIngressAndCannotAttachAfterStop() async throws {
+        let prior = Session.shared.credentials
+        Session.shared.setCredentials(origin: "http://127.0.0.1:8769", token: nil)
+        defer {
+            Session.shared.configureNodeOrigins([], primary: prior.origin)
+            Session.shared.setCredentials(origin: prior.origin, token: prior.token)
+        }
+        let decision = try coldDecision()
+        let hls = try JSONDecoder().decode(HlsStart.self, from: Data("""
+        {"sessionId":"growing","playlistUrl":"/hls/growing/master.m3u8","mediaOriginMs":813730,"vod":false}
+        """.utf8))
+        for stopDuringRecovery in [false, true] {
+            Session.shared.configureNodeOrigins(["http://127.0.0.1:8770"], primary: "http://127.0.0.1:8769")
+            var recovery: CheckedContinuation<Void, Error>?
+            var requests: [URL] = []
+            var attached: [URL] = []
+            var controller: PlayerController!
+            controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in (decision, self.caps) },
+                itemPreparation: .init(ready: { item, _ in
+                    attached.append(try XCTUnwrap((item.asset as? AVURLAsset)?.url))
+                }, seek: { _, _ in controller.stop() }), releaseHlsSession: { _, _ in },
+                prepareGrowingPlaylist: { url in
+                    requests.append(url)
+                    if requests.count == 1 { throw URLError(.networkConnectionLost) }
+                    try await withCheckedThrowingContinuation { recovery = $0 }
+                }, requestHlsSession: { _, _, _ in hls }, requestHlsStatus: { _, id in
+                    PlaybackSessionStatus(id: id)
+                })
+            let model = AppModel()
+            controller.start(model: model, itemId: 1, fileId: 1, startMs: 814_473,
+                             durationMs: 900_000, title: "Ingress preparation fixture")
+            let load = try XCTUnwrap(controller.loadingTask)
+            do { try await waitUntil("second ingress preparation entered") { recovery != nil } }
+            catch { controller.stop(); await load.value; throw error }
+            XCTAssertNil(controller.player.currentItem)
+            if stopDuringRecovery { controller.stop() }
+            recovery?.resume()
+            await load.value
+            XCTAssertEqual(requests.map(\.port), [8769, 8770])
+            XCTAssertEqual(attached.map(\.port), stopDuringRecovery ? [] : [8770])
+            XCTAssertNil(controller.player.currentItem)
+            controller.stop()
+        }
+    }
+
     func testGrowingKeyframeCorrectionUsesSessionPreparationAndSeeksOnce() async throws {
         let prior = Session.shared.credentials
         Session.shared.setCredentials(origin: "http://127.0.0.1:8769", token: nil)
@@ -1019,7 +1100,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
             }, seek: { _, ms in
                 seeks.append(ms)
                 controller.stop()
-            }), releaseHlsSession: { _, _ in }, requestHlsSession: { _, _, _ in hls },
+            }), releaseHlsSession: { _, _ in }, prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, _, _ in hls },
             requestHlsStatus: { _, id in
                 var status = PlaybackSessionStatus(id: id)
                 status.playlistReady = false; status.producerState = "running"
@@ -1033,6 +1114,45 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         await load.value
         XCTAssertEqual(now, 22_000)
         XCTAssertEqual(seeks, [743])
+    }
+
+    func testFailoverAttachmentRetiresThePredecessorsPreparationError() async throws {
+        let prior = Session.shared.credentials
+        Session.shared.setCredentials(origin: "http://127.0.0.1:8769", token: nil)
+        Session.shared.configureNodeOrigins(["http://127.0.0.1:8770"], primary: "http://127.0.0.1:8769")
+        defer {
+            Session.shared.configureNodeOrigins([], primary: prior.origin)
+            Session.shared.setCredentials(origin: prior.origin, token: prior.token)
+        }
+        let decision = try coldDecision()
+        let hls = try JSONDecoder().decode(HlsStart.self, from: Data("""
+        {"sessionId":"growing","playlistUrl":"/hls/growing/index.m3u8","mediaOriginMs":813730,"vod":false}
+        """.utf8))
+        var waits = 0
+        var controller: PlayerController!
+        controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in (decision, self.caps) },
+            itemPreparation: .init(ready: { _, _ in
+                waits += 1
+                if waits == 1 { throw PlaybackPreparationError.timedOut }
+                XCTAssertFalse(controller.surface.faults.contains {
+                    $0.detail == PlaybackPreparationError.timedOut.localizedDescription
+                }, "a successor must not inherit the failed native item's timeout")
+            }, seek: { _, _ in controller.stop() }), releaseHlsSession: { _, _ in },
+            prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, _, _ in hls },
+            requestHlsStatus: { _, id in PlaybackSessionStatus(id: id) })
+        defer { controller.stop() }
+        let model = AppModel()
+        controller.start(model: model, itemId: 1, fileId: 1, startMs: 814_473,
+                         durationMs: 900_000, title: "Failover error fixture")
+        let load = try XCTUnwrap(controller.loadingTask)
+        await load.value
+        XCTAssertTrue(controller.surface.faults.contains {
+            $0.detail == PlaybackPreparationError.timedOut.localizedDescription
+        })
+        let predecessor = try XCTUnwrap(controller.player.currentItem)
+        let retried = await controller.retryMediaOnNextNode(predecessor)
+        XCTAssertTrue(retried)
+        XCTAssertEqual(waits, 2)
     }
 
     func testSameSessionFailoverRebindsPollAndRejectsDelayedPredecessorEvidence() async throws {
@@ -1058,7 +1178,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
                 contexts.append(context)
                 try await withCheckedThrowingContinuation { waits.append($0) }
             }, seek: { _, ms in seeks.append(ms); controller.stop() }),
-            releaseHlsSession: { _, _ in }, requestHlsSession: { _, _, _ in hls },
+            releaseHlsSession: { _, _ in }, prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, _, _ in hls },
             requestHlsStatus: { _, id in
                 polls += 1
                 if polls == 1 { return try await withCheckedThrowingContinuation { oldStatus = $0 } }
@@ -1110,7 +1230,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         var creates: [(Int, CreateSessionRequest)] = []
         let controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
             try await decisions.request(file: file, selection: selection, quality: quality)
-        }, requestHlsSession: { _, file, body in
+        }, prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, file, body in
             creates.append((file, body))
             throw APIError.transport("fixture stops before network attachment")
         })
@@ -1167,7 +1287,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
             var creates: [CreateSessionRequest] = []
             let controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
                 try await decisions.request(file: file, selection: selection, quality: quality)
-            }, requestHlsSession: { _, _, body in
+            }, prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, _, body in
                 creates.append(body)
                 throw APIError.transport("fixture stops before network attachment")
             })
@@ -1207,7 +1327,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         var creates: [CreateSessionRequest] = []
         let controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
             try await decisions.request(file: file, selection: selection, quality: quality)
-        }, waitInitialDecisionDeadline: { try await deadlines.wait() }, requestHlsSession: { _, _, body in
+        }, waitInitialDecisionDeadline: { try await deadlines.wait() }, prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, _, body in
             creates.append(body)
             throw APIError.transport("fixture stops before network attachment")
         })
@@ -1270,7 +1390,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         var creates: [CreateSessionRequest] = []
         let answer = try coldDecision()
         let controller = PlayerController(requestPlaybackDecision: { [caps] _, _, _, _ in (answer, caps) },
-            requestHlsSession: { _, _, body in
+            prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, _, body in
                 creates.append(body)
                 throw APIError.transport("first session unavailable")
             })
@@ -1301,7 +1421,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         var files: [Int] = []
         let controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
             try await decisions.request(file: file, selection: selection, quality: quality)
-        }, requestHlsSession: { _, file, _ in
+        }, prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, file, _ in
             files.append(file)
             throw APIError.transport("fixture stops before network attachment")
         }, readControlSequence: { _ in

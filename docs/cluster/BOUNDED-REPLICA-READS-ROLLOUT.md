@@ -1,6 +1,13 @@
 # Bounded replica reads rollout — a consistency-policy change, one route at a time
 
-**Status:** open — M0–M4, the web echo, and the on-by-default setting (the `config.rs` seed is `true`) on `main` since 2026-10-04 (#793), switched on before the lab readout; Apple and Android send no `X-Plurx-Read-After`; the named lab readout and rolling-upgrade acceptance remain open; recommendation: remove the switch after the lab readout (see the 2026-10-04 relevance pass §2.9) · **Executes:** S1, F-sc-1, F-core-4 from
+**Status:** open — M0–M4, the web echo, and the on-by-default setting (the
+`config.rs` seed is `true`) on `main` since 2026-10-04 (#793), switched on
+before the lab readout; Apple and Android echo source landed in #1049 on
+2026-10-13, preserving the original read-cost target. Installed-client,
+named lab readout and rolling-upgrade acceptance remain open; source
+integration is not device or fleet qualification. Recommendation: remove
+the switch after the lab readout (see the 2026-10-04 relevance pass §2.9) ·
+**Executes:** S1, F-sc-1, F-core-4 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -561,9 +568,46 @@ acceptance.
 
 ## 7. Open questions
 
-1. Whether Apple and Android should adopt the `X-Plurx-Read-After` echo in
-   the same quarter; until then their Home rails are Authority on
-   non-writing nodes, which is today's behaviour.
+1. **Decided by Paul, 2026-10-13:** Apple and Android will adopt the existing
+   `X-Plurx-Read-After` echo; preserve the original read-cost target rather
+   than restate it around header-less clients. Source integration is landed;
+   native/fleet acceptance remains open. Header-less installed clients still
+   use Authority; source integration does not update an installed client.
+   Retain the web contract: lossless canonical positive u64 indexes, a
+   monotonic 60-second lifetime, auth-generation isolation and unknown-write
+   invalidation that fences already-in-flight known replies. Do not send a
+   receipt to a public server-identity probe or another account/server.
+   Focused state-machine cases cover expiry, maximum u64, out-of-order replies,
+   absent/malformed write receipts, failed mutating transports and stale auth.
+   Native source integration landed on 2026-10-13 in
+   [#1049](http://forge.lan:3000/noirr/plurx/pulls/1049), `e4b6c1c6d`:
+   exact current-tree fast lane and Main promotion passed; all48 landing
+   regression fields match the validated body, and the qualified tree and
+   ordered parents are verified. This is source integration, not the fleet
+   read-cost or physical-device acceptance result.
+   The native implementation binds authorization generation at
+   request construction, echoes only to the primary and current-generation
+   authenticated ingress peers, and keeps the receipt separate from the media
+   failover list. The ingress metadata inspection is capped at 1 MiB; malformed
+   or oversized metadata admits no additional origin, and HTTPS never admits
+   an HTTP sibling. Public identity, foreign, capability and captured-profile
+   transports cannot borrow a receipt. Apple control and bounded shared-write
+   delegates use the same unknown-write retirement without changing body
+   ceilings, redirect refusal or cancellation.
+   The sole candidate review found current-account shared watched/progress
+   writers outside the ordinary transports. Their captured generation now opts
+   into the common floor explicitly, including sharing management and the
+   captured Live TV/DVR account clients; generic background-profile clients
+   and media capability clients remain receipt-free. Watched-write fixtures
+   cover known receipt advancement and unknown/failed retirement, while a
+   captured DVR write cannot retire a later account generation's floor.
+   Focused proofs cover the actual no-content API paths, cross-voter receipt
+   sharing, stale ingress and reused-bearer generations, control writes and
+   shared transport refusal/cancellation. These are synthetic native HTTP and
+   unit proofs, not device/fleet measurements. One review, current-source
+   promotion and landing are complete; neither the fixtures nor that source
+   merge substitutes for §5.1's cross-node read-cost and rolling-upgrade
+   evidence.
 2. Whether to lengthen the implemented 60 s per-user write index and header
    window; a longer window only costs Authority reads.
 3. Should `route_group` include `reader` (ebooks) as its own value? Nine
@@ -572,8 +616,8 @@ acceptance.
    watch read is local only for a client that echoes an
    `X-Plurx-Read-After` from the last 60 s. A node's own write record no
    longer counts on its own (§3.3 *As built*). The web echo landed in #572;
-   Apple and Android (question 1) and an idle web session stay on Authority
-   for watch state.
+   Header-less Apple and Android clients (question 1), and a web session
+   without a live echo, stay on Authority for watch state.
    That is what makes the fence sound without a replicated per-user
    revision, and M3 already takes that Authority cost from two reads to one.
    The header also gives per-client, not per-user, consistency: a second

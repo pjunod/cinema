@@ -14,6 +14,7 @@ final class Session: @unchecked Sendable {
     private var credentialOrigin = ""
     private var credentialToken: String?
     private var credentialGeneration: UInt64 = 0
+    private var readAfterPeers: [String] = []
     private var authorizationObservers: [UUID: (UInt64) -> Void] = [:]
     private var mediaFailoverOrigins: [String] = []
     private var mediaFailoverIndex = 0
@@ -30,6 +31,26 @@ final class Session: @unchecked Sendable {
         return (credentialOrigin, credentialToken, credentialGeneration)
     }
 
+    var readAfterAuthorization: ReadAfterHTTP.Authorization {
+        nodeLock.lock(); defer { nodeLock.unlock() }
+        return .init(origin: credentialOrigin, token: credentialToken,
+                     generation: credentialGeneration, peers: readAfterPeers)
+    }
+
+    /// Only an authenticated, non-redirected ingress reply may install peers.
+    /// Keep this separate from the media list, whose asynchronous refresh is
+    /// not an authorization-generation receipt.
+    func recordReadAfterPeers(_ peers: [String], authorization: ReadAfterHTTP.Authorization) {
+        nodeLock.lock(); defer { nodeLock.unlock() }
+        guard authorization.generation == credentialGeneration,
+              authorization.token == credentialToken, credentialToken != nil,
+              let primary = Self.canonicalOrigin(credentialOrigin),
+              Self.canonicalOrigin(authorization.origin) == primary else { return }
+        readAfterPeers = Array(Set(peers.compactMap(Self.canonicalOrigin).filter {
+            $0 != primary && (!primary.hasPrefix("https://") || $0.hasPrefix("https://"))
+        })).sorted()
+    }
+
     /// Registration returns the generation under the same lock as the listener install.
     /// A caller that captured authorization earlier must compare this and recheck afterward.
     func observeAuthorizationChanges(_ observer: @escaping (UInt64) -> Void) -> (id: UUID, generation: UInt64) {
@@ -44,7 +65,7 @@ final class Session: @unchecked Sendable {
     func setCredentials(origin: String, token: String?) {
         nodeLock.lock()
         let changed = credentialOrigin != origin || credentialToken != token
-        if changed { credentialGeneration += 1 }
+        if changed { credentialGeneration += 1; readAfterPeers = [] }
         credentialOrigin = origin; credentialToken = token
         let generation = credentialGeneration
         let observers = changed ? Array(authorizationObservers.values) : []
@@ -189,8 +210,10 @@ final class Session: @unchecked Sendable {
 
     /// Add the bearer header to an API/image request.
     func authorize(_ request: inout URLRequest) {
-        if let token = credentials.token {
+        let captured = readAfterAuthorization
+        if let token = captured.token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
+        ReadAfterHTTP.bind(captured, to: &request)
     }
 }

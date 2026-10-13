@@ -5,6 +5,7 @@ const test = require("node:test");
 // Native startup is part of the same required web-control lane.
 require("./native-hls-startup.test.js");
 require("./paused-hls-resume.test.js");
+require("./prepared-frame-rendezvous.test.js");
 const fs = require("node:fs");
 const path = require("node:path");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
@@ -4192,7 +4193,7 @@ async function main() {
         shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
         shippedConst("PREPARED_ALIGN_SEEK_MS"), shippedConst("PREPARED_ALIGN_ATTEMPTS"),
-        shippedSource("notePreparedBuffer"), shippedSource("commitPreparedReplacement"),
+        shippedSource("notePreparedBuffer"), shippedSource("preparedClockAlignmentSlackMs"), shippedSource("commitPreparedReplacement"),
         // §7.3: the commit is two phases now. Alignment finishes before the
         // successor is exposed, so a corrective seek can no longer put a
         // blank element in front of the viewer.

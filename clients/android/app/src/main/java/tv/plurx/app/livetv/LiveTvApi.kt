@@ -550,7 +550,10 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
     override val recoveryRoutes: Boolean get() = protocols.recoveryRoutes
     private val client: OkHttpClient = Net.capabilityClient.newBuilder()
         .connectTimeout(8, TimeUnit.SECONDS).readTimeout(45, TimeUnit.SECONDS)
-        .callTimeout(45, TimeUnit.SECONDS).build()
+        .callTimeout(45, TimeUnit.SECONDS).build().let { transport ->
+            val captured = Session.playbackAuthorization()
+            if (captured.origin == origin && captured.token == token) Net.capturedReceiptClient(captured, transport) else transport
+        }
     val mediaClient: OkHttpClient = Net.capabilityClient.newBuilder()
         .connectTimeout(8, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS)
         .callTimeout(20, TimeUnit.SECONDS).build()

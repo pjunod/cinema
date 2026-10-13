@@ -61,6 +61,20 @@ test('account replacement during IndexedDB report recovery cannot adopt old evid
   recover({expires:Date.now()+60000,capture:{scope:'a'.repeat(64),id:'old-account-report',events:[{private:'old evidence'}]}});await opening;
   assert.equal(context.DIAGNOSTIC_REPORT,null);assert.equal(appended,0);
 });
+test('resumed delivery exports its immutable archive without resubmitting',async()=>{
+  const frozen=new Blob(['frozen private report']);let saved=null,persisted=0;
+  const run={capture:{id:'incident'},deliveryState:{origin:'https://approved.example',state:'staged',archive:frozen},controller:new AbortController()};
+  const context=vm.createContext({diagnosticBundle:()=>{throw new Error('Frozen report must not be rebuilt')},diagnosticPersist:async value=>{assert.equal(value,run);persisted++},diagnosticCurrent:()=>true,CinemaDiagnosticExport:{save:(blob,id)=>{saved={blob,id}}},diagnosticMessage(){}});
+  vm.runInContext(reportingFunction('diagnosticExport'),context);await context.diagnosticExport(run);
+  assert.equal(saved.blob,frozen);assert.equal(saved.id,'incident');assert.equal(persisted,1);
+  assert.equal(run.deliveryState.origin,'https://approved.example');assert.equal(run.deliveryState.state,'staged');
+});
+test('archive account setup binds identity without support provisioning',async()=>{
+  let bound=0;const context=vm.createContext({TOKEN:'fixture',ME:{id:4},AUTH_GENERATION:1,DIAGNOSTIC_VERIFIED_TOKEN:null,diagnosticAuthChanged:()=>{bound++},DIAGNOSTIC_AUTH_READY:Promise.resolve(),api:()=>{throw new Error('Archive setup must not provision support')},CinemaDiagnosticStore:{get:()=>{throw new Error('Archive setup must not read enrollment')}}});
+  vm.runInContext(reportingFunction('diagnosticProvisionForCurrentAccount'),context);await context.diagnosticProvisionForCurrentAccount();
+  assert.equal(bound,1);assert.equal(context.DIAGNOSTIC_VERIFIED_TOKEN,'fixture');
+});
+
 test('resumed delivery confirms and displays its immutable destination',async()=>{
   const fields={origin:{value:'https://changed.example',disabled:false},category:{},titles:{}};let confirmation='';
   const run={deliveryState:{origin:'https://approved.example',state:'staged'},controller:new AbortController()};

@@ -1,0 +1,403 @@
+{
+  "schema": "plurx-f2-decoded-alignment-v1",
+  "date": "2026-10-13",
+  "state": "both source corrections qualified and merged; bounded installed-source Air HDR remux to1080p SDR transition accepted; restoration complete; broader matrix and physical audio remain open",
+  "scope": "F2 HDR rolling remux to encoded 1080p SDR decoded-frame alignment",
+  "source_head": "fcac7a4ec6482d6f9b10aa39b02d390bc6771c78",
+  "base": "e4b6c1c6daff0ceef3d80cec3bafbeb544b56f24",
+  "pull_request": "http://forge.lan:3000/noirr/plurx/pulls/1074",
+  "production_js_sha256": "0dd905c44e5bf5198762ff9cc77edb1f32aa58e40b8e7c81787652138f00bb53",
+  "installed_binary_sha256": "b1566125fd6d1bfb615d78fe8f3a72d440548dfac834fff0f9e2880918194d62",
+  "original_controls": {
+    "logs": [
+      {
+        "name": "air-94-metal-startup.log",
+        "bytes": 67398,
+        "sha256": "8b3eb8f1b276f579981112ac56319b6c17d2a44e95e54cab307b944f3151bd5c"
+      },
+      {
+        "name": "air-94-metal-startup-error.log",
+        "bytes": 71633,
+        "sha256": "1f669f220bd6c7eee2ae708c9d504c742a1575359574b3f6937850d39ad674d0"
+      },
+      {
+        "name": "air-94-metal-5m-proof.log",
+        "bytes": 42427,
+        "sha256": "8d69a759452578d690f410f93487e84328d382f73fe150f98cec998c73471455"
+      }
+    ],
+    "oct12_preparation": "6bdd65ef-6dd6-450b-b997-e88e1f16599d",
+    "original_refusal": "lost-alignment; current-clock drift 51ms, callbacks4, bad0, last age34ms, runway17.1s; incumbent HDR retained"
+  },
+  "fresh_control": {
+    "utc": "2026-10-13T16:03:09Z",
+    "incumbent_session": "b4132cc6-245c-4e84-bf19-3af154b41ea1",
+    "preparation": "21eaa26e-0495-4acd-a79f-60676410cff0",
+    "runway_seconds": 21.5,
+    "incumbent_film_seconds": 17.976,
+    "incumbent_display_ms": 86542,
+    "target_film_seconds": 17.892875,
+    "target_display_ms": 86508.6,
+    "frame_tolerance_ms": 41.709,
+    "projected_drift_ms": 49.725,
+    "result": "unsafe pair correctly not exposed, but preparation immediately fails before successor callback can complete pair"
+  },
+  "failed_proposal": {
+    "name": "wait-only incumbent callback comparison",
+    "preparation": "b012715d-df09-4fa2-bb02-60bea3ae699d",
+    "utc": "2026-10-13T16:12:11.339Z",
+    "target_callbacks": 18,
+    "result": "original800ms deadline refusal; retained HDR; not successful"
+  },
+  "repair": {
+    "comparison": "either advancing decoder callback",
+    "tolerance": "one measured decoded frame, unchanged",
+    "observation_freshness_ms": 50,
+    "original_deadline_ms": 800,
+    "guards": [
+      "current ownership",
+      "viewer playback intent",
+      "no pause or seek",
+      "same playback rate",
+      "target buffer coverage",
+      "both observations fresh"
+    ],
+    "waiting": "incumbent picture and audio remain authoritative"
+  },
+  "local": {
+    "rustc": "1.97.1",
+    "focused_command": "node --test tests/playback/prepared-frame-rendezvous.test.js",
+    "focused_pass": 9,
+    "original_source_control": "first HDR regression fails against unchanged original production source",
+    "commands": [
+      "cargo check -p plurxd --all-targets",
+      "cargo clippy --workspace --all-targets -- -D warnings",
+      "make web-unit-check",
+      "make effort-web-static-check",
+      "python3 -m unittest tests.operations.test_docs_index"
+    ],
+    "all_current_candidate_commands": "passed",
+    "release_build": "passed7m22s"
+  },
+  "review": "Astra approved revised two-sided source; no blocking findings; full physical frame/audio/applied-quality evidence remains a broader acceptance requirement",
+  "negative_archive": {
+    "uuid": "09349205-d671-4076-b585-7f1c5335bb2f",
+    "url": "http://forge.lan:3000/attachments/09349205-d671-4076-b585-7f1c5335bb2f",
+    "sha256": "1d47578cc247e4016d5b7e9352c3303bb9519077a22723ce23fc582cd975690a",
+    "bytes": 2482668,
+    "members": 18,
+    "state": "immutable negative controls, original records unchanged"
+  },
+  "qualification": {
+    "repository_run": 5015,
+    "global_run": 5041,
+    "preflight": "passed",
+    "web": "passed",
+    "rust": "passed",
+    "main_promotion": "passed",
+    "qualified_head": "fcac7a4ec6482d6f9b10aa39b02d390bc6771c78"
+  },
+  "physical": {
+    "state": "installed-source startup blocked before decoding by macOS network-volume denial",
+    "utc": "2026-10-13T17:38:43Z",
+    "browser_session": "9129dc49-d565-4a5c-9433-0cbd47d6030f",
+    "producer_session": "s-5cdbbb1e916af2131cd688ba9765873fedde5b719c1c2b667b3347f952e8ba24",
+    "result": "FFmpeg source open returns Operation not permitted; producer_failed before moov or frames; no F2 comparison or applied-quality outcome",
+    "runtime_patch": "none; only a comparison wrapper logs the original return value",
+    "access_state": "existing plurxd Full Disk Access shown ON; refresh awaits local Touch ID/password"
+  },
+  "acceptance_limits": [
+    "No calibrated physical HDR-display measurement",
+    "No audible speaker seam measured",
+    "Full platform continuous-quality matrix remains open"
+  ],
+  "restoration": {
+    "utc": "2026-10-13T21:25:41Z",
+    "client_quality": "Auto, verified authenticated read and fresh reload; temporary capabilities/logging wrappers removed",
+    "shared_clipboard": "OFF; temporary toggle reversed, final native Get/Send Clipboard menu commands enabled",
+    "keyboard_sync": "temporary toggle reversed",
+    "backend": "Auto unchanged",
+    "mac_processing": "ON unchanged",
+    "movie_resume": {
+      "position_ms": 0,
+      "duration_ms": 9412111,
+      "watched": false,
+      "updated_at": 1791926554
+    },
+    "owned_player": "closed before separate delayed progress reset; authenticated session null; fresh Play-only page"
+  },
+  "source_merge": "96e4c49e92818f8f3e6b01e4786492b1c37a97d7",
+  "merged_at": "2026-10-13T17:05:35Z",
+  "qualified_archive": {
+    "uuid": "f6639fb2-2bb0-475a-b066-c7a24c79f967",
+    "url": "http://forge.lan:3000/attachments/f6639fb2-2bb0-475a-b066-c7a24c79f967",
+    "sha256": "24895b8ff899e0002fa7c3e1815d3e8d51992a0a53372a6d5ec013b334ebb4f0",
+    "bytes": 263203,
+    "members": 31,
+    "state": "source qualification and installation; Air physical transition pending unlock"
+  },
+  "immutable_evidence_verified": "all three original Oct12 log lengths and SHA256 reverified during final archive creation; all earlier archives retained",
+  "installation_notes": {
+    "active_prefix": "Homebrew arm64 prefix",
+    "first_attempt": "SSH shell did not locate brew; installed into an unused prefix; retained original service plist",
+    "retry": "correct prefix parser first required a separate source file; launchd bootstrap was retried successfully",
+    "unused_binary": "task-created unused prefix binary moved into recoverable temporary staging after exact digest check",
+    "actual_service": "ready on qualified binary; served JavaScript digest verified",
+    "source_binding": "binary built from qualified head after current main integrated; committed source archive preserved"
+  },
+  "installed_startup_archive": {
+    "uuid": "22ebe6e5-f5cd-4baf-a10a-26c3d5dc39dd",
+    "url": "http://forge.lan:3000/attachments/22ebe6e5-f5cd-4baf-a10a-26c3d5dc39dd",
+    "sha256": "59555bbf49760a37c1845db742e6b7141769a8b3099212bdb67498965d3ed20f",
+    "bytes": 958246,
+    "members": 4,
+    "state": "installed-source NAS access denied before decoding, not an F2 outcome"
+  },
+  "restoration_archive": {
+    "uuid": "dfd38c6f-aba3-4109-bc41-209eb829a05a",
+    "url": "http://forge.lan:3000/attachments/dfd38c6f-aba3-4109-bc41-209eb829a05a",
+    "sha256": "5d931248692a957e71ec577a8315557861b28410ddb9fc72e03a04723d6b922c",
+    "bytes": 2270297,
+    "members": 4,
+    "state": "authenticated persisted zero-resume and Auto quality; fresh Play-only page"
+  },
+  "physical_continuation": {
+    "access": "existing Plurx Full Disk Access grant rebound to installed binary after user authentication; NAS reads and playback restored",
+    "hdr_preserving": {
+      "utc": "2026-10-13T19:47:05.511Z",
+      "preparation": "0d85d803-202f-49ef-b67e-7c52b2e40465",
+      "incumbent_session": "8227d906-2103-4f89-872a-d504da28df6b",
+      "result": "prepared 1080p successor committed; fresh decoded delta 41.667ms within measured41.708ms; first frame about30.1ms after commit",
+      "output": "HEVC1920x1080, 10-bit BT2020/PQ: HDR retained, not SDR",
+      "proof_ms": 35,
+      "preparation_ms": 20891
+    },
+    "sdr_refusal": {
+      "utc": "2026-10-13T19:56:53.976Z",
+      "preparation": "e203a2a2-2a27-4352-b4f4-a623ac9d7281",
+      "incumbent_session": "f641fe7a-058a-4cf8-afbb-5c3755c5191e",
+      "output": "pinned FFprobe confirms H2641920x1080 BT709/AAC",
+      "capability_diagnostic": "after HDR incumbent started, hdr/hdrDisplay/hdr10t/dv disabled only in temporary successor capability request; restored on reload",
+      "incumbent_film_seconds": 9.968,
+      "target_film_seconds": 9.884875,
+      "same_display_ms": 132524.2,
+      "frame_cadence_ms": 41.709,
+      "target_gap_ms": 83.125,
+      "result": "19 advancing target callbacks; original800msdeadline; incumbent retained; no SDR exposure or applied-quality pass"
+    },
+    "warm_retry": {
+      "utc": "2026-10-13T20:00:29.123Z",
+      "preparation": "f9a291ce-f222-4868-b043-c35904064afa",
+      "result": "incumbent pressure9.9s refuses before decoded proof; not further alignment evidence"
+    },
+    "archive": {
+      "uuid": "27798e53-f80c-4897-8a90-961253559255",
+      "url": "http://forge.lan:3000/attachments/27798e53-f80c-4897-8a90-961253559255",
+      "sha256": "97f431a4ab2dafadde66de58be6a02642303477518870df4cb6a13e0dd6abfa5",
+      "members": 24,
+      "bytes": 7500991,
+      "state": "immutable installed-source HDR pass, explicit SDR refusal, NAS renewal and negative/positive clock regression"
+    }
+  },
+  "clock_correction": {
+    "branch": "codex/f2-clock-alignment",
+    "base": "b35eebb6b28c9f94b0a174c145953f79f39c1c8f",
+    "cause": "250ms clock slack skips correction of an83ms gap; independent decoded guard correctly requires one41.709msframe",
+    "repair": "use min(250ms,1000/measured_incumbent_fps) for initial and postseek clock alignment; retain250msfallback for unknown cadence",
+    "unchanged": "decoded pair tolerance/freshness, original800msproof deadline, two bounded seeks, ownership/rate/buffer guards and incumbent audio",
+    "review": "Astra approved; suggested postseek second-correction regression added; no source change after approval",
+    "focused_command": "node --test tests/playback/prepared-frame-rendezvous.test.js",
+    "focused_pass": 11,
+    "negative_control": "new two-frame-gap regression fails against original clock owner (0 seeks), passes correction",
+    "local_web_unit": "passed",
+    "local_web_static": "passed",
+    "state": "qualified, merged and installed-source SDR acceptance passed",
+    "qualification_failure": {
+      "global_run": 5071,
+      "repository_run": 5045,
+      "cause": "pre-existing Android diagnostic consent-focus adapter was not bounded in player input fence",
+      "repair": "bounded import and existing Down-to-consent handler regions; no runtime change; neighboring raw media handler still trips",
+      "local_fence_tests": 13,
+      "review": "Astra approved ancillary correction"
+    },
+    "source_head": "d1b480b5d5bd0ef7f9f6bad8ce9133bdcef05fa9",
+    "pull_request": 1083,
+    "source_merge": "f1bffab5963399f084db2f94b158412d5cb8d9d2",
+    "merged_at": "2026-10-13T21:23:44Z",
+    "production_js_sha256": "785140c1c3b5cbaa4aeb2a3506361c9682d4c97eabb0c2f5ad29b2b33298cbba",
+    "installed_binary_sha256": "e2c906fe955ba3147c8dd9bb64ec7bbb6dc956db6a60d35438385628e66000ef",
+    "qualification": {
+      "global_run": 5077,
+      "repository_run": 5051,
+      "head": "d1b480b5d5bd0ef7f9f6bad8ce9133bdcef05fa9",
+      "base": "b35eebb6b28c9f94b0a174c145953f79f39c1c8f",
+      "policy": "passed",
+      "rust": "passed",
+      "web": "passed",
+      "android": "passed",
+      "apple": "skipped by affected-surface scope",
+      "main_promotion": "passed",
+      "unit_receipt": {
+        "artifact": 2796,
+        "complete": true,
+        "applicability_commit": "d1b480b5d5bd0ef7f9f6bad8ce9133bdcef05fa9",
+        "fixture_errors": [],
+        "applicable_passes": 1385
+      },
+      "preflight_receipt": {
+        "artifact": 2797,
+        "phase_errors": [],
+        "all_outcomes": "success"
+      },
+      "landing_regressions": 3
+    },
+    "control_archive": {
+      "uuid": "d3c2e45e-bb9e-4d96-8c9e-c0f2a3e6e145",
+      "url": "http://forge.lan:3000/attachments/d3c2e45e-bb9e-4d96-8c9e-c0f2a3e6e145",
+      "sha256": "36fc1931321f4021d7cc52e52115e8656a89db6896b069482508bfaad09c27c8",
+      "bytes": 1319464,
+      "members": 22
+    },
+    "final_archive": {
+      "uuid": "26063af1-42b0-4c76-84b7-49769b9cb135",
+      "url": "http://forge.lan:3000/attachments/26063af1-42b0-4c76-84b7-49769b9cb135",
+      "sha256": "cbbbcb741c83b9721fa2f1b1c1fb477e1c35dcdc39e2f31907f75fdf8fb97642",
+      "bytes": 64419028,
+      "members": 41
+    },
+    "qualification_history": [
+      {
+        "global_run": 5073,
+        "repository_run": 5047,
+        "result": "failed missing client-history anchor for bounded diagnostic adapter; tests/client-fixes.toml row added; local history passed"
+      },
+      {
+        "global_run": 5076,
+        "repository_run": 5050,
+        "result": "superseded and cancelled after integrating current main; published receipts preserved"
+      }
+    ],
+    "physical": {
+      "utc": "2026-10-13T21:17:07.370Z",
+      "incumbent_session": "91d727cc-86e9-48fd-864e-6ff5fb21f423",
+      "successor_session": "e123d10f-2295-4d1f-b412-147cb297a53d",
+      "rendition": "6a3c64ce9f08e64e854fee57f01e62a770948d672bde51ff425d2bcb8844e898",
+      "route": "s-94b01896bfc6da18f09e57f5a175915b694d0e008c04c68a47093020a206e4e7",
+      "output": [
+        {
+          "codec_name": "h264",
+          "width": 1920,
+          "height": 1080,
+          "color_space": "bt709",
+          "color_transfer": "bt709",
+          "color_primaries": "bt709"
+        },
+        {
+          "codec_name": "aac"
+        }
+      ],
+      "diagnostic": "after HDR incumbent starts, temporary successor-only SDR capability request; logging wrappers return unmodified production results; reload restores capabilities",
+      "initial_runway_seconds": 21.3,
+      "preparation_ms": 3180,
+      "proof_buffer_elapsed_ms": 288,
+      "proof_to_commit_ms": 35,
+      "decoded_pair": {
+        "incumbent_seconds": 3.795,
+        "successor_seconds": 3.75375,
+        "same_display_ms": 159288.9,
+        "gap_ms": 41.25,
+        "cadence_ms": 41.709,
+        "meet": true
+      },
+      "previous_pair": "41.959ms exceeds41.708ms and remains rejected",
+      "first_frame_after_commit_ms": 31.5,
+      "tap_to_first_frame_ms": 3766.7,
+      "final_playback": {
+        "session": "e123d10f-2295-4d1f-b412-147cb297a53d",
+        "quality": "1080",
+        "width": 1920,
+        "height": 1080,
+        "time": 224.400667,
+        "paused": false,
+        "muted": false,
+        "volume": 1,
+        "playback": {},
+        "commit": {
+          "at": 159259.60000002384,
+          "predecessor": {
+            "_plurxMediaWired": true,
+            "_plurxTransportEvents": {
+              "play": [],
+              "pause": []
+            },
+            "_plurxFrameCancel": null
+          },
+          "successor": {
+            "_plurxMediaWired": true,
+            "_plurxTransportEvents": {
+              "play": [],
+              "pause": []
+            }
+          },
+          "tappedAt": 155524.40000003576,
+          "firstFrameAt": 159291.10000002384
+        },
+        "ledger": {
+          "frames": "Not measured",
+          "audio": "Not measured · analyser would capture this element's audio for its lifetime",
+          "visible": "3767 ms"
+        },
+        "hitches": {
+          "back": 0,
+          "held": 0,
+          "late": 0,
+          "gap": 0,
+          "drop": 0,
+          "slow": 0,
+          "worst": 0,
+          "last": null,
+          "at": [],
+          "fps": 23.976215594130704,
+          "n": 0,
+          "near": {},
+          "flushEdge": null,
+          "skewMax": 0.037,
+          "skewAt": null,
+          "decodeMs": 167.6,
+          "frames": 5290,
+          "rate": 1,
+          "renderedFps": 24,
+          "faults": [],
+          "metadataAnomalies": 0,
+          "metadataFaults": []
+        }
+      },
+      "warm_attempt": {
+        "utc": "2026-10-13T21:14:02.258Z",
+        "preparation": "9fbc41fa-9ed2-4243-9726-24c94304c6a3",
+        "result": "safe refusal at9.8s incumbent runway before decoded alignment; retained separately"
+      },
+      "measurement_limits": "frame-loss switch ledger and physical speaker seam not measured; control upload429/425 remains separate; final hitches are postcommit observations"
+    }
+  },
+  "restoration_history": [
+    {
+      "client_quality": "Auto verified from fresh browser localStorage",
+      "shared_clipboard": "OFF unchanged",
+      "backend": "Auto unchanged",
+      "mac_processing": "ON unchanged",
+      "movie_resume": "position_ms 0 and watched false verified through authenticated item read after progress committed; fresh movie page offers Play without Resume",
+      "owned_player": "closed before progress reset; no active browser session after reload",
+      "utc": "2026-10-13T17:49Z"
+    },
+    {
+      "utc": "2026-10-13T20:10Z",
+      "client_quality": "Auto after fresh reload, temporary capability override removed",
+      "shared_clipboard": "OFF verified in Screen Sharing Edit menu",
+      "backend": "Auto unchanged",
+      "mac_processing": "ON unchanged",
+      "movie_resume": "authenticated fresh item.watch position_ms0, watchedfalse; Play-only page",
+      "owned_player": "closed before deferred reset; no active browser session"
+    }
+  ]
+}

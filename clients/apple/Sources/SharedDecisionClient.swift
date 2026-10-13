@@ -19,6 +19,12 @@ struct SharedDecisionClient {
         let current = Session.shared.playbackAuthorization
         guard current.origin == origin, current.token == token, current.generation == generation else { throw APIError.badURL }
     }
+    private func authorize(_ request: inout URLRequest) throws {
+        let current = Session.shared.readAfterAuthorization
+        guard current.origin == origin, current.token == token, current.generation == generation else { throw APIError.badURL }
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        ReadAfterHTTP.bind(current, to: &request)
+    }
     func decision(context: PlaybackFileContext, selection: PrePlaySelection = .none,
                   quality: PlaybackQuality = .auto, audioOffsetMs: Int = 0,
                   presentationTarget: PresentationTarget? = nil) async throws -> (decision: SharedDecision, caps: DeviceCaps) {
@@ -65,7 +71,7 @@ struct SharedDecisionClient {
         let retained = try decoder.decode(CreateSessionRequest.self, from: encoded)
         guard let url = URL(string: origin + (try context.path("hls/sessions"))) else { throw APIError.badURL }
         var request = URLRequest(url: url); request.httpMethod = "POST"; request.httpBody = encoded; request.timeoutInterval = 310
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        try authorize(&request); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let data = try await SharedDecisionReadOperation(request: request, configuration: configuration) {
             try requireCurrent(); _ = try context.path("hls/sessions")
         }.read()
@@ -103,7 +109,7 @@ struct SharedDecisionClient {
               control.controlEpoch == channel.controlEpoch, control.clientInstanceId == channel.clientInstanceId,
               let url = URL(string: origin + channel.path) else { throw APIError.badURL }
         var request = URLRequest(url: url); request.httpMethod = "POST"; request.httpBody = try control.encoded(); request.timeoutInterval = 10
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        try authorize(&request); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let response: SharedDecisionHTTPResponse
         do {
             response = try await SharedDecisionReadOperation(request: request, configuration: configuration,
@@ -140,7 +146,7 @@ struct SharedDecisionClient {
         _ = try playlistURL(playback: playback)
         guard let url = URL(string: origin + "/api/v1/hls/\(playback.start.response.sessionId)/status") else { throw APIError.badURL }
         var request = URLRequest(url: url); request.timeoutInterval = 10
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        try authorize(&request)
         let data = try await SharedDecisionReadOperation(request: request, configuration: configuration, maxBytes: 65_536) {
             _ = try playlistURL(playback: playback)
         }.read()
@@ -156,7 +162,7 @@ struct SharedDecisionClient {
         if case .hls(let playback) = media { _ = try playlistURL(playback: playback) }
         guard let url = URL(string: origin + "/api/v1/hls/\(media.sessionId)") else { throw APIError.badURL }
         var request = URLRequest(url: url); request.httpMethod = "DELETE"; request.timeoutInterval = 10
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        try authorize(&request)
         _ = try await SharedDecisionReadOperation(request: request, configuration: configuration, statuses: [200, 202, 204], maxBytes: 16_384, allowEmpty: true, current: requireCurrent).readResponse()
     }
     /// One bounded account/Source/epoch/item watch order across imports.
@@ -228,7 +234,7 @@ struct SharedDecisionClient {
         let bytes = try encoder.encode(beat)
         guard bytes.count <= 1024, let url = URL(string: origin + "/api/v1/shared/imports/\(reference.importId)/items/\(reference.itemId)/progress") else { throw APIError.badURL }
         var request = URLRequest(url: url); request.httpMethod = "POST"; request.httpBody = bytes; request.timeoutInterval = 10
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        try authorize(&request); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let response = try await SharedDecisionReadOperation(request: request, configuration: configuration, statuses: [200, 409], maxBytes: 16_384, current: requireCurrent).readResponse()
         try requireCurrent(); try Task.checkCancellation()
         if response.status == 200 {
@@ -270,7 +276,7 @@ struct SharedDecisionClient {
         let body = try encoder.encode(Body(caps: caps)); guard body.count <= 131_072 else { throw APIError.badURL }
         guard let url = URL(string: origin + (try context.path("decision", query: query))) else { throw APIError.badURL }
         var request = URLRequest(url: url); request.httpMethod = "POST"; request.httpBody = body; request.timeoutInterval = 30
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        try authorize(&request); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let data = try await SharedDecisionReadOperation(request: request, configuration: configuration) { try requireCurrent(); _ = try context.path("decision") }.read()
         try Task.checkCancellation(); try requireCurrent()
         let decision = try SharedDecision.decode(data).validated(context); try requireCurrent()
@@ -283,7 +289,7 @@ struct SharedDecisionClient {
         guard client.origin == expected.origin, client.token == expected.token, client.generation == expected.generation else { throw APIError.badURL }
         guard let url = URL(string: client.origin + "/api/v1/shared/imports/\(reference.importId)/items/\(reference.itemId)") else { throw APIError.badURL }
         var request = URLRequest(url: url); request.timeoutInterval = 30
-        request.setValue("Bearer \(client.token)", forHTTPHeaderField: "Authorization")
+        try client.authorize(&request)
         return try await SharedDecisionReadOperation(request: request, configuration: client.configuration, current: client.requireCurrent).read()
     }
 }
@@ -292,6 +298,7 @@ private struct SharedDecisionHTTPResponse { let data: Data; let status: Int }
 
 private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegate {
     private let request: URLRequest
+    private let receiptExchange: ReadAfterHTTP.Exchange
     private let configuration: URLSessionConfiguration
     private let current: () throws -> Void
     private let lock = NSLock()
@@ -306,7 +313,11 @@ private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegat
     private var task: URLSessionDataTask?
     private var observer: UUID?
     init(request: URLRequest, configuration: URLSessionConfiguration, statuses: Set<Int> = [200], maxBytes: Int = 4_194_304, allowEmpty: Bool = false, current: @escaping () throws -> Void) {
-        self.request = request; self.configuration = configuration; self.current = current
+        // Preserve the custom bounded delegate, not URLSession's unbounded
+        // data convenience. Account metadata was bound by the captured client.
+        let exchange = ReadAfterHTTP.shared.prepare(for: request)
+        self.receiptExchange = exchange; self.request = exchange.request
+        self.configuration = configuration; self.current = current
         self.statuses = statuses; self.maxBytes = maxBytes; self.allowEmpty = allowEmpty
         super.init(); data.reserveCapacity(maxBytes)
     }
@@ -342,6 +353,7 @@ private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegat
         let session = self.session; self.session = nil
         let observer = self.observer; self.observer = nil
         data = Data(); lock.unlock()
+        if case .failure = result { ReadAfterHTTP.shared.failed(receiptExchange) }
         if let observer { Session.shared.removeAuthorizationObserver(observer) }
         task?.cancel(); session?.invalidateAndCancel(); continuation?.resume(with: result)
     }
@@ -354,6 +366,7 @@ private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegat
         do {
             try current()
             guard let response = response as? HTTPURLResponse, response.url == request.url else { throw APIError.badURL }
+            ReadAfterHTTP.shared.received(response, exchange: receiptExchange)
             guard statuses.contains(response.statusCode) else { throw APIError.http(response.statusCode) }
             guard response.expectedContentLength < 0 || response.expectedContentLength <= maxBytes else { throw APIError.badURL }
             lock.lock(); let done = completed; responseStatus = response.statusCode; lock.unlock()

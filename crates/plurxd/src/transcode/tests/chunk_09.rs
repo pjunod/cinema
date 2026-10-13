@@ -1650,6 +1650,27 @@ async fn activity_point_precedes_the_index_read() {
     );
 }
 
+/// A client waiting for a growing playlist needs completed-media evidence
+/// before the conservative publication cushion is ready. It cannot depend on
+/// the unrelated fifteen-second reaper tick to discover the writer's work.
+#[tokio::test]
+async fn preparation_status_tracks_writer_inventory_before_first_publication() {
+    let dir = crate::test_tempdir().expect("preparation inventory");
+    let session = test_session(dir.path().to_path_buf());
+    for count in [8, 12] {
+        seeded_session_dir(dir.path(), count, 2.0).await;
+        session.publication_cycle("preparation-inventory").await.expect("staging cycle");
+        let info = session_info(
+            "preparation-inventory", &session,
+            AheadLimits { max_secs: 0, max_bytes: 0, global_max_bytes: 0 }, 0, 0,
+        ).await;
+        assert_eq!(info.produced_end_ms, Some(count * 2_000));
+        assert_eq!(info.playlist_ready, Some(false));
+        assert!(info.served_end_ms.is_none());
+        assert!(session.publication.lock().await.served.is_none());
+    }
+}
+
 /// The first-media owner point follows an accepted settlement: a refused
 /// settlement never reaches it.
 #[tokio::test]

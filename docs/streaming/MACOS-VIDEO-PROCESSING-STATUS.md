@@ -11,6 +11,18 @@ measurements, negative results, provenance and reproducible raw receipts.
 
 ## 1. Current position
 
+**October 13 Air follow-up.** Renewed NAS access permits the real HDR10-to-SDR
+rerun. The paused loading repairs reach unbuffered target frames; the newly
+observed reopened preparation surface is corrected under current target-frame
+proof and physically clears without Play. PR #1068 holds the reviewed surface
+correction. The [dated acceptance addendum](MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md#7-october-13-renewed-access-and-paused-reopen-rerun)
+retains original failures and corrected captures. Ordinary Air hls.js F1
+acceptance now completes with a 58½-minute CPU control, a 150 ms paused target
+and verified cleanup: clipboard off, quality/backend Auto, Mac processing on
+and movie resume zero after restart. F2–F7 and native/device qualification
+remain separate.
+
+
 The [complete HDR acceptance report](MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 and its checksum-indexed evidence retain the five acceptance sections, exact
 receipts, negative observations and unresolved playback issues.

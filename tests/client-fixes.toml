@@ -6224,6 +6224,58 @@ source_anchor = "let complete = times.filter { $0 < lastDTS }.sorted()"
 test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
 test_anchor = "func testTransportStreamSuccessorStopsAtACompletePrefix()"
 
+# K04 native echo: source/test bindings only; focused execution is recorded
+# separately in PR1049. These rows do not waive any history or landing gate.
+[[fixes]]
+id = "apple.read-after-unknown-write-retires-inflight-floor"
+commits = ["97ee042ac5e9b045284b6c2e9c71a96e4a81d82f"]
+source = "clients/apple/Sources/ReadAfterReceipt.swift"
+source_anchor = "func observe(_ value: String?, mutating: Bool, request: Request,"
+test = "clients/apple/Tests/ReadAfterReceiptTests.swift"
+test_anchor = "func testUnknownWriteRetiresInFlightKnownReplies()"
+
+[[fixes]]
+id = "android.read-after-unknown-write-retires-inflight-floor"
+commits = []
+supplements = "apple.read-after-unknown-write-retires-inflight-floor"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/ReadAfterInterceptor.kt"
+source_anchor = "receipts.observe(value, mutating, ticket) { authorization().generation }"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/ReadAfterReceiptTest.kt"
+test_anchor = "fun unknownWriteRetiresInFlightKnownReplies()"
+
+[[fixes]]
+id = "apple.read-after-authorization-time-generation"
+commits = ["d597fcea97816b2b64bfa38a744e6b77ee4f834c"]
+source = "clients/apple/Sources/ReadAfterHTTP.swift"
+source_anchor = "URLProtocol.setProperty(authorization, forKey: authorizationKey, in: mutable)"
+test = "clients/apple/Tests/ReadAfterHTTPTests.swift"
+test_anchor = "func testAuthorizationTimeGenerationFencesReusedBearerAndOpaqueLogout()"
+
+[[fixes]]
+id = "android.read-after-authorization-time-generation"
+commits = []
+supplements = "apple.read-after-authorization-time-generation"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/ReadAfterInterceptor.kt"
+source_anchor = "val captured = original.tag(ReadAfterAuthorization::class.java)"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/ReadAfterInterceptorTest.kt"
+test_anchor = "fun authorizationTimeGenerationFencesReusedBearerAndUnboundRequests()"
+
+[[fixes]]
+id = "apple.read-after-captured-watched-writer"
+commits = ["5a74d83d0af09eb811bfaecf7d144e380f37ea34"]
+source = "clients/apple/Sources/SharedLibraryClient.swift"
+source_anchor = "ReadAfterHTTP.bindCaptured(origin: origin, token: token, generation: generation, to: &request)"
+test = "clients/apple/Tests/SharedLibraryTests.swift"
+test_anchor = "func testActualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt()"
+
+[[fixes]]
+id = "android.read-after-captured-watched-writer"
+commits = []
+supplements = "apple.read-after-captured-watched-writer"
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Net.kt"
+source_anchor = "internal fun capturedReceiptClient(auth: Session.PlaybackAuthorization, transport: OkHttpClient): OkHttpClient ="
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+test_anchor = "fun actualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt()"
 [[fixes]]
 id = "diagnostics.apple-wire"
 commits = ["f13a362361fbab0d7754a380f5e212cede32f429"]
@@ -6281,3 +6333,72 @@ source = "crates/plurxd/src/web/pages/diagnostics.js"
 source_anchor = "const authGeneration=AUTH_GENERATION,token=TOKEN"
 test = "tests/web/diagnostics-recorder.test.js"
 test_anchor = "account replacement during IndexedDB report recovery cannot adopt old evidence"
+
+# Native qualification follow-up: current source/test witnesses; actual
+# execution receipts are recorded in PR #1066 and the diagnostics ledger.
+[[fixes]]
+id = "diagnostics.android-report-clears-system-navigation"
+commits = ["faafb9c8d4a89aebd1608cfa9df0a41c480695f5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
+source_anchor = ".navigationBarsPadding()"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/DiagnosticReportNavigationTest.kt"
+test_anchor = "anonymousReportButtonClearsSystemNavigationAndOpensReport"
+
+[[fixes]]
+id = "diagnostics.native-history-frozen-consent-and-deletion"
+commits = ["a343ffb12409318c599976e57a9b48afdcde06ee"]
+source = "clients/apple/Sources/DiagnosticReportView.swift"
+source_anchor = "func resume(_ row: DiagnosticStore.Draft)"
+test = "clients/apple/Tests/DiagnosticCaptureTests.swift"
+test_anchor = "testStaleHistoryCannotReplaceFrozenConsentOrResurrectDeletedReport"
+
+# Archive-first qualification; actual export/device receipts are in PR #1066.
+[[fixes]]
+id = "diagnostics.archive-attachment-flow"
+commits = ["069615e85484537b2a2aa01ef3305f325935b8de"]
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticRuntime.kt"
+source_anchor = "fun share() = perform"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/DiagnosticReportNavigationTest.kt"
+test_anchor = "exportedZipCanBeAttachedWithoutSupportEnrollment"
+
+[[fixes]]
+id = "diagnostics.bounded-consent-focus-input-fence"
+commits = ["91d00f579bf0617b68f2c7de77c108c5be784681"]
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticReportScreen.kt"
+source_anchor = "// diagnostic-consent-navigation-adapter:begin"
+test = "tests/operations/test_player_input_fence.py"
+test_anchor = "test_diagnostic_consent_adapter_does_not_exempt_other_handlers"
+
+[[fixes]]
+id = "apple.growing-playlist-before-native-attachment"
+commits = ["94124323d9439c92c78d2d36d0e1dc3a6cc6fcce"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "try await prepareGrowingPlaylist(url)"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testGrowingPlaylistMustBePublishedBeforeNativeAttachment()"
+
+[[fixes]]
+id = "apple.failover-retires-predecessor-preparation-error"
+commits = []
+supplements = "apple.growing-playlist-before-native-attachment"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func retryMediaOnNextNode(_ failedItem: AVPlayerItem)"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testFailoverAttachmentRetiresThePredecessorsPreparationError()"
+
+[[fixes]]
+id = "apple.growing-master-waits-for-media-child"
+commits = ["e690c27bb1c0c4a2949a566e030a46cf5fbd4b50"]
+source = "clients/apple/Sources/GrowingPlaylistPreparation.swift"
+source_anchor = "while !pending.isEmpty"
+test = "clients/apple/Tests/GrowingPlaylistPreparationTests.swift"
+test_anchor = "func testImmediateMasterWaitsForPublishedChildAndCancelsItsRequest()"
+
+[[fixes]]
+id = "apple.growing-preparation-retains-ingress-recovery"
+commits = []
+supplements = "apple.growing-master-waits-for-media-child"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let successor = Session.shared.nextMediaFailoverURL(path,"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testGrowingPreparationRecoversIngressAndCannotAttachAfterStop()"
