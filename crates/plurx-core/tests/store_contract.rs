@@ -58,6 +58,9 @@ mod sharing_receiver_sessions;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/sharing_source_sessions.rs"]
 mod sharing_source_sessions;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/source_contract.rs"]
+mod source_contract;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
