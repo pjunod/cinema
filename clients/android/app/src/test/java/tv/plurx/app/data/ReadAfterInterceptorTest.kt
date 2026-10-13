@@ -9,6 +9,11 @@ import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import okhttp3.EventListener
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.test.resetMain
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.junit.After
@@ -19,6 +24,7 @@ import org.junit.Test
 
 /** Actual OkHttp I/O against two owned loopback HTTP fixtures. No lab,
  * provider, emulator, device, install or live-network-cost measurement. */
+@OptIn(ExperimentalCoroutinesApi::class)
 class ReadAfterInterceptorTest {
     private data class Reply(val code: Int = 200, val indexes: List<String> = emptyList(), val location: String? = null, val body: String = "{}")
     private data class Captured(val echo: String?, val bearer: String?)
@@ -59,6 +65,10 @@ class ReadAfterInterceptorTest {
     @Volatile private var generation = 1L
     @Volatile private var token = "fixture-a"
     @Before fun setup() {
+        // The landed diagnostic observer owns a Main scope even when its
+        // recorder is not initialized. Supply the platform dispatcher only;
+        // requests still use real OkHttp I/O and the production observers.
+        Dispatchers.setMain(StandardTestDispatcher())
         primary = Fixture(); foreign = Fixture()
         adapter = ReadAfterInterceptor({ ReadAfterAuthorization(primary.origin, token, generation) })
         client = OkHttpClient.Builder().connectTimeout(2, TimeUnit.SECONDS).readTimeout(2, TimeUnit.SECONDS)
@@ -66,6 +76,7 @@ class ReadAfterInterceptorTest {
     }
     @After fun cleanup() {
         primary.stop(); foreign.stop(); client.connectionPool.evictAll(); client.dispatcher.executorService.shutdown()
+        Dispatchers.resetMain()
     }
     private fun request(path: String, method: String = "GET", bearer: String = token): Request {
         val builder = Request.Builder().url(if (path.startsWith("http:")) path else primary.origin + "/api/v1/" + path)
