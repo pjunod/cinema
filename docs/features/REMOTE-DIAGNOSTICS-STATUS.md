@@ -18,13 +18,13 @@ duplicating its evidence.
 | Intended effort | Archive implementation merged into `main`; remaining TV transfer on `codex/diagnostics-tv-archive` |
 | Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent owned clone; current main base `4366a32dc`, archive landing `569678f25` (#1066). TV product commits `8c80b9a81` and `77ae61186`, native witnesses `5616f0f4b`; focused qualification passes, final review in progress. User checkouts untouched. |
+| Implementation workspace/base | Independent owned clone; current main base `4366a32dc`, archive landing `569678f25` (#1066). TV product commits `8c80b9a81` and `77ae61186`, native witnesses `5616f0f4b`; review correction `d0f0df4d9`; focused qualification passes and all three final-review findings are corrected. User checkouts untouched. |
 | Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
 | Plan review | Original review: 12 findings corrected. One follow-up review complete: two P1 history findings corrected; focused qualification recorded in §24. |
 | Promotion/deployment | #1037 and archive-first #1066 merged. #1066 landing `569678f2513695bb9f7b1923ed2c39af6dd19043`, eight required passes. Hosted/private service rollout cancelled by the archive direction; no production changes by this chat. |
 | Current checks | #1066 merged with eight required passes. TV download source compiles on Apple TV and Android; focused single-download/expiry/cancellation tests pass. Apple TV shipped remote UI passes selected-incident download and close revocation; Android TV export/QR, D-pad and recovery pass three tests. iOS/tvOS capture/wire suites each pass eleven cases; Android capture/wire/download suites pass eleven. One final review complete; three findings corrected and focused qualification repeated. Required fast gate pending. |
 | Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
-| Next action | Commit the three final-review corrections normally, register their unique history witness, then pass every required fast check and merge #1081 at its exact qualified head. No service or fleet installation. |
+| Next action | The final reviewed corrections and repeatable browser regression are qualified. Pass every required fast check and merge #1081 at its exact qualified head. No service or fleet installation. |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
 shared checkout and preserve unrelated `Claude outputs/` artifacts.
@@ -789,3 +789,11 @@ Apple TV actual remote UI passes one selected archive/close case. iOS/tvOS
 capture/wire suites each pass eleven on the corrected source. The local history
 check caught duplicate witness rows; one witness per corrective commit is the
 repository policy and the catalog is corrected before the ready gate.
+
+The reproducible browser regression is retained at
+`tests/web/diagnostics-tv-archive-browser.cjs`; compile the Android app first,
+select the JDK with `JAVA_HOME`, and run it with installed Playwright and an
+optional `CINEMA_BROWSER_EXECUTABLE`. It exercises the real compiled local
+endpoint and a phone-sized browser form, then compares the downloaded file byte
+for byte. One executed case passes on the corrected source. It is focused local
+evidence; the fast lane does not run this browser/native bridge.

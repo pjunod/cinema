@@ -6368,3 +6368,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticR
 source_anchor = "fun shareOnLocalNetwork()"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/DiagnosticReportNavigationTest.kt"
 test_anchor = "televisionExportsItsOwnArchiveAndClosingRevokesTheLink"
+
+[[fixes]]
+id = "diagnostics.cancelled-tv-export-creation"
+commits = ["d0f0df4d9311ae7317ab53d41385b92e2417a94b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticLocalExport.kt"
+source_anchor = "suspend fun createOwned"
+test = "clients/android/app/src/test/java/tv/plurx/app/diagnostics/DiagnosticLocalExportTest.kt"
+test_anchor = "cancellationDuringCreationClosesTheUnadoptedListener"

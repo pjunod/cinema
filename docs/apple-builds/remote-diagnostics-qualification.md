@@ -23,5 +23,5 @@ Build237 adds a physically selected, temporary local download for the TV's
 own immutable ZIP. The QR opens a phone page; Download consumes the link once.
 Closing/background/authorization retirement revokes it. The UI warns about
 unencrypted trusted Wi-Fi. Actual tvOS remote UI passes selected archive and
-close revocation; iOS/tvOS capture/wire suites each pass eleven cases. Final
-review, fast gate and the exact follow-up source are in the canonical ledger.
+close revocation; iOS/tvOS capture/wire suites each pass eleven cases. The three final-review findings are corrected. Required
+fast gate and the exact follow-up source are in the canonical ledger.
