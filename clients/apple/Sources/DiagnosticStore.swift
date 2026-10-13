@@ -28,6 +28,7 @@ actor DiagnosticStore {
     private var memory: [String: Draft] = [:]
     private var archives: [String: Data] = [:]
     private var retired: Set<String> = []
+    private var deleted: Set<String> = []
     private var ringMemory: [String: Ring] = [:]
     private let rootOverride: URL?
     private let authorizationGeneration: () -> UInt64
@@ -84,7 +85,15 @@ actor DiagnosticStore {
         var updated = draft; updated.capture = capture; _ = save(updated)
     }
     @discardableResult func save(_ draft: Draft) -> String {
-        guard !retired.contains(draft.capture.namespace), draft.capture.generation == authorizationGeneration() else { return "unavailable" }
+        guard !retired.contains(draft.capture.namespace), !deleted.contains(draft.id), draft.capture.generation == authorizationGeneration() else { return "unavailable" }
+        // A queued UI snapshot cannot replace a consented archive's privacy
+        // choices or issuer after its immutable binding has been persisted.
+        if let prior = storedDraft(draft.id, scope: draft.capture.namespace), prior.binding != nil {
+            guard draft.consented, prior.origin == draft.origin, prior.title == draft.title,
+                  prior.includePlatform == draft.includePlatform,
+                  prior.binding == draft.binding,
+                  (try? DiagnosticReport.encoder.encode(prior.manifest)) == (try? DiagnosticReport.encoder.encode(draft.manifest)) else { return "unavailable" }
+        }
         let safe = draft.capture.events.allSatisfy(\.valid) && draft.serverEvents.allSatisfy(\.valid) && draft.connection.allSatisfy(\.valid)
         guard safe, UUID(uuidString: draft.id)?.uuidString.lowercased() == draft.id, let bytes = try? JSONEncoder().encode(draft), bytes.count <= 8_388_608 else { return "unavailable" }
         memory[draft.id] = draft
@@ -152,20 +161,23 @@ actor DiagnosticStore {
             try? prune(directory)
             let urls = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
             for url in urls.prefix(32) where url.lastPathComponent != "ring.json" && url.pathExtension == "json" {
-                if let draft = try? read(Draft.self, url, limit: 8_388_608), draft.capture.namespace == scope,
-                   draft.id + ".json" == url.lastPathComponent, draft.capture.events.allSatisfy(\.valid) { memory[draft.id] = draft }
+                if let draft = try? read(Draft.self, url, limit: 8_388_608), !deleted.contains(draft.id), draft.capture.namespace == scope,
+                   draft.id + ".json" == url.lastPathComponent, draft.capture.events.allSatisfy(\.valid), memory[draft.id] == nil { memory[draft.id] = draft }
             }
         }
         return Array(memory.values.filter { $0.capture.namespace == scope && Double($0.capture.incidentMs) >= Date().addingTimeInterval(-86_400).timeIntervalSince1970 * 1_000 }.sorted { $0.capture.incidentMs > $1.capture.incidentMs }.prefix(10))
     }
     func saveArchive(_ bytes: Data, id: String, scope: String, generation: UInt64) -> String {
-        guard bytes.count <= 8_388_608, UUID(uuidString: id)?.uuidString.lowercased() == id, !retired.contains(scope), generation == authorizationGeneration() else { return "unavailable" }
+        guard bytes.count <= 8_388_608, UUID(uuidString: id)?.uuidString.lowercased() == id, !retired.contains(scope), !deleted.contains(id), generation == authorizationGeneration() else { return "unavailable" }
+        if let binding = storedDraft(id, scope: scope)?.binding {
+            guard bytes.count == binding.length, DiagnosticRecorder.digest(bytes) == binding.sha256 else { return "unavailable" }
+        }
         archives = [id: bytes]
         do { let folder = try directory(scope); try write(bytes, to: folder.appendingPathComponent(id + ".zip")); try prune(folder); return "available" }
         catch { return "memory_only" }
     }
     func archive(_ id: String, scope: String) -> Data? {
-        guard UUID(uuidString: id)?.uuidString.lowercased() == id, !retired.contains(scope) else { return nil }
+        guard UUID(uuidString: id)?.uuidString.lowercased() == id, !retired.contains(scope), !deleted.contains(id) else { return nil }
         if let value = archives[id] { return value }
         guard let folder = try? directory(scope) else { return nil }; let url = folder.appendingPathComponent(id + ".zip")
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path), (attrs[.type] as? FileAttributeType) == .typeRegular,
@@ -174,9 +186,15 @@ actor DiagnosticStore {
     }
     func delete(_ id: String, scope: String) {
         guard UUID(uuidString: id)?.uuidString.lowercased() == id else { return }
+        deleted.insert(id)
         memory.removeValue(forKey: id); archives.removeValue(forKey: id)
         for key in [id, id + ":invitation", id + ":invitation-proof"] { DiagnosticTransport.clearSecrets(key, scope: scope) }
         if let directory = try? directory(scope) { for ext in ["json","zip"] { try? FileManager.default.removeItem(at: directory.appendingPathComponent(id + "." + ext)) } }
+    }
+    private func storedDraft(_ id: String, scope: String) -> Draft? {
+        if let value = memory[id], value.capture.namespace == scope { return value }
+        guard let folder = try? directory(scope), let value = try? read(Draft.self, folder.appendingPathComponent(id + ".json"), limit: 8_388_608), value.id == id, value.capture.namespace == scope else { return nil }
+        return value
     }
     func clearRing(_ scope: String) {
         ringMemory.removeValue(forKey: scope)

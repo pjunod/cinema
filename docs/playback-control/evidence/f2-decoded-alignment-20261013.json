@@ -1,0 +1,135 @@
+{
+  "schema": "plurx-f2-decoded-alignment-v1",
+  "date": "2026-10-13",
+  "state": "source fix reviewed, qualified, merged and installed; physical Air transition pending unlock",
+  "scope": "F2 HDR rolling remux to encoded 1080p SDR decoded-frame alignment",
+  "source_head": "fcac7a4ec6482d6f9b10aa39b02d390bc6771c78",
+  "base": "e4b6c1c6daff0ceef3d80cec3bafbeb544b56f24",
+  "pull_request": "http://forge.lan:3000/noirr/plurx/pulls/1074",
+  "production_js_sha256": "0dd905c44e5bf5198762ff9cc77edb1f32aa58e40b8e7c81787652138f00bb53",
+  "installed_binary_sha256": "b1566125fd6d1bfb615d78fe8f3a72d440548dfac834fff0f9e2880918194d62",
+  "original_controls": {
+    "logs": [
+      {
+        "name": "air-94-metal-startup.log",
+        "bytes": 67398,
+        "sha256": "8b3eb8f1b276f579981112ac56319b6c17d2a44e95e54cab307b944f3151bd5c"
+      },
+      {
+        "name": "air-94-metal-startup-error.log",
+        "bytes": 71633,
+        "sha256": "1f669f220bd6c7eee2ae708c9d504c742a1575359574b3f6937850d39ad674d0"
+      },
+      {
+        "name": "air-94-metal-5m-proof.log",
+        "bytes": 42427,
+        "sha256": "8d69a759452578d690f410f93487e84328d382f73fe150f98cec998c73471455"
+      }
+    ],
+    "oct12_preparation": "6bdd65ef-6dd6-450b-b997-e88e1f16599d",
+    "original_refusal": "lost-alignment; current-clock drift 51ms, callbacks4, bad0, last age34ms, runway17.1s; incumbent HDR retained"
+  },
+  "fresh_control": {
+    "utc": "2026-10-13T16:03:09Z",
+    "incumbent_session": "b4132cc6-245c-4e84-bf19-3af154b41ea1",
+    "preparation": "21eaa26e-0495-4acd-a79f-60676410cff0",
+    "runway_seconds": 21.5,
+    "incumbent_film_seconds": 17.976,
+    "incumbent_display_ms": 86542,
+    "target_film_seconds": 17.892875,
+    "target_display_ms": 86508.6,
+    "frame_tolerance_ms": 41.709,
+    "projected_drift_ms": 49.725,
+    "result": "unsafe pair correctly not exposed, but preparation immediately fails before successor callback can complete pair"
+  },
+  "failed_proposal": {
+    "name": "wait-only incumbent callback comparison",
+    "preparation": "b012715d-df09-4fa2-bb02-60bea3ae699d",
+    "utc": "2026-10-13T16:12:11.339Z",
+    "target_callbacks": 18,
+    "result": "original800ms deadline refusal; retained HDR; not successful"
+  },
+  "repair": {
+    "comparison": "either advancing decoder callback",
+    "tolerance": "one measured decoded frame, unchanged",
+    "observation_freshness_ms": 50,
+    "original_deadline_ms": 800,
+    "guards": [
+      "current ownership",
+      "viewer playback intent",
+      "no pause or seek",
+      "same playback rate",
+      "target buffer coverage",
+      "both observations fresh"
+    ],
+    "waiting": "incumbent picture and audio remain authoritative"
+  },
+  "local": {
+    "rustc": "1.97.1",
+    "focused_command": "node --test tests/playback/prepared-frame-rendezvous.test.js",
+    "focused_pass": 9,
+    "original_source_control": "first HDR regression fails against unchanged original production source",
+    "commands": [
+      "cargo check -p plurxd --all-targets",
+      "cargo clippy --workspace --all-targets -- -D warnings",
+      "make web-unit-check",
+      "make effort-web-static-check",
+      "python3 -m unittest tests.operations.test_docs_index"
+    ],
+    "all_current_candidate_commands": "passed",
+    "release_build": "passed7m22s"
+  },
+  "review": "Astra approved revised two-sided source; no blocking findings; full physical frame/audio/applied-quality evidence remains a broader acceptance requirement",
+  "negative_archive": {
+    "uuid": "09349205-d671-4076-b585-7f1c5335bb2f",
+    "url": "http://forge.lan:3000/attachments/09349205-d671-4076-b585-7f1c5335bb2f",
+    "sha256": "1d47578cc247e4016d5b7e9352c3303bb9519077a22723ce23fc582cd975690a",
+    "bytes": 2482668,
+    "members": 18,
+    "state": "immutable negative controls, original records unchanged"
+  },
+  "qualification": {
+    "repository_run": 5015,
+    "global_run": 5041,
+    "preflight": "passed",
+    "web": "passed",
+    "rust": "passed",
+    "main_promotion": "passed",
+    "qualified_head": "fcac7a4ec6482d6f9b10aa39b02d390bc6771c78"
+  },
+  "physical": {
+    "state": "pending Air unlock",
+    "runtime_patch": "none planned; installed production source is the reviewed fix"
+  },
+  "acceptance_limits": [
+    "No calibrated physical HDR-display measurement",
+    "No audible speaker seam measured",
+    "Full platform continuous-quality matrix remains open"
+  ],
+  "restoration": {
+    "client_quality": "Auto set before installation; verify again after capture",
+    "shared_clipboard": "OFF unchanged",
+    "backend": "Auto unchanged",
+    "mac_processing": "ON unchanged",
+    "movie_resume": "zero restoration still owed after test"
+  },
+  "source_merge": "96e4c49e92818f8f3e6b01e4786492b1c37a97d7",
+  "merged_at": "2026-10-13T17:05:35Z",
+  "qualified_archive": {
+    "uuid": "f6639fb2-2bb0-475a-b066-c7a24c79f967",
+    "url": "http://forge.lan:3000/attachments/f6639fb2-2bb0-475a-b066-c7a24c79f967",
+    "sha256": "24895b8ff899e0002fa7c3e1815d3e8d51992a0a53372a6d5ec013b334ebb4f0",
+    "bytes": 263203,
+    "members": 31,
+    "state": "source qualification and installation; Air physical transition pending unlock"
+  },
+  "immutable_evidence_verified": true,
+  "installation_notes": {
+    "active_prefix": "Homebrew arm64 prefix",
+    "first_attempt": "SSH shell did not locate brew; installed into an unused prefix; retained original service plist",
+    "retry": "correct prefix parser first required a separate source file; launchd bootstrap was retried successfully",
+    "unused_binary": "task-created unused prefix binary moved into recoverable temporary staging after exact digest check",
+    "actual_service": "ready on qualified binary; served JavaScript digest verified",
+    "source_binding": "binary built from qualified head after current main integrated; committed source archive preserved"
+  }
+}

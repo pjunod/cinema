@@ -38,6 +38,24 @@ class DiagnosticCaptureTest {
             assertEquals("unavailable",store.save(draft)); assertTrue(store.drafts("anonymous").isEmpty())
         } finally { root.deleteRecursively() }
     }
+    @Test fun staleSnapshotsCannotReplaceFrozenConsentOrResurrectDeletedReport() = runBlocking {
+        val root=Files.createTempDirectory("cinema-diagnostic-history").toFile()
+        try {
+            val store=DiagnosticStore(root,authorizationGeneration={ 0 })
+            val row=DiagnosticDraft(DiagnosticRecorder(monotonic={ 0 }).freeze().copy(namespace="anonymous",generation=0,events=emptyList()))
+            store.save(row)
+            val bytes=DiagnosticReport.zip(mapOf("description.txt" to "private title".toByteArray()))
+            val binding=DiagnosticBinding(row.id,DiagnosticFields.hash(bytes),bytes.size,DiagnosticPrivacy(true))
+            val frozen=row.copy(consented=true,origin="https://support.example",title="Explicit private title",includePlatform=true,binding=binding,manifest=kotlinx.serialization.json.buildJsonObject { put("report_id",JsonPrimitive(row.id)) },state="staged")
+            store.saveArchive(row.id,"anonymous",bytes,0); store.save(frozen)
+            assertEquals("unavailable",store.save(row))
+            assertEquals("unavailable",store.saveArchive(row.id,"anonymous","replacement".toByteArray(),0))
+            assertEquals(frozen,store.drafts("anonymous").single()); assertArrayEquals(bytes,store.archive(row.id,"anonymous"))
+            store.delete(row.id,"anonymous")
+            assertEquals("unavailable",store.save(frozen)); assertEquals("unavailable",store.saveArchive(row.id,"anonymous",bytes,0))
+            assertTrue(store.drafts("anonymous").isEmpty()); assertNull(store.archive(row.id,"anonymous"))
+        } finally { root.deleteRecursively() }
+    }
     @Test fun portableZipUsesStandardCRCAndRefusesTraversal() {
         val value="123456789".toByteArray(); assertEquals(0xcbf43926L,CRC32().apply { update(value) }.value)
         val zip=DiagnosticReport.zip(mapOf("description.txt" to value)); assertEquals(listOf(0x26,0x39,0xf4,0xcb),zip.slice(14..17).map { it.toInt() and 255 })
