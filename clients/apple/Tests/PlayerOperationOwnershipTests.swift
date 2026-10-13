@@ -15,6 +15,64 @@ final class PlayerOperationOwnershipTests: XCTestCase {
                          durationMs: 600_000, title: "Title \(file)")
     }
 
+    func testStagedSelectionsResolveBeforeTheIncumbentIsReplaced() async throws {
+        let suspended = expectation(description: "staged audio resolution")
+        var release: CheckedContinuation<Void, Never>?
+        var audioApplied = 0, subtitleApplied = 0
+        let incumbent = AVPlayerItem(url: URL(fileURLWithPath: "/synthetic-incumbent"))
+        let staged = AVPlayerItem(url: URL(fileURLWithPath: "/synthetic-staged"))
+        var preparation = PlayerController.MediaSelectionPreparation()
+        preparation.audio = { _, item in
+            XCTAssertTrue(item === staged)
+            await withCheckedContinuation { release = $0; suspended.fulfill() }
+            return { audioApplied += 1 }
+        }
+        preparation.native = { _, _, item in
+            XCTAssertTrue(item === staged)
+            return .init(hasSubtitleOptions: true, apply: { subtitleApplied += 1; return true })
+        }
+        let controller = PlayerController(mediaSelectionPreparation: preparation)
+        controller.player.replaceCurrentItem(with: incumbent)
+        let selection = Task { await controller.prepareStagedMediaSelections(to: staged) { true } }
+        await fulfillment(of: [suspended], timeout: 3)
+        XCTAssertTrue(controller.player.currentItem === incumbent)
+        XCTAssertEqual(audioApplied + subtitleApplied, 0)
+        try XCTUnwrap(release).resume()
+        let ready = await selection.value
+        XCTAssertTrue(ready)
+        XCTAssertTrue(controller.player.currentItem === incumbent)
+        XCTAssertEqual(audioApplied, 1)
+        XCTAssertEqual(subtitleApplied, 1)
+        controller.player.replaceCurrentItem(with: nil)
+    }
+
+    func testStagedSelectionResolutionCannotApplyAfterOwnerOrViewerChanges() async throws {
+        for changedViewer in [false, true] {
+            let suspended = expectation(description: "staged selection resolution")
+            var release: CheckedContinuation<Void, Never>?
+            var owned = true
+            var applied = 0
+            var preparation = PlayerController.MediaSelectionPreparation()
+            preparation.audio = { _, _ in
+                await withCheckedContinuation { release = $0; suspended.fulfill() }
+                return { applied += 1 }
+            }
+            preparation.native = { _, _, _ in
+                .init(hasSubtitleOptions: true, apply: { applied += 1; return true })
+            }
+            let controller = PlayerController(mediaSelectionPreparation: preparation)
+            let staged = AVPlayerItem(url: URL(fileURLWithPath: "/synthetic-staged"))
+            let selection = Task { await controller.prepareStagedMediaSelections(to: staged) { owned } }
+            await fulfillment(of: [suspended], timeout: 3)
+            if changedViewer { controller.selectAudio(7) } else { owned = false }
+            try XCTUnwrap(release).resume()
+            let ready = await selection.value
+            XCTAssertFalse(ready)
+            XCTAssertEqual(applied, 0)
+            controller.stop()
+        }
+    }
+
     func testStartStopStartRestoresOnlyTheNewTitlesPlaybackIntent() {
         let controller = PlayerController()
         let model = AppModel()

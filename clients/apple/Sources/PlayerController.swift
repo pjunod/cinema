@@ -11980,12 +11980,16 @@ extension PlayerController: PreparedSuccessorHost {
               preparedCommitStillOwned(commitAttempt), wantsPlayback else {
             return preparedCommitFailure(at: "surface")
         }
+        guard await reconcilePreparedMediaSelections(to: item, successor: successor,
+                commit: commitAttempt, overlapStartedAtMs: overlapStartedAtMs) else {
+            return preparedCommitFailure(at: "media-selection")
+        }
         let rendezvousRate = preferredRate
         // Inspection and alignment can each consume their existing bounded
         // allowance. Pick one future instant before either suspension, rather
         // than inspecting one fragment then moving the rendezvous beyond it.
-        // The lead keeps the post-swap reserve of the overlap for selection
-        // reconciliation and the first-frame proof.
+        // The lead keeps the post-swap reserve of the overlap for the
+        // first-frame proof; track selection is already complete.
         guard rendezvousRate.isFinite, rendezvousRate > 0,
               let leadWallMs = PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: preparedOverlapRemainingMs) else {
             return preparedCommitFailure(at: "rate-or-overlap")
@@ -12140,24 +12144,8 @@ extension PlayerController: PreparedSuccessorHost {
         // successor, including manual-to-Auto, before installing observation;
         // a voluntary proposal is not required for a truthful item identity.
         installItemObserver(for: item)
-        // The viewer's audio and subtitle choices are per-ITEM state, and this
-        // is a different item. `open`, `loadOffline`, a seek and a node
-        // failover all reconcile them onto the item they attach; the commit
-        // did not, so a subtitle that was showing stopped at the moment of a
-        // server-driven quality change and stayed stopped while the menu still
-        // said it was on. Off is reconciled too — `sessionSubtitleFields`
-        // answers `nil` for it, and selecting `nil` on the legible group is
-        // what makes Off survive an item whose master carries a DEFAULT
-        // rendition.
-        //
-        // Under the same lifecycle guard `open()` uses: a viewer action that
-        // landed during the commit owns the selection, and this must not put
-        // the pre-commit choice back on top of it.
-        let reconcileGeneration = lifecycleGeneration
-        var selectionsReady = false
-        if isCurrentLifecycle(reconcileGeneration), player.currentItem === item {
-            selectionsReady = await reconcilePreparedMediaSelections(to: item, overlapStartedAtMs: overlapStartedAtMs)
-        }
+        // Selections were resolved and applied on the hidden successor before
+        // alignment. Exposing its layer must not introduce an async pause.
         applyDisplayCriteria(for: item, generation: openGeneration)
         startRecoveryEvidencePoll()
         if wantsPlayback { player.playImmediately(atRate: preferredRate) } else { player.pause() }
@@ -12165,9 +12153,8 @@ extension PlayerController: PreparedSuccessorHost {
         refreshPGSOverlayWindow(at: boundaryMs, reason: .force)
         ttffMeasurement.rebasePosition(at: realPositionMs())
         let exposedAtUnixMs = Int(Date().timeIntervalSince1970 * 1_000)
-        let firstFrameUnixMs = selectionsReady
-            ? await awaitPreparedFirstFrame(boundaryMs: boundaryMs, overlapStartedAtMs: overlapStartedAtMs, frameDurationSeconds: frameDurationSeconds)
-            : nil
+        let firstFrameUnixMs = await awaitPreparedFirstFrame(boundaryMs: boundaryMs,
+            overlapStartedAtMs: overlapStartedAtMs, frameDurationSeconds: frameDurationSeconds)
         // Do not DELETE the predecessor here. The committed control exchange
         // is the compare-and-swap that makes this successor authoritative and
         // starts the predecessor's bounded drain. Ending it first removes the
@@ -12272,15 +12259,20 @@ extension PlayerController: PreparedSuccessorHost {
 
     /// Asset track loading may ignore task cancellation. Return at the original
     /// overlap deadline and fence any eventual selection from the cancelled task.
-    private func reconcilePreparedMediaSelections(to item: AVPlayerItem, overlapStartedAtMs: Int) async -> Bool {
+    private func reconcilePreparedMediaSelections(to item: AVPlayerItem, successor: AVPlayer,
+            commit: Attempt, overlapStartedAtMs: Int) async -> Bool {
         let now = Int(ProcessInfo.processInfo.systemUptime * 1_000)
         let remaining = max(0, PreparedReplacementBounds.overlapMs - max(0, now - overlapStartedAtMs))
         guard remaining > 0 else { return false }
         var completed: Bool?
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.reconcileNativeMediaSelections(to: item)
-            if !Task.isCancelled { completed = true }
+            let ready = await self.prepareStagedMediaSelections(to: item) { [weak self] in
+                guard let self else { return false }
+                return self.started && self.preparedItem === item && self.preparedPlayer === successor
+                    && self.preparedCommitStillOwned(commit) && self.wantsPlayback
+            }
+            if !Task.isCancelled { completed = ready }
         }
         let ready = await awaitBoundedValue(
             boundMs: remaining,
@@ -12291,6 +12283,25 @@ extension PlayerController: PreparedSuccessorHost {
         )
         task.cancel()
         return ready == true
+    }
+
+    /// Resolve tracks while the exact successor is still hidden. No active-item
+    /// guard can stand in for staged ownership, and no async resolution belongs
+    /// between exposing its paused layer and starting playback.
+    func prepareStagedMediaSelections(to item: AVPlayerItem,
+            isCurrent: @escaping @MainActor () -> Bool) async -> Bool {
+        let actionEpoch = viewerActionEpoch
+        let current = { !Task.isCancelled && isCurrent() && self.viewerActionEpoch == actionEpoch }
+        guard current() else { return false }
+        let fields = Self.sessionSubtitleFields(selected: selectedSubtitle, tracks: subtitles)
+        let nativeSubtitle = pgsOverlayIsActive || activeBurnedSubtitle != nil ? nil : fields.native
+        let audio = audioOverride == nil && prePlaySelection.audioIndex == nil
+            ? await mediaSelectionPreparation.audio(audioLanguage, item) : nil
+        guard current() else { return false }
+        let native = await mediaSelectionPreparation.native(nativeSubtitle, subtitles, item)
+        guard current() else { return false }
+        audio?()
+        return native.apply()
     }
 
     /// Put the successor's playhead on the rendezvous, and give up on the seek
