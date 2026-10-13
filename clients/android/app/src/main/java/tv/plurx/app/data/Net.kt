@@ -42,6 +42,8 @@ object Net {
             }
             chain.proceed(out)
         }
+        .addInterceptor(ReadAfterNetworking.interceptor)
+        .addNetworkInterceptor(ReadAfterNetworking.interceptor.redirectGuard)
         .build()
 
     /** Capability URLs already carry their narrow authority. Adding the

@@ -561,9 +561,22 @@ acceptance.
 
 ## 7. Open questions
 
-1. Whether Apple and Android should adopt the `X-Plurx-Read-After` echo in
-   the same quarter; until then their Home rails are Authority on
-   non-writing nodes, which is today's behaviour.
+1. **Decided by Paul, 2026-10-13:** Apple and Android will adopt the existing
+   `X-Plurx-Read-After` echo; preserve the original read-cost target rather
+   than restate it around header-less clients. Implementation is in progress,
+   not native or fleet acceptance. Until their actual request adapters adopt
+   the protocol, their Home rails remain Authority on non-writing nodes.
+   Retain the web contract: lossless canonical positive u64 indexes, a
+   monotonic 60-second lifetime, auth-generation isolation and unknown-write
+   invalidation that fences already-in-flight known replies. Do not send a
+   receipt to a public server-identity probe or another account/server.
+   Focused state-machine cases cover expiry, maximum u64, out-of-order replies,
+   absent/malformed write receipts, failed mutating transports and stale auth.
+   Request-level fixtures must additionally exercise actual API/no-content
+   and control transports, peer trust, logout and capability/profile isolation.
+   Those fixtures, current native compilation, sole review and promotion are
+   still owed; neither helper cases nor a source merge substitutes for §5.1's
+   cross-node read-cost and rolling-upgrade evidence.
 2. Whether to lengthen the implemented 60 s per-user write index and header
    window; a longer window only costs Authority reads.
 3. Should `route_group` include `reader` (ebooks) as its own value? Nine

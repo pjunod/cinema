@@ -178,7 +178,7 @@ struct PlurxAPI {
         var req = try jsonRequest(path, body: body)
         req.httpMethod = "PUT"
         Session.shared.authorize(&req)
-        let (_, resp) = try await session.data(for: req)
+        let (_, resp) = try await ReadAfterHTTP.shared.data(for: req, using: session)
         try Self.check(resp)
     }
 
@@ -187,7 +187,7 @@ struct PlurxAPI {
         var req = URLRequest(url: url)
         req.httpMethod = "DELETE"
         Session.shared.authorize(&req)
-        let (_, resp) = try await session.data(for: req)
+        let (_, resp) = try await ReadAfterHTTP.shared.data(for: req, using: session)
         try Self.check(resp)
     }
 
@@ -196,7 +196,7 @@ struct PlurxAPI {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         Session.shared.authorize(&req)
-        let (_, resp) = try await session.data(for: req)
+        let (_, resp) = try await ReadAfterHTTP.shared.data(for: req, using: session)
         try Self.check(resp)
     }
 
@@ -210,14 +210,14 @@ struct PlurxAPI {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (_, resp) = try await Self.logoutSession.data(for: req)
+        let (_, resp) = try await ReadAfterHTTP.shared.data(for: req, using: Self.logoutSession)
         try Self.check(resp)
     }
 
     private func postNoContent<B: Encodable>(_ path: String, body: B) async throws {
         var req = try jsonRequest(path, body: body)
         Session.shared.authorize(&req)
-        let (_, resp) = try await session.data(for: req)
+        let (_, resp) = try await ReadAfterHTTP.shared.data(for: req, using: session)
         try Self.check(resp)
     }
 
@@ -240,7 +240,7 @@ struct PlurxAPI {
     ) async throws -> T {
         let data: Data
         let resp: URLResponse
-        do { (data, resp) = try await (session ?? self.session).data(for: req) }
+        do { (data, resp) = try await ReadAfterHTTP.shared.data(for: req, using: session ?? self.session) }
         catch { throw Self.transportError(from: error) }
         try Self.check(resp, data: data)
         return try Self.decoder.decode(T.self, from: data)
@@ -467,7 +467,7 @@ struct PlurxAPI {
         Session.shared.authorize(&request)
         let data: Data
         let response: URLResponse
-        do { (data, response) = try await session.data(for: request) }
+        do { (data, response) = try await ReadAfterHTTP.shared.data(for: request, using: session) }
         catch { throw Self.transportError(from: error) }
         guard let http = response as? HTTPURLResponse else {
             throw APIError.transport("The PGS overlay response was not HTTP.")
@@ -530,7 +530,7 @@ struct PlurxAPI {
         Session.shared.authorize(&request)
         let data: Data
         let response: URLResponse
-        do { (data, response) = try await session.data(for: request) }
+        do { (data, response) = try await ReadAfterHTTP.shared.data(for: request, using: session) }
         catch { throw Self.transportError(from: error) }
         try Self.check(response, data: data)
         guard let http = response as? HTTPURLResponse,
@@ -590,7 +590,7 @@ struct PlurxAPI {
                 guard let url = makeURL("library-channels/guide", query: query) else { throw APIError.badURL }
                 var request = URLRequest(url: url)
                 Session.shared.authorize(&request)
-                let (data, response) = try await session.data(for: request)
+                let (data, response) = try await ReadAfterHTTP.shared.data(for: request, using: session)
                 try Self.check(response)
                 programmes += try Self.decoder.decode([LibraryChannelProgramme].self, from: data)
                 cursor = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Plurx-Next-Cursor")
@@ -697,7 +697,7 @@ struct PlurxAPI {
         var req = URLRequest(url: url)
         req.httpMethod = "DELETE"
         Session.shared.authorize(&req)
-        _ = try? await session.data(for: req)
+        _ = try? await ReadAfterHTTP.shared.data(for: req, using: session)
     }
 
     func offlineOptions(
