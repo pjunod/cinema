@@ -25,7 +25,12 @@ from validation import promotion_unit_retention as retention
 from validation import python_unit_receipts as receipts
 from validation.main_preflight_adoption import run_commands
 
+RUST_KINDS = {'store_contract','wal','topology','transport'}
+COUNT_WRAPPERS = {'e85ffaa0382d6261d5749b248fe48b48db745da67c2926a753e0642a91facf07',
+                  'b6810e49dae6f5c5b2eacde7d7db15b0c5becc0c72e735fa057a13b8aa0cf1f4'}
 JOB_NAMES = {
+    'topology': 'replicated topology contracts',
+    'transport': 'cluster transport recovery contracts',
     'store_contract': 'replicated Store contracts (legacy)',
     'wal': 'replicated WAL recovery contracts',
     'validation': 'fast policy and contract preflight',
@@ -34,6 +39,8 @@ JOB_NAMES = {
 }
 # Literal historical invocation identities; these are not executable receipt data.
 COMMANDS = {
+    'topology':'make cluster-harness-check',
+    'transport':'make cluster-transport-recovery-contracts',
     'store_contract': 'make cluster-store-check',
     'wal': 'make cluster-wal-check',
     'validation': "python3 -m unittest discover -s tests/validation -p 'test_*.py'",
@@ -91,8 +98,19 @@ def job_steps(workflow, job):
 
 def historical_command(workflow, kind):
     job = {'store_contract': 'cluster_store_legacy', 'wal': 'cluster_wal',
-           'android_jvm': 'android_jvm'}.get(kind, 'preflight')
+           'android_jvm': 'android_jvm', 'topology':'cluster_topology',
+           'transport':'cluster_transport_recovery_contracts'}.get(kind, 'preflight')
     expected = {
+        'transport':['set -euo pipefail','mkdir -p target/validation',
+                     'make cluster-transport-recovery-contracts \\',
+                     '2>&1 | tee target/validation/cluster-transport-recovery-contracts.log'],
+        'topology':['set -euo pipefail','mkdir -p target/validation','{',
+                    'if [ "$RUN_CLUSTER_AUTH" = true ]; then',
+                    'make hiqlite-vendor-clippy','make cluster-harness-check','fi',
+                    'if [ "$RUN_HIQLITE_SPIKE" = true ]; then',
+                    'cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml \\',
+                    '--tests --no-deps -- -D warnings','make hiqlite-spike','fi',
+                    '} 2>&1 | tee target/validation/cluster-topology.log'],
         'store_contract': ['set -euo pipefail', 'mkdir -p target/validation',
             'make cluster-store-check 2>&1 | tee target/validation/cluster-store.log'],
         'wal': [COMMANDS['wal']],
@@ -109,8 +127,15 @@ def historical_command(workflow, kind):
                      and not re.search(r'(?m)^          ref:', checkouts[0]),
                      'Historical checkout does not bind the actual event source')
     for step in steps:
-        if re.search(r'(?m)^        (?:working-directory|env):', step):
+        if re.search(r'(?m)^        working-directory:',step):
             continue
+        if re.search(r'(?m)^        env:',step):
+            if kind != 'topology':
+                continue
+            rows=re.findall(r'(?m)^          ([A-Z_]+): (.+)$',step)
+            if dict(rows) != {'RUN_CLUSTER_AUTH':'${{ needs.scope.outputs.cluster_auth }}',
+                              'RUN_HIQLITE_SPIKE':'${{ needs.scope.outputs.hiqlite_spike }}'} or len(rows)!=2:
+                continue
         shell = re.findall(r'(?m)^        shell: (.+)$', step)
         if shell and shell != ['bash']:
             continue
@@ -242,8 +267,9 @@ def rust_identity(command):
     at = words.index('$(CARGO)')
     receipts.require(words[at + 1] == 'test' and '--locked' in words,
                      'Canonical Rust command is not a locked test')
-    environment = dict(word.split('=', 1) for word in words[:at] if '=' in word)
-    receipts.require(len(environment) == at, 'Unknown canonical command prefix')
+    prefix=[word for word in words[:at] if word != 'scripts/require-test-count']
+    environment = dict(word.split('=',1) for word in prefix if '=' in word)
+    receipts.require(len(environment) == len(prefix), 'Unknown canonical command prefix')
     harness_at = words.index('--') if '--' in words else len(words)
     cargo, harness = words[at + 2:harness_at], words[harness_at + 1:]
     flags, filters, i = {}, [], 0
@@ -263,7 +289,7 @@ def rust_identity(command):
             receipts.require(not word.startswith('-'), 'Unknown Rust compilation argument')
             filters.append(word)
             i += 1
-    receipts.require(len(filters) <= 1 and ('--lib' in flags or '--test' in flags or '--bin' in flags or flags.get('--manifest-path') == 'vendor/hiqlite-wal/Cargo.toml'),
+    receipts.require(len(filters) <= 1 and ('--lib' in flags or '--test' in flags or '--bin' in flags or flags.get('--manifest-path') == 'vendor/hiqlite-wal/Cargo.toml' or flags.get('-p') == 'plurx-cluster-check'),
                      'Rust command lacks one explicit target')
     receipts.require(all(word in {'--exact', '--nocapture', '--ignored', '--test-threads=1'}
                          for word in harness), 'Unknown Rust harness semantics')
@@ -280,10 +306,51 @@ def canonical(candidate):
         for index, command in enumerate(make_commands(makefile.decode(), target), 1):
             rust_identity(command)
             result[f'{kind}:{index}'] = command
+    for kind,target in [('topology','cluster-harness-unit-check'),('transport','cluster-transport-recovery-contracts')]:
+        text=makefile.decode()
+        if kind == 'topology' and target+': ##' not in text:
+            target='cluster-harness-check'
+        selected=[]
+        for command in make_commands(text,target):
+            if '$(CARGO) test ' in command:
+                rust_identity(command);selected.append(command)
+        receipts.require(len(selected) == (8 if kind=='topology' else 6), 'Changed embedded unit cohort requires review')
+        for index,command in enumerate(selected,1):result[f'{kind}:{index}']=command
     return result
 
 
+def implicit_cluster_target(identity):
+    flags=identity['cargo']
+    return flags.get('-p') == 'plurx-cluster-check' and not any(flag in flags for flag in ('--lib','--bin','--test'))
+
+
+def select_ids(full,identity):
+    selector=identity['filter']
+    return [test_id for test_id in full if selector is None or
+            (test_id == selector if '--exact' in identity['harness'] else selector in test_id)]
+
+
+def target_inventory(item,candidate,identity):
+    receipts.require(set(item)=={'source_commit','ids','targets'} and item['source_commit']==candidate
+                     and isinstance(item['targets'],list) and item['targets'],'Implicit command target footprint unavailable')
+    ids=[];tags=set()
+    for target in item['targets']:
+        receipts.require(set(target)=={'name','kind','binary_sha256','features','list_log'}
+                         and target['kind'] in [['lib'],['bin'],['test']]
+                         and retention.DIGEST.fullmatch(target['binary_sha256']), 'Unknown native target footprint')
+        tag=(target['name'],tuple(target['kind']))
+        receipts.require(tag not in tags,'Duplicate native target footprint');tags.add(tag)
+        raw=retention.decoded_log(target['list_log'])
+        full=[line.removesuffix(': test') for line in raw.splitlines() if line.endswith(': test')]
+        receipts.require(len(full)==len(set(full)),'Ambiguous target-native inventory')
+        ids.extend(select_ids(full,identity))
+    receipts.require(ids and item['ids']==ids and len(ids)==len(set(ids)), 'Implicit current selected union differs')
+    return ids
+
+
 def native_inventory(item, identity, candidate):
+    if implicit_cluster_target(identity):
+        return target_inventory(item,candidate,identity)
     receipts.require(set(item) == {'source_commit', 'ids', 'list_log', 'binary_sha256', 'features'},
                      'Unknown native inventory fields')
     receipts.require(item['source_commit'] == candidate
@@ -383,8 +450,9 @@ def normalized_cargo(command, *, compile_only=False):
     words = shlex.split(command)
     if compile_only:
         words = [word for word in words if word != '--no-run' and not word.startswith('--message-format=')]
-    receipts.require('cargo' in words, 'Actual command has no Cargo executor')
-    at = words.index('cargo')
+    executors=[index for index,word in enumerate(words) if word == 'cargo' or re.fullmatch(r'/(?:home|opt)/(?:[^/ ]+/)*\.rustup/toolchains/1\.97\.1-x86_64-unknown-linux-gnu/bin/cargo',word)]
+    receipts.require(len(executors)==1, 'Actual command has no uniquely pinned Cargo executor')
+    at=executors[0]
     prefix = words[:at]
     receipts.require(all('=' in word or word == 'scripts/require-test-count' for word in prefix),
                      'Unknown actual Cargo command prefix')
@@ -404,6 +472,80 @@ def same_target(left, right):
                      'Historical command target/features/filter/runtime differ')
 
 
+def logged_command(lines,start):
+    parts=[];end=start
+    while True:
+        line=lines[end];parts.append(line.removesuffix('\\').strip())
+        if not line.endswith('\\'):
+            return ' '.join(parts),end
+        end+=1
+        receipts.require(end<len(lines),'Incomplete logged command continuation')
+
+
+def historical_recipe(record,kind):
+    text=retention.git_bytes(record['source_commit'],'Makefile')
+    receipts.require(text is not None,'Historical Make recipe unavailable')
+    target={'wal':'cluster-wal-check','store_contract':'cluster-store-check',
+            'topology':'cluster-harness-check','transport':'cluster-transport-recovery-contracts'}[kind]
+    if kind=='topology' and b'cluster-harness-unit-check: ##' in text:
+        target='cluster-harness-unit-check'
+    return make_commands(text.decode(),target)
+
+
+def display_tokens(command,kind):
+    words=shlex.split(command)
+    result=[]
+    for word in words:
+        if word=='cargo' or re.fullmatch(r'/(?:home|opt)/(?:[^/ ]+/)*\.rustup/toolchains/1\.97\.1-x86_64-unknown-linux-gnu/bin/cargo',word):
+            word='$(CARGO)'
+        result.append(word)
+    # The WAL Make target expands CARGO through its source-bound override.
+    if kind=='wal' and 'scripts/require-test-count' in result:
+        result.remove('scripts/require-test-count')
+    return result
+
+
+def executor_terminal(record,kind,lines,start):
+    if record['origin']['kind']!='authenticated-ci':
+        return None
+    workflow=retention.git_bytes(record['source_commit'],'.github/workflows/ci.yml')
+    receipts.require(workflow is not None,'Historical executor step unavailable')
+    job={'store_contract':'cluster_store_legacy','wal':'cluster_wal','topology':'cluster_topology',
+         'transport':'cluster_transport_recovery_contracts'}[kind]
+    steps=[step for step in job_steps(workflow.decode(),job) if COMMANDS[kind] in step]
+    receipts.require(len(steps)==1,'Historical executor step ambiguous')
+    name=re.search(r'^      - name: (.+)$',steps[0],re.M)
+    receipts.require(name is not None,'Historical executor step has no bound name')
+    pattern=r'^\s*(?:✅|❌) (Success|Failure) - Main '+re.escape(name[1])+r'\s*$'
+    matches=[(index,re.fullmatch(pattern,line)) for index,line in enumerate(lines) if index>start and re.fullmatch(pattern,line)]
+    receipts.require(len(matches)<=1,'Actual executor completion ambiguous')
+    return (matches[0][0],matches[0][1][1]=='Success') if matches else None
+
+
+def require_native_terminals(body,actual,exit_code,command):
+    terminals=re.findall(r'^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;',body,re.M)
+    receipts.require(terminals and sum(int(row[1]) for row in terminals)==sum(value=='pass' for value in actual.values())
+                     and sum(int(row[2]) for row in terminals)==sum(value=='fail' for value in actual.values())
+                     and sum(int(row[3]) for row in terminals)==sum(value=='ignored' for value in actual.values()),
+                     'Complete native terminal counts contradict named outcomes')
+    mismatch=re.search(r'^expected (?:at least )?\d+ matching Rust test\(s\), but \d+ passed$|^expected one passing outcome for ',body,re.M)
+    if exit_code==0:
+        receipts.require(all(row[0]=='ok' and row[2]=='0' for row in terminals) and mismatch is None
+                         and not re.search(r'(?im)^(?:error:|fatal:|make: \*\*\*)',body),
+                         'Actual failed Cargo command cannot be labelled successful')
+        words=shlex.split(command)
+        if 'scripts/require-test-count' in words:
+            environment=normalized_cargo(command)['environment']
+            count=sum(value=='pass' for value in actual.values())
+            expected=environment.get('PLURX_EXPECT_TEST_COUNT')
+            if expected is None and '--exact' in words:expected='1'
+            receipts.require(expected is None or count==int(expected),'Actual historical exact wrapper predicate failed')
+            minimum=environment.get('PLURX_EXPECT_TEST_COUNT_AT_LEAST')
+            receipts.require(minimum is None or count>=int(minimum),'Actual historical minimum wrapper predicate failed')
+            receipts.require(all(actual.get(name)=='pass' for name in environment.get('PLURX_EXPECT_TEST_NAMES','').split(',') if name),
+                             'Actual historical required-name wrapper predicate failed')
+
+
 def bound_execution(record, item, raw, source_commands=canonical):
     """No receipt-selected slice can remove another outcome from one execution."""
     kind = item['name'].split(':')[0]
@@ -414,7 +556,7 @@ def bound_execution(record, item, raw, source_commands=canonical):
     first = witness['first_line']
     receipts.require(type(first) is int and 0 < first <= len(lines), 'Invalid command anchor')
     if witness['mode'] == 'local-binary':
-        receipts.require(origin['kind'] == 'attested-local' and kind in {'wal','store_contract'}
+        receipts.require(origin['kind'] == 'attested-local' and kind in RUST_KINDS
                          and set(witness) == {'mode','first_line','build_invocation','archive_sha256','binary_sha256_before','binary_sha256_after','features','fingerprint'},
                          'Unknown local binary witness')
         receipts.require(lines[first-1].startswith('COMMAND '), 'Local command anchor unavailable')
@@ -447,8 +589,8 @@ def bound_execution(record, item, raw, source_commands=canonical):
         actual = retention.log_outcomes(body, record['coverage']['format'])
         receipts.require(set(actual) == {selected}, 'Actual local selector/outcomes differ')
     else:
-        receipts.require(witness['mode'] == 'cargo-command' and kind in {'wal','store_contract'}
-                         and set(witness) == {'mode','first_line','historical_name'}, 'Unknown Cargo execution witness')
+        receipts.require(witness['mode'] == 'cargo-command' and kind in RUST_KINDS
+                         and set(witness) == ({'mode','first_line','historical_name','job_status'} if origin['kind']=='authenticated-ci' else {'mode','first_line','historical_name'}), 'Unknown Cargo execution witness')
         historical = source_commands(record['source_commit'])
         name = witness['historical_name']
         receipts.require(name in historical and name.split(':')[0] == kind, 'Unknown historical command ordinal')
@@ -464,10 +606,23 @@ def bound_execution(record, item, raw, source_commands=canonical):
         same_target(normalized_cargo(command),expected)
         actual_env = normalized_cargo(command)['environment']
         receipts.require(actual_env == expected['environment'], 'Historical wrapper environment differs')
-        end = len(lines)
-        for index in range(end_command+1,len(lines)):
-            if re.match(r'^(?:(?:[A-Z_]+=[^ ]+|scripts/require-test-count) +)*cargo test(?: |$)|^COMMAND ',lines[index]):
-                end = index;break
+        recipes=historical_recipe(record,kind)
+        command_matches=[index for index,value in enumerate(recipes) if value==historical[name]]
+        receipts.require(len(command_matches)==1,'Historical command ordinal lacks unique recipe authority')
+        ordinal=command_matches[0]
+        next_command=recipes[ordinal+1] if ordinal+1<len(recipes) else None
+        terminal=executor_terminal(record,kind,lines,end_command)
+        end=terminal[0] if terminal is not None else len(lines)
+        progressed=False
+        for index in range(end_command+1,end):
+            if re.match(r'^(?:(?:[A-Z_]+=[^ ]+|scripts/require-test-count) +)*(?:cargo|/[^ ]+/cargo) (?:test|run|clippy|check)(?: |$)',lines[index]):
+                value,_=logged_command(lines,index)
+                receipts.require(next_command is not None and display_tokens(value,kind)==display_tokens(next_command,kind),
+                                 'Ambiguous Cargo-looking output is not the next historical recipe command')
+                end=index;progressed=True;break
+        if origin['kind']=='authenticated-ci' and record['exit_code']==0:
+            receipts.require(progressed or (terminal is not None and terminal[1]) or witness.get('job_status')=='success',
+                             'Historical success is not proved by actual Make progression or executor completion')
         body = '\n'.join(lines[end_command+1:end])
         flags = expected['cargo']
         target = flags.get('--test') or flags.get('--bin') or flags.get('-p')
@@ -477,10 +632,25 @@ def bound_execution(record, item, raw, source_commands=canonical):
             receipts.require(manifest is not None,'Historical manifest unavailable')
             target = tomllib.loads(manifest.decode())['package']['name']
         target = target.replace('-','_')
-        running = re.findall(r'^\s*Running (?:unittests|tests/).*?\(([^)]+)\)$',body,re.M)
-        receipts.require(len(running) == 1 and re.search(r'(?:^|/)' + re.escape(target) + r'-[0-9a-f]+$',running[0]),
-                         'Actual Cargo target differs or is ambiguous')
+        running = list(re.finditer(r'^\s*Running ((?:unittests|tests/).*?)\(([^)]+)\)$',body,re.M))
+        if implicit_cluster_target(expected):
+            tags=set()
+            for index,match in enumerate(running):
+                label,path=match.groups()
+                target_kind=['lib'] if label.startswith('unittests src/lib.rs') else ['bin'] if label.startswith('unittests src/main.rs') else ['test']
+                stem=Path(path).name.rsplit('-',1)[0]
+                eligible=[target for target in item['inventory']['targets'] if target['name'].replace('-','_')==stem and target['kind']==target_kind]
+                receipts.require(len(eligible)==1,'Logged implicit target differs from current footprint')
+                tags.add((eligible[0]['name'],tuple(target_kind)))
+                segment=body[match.end():running[index+1].start() if index+1<len(running) else len(body)]
+                if re.search(r'^running 0 tests$',segment,re.M):
+                    receipts.require(re.search(r'^test result: ok\. 0 passed; 0 failed; 0 ignored;',segment,re.M), 'Zero target lacks its actual terminal')
+            receipts.require(tags=={(target['name'],tuple(target['kind'])) for target in item['inventory']['targets']}, 'Logged implicit target footprint incomplete')
+        else:
+            receipts.require(len(running)==1 and re.search(r'(?:^|/)' + re.escape(target) + r'-[0-9a-f]+$',running[0][2]),
+                             'Actual Cargo target differs or is ambiguous')
         actual = retention.log_outcomes(body, record['coverage']['format'])
+        require_native_terminals(body,actual,record['exit_code'],command)
     receipts.require(actual == record['coverage']['outcomes'], 'Cropped or contradictory complete execution outcomes')
     return body
 
@@ -507,7 +677,7 @@ def completion_obligations(item, records, result, bodies):
         body = bodies[record['sequence']]
         outcomes = record['coverage']['outcomes']
         if obligation['category'] == 'native-failure':
-            receipts.require(record['exit_code'] == 101 and 'fail' in outcomes.values()
+            receipts.require(record['exit_code'] in {101,2} and 'fail' in outcomes.values()
                              and re.search(r'^test result: FAILED\.',body,re.M), 'Unknown native failure category')
         else:
             receipts.require(obligation['category'] == 'stale-count-wrapper', 'Unexplained failed command')
@@ -521,13 +691,12 @@ def completion_obligations(item, records, result, bodies):
                              and set(outcomes.values()) == {'pass'} and old_expected != diagnostics[0][1]
                              and not re.search(r'(?im)^(?!make: \*\*\*|##\[error\]Process completed with exit code [12]\.?$).*?(?:fatal|panicked|error:)',body), 'Ambiguous or unproved stale count failure')
             wrapper = retention.git_bytes(record['source_commit'],'scripts/require-test-count')
-            receipts.require(wrapper is not None and b'expected %s matching Rust test(s), but %s passed' in wrapper
-                             and b'status=${PIPESTATUS[0]}' in wrapper, 'Historical count wrapper unavailable')
+            receipts.require(wrapper is not None and retention.digest(wrapper) in COUNT_WRAPPERS, 'Historical count wrapper unavailable')
 
 
 def authenticate(api, proof, document, repository):
     """Local records use the authenticated writer; CI records also use live logs."""
-    origins = {}
+    origins, runs, jobs_by_run, scopes = {}, {}, {}, set()
     for item in proof['commands']:
         kind = item['name'].split(':')[0]
         for record in item['records']:
@@ -537,13 +706,19 @@ def authenticate(api, proof, document, repository):
             match = re.fullmatch(r'run:(\d+)/job:(\d+)', origin['identity'])
             receipts.require(match is not None, 'Malformed CI command origin')
             run_id, job_id = map(receipts.positive, match.groups())
-            run = api.get(f'/actions/runs/{run_id}')
-            jobs = [job for job in api.pages(f'/actions/runs/{run_id}/jobs') if job['id'] == job_id]
+            if run_id not in runs:
+                runs[run_id]=api.get(f'/actions/runs/{run_id}')
+                jobs_by_run[run_id]=api.pages(f'/actions/runs/{run_id}/jobs')
+            run=runs[run_id]
+            jobs=[job for job in jobs_by_run[run_id] if job['id']==job_id]
             receipts.require(run['repository']['id'] == repository and run['commit_sha'] == record['source_commit']
                              and run['workflow_id'] == 'ci.yml' and len(jobs) == 1
                              and jobs[0]['name'] == JOB_NAMES[kind] and jobs[0]['attempt'] == 1
                              and jobs[0]['run_id'] == run_id and jobs[0]['repo_id'] == repository
                              and jobs[0]['status'] in {'success','failure'}, 'Historical command job identity mismatch')
+            execution=origin['execution']
+            receipts.require(execution.get('mode')=='cargo-command' and execution.get('job_status')==jobs[0]['status'],
+                             'Declared historical job disposition differs from live authority')
             event = receipts.bounded_json(run['event_payload'].encode())
             inputs = event['inputs']
             receipts.require(run.get('trigger_event') == 'workflow_dispatch'
@@ -554,7 +729,10 @@ def authenticate(api, proof, document, repository):
             workflow = retention.git_bytes(record['source_commit'], '.github/workflows/ci.yml')
             receipts.require(workflow is not None and historical_command(workflow.decode(), kind),
                              'Historical command executor differs')
-            authenticate_scope(api, run_id, run, workflow.decode(), document, record['source_commit'], repository)
+            key=(run_id,record['source_commit'])
+            if key not in scopes:
+                authenticate_scope(api,run_id,run,workflow.decode(),document,record['source_commit'],repository)
+                scopes.add(key)
             if job_id not in origins:
                 origins[job_id] = api.bytes(f'/actions/jobs/{job_id}/logs')
             raw = origins[job_id]
@@ -585,18 +763,20 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
         receipts.require(isinstance(environment, dict)
                          and {'platform', 'toolchain', 'features', 'runtime'} <= environment.keys()
                          and isinstance(environment['runtime'], dict), 'Incomplete command environment values')
-        if kind in {'wal', 'store_contract'}:
+        if kind in RUST_KINDS:
             identity = rust_identity(item['invocation'])
             receipts.require(environment['toolchain'] == 'rust1.97.1'
-                             and environment['runtime'].get('test_threads') == (1 if '--test-threads=1' in identity['harness'] or '--exact' in identity['harness'] else 'libtest-default')
+                             and environment['runtime'].get('test_threads') == (1 if '--test-threads=1' in identity['harness'] else 'libtest-default')
                              and environment['runtime'].get('rust_min_stack') == (int(identity['environment']['RUST_MIN_STACK']) if 'RUST_MIN_STACK' in identity['environment'] else None),
                              'Rust command runtime differs from exact canonical invocation')
             ids = native_inventory(item['inventory'], identity, candidate)
             native_inventories[name] = {'ids_sha256': retention.digest(json.dumps(ids, separators=(',', ':')).encode()), 'features': environment['features']}
+            if implicit_cluster_target(identity):
+                native_inventories[name]['targets']=[{'name':target['name'],'kind':target['kind'],'features':target['features']} for target in item['inventory']['targets']]
             requested = identity['cargo'].get('--features', '').split(',')
             requested = [feature for feature in requested if feature]
-            receipts.require(set(requested) <= set(item['inventory']['features'])
-                             and environment['features'] == item['inventory']['features'],
+            graphs=[target['features'] for target in item['inventory']['targets']] if implicit_cluster_target(identity) else [item['inventory']['features']]
+            receipts.require(all(set(requested)<=set(graph) and environment['features']==graph for graph in graphs),
                              'Rust feature graph mismatch')
         elif kind in {'validation', 'operations'}:
             ids = list(discovery(candidate, kind))
@@ -620,7 +800,7 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
             invalid = changed_inputs(record, candidate)
             receipts.require(invalid <= set(ids), 'Unknown affected command unit')
             raw = clean_log(command_log(proof, record))
-            if kind in {'wal','store_contract'}:
+            if kind in RUST_KINDS:
                 bodies[sequence] = bound_execution(record,item,raw)
             actual = coverage(record, raw, kind, discovery)
             receipts.require(set(actual) <= set(ids), 'Execution belongs to another command inventory')
@@ -639,7 +819,7 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
                         last_pass[test_id] = sequence
         receipts.require(set(result) == set(ids) and all(value in {'pass', 'ignored'} for value in result.values())
                          and all(last_pass.get(test_id, 0) > sequence for test_id, sequence in last_failure.items()), 'Incomplete or failed applicable command coverage')
-        if kind in {'wal','store_contract'}:
+        if kind in RUST_KINDS:
             completion_obligations(item,records,result,bodies)
         else:
             receipts.require(item['obligations'] == [] and all(row['exit_code'] == 0 for row in records),
@@ -672,41 +852,57 @@ def compile_commands(kind, candidate):
 
 
 def owned_output(command, *, timeout, limit):
-    """Bound live output and retire/wait every owned child on cancellation."""
+    """Queue cancellation through birth and retirement; bound all live output."""
+    pending=[]
     def cancelled(signum, _frame):
-        raise receipts.ReceiptError(f'Owned command cancelled by signal {signum}')
-    previous = {signum: signal.signal(signum, cancelled) for signum in (signal.SIGTERM, signal.SIGINT)}
-    process = None
+        # A handler never raises across Popen registration or child retirement.
+        pending.append(signum)
+    def check_cancel():
+        receipts.require(not pending, f'Owned command cancelled by signal {pending[0] if pending else "none"}')
+    previous={}
+    process=None
     try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, start_new_session=True)
-        deadline = time.monotonic() + timeout
-        output = bytearray()
+        for signum in (signal.SIGTERM,signal.SIGINT):
+            previous[signum]=signal.signal(signum,cancelled)
+        process=subprocess.Popen(command,stdout=subprocess.PIPE,start_new_session=True)
+        check_cancel()
+        deadline=time.monotonic()+timeout
+        output=bytearray()
         with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
+            selector.register(process.stdout,selectors.EVENT_READ)
             while True:
-                remaining = deadline - time.monotonic()
-                receipts.require(remaining > 0, 'Owned command timeout')
-                if not selector.select(min(remaining, 1)):
+                check_cancel()
+                remaining=deadline-time.monotonic()
+                receipts.require(remaining>0,'Owned command timeout')
+                if not selector.select(min(remaining,1)):
                     continue
-                chunk = os.read(process.stdout.fileno(), 65536)
+                chunk=os.read(process.stdout.fileno(),65536)
                 if not chunk:
                     break
-                receipts.require(len(output) + len(chunk) <= limit, 'Owned command output limit exceeded')
+                receipts.require(len(output)+len(chunk)<=limit,'Owned command output limit exceeded')
                 output.extend(chunk)
-        receipts.require(process.wait(timeout=max(0.01, deadline-time.monotonic())) == 0,
-                         'Owned command failed')
-        return output.decode('utf-8', errors='strict')
+        while process.poll() is None:
+            check_cancel()
+            receipts.require(time.monotonic()<deadline,'Owned command timeout')
+            time.sleep(0.05)
+        check_cancel()
+        receipts.require(process.returncode==0,'Owned command failed')
+        return output.decode('utf-8',errors='strict')
     finally:
-        if process is not None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=10)
-            if process.stdout is not None:
-                process.stdout.close()
-        for signum, handler in previous.items():
-            signal.signal(signum, handler)
+        try:
+            if process is not None:
+                try:
+                    os.killpg(process.pid,signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=10)
+                finally:
+                    if process.stdout is not None:
+                        process.stdout.close()
+        finally:
+            for signum,handler in previous.items():
+                signal.signal(signum,handler)
 
 
 def owned_compile(command):
@@ -743,6 +939,21 @@ def compile_adopted(kind, proof, candidate):
                 artifacts.append(row)
         for name, identity in group:
             flags = identity['cargo']
+            if implicit_cluster_target(identity):
+                footprint=expected[name]['targets']
+                matching=[row for row in artifacts if row['package_id'].split('#')[-1].startswith('plurx-cluster-check@') or '/plurx-cluster-check#' in row['package_id']]
+                tags=[(row['target']['name'],tuple(row['target']['kind'])) for row in matching]
+                receipts.require(len(tags)==len(set(tags)) and set(tags)=={(target['name'],tuple(target['kind'])) for target in footprint},'Compiled implicit target footprint differs')
+                all_ids=[]
+                for target in footprint:
+                    rows=[row for row in matching if row['target']['name']==target['name'] and row['target']['kind']==target['kind']]
+                    receipts.require(len(rows)==1 and sorted(rows[0]['features'])==sorted(target['features']),'Implicit target feature graph differs')
+                    output=owned_output([rows[0]['executable'],'--list','--format=terse'],timeout=30,limit=8*1024*1024)
+                    full=[line.removesuffix(': test') for line in output.splitlines() if line.endswith(': test')]
+                    all_ids.extend(select_ids(full,identity))
+                receipts.require(retention.digest(json.dumps(all_ids,separators=(',',':')).encode())==expected[name]['ids_sha256'],'Compiled implicit selected universe differs')
+                print('ADOPTED_COMPLETE_UNIT_COMMAND '+name,flush=True)
+                continue
             target_name = flags.get('--test') or flags.get('--bin')
             if target_name is None:
                 package = flags.get('-p')
@@ -768,7 +979,7 @@ def compile_adopted(kind, proof, candidate):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--compile-units', choices=['store_contract', 'wal'], required=True)
+    parser.add_argument('--compile-units', choices=sorted(RUST_KINDS), required=True)
     args = parser.parse_args()
     candidate = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
     receipts.require(candidate == os.environ['GITHUB_SHA'], 'Checked-out adoption source differs')

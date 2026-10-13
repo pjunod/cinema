@@ -92,6 +92,8 @@ jobs:
       retain_store_contract_units: ${{ steps.retention.outputs.retain_store_contract_units }}
       retain_wal_units: ${{ steps.retention.outputs.retain_wal_units }}
       retain_android_jvm_units: ${{ steps.retention.outputs.retain_android_jvm_units }}
+      retain_topology_units: ${{ steps.retention.outputs.retain_topology_units }}
+      retain_transport_units: ${{ steps.retention.outputs.retain_transport_units }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -579,13 +581,20 @@ jobs:
         env:
           RUN_CLUSTER_AUTH: ${{ needs.scope.outputs.cluster_auth }}
           RUN_HIQLITE_SPIKE: ${{ needs.scope.outputs.hiqlite_spike }}
+          RETAIN_TOPOLOGY_UNITS: ${{ needs.scope.outputs.retain_topology_units }}
+          PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}
         run: |
           set -euo pipefail
           mkdir -p target/validation
           {
             if [ "$RUN_CLUSTER_AUTH" = true ]; then
               make hiqlite-vendor-clippy
-              make cluster-harness-check
+              if [ "$RETAIN_TOPOLOGY_UNITS" = true ]; then
+                python3 -m validation.qualification_unit_continuation --compile-units topology
+                make cluster-harness-nonunit-check
+              else
+                make cluster-harness-check
+              fi
             fi
             if [ "$RUN_HIQLITE_SPIKE" = true ]; then
               cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml \
@@ -678,11 +687,20 @@ jobs:
         id: recovery_contracts
         continue-on-error: true
         shell: bash
+        env:
+          RETAIN_TRANSPORT_UNITS: ${{ needs.scope.outputs.retain_transport_units }}
+          PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}
         run: |
           set -euo pipefail
           mkdir -p target/validation
-          make cluster-transport-recovery-contracts \
-            2>&1 | tee target/validation/cluster-transport-recovery-contracts.log
+          {
+            test "$(uname -s)" = Linux
+            if [ "$RETAIN_TRANSPORT_UNITS" = true ]; then
+              python3 -m validation.qualification_unit_continuation --compile-units transport
+            else
+              make cluster-transport-recovery-contracts
+            fi
+          } 2>&1 | tee target/validation/cluster-transport-recovery-contracts.log
       - name: Retain recovery contract logs
         if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4

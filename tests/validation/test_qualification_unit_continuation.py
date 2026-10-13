@@ -150,3 +150,65 @@ class CompleteCommandUnitCase(unittest.TestCase):
         original=q.command_log(proof,row);raw=log(original.replace('NATIVE_EXIT 0','test hidden ... FAILED\nNATIVE_EXIT 0'))
         proof['logs'][raw['sha256']]=raw;row['log']={'sha256_ref':raw['sha256']}
         with self.assertRaises(receipts.ReceiptError):self.validate(proof)
+
+    def test_pinned_absolute_executor_is_narrow_and_command_semantics_stay_bound(self):
+        absolute='/home/runner/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/cargo'
+        actual=q.normalized_cargo(COMMAND.replace('$(CARGO)',absolute))
+        q.same_target(actual,q.rust_identity(COMMAND))
+        for other in ['/tmp/cargo','/home/runner/.rustup/toolchains/stable/bin/cargo']:
+            with self.assertRaises(receipts.ReceiptError):q.normalized_cargo(COMMAND.replace('$(CARGO)',other))
+        for change in ['--test different','--features different']:
+            altered=COMMAND.replace('--test store_contract',change) if change.startswith('--test') else COMMAND.replace('--features cluster-read-cost-validation,hiqlite-contract-tests',change)
+            with self.assertRaises(receipts.ReceiptError):q.same_target(q.rust_identity(COMMAND),q.rust_identity(altered))
+
+    def test_generic_failure_reason_and_ambiguous_count_diagnostics_refuse(self):
+        command=COMMAND.replace('RUST_MIN_STACK=8388608','PLURX_EXPECT_TEST_COUNT=2 RUST_MIN_STACK=8388608')
+        old=command.replace('PLURX_EXPECT_TEST_COUNT=2','PLURX_EXPECT_TEST_COUNT=1').replace('$(CARGO)','scripts/require-test-count cargo')
+        item={'invocation':command,'obligations':[{'sequence':1,'category':'stale-count-wrapper'}]}
+        record={'sequence':1,'exit_code':1,'source_commit':CANDIDATE,'origin':{'command':old},'coverage':{'outcomes':{'a':'pass','b':'pass'}}}
+        terminal='test result: ok. 2 passed; 0 failed; 0 ignored;\nexpected 1 matching Rust test(s), but 2 passed\n'
+        for body in [terminal+terminal,terminal+'fatal: unexplained failure\n',terminal.replace('expected 1','expected 3')]:
+            with self.assertRaises(receipts.ReceiptError):q.completion_obligations(item,[record],{'a':'pass','b':'pass'},{1:body})
+        item['obligations'][0]['category']='arbitrary-fixed-command'
+        with self.assertRaises(receipts.ReceiptError):q.completion_obligations(item,[record],{'a':'pass','b':'pass'},{1:terminal})
+
+    def test_current_wrapper_count_minimum_and_required_name_predicates_are_real(self):
+        for prefix in ['PLURX_EXPECT_TEST_COUNT=3','PLURX_EXPECT_TEST_COUNT_AT_LEAST=3','PLURX_EXPECT_TEST_NAMES=missing']:
+            item={'invocation':prefix+' '+COMMAND,'obligations':[]}
+            with self.assertRaises(receipts.ReceiptError):q.completion_obligations(item,[],{'a':'pass','b':'pass'},{})
+
+    def test_implicit_target_cannot_hide_a_matching_case_in_an_auxiliary_binary(self):
+        identity=q.rust_identity('$(CARGO) test --locked -p plurx-cluster-check topology:: -- --nocapture')
+        target={'name':'plurx_cluster_check','kind':['lib'],'binary_sha256':'c'*64,'features':[],'list_log':log('topology::a: test\n')}
+        proof={'source_commit':CANDIDATE,'ids':['topology::a'],'targets':[target]}
+        self.assertEqual(q.target_inventory(proof,CANDIDATE,identity),['topology::a'])
+        auxiliary=copy.deepcopy(target);auxiliary.update(name='harness',kind=['test'],list_log=log('topology::hidden: test\n'))
+        proof['targets'].append(auxiliary)
+        with self.assertRaises(receipts.ReceiptError):q.target_inventory(proof,CANDIDATE,identity)
+
+    def test_cancellation_during_retirement_does_not_skip_wait_or_restoration(self):
+        import os,signal
+        from unittest.mock import Mock
+        read,write=os.pipe();os.write(write,b'over limit');os.close(write)
+        process=Mock(pid=123,stdout=os.fdopen(read,'rb'))
+        before={signum:signal.getsignal(signum) for signum in (signal.SIGTERM,signal.SIGINT)}
+        def retire(**_):
+            handler=signal.getsignal(signal.SIGTERM);handler(signal.SIGTERM,None);handler(signal.SIGTERM,None)
+            return -signal.SIGKILL
+        process.wait.side_effect=retire
+        with patch.object(q.subprocess,'Popen',return_value=process),patch.object(q.os,'killpg') as kill:
+            with self.assertRaises(receipts.ReceiptError):q.owned_output(['cargo'],timeout=1,limit=1)
+        kill.assert_called_once_with(123,signal.SIGKILL);process.wait.assert_called_once_with(timeout=10)
+        self.assertTrue(process.stdout.closed)
+        self.assertEqual(before,{signum:signal.getsignal(signum) for signum in before})
+
+    def test_actual_wrapper_failure_cannot_be_labelled_exit_zero(self):
+        old='PLURX_EXPECT_TEST_COUNT=1 '+COMMAND.replace('$(CARGO)','scripts/require-test-count cargo')
+        body='test a ... ok\ntest b ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored;\nexpected 1 matching Rust test(s), but 2 passed\n'
+        with self.assertRaises(receipts.ReceiptError):q.require_native_terminals(body,{'a':'pass','b':'pass'},0,old)
+        body=body.split('expected 1')[0]
+        with self.assertRaises(receipts.ReceiptError):q.require_native_terminals(body,{'a':'pass','b':'pass'},0,old)
+
+    def test_positive_native_rows_require_complete_target_terminal(self):
+        body='test a ... ok\n'
+        with self.assertRaises(receipts.ReceiptError):q.require_native_terminals(body,{'a':'pass'},0,COMMAND.replace('$(CARGO)','cargo'))
