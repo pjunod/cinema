@@ -1,6 +1,6 @@
 # The hiqlite fork and what it drags in — decide the ownership, then cut the graph
 
-**Status:** implementation in progress (M1-M3 merged, M4 merged as far as candle allows; M0 measured and M5 (d) in [#558](http://forge.lan:3000/noirr/plurx/pulls/558), M5 (b)-(c) declined on M0's numbers); M6 one accepted mechanism, nine generic rows pending as of 2026-09-30 · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
+**Status:** implementation in progress (M1-M3 merged, M4 merged as far as candle allows; M0 measured and M5 (d) in [#558](http://forge.lan:3000/noirr/plurx/pulls/558), M5 (b)-(c) declined on M0's numbers); M6 two accepted mechanisms, nine generic rows pending as of 2026-10-13 · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
 F-build-ops-codehealth-5, -6, -7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -1166,6 +1166,37 @@ maintainer acceptance. Row 19 remains `pending M6`; its kind/drop condition,
 the nine incomplete generic rows, M6's formal dispositions and M5 (d)'s fleet
 acceptance remain unchanged. No public filing, upgrade or patch removal.
 
+**M6 current inventory and row 26 receipt, 2026-10-13.** The current ledgers
+contain eleven generic rows: Hiqlite 1, 8, 9, 10, 11, 17, 19 and 26, plus
+WAL 1, 2 and 3. Hiqlite 26 was added in `d2c32394d`; the earlier ten-row
+inventory is historical. Two rows now have verified accepted mechanisms:
+WAL 2 and Hiqlite 26. The same nine combined rows remain pending; partial
+Hiqlite 1 / WAL 3 and the H19 constructor boundary are not reclassified.
+
+[Upstream PR 374](https://github.com/sebadob/hiqlite/pull/374) merged on
+2026-10-05 as
+[`80a3c2c60c920917d8e7f775557030cf515fe331`](https://github.com/sebadob/hiqlite/commit/80a3c2c60c920917d8e7f775557030cf515fe331).
+The [v0.15.2 release](https://github.com/sebadob/hiqlite/releases/tag/v0.15.2)
+resolves to `18e3e71be1b40465f82e1f26f17b7d1bfcc6995d`. Its
+[accepted-stream helper](https://github.com/sebadob/hiqlite/blob/18e3e71be1b40465f82e1f26f17b7d1bfcc6995d/hiqlite/src/network/tcp_socket.rs)
+calls `set_nodelay(true)`; its
+[listener source](https://github.com/sebadob/hiqlite/blob/18e3e71be1b40465f82e1f26f17b7d1bfcc6995d/hiqlite/src/start.rs)
+wires that helper into both Raft and API, before TLS or through plain-stream
+`tap_io`. This matches row 26's generic mechanism; it is not a runtime test or
+the local staged-startup policy. The retained source SHA256 values are
+`90214c004fbb70bf759b88ddda8f4f1d9a0a3c081fc62d0d3339be7c3b2841a0`
+(socket helper, 2,617 B) and
+`eac6bd1168af7f34bf97cd1d4741133db0c5ebf46bb7e9dea2dbef7586a68d58`
+(listener, 15,382 B). The official PR state, merged diff, tag identity and
+released source were read without authentication or public writes.
+
+`HiqlitePatchLedgerCase.test_upstream_disposition_inventory_includes_the_listener_fix`
+pins all eleven rows, the two real URLs and the nine pending dispositions.
+Its first run failed on the unrecorded row 26 URL. No older reproduction,
+denied H8/H9/WAL1 action, provider constructor, dependency build or fleet
+measurement was replayed. No public filing, upgrade or patch removal occurred;
+M6 and M5 (d)'s separate fleet acceptance remain open.
+
 ### 5.8 2026-09-21 implementation boundary
 
 The safe source-only boundary is M1 plus the locally provable portion of M2.
@@ -1262,6 +1293,14 @@ because M5 (a) is conditional on it.
 ---
 
 ## Execution log
+
+**2026-10-13 evidence continuation** (`none:openai:2026-10-13`,
+`codex://threads/01a0c165-d718-73a1-93e9-e81380017705`,
+`codex/architecture-acceptance-receipts`): root reconciles only the objective
+row 26 accepted/released receipt and current inventory above. Original
+authors, policies, failures and pending combined rows remain. Independent
+review and the current documentation PR gate are separate from public-source
+acceptance; no K-08 closure, private-code publication or runtime action.
 
 Executing sessions append one row per milestone PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
