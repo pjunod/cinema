@@ -144,6 +144,9 @@ configuration as beyond permitted settings. No logging configuration changed.
 
 ## 6. Remaining playback work — preserve failures alongside successful frames
 
+The [detailed follow-up plan](../playback-control/MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md)
+specifies F1–F7 evidence, investigation order, reproduction and closure criteria.
+
 | Observation | Status and next investigation | Evidence member |
 |---|---|---|
 | Paused seek outside buffered video stalls about 20 seconds; timeline can show an old picture at5:00 | Open: qualify presented-frame completion and paused unbuffered-seek recovery under the playback lifecycle work. | air-4e-final-playback.log; air-94-cpu-5m-proof.log |
