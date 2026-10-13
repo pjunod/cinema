@@ -2,7 +2,8 @@
 
 This adapter does not turn a failed historical job into a passing lane. Its
 commands come from the current committed repository, never from a receipt.
-Completed Python suites have aggregate coverage, not invented per-ID outcomes.
+Python/JVM parsers are preparatory only: enrollment stays refused until their
+execution and environment provenance are implemented in a separate follow-up.
 """
 from __future__ import annotations
 
@@ -51,6 +52,50 @@ TARGETS = ('store_contract', 'schema_lineage_upgrade')
 STORE_FEATURES = 'cluster-read-cost-validation,hiqlite-contract-tests'
 IGNORED_STORE_HELPERS = {'hiqlite_contract_node_process', 'hiqlite_activation_node_process',
                          'k05_capture_hiqlite_statements'}
+
+
+# Reviewed, finite original captures. Missing measurements remain unknown; these
+# hashes authorize no other log, compiler, environment, or future execution.
+ORIGINAL_CAPTURES = {'810a808e88213d60a1ff5647dda57cf36a93f46cdb26acab0629db5bf67a0f04': {'source': '2d3695541df4dbc391a91d9f60504e7f422710e2',
+                                                                      'binding': 'fd3f224a610c9372b62408063aaa8c7550ddbed4f9f30a30106a6cef5e52dcff',
+                                                                      'form': 'bulk',
+                                                                      'blocks': 1},
+ '7cb05f4538e8fd6a12c88efdfad481348fb76a93db063dd9064de48cb03f62f6': {'source': '2d3695541df4dbc391a91d9f60504e7f422710e2',
+                                                                      'binding': 'a3fc3ab5a8be3d8a296d86da7c0ff9dece38e9c6a2b60ff917098461b92fcaa8',
+                                                                      'form': 'bulk',
+                                                                      'blocks': 1},
+ '5732a7657c169d67e0d5568eaf89cc1d625a3e01830d9f7471ce4442625e4d8b': {'source': '2d3695541df4dbc391a91d9f60504e7f422710e2',
+                                                                      'binding': None,
+                                                                      'form': 'header',
+                                                                      'blocks': 1},
+ '847f05279325c486bac8ad935e8806638ad59f4d39277f9166355403de07dd48': {'source': 'd74076d76d28f8a63f9ddb1ab2d0d9f59a7e0307',
+                                                                      'binding': '5665c98167ece2a690300c0b2efa0da5281483acdb6b7d5cf02c63df7e9e1337',
+                                                                      'form': 'blocks',
+                                                                      'blocks': 29},
+ '39ed30d207e8b03c52b5401103f880a54960a552c4167ce9fcbbed57a68fb919': {'source': 'd74076d76d28f8a63f9ddb1ab2d0d9f59a7e0307',
+                                                                      'binding': '3758ccfe7541d584eab256d8e520c28cdecfe1c0162f4bd4a645bda21858c72c',
+                                                                      'form': 'blocks',
+                                                                      'blocks': 1},
+ '2e92ded917b4fba2d6788b30811bd3c4c79d911878e372ca5920af74d40157c2': {'source': 'dd270bdf31cfde2efeb3d024f3308cd4353d6e62',
+                                                                      'binding': 'a445afbc5b300cf41e9b9dd3605050a61c32046c378c9855d4a888e0bdd9b545',
+                                                                      'form': 'blocks',
+                                                                      'blocks': 7},
+ '55d1c73dfd291697f3d3707dceb1fcdb2b530971648731dc233848103c3392bf': {'source': '2a5122a34ee3580cda3a063b032447947fabf188',
+                                                                      'binding': '74a63106e0bd89dca0613237879183dd41d1bbf4c3604c648a4a521f1c3993ab',
+                                                                      'form': 'blocks',
+                                                                      'blocks': 3},
+ 'd743390863f2f383e7d3fe48fa3719e373235877ca710a6c4acf8ee2d3f1fc2f': {'source': 'dd742d66c8a25161bcb55a5431ab6ee718535233',
+                                                                      'binding': 'bcdd98face11bf2b6173fc3e74de9583adcd01778cbb1400f4dd27414110b8f0',
+                                                                      'form': 'blocks',
+                                                                      'blocks': 2},
+ 'fa65d6d4335c74bfbc542f2a29afee78d1c71bc682a38de1f2da0db10881f045': {'source': '314734701b1b713f72bf017f756efaac763b338a',
+                                                                      'binding': 'c6ef5258406bf7a1bfeac0f556e16ad456685cce26d28914ffe8ae9b57ac85bf',
+                                                                      'form': 'blocks',
+                                                                      'blocks': 1},
+ 'e402da6e8ed9c8bfe50fcfc549b09be033fca651178bd1cef6812f6c00cb3b44': {'source': 'dd270bdf31cfde2efeb3d024f3308cd4353d6e62',
+                                                                      'binding': '9cd1e56732ab4400d78e09ac7b114c10f402cb4ac4384cb8a6c991a506b2d377',
+                                                                      'form': 'blocks',
+                                                                      'blocks': 1}}
 
 
 def clean_log(raw):
@@ -595,6 +640,162 @@ def native_target_paths(identity,source):
     return package,name.replace('-','_'),'test-'+kind+'-'+name+'.json'
 
 
+def require_executor_interrupted(record,body):
+    origin=record['origin'];witness=origin['execution']
+    receipts.require(origin['kind']=='authenticated-ci' and witness.get('job_status')=='failure'
+                     and witness.get('disposition')=='executor-interrupted' and record['exit_code'] is None
+                     and not re.search(r'^test result:',body,re.M)
+                     and re.search(r'^⚙️ \[runner\]: Failed to execute step .*context deadline exceeded, exec: RUN signal: killed$',body,re.M),
+                     'Interrupted native exit must remain unknown and have authenticated runner termination')
+
+
+
+def original_capture(record,item,raw):
+    witness=record['origin']['execution'];digest=record['log']['sha256_ref']
+    receipts.require(set(witness)=={'mode','first_line','ordinal','binding','observed','compatibility'}
+                     and digest in ORIGINAL_CAPTURES
+                     and witness['compatibility']=='reviewed-original-linux-store-v1',
+                     'Unknown original capture or compatibility authority')
+    contract=ORIGINAL_CAPTURES[digest]
+    identity=rust_identity(item['invocation'])
+    runtime=record['environment']['runtime']
+    receipts.require(record['environment']['platform']=='linux-x64'
+                     and record['environment']['toolchain']=='rust1.97.1'
+                     and record['environment']['features']==['cluster-read-cost-validation','hiqlite-contract-tests','hiqlite-store']
+                     and runtime=={'test_threads':1,'rust_min_stack':8388608,
+                         'target':'x86_64-unknown-linux-gnu','rustc_version':RUSTC_VERSION,
+                         'profile':{'opt_level':'0','debuginfo':0,'debug_assertions':True,'overflow_checks':True,'test':True}}
+                     and identity['cargo'].get('--features')==STORE_FEATURES
+                     and identity['environment'].get('RUST_MIN_STACK')=='8388608'
+                     and identity['harness'] in (['--test-threads=1'],['--exact','--test-threads=1']),
+                     'Original compatibility policy does not cover this feature/runtime contract')
+    receipts.require(record['source_commit']==contract['source'] and retention.digest(raw.encode())==digest,
+                     'Original capture source or bytes differ')
+    ordinal=witness['ordinal']
+    receipts.require(type(ordinal) is int and 0<=ordinal<contract['blocks'],'Original capture ordinal differs')
+    binding=witness['binding']
+    if contract['binding'] is None:
+        receipts.require(binding is None,'Unrecorded original sidecar must remain absent')
+        data={}
+    else:
+        receipts.require(isinstance(binding,dict) and binding.get('sha256')==contract['binding'],
+                         'Original sidecar identity differs')
+        data=receipts.bounded_json(retention.decoded_log(binding).encode())
+        receipts.require(data['source_commit']==record['source_commit'] and data['branch']=='effort/dv-hdr-repair',
+                         'Original sidecar source differs')
+        if 'log_sha256' in data:receipts.require(data['log_sha256']==digest,'Original sidecar log differs')
+    lines=raw.splitlines();form=contract['form']
+    if form=='header':
+        prefix='source_commit '+record['source_commit']+' branch effort/dv-hdr-repair command '
+        receipts.require(lines[0].startswith(prefix),'Original diagnostic command header absent')
+        argv=receipts.bounded_json(lines[0][len(prefix):].encode())
+        body='\n'.join(lines[1:-1]);exit_code=0
+        receipts.require(lines[-1]=='diagnostic_exit_code 0' and witness['first_line']==1,
+                         'Original diagnostic exit missing')
+    elif form=='bulk':
+        argv=data['command'];body=raw;exit_code=data.get('exit_code')
+        receipts.require(witness['first_line']==1,'Bulk capture must retain every original line')
+    else:
+        anchors=[index for index,line in enumerate(lines) if line.startswith('COMMAND ')]
+        receipts.require(len(anchors)==contract['blocks'],'Original block inventory differs')
+        first=anchors[ordinal];end=anchors[ordinal+1] if ordinal+1<len(anchors) else len(lines)
+        receipts.require(witness['first_line']==first+1,'Original block anchor differs')
+        argv=receipts.bounded_json(lines[first].removeprefix('COMMAND ').encode())
+        observed_record=data['records'][ordinal] if 'records' in data else data
+        receipts.require(argv==observed_record['command'],'Original block argv differs from sidecar')
+        exit_code=observed_record['exit_code'];body='\n'.join(lines[first+1:end])
+        exits=re.findall(r'^NATIVE_EXIT (\d+)$',body,re.M)
+        receipts.require(not exits or exits==[str(exit_code)],'Original block exit contradicts sidecar')
+    receipts.require(record['origin']['kind']=='attested-local' and record['origin']['command']==shlex.join(argv)
+                     and record['exit_code']==exit_code,'Original execution command or numeric exit differs')
+    observed={key:data.get(key) for key in ['archive_sha256','binary_sha256','binary_sha256_after',
+                                          'fingerprint','features','profile','rust_min_stack','test_threads']}
+    observed['exit_code']=exit_code
+    features=observed['features']
+    if isinstance(features,str):features=json.loads(features)
+    receipts.require(features is None or features in [STORE_FEATURES.split(','),record['environment']['features']],
+                     'Recorded original feature selection contradicts compatibility')
+    receipts.require(observed['rust_min_stack'] in (None,8388608)
+                     and observed['test_threads'] in (None,1)
+                     and observed['profile'] in (None,TEST_PROFILE_FINGERPRINTS[0]),
+                     'Recorded original runtime contradicts compatibility')
+    receipts.require(witness['observed']==observed,'Original measurements were changed or invented')
+    if observed['archive_sha256'] is not None:
+        receipts.require(observed['archive_sha256']==source_archive_digest(record['source_commit']),
+                         'Original source archive differs')
+    if observed['binary_sha256_after'] is not None:
+        receipts.require(observed['binary_sha256_after']==observed['binary_sha256'],
+                         'Original binary changed during execution')
+    target=rust_identity(item['invocation']);package,stem,_=native_target_paths(target,record['source_commit'])
+    suffix=Path(argv[0]).name.rsplit('-',1)[-1]
+    receipts.require(package=='plurx-core' and Path(argv[0]).name==stem+'-'+suffix
+                     and re.fullmatch(r'[0-9a-f]{16}',suffix) and '--exact' in argv
+                     and '--test-threads=1' in argv and '--list' not in argv,
+                     'Original native target or harness differs')
+    fp=observed['fingerprint']
+    if fp is not None:
+        dep='debug/.fingerprint/'+package+'-'+suffix+'/dep-test-integration-test-'+stem
+        receipts.require(fp.get('rustc')==RUSTC_FINGERPRINT and fp.get('compile_kind')==0
+                         and fp.get('rustflags')==[] and fp.get('profile')==TEST_PROFILE_FINGERPRINTS[0]
+                         and json.loads(fp['features'])==record['environment']['features']
+                         and any(row.get('CheckDepInfo',{}).get('dep_info')==dep for row in fp.get('local',[])),
+                         'Original measured compiler/feature/target linkage differs')
+    # Compiler/profile/full feature graph for old captures, and stack for the
+    # media diagnostic, are compatibility policy, never recorded measurements.
+    actual=retention.log_outcomes(body,record['coverage']['format'])
+    receipts.require(actual==record['coverage']['outcomes'],'Original complete outcomes differ')
+    if form=='bulk':
+        skipped=[argv[index+1] for index,arg in enumerate(argv) if arg=='--skip']
+        receipts.require(len(skipped)==len(set(skipped)) and set(actual)==set(data['inventory'])-set(skipped),
+                         'Original bulk selection or complete inventory differs')
+    else:
+        selected=[arg for arg in argv[1:] if not arg.startswith('--')]
+        receipts.require(len(selected)==1 and set(actual)==set(selected),'Original exact selector differs')
+    if exit_code is None:
+        receipts.require(digest=='810a808e88213d60a1ff5647dda57cf36a93f46cdb26acab0629db5bf67a0f04'
+                         and 'fail' in actual.values() and re.search(r'^test result: FAILED\.',body,re.M),
+                         'Unrecorded numeric exit is outside the closed failed capture')
+    require_native_terminals(body,actual,exit_code,record['origin']['command'])
+    terminals=re.findall(r'^test result: .*?; (\d+) filtered out;',body,re.M)
+    receipts.require(len(terminals)==1 and (form!='bulk' or int(terminals[0])==len(skipped)),
+                     'Original full terminal or filtered count differs')
+    return body
+
+
+def complete_original_capture_ordinals(records):
+    groups={}
+    for record in records:
+        witness=record['origin']['execution']
+        if witness['mode']=='local-original-capture':
+            groups.setdefault(record['log']['sha256_ref'],[]).append(witness['ordinal'])
+    for digest,ordinals in groups.items():
+        receipts.require(sorted(ordinals)==list(range(ORIGINAL_CAPTURES[digest]['blocks'])),
+                         'An enrolled original capture omits or repeats an execution block')
+    if not groups:return
+    ordered=list(ORIGINAL_CAPTURES)
+    # Registry insertion order below is corrected for the diagnostic before its
+    # resource retry. All captured failure attempts are mandatory for this cohort.
+    ordered[1],ordered[2]=ordered[2],ordered[1]
+    lineage=[digest for digest in ordered if digest in {
+        '39ed30d207e8b03c52b5401103f880a54960a552c4167ce9fcbbed57a68fb919',
+        'e402da6e8ed9c8bfe50fcfc549b09be033fca651178bd1cef6812f6c00cb3b44'}]
+    is_lineage=bool(set(groups)&set(lineage))
+    expected=lineage if is_lineage else [digest for digest in ordered if digest not in lineage]
+    receipts.require(set(groups)==set(expected),'Original cohort omits an earlier complete failure capture')
+    actual=[(record['log']['sha256_ref'],record['origin']['execution']['ordinal'])
+            for record in sorted(records,key=lambda row:row['sequence'])
+            if record['origin']['execution']['mode']=='local-original-capture']
+    receipts.require(actual==[(digest,ordinal) for digest in expected for ordinal in range(ORIGINAL_CAPTURES[digest]['blocks'])],
+                     'Original capture chronology differs from the reviewed execution history')
+    if not is_lineage:
+        ci=[record for record in records if record['log']['sha256_ref']==
+            'f4de403db2e806a1894a3434dbd8edb5dd886ccafeeca37c5f0e49a127dffdf2']
+        receipts.require(len(ci)==1 and ci[0]['origin']['kind']=='authenticated-ci'
+                         and ci[0]['sequence']<min(record['sequence'] for record in records
+                         if record['origin']['execution']['mode']=='local-original-capture'),
+                         'Original authenticated partial failure must precede local completion')
+
+
 def bound_execution(record, item, raw, source_commands=canonical):
     """No receipt-selected slice can remove another outcome from one execution."""
     kind = item['name'].split(':')[0]
@@ -604,6 +805,8 @@ def bound_execution(record, item, raw, source_commands=canonical):
     lines = raw.splitlines()
     first = witness['first_line']
     receipts.require(type(first) is int and 0 < first <= len(lines), 'Invalid command anchor')
+    if witness['mode']=='local-original-capture':
+        return original_capture(record,item,raw)
     if witness['mode'] == 'local-binary':
         receipts.require(origin['kind'] == 'attested-local' and kind in RUST_KINDS
                          and set(witness) == {'mode','first_line','build_invocation','archive_sha256','binary_sha256_before','binary_sha256_after','features','fingerprint','binary_path','fingerprint_path'},
@@ -649,9 +852,59 @@ def bound_execution(record, item, raw, source_commands=canonical):
         selected = next(arg for arg in args if not arg.startswith('--'))
         actual = retention.log_outcomes(body, record['coverage']['format'])
         receipts.require(set(actual) == {selected}, 'Actual local selector/outcomes differ')
+    elif witness['mode']=='local-cargo-json':
+        receipts.require(origin['kind']=='attested-local' and kind in RUST_KINDS
+                         and set(witness)=={'mode','first_line','historical_name','archive_sha256',
+                                           'cargo_artifact','binary_sha256_before','binary_sha256_after','cwd','fingerprint',
+                                           'fingerprint_path','fingerprint_observation'},
+                         'Unknown local Cargo JSON witness')
+        receipts.require(lines[first-1].startswith('COMMAND '),'Local Cargo JSON anchor missing')
+        argv=receipts.bounded_json(lines[first-1].removeprefix('COMMAND ').encode())
+        receipts.require(isinstance(argv,list) and argv and all(isinstance(arg,str) for arg in argv)
+                         and origin['command']==shlex.join(argv),'Actual Cargo JSON argv differs')
+        historical=source_commands(record['source_commit']);name=witness['historical_name']
+        receipts.require(name in historical and name.split(':')[0]==kind,'Local Cargo historical ordinal differs')
+        command=shlex.join(argv);actual_command=normalized_cargo(command)
+        expected=rust_identity(historical[name]);same_target(actual_command,expected)
+        same_target(expected,rust_identity(item['invocation']))
+        receipts.require(actual_command['environment']==expected['environment']
+                         and witness['archive_sha256']==source_archive_digest(record['source_commit'])
+                         and retention.DIGEST.fullmatch(witness['binary_sha256_before'])
+                         and witness['binary_sha256_after']==witness['binary_sha256_before'],
+                         'Actual local Cargo source, environment or preserved binary differs')
+        ends=[index for index in range(first,len(lines)) if lines[index].startswith(('NATIVE_EXIT ','COMMAND '))]
+        receipts.require(ends and lines[ends[0]]=='NATIVE_EXIT '+str(record['exit_code']),
+                         'Actual local Cargo terminal missing or contradicted')
+        body='\n'.join(lines[first:ends[0]])
+        artifact=witness['cargo_artifact'];package,stem,_=native_target_paths(expected,record['source_commit'])
+        receipts.require(isinstance(artifact,dict) and artifact.get('reason')=='compiler-artifact'
+                         and artifact['target']['name'].replace('-','_')==stem
+                         and sorted(artifact['features'])==record['environment']['features']
+                         and artifact['profile']==record['environment']['runtime']['profile'],
+                         'Captured Cargo artifact target, features or profile differs')
+        binary=Path(artifact['executable']);suffix=binary.name.rsplit('-',1)[-1]
+        fingerprint_path=Path(witness['fingerprint_path']);fp=witness['fingerprint']
+        _,_,fpname=native_target_paths(expected,record['source_commit'])
+        receipts.require(witness['fingerprint_observation']=='preserved-matching-binary'
+                         and binary.is_absolute() and Path(witness['cwd']).is_absolute()
+                         and re.fullmatch(r'[0-9a-f]{8,64}',suffix) is not None
+                         and binary.name==stem+'-'+suffix and fingerprint_path.name==fpname
+                         and fingerprint_path.parent.name==package+'-'+suffix
+                         and fingerprint_path.parent.parent.name=='.fingerprint'
+                         and fp.get('rustc')==RUSTC_FINGERPRINT and fp.get('compile_kind')==0
+                         and fp.get('rustflags')==[]
+                         and fp.get('profile')==TEST_PROFILE_FINGERPRINTS[artifact['profile']['debuginfo']]
+                         and json.loads(fp.get('features','null'))==sorted(artifact['features']),
+                         'Preserved local Cargo compiler/target/flags/fingerprint differs')
+        running=re.findall(r'^\s*Running unittests src/lib.rs \(([^)]+)\)$',body,re.M)
+        receipts.require('--lib' in expected['cargo'] and len(running)==1
+                         and str(Path(witness['cwd'])/running[0])==str(binary),
+                         'Actual local Cargo Running artifact differs')
+        actual=retention.log_outcomes(body,record['coverage']['format'])
+        require_native_terminals(body,actual,record['exit_code'],command)
     else:
         receipts.require(witness['mode'] == 'cargo-command' and kind in RUST_KINDS
-                         and set(witness) == ({'mode','first_line','historical_name','job_status'} if origin['kind']=='authenticated-ci' else {'mode','first_line','historical_name'}), 'Unknown Cargo execution witness')
+                         and set(witness) == (({'mode','first_line','historical_name','job_status','disposition'} if witness.get('disposition')=='executor-interrupted' else {'mode','first_line','historical_name','job_status'}) if origin['kind']=='authenticated-ci' else {'mode','first_line','historical_name'}), 'Unknown Cargo execution witness')
         historical = source_commands(record['source_commit'])
         name = witness['historical_name']
         receipts.require(name in historical and name.split(':')[0] == kind, 'Unknown historical command ordinal')
@@ -711,7 +964,10 @@ def bound_execution(record, item, raw, source_commands=canonical):
             receipts.require(len(running)==1 and re.search(r'(?:^|/)' + re.escape(target) + r'-[0-9a-f]+$',running[0][2]),
                              'Actual Cargo target differs or is ambiguous')
         actual = retention.log_outcomes(body, record['coverage']['format'])
-        require_native_terminals(body,actual,record['exit_code'],command)
+        if witness.get('disposition')=='executor-interrupted':
+            require_executor_interrupted(record,body)
+        else:
+            require_native_terminals(body,actual,record['exit_code'],command)
     receipts.require(actual == record['coverage']['outcomes'], 'Cropped or contradictory complete execution outcomes')
     return body
 
@@ -737,7 +993,14 @@ def completion_obligations(item, records, result, bodies):
         receipts.require(set(obligation) == {'sequence','category'} and obligation['sequence'] == record['sequence'], 'Unknown completion obligation')
         body = bodies[record['sequence']]
         outcomes = record['coverage']['outcomes']
-        if obligation['category'] == 'native-failure':
+        if obligation['category']=='native-failure-exit-unrecorded':
+            receipts.require(record['exit_code'] is None and record['origin']['execution']['mode']=='local-original-capture'
+                             and record['log']['sha256_ref']=='810a808e88213d60a1ff5647dda57cf36a93f46cdb26acab0629db5bf67a0f04'
+                             and 'fail' in outcomes.values() and re.search(r'^test result: FAILED\.',body,re.M),
+                             'Unknown original native failure without recorded exit')
+        elif obligation['category']=='executor-interrupted':
+            require_executor_interrupted(record,body)
+        elif obligation['category'] == 'native-failure':
             receipts.require(record['exit_code'] in {101,2} and 'fail' in outcomes.values()
                              and re.search(r'^test result: FAILED\.',body,re.M), 'Unknown native failure category')
         else:
@@ -771,9 +1034,14 @@ def historical_rust_environment_contract(source,workflow,kind):
             receipts.require(retention.git_bytes(source,path) is None,'Historical Cargo source config requires review')
     job={'store_contract':'cluster_store_legacy','wal':'cluster_wal','topology':'cluster_topology',
          'transport':'cluster_transport_recovery_contracts'}[kind]
-    text='\n'.join(job_steps(workflow,job))
+    headers=list(re.finditer(r'^  ([A-Za-z0-9_]+):\s*$',workflow,re.M))
+    matches=[index for index,row in enumerate(headers) if row[1]==job]
+    receipts.require(len(matches)==1,'Historical environment job unavailable')
+    index=matches[0];start=headers[index].start();end=headers[index+1].start() if index+1<len(headers) else len(workflow)
+    # Include global env plus the full selected job header and every step.
+    text=workflow.split('jobs:',1)[0]+'\n'+workflow[start:end]
     receipts.require(text.count('uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5')==1
-                     and not re.search(r'RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_TARGET|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_PROFILE_',text),
+                     and not re.search(r'RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_TARGET|CARGO_BUILD_RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_PROFILE_|\bRUSTC\b',text,re.M),
                      'Historical Rust setup or semantic overrides differ')
 
 
@@ -838,13 +1106,13 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
     claims = proof['commands']
     receipts.require(isinstance(claims, list) and claims and len(claims) <= 512,
                      'Empty or oversized command enrollment')
-    seen, by_kind, native_inventories = set(), {}, {}
+    seen, by_kind, native_inventories, validated = set(), {}, {}, {}
     for item in claims:
-        receipts.require(set(item) == {'name', 'invocation', 'environment', 'inventory', 'records', 'obligations'},
+        receipts.require(set(item) in ({'name', 'invocation', 'environment', 'inventory', 'records', 'obligations'}, {'name', 'invocation', 'environment', 'inventory', 'records', 'obligations','references'}),
                          'Unknown command unit fields')
         name = item['name'];kind = name.split(':')[0]
-        receipts.require(name in canonical_commands and name not in seen
-                         and item['invocation'] == canonical_commands[name], 'Unknown or repeated canonical command')
+        receipts.require(name in canonical_commands and name not in seen and kind in RUST_KINDS
+                         and item['invocation'] == canonical_commands[name], 'Unknown, pending non-Rust, or repeated canonical command')
         seen.add(name)
         receipts.require(not (kind == 'android_jvm' and 'android_jvm' in existing),
                          'Multiple unit authorities for one JVM command')
@@ -875,6 +1143,25 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
             receipts.require(item['inventory'] == {'mode': 'whole-command'}, 'JVM names must remain opaque')
             ids = ['whole-command']
         receipts.require(len(ids) == len(set(ids)), 'Repeated current unit identity')
+        if 'references' in item:
+            receipts.require(kind=='wal' and len(ids)==1 and item['records']==[] and item['obligations']==[]
+                             and item['references']==[{'command':'store_contract:1','test_id':ids[0],
+                                                       'policy':'isolated-store-auth-8mib-serial-v1'}]
+                             and ids[0] in {'clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure',
+                                           'login_token_insert_requires_the_verified_password_version'},
+                             'Unknown cross-command coverage reference')
+            source=validated.get('store_contract:1')
+            receipts.require(source is not None and source['result'].get(ids[0])=='pass'
+                             and source['environment']==environment and source['identity']['cargo']==identity['cargo']
+                             and source['identity']['filter'] is None and identity['filter']==ids[0]
+                             and identity['harness']==['--exact','--test-threads=1']
+                             and source['identity']['harness']==['--test-threads=1']
+                             and environment['runtime']['rust_min_stack']==8388608,
+                             'Referenced complete Store outcome or isolated runtime contract differs')
+            completion_obligations(item,[],{ids[0]:'pass'},{})
+            by_kind.setdefault(kind,[]).append(name)
+            validated[name]={'result':{ids[0]:'pass'},'environment':environment,'identity':identity}
+            continue
         records = item['records'];receipts.require(isinstance(records, list) and records, 'No actual command executions')
         result, last_failure, last_pass, sequences, bodies = {}, {}, {}, set(), {}
         for record in sorted(records, key=lambda row: row['sequence']):
@@ -912,11 +1199,13 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
         receipts.require(set(result) == set(ids) and all(value in {'pass', 'ignored'} for value in result.values())
                          and all(last_pass.get(test_id, 0) > sequence for test_id, sequence in last_failure.items()), 'Incomplete or failed applicable command coverage')
         if kind in RUST_KINDS:
+            complete_original_capture_ordinals(records)
             completion_obligations(item,records,result,bodies)
         else:
             receipts.require(item['obligations'] == [] and all(row['exit_code'] == 0 for row in records),
                              'Non-Rust failed commands cannot qualify by assertion')
         by_kind.setdefault(kind, []).append(name)
+        validated[name]={'result':result,'environment':environment,'identity':identity}
     for kind, names in by_kind.items():
         receipts.require(set(names) == {name for name in canonical_commands if name.split(':')[0] == kind},
                          'Incomplete canonical command cohort')

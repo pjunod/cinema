@@ -55,6 +55,132 @@ class CompleteCommandUnitCase(unittest.TestCase):
         proof['source_commit'] = 'd' * 40
         with self.assertRaises(receipts.ReceiptError): self.validate(proof)
 
+    def test_local_cargo_json_preserves_actual_argv_exit_and_running_artifact(self):
+        import json
+        command='scripts/require-test-count $(CARGO) test --locked -p hiqlite a --lib -- --exact'
+        argv=shlex.split(command.replace('$(CARGO)','cargo'))
+        raw='COMMAND '+json.dumps(argv)+'\nRunning unittests src/lib.rs (/owned/hiqlite-deadbeef)\nrunning 1 test\ntest a ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\nNATIVE_EXIT 0\n'
+        record=fixture()['commands'][0]['records'][0]
+        record['environment']['features']=[];record['environment']['runtime']['test_threads']='libtest-default'
+        record['origin']={'kind':'attested-local','identity':'actual cargo driver','command':shlex.join(argv),
+            'execution':{'mode':'local-cargo-json','first_line':1,'historical_name':'transport:2',
+                'archive_sha256':'d'*64,'binary_sha256_before':'c'*64,'binary_sha256_after':'c'*64,
+                'cargo_artifact':{'reason':'compiler-artifact','target':{'name':'hiqlite'},'features':[],
+                    'profile':record['environment']['runtime']['profile'],'executable':'/owned/hiqlite-deadbeef'},
+                'cwd':'/owned','fingerprint_path':'/owned/.fingerprint/hiqlite-deadbeef/test-lib-hiqlite.json',
+                'fingerprint_observation':'preserved-matching-binary',
+                'fingerprint':{'rustc':q.RUSTC_FINGERPRINT,'profile':q.TEST_PROFILE_FINGERPRINTS[0],
+                               'compile_kind':0,'rustflags':[],'features':'[]'}}}
+        item={'name':'transport:2','invocation':command}
+        with patch.object(q,'source_archive_digest',return_value='d'*64):
+            self.assertIn('test a ... ok',q.bound_execution(record,item,raw,lambda _: {'transport:2':command}))
+            for altered in [raw.replace('NATIVE_EXIT 0','NATIVE_EXIT 101'),
+                            raw.replace('Running unittests src/lib.rs (/owned/hiqlite-deadbeef)','Running unittests src/lib.rs (/owned/other-deadbeef)'),
+                            raw.replace('NATIVE_EXIT 0','COMMAND []\nNATIVE_EXIT 0')]:
+                with self.assertRaises(receipts.ReceiptError):q.bound_execution(record,item,altered,lambda _: {'transport:2':command})
+            for key,value in [('rustc',0),('rustflags',['--cfg','hidden']),('compile_kind',1)]:
+                altered=copy.deepcopy(record);altered['origin']['execution']['fingerprint'][key]=value
+                with self.assertRaises(receipts.ReceiptError):q.bound_execution(altered,item,raw,lambda _: {'transport:2':command})
+            altered=copy.deepcopy(record);altered['origin']['execution']['cwd']='/unrelated'
+            relative=raw.replace('(/owned/hiqlite-deadbeef)','(hiqlite-deadbeef)')
+            with self.assertRaises(receipts.ReceiptError):q.bound_execution(altered,item,relative,lambda _: {'transport:2':command})
+
+    def test_authenticated_executor_interruption_keeps_unknown_native_exit(self):
+        record={'exit_code':None,'origin':{'kind':'authenticated-ci','execution':
+            {'job_status':'failure','disposition':'executor-interrupted'}}}
+        body='test actual ... ok\n⚙️ [runner]: Failed to execute step (but continue-on-error is true): this step has been cancelled: ctx: context deadline exceeded, exec: RUN signal: killed'
+        q.require_executor_interrupted(record,body)
+        for altered in [body.replace('signal: killed','exit status 1'),body+'\ntest result: ok. 1 passed; 0 failed; 0 ignored;']:
+            with self.assertRaises(receipts.ReceiptError):q.require_executor_interrupted(record,altered)
+        for key,value in [('exit_code',101)]:
+            copy_record=copy.deepcopy(record);copy_record[key]=value
+            with self.assertRaises(receipts.ReceiptError):q.require_executor_interrupted(copy_record,body)
+        record['origin']['kind']='attested-local'
+        with self.assertRaises(receipts.ReceiptError):q.require_executor_interrupted(record,body)
+
+    def test_wal_reference_requires_complete_validated_store_and_exact_isolated_contract(self):
+        name='login_token_insert_requires_the_verified_password_version'
+        proof=fixture();store=proof['commands'][0];store['records']=store['records'][:1]
+        store['inventory']['ids']=[name];store['inventory']['list_log']=log(name+': test\n')
+        wal=copy.deepcopy(store);wal.update(name='wal:215',records=[],obligations=[],
+            invocation=COMMAND.replace(' -- --test-threads=1',' '+name+' -- --exact --test-threads=1'),
+            references=[{'command':'store_contract:1','test_id':name,'policy':'isolated-store-auth-8mib-serial-v1'}])
+        proof['commands'].append(wal)
+        commands={'store_contract:1':COMMAND,'wal:215':wal['invocation']}
+        with patch.object(q,'changed_inputs',return_value=set()),patch.object(q,'bound_execution',return_value=''),patch.object(q,'coverage',return_value={name:'pass'}),patch.object(q,'test_profile',return_value=store['environment']['runtime']['profile']):
+            self.assertIn('wal',q.validate(proof,CANDIDATE,commands=lambda _:commands))
+            wal['references'][0]['policy']='arbitrary compatibility'
+            with self.assertRaises(receipts.ReceiptError):q.validate(proof,CANDIDATE,commands=lambda _:commands)
+            wal['references'][0]['policy']='isolated-store-auth-8mib-serial-v1'
+            proof['commands'].reverse()
+            with self.assertRaises(receipts.ReceiptError):q.validate(proof,CANDIDATE,commands=lambda _:commands)
+
+    def test_original_capture_keeps_unknown_observations_and_refuses_substitution(self):
+        import json
+        argv=['/owned/store_contract-0123456789abcdef','a','--exact','--test-threads=1']
+        raw='source_commit '+CANDIDATE+' branch effort/dv-hdr-repair command '+json.dumps(argv)+'\nrunning 1 test\ntest a ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 367 filtered out; finished in 1.00s\ndiagnostic_exit_code 0'
+        digest=log(raw)['sha256'];record=fixture()['commands'][0]['records'][0]
+        observed={key:None for key in ['archive_sha256','binary_sha256','binary_sha256_after','fingerprint','features','profile','rust_min_stack','test_threads']};observed['exit_code']=0
+        record['log']={'sha256_ref':digest};record['coverage']['outcomes']={'a':'pass'}
+        record['origin']['command']=shlex.join(argv)
+        record['origin']['execution']={'mode':'local-original-capture','first_line':1,'ordinal':0,
+            'binding':None,'observed':observed,'compatibility':'reviewed-original-linux-store-v1'}
+        item={'name':'store_contract:1','invocation':COMMAND}
+        with self.assertRaises(receipts.ReceiptError):q.bound_execution(record,item,raw)
+        with patch.dict(q.ORIGINAL_CAPTURES,{digest:{'source':CANDIDATE,'binding':None,'form':'header','blocks':1}},clear=True):
+            self.assertIn('test a ... ok',q.bound_execution(record,item,raw))
+            for key,value in [('rust_min_stack',8388608),('binary_sha256','c'*64),('features',record['environment']['features'])]:
+                altered=copy.deepcopy(record);altered['origin']['execution']['observed'][key]=value
+                with self.assertRaises(receipts.ReceiptError):q.bound_execution(altered,item,raw)
+            for key,value in [('features',[]),('runtime',{**record['environment']['runtime'],'rust_min_stack':4194304})]:
+                altered=copy.deepcopy(record);altered['environment'][key]=value
+                with self.assertRaises(receipts.ReceiptError):q.bound_execution(altered,item,raw)
+            altered=copy.deepcopy(record);altered['origin']['execution']['binding']=log('{}')
+            with self.assertRaises(receipts.ReceiptError):q.bound_execution(altered,item,raw)
+            altered=copy.deepcopy(record);altered['origin']['execution']['compatibility']='arbitrary compatibility'
+            with self.assertRaises(receipts.ReceiptError):q.bound_execution(altered,item,raw)
+            for text in [raw.replace('diagnostic_exit_code 0','diagnostic_exit_code 101'),raw.replace('367 filtered','366 filtered')]:
+                with self.assertRaises(receipts.ReceiptError):q.bound_execution(record,item,text)
+
+    def test_original_cohort_cannot_omit_failure_capture_or_reorder_ordinals(self):
+        rows=[];ordered=list(q.ORIGINAL_CAPTURES);ordered[1],ordered[2]=ordered[2],ordered[1]
+        lineage={'39ed30d207e8b03c52b5401103f880a54960a552c4167ce9fcbbed57a68fb919',
+                 'e402da6e8ed9c8bfe50fcfc549b09be033fca651178bd1cef6812f6c00cb3b44'}
+        rows.append({'sequence':1,'log':{'sha256_ref':'f4de403db2e806a1894a3434dbd8edb5dd886ccafeeca37c5f0e49a127dffdf2'},
+                     'origin':{'kind':'authenticated-ci','execution':{'mode':'cargo-command'}}})
+        for digest in ordered:
+            if digest in lineage:continue
+            for ordinal in range(q.ORIGINAL_CAPTURES[digest]['blocks']):
+                rows.append({'sequence':len(rows)+1,'log':{'sha256_ref':digest},
+                    'origin':{'execution':{'mode':'local-original-capture','ordinal':ordinal}}})
+        q.complete_original_capture_ordinals(rows)
+        for altered in [rows[:2]+rows[3:],rows[:1]+rows[2:],rows[1:]]:
+            with self.assertRaises(receipts.ReceiptError):q.complete_original_capture_ordinals(altered)
+        altered=copy.deepcopy(rows);altered[1]['sequence'],altered[2]['sequence']=altered[2]['sequence'],altered[1]['sequence']
+        with self.assertRaises(receipts.ReceiptError):q.complete_original_capture_ordinals(altered)
+        altered=copy.deepcopy(rows);altered.append(copy.deepcopy(rows[-1]))
+        with self.assertRaises(receipts.ReceiptError):q.complete_original_capture_ordinals(altered)
+
+    def test_historical_global_and_job_compiler_overrides_refuse(self):
+        workflow='env:\n  CARGO_TERM_COLOR: always\njobs:\n  cluster_wal:\n    runs-on: [self-hosted, Linux, X64, lab]\n    steps:\n      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5\n'
+        blobs={'.github/actions/cargo-cache/action.yml':b'cache','rust-toolchain.toml':b'toolchain'}
+        hashes={b'cache':'b22fa9dcb68f0cb063ae9de4f80a420631d19f61af60b32e1c6b47e2d9aadb43',b'toolchain':'03cbfb27fcdc8253524b3e4c71c832457a504f7e9b1da5e6220178404b77f4e4'}
+        with patch.object(q.retention,'git_bytes',side_effect=lambda _,path:blobs.get(path)),patch.object(q.retention,'digest',side_effect=lambda raw:hashes[raw]):
+            q.historical_rust_environment_contract(CANDIDATE,workflow,'wal')
+            for altered in [workflow.replace('  CARGO_TERM_COLOR: always','  CARGO_TERM_COLOR: always\n  RUSTFLAGS: --cfg hidden'),
+                            workflow.replace('    steps:','    env:\n      RUSTC: /unbound/compiler\n    steps:'),
+                            workflow.replace('    steps:','    env:\n      CARGO_BUILD_RUSTC: /unbound/compiler\n    steps:'),
+                            workflow+'      - run: export RUSTC=/unbound/compiler\n',
+                            workflow.replace('    steps:', '    env: {RUSTC: /unbound/compiler}\n    steps:')]:
+                with self.assertRaises(receipts.ReceiptError):q.historical_rust_environment_contract(CANDIDATE,altered,'wal')
+
+    def test_pending_non_rust_enrollment_is_refused_before_any_adoption(self):
+        proof=fixture();item=proof['commands'][0]
+        for kind in ['validation','operations','android_jvm']:
+            item['name']=kind;item['invocation']=q.COMMANDS[kind]
+            with self.assertRaisesRegex(receipts.ReceiptError,'pending non-Rust'):
+                self.validate(proof,{kind:q.COMMANDS[kind]})
+
     def test_no_explicit_features_accepts_actual_empty_feature_graph(self):
         proof=fixture();item=proof['commands'][0]
         command=COMMAND.replace(' --features cluster-read-cost-validation,hiqlite-contract-tests','')
