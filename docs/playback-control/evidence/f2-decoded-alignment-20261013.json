@@ -205,7 +205,15 @@
     "negative_control": "new two-frame-gap regression fails against original clock owner (0 seeks), passes correction",
     "local_web_unit": "passed",
     "local_web_static": "passed",
-    "state": "reviewed source; exact qualification and installed-source SDR retest pending"
+    "state": "reviewed source; exact qualification and installed-source SDR retest pending",
+    "qualification_failure": {
+      "global_run": 5071,
+      "repository_run": 5045,
+      "cause": "pre-existing Android diagnostic consent-focus adapter was not bounded in player input fence",
+      "repair": "bounded import and existing Down-to-consent handler regions; no runtime change; neighboring raw media handler still trips",
+      "local_fence_tests": 13,
+      "review": "Astra approved ancillary correction"
+    }
   },
   "restoration_history": [
     {

@@ -61,7 +61,7 @@ TOKEN_FILE_ALLOWLIST = {
 }
 
 # The web app is several independent applications (docs/clients/WEB-SHELL-LAYOUT.md).
-# These bounded regions are non-player keyboard adapters with reasons beside
+# These bounded platform regions are non-player keyboard adapters with reasons beside
 # their anchors. The player itself gets one region only; adding a second handler
 # makes the fence fail even if it happens to agree with the reducer today.
 #
@@ -72,6 +72,18 @@ TOKEN_FILE_ALLOWLIST = {
 # line of the next file.
 WEB = Path("crates/plurxd/src/web")
 WEB_REGIONS = (
+    (
+        Path("clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticReportScreen.kt"),
+        "import androidx.compose.ui.input.key.onPreviewKeyEvent",
+        "import androidx.compose.ui.input.key.onPreviewKeyEvent",
+        "Import for the bounded diagnostic consent focus adapter below; no event handling in the import.",
+    ),
+    (
+        Path("clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticReportScreen.kt"),
+        "// diagnostic-consent-navigation-adapter:begin",
+        "// diagnostic-consent-navigation-adapter:end",
+        "The report editor owns Down only to reach title-consent focus; no playback commands or companion navigation.",
+    ),
     (
         WEB / "pages/diagnostics.js",
         "// diagnostic-modal-keyboard-adapter:begin",

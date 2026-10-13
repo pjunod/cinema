@@ -500,7 +500,11 @@ execute the shipped commit/alignment functions: correct the initial two-frame
 gap, and correct a first seek that still trails by 60 ms. The first rejects the
 unchanged owner; all eleven focused tests and full web units/static checks
 pass. Astra approves the source. Qualification and installed SDR proof remain
-pending; no SDR acceptance is claimed from these tests.
+pending; no SDR acceptance is claimed from these tests. The first qualification
+run (global 5071) fails on an existing Android diagnostic consent-focus
+adapter missing from the input fence. The correction scopes only its import
+and existing handler; thirteen fence tests prove neighboring media handlers
+still fail. Astra approves that ancillary correction. The failed run is retained.
 
 The [24-member physical archive](http://forge.lan:3000/attachments/27798e53-f80c-4897-8a90-961253559255)
 has SHA-256 `97f431a4ab2dafadde66de58be6a02642303477518870df4cb6a13e0dd6abfa5`.
