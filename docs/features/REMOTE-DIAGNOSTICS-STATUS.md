@@ -1,11 +1,10 @@
 # Remote diagnostics status — ownership, implementation and release evidence
 
-**Status:** open — implementation complete; release acceptance pending ·
-**Planning baseline:** `8d7bc723e`.
+**Status:** open — web/phone ZIP export qualified; native TV transfer and physical acceptance open.
+**Updated:** 2026-10-13 · **Planning baseline:** `8d7bc723e`.
 
-The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) defines the first
-release: web, Apple and Android, including both native TV handoffs and the
-independent upload inbox. This file is the canonical execution ledger.
+The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md#current-direction--attach-a-zip-to-a-bug-report) defines the current archive-attachment release.
+Hosted submission is deferred; native TV file transfer is unfinished. This file is the canonical execution ledger.
 The [project backlog](PROJECT-BACKLOG.md) indexes the effort rather than
 duplicating its evidence.
 
@@ -13,15 +12,19 @@ duplicating its evidence.
 
 | Field | Current value |
 |---|---|
-| User authorization | 2026-10-12: detailed build plan and a GPT-6.1 Sol session to build it |
-| Implementation owner | GPT-6.1 Sol chat; launch reference added by the planning chat |
-| Intended effort | Superseded by `codex/remote-diagnostics`, targeting `main` |
-| Task branch convention | Normal packet commits on `codex/remote-diagnostics` |
+| User authorization | 2026-10-13: produce a diagnostic ZIP users can attach to bug/issue reports. This supersedes hosted rollout and the private-pilot approval. Normal qualification and green merge continue; no production service changes. |
+| Implementation owner | GPT-6.1 Sol · chat `01a13167-0996-7723-a0fb-fa64421a384d` |
+| Qualification pull request | #1066 |
+| Intended effort | Implementation merged into `main`; qualification follows on `codex/remote-diagnostics-qualification` |
+| Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent clone in temporary owner storage; base includes current main `607d3577c`; B00 committed source `3f92afc9d`. Former managed worktree archived after verified preservation. |
-| Compiler loop | Local Rust/cargo 1.97.1 verified via rustup toolchain bin; isolated warm target in temporary storage; daemon baseline passed |
-| Plan review | One final adversarial implementation review complete; 12 findings corrected before fast lane |
-| Promotion/deployment | Not started |
+| Implementation workspace/base | Independent clone in temporary owner storage; original landing `8040f862c3458245480065e11dec643fbfe370b3`, current main base `96e4c49e9`, diagnostic corrections `a343ffb12`, archive-flow correction `069615e85` on the integrated current base; the exact final gate/landing receipt is maintained in #1066; user checkouts remain untouched. |
+| Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
+| Plan review | Original review: 12 findings corrected. One follow-up review complete: two P1 history findings corrected; focused qualification recorded in §24. |
+| Promotion/deployment | PR #1037 merged 2026-10-13, all eight checks passed on `6bc7235a0`; no production changes by this chat. Another rollout placed the landing on two nodes and exposed a router startup failure; recovery owner is recorded in §22. Isolated qualification continues. |
+| Current checks | Original #1037: eight checks passed and all 32 landing anchors verified. Follow-up: normal hooks, affected native compilation and focused regressions passed; all-target pinned check and composed startup passed on integrated `468a06545`. Follow-up fast gate/landing receipt is in #1066. |
+| Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
+| Next action | Finish #1066 only on its required green gate; qualify physical sharing and implement native TV archive transfer separately. Web/phone ZIP export is built and qualified on owned software devices. Hosted delivery and the approved private pilot are superseded by Paul’s archive-first direction. |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
 shared checkout and preserve unrelated `Claude outputs/` artifacts.
@@ -32,17 +35,17 @@ index/backlog rows; the builder adopts them together in a normal commit.
 
 | Packet | Scope | State | Branch/PR | Verification and remaining evidence |
 |---|---|---|---|---|
-| B00 | Isolated workspace, compile baseline, plan adoption | Software verified; old gate superseded | Batched PR #1037 | Pinned Rust daemon check, iOS/tvOS builds, Android app/test APKs passed on current main |
-| B01 | Schema/privacy fixtures and archive inspector | Built; compiler verified | Batched PR #1037 | Owned-clone workspace Clippy, iOS/tvOS and Android compilation passed; historical 35-case four-language fixtures passed before ruling; three extra timestamp fixtures await final checks |
-| B02 | User-scoped server/worker snapshot collection | Built; compiler verified | Batched PR #1037 | Pinned daemon Clippy passed; positive attribution, accepted route receipts, account-generation fencing, bounded jobs and signed peers implemented; real HTTP acceptance pending |
-| B03 | Support auth, grants, uploads and durable storage | Built; compiler verified | Batched PR #1037 | Independent encrypted SQLite publication, separate capture authority, provisioning/revocation, resume/refresh, quotas and external deletion/revocation fences implemented; final Clippy and composed upload/delete/missing-fence runtime checks passed; broader failure matrix remains open |
-| B04 | TV handoff, mobile page, inbox and packaging | Built; compiler verified | Batched PR #1037 | Phone claim/approval protocol, responsive completion page, named passkey inbox and TLS/service packaging built; composed browser races/passkeys passed; physical acceptance pending |
-| B05 | Web/TV browser reporting | Built; compiler verified | Batched PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks built; hook/types, focused privacy/wire/recovery/consent and composed upload passed; hardware focus remains open |
-| B06 | Apple mobile/TV reporting | Built; compiler verified | Batched PR #1037 | Recorder, protected account store, deterministic ZIP/share, fixed support transport, exact archive resume, report UI and local-only TV approval written; tests declared, no unit execution; both targets and declared XCTest sources compiled; normal hook passed; physical acceptance owed |
-| B07 | Android mobile/TV reporting | Built; compiler verified | Batched PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; normal hook passed; signed release and physical acceptance owed |
-| B08 | Reproduction, connection checks, diagnostic adapters | Built; compiler verified | Batched PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 22-case shared event fixture; physical provider delivery remains open |
-| B09 | Composed security/resource/device qualification | Browser software verified; physical open | Batched PR #1037 | Global capture limits/expiry and authority cleanup tightened; real local support/browser/passkey acceptance passed; physical matrix and native overhead measurements remain open |
-| B10 | Operations, exact-candidate promotion and rollout | Final candidate | Batched PR #1037 | Operations/runbook built; one adversarial review complete, findings corrected; fast lane pending; production/device inputs remain external |
+| B00 | Isolated workspace, compile baseline, plan adoption | Software verified; old gate superseded | Merged PR #1037 | Pinned Rust daemon check, iOS/tvOS builds, Android app/test APKs passed on current main |
+| B01 | Schema/privacy fixtures and archive inspector | Landed; software evidence recorded | Merged PR #1037 | Owned-clone workspace Clippy, iOS/tvOS and Android compilation passed; 38 shared manifest cases retained; core/web final runtime checks passed; all 21 focused native cases passed in §22 |
+| B02 | User-scoped server/worker snapshot collection | Landed; software evidence recorded | Merged PR #1037 | Pinned daemon Clippy passed; positive attribution, accepted route receipts, account-generation fencing, bounded jobs and signed peers implemented; real HTTP acceptance pending |
+| B03 | Support auth, grants, uploads and durable storage | Landed; software evidence recorded | Merged PR #1037 | Independent encrypted SQLite publication, separate capture authority, provisioning/revocation, resume/refresh, quotas and external deletion/revocation fences implemented; final Clippy and composed upload/delete/missing-fence runtime checks passed; broader failure matrix remains open |
+| B04 | TV handoff, mobile page, inbox and packaging | Landed; software evidence recorded | Merged PR #1037 | Phone claim/approval protocol, responsive completion page, named passkey inbox and TLS/service packaging built; composed browser races/passkeys passed; physical acceptance pending |
+| B05 | Web/TV browser reporting | Landed; software evidence recorded | Merged PR #1037 | Early typed recorder, account-bound storage/recovery, worker ZIP export, Help/login/player entry points, consented upload/phone flow and bounded checks built; hook/types, focused privacy/wire/recovery/consent and composed upload passed; hardware focus remains open |
+| B06 | Apple mobile/TV reporting | Landed; software evidence recorded | Merged PR #1037 | Recorder, protected account store, deterministic ZIP/share, fixed support transport, exact archive resume, report UI and local-only TV approval written; seven focused cases passed on each simulator platform; offline iPhone and Apple TV remote capture/consent/relaunch UI passed; normal hook passed; direct send and physical acceptance owed |
+| B07 | Android mobile/TV reporting | Landed; software evidence recorded | Merged PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; normal hook passed; signed release and physical acceptance owed |
+| B08 | Reproduction, connection checks, diagnostic adapters | Landed; software evidence recorded | Merged PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 22-case shared event fixture; physical provider delivery remains open |
+| B09 | Composed security/resource/device qualification | Browser software verified; physical open | Merged PR #1037 | Global capture limits/expiry and authority cleanup tightened; real local support/browser/passkey acceptance passed; physical matrix and native overhead measurements remain open |
+| B10 | Operations, exact-candidate promotion and rollout | Merged; rollout preparation active | Merged PR #1037 | Operations/runbook landed; one review and all 12 corrections complete; eight fast checks passed; merge verified at `8040f862c`; isolated qualification/read-only deployment audit active |
 
 Replace “Not started” with claimed/building/built/software verified/physical
 verified/promoted as evidence warrants. “Built” never means deployed.
@@ -56,12 +59,12 @@ from regressions. Record test absence as absence, not a passing check.
 |---|---|---|---|---|
 | Web desktop/mobile/all layouts | Built B05 | Types/syntax/hook, focused wire/recorder and composed browser flow passed | None | Remaining browser failure matrix and real-device qualification |
 | Browser TV | Built B05 | Types/syntax/hook passed | None | Remote focus + physical phone handoff |
-| iPhone/iPad | Built B06 | Both app and test sources compiled | None | Share/send/recovery runtime acceptance |
-| Apple TV | Built B06 | Simulator app compiled | None | Direct send + phone on separate network |
-| Android phone/tablet | Built B07 | Debug app/JVM/test APK compiled | None | Share/send/recovery runtime and signed release acceptance |
+| iPhone/iPad | Built B06 | Seven focused cases and actual offline capture/consent/relaunch UI passed | None | Share/send and physical runtime acceptance |
+| Apple TV | Built B06 | Seven focused simulator cases and real remote offline capture/consent/relaunch UI passed | None | Direct send + physical phone on separate network |
+| Android phone/tablet | Built B07 | Seven focused JVM cases; actual navigation/recovery instrumentation and process-relaunch UI passed | None | UI share/send, tablet and signed release acceptance |
 | Android/Google TV | Built B07 | Debug app/JVM/test APK compiled | None | D-pad/send + phone on separate network |
 | Cinema snapshots / multiple workers | Built B02 | Pinned compiler passed | None | Real two-user/two-node HTTP and peer-failure behavior |
-| Support upload service | Built B03 | Compiler, composed upload/delete/restore-fence checks passed | None | Durable/resume/retention runtime qualification |
+| Support upload service | Built B03 | Compiler, composed upload/delete/restore-fence and five focused durability/receipt cases passed | None | Disk-full, retention and remaining failure matrix |
 | Phone completion page | Built B04 | Real browser claim, approval, disconnected-TV submission passed | None | Real QR/manual claim, TV approval, submission |
 | Operator inbox | Built B04 | Real browser passkey login, escaped description, final ZIP and deletion passed | None | Passkey/inbox runtime and deployment qualification |
 | Privacy/resource/retention | Built | Browser canaries, ZIP/inbox, deletion and observer bounds passed; restore fixes rechecked | None | Native/device overhead and remaining failure matrix |
@@ -130,9 +133,9 @@ Git configuration or a remote URL.
 Old draft #1035 is superseded by batched main-bound PR #1037 and closed. Its body was
 updated with owner/chat, source, checks, workflow change and next step.
 
-- Active PR: [#1037](http://forge.lan:3000/noirr/plurx/pulls/1037), owned by
-  this chat/model, draft while implementation continues. Final review and
-  fast lane have not started. The app attachment tool refuses Forgejo URLs;
+- Historical PR state (2026-10-12): [#1037](http://forge.lan:3000/noirr/plurx/pulls/1037)
+  was a draft while implementation continued. Its final review and fast lane
+  had not started at that checkpoint. The app attachment tool refuses Forgejo URLs;
   the canonical link is retained here and in the local status page.
 
 ## 7. B01 — strict report format and archive inspection
@@ -540,3 +543,208 @@ The normal Clippy/format/catalog/JavaScript hook remains required at commit.
 Native and web application source is unchanged; its passing receipts remain
 applicable. The published updated head must receive its fast merge gate before
 integration; no second adversarial review is added.
+
+
+## 21. Merge receipt and continued qualification — 2026-10-13
+
+PR [#1037](http://forge.lan:3000/noirr/plurx/pulls/1037) merged at
+`8040f862c3458245480065e11dec643fbfe370b3`, from qualified head
+`6bc7235a07463719617957b9e372686303dab781`. Fresh Forgejo state confirmed
+all eight required checks passed and the candidate was mergeable. The API
+request pinned that head and supplied all 32 `Regression-Test` lines in
+`MergeMessageField`; the landed commit retains all 32. No repeated review
+or unchanged-suite rerun preceded the merge.
+
+The ready-to-merge handoff was an incomplete response to Paul's authorized
+merge instruction. Qualification now continues on the actual landed source.
+Physical acceptance, signed releases and production deployment remain open.
+
+Automatic approval review rejected the earlier broad production instruction
+because exact targets and changes were unspecified. That rejected instruction
+was not delivered and supplies no deployment authority. Read-only inspection,
+isolated qualification and concrete rollout preparation continue; production
+service/network changes wait for approval of the prepared exact scope.
+
+
+## 22. Continued qualification and startup recovery — 2026-10-13
+
+Qualification uses the independent clone at landing `8040f862c`; the first
+follow-up commit is `05ebe4aa0`. Existing user checkouts, physical app
+installations and production services have not been modified by this chat.
+
+| Evidence | Actual result and limit |
+|---|---|
+| iOS focused XCTest | `DiagnosticCaptureTests` and `DiagnosticWireTests`: seven tests, zero failures on an owned iOS 26.5 simulator. |
+| tvOS focused XCTest | The same two classes: seven tests, zero failures on an owned tvOS 26.5 simulator. This is simulator evidence. |
+| Android focused JVM | `DiagnosticCaptureTest` and `DiagnosticWireTest`: seven tests, zero failures/skips; XML reports verified. |
+| iOS shipped offline UI | `DiagnosticReportingTests::testOfflineCaptureKeepsUploadExplicitAndRecoversAfterRelaunch`: one test, zero failures after correcting the fixture's scrolling. Frozen report, available local export, disabled unconsented upload, relaunch recovery and preserved consent boundary were observed. |
+| UI fixture failures | The initial unregistered iOS selection executed zero tests and is not passing evidence. The first registered run failed because SwiftUI had not created the offscreen Send row. The corrected fixture scrolls the shipped form and passed without changing production UI. |
+| Linux support artifact | Source-only committed archive `05ebe4aa0`, pinned Rust 1.97.1, local linux/amd64 container: release build passed. SHA-256 `1b0f21ac23efc7da00ce70d4462131927c47c8f0fc57044d0c04dc236629ebc6`; dependencies and command startup checked with networking disabled. Not deployed. |
+| Device inventory | Paired phone and TV devices are reachable, but their installed Cinema is build 232. The current feature has not been installed over those apps. Owned iOS/tvOS simulators and Android phone/TV emulators provide isolated qualification surfaces. |
+| Hosting inspection | Read-only audit found no support origin, certificate or support service on the four Cinema nodes. The infrastructure repository contains local monitoring ingress, but no inspected public support hosting/TLS configuration. Real addresses and trusted certificates remain rollout inputs. |
+
+A separate build chat reported that another process replaced two Cinema
+nodes with landing `8040f862c`, after which the composed daemon crash-looped.
+The diagnostics router re-enabled Axum's route checks when merged, rejecting
+Plex literal-colon routes. The earlier isolated support/browser fixture did
+not boot this composed Cinema router; its passing result did not cover this
+startup integration.
+
+Recovery belongs to chat `01a132c0-a6bb-7580-a670-659cca2ffbdf`, on
+`codex/diagnostics-router-startup`, PR #1067. That owner reproduced the exact
+pre-fix failure and reports the focused full-router regression passing on
+pinned Rust 1.97.1 after the narrow repair, with one adversarial review and
+normal hooks passed. PR #1067 landed at `fa464662fe0b671cec9f37a975b56727b9b26840`; actual fleet recovery is in progress. The owner directly verified the human's urgent lint/syntax validation exception before merging; local pinned regression, review and hooks passed, while Rust CI was still running. This exception is specific to that startup repair.
+This chat has confirmed it owns no fleet rollout and performs no competing
+router edit or production replacement. Healthy nodes are preserved by the
+recovery owner. The next daemon qualification must use that landed repair. The human also identified repair chat `01a13599-851f-7f20-a123-7913595862e1`; both chats coordinated a single landing and recovery owner rather than competing patches. This qualification branch held main merges during the repair gate and retains the fleet hold while recovery runs.
+
+The original eight-check receipt and 32 regression declarations remain true
+for the original PR. They do not imply that this subsequently discovered
+startup defect or physical/deployment acceptance was covered.
+
+
+## 23. Native UI defects found by qualification
+
+The Android anonymous connection report action overlapped the system
+navigation area on the owned Android 36 phone. A tap on its displayed text
+could enter system navigation instead of the report. The action now consumes
+navigation-bar insets. The focused instrumentation regression
+`DiagnosticReportNavigationTest::anonymousReportButtonClearsSystemNavigationAndOpensReport`
+passed one test on that emulator, checking actual window-inset bounds and
+opening the shipped report dialog. The initial hierarchy preserves the
+pre-fix overlap evidence.
+
+Both native report owners used authorization retirement when switching to a
+saved incident, unnecessarily clearing local history. Resume now cancels the
+previous operation, transport and handoff polling while preserving the
+account's pending history. Each selected incident also owns its scroll
+context, so the coverage/privacy summary opens at the start. These are
+correctness fixes with no feature toggle.
+
+The real Apple TV remote fixture exposed the retained Form scroll offset:
+after selecting a saved incident, the summary could remain offscreen while
+focus returned to the toolbar. Preserving history alone did not fix that
+scroll state. With incident-scoped Form identity, the actual remote case
+passed one test, zero failures, on tvOS 26.5. It checks the exact incident
+identity from before relaunch, preserved history and disabled unconsented
+upload. Fixture compile/focus failures and the pre-fix scroll failure are
+retained separately; they are not passing evidence.
+
+The final iPhone and Apple TV cases each passed one test, zero failures.
+Android phone instrumentation passed the navigation-inset case and the
+saved-incident/history/consent case, one test each; the separate actual
+phone UI flow also recovered the exact incident across process relaunch.
+Android TV D-pad qualification is active. Apple source claims build 235, with the test wired into the iOS
+UI target; Android source claims versionCode 169. Physical apps are still
+untouched. The five focused support regressions also passed: restart and
+immutable receipt, two-phone approval/revocation restore, real HTTP origin
+and listener boundaries, missing external journal rejection, and final
+edited archive content. That is five tests, zero failures; broader disk-full,
+provider, device and deployment acceptance remains open.
+
+
+## 24. Follow-up adversarial findings and composed startup receipt
+
+The one final review of candidate `f96eadf666` against `fa464662f` found two
+P1 defects in retained native history. A row could restore its original
+pre-upload snapshot, losing the current consent, archive binding and support
+issuer. Deleting the selected row left the active draft alive, so Close or
+an upload progress save could recreate it. Neither finding is waived.
+
+Resume now treats the row as identity only: cancel and drain prior work,
+reload the protected store under the account/work revision fence, and
+refresh pending rows after persistence. Frozen archive/privacy/issuer state
+cannot be replaced by an older write. Deletion clears the selected owner
+before draining its work; store tombstones reject queued draft/archive
+writes and secret cleanup runs after the drain. The new frozen-consent/deletion regression passed once on iOS, once on tvOS and once in Android JVM storage. The shipped Android phone owner also passed its failed-grant/frozen-privacy/deletion case (one test). Actual iOS and tvOS remote capture/consent/relaunch UI each passed again after selecting the exact saved incident ID. Those UI fixture failures are retained; selecting the newest row was not evidence of recovery.
+
+Pinned Rust 1.97.1 all-target check and the composed-daemon regression
+`an_unauthenticated_facade_request_is_counted_as_a_client_that_tried` passed
+on `f96eadf666` (one test, zero failures). The exact-source Linux support
+release build also passed after reducing build concurrency to fit the
+container; the first attempt was killed for memory, not a compiler failure.
+The recovery chat reports two nodes healthy and two repair images preloaded;
+its remaining rollout is waiting for the Mac to be unlocked. This is that
+chat's recovery receipt, not a deployment by this diagnostics owner.
+
+The acceptance matrix and generated summary now name the qualified subset
+and active follow-up #1066. Physical/direct-send/cross-network/provider and
+production support acceptance remain open.
+
+The final corrected Android phone and TV report owners each passed the
+failed-grant/frozen-privacy/deletion instrumentation case, one test each.
+The saved-incident/explicit-consent instrumentation case passed again on
+both profiles, one test each. Android TV semantic instrumentation is
+software evidence; it does not stand in for physical D-pad/cross-network
+acceptance. iOS/tvOS real shipped UI each passed one exact-ID relaunch
+case. The local status regression and four docs-index checks passed; the
+infrastructure-name scrub is clean. Both native app versions remain the
+qualification claims 235/169, without changing physical installations.
+
+Current main `b2a186450` was merged normally into the qualification branch
+after the review corrections. All-target pinned compilation and the
+composed startup regression passed on archive-flow correction `069615e85` on the integrated current base.
+The final branch and seven named regressions must still pass the required
+fast gate before its green merge; that exact receipt is recorded in #1066.
+
+The first #1066 fast lane on `c5e9fd30e` stopped at corrective-history
+coverage: the two native corrective commits lacked `tests/client-fixes.toml`
+witnesses. Both now have exact commit/source/test rows, and local
+`make history-check` passed. These catalog entries record the real passing
+regressions; they do not add or waive runtime evidence. The corrected head
+must pass the gate before merge. Paul took ownership of fleet installs;
+this chat keeps all fleet/network/service writes held.
+
+## 25. Archive-first direction — 2026-10-13
+
+Paul requested a diagnostic archive that users attach to bug or issue reports,
+in place of wiring up hosted submission. This supersedes the private-pilot
+approval: no service, proxy or Tailnet mapping will be installed by this chat.
+The existing ZIP generators are reused; ordinary upload and invitation controls
+are removed, and account setup no longer provisions support enrollments.
+
+Web downloads and native phone share sheets are the release path. Native TVs
+keep capture/history; transferring the TV archive without the hosted service
+is still missing implementation, separate from physical acceptance. The original
+B00–B10 delivery receipts above remain historical evidence, not completion of
+the new archive scope. PR #1066 records the exact source, focused file-export
+checks, required gate and landing status.
+
+Archive qualification uses real downloaded/exported files: the shipped browser
+report dialog produced anonymous and signed-in ZIPs without support requests;
+selected incident IDs, summary, description and every manifest file hash were
+verified. Android's actual share intent exposes a readable `application/zip`
+attachment with a scoped URI grant and the selected incident, without consent,
+binding, origin or enrollment. The Apple report model wrote the exact selected
+archive and retained an unconsented local draft. Phone and native TV relaunch
+recovery passed on owned simulators/emulators. These are software fixtures,
+not physical-device or signed-release acceptance.
+
+Android TV description traversal failed a real Down-key assertion before the
+fix. The existing select-to-edit text field plus an explicit Down focus target
+now reaches the privacy switch; the focused navigation and select-to-edit cases
+passed two tests. An initial test-clock timeout was corrected by freezing the
+caret animation clock, exposing the actual focus assertion before the product
+fix. Failed and zero-test receipts are retained privately, never counted as
+passes. The required gate and precise landing remain in #1066.
+
+The actual iOS share-sheet case passed one executed test after matching the
+observed Save to Files action cell. A URL-bound presentation keeps the exported
+file alive until dismissal. Earlier button-selector failures and the zero-test
+receipt remain failures, not qualification. This batch claims Apple236 and
+Android170 above current main’s Apple235/Android169; current-base compilation
+and the required fast gate remain recorded in #1066.
+
+Final current-base receipts: iOS and tvOS capture/wire suites each passed nine
+cases; Android capture/wire passed eight. Actual UI passed two iPhone cases
+including the system share sheet, one Apple TV retained-incident case, three
+Android phone and four Android TV cases. The iPhone generated target's missing
+report-test source was caught by its zero-test result, restored normally and
+rerun with two executed passes. Apple236/Android170 are valid against current
+main. Pinned all-target check, full composed-router startup and normal hooks
+passed; the local history audit passed all 3773 corrective commits and 565
+client-fix anchors. The later playback landing `96e4c49e9` changes no native
+product/test inputs; native receipts remain applicable after source comparison.
+Its focused browser rendezvous checks were included in the latest-base web run.
+The exact final head, fast-gate outcome and landing are maintained in #1066.

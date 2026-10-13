@@ -336,7 +336,7 @@ async function saveCinemaRemoteInvitations(button){
   }catch(error){if(err)err.textContent=error.message;if(button)button.disabled=false;}
 }
 
-function diagnosticDeveloperCard(){return setCard(`${cardHead("Remote diagnostics","Bounded local capture and an independent support inbox.",'<span class="pill">Qualification pending</span>')}<p>Help → Report a problem provides local export and explicit upload consent. Support hosting is configured through a protected operator file. Browser/native/device and durable delivery evidence remain in progress.</p>${devGraduation("all first-release client, privacy, handoff and delivery checks have applicable receipts.","this advisory card is removed; reporting remains in Help and the player.")}<button type="button" onclick="showDiagnostics()">Open reporting</button>`);}
+function diagnosticDeveloperCard(){return setCard(`${cardHead("Diagnostic ZIP reports","Bounded local evidence for bug and issue attachments.",'<span class="pill">Qualification pending</span>')}<p>Help → Report a problem saves a ZIP with a readable summary and structured evidence. Attach it to an issue using your usual reporting channel. Web download and phone sharing are available; native TV file transfer remains unfinished.</p>${devGraduation("archive export, privacy and recovery have applicable client and device receipts, including native TV file transfer.","this advisory card is removed; reporting remains in Help and the player.")}<button type="button" onclick="showDiagnostics()">Open reporting</button>`);}
 function developerPanel(settings,readiness){
   // Only features that are not yet fully active or fully tested wait here,
   // each saying what it waits on (devGraduation). Everything that graduated
