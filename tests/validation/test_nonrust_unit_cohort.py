@@ -56,6 +56,59 @@ class NonRustSourceCohortCase(unittest.TestCase):
                                    lambda record, candidate, logs: set(record['changes']),
                                    continuation.clean_log, lambda source: 'c' * 64)
 
+    def custody_fixture(self):
+        proof = {'logs': {}}
+        binding = {'source_clean_after': False, 'source_commit': 'b' * 40,
+                   'log_sha256': 'd' * 64, 'tree': 'a' * 40,
+                   'source_archive_sha256': 'c' * 64, 'started_utc': 'start',
+                   'finished_utc': 'finish', 'exit_code': 0}
+        raw = json.dumps(binding).encode()
+        supplement = {'original_binding_sha256': retention.digest(raw),
+                      'original_raw_log_sha256': binding['log_sha256'],
+                      'source_commit': binding['source_commit'], 'tree': binding['tree'],
+                      'original_source_archive_sha256': binding['source_archive_sha256'],
+                      'original_started_utc': 'start', 'original_finished_utc': 'finish',
+                      'original_native_exit': 0, 'original_wrapper_exit': 1,
+                      'original_source_clean_after': False, 'original_dirty_paths': None,
+                      'tracked_entries': 5874, 'tracked_byte_type_git_executable_mismatches': [],
+                      'tracked_entries_with_mtime_or_ctime_after_original_start': [],
+                      'current_head': binding['source_commit'], 'current_porcelain': '',
+                      'unit_bodies_executed': 0}
+        reference = self.blob(proof, json.dumps(supplement).encode())
+        registry = {retention.digest(raw): {'source': binding['source_commit'],
+                    'log': binding['log_sha256'], 'supplement': reference['sha256_ref']}}
+        return proof, raw, binding, supplement, reference, registry
+
+    def test_finite_custody_preserves_dirty_observation_and_wrapper_failure(self):
+        proof, raw, binding, _, reference, registry = self.custody_fixture()
+        with mock.patch.object(cohort, 'RECONCILED_CUSTODY', registry):
+            cohort.require_capture_custody(proof, {'custody_supplement': reference}, raw, binding)
+        self.assertIs(binding['source_clean_after'], False)
+
+    def test_finite_custody_refuses_missing_mutated_cross_source_and_other_capture(self):
+        proof, raw, binding, supplement, reference, registry = self.custody_fixture()
+        with mock.patch.object(cohort, 'RECONCILED_CUSTODY', registry):
+            with self.assertRaises(receipts.ReceiptError):
+                cohort.require_capture_custody(proof, {}, raw, binding)
+            for key, value in [('source_commit', 'e' * 40), ('original_wrapper_exit', 0),
+                               ('tracked_entries_with_mtime_or_ctime_after_original_start', ['input.py'])]:
+                changed = {**supplement, key: value}
+                changed_ref = self.blob(proof, json.dumps(changed).encode())
+                with self.subTest(key=key), self.assertRaises(receipts.ReceiptError):
+                    cohort.require_capture_custody(proof, {'custody_supplement': changed_ref}, raw, binding)
+            other = {**binding, 'source_commit': 'e' * 40}
+            with self.assertRaises(receipts.ReceiptError):
+                cohort.require_capture_custody(proof, {'custody_supplement': reference}, json.dumps(other).encode(), other)
+
+    def test_custody_keeps_absent_history_unknown_and_refuses_invalid_new_flag(self):
+        cohort.require_capture_custody({'logs': {}}, {}, b'{}', {})
+        cohort.require_capture_custody({'logs': {}}, {}, b'{}', {'source_clean_after': True})
+        for value in (None, 0, 'true', False):
+            with self.subTest(value=value), self.assertRaises(receipts.ReceiptError):
+                cohort.require_capture_custody({'logs': {}}, {}, b'{}', {'source_clean_after': value})
+        with self.assertRaises(receipts.ReceiptError):
+            cohort.require_capture_custody({'logs': {}}, {'custody_supplement': {}}, b'{}', {'source_clean_after': True})
+
     def test_opaque_membership_and_actual_overlay_are_disjoint_without_runtime_rows(self):
         item, proof, ids, raw, _ = self.fixture()
         result = self.validate(item, proof, ids, raw)

@@ -41,6 +41,16 @@ ORIGINAL40_JVM_BUILD_INPUTS = {
 CURRENT_JVM_BUILD_INPUTS = {**ORIGINAL40_JVM_BUILD_INPUTS,
     'clients/android/app/build.gradle.kts': '976150cce61cc8292d5710768dfa059e2c4c640e5bc13385d389900ac824177d',
 }
+# One immutable capture whose native command passed but whose enclosing wrapper
+# observed transient dirtiness. Independent tracked-input custody does not rewrite
+# that observation or authorize another dirty capture.
+RECONCILED_CUSTODY = {
+    'c040dd312606e7062acb25205425fee7b7dcc5d5ca52f1c822c2d31392540193': {
+        'supplement': '3e69b6bcfd470c8eefe46d61502fb5e75b5358f79364f2c6302735e528d12ab3',
+        'source': 'da8d67f18a910ae0acdc51cbd153ac6ef04d75bf',
+        'log': '7c3fbeaf644fb04123b61df55b5e76549e02ea1056ccb0de5e187694e7e1f2d6',
+    },
+}
 CONTRACTS = {'validation': 'python-source-cohort-v1',
              'operations': 'python-source-cohort-v1',
              'android_jvm': 'junit4-gradle9-java21-or25-v1'}
@@ -292,6 +302,39 @@ def modern_jvm_argv(command):
     return selectors
 
 
+def require_capture_custody(proof, execution, binding_raw, binding):
+    """Preserve an absent historical measurement; reconcile only a pinned one."""
+    reference = execution.get('custody_supplement')
+    if 'source_clean_after' not in binding or binding['source_clean_after'] is True:
+        receipts.require('custody_supplement' not in execution, 'Unneeded custody supplement cannot alter a capture')
+        return
+    registered = RECONCILED_CUSTODY.get(retention.digest(binding_raw))
+    receipts.require(binding['source_clean_after'] is False and registered is not None
+                     and reference == {'sha256_ref': registered['supplement']},
+                     'Failed source cleanliness needs its exact finite custody supplement')
+    supplement = receipts.bounded_json(blob(proof, reference))
+    receipts.require(binding['source_commit'] == registered['source']
+                     and binding['log_sha256'] == registered['log']
+                     and supplement['original_binding_sha256'] == retention.digest(binding_raw)
+                     and supplement['original_raw_log_sha256'] == binding['log_sha256']
+                     and supplement['source_commit'] == binding['source_commit']
+                     and supplement['tree'] == binding['tree']
+                     and supplement['original_source_archive_sha256'] == binding['source_archive_sha256']
+                     and supplement['original_started_utc'] == binding['started_utc']
+                     and supplement['original_finished_utc'] == binding['finished_utc']
+                     and supplement['original_native_exit'] == binding['exit_code'] == 0
+                     and supplement['original_wrapper_exit'] == 1
+                     and supplement['original_source_clean_after'] is False
+                     and supplement['original_dirty_paths'] is None
+                     and supplement['tracked_entries'] == 5874
+                     and supplement['tracked_byte_type_git_executable_mismatches'] == []
+                     and supplement['tracked_entries_with_mtime_or_ctime_after_original_start'] == []
+                     and supplement['current_head'] == registered['source']
+                     and supplement['current_porcelain'] == ''
+                     and supplement['unit_bodies_executed'] == 0,
+                     'Finite source-custody supplement contradicts the original capture')
+
+
 def current_binding(proof, record, raw, candidate, archive_digest):
     """New local captures retain their original measured sidecar, without edits."""
     execution = record['origin']['execution']
@@ -308,6 +351,7 @@ def current_binding(proof, record, raw, candidate, archive_digest):
                      and isinstance(command, list) and command and all(isinstance(token, str) for token in command)
                      and record['origin']['command'] == command,
                      'Actual local source/archive/command/completion binding differs')
+    require_capture_custody(proof, execution, binding_raw, binding)
     kind = execution['kind']
     if kind in {'validation', 'operations'}:
         receipts.require(binding['python_version'].startswith('3.14.7')
@@ -547,7 +591,8 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
                                    'runtime_named_outcomes': None})
         else:
             receipts.require(origin['kind'] == 'attested-local'
-                             and set(execution) == {'mode', 'kind', 'binding'},
+                             and set(execution) in ({'mode', 'kind', 'binding'},
+                                                    {'mode', 'kind', 'binding', 'custody_supplement'}),
                              'Named source-cohort capture lacks actual local binding')
             command, binding = current_binding(proof, record, raw, candidate, archive_digest)
             if mode == 'python-named':
