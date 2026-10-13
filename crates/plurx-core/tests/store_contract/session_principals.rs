@@ -184,21 +184,22 @@ async fn sharing_principal_rebuild_is_atomic_and_preserves_rows_on_three_voters(
     drop(store);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sharing_principal_owner_deletion_and_revocation_fence_three_voter_authority() {
-    let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("connect migration client");
+#[test]
+fn sharing_principal_owner_deletion_and_revocation_fence_three_voter_authority() {
+    startup_observer::run_full_hiqlite_fixture(
+        "sharing_principal_owner_deletion_and_revocation_fence_three_voter_authority",
+        || async {
+            let _case = HIQLITE_CASE.lock().await;
+            source_contract::with_cluster(|cluster| Box::pin(sharing_principal_owner_deletion_and_revocation_fence_three_voter_authority_scenario(cluster))).await;
+        },
+    );
+}
+
+async fn sharing_principal_owner_deletion_and_revocation_fence_three_voter_authority_scenario(
+    cluster: &source_contract::SourceContractCluster,
+) {
+    let store = cluster.open_store().await;
+    let client = cluster.client();
     for result in client
         .batch(include_str!("../fixtures/session-principal-local.sql"))
         .await
@@ -206,13 +207,7 @@ async fn sharing_principal_owner_deletion_and_revocation_fence_three_voter_autho
     {
         result.expect("populate local retention");
     }
-    for result in client
-        .txn(rebuild_statements())
-        .await
-        .expect("candidate ownership rebuild")
-    {
-        result.expect("atomic rebuild");
-    }
+    cluster.install_source().await;
     for result in client
         .batch(include_str!("../fixtures/session-principal-sharing.sql"))
         .await
