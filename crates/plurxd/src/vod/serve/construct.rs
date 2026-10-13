@@ -4,7 +4,21 @@ impl VodServe {
     /// Record the durable incarnation a speculative (prepared) session was
     /// primed as, and wake its rendition so an earlier refusal can now look
     /// for the predecessor that staged it.
+    #[cfg(test)]
     pub(crate) async fn mark_prepared_incarnation(&self, session_id: &str, incarnation: &str) {
+        self.mark_prepared_incarnation_with_bootstrap(session_id, incarnation, false)
+            .await;
+    }
+
+    /// The first-prime ledger authorizes this attachment's bounded manual to
+    /// Auto bootstrap. Cached encoder purpose remains immutable and other
+    /// readers retain their own nonpreemptive trial authority.
+    pub(crate) async fn mark_prepared_incarnation_with_bootstrap(
+        &self,
+        session_id: &str,
+        incarnation: &str,
+        bootstrap: bool,
+    ) {
         let rendition = {
             let mut sessions = self.shared.sessions.lock().await;
             let Some(session) = sessions
@@ -14,6 +28,11 @@ impl VodServe {
                 return;
             };
             session.prepared_incarnation = Some(incarnation.to_owned());
+            if bootstrap {
+                session
+                    .set_prepared_bootstrap_reader_purpose(session_id)
+                    .await;
+            }
             session
                 .set_reader_admission_priority(session_id, crate::admission::Priority::Speculative)
                 .await;

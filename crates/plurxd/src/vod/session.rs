@@ -893,6 +893,27 @@ impl Session {
         }
     }
 
+    /// Called only after first-prime validation of this session's durable
+    /// preparation ledger. Do not change any other consumer of a cached Arc.
+    pub(super) async fn set_prepared_bootstrap_reader_purpose(&self, session_id: &str) {
+        if let Some(root) = self.rendition.as_ref() {
+            if let Some(reader) = root.readers.lock().await.get_mut(session_id) {
+                reader.nonpreemptive_trial = false;
+            }
+        }
+        for child in &self.children {
+            if let Some(reader) = child
+                .rendition
+                .readers
+                .lock()
+                .await
+                .get_mut(&child.reader_id)
+            {
+                reader.nonpreemptive_trial = false;
+            }
+        }
+    }
+
     /// An immutable retained response keeps the viewer's control identity,
     /// but has no missing bytes for this rendition's producer to generate.
     pub(super) fn attachment_reader(&self, frontier: u32) -> Reader {

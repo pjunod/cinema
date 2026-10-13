@@ -2512,14 +2512,29 @@
 
     #[cfg(unix)]
     async fn prepared_handoff_fixture(base: &Path, predecessor_hardware: bool) -> HandoffFixture {
+        prepared_handoff_fixture_with_trial(base, predecessor_hardware, false).await
+    }
+
+    #[cfg(unix)]
+    async fn prepared_handoff_fixture_with_trial(base: &Path, predecessor_hardware: bool, trial: bool) -> HandoffFixture {
         let serve = bare_serve(base);
         let (file, source_encoding) = encoded_fixture(base).await;
-        let successor_encoding = source_encoding
+        let mut successor_encoding = source_encoding
             .clone_with_admissions_for_test(source_encoding.admissions.clone())
             .await;
         let mut predecessor_encoding = source_encoding
             .clone_with_admissions_for_test(source_encoding.admissions.clone())
             .await;
+        if trial {
+            for encoding in [&mut successor_encoding, &mut predecessor_encoding] {
+                let encoding = Arc::get_mut(encoding).expect("unshared purpose fixture");
+                encoding.resources = crate::admission::TranscodeResourceEstimate {
+                    hardware_slot: false, cpu_threads: 3, decoder_threads: None,
+                };
+                encoding.options.software_threads = Some(3);
+            }
+            Arc::get_mut(&mut successor_encoding).expect("unshared automatic recipe").nonpreemptive_trial = true;
+        }
         if predecessor_hardware {
             Arc::get_mut(&mut predecessor_encoding)
                 .expect("unshared predecessor encoding")
@@ -2677,6 +2692,37 @@
             },
         )
         .await;
+    }
+
+    /// A cached Auto recipe's voluntary purpose cannot starve an actual
+    /// bounded bootstrap or grant another viewer a predecessor's permit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cached_auto_bootstrap_handoff_keeps_voluntary_and_unrelated_readers_scoped() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture_with_trial(base.path(), false, true).await;
+        fixture.successor_encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "5").await.expect("three plus three cannot fit five");
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+        assert!(fixture.successor_encoding.nonpreemptive_trial);
+        driver_pass(&fixture.serve.shared, &fixture.successor).await;
+        assert!(!fixture.successor_encoding.handoff_wait.load(Relaxed), "automatic recipe alone is a nonpreemptive trial");
+        insert_control_session(&fixture.serve, "voluntary", Arc::clone(&fixture.successor), Instant::now()).await;
+        fixture.serve.mark_prepared_incarnation("voluntary", "unrelated-incarnation").await;
+        fixture.serve.mark_prepared_incarnation_with_bootstrap("new-session", STAGED_SUCCESSOR, true).await;
+        {
+            let readers = fixture.successor.readers.lock().await;
+            assert!(readers["new-session"].may_request_predecessor_handoff());
+            assert!(!readers["voluntary"].may_request_predecessor_handoff(), "same cached Arc retains the other trial's purpose");
+            assert!(fixture.successor_encoding.nonpreemptive_trial, "no cached purpose mutation");
+        }
+        fixture.predecessor.attach_reader("other-viewer", 0).await;
+        driver_pass(&fixture.serve.shared, &fixture.successor).await;
+        assert!(!fixture.successor_encoding.handoff_wait.load(Relaxed), "another predecessor reader forbids exclusive handoff");
+        fixture.predecessor.detach_media_reader(&fixture.serve.shared.pool, "other-viewer").await;
+        assert!(successor_then_predecessor(&fixture).await, "actual bootstrap retires only its own exclusive running predecessor");
+        assert_eq!(fixture.successor_encoding.resources.cpu_threads, 3);
+        let _ = perform_driver_step(&fixture.serve.shared, &fixture.successor, Step::Terminate { why: Termination::Idle }).await;
     }
 
     /// Reusing a formerly Live cached recipe does not grant a prepared

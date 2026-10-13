@@ -1,6 +1,47 @@
 enum VodRecipeAttachment {
-    Recovery { speculative: bool },
-    FirstPreparation(PreparedVodOwner),
+    Recovery {
+        speculative: bool,
+        bootstrap: bool,
+    },
+    FirstPreparation {
+        owner: PreparedVodOwner,
+        bootstrap: bool,
+    },
+}
+
+/// Resource handoff belongs to a bounded transition from an unbound manual
+/// incumbent, never to the fact that a cached encoded recipe was automatic.
+fn prepared_manual_auto_bootstrap(
+    predecessor: &crate::media_sessions::RemoteStartRequest,
+    successor: &crate::media_sessions::RemoteStartRequest,
+) -> bool {
+    let crate::transcode::SessionKind::Transcode {
+        height: incumbent_height,
+    } = predecessor.request.kind
+    else {
+        return false;
+    };
+    let crate::transcode::SessionKind::Transcode { height } = successor.request.kind else {
+        return false;
+    };
+    !predecessor.request.automatic
+        && predecessor.candidate_id.is_none()
+        && predecessor.decoder_caps.is_some()
+        && successor.request.automatic
+        && predecessor.request.file_id == successor.request.file_id
+        && predecessor.request.playback_id == successor.request.playback_id
+        && predecessor.principal == successor.principal
+        && predecessor.request.presentation == crate::transcode::Presentation::Vod
+        && successor.request.presentation == crate::transcode::Presentation::Vod
+        && height > 0
+        && height <= incumbent_height
+        && successor.candidate_catalog.as_ref().is_some_and(|catalog| {
+            catalog.candidate.identity_matches()
+                && catalog.candidate.route
+                    == plurx_core::playback::candidate::CandidateRoute::Encode
+                && i64::from(catalog.candidate.height) == height
+                && successor.candidate_id == Some(catalog.candidate.id)
+        })
 }
 
 /// Cancellation after actual capture still retires only that exact private owner.
@@ -3021,6 +3062,13 @@ impl TranscodeManager {
                 if incoming != current {
                     return false;
                 }
+                // Derive purpose from the exact durable predecessor admitted by
+                // the preparation ledger, on both local and remote first primes.
+                // An Auto incumbent's voluntary proposals remain nonpreemptive.
+                let bootstrap = serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(
+                    &predecessor.recipe_json,
+                )
+                .is_ok_and(|previous| prepared_manual_auto_bootstrap(&previous, &current_recipe));
                 let pending = response["prepared_output_capture_pending"] == true;
                 let complete = response["prepared_output_capture_complete"] == true;
                 if !pending && !complete {
@@ -3031,7 +3079,10 @@ impl TranscodeManager {
                             user_id,
                             adoption,
                             deadline,
-                            VodRecipeAttachment::Recovery { speculative: true },
+                            VodRecipeAttachment::Recovery {
+                                speculative: true,
+                                bootstrap,
+                            },
                         )
                         .await;
                 }
@@ -3059,9 +3110,15 @@ impl TranscodeManager {
                             adoption,
                             deadline,
                             if pending {
-                                VodRecipeAttachment::FirstPreparation(owner.clone())
+                                VodRecipeAttachment::FirstPreparation {
+                                    owner: owner.clone(),
+                                    bootstrap,
+                                }
                             } else {
-                                VodRecipeAttachment::Recovery { speculative: true }
+                                VodRecipeAttachment::Recovery {
+                                    speculative: true,
+                                    bootstrap,
+                                }
                             },
                         )
                         .await
@@ -3087,6 +3144,15 @@ impl TranscodeManager {
                 else {
                     return false;
                 };
+                // Replayed first primes can already own an attachment. Refresh
+                // its exact consumer purpose after checking the same owner.
+                self.vod
+                    .mark_prepared_incarnation_with_bootstrap(
+                        session_id,
+                        &route.incarnation_id,
+                        bootstrap,
+                    )
+                    .await;
                 let output = facts.response_owner.retained_output_facts();
                 let seal = plurx_core::store::PreparedOutputSeal {
                     incarnation_id: route.incarnation_id,
@@ -3158,7 +3224,10 @@ impl TranscodeManager {
             user_id,
             adoption,
             deadline,
-            VodRecipeAttachment::Recovery { speculative },
+            VodRecipeAttachment::Recovery {
+                speculative,
+                bootstrap: false,
+            },
         ))
     }
 
@@ -3171,9 +3240,14 @@ impl TranscodeManager {
         deadline: Instant,
         purpose: VodRecipeAttachment,
     ) -> bool {
-        let (speculative, first_owner) = match purpose {
-            VodRecipeAttachment::Recovery { speculative } => (speculative, None),
-            VodRecipeAttachment::FirstPreparation(owner) => (true, Some(owner)),
+        let (speculative, first_owner, bootstrap) = match purpose {
+            VodRecipeAttachment::Recovery {
+                speculative,
+                bootstrap,
+            } => (speculative, None, bootstrap),
+            VodRecipeAttachment::FirstPreparation { owner, bootstrap } => {
+                (true, Some(owner), bootstrap)
+            }
         };
         let first_capture = first_owner.is_some();
         if Instant::now() >= deadline {
@@ -3356,7 +3430,11 @@ impl TranscodeManager {
                     }
                     if speculative {
                         self.vod
-                            .mark_prepared_incarnation(session_id, &remote.incarnation_id)
+                            .mark_prepared_incarnation_with_bootstrap(
+                                session_id,
+                                &remote.incarnation_id,
+                                bootstrap,
+                            )
                             .await;
                     }
                     tracing::info!(
