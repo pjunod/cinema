@@ -1112,7 +1112,10 @@ pattern = "VodPublication"
 # early results carry the already captured ResponseOwner; neither creates an
 # owner, producer, or recovery decision.
 # Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 52
+# F1/N2 landing repair: +1 test-only VodPublication match in
+# an_unplaced_start_entry_does_not_refuse_a_seek_elsewhere. It inspects the
+# existing owner-bearing refusal; no producer or response owner is created.
+expected_occurrences = 53
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -4970,7 +4973,16 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Shared-read indexing (+1, test-only): the fragindex differential builds its
 # plain HEVC fixture with one `Command::new(ffmpeg)` it runs to completion
 # with `.output()`; it owns no producer.
-expected_occurrences = 263
+# F1/N2 landing repair: +4 constructors. The single production landing-probe
+# helper opens the held source through its own fenced descriptor and uses
+# bounded_command_output_cancellable (5 s, 64 KiB, retirement cancellation,
+# realtime ChildWork and awaited kill/reap). The origin answer is cached only
+# for this rendition's immutable held source. The other three constructors
+# are test-only: constant-size lavfi encode, offset-film lavfi encode, and
+# production-copy fixture collection. Each runs finite owned media to
+# completion synchronously before its fixture is released. No task or timer
+# constructor is added; existing probe collector bounds remain unchanged.
+expected_occurrences = 267
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5587,7 +5599,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # child.
 # Shared-read indexing (+1, test-only): that fixture command's `.output()`,
 # awaited to completion in the test.
-expected_occurrences = 750
+# F1/N2 landing repair: +2 matches. constant_size_film.status() synchronously
+# waits/reaps its finite fixture child. record_unplaced's decision.status()
+# names the existing MediaLandingFailed verdict and starts no process.
+expected_occurrences = 752
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

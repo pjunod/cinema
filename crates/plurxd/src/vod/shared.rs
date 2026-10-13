@@ -902,6 +902,8 @@ impl Shared {
             active_marker_prewarms: AtomicU32::new(0),
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
+            unplaced: StdMutex::new(HashMap::new()),
+            landing_origin: tokio::sync::OnceCell::new(),
             capacity_hold: StdMutex::new(None),
             ahead_hold: AtomicBool::new(false),
             init_notify: Notify::new(),

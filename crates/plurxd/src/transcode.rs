@@ -485,7 +485,7 @@ pub use response::*;
 /// that cannot answer that quickly is a source whose session is about to have
 /// much larger problems, and the fallback (the requested start) is exactly
 /// what this code used unconditionally before.
-const MEDIA_ORIGIN_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const MEDIA_ORIGIN_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // split: begin media-origin
 #[path = "transcode/media_origin.rs"]

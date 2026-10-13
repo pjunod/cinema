@@ -56,6 +56,12 @@ pub(super) async fn spawn_generation(
     // generation that serves it starts at the last video boundary and its
     // `finish` produces the tail entries.
     let at = video_entry_at_or_before(&rendition.plan, at);
+    if let Some(cause) = rendition.unplaced_cause(at) {
+        // The same seek lands on the same bytes: spawning it again would
+        // only fail again. Tell whoever is waiting on it now.
+        fail_unplaced_waiters(shared, rendition, at, &cause);
+        return;
+    }
     let Some(entry) = rendition.plan.entry(at) else {
         tracing::warn!(
             target: "plurxd::vodserve",
@@ -239,6 +245,7 @@ pub(super) async fn spawn_generation(
             at,
             epoch,
             retirement,
+            None,
         )
         .await;
         let trailer_complete = completed.is_some();
@@ -312,7 +319,7 @@ pub(super) async fn spawn_generation(
                     "processed window did not complete publication".to_owned(),
                 );
             }
-            on_generation_end(shared, rendition, outcome, epoch).await;
+            on_generation_end(shared, rendition, outcome, epoch, at).await;
         }
         drop(done);
         return;
@@ -375,11 +382,17 @@ pub(super) async fn spawn_generation(
     // One ffmpeg, converting or not. The conversion happens on the far side of
     // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
     // process writes — so the producer is the producer it always was.
-    let (child, child_job, stdout, stderr) = {
+    let (child, child_job, stdout, stderr, landing_probe) = {
         let mut args = recipe_pipe_args(recipe, start_seconds, attested);
         if rendition.key.starts_with("source-") && recipe.encoding.is_none() {
             bound_source_copy_threads(&mut args);
         }
+        // Only a copy generation lands against an index.
+        let landing_probe = rendition
+            .index
+            .is_some()
+            .then(|| copy_landing_probe(&args))
+            .flatten();
         #[cfg(unix)]
         let descriptors = crate::producer_spawn::Descriptors::from_files(
             rendition.source.as_ref().map(|source| &source.handle),
@@ -433,6 +446,7 @@ pub(super) async fn spawn_generation(
             spawned.child_job,
             spawned.stdout,
             spawned.stderr,
+            landing_probe,
         )
     };
     rendition
@@ -525,6 +539,7 @@ pub(super) async fn spawn_generation(
                     at,
                     epoch,
                     registration.retirement(),
+                    landing_probe,
                 )
                 .await;
                 // Killing starts before diagnostic drain is joined, while the
@@ -578,7 +593,7 @@ pub(super) async fn spawn_generation(
             tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = epoch, diagnostic = %diagnostic.actionable, "VOD producer diagnostic");
         }
         if let Some(outcome) = outcome {
-            on_generation_end(&shared, &rendition, outcome, epoch).await;
+            on_generation_end(&shared, &rendition, outcome, epoch, at).await;
         }
     });
     // The writer task owns this generation's segment writes and its end. A
@@ -789,6 +804,218 @@ pub(super) fn copy_video_pipeline(
         .with_dolby_vision_conversion(convert_dolby_vision)
 }
 
+/// How to ask where a repositioned copy generation's demuxer landed.
+///
+/// The producer's own output cannot say: `-avoid_negative_ts make_zero`
+/// rebases every generation to zero (plan §12.3). So the question is put to a
+/// tiny ffmpeg that opens the source with the producer's own global and
+/// first-input options — the same `-noaccurate_seek -ss`, so the same keyframe
+/// — and prints only that first video packet as `framecrc` text.
+///
+/// Both answers are taken with `-copyts`, as absolute source PTS, because the
+/// index does not count from the container's start time: its pipe maps only
+/// the video and drops the non-keyframes before the first keyframe, so its
+/// zero is the film's first video keyframe. Without `-copyts` ffmpeg reports
+/// a time relative to the container's start — the earliest packet of any
+/// stream, which is audio leading the video, or a transport stream's partial
+/// first GOP — and that offset named the neighbouring row. So the origin, the
+/// first video keyframe's PTS, is measured once per rendition by the same
+/// probe without the seek, and the landing is the difference.
+pub(super) struct LandingProbe {
+    /// The seeking probe.
+    pub(super) args: Vec<String>,
+    /// The same probe without the seek: the film's first video keyframe.
+    pub(super) origin_args: Vec<String>,
+    /// The producer reads the held descriptor, so the probe must too — through
+    /// its own reopened description, since a second demuxer on the same one
+    /// would share its offset ([`crate::fragment_index_cluster::SourceFence::reopen`]).
+    pub(super) attested: bool,
+}
+
+/// The landing probe for one copy producer argv, or `None` for a generation
+/// that does not seek (it starts at the film's first fragment).
+pub(super) fn copy_landing_probe(production: &[String]) -> Option<LandingProbe> {
+    let input = production.iter().position(|arg| arg == "-i")?;
+    let source = production.get(input + 1)?;
+    let seek = production[..input].iter().position(|arg| arg == "-ss")?;
+    production.get(seek + 1)?.parse::<f64>().ok()?;
+    let output = [
+        "-map",
+        "0:v:0",
+        "-c:v",
+        "copy",
+        "-frames:v",
+        "1",
+        "-f",
+        "framecrc",
+        "pipe:1",
+    ]
+    .map(str::to_owned);
+    let mut args = vec!["-copyts".to_owned()];
+    args.extend_from_slice(&production[..=input + 1]);
+    args.extend(output.iter().cloned());
+    let mut origin_args = vec!["-copyts".to_owned()];
+    let mut prefix = production[..=input + 1].iter().enumerate();
+    while let Some((at, arg)) = prefix.next() {
+        match arg.as_str() {
+            "-noaccurate_seek" if at < input => {}
+            "-ss" if at < input => {
+                prefix.next();
+            }
+            _ => origin_args.push(arg.clone()),
+        }
+    }
+    origin_args.extend(output);
+    Some(LandingProbe {
+        attested: source == "/dev/fd/3",
+        args,
+        origin_args,
+    })
+}
+
+/// A [`vodgen::LandingClock`] that runs `probe` against this rendition's
+/// source. Cancelled with the generation it measures.
+fn landing_clock(
+    rendition: Arc<Rendition>,
+    runtime_cache: PathBuf,
+    probe: LandingProbe,
+    retirement: tokio_util::sync::CancellationToken,
+) -> vodgen::LandingClock {
+    Box::new(move || {
+        Box::pin(async move {
+            let timescale = rendition
+                .index
+                .as_ref()
+                .map(|index| index.timescale)
+                .ok_or_else(|| "the rendition has no fragment index".to_owned())?;
+            let source = rendition
+                .source
+                .as_ref()
+                .filter(|_| probe.attested)
+                .map(|source| (source, &rendition.recipe.file));
+            measure_landing(
+                &recipe_program(&rendition.recipe),
+                &probe,
+                source,
+                &rendition.landing_origin,
+                timescale,
+                &runtime_cache,
+                Some(&retirement),
+            )
+            .await
+        })
+    })
+}
+
+/// Run a landing probe: the landing keyframe's PTS less the film's first video
+/// keyframe's (asked once and kept in `origin`), in index ticks, and the
+/// landing packet's duration as the tolerance.
+pub(super) async fn measure_landing(
+    program: &std::path::Path,
+    probe: &LandingProbe,
+    source: Option<(&crate::fragment_index_cluster::SourceFence, &MediaFile)>,
+    origin: &tokio::sync::OnceCell<f64>,
+    timescale: u32,
+    runtime_cache: &std::path::Path,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<vodgen::LandingTime, String> {
+    let (landed, frame) =
+        run_landing_probe(program, &probe.args, source, runtime_cache, cancel).await?;
+    let origin = *origin
+        .get_or_try_init(|| async {
+            run_landing_probe(program, &probe.origin_args, source, runtime_cache, cancel)
+                .await
+                .map(|(pts, _)| pts)
+        })
+        .await?;
+    let seconds = landed - origin;
+    if !seconds.is_finite() || seconds < -frame {
+        return Err(format!(
+            "the probe landed before the film's first keyframe ({landed} s < {origin} s)"
+        ));
+    }
+    if !(frame.is_finite() && frame > 0.0) {
+        return Err("the landing packet has no duration to bound the match".to_owned());
+    }
+    let ticks = |seconds: f64| (seconds.max(0.0) * f64::from(timescale)).round() as u64;
+    Ok(vodgen::LandingTime {
+        ticks: ticks(seconds),
+        frame_ticks: ticks(frame).max(1),
+    })
+}
+
+async fn run_landing_probe(
+    program: &std::path::Path,
+    args: &[String],
+    source: Option<(&crate::fragment_index_cluster::SourceFence, &MediaFile)>,
+    runtime_cache: &std::path::Path,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(f64, f64), String> {
+    let reopened = match source {
+        Some((source, file)) => Some(source.reopen(file).await?),
+        None => None,
+    };
+    let mut command = tokio::process::Command::new(program);
+    command.args(args);
+    crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    if let Some(reopened) = &reopened {
+        crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&reopened.handle, 3)]);
+    }
+    let output = crate::ffmpeg::bounded_command_output_cancellable(
+        command,
+        crate::transcode::MEDIA_ORIGIN_PROBE_TIMEOUT,
+        LANDING_PROBE_MAX_BYTES,
+        "VOD landing probe",
+        cancel,
+        crate::process_control::ChildWork::realtime("VOD landing probe"),
+    )
+    .await?;
+    first_packet_time(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// A probe prints a handful of header lines and one packet line.
+const LANDING_PROBE_MAX_BYTES: u64 = 64 * 1024;
+
+/// The first packet's PTS and duration, in seconds, from a landing probe's
+/// `framecrc` output: `#tb 0: num/den`, then `stream, dts, pts, duration,
+/// size, crc` for the packet.
+pub(super) fn first_packet_time(framecrc: &str) -> Result<(f64, f64), String> {
+    let mut time_base = None;
+    for line in framecrc.lines() {
+        if let Some(rest) = line.strip_prefix("#tb 0:") {
+            let (num, den) = rest
+                .trim()
+                .split_once('/')
+                .ok_or_else(|| format!("unreadable time base {line:?}"))?;
+            let num = num
+                .trim()
+                .parse::<f64>()
+                .map_err(|error| error.to_string())?;
+            let den = den
+                .trim()
+                .parse::<f64>()
+                .map_err(|error| error.to_string())?;
+            if den <= 0.0 {
+                return Err(format!("unreadable time base {line:?}"));
+            }
+            time_base = Some(num / den);
+            continue;
+        }
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let time_base = time_base.ok_or("the probe printed a packet before its time base")?;
+        let field = |at: usize| {
+            line.split(',')
+                .nth(at)
+                .and_then(|field| field.trim().parse::<i64>().ok())
+                .ok_or_else(|| format!("unreadable packet line {line:?}"))
+        };
+        return Ok((field(2)? as f64 * time_base, field(3)? as f64 * time_base));
+    }
+    Err("the probe printed no video packet".to_owned())
+}
+
 /// Read one generation to its end: establish or verify the init identity,
 /// then let [`vodgen::run`] cut the plan's entries into the sink.
 async fn run_generation(
@@ -798,6 +1025,7 @@ async fn run_generation(
     at: u32,
     epoch: u64,
     retirement: tokio_util::sync::CancellationToken,
+    landing_probe: Option<LandingProbe>,
 ) -> (Option<Outcome>, Option<(RenditionSink, bool)>) {
     let mut stdout = stdout;
     let need_pre_read = {
@@ -841,6 +1069,14 @@ async fn run_generation(
     let generation = Generation {
         plan: rendition.plan.clone(),
         index: rendition.index.clone(),
+        landing_clock: landing_probe.map(|probe| {
+            landing_clock(
+                Arc::clone(&rendition),
+                shared.runtime_cache.clone(),
+                probe,
+                retirement.clone(),
+            )
+        }),
         encoded_frame_ticks: rendition
             .recipe
             .encoding
@@ -1003,11 +1239,12 @@ async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result
 }
 
 /// What a generation's ending means for the rendition.
-async fn on_generation_end(
+pub(super) async fn on_generation_end(
     shared: &Arc<Shared>,
     rendition: &Arc<Rendition>,
     outcome: Outcome,
     epoch: u64,
+    at: u32,
 ) {
     if rendition.cancelled_preparation_epoch.load(Acquire) == epoch.saturating_add(1) {
         // Background cancellation is not a foreground producer verdict. The
@@ -1043,6 +1280,15 @@ async fn on_generation_end(
                 target: "plurxd::vodserve",
                 rendition = %rendition.key,
                 "holding publication because continuous dependencies are unknown: {error}"
+            );
+        }
+        Outcome::Failed(failure @ Failure::Unplaced { transient, .. }) => {
+            record_unplaced(
+                shared,
+                rendition,
+                at,
+                describe_failure(&failure),
+                !transient,
             );
         }
         Outcome::Failed(failure) => {
@@ -1186,6 +1432,60 @@ pub(super) fn record_failure(
     rendition.kick();
 }
 
+/// Record that no generation can be placed at start entry `at`, and fail the
+/// GETs waiting on it. The rendition itself stays healthy.
+///
+/// `durable` keeps the refusal for the rendition's life, because the same
+/// seek lands on the same bytes and the same time. A refusal whose landing
+/// time was never measured is not kept: the next demand at the entry tries
+/// again rather than inheriting a probe's one bad moment.
+pub(super) fn record_unplaced(
+    shared: &Arc<Shared>,
+    rendition: &Arc<Rendition>,
+    at: u32,
+    cause: String,
+    durable: bool,
+) {
+    tracing::warn!(
+        target: "plurxd::vodserve",
+        rendition = %rendition.key,
+        decision = crate::playback_control::ProducerDecisionReason::MediaLandingFailed.status(),
+        start_entry = at,
+        "producer failed at this start entry: {cause}"
+    );
+    if durable {
+        rendition
+            .unplaced
+            .lock()
+            .expect("unplaced lock")
+            .entry(at)
+            .or_insert_with(|| cause.clone());
+    }
+    fail_unplaced_waiters(shared, rendition, at, &cause);
+    // Other demand may be waiting behind this one.
+    rendition.kick();
+}
+
+/// Wake every GET that only a generation started at `at` could serve: the
+/// entry itself and the audio-tail entries that follow it.
+fn fail_unplaced_waiters(shared: &Arc<Shared>, rendition: &Rendition, at: u32, cause: &str) {
+    let served = rendition
+        .plan
+        .entries
+        .iter()
+        .skip_while(|entry| entry.index < at)
+        .enumerate()
+        .take_while(|(offset, entry)| *offset == 0 || entry.kind == PlanEntryKind::AudioTail)
+        .map(|(_, entry)| entry.index);
+    for index in served {
+        shared.pool.expire_entry(
+            &rendition.key,
+            index,
+            WaitOutcome::ProducerFailed(cause.to_owned()),
+        );
+    }
+}
+
 /// One recorded rendition failure: what a client can act on, and what an
 /// operator reads.
 #[derive(Debug, Clone)]
@@ -1214,7 +1514,7 @@ pub(super) fn classify_failure(
         // with the same local class that path records.
         Failure::InitDrift(_) => Reason::RenditionInitChanged,
         Failure::EngineChanged(_) => Reason::EngineChanged,
-        Failure::Landing(_) => Reason::MediaLandingFailed,
+        Failure::Landing(_) | Failure::Unplaced { .. } => Reason::MediaLandingFailed,
         Failure::Stream(_) => Reason::ReaderFailed,
         Failure::Sink(_) => Reason::ProducerWriteFailed,
     }
@@ -1224,7 +1524,7 @@ pub(super) fn describe_failure(failure: &Failure) -> String {
     match failure {
         Failure::InitDrift(why) => format!("init drift: {why}"),
         Failure::EngineChanged(why) => format!("engine changed: {why}"),
-        Failure::Landing(why) => format!("landing failed: {why}"),
+        Failure::Landing(why) | Failure::Unplaced { why, .. } => format!("landing failed: {why}"),
         Failure::Stream(why) => format!("stream failed: {why}"),
         Failure::Sink(error) => format!("sink refused: {error}"),
     }

@@ -26,7 +26,10 @@
 //! "discard fragments until the first whose DTS equals the boundary" could
 //! never converge. What does converge — 43 of 43, uniquely — is matching the
 //! landing by **output byte count**, which the index already stores. See
-//! plan §12.3 and §12.9 ruling A1.
+//! plan §12.3 and §12.9 ruling A1. Where byte counts cannot decide — a run of
+//! fragments that all weigh the same — the landing is placed by the source
+//! time the demuxer measurably landed at ([`match_landing_at`]), and the
+//! bytes must still agree.
 
 use std::fmt;
 
@@ -1008,6 +1011,12 @@ pub enum LandingError {
         second: usize,
         compared: usize,
     },
+    /// The demuxer's measured landing time is not the start of any index
+    /// row, so the index does not describe where this seek lands.
+    TimeOffIndex { ticks: u64 },
+    /// The measured landing time names an index row whose byte sequence is
+    /// not what the generation emitted: the time and the bytes disagree.
+    TimeContradicts { row: usize },
 }
 
 impl fmt::Display for LandingError {
@@ -1037,6 +1046,16 @@ impl fmt::Display for LandingError {
                 "the repositioned generation's fragment byte sequence appears \
                  at index rows {first} and {second} over {compared} fragments; \
                  the landing is undetermined"
+            ),
+            LandingError::TimeOffIndex { ticks } => write!(
+                f,
+                "the demuxer landed at {ticks} index ticks, which begins no \
+                 index row; the index does not describe this seek"
+            ),
+            LandingError::TimeContradicts { row } => write!(
+                f,
+                "the demuxer landed at index row {row}, but the repositioned \
+                 generation's fragment byte sequence does not appear there"
             ),
         }
     }
@@ -1071,30 +1090,10 @@ pub fn match_landing(
     observed: &[u32],
     target: usize,
 ) -> Result<usize, LandingError> {
-    if observed.is_empty() {
-        return Err(LandingError::TooShort {
-            observed: 0,
-            needed: 1,
-        });
-    }
+    let last_start = last_landing_start(index, observed)?;
     let probe = observed;
     let rows = &index.rows;
-    if rows.len() < probe.len().min(LANDING_WINDOW) {
-        return Err(LandingError::TooShort {
-            observed: rows.len(),
-            needed: probe.len().min(LANDING_WINDOW),
-        });
-    }
-    let Some(last_start) = rows.len().checked_sub(probe.len()) else {
-        // More fragments than the index has rows: no landing reproduces it.
-        return Err(LandingError::NoMatch);
-    };
-    let matches_at = |start: usize| {
-        rows[start..start + probe.len()]
-            .iter()
-            .zip(probe)
-            .all(|(row, bytes)| row.video_bytes == *bytes)
-    };
+    let matches_at = |start: usize| reproduces(index, start, probe);
 
     let mut found: Option<usize> = None;
     for start in 0..=last_start.min(target) {
@@ -1129,6 +1128,100 @@ pub fn match_landing(
         return Err(LandingError::NoMatch);
     }
     Ok(start)
+}
+
+/// Where a repositioned producer landed, placed by the time its demuxer
+/// landed at, for when the byte sequence alone cannot say.
+///
+/// Byte counts cannot separate two landings inside a run whose fragments all
+/// weigh the same — a static picture, a slow pan over a flat field, a test
+/// card — however far the producer reads, because every row of the run
+/// reproduces the whole observation. The generation's own timestamps cannot
+/// help either: `-avoid_negative_ts make_zero` rebases every generation to
+/// zero (module header). What does answer is the source time the demuxer
+/// actually landed at, which the caller measures with the generation's own
+/// seek and hands in as `landed_ticks`, in index ticks — counted, like the
+/// index, from the film's first video keyframe.
+///
+/// The time names the row and the bytes must still agree. The row is the one
+/// whose start is nearest `landed_ticks`, and the time has to sit closer to
+/// that start than `tolerance_ticks` (the caller passes one frame) and than
+/// half the row's own duration: a landing is always a fragment start, so a
+/// time that is off by more than a frame is a measurement the index does not
+/// share — a typed failure, never the neighbouring row. Then the whole
+/// observation must reproduce from that row, exactly as [`match_landing`]
+/// demands of every candidate, and the row is bounded by `target` as there.
+/// A time that names no row, or names one the bytes contradict, is a typed
+/// failure: the index and the stream disagree about this seek.
+pub fn match_landing_at(
+    index: &FragmentIndex,
+    observed: &[u32],
+    target: usize,
+    landed_ticks: u64,
+    tolerance_ticks: u64,
+) -> Result<usize, LandingError> {
+    let last_start = last_landing_start(index, observed)?;
+    let rows = &index.rows;
+    let after = rows.partition_point(|row| row.dts <= landed_ticks);
+    let Some(row) = [after.checked_sub(1), (after < rows.len()).then_some(after)]
+        .into_iter()
+        .flatten()
+        .min_by_key(|&row| rows[row].dts.abs_diff(landed_ticks))
+    else {
+        return Err(LandingError::TimeOffIndex {
+            ticks: landed_ticks,
+        });
+    };
+    let off = rows[row].dts.abs_diff(landed_ticks);
+    if off >= tolerance_ticks.max(1) || off.saturating_mul(2) >= rows[row].duration.max(1) {
+        return Err(LandingError::TimeOffIndex {
+            ticks: landed_ticks,
+        });
+    }
+    if row > target {
+        return Err(LandingError::PastTarget { row, target });
+    }
+    if row > last_start || !reproduces(index, row, observed) {
+        return Err(LandingError::TimeContradicts { row });
+    }
+    // The same tail rule as `match_landing`: a short probe is evidence only
+    // where the stream genuinely ran out.
+    if observed.len() < LANDING_WINDOW && row + observed.len() != rows.len() {
+        return Err(LandingError::NoMatch);
+    }
+    Ok(row)
+}
+
+/// What every landing question checks first: a non-empty probe and an index
+/// long enough to hold it. Returns the last row a probe this long can start
+/// at.
+fn last_landing_start(index: &FragmentIndex, observed: &[u32]) -> Result<usize, LandingError> {
+    if observed.is_empty() {
+        return Err(LandingError::TooShort {
+            observed: 0,
+            needed: 1,
+        });
+    }
+    let rows = &index.rows;
+    if rows.len() < observed.len().min(LANDING_WINDOW) {
+        return Err(LandingError::TooShort {
+            observed: rows.len(),
+            needed: observed.len().min(LANDING_WINDOW),
+        });
+    }
+    // More fragments than the index has rows: no landing reproduces it.
+    rows.len()
+        .checked_sub(observed.len())
+        .ok_or(LandingError::NoMatch)
+}
+
+/// Whether the rows from `start` weigh exactly what was observed, fragment
+/// for fragment. The caller has bounded `start` by [`last_landing_start`].
+fn reproduces(index: &FragmentIndex, start: usize, observed: &[u32]) -> bool {
+    index.rows[start..start + observed.len()]
+        .iter()
+        .zip(observed)
+        .all(|(row, bytes)| row.video_bytes == *bytes)
 }
 
 /// The index row that begins `entry`, or `None` when the plan and the index
@@ -1563,6 +1656,79 @@ mod tests {
                 second: 11,
                 compared: 5,
             })
+        );
+    }
+
+    /// Lab F1 (2026-10-11), constant-size content: every fragment of a
+    /// static picture weighs the same, so no amount of reading separates the
+    /// rows; the demuxer's landing time does.
+    /// One frame at 24 fps on the fixtures' 16 kHz timescale.
+    const FRAME: u64 = 667;
+
+    #[test]
+    fn a_constant_size_run_is_placed_by_its_landing_time() {
+        let mut index = gop_index(200, CutClass::CleanIdr);
+        for row in &mut index.rows[1..] {
+            row.video_bytes = 244;
+        }
+        let observed = vec![244u32; 40];
+        assert!(matches!(
+            match_landing(&index, &observed, 150),
+            Err(LandingError::Ambiguous {
+                first: 1,
+                second: 2,
+                ..
+            })
+        ));
+        // The demuxer's clock is the source's, not the index's, so its answer
+        // can sit a few ticks off the row start.
+        let landed = index.rows[149].dts + 7;
+        assert_eq!(
+            match_landing_at(&index, &observed, 150, landed, FRAME),
+            Ok(149)
+        );
+        let landed = index.rows[150].dts - 7;
+        assert_eq!(
+            match_landing_at(&index, &observed, 150, landed, FRAME),
+            Ok(150)
+        );
+    }
+
+    #[test]
+    fn a_landing_time_the_bytes_contradict_fails_typed() {
+        let mut index = gop_index(200, CutClass::CleanIdr);
+        for row in &mut index.rows[1..] {
+            row.video_bytes = 244;
+        }
+        let observed = vec![244u32; 40];
+        // Row 0 is the opening fragment, which weighs something else.
+        assert_eq!(
+            match_landing_at(&index, &observed, 150, index.rows[0].dts, FRAME),
+            Err(LandingError::TimeContradicts { row: 0 })
+        );
+        // A time halfway between two fragment starts names neither.
+        let between = index.rows[100].dts + index.rows[100].duration / 2;
+        assert_eq!(
+            match_landing_at(&index, &observed, 150, between, FRAME),
+            Err(LandingError::TimeOffIndex { ticks: between })
+        );
+        // And a time past the target is still past the target.
+        assert_eq!(
+            match_landing_at(&index, &observed, 150, index.rows[151].dts, FRAME),
+            Err(LandingError::PastTarget {
+                row: 151,
+                target: 150
+            })
+        );
+        // Review of F1: a measurement off by more than a frame — a clock with
+        // a different zero than the index's — is refused, not rounded to
+        // whichever row start is nearest. Here it is 0.42 s late, well inside
+        // half a fragment, which is the shape that published row 29's media
+        // as row 30.
+        let late = index.rows[149].dts + 6_720;
+        assert_eq!(
+            match_landing_at(&index, &observed, 150, late, FRAME),
+            Err(LandingError::TimeOffIndex { ticks: late })
         );
     }
 
