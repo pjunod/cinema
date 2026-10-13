@@ -18,7 +18,7 @@ duplicating its evidence.
 | Intended effort | Archive implementation merged into `main`; TV follow-up #1081 on `codex/diagnostics-tv-archive` |
 | Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent owned clone; current main base `f1bffab59`, archive landing `569678f25` (#1066). TV product commits `8c80b9a81` and `77ae61186`, native witnesses `5616f0f4b`; review correction `d0f0df4d9`; focused qualification passes and all three final-review findings are corrected. User checkouts untouched. |
+| Implementation workspace/base | Independent owned clone; current main base `cd5c8ddf1`, archive landing `569678f25` (#1066). TV product commits `8c80b9a81` and `77ae61186`, native witnesses `5616f0f4b`; review correction `d0f0df4d9`; focused qualification passes and all three final-review findings are corrected. User checkouts untouched. |
 | Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
 | Plan review | Original review: 12 findings corrected; history follow-up: two findings corrected. One final TV-archive review found three issues, all corrected with focused regressions in §26; no repeated review cycle. |
 | Promotion/deployment | #1037 and archive-first #1066 merged. #1066 landing `569678f2513695bb9f7b1923ed2c39af6dd19043`, eight required passes. Hosted/private service rollout cancelled by the archive direction; no production changes by this chat. |
@@ -863,3 +863,12 @@ Down-key decoding remains in AuthTextField. The obsolete key-import allowance
 is removed because this screen no longer imports or decodes keys. Android
 runtime behavior and all Apple inputs are unchanged by this integration.
 Focused web/fence checks and the pinned hook qualify this combined source.
+
+
+Main's CI-prerequisite/Android-fixture repair and final SDR evidence landings
+advance the base to `cd5c8ddf1`. Their build contracts, fixture and witness are
+preserved. Production archive, playback and web source files do not change
+from the qualified candidate161d96f68. The fresh normal pinned hook and focused
+build-contract/Android-fixture checks qualify this integration; completed
+native UI, archive and web runtime results remain applicable by source digest.
+The prior candidate's gate5058 and the exact final gate are recorded in #1081.
