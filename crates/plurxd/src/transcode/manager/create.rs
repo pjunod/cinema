@@ -3944,6 +3944,112 @@ pub(super) fn constrain_finite_vod_rate(
 mod retained_recovery_tests {
     use super::*;
 
+    #[test]
+    fn prepared_bootstrap_purpose_refuses_voluntary_upward_foreign_and_missing_decoder() {
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        let route = crate::media_sessions::takeover_eligible_route("bootstrap", "incarnation");
+        let mut manual: crate::media_sessions::RemoteStartRequest =
+            serde_json::from_str(&route.recipe_json).expect("durable fixture");
+        manual.request.presentation = Presentation::Vod;
+        manual.request.automatic = false;
+        manual.request.kind = SessionKind::Transcode { height: 720 };
+        manual.candidate_id = None;
+        let caps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls"]})).expect("actual caps shape");
+        manual.decoder_caps = Some(
+            crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1)
+                .expect("usable decoder snapshot"),
+        );
+        let digest = [42; 32];
+        let mut automatic = manual.clone();
+        automatic.request.automatic = true;
+        automatic.candidate_id = Some(CandidateId::for_recipe_digest(digest));
+        automatic.candidate_catalog = Some(crate::media_sessions::CandidateCatalogContext {
+            caps,
+            candidate: QualityCandidate {
+                id: CandidateId::for_recipe_digest(digest),
+                recipe_digest: digest,
+                route: CandidateRoute::Encode,
+                normalized_geometry: false,
+                width: 1280,
+                height: 720,
+                target_height: 720,
+                planned_codec: None,
+                average_bps: None,
+                peak_bps: None,
+                grade: OutputGrade::Sdr,
+                decoder_compatible: true,
+                complete_cache: false,
+                sustainable: true,
+            },
+            binding: crate::media_pool::PlanningBinding {
+                generation: 1,
+                source_digest: "0".repeat(64),
+            },
+        });
+        assert!(
+            prepared_manual_auto_bootstrap(&manual, &automatic),
+            "bounded canonical transition is a bootstrap"
+        );
+        assert!(
+            !prepared_manual_auto_bootstrap(&automatic, &automatic),
+            "an already automatic incumbent cannot grant voluntary handoff"
+        );
+        let mut changed = automatic.clone();
+        changed.request.kind = SessionKind::Transcode { height: 1080 };
+        changed
+            .candidate_catalog
+            .as_mut()
+            .expect("catalog")
+            .candidate
+            .height = 1080;
+        assert!(
+            !prepared_manual_auto_bootstrap(&manual, &changed),
+            "upward proposal needs its own capacity"
+        );
+        changed = automatic.clone();
+        changed.principal =
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 987 };
+        assert!(
+            !prepared_manual_auto_bootstrap(&manual, &changed),
+            "foreign principal cannot borrow an incumbent permit"
+        );
+        changed = automatic.clone();
+        changed.request.playback_id.push_str("-other");
+        assert!(
+            !prepared_manual_auto_bootstrap(&manual, &changed),
+            "another playback is unrelated"
+        );
+        changed = automatic.clone();
+        changed.request.file_id += 1;
+        assert!(
+            !prepared_manual_auto_bootstrap(&manual, &changed),
+            "different source is unrelated"
+        );
+        let mut no_decoder = manual.clone();
+        no_decoder.decoder_caps = None;
+        assert!(
+            !prepared_manual_auto_bootstrap(&no_decoder, &automatic),
+            "legacy metadata is not decoder authority"
+        );
+        changed = automatic.clone();
+        changed.candidate_id = None;
+        assert!(
+            !prepared_manual_auto_bootstrap(&manual, &changed),
+            "catalog presence alone cannot bind canonical output"
+        );
+        changed = automatic;
+        changed
+            .candidate_catalog
+            .as_mut()
+            .expect("catalog")
+            .candidate
+            .recipe_digest = [24; 32];
+        assert!(
+            !prepared_manual_auto_bootstrap(&manual, &changed),
+            "wrong canonical identity never grants handoff"
+        );
+    }
+
     #[tokio::test]
     async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues() {
         use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
