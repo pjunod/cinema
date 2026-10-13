@@ -126,6 +126,8 @@ class CompleteCommandUnitCase(unittest.TestCase):
             with self.assertRaises(receipts.ReceiptError):q.changed_inputs(record,CANDIDATE,{blob['sha256']:blob})
             changes['after']='d'*64;blob=log(json.dumps(manifest));record['changes']={'sha256_ref':blob['sha256']}
             self.assertEqual(q.changed_inputs(record,CANDIDATE,{blob['sha256']:blob}),{'a'})
+            alias=copy.deepcopy(manifest);alias['changes']['input.rs']['affected_ids']=[];aliased=log(json.dumps(alias))
+            with self.assertRaises(receipts.ReceiptError):q.changed_inputs(record,CANDIDATE,{blob['sha256']:aliased})
             for key in ['source_commit','candidate']:
                 altered=copy.deepcopy(manifest);altered[key]='a'*40;other=log(json.dumps(altered));record['changes']={'sha256_ref':other['sha256']}
                 with self.assertRaises(receipts.ReceiptError):q.changed_inputs(record,CANDIDATE,{other['sha256']:other})

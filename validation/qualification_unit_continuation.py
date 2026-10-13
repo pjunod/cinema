@@ -109,7 +109,8 @@ def changed_inputs(record, candidate, shared_logs=None):
     if set(changes)=={'sha256_ref'}:
         digest=changes['sha256_ref']
         receipts.require(shared_logs is not None and retention.DIGEST.fullmatch(digest)
-                         and digest in shared_logs,'Shared applicability manifest unavailable')
+                         and digest in shared_logs and shared_logs[digest].get('sha256')==digest,
+                         'Shared applicability manifest unavailable or aliased')
         manifest=receipts.bounded_json(retention.decoded_log(shared_logs[digest]).encode())
         receipts.require(set(manifest)=={'source_commit','candidate','changes'}
                          and manifest['source_commit']==record['source_commit'] and manifest['candidate']==candidate,
