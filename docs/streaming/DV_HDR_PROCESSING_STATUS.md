@@ -993,8 +993,9 @@ authorize it. The complete processing pipeline must sustain the existing
 | R07 | Preserve resumable ownership for positioned paused startup seeks | PR #1055 landed as `3b1a0ba31` after compile-only gate 4979 passed all seven jobs on `0ecf3d5e0`, based on effort `77642f0b3` containing current main `5874dbb59`. Positioning without frame callbacks retains exact loader custody and the original, possibly tightened deadline. Play, consecutive Pause, local subtitle preservation and an executed replacement seek carry only their current ownership. Positioning grants no presented-frame or processing-report authority. All 21 cases in `node --test tests/playback/paused-hls-resume.test.js`, including the eight new controls, passed once on integrated effort `3b1a0ba31`. No task units executed. |
 | R08 | Qualification fixture lineage, complete transport batch and real membership URL publication | PR #1057 landed as `2d3695541` after compile-only gate 4981 passed all seven jobs on exact head `ffa163816`. Store fixtures remove only empty sharing tables before constructing historical fixtures, preserve the production lineage guard, and cover the actual migration baseline. The transport batch requires 70 passes and each of seven named regressions once and retains distinct vendor checks. Topology uses the existing manager and the production publication transaction with durable restoration. An isolated UI fixture reproduces an occupied default Jellyfin port and boot caption-probe children in Activity; the fixture reserves its own fourth port and waits for this boot's audit retirement plus a stable empty local process inventory before captures. Six affected/new UI controls are written; no golden drift is blessed. Affected effort units and stable UI capture remain owed. |
 | R09 | Bound the effort compiler resource budget | PR #1056 landed as `e112f137b` after gate 4970 passed all seven jobs on `77e999c50`. The Rust compile job uses one Cargo build worker and a 20-minute whole-job deadline; every compiler and static/history check remains enabled. The green Rust job took about six minutes. Temporary runner routing and memory adjustments were restored; previous timeout results remain failures. |
-| R10 | Bound Android emulator post-boot service readiness | Reviewed PR #1058 vendors the exact pinned upstream action and changes only its post-boot startup block. One shared 60-second deadline requires positive package/input service readiness before unlock and settings, retries only the failed stage, and kills/reaps a timed-out child. Four new focused cases and the affected operations contract await effort execution; the task was rebased onto effort `2d3695541` and its exact committed-source compiler loop passes; task gate is pending. |
-| R11 | Reproduce the unchanged Fontconfig source archive | Reviewed PR #1059 replaces the broken HTML-returning source URL acquisition with an explicit public exact-commit Git archive. Reproduction matches the existing locked SHA-256; the source, hash and recipe are unchanged. Fresh isolated Git state, shared deadlines, bounded scratch/archive size and process-group retirement remain enforced. Seven new cases and the affected source contract await effort execution; task gate and package qualification are pending. |
+| R10 | Bound Android emulator post-boot service readiness | PR #1058 landed as `3c4a7d626` after compile-only gate 4985 passed all seven jobs on exact head `b2247d003`. It vendors the exact pinned upstream action and changes only its post-boot startup block. One shared 60-second deadline requires positive package/input service readiness before unlock and settings, retries only the failed stage, and kills/reaps a timed-out child. Four new focused cases and the affected operations contract passed once on integrated effort `a7fa0053e`; its exact committed-source compiler loop passed, and the original instrumentation checks remain unchanged. |
+| R11 | Reproduce the unchanged Fontconfig source archive | PR #1059 landed as `a7fa0053e` after compile-only gate 4987 passed all seven jobs on exact head `d3528414b`. It replaces the broken HTML-returning source URL acquisition with an explicit public exact-commit Git archive. Reproduction matches the existing locked SHA-256; the source, hash and recipe are unchanged. Fresh isolated Git state, shared deadlines, bounded scratch/archive size and process-group retirement remain enforced. Seven new cases and the affected source contract passed once on integrated effort `a7fa0053e`; the exact current-base pinned compiler loop passed; package qualification remains owed. |
+| R13 | Model actual composed library-path SQL and reconcile enumerated source audits | A task based on effort `a7fa0053e` updates two exact consistent-read pins, registers the new library-root removal transaction, and records one prepared SQLite deletion whose bindings live at execution. The SQL scanner evaluates the production path-set helper with reviewed literal placeholders, admits composed SELECTs, and refuses dynamic arguments or ambiguous local ownership. Nine positive and negative controls are written and compiled. Pinned affected check and denied-lint Clippy pass; Astra found no remaining source-review blockers. Task units are deferred to the effort. The effort core target completed 1,861 passes, seven source-audit failures and four existing ignored cases; these failures remain preserved. The scanner failure is missing helper modeling, not a production SQL gap. Qualification and physical acceptance remain open. |
 | A01 | Current-main fleet build and physical Profile 5, Profile 8 and Profile 7 FEL acceptance on web, Android and Apple TV | Owed after qualification/deployment. Retain startup, stalls, seek/reopen report clearing, stats, screenshots and exact effective-processing logs; repeat with both preferences off. |
 
 Tasks integrate serially through pull requests into the effort after the
@@ -1029,8 +1030,29 @@ failed because the Fontconfig source URL returned HTML instead of the locked
 archive; R11 reproduces the original archive without changing its pin. The partial Store
 run retained named passes and three failures before timeout. These failures
 remain preserved; none is a passing whole-lane receipt. Current main advanced
-with the paused reopened-seek change. Effort `2d3695541` contains current main `5874dbb59` and the R06/R07/R08/R09
-landings; remaining task gates are pending. R07 repairs
+with the paused reopened-seek change. Effort `a7fa0053e` contains the incorporated main `5874dbb59` and the R06–R11
+landings. Current-source applicability and complete inventory closure remain open. R07 repairs
 a reviewed positioned-resume gap in that change. Successful named unit evidence
 must remain source-bound; missing and invalidated cases need focused execution.
 No repaired fleet build or physical HDR acceptance is claimed.
+
+The subsequent effort-only source archive at `2d3695541` completed the core
+target with 1,861 passing cases, seven source-audit failures and four existing
+ignored cases. Its enclosing 30-minute workspace invocation then timed out
+during later targets; completed passes are retained, and missing cases remain
+explicit. The separate feature-qualified Store continuation completed with
+173 passes, 65 failures and one existing ignored measurement helper among its
+239 selected cases. Its outer driver also refused the result; neither execution
+is a passing lane receipt. A single previously failed media contract passed
+on an isolated retry after stale source-only extractions were removed to
+restore the compiler's fixed storage allowance. Original failures and exact
+source/binary bindings remain preserved. R13 repairs the core source audits;
+the remaining Store failures and missing qualification cohorts still require
+diagnosis and bounded effort-only continuation. No repaired fleet deployment
+or physical acceptance is claimed.
+
+All 22 selected new or changed Python regressions from R08, R10 and R11
+passed once on the integrated main-bound effort `a7fa0053e`, with no failures
+or skips. The earlier preflight suites were not replayed. This focused result
+does not close UI captures, Android device execution, package qualification,
+Store/runtime failures or the final promotion receipt.
