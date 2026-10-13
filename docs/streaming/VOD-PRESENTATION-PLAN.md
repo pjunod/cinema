@@ -1300,10 +1300,11 @@ real titles including a Dolby Vision title and one with an A/V offset.
 
 ## 13. F1/N2 copy-landing repair — source proof, not device acceptance
 
-**Status:** [PR #1041](http://forge.lan:3000/noirr/plurx/pulls/1041), draft;
+**Status:** [PR #1041](http://forge.lan:3000/noirr/plurx/pulls/1041), merged as
+`f5232bdcf8` on 2026-10-13 00:07:47 UTC;
 source `925d18f93`, current-main composition `ba023d773`; 22 focused passes,
-sole review and current-base compiler/static/hooks clear; PR gate owed ·
-**Date:** 2026-10-12 · **Owner:**
+sole review/current-base checks and configured PR gate passed ·
+**Date:** 2026-10-13 · **Owner:**
 `none:openai:2026-10-12`,
 `codex://threads/01a0c165-d718-73a1-93e9-e81380017705` · **Branch:**
 `codex/copy-landing-origin`.
@@ -1354,9 +1355,19 @@ The actual current-main workspace/all-targets check passed on pinned
 Rust 1.97.1 in 1 min 7 s. Twenty current-input documentation/infrastructure
 and changed module-census checks passed. Normal current-tree hooks passed
 strict workspace/all-targets Clippy in 1 min 24 s, format, catalog and all
-86 served scripts. Draft #1041 opened at 23:33 UTC; this tracking-only commit
-changes no Rust input. Current-head configured PR fast lane and landing
-remain required; no source pass is substituted for them.
+86 served scripts. Draft #1041 opened on 2026-10-12 at 23:33 UTC;
+the tracking-only commit changed no Rust input.
+
+**Actual landing receipt, 2026-10-13:** run4875 passed scope17s,
+preflight6m7s, web1m33s, Rust23m12s and Main promotion16s on reviewed
+head `57accd5c8443375dccd4a63b0a57939dc79cc974`. Unaffected native/mobile
+lanes were skipped. Main remained `290346685` immediately before root's
+direct ordinary merge. Actual landing `f5232bdcf8aa4e68ae9a215c2f27025bacfa58a8`
+has parents `290346685` and `57accd5c8`; its tree
+`2ff3ff216459227cab2b7a8604d1c7c26b394877` equals the qualified head,
+with no candidate-versus-landing diff. All22Regression-Test lines match
+the body exactly. Source branch and original author WIP remain preserved;
+no passing test or configured gate was replayed for this receipt.
 
 This repairs the two source defects; it does not qualify the physical client
 matrix, every source family, original M0 real-title corpus or fleet rollout.

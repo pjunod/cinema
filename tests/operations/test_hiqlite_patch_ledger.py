@@ -117,6 +117,34 @@ def banned_crates() -> list[tuple[str, str | None]]:
 
 
 class HiqlitePatchLedgerCase(unittest.TestCase):
+    def test_upstream_disposition_inventory_includes_the_listener_fix(self):
+        generic = {
+            (path.parent.name, int(row[0])): row[3]
+            for path, _expected in LEDGERS
+            for row in table_rows(path.read_text(encoding="utf-8"))
+            if row[2] == "generic bug"
+        }
+        self.assertEqual(len(generic), 11)
+        self.assertEqual(
+            {key: url for key, url in generic.items() if url != "pending M6"},
+            {
+                ("hiqlite", 26): "https://github.com/sebadob/hiqlite/pull/374",
+                ("hiqlite-wal", 2): "https://github.com/sebadob/hiqlite/pull/357",
+            },
+        )
+        self.assertEqual(
+            {key for key, url in generic.items() if url == "pending M6"},
+            {
+                ("hiqlite", number) for number in (1, 8, 9, 10, 11, 17, 19)
+            } | {("hiqlite-wal", 1), ("hiqlite-wal", 3)},
+        )
+        plan = (ROOT / "docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("M6 two accepted mechanisms, nine generic rows pending", plan)
+        self.assertIn("eleven generic rows", plan)
+        self.assertIn("https://github.com/sebadob/hiqlite/pull/374", plan)
+
     def test_each_prose_patch_has_one_owned_ledger_row(self):
         for path, expected in LEDGERS:
             with self.subTest(ledger=path.parent.name):
