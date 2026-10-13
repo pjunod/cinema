@@ -11,6 +11,10 @@ measurements, negative results, provenance and reproducible raw receipts.
 
 ## 1. Current position
 
+The [complete HDR acceptance report](MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
+and its checksum-indexed evidence retain the five acceptance sections, exact
+receipts, negative observations and unresolved playback issues.
+
 **Mac HDR hardware acceptance, 2026-10-12.** The Metal CPU-parity and
 parser-install repairs are in `main` (PRs #1013/#1025). The media mount was
 remounted with its original options; native reads and FFprobe pass. The Mac
