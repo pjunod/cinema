@@ -6680,3 +6680,29 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "struct AutoTransferPressureEvidence"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testPressureThresholdsKeepSevereAndTwoMildAuthority"
+
+[[fixes]]
+id = "apple.hidden-clock-startup-strict-contiguous-runway"
+commits = ["a8e3d952c78cf111a9ca78771d514d18f1783bda"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func preparedClockStartupHasRunway("
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testClockStartupRunwayRejectsPositiveGaps"
+
+[[fixes]]
+id = "server.cached-wait-watcher-current-accepted-authority"
+commits = []
+supplements = "apple.hidden-clock-startup-strict-contiguous-runway"
+source = "crates/plurxd/src/http/hls/preparation.rs"
+source_anchor = "fn cached_accepted_wait_is_current(active: &ActivePreparedSuccessor) -> bool"
+test = "crates/plurxd/src/http/hls/preparation.rs"
+test_anchor = "cached_accepted_wait_survives_actual_foreground_watcher_capacity_pressure"
+
+[[fixes]]
+id = "apple.cadence-disposal-before-monitor-and-preroll"
+commits = []
+supplements = "apple.hidden-clock-startup-strict-contiguous-runway"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func discardPreparedSuccessor() {"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testCadencePreparationFinishesBeforeOneTargetIsFrozenAndDisposalCancelsIt"
