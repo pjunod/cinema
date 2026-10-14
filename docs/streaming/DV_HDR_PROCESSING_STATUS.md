@@ -1222,3 +1222,12 @@ raw capture, unknown measurement and failure disposition. The frozen final
 candidate still needs the complete authenticated unit union, current native
 command discovery, non-unit qualification and promotion receipt. Fleet
 deployment and the physical web/Android/Apple TV HDR ON/OFF checks remain open.
+
+R31 preserves the complete original eight-pass R30 capture when mocked compiler
+stdout interleaves one verbose unittest terminal. Its parsing projection is
+limited to the exact raw digest, effort source, validation kind and measured
+binding; only the known six-line span and standalone `ok` are collapsed for
+the strict named-result parser. Original proof bytes remain unchanged and no
+mocked compiler output becomes compiler evidence. The two new refusal controls
+await an integrated effort execution; the eight passing R30 bodies are not
+repeated. Complete qualification and physical acceptance remain open.

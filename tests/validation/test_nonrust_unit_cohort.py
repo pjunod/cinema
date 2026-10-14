@@ -163,6 +163,57 @@ class NonRustSourceCohortCase(unittest.TestCase):
         with self.assertRaises(receipts.ReceiptError):
             cohort.python_rows(raw.replace(' ... ok', ' ... skipped'), 'validation', {'test_a.Case.test_a'}, {'test_b.Case.test_b'})
 
+    def interleaved_fixture(self, identity):
+        prefix = identity.rsplit('.', 1)[1] + ' (' + identity + ') ... '
+        raw = (prefix + 'COMPILE_ONLY actual mocked compiler\n'
+               'ADOPTED_COMPLETE_UNIT_COMMAND wal:237\n' +
+               'COMPILE_ONLY actual mocked compiler\n' * 4 +
+               'ok\n\nRan 1 test in 0.001s\n\nOK\n').encode()
+        registry = {retention.digest(raw): {'source': 'b' * 40, 'id': identity,
+                                          'binding': retention.digest(b'original binding')}}
+        return raw, registry
+
+    def test_finite_interleaved_capture_preserves_raw_and_requires_exact_source_and_terminal(self):
+        identity = 'tests.validation.test_a.Case.test_a'
+        raw, registry = self.interleaved_fixture(identity)
+        original = bytes(raw)
+        with mock.patch.object(cohort, 'INTERLEAVED_PYTHON_CAPTURES', registry):
+            projected = cohort.named_python_capture_text(raw, 'b' * 40, 'validation', b'original binding')
+            self.assertEqual(cohort.python_rows(projected, 'validation', {'test_a.Case.test_a'}),
+                             {'test_a.Case.test_a': 'pass'})
+            with self.assertRaises(receipts.ReceiptError):
+                cohort.named_python_capture_text(raw, 'e' * 40, 'validation', b'original binding')
+            for mutated in (raw + b'changed\n', raw.replace(b'\nok\n', b'\nFAIL\n'),
+                            raw.replace(b'wal:237', b'wal:238')):
+                self.assertEqual(cohort.named_python_capture_text(mutated, 'b' * 40, 'validation', b'original binding'), mutated.decode())
+                with self.assertRaises(receipts.ReceiptError):
+                    cohort.python_rows(mutated.decode(), 'validation', {'test_a.Case.test_a'})
+            for bad in ({**registry[retention.digest(raw)], 'id': identity + '_other'},):
+                with mock.patch.object(cohort, 'INTERLEAVED_PYTHON_CAPTURES', {retention.digest(raw): bad}):
+                    with self.assertRaises(receipts.ReceiptError):
+                        cohort.named_python_capture_text(raw, 'b' * 40, 'validation', b'original binding')
+            for kind, binding_raw in [('operations', b'original binding'), ('validation', b'changed binding')]:
+                with self.subTest(kind=kind, binding=binding_raw), self.assertRaises(receipts.ReceiptError):
+                    cohort.named_python_capture_text(raw, 'b' * 40, kind, binding_raw)
+        self.assertEqual(raw, original)
+
+    def test_named_interleaved_enrollment_keeps_binding_and_refuses_mutated_custody(self):
+        item, proof, ids, baseline, binding = self.fixture()
+        raw, registry = self.interleaved_fixture('tests.validation.' + ids[0])
+        record = item['records'][1]
+        record['log'] = self.blob(proof, raw)
+        binding['log_sha256'] = record['log']['sha256_ref']
+        record['origin']['execution']['binding'] = self.blob(proof, json.dumps(binding).encode())
+        registry[retention.digest(raw)]['binding'] = retention.digest(json.dumps(binding).encode())
+        with mock.patch.object(cohort, 'INTERLEAVED_PYTHON_CAPTURES', registry):
+            result = self.validate(item, proof, ids, baseline)
+            self.assertEqual(result['actual_named_pass_count'], 1)
+            self.assertEqual(cohort.blob(proof, record['log']), raw)
+            binding['log_sha256'] = 'e' * 64
+            record['origin']['execution']['binding'] = self.blob(proof, json.dumps(binding).encode())
+            with self.assertRaises(receipts.ReceiptError):
+                self.validate(item, proof, ids, baseline)
+
     def test_junit_preserves_full_class_identity_and_native_failure_totals(self):
         raw = b'<testsuites><testsuite tests="2" failures="1" errors="0"><testcase classname="a.Case" name="same"/><testcase classname="b.Case" name="same"><failure/></testcase></testsuite></testsuites>'
         self.assertEqual(cohort.junit_rows(raw, {'a.Case/same', 'b.Case/same'}),
