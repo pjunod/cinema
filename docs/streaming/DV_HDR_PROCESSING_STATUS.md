@@ -1172,8 +1172,9 @@ methods without executing bodies. These are component facts: remaining full
 retention, non-unit qualification, promotion, deployment and physical HDR
 acceptance are still open.
 
-R29 is built on a reviewable task branch and awaits its compile-only gate,
-landing and ten new effort-only controls. It preserves the complete original
+R29 landed as #1089 on effort `630c4f978` after all seven exact-head
+gate 5102 jobs passed. Its ten new controls passed once there with native
+and wrapper exit 0 and clean stable source. It preserves the complete original
 daemon capture, accounts separately for its single retired passing method,
 and requires the current successor to pass later. Only the exact reviewed
 source and log can use that retirement rule; duplicate enrollment refuses.
@@ -1186,5 +1187,25 @@ Iterator traversal stops before consuming a broad child list. Generic and
 typed CI authentication share one 64 MiB raw-log cache; bounded decimal
 identities convert to integers before live authority checks. Original
 failures, source invalidation and current compiler obligations remain.
-The locked external Openraft package adapter is still missing; complete
-qualification, deployment and physical HDR acceptance remain open.
+R30 builds the locked external Openraft adapter on a reviewable task branch;
+its source-only compiler check, task gate, landing and eight new effort-only
+controls remain owed. Complete qualification, deployment and physical HDR
+acceptance remain open.
+
+R30 recognizes only the exact committed Openraft metadata/test wrapper and
+the unique `openraft` 0.9.25 registry entry with its checksum in both locks.
+The descriptor pins the archive, own manifest and own lock, including its
+default debug-2 test profile. Current compilation authenticates all package
+source bytes and copies only archive files into an owned directory. Existing
+registry `target/` build outputs are neither imported nor compiled. Bounded
+file-descriptor reads and lazy directory traversal reject growth, aliases,
+extra source, excessive entries and depth. Current native artifacts must
+name the owned lib source, exact package, feature graph, profile and discovered
+selector. The original WAL-237 capture keeps its whole shell wrapper, original
+sidecar, preserved binary and compiler fingerprint, native exit and complete
+terminal; the adapter does not retrofit new command/exit markers. The actual
+original capture and all 246 archived source files passed parser/source
+inspection without compiler commands or unit execution. Remaining Rust
+workspace evidence validates 472 passes and one ignored case, retaining three
+empty targets only as compiler facts. Those source-reviewed component checks
+do not constitute complete qualification or physical HDR acceptance.

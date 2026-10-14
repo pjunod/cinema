@@ -25,6 +25,7 @@ from functools import lru_cache
 
 from validation import promotion_unit_retention as retention
 from validation import python_unit_receipts as receipts
+from validation import unit_openraft_package as openraft_package
 from validation.main_preflight_adoption import run_commands
 
 RUST_KINDS = {'store_contract','wal','topology','transport'}
@@ -519,6 +520,8 @@ TEST_PROFILE_FINGERPRINTS={0:16018505129029273480,2:6599234302872229273}
 @lru_cache(maxsize=32)
 def test_profile(source,manifest):
     import tomllib
+    if manifest == openraft_package.MANIFEST_VARIABLE:
+        return openraft_package.source_descriptor(source)['profile']
     path=manifest or 'Cargo.toml'
     raw=retention.git_bytes(source,path)
     receipts.require(raw is not None,'Historical profile manifest unavailable')
@@ -647,6 +650,8 @@ def require_native_terminals(body,actual,exit_code,command):
 
 def native_target_paths(identity,source):
     flags=identity['cargo'];package=flags.get('-p')
+    if flags.get('--manifest-path') == openraft_package.MANIFEST_VARIABLE:
+        package = openraft_package.source_descriptor(source)['name']
     if package is None:
         import tomllib
         manifest=retention.git_bytes(source,flags['--manifest-path'])
@@ -818,6 +823,82 @@ def complete_original_capture_ordinals(records):
                          'Original authenticated partial failure must precede local completion')
 
 
+
+OPENRAFT_ORIGINAL_SOURCE = '2d3695541df4dbc391a91d9f60504e7f422710e2'
+OPENRAFT_ORIGINAL_LOG = 'af40b665c5f01adc643c98d01dbda24ecb7afdab4445cff91e025e15999ca9e4'
+OPENRAFT_ORIGINAL_BINDING = '353c31feec8c31a0de9061d3d005b80160208eaca2216177718c50baa8f2c7fa'
+OPENRAFT_ORIGINAL_ARTIFACTS = 'bd80b558364be92fb162a6346ebc3d1d0708fbef6b010ad91f524a61aa411eb6'
+
+
+def original_openraft_capture(record, item, raw):
+    """One intact native capture; no retrofitted command/exit framing."""
+    witness = record['origin']['execution']
+    receipts.require(set(witness) == {'mode', 'first_line', 'binding', 'artifacts'}
+                     and witness['mode'] == 'local-openraft-original' and witness['first_line'] == 2
+                     and record['origin']['kind'] == 'attested-local'
+                     and item['invocation'] == openraft_package.WRAPPER
+                     and item['name'].split(':')[0] == 'wal'
+                     and record['source_commit'] == OPENRAFT_ORIGINAL_SOURCE
+                     and record['log']['sha256_ref'] == OPENRAFT_ORIGINAL_LOG
+                     and retention.digest(raw.encode()) == OPENRAFT_ORIGINAL_LOG,
+                     'Unknown original Openraft capture/source/wrapper')
+    descriptor = openraft_package.source_descriptor(record['source_commit'])
+    expected_env = {'platform': 'linux-x64', 'toolchain': 'rust1.97.1',
+        'features': descriptor['features'], 'runtime': {'test_threads': 'libtest-default',
+        'rust_min_stack': None, 'target': 'x86_64-unknown-linux-gnu',
+        'profile': descriptor['profile'], 'rustc_version': RUSTC_VERSION}}
+    receipts.require(record['environment'] == expected_env,
+                     'Original Openraft feature/runtime/profile differs')
+    decoded = []
+    for field, expected_hash in [('binding', OPENRAFT_ORIGINAL_BINDING),
+                                 ('artifacts', OPENRAFT_ORIGINAL_ARTIFACTS)]:
+        blob = witness[field]
+        receipts.require(isinstance(blob, dict) and blob.get('sha256') == expected_hash,
+                         'Original Openraft sidecar identity differs')
+        decoded.append(receipts.bounded_json(retention.decoded_log(blob).encode()))
+    binding, artifacts = decoded
+    receipts.require(binding['source_commit'] == OPENRAFT_ORIGINAL_SOURCE
+                     and binding['branch'] == 'effort/dv-hdr-repair' and binding['rustc'] == RUSTC_VERSION,
+                     'Original Openraft source/compiler sidecar differs')
+    observations = [row for row in binding['records'] if row.get('ordinal') == 237]
+    receipts.require(len(observations) == 1, 'Original Openraft ordinal ambiguous')
+    observed = observations[0]
+    lines = raw.splitlines()
+    receipts.require(lines[0] == 'Canonical WAL ordinal 237 on effort ' + OPENRAFT_ORIGINAL_SOURCE
+                     and lines[1] == observed['execution_command'] == record['origin']['command']
+                     and observed['canonical_command'] == openraft_package.WRAPPER
+                     and observed['source_commit'] == OPENRAFT_ORIGINAL_SOURCE
+                     and observed['log_sha256'] == OPENRAFT_ORIGINAL_LOG
+                     and observed['exit_code'] == record['exit_code'] == 0
+                     and observed['expected_pass_count'] == 1 and observed['terminal_success'] is True
+                     and observed['features'] == 'generic-snapshot-data',
+                     'Original Openraft command/native exit differs')
+    running = re.findall(r'^\s*Running unittests src/lib.rs \(([^)]+)\)$', raw, re.M)
+    receipts.require(running == observed['running_binaries'] and len(running) == 1,
+                     'Original Openraft native binary differs')
+    path = running[0]
+    matching = [row for row in artifacts['artifacts'] if row.get('path') == path]
+    receipts.require(len(matching) == 1 and matching[0].get('sha256') ==
+                     '4f41f4416a03c63c962512cd4fe35bb537e4a85c9767576fa3055de4b23712c4',
+                     'Original Openraft preserved binary identity differs')
+    fingerprint = artifacts['fingerprints'].get('target/openraft-regression/debug/.fingerprint/'
+                     + Path(path).name + '/test-lib-openraft.json', {})
+    receipts.require(fingerprint.get('rustc') == RUSTC_FINGERPRINT
+                     and fingerprint.get('profile') == TEST_PROFILE_FINGERPRINTS[2]
+                     and fingerprint.get('compile_kind') == 0 and fingerprint.get('rustflags') == []
+                     and json.loads(fingerprint.get('features', 'null')) == descriptor['features'],
+                     'Original Openraft compiler/profile/features fingerprint differs')
+    body = '\n'.join(lines[2:])
+    outcomes = retention.log_outcomes(body, 'rust')
+    receipts.require(outcomes == {descriptor['selector']: 'pass'}
+                     and re.findall(r'^test result: (.+)$', body, re.M) ==
+                     ['ok. 1 passed; 0 failed; 0 ignored; 0 measured; 196 filtered out; finished in 0.01s']
+                     and record['coverage']['first_line'] == 3
+                     and record['coverage']['last_line'] == len(lines)
+                     and record['coverage']['format'] == 'rust',
+                     'Original Openraft full native execution scope differs')
+    return body
+
 def bound_execution(record, item, raw, source_commands=historical_canonical):
     """No receipt-selected slice can remove another outcome from one execution."""
     kind = item['name'].split(':')[0]
@@ -827,6 +908,8 @@ def bound_execution(record, item, raw, source_commands=historical_canonical):
     lines = raw.splitlines()
     first = witness['first_line']
     receipts.require(type(first) is int and 0 < first <= len(lines), 'Invalid command anchor')
+    if witness['mode'] == 'local-openraft-original':
+        return original_openraft_capture(record, item, raw)
     if witness['mode']=='local-original-capture':
         return original_capture(record,item,raw)
     if witness['mode'] == 'local-binary':
@@ -1190,6 +1273,8 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
                              'Rust command runtime differs from exact canonical invocation')
             ids = native_inventory(item['inventory'], identity, candidate)
             native_inventories[name] = {'ids_sha256': retention.digest(json.dumps(ids, separators=(',', ':')).encode()), 'features': environment['features']}
+            if identity['cargo'].get('--manifest-path') == openraft_package.MANIFEST_VARIABLE:
+                native_inventories[name]['external_package'] = openraft_package.source_descriptor(candidate)
             if implicit_cluster_target(identity):
                 native_inventories[name]['targets']=[{'name':target['name'],'kind':target['kind'],'features':target['features']} for target in item['inventory']['targets']]
             requested = identity['cargo'].get('--features', '').split(',')
@@ -1404,58 +1489,82 @@ def compile_adopted(kind, proof, candidate):
     receipts.require(set(expected) == {name for group in actions.values() for name, _ in group},
                      'Adopted command/compiler footprint incomplete')
     for command, group in actions.items():
-        print('COMPILE_ONLY ' + shlex.join(command), flush=True)
-        output = owned_compile(command)
-        artifacts = []
-        for line in output.splitlines():
-            try:
-                row = json.loads(line)
-            except (ValueError, TypeError) as error:
-                raise receipts.ReceiptError('Malformed current Cargo JSON evidence') from error
-            receipts.require(isinstance(row, dict), 'Malformed current Cargo artifact')
-            if row.get('reason') == 'compiler-artifact' and row.get('profile', {}).get('test') and row.get('executable'):
-                artifacts.append(row)
-        for name, identity in group:
-            flags = identity['cargo']
-            profile=test_profile(candidate,flags.get('--manifest-path'))
-            if implicit_cluster_target(identity):
-                footprint=expected[name]['targets']
-                matching=[row for row in artifacts if row['package_id'].split('#')[-1].startswith('plurx-cluster-check@') or '/plurx-cluster-check#' in row['package_id']]
-                tags=[(row['target']['name'],tuple(row['target']['kind'])) for row in matching]
-                receipts.require(len(tags)==len(set(tags)) and set(tags)=={(target['name'],tuple(target['kind'])) for target in footprint},'Compiled implicit target footprint differs')
-                all_ids=[]
-                for target in footprint:
-                    rows=[row for row in matching if row['target']['name']==target['name'] and row['target']['kind']==target['kind']]
-                    receipts.require(len(rows)==1 and sorted(rows[0]['features'])==sorted(target['features']) and rows[0]['profile']==profile,'Implicit target feature graph differs')
-                    require_current_fingerprint(rows[0],profile)
-                    output=owned_output([rows[0]['executable'],'--list','--format=terse'],timeout=30,limit=8*1024*1024)
-                    full=[line.removesuffix(': test') for line in output.splitlines() if line.endswith(': test')]
-                    all_ids.extend(select_ids(full,identity))
-                receipts.require(retention.digest(json.dumps(all_ids,separators=(',',':')).encode())==expected[name]['ids_sha256'],'Compiled implicit selected universe differs')
-                print('ADOPTED_COMPLETE_UNIT_COMMAND '+name,flush=True)
-                continue
-            target_name = flags.get('--test') or flags.get('--bin')
-            if target_name is None:
-                package = flags.get('-p')
-                if package is None:
-                    import tomllib
-                    package = tomllib.loads(Path(flags['--manifest-path']).read_text())['package']['name']
-                target_name = package.replace('-', '_')
-            matching = [row for row in artifacts if row['target']['name'] == target_name]
-            receipts.require(len(matching) == 1, 'Current target artifact missing or ambiguous')
-            artifact = matching[0]
-            receipts.require(sorted(artifact['features']) == sorted(expected[name]['features']) and artifact['profile']==profile,
-                             'Current compiled feature graph differs from adopted target')
-            require_current_fingerprint(artifact,profile)
-            output = owned_output([artifact['executable'], '--list', '--format=terse'], timeout=30, limit=8 * 1024 * 1024)
-            ids = [line.removesuffix(': test') for line in output.splitlines() if line.endswith(': test')]
-            selector = identity['filter']
-            selected = [test_id for test_id in ids if selector is None or
-                        (test_id == selector if '--exact' in identity['harness'] else selector in test_id)]
-            actual = retention.digest(json.dumps(selected, separators=(',', ':')).encode())
-            receipts.require(actual == expected[name]['ids_sha256'],
-                             'Current compiler discovered another unit universe')
-            print('ADOPTED_COMPLETE_UNIT_COMMAND ' + name, flush=True)
+        from contextlib import ExitStack
+        with ExitStack() as owned_sources:
+            external_manifest = external_descriptor = None
+            if any(identity['cargo'].get('--manifest-path') == openraft_package.MANIFEST_VARIABLE
+                   for _, identity in group):
+                receipts.require(len(group) == 1 and group[0][1] == rust_identity(openraft_package.WRAPPER),
+                                 'External compiler action is not the closed wrapper')
+                external_manifest, external_descriptor = owned_sources.enter_context(
+                    openraft_package.current_source(candidate, owned_output))
+                receipts.require(expected[group[0][0]].get('external_package') == external_descriptor,
+                                 'External package descriptor changed after scope')
+                command = tuple(str(external_manifest) if arg == openraft_package.MANIFEST_VARIABLE
+                                else arg for arg in command)
+                command = ('env', 'CARGO_TARGET_DIR=' + str(Path.cwd() / 'target/openraft-regression'), *command)
+            print('COMPILE_ONLY ' + shlex.join(command), flush=True)
+            output = owned_compile(command)
+            artifacts = []
+            for line in output.splitlines():
+                try:
+                    row = json.loads(line)
+                except (ValueError, TypeError) as error:
+                    raise receipts.ReceiptError('Malformed current Cargo JSON evidence') from error
+                receipts.require(isinstance(row, dict), 'Malformed current Cargo artifact')
+                if row.get('reason') == 'compiler-artifact' and row.get('profile', {}).get('test') and row.get('executable'):
+                    artifacts.append(row)
+            for name, identity in group:
+                flags = identity['cargo']
+                profile=test_profile(candidate,flags.get('--manifest-path'))
+                if implicit_cluster_target(identity):
+                    footprint=expected[name]['targets']
+                    matching=[row for row in artifacts if row['package_id'].split('#')[-1].startswith('plurx-cluster-check@') or '/plurx-cluster-check#' in row['package_id']]
+                    tags=[(row['target']['name'],tuple(row['target']['kind'])) for row in matching]
+                    receipts.require(len(tags)==len(set(tags)) and set(tags)=={(target['name'],tuple(target['kind'])) for target in footprint},'Compiled implicit target footprint differs')
+                    all_ids=[]
+                    for target in footprint:
+                        rows=[row for row in matching if row['target']['name']==target['name'] and row['target']['kind']==target['kind']]
+                        receipts.require(len(rows)==1 and sorted(rows[0]['features'])==sorted(target['features']) and rows[0]['profile']==profile,'Implicit target feature graph differs')
+                        require_current_fingerprint(rows[0],profile)
+                        output=owned_output([rows[0]['executable'],'--list','--format=terse'],timeout=30,limit=8*1024*1024)
+                        full=[line.removesuffix(': test') for line in output.splitlines() if line.endswith(': test')]
+                        all_ids.extend(select_ids(full,identity))
+                    receipts.require(retention.digest(json.dumps(all_ids,separators=(',',':')).encode())==expected[name]['ids_sha256'],'Compiled implicit selected universe differs')
+                    print('ADOPTED_COMPLETE_UNIT_COMMAND '+name,flush=True)
+                    continue
+                target_name = flags.get('--test') or flags.get('--bin')
+                if target_name is None:
+                    package = flags.get('-p')
+                    if flags.get('--manifest-path') == openraft_package.MANIFEST_VARIABLE:
+                        package = openraft_package.NAME
+                    elif package is None:
+                        import tomllib
+                        package = tomllib.loads(Path(flags['--manifest-path']).read_text())['package']['name']
+                    target_name = package.replace('-', '_')
+                matching = [row for row in artifacts if row['target']['name'] == target_name]
+                receipts.require(len(matching) == 1, 'Current target artifact missing or ambiguous')
+                artifact = matching[0]
+                if flags.get('--manifest-path') == openraft_package.MANIFEST_VARIABLE:
+                    receipts.require(external_manifest is not None
+                                     and expected[name].get('external_package') == external_descriptor
+                                     and artifact['target']['kind'] == ['lib']
+                                     and Path(artifact['target']['src_path']) == external_manifest.parent / 'src/lib.rs'
+                                     and artifact['package_id'] == 'path+' + external_manifest.parent.as_uri()
+                                         + '#' + openraft_package.NAME + '@' + openraft_package.VERSION,
+                                     'Current external package artifact source/identity differs')
+                receipts.require(sorted(artifact['features']) == sorted(expected[name]['features']) and artifact['profile']==profile,
+                                 'Current compiled feature graph differs from adopted target')
+                require_current_fingerprint(artifact,profile)
+                output = owned_output([artifact['executable'], '--list', '--format=terse'], timeout=30, limit=8 * 1024 * 1024)
+                ids = [line.removesuffix(': test') for line in output.splitlines() if line.endswith(': test')]
+                selector = identity['filter']
+                selected = [test_id for test_id in ids if selector is None or
+                            (test_id == selector if '--exact' in identity['harness'] else selector in test_id)]
+                actual = retention.digest(json.dumps(selected, separators=(',', ':')).encode())
+                receipts.require(actual == expected[name]['ids_sha256'],
+                                 'Current compiler discovered another unit universe')
+                print('ADOPTED_COMPLETE_UNIT_COMMAND ' + name, flush=True)
 
 
 def main():
