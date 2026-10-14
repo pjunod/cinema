@@ -49,6 +49,212 @@ def native_xctest_tree(status='Success', count='0'):
         typed('ActionTestPlanRunSummary', name=string('Test Scheme Action'), testableSummaries=array(testable))))
 
 
+class OriginalScopeEvidenceCase(unittest.TestCase):
+    def retired_fixture(self):
+        policy = dict(retention.RETIRED_DAEMON)
+        old, successor = policy['id'], policy['successor']
+        proof = fixture()
+        proof.update(version=2, source_commit='b' * 40,
+                     command_units={'version': 1, 'source_commit': 'b' * 40,
+                                    'logs': {}, 'commands': []})
+        suite = proof['lanes']['rust'][0]
+        suite.update(name='daemon', ids=['a', successor], inventory=log('a\n' + successor + '\n'))
+        first = suite['records'][0]
+        text = 'test a ... ok\ntest ' + old + ' ... ok\n'
+        first.update(source_commit=policy['source'], outcomes={'a': 'pass', old: 'pass'}, log=log(text))
+        proof['command_units']['logs'][first['log']['sha256']] = first['log']
+        policy['log'] = first['log']['sha256']
+        second = copy.deepcopy(first)
+        second.update(sequence=2, source_commit='b' * 40, outcomes={successor: 'pass'},
+                      log=log('test ' + successor + ' ... ok\n'))
+        suite['records'].append(second)
+        return proof, policy
+
+    def validate_retired(self, proof, policy, differences=lambda a, b: set(), source=lambda a, b: None):
+        with patch.object(retention, 'RETIRED_DAEMON', policy), \
+                patch.object(retention, 'COHORTS', {'rust': {proof['lanes']['rust'][0]['name']}}), \
+                patch('validation.qualification_unit_continuation.validate', return_value={}):
+            return retention.validate(proof, 'b' * 40, differences=differences, source=source)
+
+    def test_retired_original_pass_keeps_full_native_scope_and_later_successor_accounting(self):
+        proof, policy = self.retired_fixture()
+        original = copy.deepcopy(proof)
+        adopted, _ = self.validate_retired(proof, policy)
+        self.assertEqual(adopted['rust']['passed'], 2)
+        retired = adopted['rust']['retired_original_passes']
+        self.assertEqual([(row['test_id'], row['outcome'], row['successor']) for row in retired],
+                         [(policy['id'], 'pass', policy['successor'])])
+        self.assertEqual(proof, original)
+
+    def test_retired_original_refuses_other_capture_context_and_nonpassing_or_earlier_successor(self):
+        mutations = [
+            lambda p: p['lanes']['rust'][0].update(name='core'),
+            lambda p: p['lanes']['rust'][0]['records'][0].update(source_commit='a' * 40),
+            lambda p: p['lanes']['rust'][0]['records'][0].update(log=log('test a ... ok\n')),
+            lambda p: p['lanes']['rust'][0]['records'][0]['outcomes'].update(unreviewed='pass'),
+            lambda p: p['lanes']['rust'][0]['records'].pop(),
+            lambda p: p['lanes']['rust'][0]['records'][1].update(sequence=0),
+        ]
+        for mutate in mutations:
+            proof, policy = self.retired_fixture()
+            mutate(proof)
+            with self.subTest(mutation=mutate), self.assertRaises(receipts.ReceiptError):
+                self.validate_retired(proof, policy)
+        for status, native in [('ignored', 'ignored'), ('fail', 'FAILED')]:
+            proof, policy = self.retired_fixture()
+            record = proof['lanes']['rust'][0]['records'][1]
+            record.update(outcomes={policy['successor']: status},
+                          log=log('test ' + policy['successor'] + ' ... ' + native + '\n'))
+            with self.subTest(status=status), self.assertRaises(receipts.ReceiptError):
+                self.validate_retired(proof, policy)
+        proof, policy = self.retired_fixture()
+        record = proof['lanes']['rust'][0]['records'][0]
+        record['outcomes'][policy['id']] = 'fail'
+        record['log'] = log('test a ... ok\ntest ' + policy['id'] + ' ... FAILED\n')
+        policy['log'] = record['log']['sha256']
+        with self.assertRaises(receipts.ReceiptError):
+            self.validate_retired(proof, policy)
+
+        proof, policy = self.retired_fixture()
+        records = proof['lanes']['rust'][0]['records']
+        duplicate = copy.deepcopy(records[0])
+        duplicate['sequence'] = 2
+        records[1]['sequence'] = 3
+        records.append(duplicate)
+        with self.assertRaisesRegex(receipts.ReceiptError, 'Duplicate retired original'):
+            self.validate_retired(proof, policy)
+
+    def test_retired_successor_refuses_source_invalidation_and_later_withheld_failure(self):
+        for later_failure in (False, True):
+            proof, policy = self.retired_fixture()
+            suite = proof['lanes']['rust'][0]
+            if later_failure:
+                record = copy.deepcopy(suite['records'][1])
+                record.update(sequence=3, outcomes={policy['successor']: 'fail'},
+                              log=log('test ' + policy['successor'] + ' ... FAILED\n'))
+                suite['records'].append(record)
+            suite['records'][-1]['source_commit'] = 'a' * 40
+            for record in suite['records']:
+                if record['source_commit'] != 'b' * 40:
+                    record['changes'] = {'crates/input.rs': {
+                        'before': retention.digest(b'old'), 'after': retention.digest(b'new'),
+                        'affected_ids': [policy['successor']] if record is suite['records'][-1] else []}}
+            with self.subTest(later_failure=later_failure), self.assertRaises(receipts.ReceiptError):
+                self.validate_retired(proof, policy,
+                    differences=lambda a, b: {'crates/input.rs'} if a != b else set(),
+                    source=lambda commit, path: b'new' if commit == 'b' * 40 else b'old')
+
+    def test_structural_slots_bound_before_decode_and_duplicate_canonical_names_refuse(self):
+        from validation import qualification_unit_continuation as commands
+        proof = fixture()
+        proof.update(version=2, source_commit='b' * 40, command_units={
+            'version': 2, 'source_commit': 'b' * 40, 'logs': {}, 'commands': []})
+        suite = proof['lanes']['rust'][0]
+        item = log(json.dumps(suite))
+        command = log(json.dumps({'name': 'validation', 'records': []}))
+        proof['command_units']['logs'].update({item['sha256']: item, command['sha256']: command})
+        proof['lanes']['rust'] = [{'sha256_ref': item['sha256']}]
+        proof['command_units']['commands'] = [{'sha256_ref': command['sha256']}]
+        with patch.object(commands, 'canonical', return_value={'validation': 'committed command'}):
+            expanded = retention.expanded_document(proof)
+            self.assertEqual(expanded['lanes']['rust'][0], suite)
+            self.assertEqual(expanded['command_units']['commands'][0]['name'], 'validation')
+            for field, count in [('suites', 9), ('commands', 513)]:
+                changed = copy.deepcopy(proof)
+                slots = changed['lanes']['rust'] if field == 'suites' else changed['command_units']['commands']
+                slots *= count
+                with self.subTest(field=field), self.assertRaises(receipts.ReceiptError), \
+                        patch('validation.unit_evidence_objects.Objects.resolve') as decode:
+                    try:
+                        retention.expanded_document(changed)
+                    finally:
+                        decode.assert_not_called()
+            for field in ('suites', 'commands'):
+                changed = copy.deepcopy(proof)
+                slots = changed['lanes']['rust'] if field == 'suites' else changed['command_units']['commands']
+                slots *= 2
+                with self.subTest(field=field), self.assertRaises(receipts.ReceiptError):
+                    retention.expanded_document(changed)
+            changed = copy.deepcopy(proof)
+            changed['command_units']['version'] = 1
+            with self.assertRaises(receipts.ReceiptError):
+                retention.expanded_document(changed)
+
+    def test_generic_ci_authentication_uses_bounded_integer_ids_and_one_live_origin(self):
+        proof = fixture()
+        records = proof['lanes']['rust'][0]['records']
+        records[0]['origin'].update(kind='authenticated-ci', identity='run:77/job:88')
+        second = copy.deepcopy(records[0])
+        second['sequence'] = 2
+        records.append(second)
+        binding = {'pull_request': 1, 'head_sha': 'd' * 40, 'base_sha': 'c' * 40,
+                   'head_ref': proof['branch']}
+        class API:
+            def __init__(self, raw):
+                self.calls = []
+                self.digest = retention.digest(raw)
+            def get(self, path):
+                self.calls.append(path)
+                if path == '': return {'id': 1}
+                if path == '/actions/runs/77':
+                    return {'repository': {'id': 1}, 'commit_sha': 'b' * 40}
+                if path == '/pulls/1':
+                    return {'number': 1, 'state': 'open', 'merged': False,
+                        'head': {'repo': {'id': 1}, 'sha': 'd' * 40, 'ref': proof['branch']},
+                        'base': {'repo': {'id': 1}, 'sha': 'c' * 40, 'ref': 'main'}}
+                raise AssertionError(path)
+            def pages(self, path):
+                self.calls.append(path)
+                if path == '/actions/runs/77/jobs':
+                    return [{'id': 88, 'run_id': 77, 'repo_id': 1, 'status': 'failure', 'attempt': 1}]
+                if path == '/issues/1/comments':
+                    claim = {'repository': 1, 'pr': 1, 'sha256': self.digest,
+                             'attachment_id': 1, 'attachment_uuid': '0' * 36}
+                    return [{'id': 1, 'user': {'id': 2, 'login': 'writer'},
+                             'body': 'Promotion-Unit-Evidence: ' + json.dumps(claim)}]
+                raise AssertionError(path)
+            def bytes(self, path):
+                self.calls.append(path)
+                self.assert_path = path
+                return base64.b64decode(records[0]['log']['base64'])
+        raw = json.dumps(proof).encode()
+        api = API(raw)
+        with patch.object(receipts, 'verify_attestor'), \
+                patch.object(retention, 'validate', return_value={'rust': {'mode': 'retained-unit-evidence'}}):
+            retention.verify(api, raw, retention.digest(raw), binding, 'd' * 40, 1, '0' * 36)
+        for path in ['/actions/runs/77', '/actions/runs/77/jobs', '/actions/jobs/88/logs']:
+            self.assertEqual(api.calls.count(path), 1)
+        from validation import unit_evidence_objects as objects
+        from validation import qualification_unit_continuation as commands
+        shared = copy.deepcopy(proof)
+        shared.update(version=2, command_units={})
+        shared_raw = json.dumps(shared).encode()
+        shared_api = API(shared_raw)
+        def typed_auth(api, command_proof, document, repository, live_logs=None):
+            self.assertIsNotNone(live_logs)
+            self.assertEqual(live_logs.get(api, 77, 88), base64.b64decode(records[0]['log']['base64']))
+            self.assertEqual(live_logs.bytes, len(base64.b64decode(records[0]['log']['base64'])))
+        with patch.object(receipts, 'verify_attestor'), \
+                patch.object(retention, 'expanded_document', side_effect=lambda value: value), \
+                patch.object(commands, 'authenticate', side_effect=typed_auth), \
+                patch.object(retention, 'validate', return_value=({'rust': {}}, {})):
+            retention.verify(shared_api, shared_raw, retention.digest(shared_raw), binding, 'd' * 40, 1, '0' * 36)
+        self.assertEqual(shared_api.calls.count('/actions/jobs/88/logs'), 1)
+        with patch.object(objects, 'CI_LOG_BYTES', 1), patch.object(receipts, 'verify_attestor'), \
+                patch.object(retention, 'validate'), self.assertRaisesRegex(receipts.ReceiptError, 'budget'):
+            retention.verify(API(raw), raw, retention.digest(raw), binding, 'd' * 40, 1, '0' * 36)
+        for identity in ['run:0/job:88', 'run:077/job:88', 'run:77/job:088',
+                         'run:' + '1' * 20 + '/job:88', 'run:77/job:88/trailing']:
+            changed = copy.deepcopy(proof)
+            changed['lanes']['rust'][0]['records'][0]['origin']['identity'] = identity
+            raw = json.dumps(changed).encode()
+            api = API(raw)
+            with self.subTest(identity=identity), patch.object(receipts, 'verify_attestor'), \
+                    patch.object(retention, 'validate'), self.assertRaises(receipts.ReceiptError):
+                retention.verify(api, raw, retention.digest(raw), binding, 'd' * 40, 1, '0' * 36)
+            self.assertFalse(any(path.startswith('/actions/') for path in api.calls))
+
+
 class NativeAppleEvidenceCase(unittest.TestCase):
     def test_native_namespaces_preserve_methods_and_refuse_collisions_and_other_lanes(self):
         template = "Test Case '-[{}.ExampleTests testA]' passed (0.1 seconds).\n"

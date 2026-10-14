@@ -26,6 +26,12 @@ PROTOCOL_PATHS = {
     'validation/main_preflight_adoption.py', 'validation/main_unit_receipts.py',
 }
 DIGEST = re.compile(r'[0-9a-f]{64}')
+RETIRED_DAEMON = {
+    'source': 'e52f1e3603a0d805db0f8acb6edca8eb883b1ea6',
+    'log': 'e89367b0af7ace99368854e141cc9f36e08b546e09fd9da9845ba2a0d983bd96',
+    'id': 'fragindex::ride_along_tests::dropping_the_build_future_mid_pass_removes_the_stage',
+    'successor': 'fragindex::ride_along_tests::standalone_index_yields_to_foreground_and_removes_partial_stage',
+}
 
 
 def digest(raw):
@@ -78,6 +84,37 @@ def shared_blob(document, item):
               and logs[value].get('sha256') == value, 'Shared evidence unavailable or aliased')
     decoded_log(logs[value])
     return logs[value]
+
+
+def expanded_document(document):
+    """Authenticate and validate one bounded view of the original signed bytes."""
+    if document.get('version') != 2:
+        return document
+    from validation.unit_evidence_objects import Objects
+    from validation import qualification_unit_continuation as commands
+    lanes = document['lanes']
+    units = document['command_units']
+    r.require(isinstance(lanes, dict) and lanes and set(lanes) <= LANES
+              and all(isinstance(slots, list) for slots in lanes.values())
+              and sum(len(slots) for slots in lanes.values()) <= 8,
+              'Unknown or oversized structural suite slots')
+    r.require(isinstance(units, dict) and isinstance(units.get('commands'), list)
+              and len(units['commands']) <= 512, 'Oversized structural command slots')
+    objects = Objects(units['logs'])
+    if units.get('version') == 2:
+        units = commands.expanded_commands(units, document['source_commit'], objects)
+    else:
+        r.require(not any(isinstance(item, dict) and 'sha256_ref' in item
+                          for item in units['commands']),
+                  'Version-one command objects cannot use references')
+    expanded = {}
+    for lane, slots in lanes.items():
+        suites = [objects.resolve(slot, True) for slot in slots]
+        names = [suite.get('name') for suite in suites]
+        r.require(all(isinstance(name, str) and name in COHORTS[lane] for name in names)
+                  and len(names) == len(set(names)), 'Unknown or repeated expanded suite')
+        expanded[lane] = suites
+    return {**document, 'lanes': expanded, 'command_units': units}
 
 
 def xctest_result_rows(raw):
@@ -290,6 +327,7 @@ def validate(document, candidate, source=git_bytes, differences=changed):
     frozen = r.sha(document['source_commit'])
     if document['version'] == 2:
         r.require(frozen == candidate, 'Command adoption binds the exact candidate')
+        document = expanded_document(document)
     protocol_paths = set(PROTOCOL_PATHS)
     r.require(differences(frozen, candidate) <= protocol_paths,
               'Candidate changed beyond reviewed retention protocol')
@@ -298,6 +336,7 @@ def validate(document, candidate, source=git_bytes, differences=changed):
         r.require(isinstance(suites, list) and suites, 'Empty retained suite')
         suite_names = set()
         lane_count = 0
+        lane_retired = []
         for suite in suites:
             r.require({'name', 'ids', 'environment', 'inventory', 'records'} <= set(suite)
                       and set(suite) <= {'name', 'ids', 'environment', 'inventory', 'records',
@@ -330,6 +369,9 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                               for key, value in environment.items()) for item in compatible),
                       'Reviewed environments do not share the unit contract')
             results = {}
+            passing_sequences = {}
+            failure_sequences = {}
+            retired_records = []
             failed_ids = set()
             sequences = set()
             records = suite['records']
@@ -373,8 +415,7 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                               and set(affected) <= set(ids), 'Unknown affected unit identity')
                     invalidated.update(affected)
                 outcomes = record['outcomes']
-                r.require(isinstance(outcomes, dict) and outcomes and set(outcomes) <= set(ids),
-                          'Unknown actual unit outcome')
+                r.require(isinstance(outcomes, dict) and outcomes, 'Unknown actual unit outcome')
                 r.require(record['format'] not in {'xctest-class', 'xctest-result'} or lane == 'apple',
                           'Native XCTest format outside Apple lane')
                 raw_log = decoded_log(shared_blob(document, record['log']))
@@ -383,6 +424,22 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                                         origin['command']),
                               'Split Rust outcomes require actual serial or exact execution')
                 actual_outcomes = log_outcomes(raw_log, record['format'])
+                extras = set(outcomes) - set(ids)
+                retired = None
+                if extras:
+                    r.require(not retired_records, 'Duplicate retired original execution')
+                    r.require(document['version'] == 2 and lane == 'rust'
+                              and suite['name'] == 'daemon' and record['format'] == 'rust'
+                              and prior == RETIRED_DAEMON['source']
+                              and digest(raw_log.encode()) == RETIRED_DAEMON['log']
+                              and extras == {RETIRED_DAEMON['id']}
+                              and outcomes[RETIRED_DAEMON['id']] == 'pass'
+                              and RETIRED_DAEMON['successor'] in ids,
+                              'Unknown or failed retired original outcome')
+                    retired = RETIRED_DAEMON['id']
+                    retired_records.append({'sequence': sequence, 'source_commit': prior,
+                        'log_sha256': RETIRED_DAEMON['log'], 'test_id': retired,
+                        'outcome': 'pass', 'successor': RETIRED_DAEMON['successor']})
                 if aggregate and sequence == aggregate['baseline_sequence']:
                     r.require(record['format'] in {'gradle-summary', 'instrumentation-summary'},
                               'Unsupported aggregate cohort source')
@@ -400,8 +457,13 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                     r.require(outcome in {'pass', 'fail', 'ignored'}, 'Invalid actual outcome')
                     if outcome == 'fail':
                         failed_ids.add(test_id)
+                        failure_sequences[test_id] = sequence
+                    if test_id == retired:
+                        continue
                     if test_id not in invalidated:
                         results[test_id] = outcome
+                        if outcome == 'pass':
+                            passing_sequences[test_id] = sequence
             if aggregate:
                 r.require(aggregate['baseline_sequence'] in sequences and
                           sum(record['sequence'] == aggregate['baseline_sequence'] for record in records) == 1,
@@ -411,12 +473,20 @@ def validate(document, candidate, source=git_bytes, differences=changed):
             r.require(all(results[test_id] == 'pass' for test_id in failed_ids)
                       and (not aggregate or all(value == 'pass' for value in results.values())),
                       'A failed unit cannot be cleared by ignoring it')
+            r.require(all(results.get(item['successor']) == 'pass'
+                          and passing_sequences.get(item['successor'], 0)
+                          > max(item['sequence'], failure_sequences.get(item['successor'], 0))
+                          for item in retired_records),
+                      'Retired original outcome needs a later applicable successor pass')
+            lane_retired.extend(retired_records)
             lane_count += (aggregate['total'] if aggregate else
                            sum(value == 'pass' for value in results.values()))
         r.require(suite_names == COHORTS[lane], 'Incomplete canonical lane cohort footprint')
         adopted[lane] = {'mode': 'retained-unit-evidence', 'passed': lane_count,
                          'suites': sorted(suite_names),
                          'accounting': 'aggregate-cohort-derived' if any('aggregate' in s for s in suites) else 'literal-per-ID'}
+        if lane_retired:
+            adopted[lane]['retired_original_passes'] = lane_retired
     waiver = document['windows_waiver']
     r.require(waiver is None or waiver == {
         'scope': 'windows_compile', 'authority': 'human-user',
@@ -530,16 +600,21 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
         r.verify_attestor(api, {'repository': repository}, comment['user'])
         attested.append(r.positive(comment['id']))
     r.require(attested, 'Retained units await authenticated writer hash attestation')
+    document = expanded_document(document)
+    from validation import qualification_unit_continuation as commands
+    from validation.unit_evidence_objects import LiveLogs
+    runs, jobs_by_run, live_logs = {}, {}, LiveLogs()
     for suites in document['lanes'].values():
         for suite in suites:
             for record in suite['records']:
                 origin = record['origin']
                 if origin['kind'] == 'authenticated-ci':
-                    match = re.fullmatch(r'run:(\d+)/job:(\d+)', origin['identity'])
-                    r.require(match is not None, 'Malformed CI execution identity')
-                    run_id, job_id = map(r.positive, match.groups())
-                    actual_run = api.get(f'/actions/runs/{run_id}')
-                    actual_jobs = api.pages(f'/actions/runs/{run_id}/jobs')
+                    run_id, job_id = commands.authenticated_ids(origin['identity'])
+                    if run_id not in runs:
+                        runs[run_id] = api.get(f'/actions/runs/{run_id}')
+                        jobs_by_run[run_id] = api.pages(f'/actions/runs/{run_id}/jobs')
+                    actual_run = runs[run_id]
+                    actual_jobs = jobs_by_run[run_id]
                     jobs = [job for job in actual_jobs if job['id'] == job_id]
                     r.require(actual_run['repository']['id'] == repository
                               and actual_run['commit_sha'] == record['source_commit']
@@ -548,13 +623,13 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
                               and jobs[0]['status'] in {'success', 'failure'}
                               and type(jobs[0]['attempt']) is int and jobs[0]['attempt'] == 1,
                               'Actual CI unit execution identity mismatch')
-                    raw_log = api.bytes(f'/actions/jobs/{job_id}/logs')
+                    raw_log = live_logs.get(api, run_id, job_id)
                     r.require(digest(raw_log) == shared_blob(document, record['log'])['sha256'],
                               'Authenticated CI log contradicts retained origin')
     command_units = None
     if document.get('version') == 2:
         from validation import qualification_unit_continuation as commands
-        commands.authenticate(api, document['command_units'], document, repository)
+        commands.authenticate(api, document['command_units'], document, repository, live_logs=live_logs)
         adopted, command_units = validate(document, candidate)
     else:
         adopted = validate(document, candidate)

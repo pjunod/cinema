@@ -1074,9 +1074,31 @@ def authenticated_ids(identity):
     return tuple(receipts.positive(int(value)) for value in match.groups())
 
 
-def authenticate(api, proof, document, repository):
+def expanded_commands(proof, candidate, objects=None):
+    """Resolve only declared command slots; ordinary authority checks still follow."""
+    from validation.unit_evidence_objects import Objects
+    receipts.require(set(proof) == {'version', 'source_commit', 'commands', 'logs'}
+                     and proof['version'] in {1, 2} and proof['source_commit'] == candidate,
+                     'Unknown or stale command proof')
+    claims = proof['commands']
+    receipts.require(isinstance(claims, list) and 0 < len(claims) <= 512,
+                     'Empty or oversized command enrollment')
+    objects = objects or Objects(proof['logs'])
+    claims = [objects.resolve(item, proof['version'] == 2) for item in claims]
+    names = [item.get('name') for item in claims]
+    known = canonical(candidate)
+    receipts.require(all(isinstance(name, str) and name in known for name in names)
+                     and len(names) == len(set(names)), 'Unknown or repeated expanded command')
+    return {**proof, 'commands': claims}
+
+
+def authenticate(api, proof, document, repository, live_logs=None):
     """Local records use the authenticated writer; CI records also use live logs."""
-    origins, runs, jobs_by_run, scopes = {}, {}, {}, set()
+    if proof['version'] == 2:
+        proof = expanded_commands(proof, document['source_commit'])
+    from validation.unit_evidence_objects import LiveLogs
+    live_logs = LiveLogs() if live_logs is None else live_logs
+    runs, jobs_by_run, scopes = {}, {}, set()
     for item in proof['commands']:
         kind = item['name'].split(':')[0]
         for record in item['records']:
@@ -1112,9 +1134,7 @@ def authenticate(api, proof, document, repository):
             if key not in scopes:
                 authenticate_scope(api,run_id,run,workflow.decode(),document,record['source_commit'],repository)
                 scopes.add(key)
-            if job_id not in origins:
-                origins[job_id] = api.bytes(f'/actions/jobs/{job_id}/logs')
-            raw = origins[job_id]
+            raw = live_logs.get(api, run_id, job_id)
             if kind in RUST_KINDS:
                 historical_rust_environment_contract(record['source_commit'],workflow.decode(),kind)
                 text=clean_log(raw.decode())
@@ -1126,8 +1146,10 @@ def authenticate(api, proof, document, repository):
 
 def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen_python_ids):
     """Only a complete source-applicable union authorizes command adoption."""
-    receipts.require(set(proof) == {'version', 'source_commit', 'commands', 'logs'} and proof['version'] == 1
+    receipts.require(set(proof) == {'version', 'source_commit', 'commands', 'logs'} and proof['version'] in {1, 2}
                      and proof['source_commit'] == candidate, 'Unknown or stale command proof')
+    if proof['version'] == 2:
+        proof = expanded_commands(proof, candidate)
     receipts.require(isinstance(proof['logs'], dict) and proof['logs'] and len(proof['logs']) <= 1024,
                      'Missing or oversized shared actual logs')
     canonical_commands = commands(candidate)

@@ -1155,8 +1155,9 @@ turn namespace normalization into cross-platform execution. Strict hierarchy,
 target/URI/name agreement, failure counts, duplicate identities/JSON keys and
 traversal bounds refuse malformed evidence. Version-two evidence may share
 digest-bound embedded logs and source manifests, retaining every source, path
-hash and affected-ID check within the existing size limit. The six new controls
-remain effort-only obligations after the reviewable task gate and landing.
+hash and affected-ID check within the existing size limit. R28 landed as #1088 on effort `1d489c2ba` after all seven exact-head
+gate 5099 jobs passed. Its six new controls passed once there with native
+and wrapper exit 0 and unchanged clean source.
 
 On effort `52dfb9128`, the complete Python components validate 443 validation
 and 1,042 operations memberships; Android JVM validates 1,149 memberships,
@@ -1170,3 +1171,20 @@ effort. Apple compilation and enumeration find 1,029 iOS and 1,013 tvOS unit
 methods without executing bodies. These are component facts: remaining full
 retention, non-unit qualification, promotion, deployment and physical HDR
 acceptance are still open.
+
+R29 is built on a reviewable task branch and awaits its compile-only gate,
+landing and ten new effort-only controls. It preserves the complete original
+daemon capture, accounts separately for its single retired passing method,
+and requires the current successor to pass later. Only the exact reviewed
+source and log can use that retirement rule; duplicate enrollment refuses.
+Bounded version-two structural references address a measured 5,210,534-byte
+partial proof without raising the 4 MiB attachment limit. Expanded suites
+and commands retain their original validation and authentication. Unique
+structural data is limited to 32 MiB, individual objects to 4 MiB, traversal
+to 64 levels and 131,072 nodes per object, and a proof to 524,288 nodes.
+Iterator traversal stops before consuming a broad child list. Generic and
+typed CI authentication share one 64 MiB raw-log cache; bounded decimal
+identities convert to integers before live authority checks. Original
+failures, source invalidation and current compiler obligations remain.
+The locked external Openraft package adapter is still missing; complete
+qualification, deployment and physical HDR acceptance remain open.
