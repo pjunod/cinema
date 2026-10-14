@@ -6544,3 +6544,35 @@ source = "clients/apple/Sources/PreparedReplacement.swift"
 source_anchor = "fields.append("
 test = "clients/apple/Tests/PreparedReplacementTests.swift"
 test_anchor = "testPreparedAcquisitionReplacesStaleHintsAndClampsOnlyNegativePosition"
+
+[[fixes]]
+id = "apple.pressure-acquisition-observed-intent"
+commits = ["1eb39847ab7c39d60003221feeaba9e70a17825d"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "struct PreparedAcquisitionAnchors: Equatable"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testAcquisitionPreservesObservedIntentAndBoundsRateScaledLead"
+
+[[fixes]]
+id = "apple.pressure-acquisition-fact-refusal"
+commits = ["1eb39847ab7c39d60003221feeaba9e70a17825d"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "struct PreparedAcquisitionAnchors: Equatable"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testAcquisitionPreservesIdentityForUnprotectedIntentAndInvalidFacts"
+
+[[fixes]]
+id = "apple.pressure-acquisition-tail-bounds"
+commits = ["1eb39847ab7c39d60003221feeaba9e70a17825d"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "struct PreparedAcquisitionAnchors: Equatable"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testAcquisitionCapsBeforeEOFWithRunwayAndMinimumWallLead"
+
+[[fixes]]
+id = "apple.pressure-acquisition-final-clock"
+commits = ["1eb39847ab7c39d60003221feeaba9e70a17825d"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func preparedAcquisitionTargetHasRunway"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testFutureAcquisitionKeepsObservedClockAndRequiresItsOwnContiguousInterval"

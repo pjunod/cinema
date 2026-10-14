@@ -11444,3 +11444,52 @@ qualification remains open. Skipping the earlier fragment is not yet a proven
 repair. No units have executed. Formal adversarial
 review starts only after qualification; the requested Fable checkpoint follows
 that review and its fixes, before the batched merge coordinator's fast lane.
+
+### 10.317 — acquire future media without moving the viewer's clock
+
+The Apple 241 phone capture on `6dac64442` passes the original 15 manual and 5 Auto
+changes, with a 76.441 ms maximum decoded-frame gap. Its separate 3 Mb/s series
+stalls before any low-link landing. All 188 owned processes close with zero
+residuals. The TV 241 full attempt measures its four output costs but the SDK
+launch is refused because the device is asleep; it receives zero manual, Auto
+or low-link credit. TV wake readiness remains pending.
+
+An isolated private incumbent-hint experiment reduces the advisory forward
+preference from 16 to 4 seconds while retaining the actual 16-second protection.
+It does not cancel an already outstanding 2.137 MB incumbent body, which overlaps
+the successor's acquisition for the six-second metadata window. A 480p successor
+loads 104–108seconds while the incumbent reaches 111seconds; a later 360p successor
+reaches metadata-ready but its loaded 114–126second interval trails the incumbent
+at 127seconds when readiness expires. The observed media responses are 200; these
+failures are not 503 refusals. The hint-only patch is rejected and is not part of
+the public repair.
+
+A separate private probe `f22185c5f` retains the captured viewer position as an
+immutable observation and gives pressure-driven Auto acquisition its own bounded
+future anchor. The response URL hint, initial hidden seek and loaded-media proof
+use that same anchor. The visible incumbent continues at its own clock until
+the final exact rendezvous; it is never paused, sought or advanced to the
+acquisition position. Original owner, item, viewer-action and rate fences remain.
+Unknown, paused, backward, unsafe-rate or infeasible end-of-title facts retain ordinary
+acquisition. No feature switch is added.
+
+The private probe records two actual low-link landings: 360p at 3 Mb/s and 1080p
+recovery, with no errors and a 69.696 ms maximum decoded-frame gap. The 360p
+acquisition anchor is six wall seconds ahead; its initial exact position is
+124,076 ms and the final exact rendezvous is 125,976 ms. Independent typed landing
+joins verify the actual offer, accepted wire acknowledgement, media ownership
+and decoded frames. This is a focused diagnostic, not the original 15-manual/
+5-Auto qualification, and it makes no largest-fitting-rung claim.
+
+The public two-anchor repair is committed in `1eb39847a` for Apple 242;
+exact final iOS/tvOS compilation and full qualification remain pending. The 77 authored regression
+anchors (73 retained plus 4 for this repair) have not executed. Metadata 6 seconds,
+readiness 12 seconds, reserve 4 seconds, minimum lead 1 second, runway 2 seconds and
+100ms readiness polls are unchanged; final cadence, seek, decoded alignment,
+clock matching and exposure proofs remain mandatory.
+
+Fresh full phone/TV qualification on the final Apple 242 tree, final adversarial
+review and the requested Fable checkpoint remain open. The earlier6dac full
+series does not qualify changed242 code. Independent display/audio, Safari iOS
+and the broader source/pressure matrix retain their existing limits. Units stay
+deferred through review to the authorized batched merge coordinator.

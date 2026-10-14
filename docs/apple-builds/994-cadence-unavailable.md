@@ -1,6 +1,6 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 241
+Build: 242
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal
@@ -49,3 +49,23 @@ extra HTTP probe or retry is introduced.
 
 [Continuous Quality Build §10.316](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10316--measure-acquisition-clock-lag-before-changing-prepared-hints)
 records the actual hint, early readiness gates and preserved failure evidence.
+
+
+Pressure-driven Auto now retains immutable viewer intent separately from one
+bounded future acquisition anchor. The URL hint, initial hidden seek and
+contiguous loaded-media proof use the same acquisition position; final exposure
+still matches the naturally advancing incumbent clock. All original timing,
+runway, owner, cadence and decoded-frame requirements remain unchanged.
+
+The private two-anchor diagnostic records 360p low-link and 1080p recovery with
+no errors and a 69.696 ms maximum decoded-frame gap. It is not full qualification.
+Earlier phone 241 passes 15 manual/5 Auto but stalls in the separate 3 Mb/s series;
+TV 241 launch is refused asleep. The rejected incumbent-hint-only trial does not
+cancel competing media fetches; observed responses are 200, not 503.
+
+Exact final Apple 242 compilation and full native acceptance remain pending. The 77
+authored regression anchors remain unrun; final adversarial and Fable reviews
+have not begun. Independent display/audio and broader matrix limits remain.
+
+[Continuous Quality Build §10.317](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10317--acquire-future-media-without-moving-the-viewers-clock)
+records the distinct production failures and focused diagnostic scope.
