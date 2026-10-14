@@ -44,6 +44,51 @@ fn prepared_manual_auto_bootstrap(
         })
 }
 
+/// A completed cache is not a purpose grant. Only an authorized canonical
+/// Auto downshift, or the existing bounded manual-to-Auto bootstrap, can keep
+/// its reader while the incumbent waits. Same-rung trials and upgrades cannot.
+fn prepared_cached_recovery_recipe_matches(
+    predecessor: &crate::media_sessions::RemoteStartRequest,
+    successor: &crate::media_sessions::RemoteStartRequest,
+) -> bool {
+    let SessionKind::Transcode { height: old_height } = predecessor.request.kind else {
+        return false;
+    };
+    let SessionKind::Transcode { height } = successor.request.kind else {
+        return false;
+    };
+    let Some(catalog) = successor.candidate_catalog.as_ref() else {
+        return false;
+    };
+    let downward = predecessor.request.automatic
+        && height > 0
+        && height < old_height
+        && predecessor
+            .candidate_catalog
+            .as_ref()
+            .is_some_and(|previous| {
+                previous.candidate.identity_matches()
+                    && predecessor.candidate_id == Some(previous.candidate.id)
+                    && i64::from(previous.candidate.height) == old_height
+            });
+    (downward || prepared_manual_auto_bootstrap(predecessor, successor))
+        && predecessor.principal == successor.principal
+        && predecessor.request.file_id == successor.request.file_id
+        && predecessor.request.playback_id == successor.request.playback_id
+        && predecessor.request.presentation == Presentation::Vod
+        && successor.request.presentation == Presentation::Vod
+        && successor.request.automatic
+        && predecessor.decoder_caps.is_some()
+        && predecessor.decoder_caps == successor.decoder_caps
+        && crate::playback_control::GradeIntent::from_request(&predecessor.request)
+            == crate::playback_control::GradeIntent::from_request(&successor.request)
+        && catalog.candidate.identity_matches()
+        && catalog.candidate.decoder_compatible
+        && catalog.candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
+        && i64::from(catalog.candidate.height) == height
+        && successor.candidate_id == Some(catalog.candidate.id)
+}
+
 /// Cancellation after actual capture still retires only that exact private owner.
 struct FirstPreparationCleanup {
     vod: Arc<crate::vodserve::VodServe>,
@@ -2960,6 +3005,74 @@ impl TranscodeManager {
         ready
     }
 
+    /// No public metadata can mint this proof: the exact private output must
+    /// already be sealed into the durable reservation and attached locally.
+    pub(crate) async fn prepared_cached_recovery_owner(
+        &self,
+        preparation: &plurx_core::domain::MediaSessionPreparation,
+        predecessor: &crate::media_sessions::RemoteStartRequest,
+    ) -> Option<(crate::vodserve::ResponseOwner, bool)> {
+        let route = self
+            .store
+            .media_session_route_by_incarnation(&preparation.incarnation_id)
+            .await
+            .ok()??;
+        if !plurx_core::store::PreparedOutputSeal::matches_reservation(preparation, &route)
+            || route.principal != predecessor.principal
+            || preparation.principal != predecessor.principal
+        {
+            return None;
+        }
+        let successor =
+            serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(&route.recipe_json)
+                .ok()?;
+        if !prepared_cached_recovery_recipe_matches(predecessor, &successor) {
+            return None;
+        }
+        let output = successor.retained_output.as_ref()?;
+        let user_id = route.principal.local_user_id()?;
+        let seal = plurx_core::store::PreparedOutputSeal {
+            incarnation_id: route.incarnation_id.clone(),
+            session_id: route.session_id.clone(),
+            user_id,
+            playback_id: route.playback_id,
+            owner_node_id: route.owner_node_id,
+            owner_epoch: route.owner_epoch,
+            expected_recipe_json: route.recipe_json,
+            expected_response_json: route.response_json,
+            predecessor_incarnation_id: preparation.expected_predecessor_incarnation_id.clone(),
+            predecessor_owner_node_id: preparation.expected_predecessor_owner_node_id.clone(),
+            predecessor_owner_epoch: preparation.expected_predecessor_owner_epoch,
+            deadline_ms: preparation.deadline_ms,
+            now_ms: crate::media_sessions::unix_ms(),
+            already_complete: true,
+            retained_output: Some(serde_json::to_value(output).ok()?),
+        };
+        if !self.store.prepared_output_sealed(&seal).await.ok()? {
+            return None;
+        }
+        let owner = self
+            .vod
+            .cached_prepared_reader_owner(&route.session_id, &route.incarnation_id, output)
+            .await?;
+        Some((
+            owner,
+            prepared_manual_auto_bootstrap(predecessor, &successor),
+        ))
+    }
+
+    pub(crate) fn prepared_cached_recovery_is_live(
+        &self,
+        preparation: &plurx_core::domain::MediaSessionPreparation,
+        owner: &crate::vodserve::ResponseOwner,
+    ) -> bool {
+        self.vod.cached_prepared_reader_is_live(
+            &preparation.session_id,
+            &preparation.incarnation_id,
+            owner,
+        )
+    }
+
     /// Prime a genuinely new unpublished reservation and seal its private output
     /// choice before admitting a client. Missing pending markers are strict recovery.
     #[allow(clippy::too_many_arguments)]
@@ -4057,6 +4170,114 @@ mod retained_recovery_tests {
             !prepared_manual_auto_bootstrap(&manual, &changed),
             "wrong canonical identity never grants handoff"
         );
+    }
+
+    #[test]
+    fn cached_recovery_purpose_requires_downward_auto_identity_grade_and_decoder() {
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        let route = crate::media_sessions::takeover_eligible_route("bootstrap", "incarnation");
+        let mut manual: crate::media_sessions::RemoteStartRequest =
+            serde_json::from_str(&route.recipe_json).expect("durable fixture");
+        manual.request.presentation = Presentation::Vod;
+        manual.request.automatic = false;
+        manual.request.kind = SessionKind::Transcode { height: 720 };
+        manual.candidate_id = None;
+        let caps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls"]})).expect("actual caps shape");
+        manual.decoder_caps = Some(
+            crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1)
+                .expect("usable decoder snapshot"),
+        );
+        let digest = [42; 32];
+        let mut automatic = manual.clone();
+        automatic.request.automatic = true;
+        automatic.candidate_id = Some(CandidateId::for_recipe_digest(digest));
+        automatic.candidate_catalog = Some(crate::media_sessions::CandidateCatalogContext {
+            caps,
+            candidate: QualityCandidate {
+                id: CandidateId::for_recipe_digest(digest),
+                recipe_digest: digest,
+                route: CandidateRoute::Encode,
+                normalized_geometry: false,
+                width: 1280,
+                height: 720,
+                target_height: 720,
+                planned_codec: None,
+                average_bps: None,
+                peak_bps: None,
+                grade: OutputGrade::Sdr,
+                decoder_compatible: true,
+                complete_cache: false,
+                sustainable: true,
+            },
+            binding: crate::media_pool::PlanningBinding {
+                generation: 1,
+                source_digest: "0".repeat(64),
+            },
+        });
+        let mut incumbent = automatic.clone();
+        incumbent.request.kind = SessionKind::Transcode { height: 1080 };
+        incumbent
+            .candidate_catalog
+            .as_mut()
+            .expect("catalog")
+            .candidate
+            .height = 1080;
+        assert!(
+            prepared_cached_recovery_recipe_matches(&incumbent, &automatic),
+            "an already Auto incumbent may recover to its exact lower candidate"
+        );
+        assert!(
+            prepared_cached_recovery_recipe_matches(&manual, &automatic),
+            "the separately validated manual bootstrap keeps its existing purpose"
+        );
+        assert!(
+            !prepared_cached_recovery_recipe_matches(&automatic, &automatic),
+            "a same-rung voluntary retry is not pressure recovery"
+        );
+        assert!(!prepared_cached_recovery_recipe_matches(
+            &automatic, &incumbent
+        ));
+        let mut changed = automatic.clone();
+        changed.request.hdr10 = !incumbent.request.hdr10;
+        assert!(!prepared_cached_recovery_recipe_matches(
+            &incumbent, &changed
+        ));
+        changed = automatic.clone();
+        changed.decoder_caps = None;
+        assert!(!prepared_cached_recovery_recipe_matches(
+            &incumbent, &changed
+        ));
+        changed = automatic.clone();
+        changed
+            .candidate_catalog
+            .as_mut()
+            .expect("catalog")
+            .candidate
+            .decoder_compatible = false;
+        assert!(!prepared_cached_recovery_recipe_matches(
+            &incumbent, &changed
+        ));
+        changed = automatic.clone();
+        changed
+            .candidate_catalog
+            .as_mut()
+            .expect("catalog")
+            .candidate
+            .recipe_digest = [24; 32];
+        assert!(!prepared_cached_recovery_recipe_matches(
+            &incumbent, &changed
+        ));
+        changed = automatic.clone();
+        changed.request.playback_id = "foreign-playback".into();
+        assert!(!prepared_cached_recovery_recipe_matches(
+            &incumbent, &changed
+        ));
+        changed = automatic.clone();
+        changed.principal =
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 987 };
+        assert!(!prepared_cached_recovery_recipe_matches(
+            &incumbent, &changed
+        ));
     }
 
     #[tokio::test]

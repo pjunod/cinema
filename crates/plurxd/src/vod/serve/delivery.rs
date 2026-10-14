@@ -383,6 +383,83 @@ impl VodServe {
         owner.file.as_ref().clone()
     }
 
+    /// Issue a private proof only for this exact completed retained reader.
+    /// The immutable artifact serves all bytes; its authority-only consumer
+    /// cannot request an encoder permit or borrow the incumbent's producer.
+    pub(crate) async fn cached_prepared_reader_owner(
+        &self,
+        session_id: &str,
+        incarnation: &str,
+        expected: &crate::transcode::RetainedOutputFacts,
+    ) -> Option<ResponseOwner> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        if !session.renewable()
+            || session.prepared_incarnation.as_deref() != Some(incarnation)
+            || !session.children.is_empty()
+            || session.retained_output.as_ref()?.facts() != *expected
+        {
+            return None;
+        }
+        let rendition = session.rendition.as_ref()?;
+        let readers = rendition.readers.lock().await;
+        let reader = readers.get(session_id)?;
+        if !reader.authority_only
+            || reader.draining_after_prepared_commit
+            || reader.admission_priority != crate::admission::Priority::Speculative
+        {
+            return None;
+        }
+        Some(session.response_owner())
+    }
+
+    /// Waiting cancellation cannot suspend or extend an accepted exchange.
+    /// A contended lock is unknown, never proof that a cached reader is live.
+    pub(crate) fn cached_prepared_reader_is_live(
+        &self,
+        session_id: &str,
+        incarnation: &str,
+        owner: &ResponseOwner,
+    ) -> bool {
+        let Ok(_lifecycle) = owner.lifecycle.try_lock() else {
+            return false;
+        };
+        let Ok(sessions) = self.shared.sessions.try_lock() else {
+            return false;
+        };
+        let Some(session) = sessions.get(session_id) else {
+            return false;
+        };
+        if !session.renewable()
+            || session.prepared_incarnation.as_deref() != Some(incarnation)
+            || !Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
+            || !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+            || !session.children.is_empty()
+            || owner.tombstone.is_some()
+        {
+            return false;
+        }
+        let (Some(actual), Some(retained), Some(rendition), Some(frozen)) = (
+            session.retained_output.as_ref(),
+            owner.retained_output.as_ref(),
+            session.rendition.as_ref(),
+            owner.rendition.as_ref(),
+        ) else {
+            return false;
+        };
+        if !Arc::ptr_eq(actual, retained) || !Arc::ptr_eq(rendition, frozen) {
+            return false;
+        }
+        let Ok(readers) = rendition.readers.try_lock() else {
+            return false;
+        };
+        readers.get(session_id).is_some_and(|reader| {
+            reader.authority_only
+                && !reader.draining_after_prepared_commit
+                && reader.admission_priority == crate::admission::Priority::Speculative
+        })
+    }
+
     pub(crate) async fn prepared_owner_matches(
         &self,
         session_id: &str,
@@ -1549,4 +1626,53 @@ fn playlist_with_start_tag(playlist: &[u8], start_ms: i64) -> Vec<u8> {
         output.extend_from_slice(line.as_bytes());
     }
     output
+}
+
+#[cfg(test)]
+mod cached_recovery_tests {
+    #[tokio::test]
+    async fn cached_reader_proof_requires_live_exact_incarnation_and_no_producer_demand() {
+        let (_temp, serve, facts, _) =
+            crate::vodserve::retained::test_post_attachment_output_facts().await;
+        let id = "00000000-0000-4000-8000-00000000cace";
+        let incarnation = "cached-recovery-incarnation";
+        let output = facts
+            .response_owner
+            .retained_output_facts()
+            .expect("actual immutable complete output");
+        assert!(
+            serve
+                .cached_prepared_reader_owner(id, incarnation, &output)
+                .await
+                .is_none(),
+            "ordinary cached publication is not a primed successor proof"
+        );
+        serve.mark_prepared_incarnation(id, incarnation).await;
+        let owner = serve
+            .cached_prepared_reader_owner(id, incarnation, &output)
+            .await
+            .expect("exact prepared retained reader");
+        assert!(serve.cached_prepared_reader_is_live(id, incarnation, &owner));
+        assert!(!serve.cached_prepared_reader_is_live(id, "foreign-incarnation", &owner));
+        {
+            let _busy = owner.lifecycle.lock().await;
+            assert!(
+                !serve.cached_prepared_reader_is_live(id, incarnation, &owner),
+                "contended lifecycle is unknown, never a survival claim"
+            );
+        }
+        {
+            let _busy = serve.shared.sessions.lock().await;
+            assert!(!serve.cached_prepared_reader_is_live(id, incarnation, &owner));
+        }
+        crate::vodserve::retained::test_make_attachment_uncaptured(&serve, id).await;
+        assert!(
+            !serve.cached_prepared_reader_is_live(id, incarnation, &owner),
+            "cold attachment cannot retain an old cached proof"
+        );
+        assert!(serve
+            .cached_prepared_reader_owner(id, incarnation, &output)
+            .await
+            .is_none());
+    }
 }

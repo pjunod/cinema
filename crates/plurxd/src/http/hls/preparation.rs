@@ -21,12 +21,23 @@ const MAX_PREPARATION_CANDIDATES: usize = 32;
 /// cancellation edge: settings disable, incumbent wait, the fixed deadline,
 /// and a planned-outage cancellation all name the same exact reservation and
 /// only one of them can take cleanup ownership.
+// No serde/public constructor: only the manager's sealed local reader can
+// produce this capability. Bootstrap is derived from the validated recipes.
+#[derive(Clone)]
+struct CachedRecoveryOwner {
+    owner: crate::vodserve::ResponseOwner,
+    bootstrap: bool,
+}
+
 #[derive(Clone)]
 pub(super) struct ActivePreparedSuccessor {
     state: AppState,
     executor: crate::playback_control::PreparationExecutor,
     pub(super) preparation: plurx_core::domain::MediaSessionPreparation,
     pub(super) purpose: PreparationPurpose,
+    // Issued only after local retained-output seal and successful prime.
+    cached_recovery_owner: Option<CachedRecoveryOwner>,
+    planning_registration: Option<Arc<std::sync::atomic::AtomicBool>>,
     quality_intent: Option<QualityIntentIdentity>,
     cancelled: tokio_util::sync::CancellationToken,
 }
@@ -74,6 +85,7 @@ pub(in crate::http) async fn prepared_handoff_write_guard() -> tokio::sync::Owne
 /// until it does.
 struct PendingPreparationCandidate {
     claim: u64,
+    registered: Arc<std::sync::atomic::AtomicBool>,
     desired_digest: String,
     quality_intent: Option<QualityIntentIdentity>,
     cancelled: tokio_util::sync::CancellationToken,
@@ -138,6 +150,7 @@ impl PendingCandidateGuard {
     ) -> Self {
         let claim = NEXT_PENDING_CANDIDATE_CLAIM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let cancelled = tokio_util::sync::CancellationToken::new();
+        let registered = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let previous = pending_preparation_candidates()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -145,6 +158,7 @@ impl PendingCandidateGuard {
                 playback_id.to_owned(),
                 PendingPreparationCandidate {
                     claim,
+                    registered: Arc::clone(&registered),
                     desired_digest: desired_digest.to_owned(),
                     quality_intent: quality_intent.clone(),
                     cancelled: cancelled.clone(),
@@ -157,7 +171,7 @@ impl PendingCandidateGuard {
             playback_id: playback_id.to_owned(),
             claim,
             quality_intent,
-            registered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            registered,
             settlement: None,
             cancelled,
         }
@@ -341,6 +355,8 @@ pub(super) fn register_test_preparation(
         executor,
         preparation,
         purpose,
+        cached_recovery_owner: None,
+        planning_registration: None,
         quality_intent: None,
         cancelled: cancelled.clone(),
     });
@@ -539,11 +555,157 @@ pub(super) fn cancel_quality_preparation(
     found
 }
 
-pub(super) fn cancel_preparations_for_incumbent_wait(playback_id: &str) {
-    // A candidate can still be planning across Store awaits and have no
-    // registered successor yet. Stop it before it acquires spare capacity.
-    cancel_pending_candidate(playback_id);
-    for active in take_active_preparations_for_playback(playback_id) {
+fn same_accepted_quality_intent(
+    admitted: &QualityIntentIdentity,
+    current: &QualityIntentIdentity,
+) -> bool {
+    admitted.generation == current.generation
+        && admitted.control_epoch == current.control_epoch
+        && admitted.client_instance_id == current.client_instance_id
+        && admitted.lifetime_id == current.lifetime_id
+        && admitted.recipe_revision == current.recipe_revision
+        && current.accepted_sequence >= admitted.accepted_sequence
+}
+
+fn record_cached_recovery_owner_if_registered(
+    expected: &ActivePreparedSuccessor,
+    owner: (crate::vodserve::ResponseOwner, bool),
+) {
+    let mut registered = active_prepared_successors()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(current) = registered
+        .get_mut(&expected.preparation.incarnation_id)
+        .filter(|current| {
+            current.preparation.session_id == expected.preparation.session_id
+                && current.preparation.principal == expected.preparation.principal
+                && current.preparation.playback_id == expected.preparation.playback_id
+                && current.preparation.request_fingerprint
+                    == expected.preparation.request_fingerprint
+                && current.preparation.expected_predecessor_incarnation_id
+                    == expected.preparation.expected_predecessor_incarnation_id
+                && current.preparation.expected_predecessor_owner_epoch
+                    == expected.preparation.expected_predecessor_owner_epoch
+                && current.preparation.owner_node_id == expected.preparation.owner_node_id
+                && current.preparation.deadline_ms == expected.preparation.deadline_ms
+                && current.quality_intent == expected.quality_intent
+                && match (
+                    &current.planning_registration,
+                    &expected.planning_registration,
+                ) {
+                    (Some(current), Some(expected)) => Arc::ptr_eq(current, expected),
+                    (None, None) => true,
+                    _ => false,
+                }
+                && !current.cancelled.is_cancelled()
+        })
+    {
+        current.cached_recovery_owner = Some(CachedRecoveryOwner {
+            owner: owner.0,
+            bootstrap: owner.1,
+        });
+    }
+}
+
+fn cached_recovery_matches_accepted_wait(
+    active: &ActivePreparedSuccessor,
+    route: &MediaSessionRoute,
+    request: &crate::playback_control::ControlRequestV1,
+    deadline_unix_ms: i64,
+) -> bool {
+    let now = unix_ms();
+    let Some(owner) = active.cached_recovery_owner.as_ref() else {
+        return false;
+    };
+    let Some(identity) = active.quality_intent.as_ref() else {
+        return false;
+    };
+    let Some(current) = QualityIntentIdentity::from_control(request) else {
+        return false;
+    };
+    let Ok(recipe) = serde_json::from_str::<RemoteStartRequest>(&active.preparation.recipe_json)
+    else {
+        return false;
+    };
+    let selection_matches = match request.selection.quality {
+        crate::playback_control::QualitySelection::Auto { candidate_id: Some(candidate), height } => {
+            recipe.candidate_id == Some(candidate)
+                && height.is_none_or(|height| matches!(recipe.request.kind,
+                    crate::transcode::SessionKind::Transcode { height: expected } if height == expected))
+        }
+        crate::playback_control::QualitySelection::Auto { candidate_id: None, height: None } => owner.bootstrap,
+        _ => false,
+    };
+    deadline_unix_ms > now
+        && active.preparation.deadline_ms > now
+        && !active.cancelled.is_cancelled()
+        && matches!(active.purpose, PreparationPurpose::SelectionChange)
+        && active.preparation.owner_node_id == active.state.node_id
+        && active.preparation.expected_predecessor_incarnation_id == route.incarnation_id
+        && active.preparation.expected_predecessor_owner_node_id == route.owner_node_id
+        && active.preparation.expected_predecessor_owner_epoch == route.owner_epoch
+        && active.preparation.principal == route.principal
+        && active.preparation.playback_id == route.playback_id
+        && same_accepted_quality_intent(identity, &current)
+        && selection_matches
+        && active
+            .state
+            .transcode
+            .prepared_cached_recovery_is_live(&active.preparation, &owner.owner)
+}
+
+pub(super) fn cancel_preparations_for_incumbent_wait(
+    playback_id: &str,
+    accepted: Option<(
+        &MediaSessionRoute,
+        &crate::playback_control::ControlRequestV1,
+        i64,
+    )>,
+) {
+    // Decide while entries stay registered. A cached keeper may still share
+    // its token with the pending guard until the candidate task returns.
+    let cancelled = {
+        let mut registered = active_prepared_successors()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let keep = registered
+            .iter()
+            .filter(|(_, active)| {
+                active.preparation.playback_id == playback_id
+                    && accepted.is_some_and(|(route, request, deadline)| {
+                        cached_recovery_matches_accepted_wait(active, route, request, deadline)
+                    })
+            })
+            .map(|(id, active)| (id.clone(), active.planning_registration.clone()))
+            .collect::<Vec<_>>();
+        {
+            let mut pending = pending_preparation_candidates()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(candidate) = pending.get_mut(playback_id) {
+                let same_keeper = keep.iter().any(|(_, registration)| {
+                    registration.as_ref().is_some_and(|registration| {
+                        Arc::ptr_eq(registration, &candidate.registered)
+                    })
+                });
+                if !same_keeper {
+                    candidate.cancelled.cancel();
+                }
+            }
+        }
+        let ids = registered
+            .iter()
+            .filter(|(id, active)| {
+                active.preparation.playback_id == playback_id
+                    && !keep.iter().any(|(kept, _)| kept == *id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        ids.into_iter()
+            .filter_map(|id| registered.remove(&id))
+            .collect::<Vec<_>>()
+    };
+    for active in cancelled {
         spawn_cancelled_preparation(active, "incumbent playback needed prepared capacity");
     }
 }
@@ -2349,6 +2511,8 @@ pub(super) async fn stage_prepared_successor_with_prime(
             executor: executor.clone(),
             preparation: preparation.clone(),
             purpose,
+            cached_recovery_owner: None,
+            planning_registration: planning_registration.clone(),
             quality_intent,
             cancelled: planning_cancellation
                 .unwrap_or_else(tokio_util::sync::CancellationToken::new),
@@ -2471,14 +2635,32 @@ pub(super) async fn stage_prepared_successor_with_prime(
                 return;
             }
         }
+        let cached_recovery_owner = if successor_owner == state.node_id
+            && matches!(purpose, PreparationPurpose::SelectionChange)
+        {
+            tokio::time::timeout_at(
+                prime_deadline.into(),
+                state
+                    .transcode
+                    .prepared_cached_recovery_owner(&preparation, predecessor),
+            )
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
         let activated = tokio::select! {
             () = active.cancelled.cancelled() => None,
             activated = activate_preparation_before(reservation) => activated,
         };
         if let Some(guard) = activated {
             let active = guard.disarm();
-            // Observations cannot delay the existing cleanup/deadline owner.
+            // Arm cleanup before publishing the optional proof or observations.
             arm_preparation_deadline(active.clone());
+            if let Some(proof) = cached_recovery_owner {
+                record_cached_recovery_owner_if_registered(&active, proof);
+            }
             if successor_owner == state.node_id {
                 if let Some(proof) = prepared_proof.as_ref() {
                     // Bounded by the shared advisory stage; a registration
@@ -2581,6 +2763,285 @@ mod quality_cancellation_tests {
             recipe_revision: 1,
             accepted_sequence: sequence,
         }
+    }
+
+    fn cached_wait_request(generation: String) -> crate::playback_control::ControlRequestV1 {
+        crate::playback_control::ControlRequestV1 {
+            intent: None,
+            protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+            generation,
+            control_epoch: 1,
+            client_instance_id: uuid::Uuid::new_v4().to_string(),
+            sequence: 1,
+            demand: crate::playback_control::PlaybackDemand::Active,
+            position_ms: 1_000,
+            buffered_from_ms: Some(0),
+            buffered_through_ms: 10_000,
+            playback_rate: 1.0,
+            render_state: crate::playback_control::RenderState::Rendering,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            selection: crate::playback_control::ClientSelection {
+                quality: crate::playback_control::QualitySelection::Auto {
+                    height: None,
+                    candidate_id: None,
+                },
+                audio_track: None,
+                subtitle: crate::playback_control::SubtitleSelection {
+                    mode: crate::playback_control::SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: crate::playback_control::CodecPolicy::Auto,
+                dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(crate::playback_control::DynamicCapabilities {
+                presentation_target: None,
+                decoder_caps: None,
+                platform: crate::playback_control::ClientPlatform::Web,
+                max_height: 1080,
+                codecs: vec![crate::playback_control::CodecPolicy::H264],
+                dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+            acknowledgement: None,
+            supported_actions: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_wait_preserves_registered_reader_and_its_pending_token_without_resurrection() {
+        let (_output_dir, serve, facts, output_request) =
+            crate::vodserve::retained::test_post_attachment_output_facts().await;
+        let work = crate::test_tempdir().expect("control fixture");
+        let fixture =
+            crate::transcode::HlsDeliveryFixture::publish(work.path(), "waiting-incumbent").await;
+        let mut state = fixture.state.clone();
+        state.transcode = Arc::new(
+            crate::transcode::TranscodeManager::new(
+                state.store.clone(),
+                work.path().join("cached-recovery"),
+                plurx_core::transcode::EncoderCaps::default(),
+                plurx_core::transcode::Pipeline::Cpu,
+            )
+            .with_copy_test_vod(serve.clone()),
+        );
+        let playback = uuid::Uuid::new_v4().to_string();
+        let mut route = crate::media_sessions::takeover_eligible_route(
+            "incumbent",
+            &uuid::Uuid::new_v4().to_string(),
+        );
+        route.playback_id = playback.clone();
+        route.owner_node_id = state.node_id.clone();
+        let mut request = cached_wait_request(route.incarnation_id.clone());
+        let candidate = plurx_core::playback::candidate::CandidateId::for_recipe_digest([42; 32]);
+        request.selection.quality = crate::playback_control::QualitySelection::Auto {
+            height: Some(360),
+            candidate_id: Some(candidate),
+        };
+        request.render_state = crate::playback_control::RenderState::Waiting;
+        request.intent = Some(plurx_core::playback::MediaIntentEnvelope {
+            lifetime_id: "cached-pressure-viewer".into(),
+            recipe_revision: 3,
+            destination_revision: 1,
+            transport_revision: 1,
+            selection: request.selection.desired(),
+        });
+        let pending = PendingCandidateGuard::begin_control(&state, &route, &request);
+        pending
+            .registered
+            .store(true, std::sync::atomic::Ordering::Release);
+        let id = "00000000-0000-4000-8000-00000000cace";
+        let incarnation = uuid::Uuid::new_v4().to_string();
+        serve.mark_prepared_incarnation(id, &incarnation).await;
+        let output = facts
+            .response_owner
+            .retained_output_facts()
+            .expect("real sealed complete artifact");
+        let owner = serve
+            .cached_prepared_reader_owner(id, &incarnation, &output)
+            .await
+            .expect("exact retained speculative reader");
+        let mut recipe: RemoteStartRequest =
+            serde_json::from_str(&route.recipe_json).expect("fixture recipe");
+        recipe.request.file_id = output_request.file_id;
+        recipe.request.kind = crate::transcode::SessionKind::Transcode { height: 360 };
+        recipe.candidate_id = Some(candidate);
+        let preparation = plurx_core::domain::MediaSessionPreparation {
+            quality_cancellation_key: None,
+            incarnation_id: incarnation.clone(),
+            session_id: id.into(),
+            principal: route.principal.clone(),
+            playback_id: playback.clone(),
+            expected_predecessor_incarnation_id: route.incarnation_id.clone(),
+            expected_predecessor_owner_node_id: route.owner_node_id.clone(),
+            expected_predecessor_owner_epoch: route.owner_epoch,
+            request_fingerprint: "exact-cached-reader".into(),
+            owner_node_id: state.node_id.clone(),
+            recipe_json: serde_json::to_string(&recipe).expect("recipe"),
+            response_json: "{}".into(),
+            media_origin_ms: 0,
+            now_ms: unix_ms(),
+            expected_desired_revision: None,
+            deadline_ms: unix_ms() + 30_000,
+        };
+        let mut active = ActivePreparedSuccessor {
+            state: state.clone(),
+            executor: crate::playback_control::PreparationExecutor::new(
+                state.store.clone(),
+                state
+                    .transcode
+                    .session_preparation_gate(id)
+                    .await
+                    .expect("exact cached gate"),
+                route.principal.clone(),
+                route.playback_id.clone(),
+                route.owner_node_id.clone(),
+                route.owner_epoch,
+            ),
+            preparation,
+            purpose: PreparationPurpose::SelectionChange,
+            cached_recovery_owner: None,
+            planning_registration: Some(Arc::clone(&pending.registered)),
+            quality_intent: QualityIntentIdentity::from_control(&request),
+            cancelled: pending.cancellation_token(),
+        };
+        register_active_preparation(active.clone());
+        record_cached_recovery_owner_if_registered(&active, (owner.clone(), false));
+        request.sequence += 1;
+        cancel_preparations_for_incumbent_wait(
+            &playback,
+            Some((&route, &request, unix_ms() + 4_000)),
+        );
+        assert!(
+            !pending.cancelled(),
+            "the actual Waiting path must preserve its keeper's still-live pending token"
+        );
+        assert!(!active.cancelled.is_cancelled());
+        assert!(active_prepared_successors()
+            .lock()
+            .expect("registry")
+            .contains_key(&incarnation));
+        // A fresh named selection cannot use a different viewer's retained reader.
+        request.intent.as_mut().expect("intent").recipe_revision += 1;
+        cancel_preparations_for_incumbent_wait(
+            &playback,
+            Some((&route, &request, unix_ms() + 4_000)),
+        );
+        assert!(pending.cancelled());
+        assert!(!active_prepared_successors()
+            .lock()
+            .expect("registry")
+            .contains_key(&incarnation));
+        record_cached_recovery_owner_if_registered(&active, (owner.clone(), false));
+        assert!(
+            !active_prepared_successors()
+                .lock()
+                .expect("registry")
+                .contains_key(&incarnation),
+            "a late sealed proof cannot resurrect a cancelled registration"
+        );
+        // Unprimed work has no proof even if it happens to name cached metadata.
+        let cold_pending = PendingCandidateGuard::begin_control(&state, &route, &request);
+        active.cancelled = cold_pending.cancellation_token();
+        active.quality_intent = QualityIntentIdentity::from_control(&request);
+        active.planning_registration = Some(Arc::clone(&cold_pending.registered));
+        active.cached_recovery_owner = None;
+        register_active_preparation(active.clone());
+        cancel_preparations_for_incumbent_wait(
+            &playback,
+            Some((&route, &request, unix_ms() + 4_000)),
+        );
+        assert!(cold_pending.cancelled());
+        assert!(!active_prepared_successors()
+            .lock()
+            .expect("registry")
+            .contains_key(&incarnation));
+        for quality in [
+            crate::playback_control::QualitySelection::Manual { height: 360 },
+            crate::playback_control::QualitySelection::Auto {
+                height: None,
+                candidate_id: None,
+            },
+        ] {
+            let mut unsupported = request.clone();
+            unsupported.selection.quality = quality;
+            unsupported.intent.as_mut().expect("intent").selection =
+                unsupported.selection.desired();
+            let other = PendingCandidateGuard::begin_control(&state, &route, &unsupported);
+            active.cancelled = other.cancellation_token();
+            active.planning_registration = Some(Arc::clone(&other.registered));
+            active.quality_intent = QualityIntentIdentity::from_control(&unsupported);
+            active.cached_recovery_owner = Some(CachedRecoveryOwner {
+                owner: owner.clone(),
+                bootstrap: false,
+            });
+            register_active_preparation(active.clone());
+            cancel_preparations_for_incumbent_wait(
+                &playback,
+                Some((&route, &unsupported, unix_ms() + 4_000)),
+            );
+            assert!(
+                other.cancelled(),
+                "manual and unnamed non-bootstrap Auto do not inherit pressure immunity"
+            );
+            assert!(!active_prepared_successors()
+                .lock()
+                .expect("registry")
+                .contains_key(&incarnation));
+        }
+        // User cancellation remains authoritative for a live cached keeper.
+        active.quality_intent = QualityIntentIdentity::from_control(&request);
+        let user_pending = PendingCandidateGuard::begin_control(&state, &route, &request);
+        active.cancelled = user_pending.cancellation_token();
+        active.planning_registration = Some(Arc::clone(&user_pending.registered));
+        active.cached_recovery_owner = Some(CachedRecoveryOwner {
+            owner,
+            bootstrap: false,
+        });
+        register_active_preparation(active.clone());
+        assert!(cancel_quality_preparation(
+            &playback,
+            active.quality_intent.as_ref().expect("identity")
+        ));
+        assert!(active.cancelled.is_cancelled());
+        assert!(!active_prepared_successors()
+            .lock()
+            .expect("registry")
+            .contains_key(&incarnation));
+    }
+
+    #[test]
+    fn cached_recovery_wait_keeps_only_the_current_accepted_intent() {
+        let admitted = QualityIntentIdentity {
+            generation: uuid::Uuid::new_v4().to_string(),
+            control_epoch: 2,
+            client_instance_id: uuid::Uuid::new_v4().to_string(),
+            lifetime_id: "same-viewer".into(),
+            recipe_revision: 3,
+            accepted_sequence: 19,
+        };
+        let mut current = admitted.clone();
+        current.accepted_sequence = 28;
+        assert!(
+            same_accepted_quality_intent(&admitted, &current),
+            "a later ordinary Waiting snapshot must not cancel its own recovery"
+        );
+        current.recipe_revision += 1;
+        assert!(!same_accepted_quality_intent(&admitted, &current));
+        current = admitted.clone();
+        current.accepted_sequence -= 1;
+        assert!(!same_accepted_quality_intent(&admitted, &current));
+        current = admitted.clone();
+        current.generation = uuid::Uuid::new_v4().to_string();
+        assert!(!same_accepted_quality_intent(&admitted, &current));
+        current = admitted.clone();
+        current.client_instance_id = uuid::Uuid::new_v4().to_string();
+        assert!(!same_accepted_quality_intent(&admitted, &current));
+        current = admitted.clone();
+        current.lifetime_id = "another-viewer".into();
+        assert!(!same_accepted_quality_intent(&admitted, &current));
     }
 
     #[test]

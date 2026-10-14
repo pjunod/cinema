@@ -3020,11 +3020,14 @@ async fn control_local_with_observation(
                 | crate::playback_control::RenderState::Stalled
         );
     if incumbent_waiting {
-        // Preparation is speculative. A current-player wait outranks it even
-        // when the client still has loaded media: synchronously take the exact
-        // registry entry and let its detached cancellation owner abort the row,
-        // actor slot, and worker without extending this exchange's deadline.
-        cancel_preparations_for_incumbent_wait(&route.playback_id);
+        // Cold and voluntary preparation must release spare capacity. A sealed,
+        // exact cached Auto recovery holds no encoder and may resolve this wait.
+        // Its liveness/intent check never awaits; unknown still cancels under
+        // the original exchange deadline and detached settlement ownership.
+        cancel_preparations_for_incumbent_wait(
+            &route.playback_id,
+            Some((route, &request, deadline_unix_ms)),
+        );
     }
     // The replacement seam. A viewer's quality change arrives as a new session
     // that replaces the old one, so the transition to measure is
