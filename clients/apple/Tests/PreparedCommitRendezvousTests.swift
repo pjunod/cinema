@@ -199,6 +199,32 @@ final class PreparedCommitRendezvousTests: XCTestCase {
             loadedItemRanges: [10...20], cadence: cadence))
     }
 
+    func testFutureAcquisitionKeepsObservedClockAndRequiresItsOwnContiguousInterval() throws {
+        let anchors = PreparedAcquisitionAnchors(observedIntentFilmMs: 618_000, allowsAdvance: true,
+            actualRunwaySeconds: 16, playbackRate: 1, overlapRemainingMs: 12_000, durationMs: 900_000)
+        let plan = try XCTUnwrap(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: anchors.acquisitionFilmMs, incumbentFilmPositionMs: 623_000,
+            mediaOriginMs: 600_000, playbackRate: 1, overlapRemainingMs: 6_500,
+            loadedItemRanges: [24...27]))
+        XCTAssertEqual(anchors.observedIntentFilmMs, 618_000)
+        XCTAssertEqual(plan.filmPositionMs, 625_000)
+        XCTAssertEqual(plan.itemPositionMs, 25_000)
+        XCTAssertNotNil(plan.clockAnchor(incumbentFilmMs: 623_000, hostSeconds: 100,
+            rate: 1, frameDurationSeconds: 1 / 60, overlapRemainingMs: 6_500))
+        XCTAssertNil(plan.clockAnchor(incumbentFilmMs: 625_001, hostSeconds: 100,
+            rate: 1, frameDurationSeconds: 1 / 60, overlapRemainingMs: 6_500),
+            "consumed lead never resets the visible incumbent clock")
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: anchors.acquisitionFilmMs, incumbentFilmPositionMs: 623_000,
+            mediaOriginMs: 600_000, playbackRate: 1, overlapRemainingMs: 6_500,
+            loadedItemRanges: [18...20, 25...29]),
+            "a future island cannot replace the interval containing acquisition")
+        XCTAssertNil(PreparedCommitRendezvous.planLoaded(
+            stagedFilmPositionMs: anchors.acquisitionFilmMs, incumbentFilmPositionMs: 623_000,
+            mediaOriginMs: 600_000, playbackRate: 1, overlapRemainingMs: 5_000,
+            loadedItemRanges: [24...27]))
+    }
+
     func testIncumbentFetchPreferenceLeaseProtectsPhysicalOverlapAndReserve() throws {
         let policy = try XCTUnwrap(PreparedIncumbentBufferPreference(
             original: 60, actualRunwaySeconds: 54, playbackRate: 1))

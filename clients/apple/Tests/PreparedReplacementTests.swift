@@ -26,6 +26,49 @@ final class PreparedAcquisitionURLTests: XCTestCase {
     }
 }
 
+final class PreparedAcquisitionAnchorTests: XCTestCase {
+    private func anchors(_ observed: Int = 618_000, advance: Bool = true,
+                         runway: Double? = 16, rate: Double = 1,
+                         overlap: Int = 12_000, duration: Int? = 900_000) -> PreparedAcquisitionAnchors {
+        PreparedAcquisitionAnchors(observedIntentFilmMs: observed, allowsAdvance: advance,
+            actualRunwaySeconds: runway, playbackRate: rate,
+            overlapRemainingMs: overlap, durationMs: duration)
+    }
+
+    func testAcquisitionPreservesObservedIntentAndBoundsRateScaledLead() {
+        let normal = anchors()
+        XCTAssertEqual(normal.observedIntentFilmMs, 618_000)
+        XCTAssertEqual(normal.acquisitionFilmMs, 624_000)
+        XCTAssertEqual(anchors(runway: 32, rate: 2).acquisitionFilmMs, 630_000)
+        XCTAssertEqual(anchors(rate: 0.5).acquisitionFilmMs, 621_000)
+        XCTAssertEqual(anchors(overlap: 6_000).acquisitionFilmMs, 619_900)
+        XCTAssertEqual(anchors(overlap: 5_000).acquisitionFilmMs, 618_000)
+        XCTAssertEqual(anchors(runway: 15.999).acquisitionFilmMs, 618_000)
+        XCTAssertEqual(anchors(runway: 31.999, rate: 2).acquisitionFilmMs, 618_000)
+    }
+
+    func testAcquisitionPreservesIdentityForUnprotectedIntentAndInvalidFacts() {
+        XCTAssertEqual(anchors(advance: false).acquisitionFilmMs, 618_000,
+            "manual, paused, seeking and voluntary requests retain their observed anchor")
+        XCTAssertEqual(anchors(runway: nil).acquisitionFilmMs, 618_000)
+        XCTAssertEqual(anchors(duration: nil).acquisitionFilmMs, 618_000)
+        for invalid in [Double.nan, .infinity, -.infinity, -1, 0, 17] {
+            XCTAssertEqual(anchors(rate: invalid).acquisitionFilmMs, 618_000)
+        }
+        for invalid in [Double.nan, .infinity, -.infinity, -1] {
+            XCTAssertEqual(anchors(runway: invalid).acquisitionFilmMs, 618_000)
+        }
+        XCTAssertEqual(anchors(Int.max, duration: Int.max).acquisitionFilmMs, Int.max)
+    }
+
+    func testAcquisitionCapsBeforeEOFWithRunwayAndMinimumWallLead() {
+        XCTAssertEqual(anchors(895_000).acquisitionFilmMs, 898_000)
+        XCTAssertEqual(anchors(897_500).acquisitionFilmMs, 897_500)
+        XCTAssertEqual(anchors(897_500).observedIntentFilmMs, 897_500)
+        XCTAssertEqual(anchors(advance: true, duration: 1_000).acquisitionFilmMs, 618_000)
+    }
+}
+
 final class PreparedFailureDiagnosticTests: XCTestCase {
     func testPreparedFailureDiagnosticExcludesResourceCredentials() {
         let secretURL = "https://example.invalid/media?token=private-playback-credential"

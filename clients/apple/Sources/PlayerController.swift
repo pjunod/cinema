@@ -3071,7 +3071,8 @@ final class PlayerController: ObservableObject {
     private var preparedLifecycle: [AnyCancellable] = []
     /// The film position the successor was primed to, and the boundary the
     /// commit's first qualifying frame has to reach or pass.
-    private var preparedFilmPositionMs = 0
+    private var preparedAcquisitionFilmPositionMs = 0
+    private var preparedAcquisitionAnchors: PreparedAcquisitionAnchors?
     /// The item-local seek the successor still owes. An `AVPlayerItem` one
     /// statement old has status `.unknown` and silently drops a seek, which
     /// would leave the successor primed to its own zero and commit a stream
@@ -12014,13 +12015,26 @@ extension PlayerController: PreparedSuccessorHost {
     ) -> Bool {
         discardPreparedSuccessor()
         let capturedFilmPositionMs = max(0, filmPositionMs)
+        guard let incumbentItem = player.currentItem else { return false }
+        let incumbentPlayer = player
+        let incumbentEpoch = viewerActionEpoch
+        let anchors = PreparedAcquisitionAnchors(
+            observedIntentFilmMs: capturedFilmPositionMs,
+            allowsAdvance: autoPreparing && !autoVoluntary && wantsPlayback && player.rate > 0
+                && incumbentItem.status == .readyToPlay && autoPreparedViewerEpoch == viewerActionEpoch
+                && player.rate == preferredRate && seekState.pendingMs == nil && !isChangingStream
+                && preparedReplacement.activeAction?.actionId == action.actionId,
+            actualRunwaySeconds: bufferedRunwaySeconds(), playbackRate: Double(preferredRate),
+            overlapRemainingMs: PreparedReplacementBounds.overlapMs,
+            durationMs: knownDurationMs > 0 ? knownDurationMs : nil)
         // `playlistUrl` was proven node-relative before this action reached
         // the player, so this join cannot reach another origin — the same
         // property the control bootstrap's path check gives the reporter.
         guard started,
-              player.currentItem != nil,
+              player === incumbentPlayer, player.currentItem === incumbentItem,
+              viewerActionEpoch == incumbentEpoch,
               let actionURL = Session.shared.url(action.playlistUrl),
-              let url = preparedAcquisitionURL(actionURL, filmPositionMs: capturedFilmPositionMs)
+              let url = preparedAcquisitionURL(actionURL, filmPositionMs: anchors.acquisitionFilmMs)
         else { return false }
         preparedOverlapStartedAtMs = Int(ProcessInfo.processInfo.systemUptime * 1_000)
         let item = AVPlayerItem(url: url)
@@ -12059,7 +12073,9 @@ extension PlayerController: PreparedSuccessorHost {
                 deadlineMs: now + 15_000)
         }
         installAutoTransferMetrics(for: item, staged: true, stagedAction: action)
-        preparedFilmPositionMs = capturedFilmPositionMs
+        preparedAcquisitionAnchors = anchors
+        preparedAcquisitionFilmPositionMs = anchors.acquisitionFilmMs
+        noteSurfaceLogOnly("prepared_acquisition_anchor:observed_film_ms=\(anchors.observedIntentFilmMs):acquisition_film_ms=\(anchors.acquisitionFilmMs):advanced=\(anchors.acquisitionFilmMs > anchors.observedIntentFilmMs ? 1 : 0)")
         // The successor's session-relative zero is not the film's. This is the
         // same arithmetic a created session gets, over a raw origin — and it
         // is *recorded* here rather than performed, because the item is one
@@ -12068,7 +12084,7 @@ extension PlayerController: PreparedSuccessorHost {
         // has the same problem and solves it the same way, by waiting for
         // readiness first (`seekWhenReady`).
         preparedSeekMs = Self.sessionAttachSeekMs(
-            requestedStartMs: preparedFilmPositionMs,
+            requestedStartMs: preparedAcquisitionFilmPositionMs,
             mediaOriginMs: action.mediaOriginMs
         )
         acquirePreparedIncumbentBufferPreference(action)
@@ -12158,7 +12174,8 @@ extension PlayerController: PreparedSuccessorHost {
         warmPredecessor = nil
         stagedSurfacePlayer = nil
         preparedItem = nil
-        preparedFilmPositionMs = 0
+        preparedAcquisitionFilmPositionMs = 0
+        preparedAcquisitionAnchors = nil
         preparedSeekMs = nil
     }
 
@@ -12278,9 +12295,9 @@ extension PlayerController: PreparedSuccessorHost {
                             return
                         }
                         if let throughMs = self.preparedBufferedThroughMs(item),
-                              throughMs >= self.preparedFilmPositionMs
+                              throughMs >= self.preparedAcquisitionFilmPositionMs
                                   + PreparedReplacementBounds.switchRunwayMs,
-                              self.preparedOriginalTargetHasRunway(item),
+                              self.preparedAcquisitionTargetHasRunway(item),
                               self.preparedReplacement.activeAction.map({
                                   self.autoStagedProductionAllowsCommit($0) && self.autoStagedOriginalAllowsCommit($0) &&
                                       self.preparedLoadedRendezvous(item, action: $0, rate: self.preferredRate) != nil
@@ -12323,9 +12340,9 @@ extension PlayerController: PreparedSuccessorHost {
         return action.mediaOriginMs + Int(((playhead + runway) * 1_000).rounded())
     }
 
-    /// Loaded media must cover the original target, not merely the earlier
+    /// Loaded media must cover the acquisition target, not merely the earlier
     /// coarse landing. A later island or any positive gap cannot prove runway.
-    private func preparedOriginalTargetHasRunway(_ item: AVPlayerItem) -> Bool {
+    private func preparedAcquisitionTargetHasRunway(_ item: AVPlayerItem) -> Bool {
         guard let action = preparedReplacement.activeAction else { return false }
         let ranges = item.loadedTimeRanges.compactMap { value -> ClosedRange<Double>? in
             let range = value.timeRangeValue
@@ -12334,12 +12351,12 @@ extension PlayerController: PreparedSuccessorHost {
             return start...end
         }
         return PreparedSeekPolicy.originalTargetHasRunway(
-            filmPositionMs: preparedFilmPositionMs, mediaOriginMs: action.mediaOriginMs,
+            filmPositionMs: preparedAcquisitionFilmPositionMs, mediaOriginMs: action.mediaOriginMs,
             ranges: ranges)
     }
 
     /// Readiness and commit admit the same loaded future point. The incumbent
-    /// keeps moving while the successor is paused, so original-target runway
+    /// keeps moving while the successor is paused, so acquisition-target runway
     /// alone cannot prove a handoff the commit can still reach.
     private func preparedLoadedRendezvous(_ item: AVPlayerItem,
                                          action: PreparedReplacementAction,
@@ -12354,7 +12371,7 @@ extension PlayerController: PreparedSuccessorHost {
             return start...end
         }
         return preparedRendezvousWithCadence(
-            stagedFilmPositionMs: preparedFilmPositionMs,
+            stagedFilmPositionMs: preparedAcquisitionFilmPositionMs,
             incumbentFilmPositionMs: realPositionMs(), mediaOriginMs: action.mediaOriginMs,
             playbackRate: Double(rate), overlapRemainingMs: preparedOverlapRemainingMs,
             loadedItemRanges: ranges, cadence: cadence)
@@ -12421,7 +12438,7 @@ extension PlayerController: PreparedSuccessorHost {
             return start...end
         }
         guard let probeMs = preparedCadenceProbeItemMs(
-            stagedFilmPositionMs: preparedFilmPositionMs, incumbentFilmPositionMs: realPositionMs(),
+            stagedFilmPositionMs: preparedAcquisitionFilmPositionMs, incumbentFilmPositionMs: realPositionMs(),
             mediaOriginMs: action.mediaOriginMs, playbackRate: Double(preferredRate),
             overlapRemainingMs: preparedOverlapRemainingMs, loadedItemRanges: ranges),
               let opened = preparedReplacement.openedAtMs else { return }

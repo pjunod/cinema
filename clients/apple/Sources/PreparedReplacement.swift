@@ -15,6 +15,37 @@ func preparedAcquisitionURL(_ url: URL, filmPositionMs: Int) -> URL? {
     return components.url
 }
 
+/// Preserve viewer intent separately from a fixed, bounded acquisition point.
+/// The visible incumbent must reach that point naturally before exposure.
+struct PreparedAcquisitionAnchors: Equatable {
+    let observedIntentFilmMs: Int
+    let acquisitionFilmMs: Int
+
+    init(observedIntentFilmMs: Int, allowsAdvance: Bool, actualRunwaySeconds: Double?,
+         playbackRate: Double, overlapRemainingMs: Int, durationMs: Int?) {
+        let observed = max(0, observedIntentFilmMs)
+        self.observedIntentFilmMs = observed
+        var acquisition = observed
+        if allowsAdvance, playbackRate.isFinite, playbackRate > 0, playbackRate <= 16,
+           let runway = actualRunwaySeconds, runway.isFinite,
+           runway >= Double(PreparedReplacementBounds.overlapMs
+                + PreparedCommitRendezvous.postSwapReserveMs) / 1_000 * max(1, playbackRate),
+           let maximumLead = PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: overlapRemainingMs),
+           let durationMs, durationMs > PreparedReplacementBounds.switchRunwayMs {
+            let lead = min(PreparedReplacementBounds.metadataMs, maximumLead)
+            let maximum = Double(observed) + playbackRate * Double(lead)
+            let ceiling = durationMs - PreparedReplacementBounds.switchRunwayMs
+            let candidate = min(maximum, Double(ceiling)).rounded(.down)
+            if lead >= 1_000, candidate.isFinite, candidate >= Double(observed),
+               candidate - Double(observed) >= playbackRate * 1_000,
+               candidate < Double(Int.max), let value = Int(exactly: candidate) {
+                acquisition = value
+            }
+        }
+        acquisitionFilmMs = acquisition
+    }
+}
+
 /// Resource URLs and NSError descriptions may contain playback credentials.
 /// Preserve only the typed framework domain and code for retained failures.
 func preparedSuccessorErrorDetail(_ error: NSError?) -> String {
