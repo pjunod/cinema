@@ -1316,3 +1316,13 @@ target comments after a full foreign page, metadata and URL substitution,
 duplicate/page limits, empty/filter cases and unchanged non-Forgejo/generic
 paths. Their first body execution is reserved for the integrated effort.
 Whole qualification, deployment and physical HDR ON/OFF acceptance remain open.
+
+### R35 — Reclaim mobile build counters above current main
+
+The full promotion's evidence scope passed. Its release-version check refused
+Apple 238 and Android 171 because current main already owns both counters.
+The repair claims Apple 239 and Android 172, regenerates the current claims,
+and updates only the current JVM build-input digest. Original JVM captures
+and historical build pins retain their actual sources and bytes. Fresh Android
+compilation and discovery remain required; deployment and physical acceptance
+remain open.
