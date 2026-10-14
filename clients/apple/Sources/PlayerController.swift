@@ -421,15 +421,30 @@ func autoTrialMayCommit(requestedId: String?, offeredId: String?, requestedTarge
         automatic && presenting && !seeking
 }
 
+/// A severe cliff gets one protected acquisition attempt when actual loaded
+/// runway cannot afford a metadata failure followed by another protected try.
+func autoPressureNeedsMinimumAcquisitionCost(severe: Bool, runwaySeconds: Double?,
+                                            playbackRate: Double) -> Bool {
+    guard severe, let runwaySeconds, runwaySeconds.isFinite, runwaySeconds >= 0,
+          playbackRate.isFinite, playbackRate > 0 else { return false }
+    let wallSeconds = Double(PreparedReplacementBounds.metadataMs
+        + PreparedReplacementBounds.overlapMs + PreparedCommitRendezvous.postSwapReserveMs) / 1_000
+    let requiredRunway = wallSeconds * max(1, playbackRate)
+    return requiredRunway.isFinite && runwaySeconds < requiredRunway
+}
+
 /// The lower rung a recovery moves to. Under link pressure the link has
 /// already proved it cannot carry `current`: the largest lower rung whose cost
 /// fits `linkCeiling` is the answer. When none fits, the cheapest costed lower
 /// rung is the smallest deficit, provided it costs less than `current`
 /// (`currentCost`); otherwise holding is no worse. An uncosted rung is never
-/// chosen for link pressure.
+/// chosen for link pressure. A severe cliff with insufficient loaded recovery
+/// runway instead minimizes measured output cost, retaining larger geometry
+/// when costs tie; native admission still measures actual acquisition readiness.
 func autoRecoveryCandidate(_ candidates: [QualityCandidate], current: QualityCandidate,
                            rejected: Set<String>, linkCeiling: Double? = nil, decoderRecovery: Bool = false,
-                           currentCost: Double? = nil) -> QualityCandidate? {
+                           currentCost: Double? = nil,
+                           minimumAcquisitionCost: Bool = false) -> QualityCandidate? {
     let area = { (candidate: QualityCandidate) in Int64(candidate.width) * Int64(candidate.height) }
     let lower = candidates.filter { candidate in
         candidate.hasValidIdentity && candidate.decoderCompatible && !rejected.contains(candidate.id) &&
@@ -438,6 +453,13 @@ func autoRecoveryCandidate(_ candidates: [QualityCandidate], current: QualityCan
     }
     guard let ceiling = linkCeiling else { return lower.max { area($0) < area($1) } }
     let costed = lower.filter { ($0.peakBps ?? 0) > 0 }
+    if minimumAcquisitionCost, !decoderRecovery, ceiling.isFinite, ceiling > 0,
+       let currentCost, currentCost.isFinite, currentCost > 0 {
+        return costed.filter { Double($0.peakBps!) < currentCost }.min {
+            if $0.peakBps! != $1.peakBps! { return $0.peakBps! < $1.peakBps! }
+            return area($0) > area($1)
+        }
+    }
     if let fitting = costed.filter({ Double($0.peakBps!) <= ceiling }).max(by: { area($0) < area($1) }) {
         return fitting
     }
@@ -11882,7 +11904,10 @@ extension PlayerController {
         let chosen: QualityCandidate?
         if pressure {
             chosen = autoRecoveryCandidate(eligible, current: current, rejected: autoDecoderRejected,
-                linkCeiling: severe || autoMildSamples >= 2 ? link : nil, currentCost: downsideCost)
+                linkCeiling: severe || autoMildSamples >= 2 ? link : nil, currentCost: downsideCost,
+                minimumAcquisitionCost: autoPressureNeedsMinimumAcquisitionCost(
+                    severe: severe, runwaySeconds: bufferedRunwaySeconds(),
+                    playbackRate: Double(player.rate)))
             autoUpgradeSinceMs = nil
         } else {
             let fitting = eligible.filter { candidate in

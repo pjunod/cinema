@@ -1830,6 +1830,105 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
                                            linkCeiling: 2_000_000, currentCost: 6_000_000))
     }
 
+    func testSeverePressureAcquisitionBudgetUsesOriginalBoundsAndActualRate() {
+        XCTAssertTrue(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: 16.8696, playbackRate: 1))
+        XCTAssertTrue(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: 21.999, playbackRate: 1))
+        XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: 22, playbackRate: 1))
+        XCTAssertTrue(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: 43.999, playbackRate: 2))
+        XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: 44, playbackRate: 2))
+        XCTAssertTrue(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: 21.999, playbackRate: 0.5))
+        XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: false,
+            runwaySeconds: 0, playbackRate: 1))
+    }
+
+    func testPressureAcquisitionBudgetPreservesUnknownAndInvalidFacts() {
+        XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: nil, playbackRate: 1))
+        for invalid in [Double.nan, .infinity, -.infinity, -1] {
+            XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+                runwaySeconds: invalid, playbackRate: 1))
+        }
+        for invalid in [Double.nan, .infinity, -.infinity, -1, 0, Double.greatestFiniteMagnitude] {
+            XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+                runwaySeconds: 16, playbackRate: invalid))
+        }
+    }
+
+    func testLimitedSeverePressureRanksMeasuredCostRatherThanHeight() {
+        let current = candidate(1_080, peak: 8_812_956)
+        let ladder = [candidate(720, peak: 1_100_000), candidate(480, peak: 2_415_736),
+                      candidate(360, peak: 1_300_000)]
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+            linkCeiling: 3_000_000, currentCost: 8_812_956,
+            minimumAcquisitionCost: true)?.height, 720,
+            "height does not establish the smallest measured acquisition cost")
+        let observed = [candidate(720, peak: 6_000_000), candidate(480, peak: 2_415_736),
+                        candidate(360, peak: 1_300_000)]
+        XCTAssertEqual(autoRecoveryCandidate(observed, current: current, rejected: [],
+            linkCeiling: 3_000_000, currentCost: 8_812_956,
+            minimumAcquisitionCost: autoPressureNeedsMinimumAcquisitionCost(
+                severe: true, runwaySeconds: 16.8696, playbackRate: 1))?.height, 360)
+        for severe in [false, true] {
+            XCTAssertEqual(autoRecoveryCandidate(observed, current: current, rejected: [],
+                linkCeiling: 3_000_000, currentCost: 8_812_956,
+                minimumAcquisitionCost: autoPressureNeedsMinimumAcquisitionCost(
+                    severe: severe, runwaySeconds: 30, playbackRate: 1))?.height, 480)
+        }
+        XCTAssertEqual(autoRecoveryCandidate([candidate(480, peak: 1_000_000),
+            candidate(720, peak: 1_000_000)], current: current, rejected: [],
+            linkCeiling: 3_000_000, currentCost: 8_812_956,
+            minimumAcquisitionCost: true)?.height, 720,
+            "equal measured cost preserves the larger compatible geometry")
+    }
+
+    func testSeverePressureCostRankingRetainsCandidateFencesAndImprovement() {
+        let current = candidate(1_080, peak: 8_812_956)
+        let unknown = candidate(360, peak: nil)
+        let zero = candidate(360, peak: 0)
+        let wrongGrade = candidate(360, peak: 1, grade: "hdr10")
+        let compatible = candidate(480, peak: 2_415_736)
+        func changed(_ candidate: QualityCandidate, id: String? = nil,
+                     compatible: Bool = true) -> QualityCandidate {
+            QualityCandidate(id: id ?? candidate.id, recipeDigest: candidate.recipeDigest,
+                route: candidate.route, width: candidate.width, height: candidate.height,
+                targetHeight: candidate.targetHeight, averageBps: candidate.averageBps,
+                peakBps: candidate.peakBps, grade: candidate.grade, decoderCompatible: compatible,
+                completeCache: candidate.completeCache, sustainable: candidate.sustainable)
+        }
+        let invalidIdentity = changed(candidate(360, peak: 1), id: "invalid")
+        let invalidDecoder = changed(candidate(360, peak: 1), compatible: false)
+        XCTAssertEqual(autoRecoveryCandidate([unknown, zero, wrongGrade, invalidIdentity,
+            invalidDecoder, compatible, current], current: current, rejected: [],
+            linkCeiling: 3_000_000, currentCost: 8_812_956,
+            minimumAcquisitionCost: true)?.height, 480)
+        XCTAssertNil(autoRecoveryCandidate([compatible], current: current,
+            rejected: [compatible.id], linkCeiling: 3_000_000, currentCost: 8_812_956,
+            minimumAcquisitionCost: true))
+        XCTAssertNil(autoRecoveryCandidate([candidate(480, peak: 9_000_000)],
+            current: current, rejected: [], linkCeiling: 3_000_000,
+            currentCost: 8_812_956, minimumAcquisitionCost: true))
+        XCTAssertEqual(autoRecoveryCandidate([compatible], current: current,
+            rejected: [], linkCeiling: 3_000_000, currentCost: nil,
+            minimumAcquisitionCost: true)?.height, 480,
+            "unknown incumbent cost retains the existing selection")
+    }
+
+    func testPressureRescueDoesNotOverrideDecoderOrUnmeasuredProducerRecovery() {
+        let current = candidate(1_080, peak: 8_812_956)
+        let ladder = [candidate(720, peak: 2_000_000), candidate(360, peak: 1_000_000)]
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+            linkCeiling: 3_000_000, decoderRecovery: true, currentCost: 8_812_956,
+            minimumAcquisitionCost: true)?.height, 720)
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+            currentCost: 8_812_956, minimumAcquisitionCost: true)?.height, 720)
+    }
+
     func testColdOriginalRecoversToUnprovedCompatibleEncodeUnderLinkPressure() {
         let original = candidate(2_160, route: "remux", peak: nil)
         let lower = candidate(1_080)
