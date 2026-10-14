@@ -214,8 +214,11 @@ def log_outcomes(log, format_name):
     elif format_name == 'xctest-class':
         rows = []
         for line in log.splitlines():
-            if not line.startswith('Test Case '):
+            # XCTest stdout can share a line with asynchronous stderr output.
+            start = 0 if line.startswith('Test Case ') else line.find("Test Case '-[")
+            if start < 0:
                 continue
+            line = line[start:]
             native = re.fullmatch(r"Test Case '-\[([^ ]+) ([^]]+)\]' (.+)", line)
             r.require(native is not None, 'Malformed native XCTest case line')
             name, method, terminal = native.groups()

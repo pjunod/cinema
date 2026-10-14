@@ -56,9 +56,13 @@ class NativeAppleEvidenceCase(unittest.TestCase):
             started = "Test Case '-[{}.ExampleTests testA]' started.\n".format(module)
             self.assertEqual(retention.log_outcomes(started + template.format(module), 'xctest-class'),
                              {'ExampleTests/testA': 'pass'})
+            self.assertEqual(retention.log_outcomes('asynchronous stderr prefix>' + template.format(module),
+                                                   'xctest-class'), {'ExampleTests/testA': 'pass'})
         for invalid in (template.format('Unknown'), template.format('ReceiptTests') + template.format('plurx_iOSTests'),
                         template.format('ReceiptTests').replace('testA', 'notATest'),
                         template.format('ReceiptTests').replace('passed', 'passedX'),
+                        'stderr prefix>' + template.format('ReceiptTests').replace('passed', 'unknown'),
+                        'Test Case malformed>' + template.format('ReceiptTests'),
                         template.format('ReceiptTests') + template.format('ReceiptTests').replace('passed', 'unknown')):
             with self.subTest(invalid=invalid), self.assertRaises(receipts.ReceiptError):
                 retention.log_outcomes(invalid, 'xctest-class')
