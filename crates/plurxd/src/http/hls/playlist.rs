@@ -12,15 +12,15 @@ pub async fn playlist(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let (playlist_deadline, request_deadline) = playlist_request_deadlines(&state);
-    // Relay peers have no query capability negotiation and reject unknown
-    // envelope fields. Preserve their original attachment hint unchanged;
-    // only the local owner has the frozen rendition facts for this override.
+    // Relay acquisition metadata only when the selected owner proves the
+    // implemented protocol in its current committed heartbeat.
     if let Some(response) = relay_if_remote(
         &state,
         &session,
         RelayResource::Playlist {
             native: query.native,
             subtitle: query.subtitle,
+            acquisition_start_ms: query.acquisition_start_ms,
         },
         RelayHeaders::from_http(&headers),
         request_deadline,

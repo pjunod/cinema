@@ -5920,10 +5920,28 @@ fn acquisition_query_preserves_integer_offsets_and_legacy_relay_wire_shape() {
     enum LegacyResource {
         Playlist { native: Option<u8>, subtitle: Option<i64> },
     }
-    let resource = RelayResource::Playlist { native: query.native, subtitle: query.subtitle };
+    let resource = RelayResource::Playlist { native: query.native, subtitle: query.subtitle, acquisition_start_ms: None };
     let wire = serde_json::to_value(resource).expect("legacy wire");
     assert!(wire.get("acquisition_start_ms").is_none());
     let LegacyResource::Playlist { native, subtitle } = serde_json::from_value(wire).expect("old strict peer accepts original envelope");
     assert_eq!(native, Some(1));
     assert_eq!(subtitle, None);
+}
+
+#[test]
+fn acquisition_relay_sends_extension_only_to_proven_peer() {
+    #[derive(serde::Deserialize)]
+    #[serde(tag="resource",rename_all="snake_case",deny_unknown_fields)]
+    enum LegacyResource { Playlist { native: Option<u8>, subtitle: Option<i64> } }
+    let resource = RelayResource::Playlist { native: None, subtitle: Some(2), acquisition_start_ms: Some(296_065) };
+    let legacy = serde_json::to_value(resource.for_acquisition_peer(false)).expect("legacy serialization");
+    assert!(legacy.get("acquisition_start_ms").is_none());
+    let LegacyResource::Playlist { native, subtitle } = serde_json::from_value(legacy.clone()).expect("old peer accepts original shape");
+    assert_eq!(native,None); assert_eq!(subtitle,Some(2));
+    let restored: RelayResource = serde_json::from_value(legacy).expect("new peer accepts absent field");
+    assert!(matches!(restored,RelayResource::Playlist{acquisition_start_ms:None,..}));
+    let updated = serde_json::to_value(resource.for_acquisition_peer(true)).expect("negotiated serialization");
+    assert_eq!(updated["acquisition_start_ms"],296_065);
+    assert!(serde_json::from_value::<LegacyResource>(updated.clone()).is_err(),"must never send extension to an old strict peer");
+    assert!(matches!(serde_json::from_value::<RelayResource>(updated).expect("updated owner"),RelayResource::Playlist{acquisition_start_ms:Some(296_065),..}));
 }
