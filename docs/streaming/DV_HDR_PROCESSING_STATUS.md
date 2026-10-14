@@ -1187,9 +1187,11 @@ Iterator traversal stops before consuming a broad child list. Generic and
 typed CI authentication share one 64 MiB raw-log cache; bounded decimal
 identities convert to integers before live authority checks. Original
 failures, source invalidation and current compiler obligations remain.
-R30 builds the locked external Openraft adapter on a reviewable task branch;
-its source-only compiler check, task gate, landing and eight new effort-only
-controls remain owed. Complete qualification, deployment and physical HDR
+R30 landed as #1090 on effort `bf1eee9c4` after all seven exact-head
+gate 5104 jobs passed. Its eight new controls passed once there with native
+and wrapper exit 0 and clean stable source. Exact task source `c3aa37e86`
+also passed the source-only Linux Rust 1.97.1 compile and native enumeration
+of 197 Openraft methods; no unit bodies ran in that compiler check. Complete qualification, deployment and physical HDR
 acceptance remain open.
 
 R30 recognizes only the exact committed Openraft metadata/test wrapper and
@@ -1209,3 +1211,14 @@ inspection without compiler commands or unit execution. Remaining Rust
 workspace evidence validates 472 passes and one ignored case, retaining three
 empty targets only as compiler facts. Those source-reviewed component checks
 do not constitute complete qualification or physical HDR acceptance.
+
+All R29 and R30 new controls have actual passing effort results. The daemon
+component validates 4,192 passes and 37 ignored cases with its single retired
+original pass accounted separately; original execution events prove the
+failed-only PCM attempt preceded R17 closure. Remaining workspace evidence
+validates 472 passes and one ignored case, preserving three empty targets
+as compiler facts. Complete source-reviewed components retain every original
+raw capture, unknown measurement and failure disposition. The frozen final
+candidate still needs the complete authenticated unit union, current native
+command discovery, non-unit qualification and promotion receipt. Fleet
+deployment and the physical web/Android/Apple TV HDR ON/OFF checks remain open.
