@@ -1010,7 +1010,8 @@ authorize it. The complete processing pipeline must sustain the existing
 | R24 | Seal actual empty installed custody before SQL release controls | The installed lifecycle fixture admitted no driver or producer but never sealed its actual ingress ledger. Read that exact retained empty ledger and seal through the public production CAS before the no-spawn rollback trigger and before the live-route terminal refusal. Preserve an explicit unsealed refusal, every foreign-resource, rollback and replay control, and held counts 8→7→6. No production guard changes and no physical closure claim. PR #1078 landed as `314734701` after all seven exact-head compile-only gate 5050 checks passed. The failed-only installed body then passes on that exact effort with feature-qualified binary, complete 368-ID inventory and serial 8 MiB execution; the candidate pass and original failure remain preserved without replay. |
 | R25 | Supply JVM platform time and dispatcher only in the watched read-after fixture | The original selected watched-write pass predates the diagnostic observer added to the shared authenticated client. Its `Net.client` probe now invokes Android elapsed time and owns a Main scope on the plain JVM, invalidating that earlier result. Construct the same production authenticated client with an injected deterministic clock and install/reset the test Main dispatcher inside this one body with `finally`. Retain all receipt advancement, absence and failed-write clearing assertions and real middleware. No production change. Current affected compilation and normal hooks pass. Exact-head gate 5060 passes all seven jobs and PR #1080 lands on the effort. The missing/invalidated-only Android batch on effort `4a44a2279` passes all 40 selected cases, including this fixture, on measured OpenJDK 25.0.2 with original logs/XML retained and no applicable prior passing body repeated. |
 | R32 | Authenticate two bounded disjoint unit proofs | Built in #1094 after all seven exact-head gate 5113 jobs passed. Six new refusal/composition controls passed once on integrated effort `ddf2397a4`; no task bodies ran. Both complete partitions validate within the unchanged bounds, and all seven command cohorts plus native original CI logs authenticate. The complete Apple CI tail is preserved alongside its earlier exact prefix. Signed promotion enrollment, final qualification and physical HDR acceptance remain owed. |
-| R33 | Retain the two original Node preflight scripts | Proposed after Astra confirmed all consumed function slices and fixture inputs remain applicable. A finite original run/source/job/raw binding requires 18 custom successes, six custom successes and the one complete native TAP success; unknown original binary, flags and individual exits remain unknown. Only these two script commands can be adopted; preflight, browser/UI and non-unit qualification remain required. Five new controls await first execution on the integrated effort; the original R32 Python invocation notation is bound to its exact immutable binding/source/raw bytes rather than replaying six passing bodies. |
+| R33 | Retain the two original Node preflight scripts | Built in #1095 after all seven exact-head gate 5116 jobs passed. Five new controls and the one source-invalidated YAML reader passed once on effort `60715bd54`. All 15 current-source compiler actions and 266 filtered listings completed without bodies; both final bounded partitions and their shared structural budget validate. Signed enrollment exposed Forgejo's unpaginated per-issue comment endpoint; original enrollment bytes and quota failures remain preserved. |
+| R34 | Retrieve every signed evidence comment through real pagination | Build a Forgejo-only scoped reader using the repository comments endpoint, which applies pagination in SQL. Authenticated issue metadata and exact issue/pull URLs scope the selected comments; raw repository batches determine continuation before filtering. Duplicate identities, unknown filters and existing byte/page/request bounds still refuse. Five new controls await first execution on the main-bound effort; no old unit replay is indicated. |
 | A01 | Current-main fleet build and physical Profile 5, Profile 8 and Profile 7 FEL acceptance on web, Android and Apple TV | Owed after qualification/deployment. Retain startup, stalls, seek/reopen report clearing, stats, screenshots and exact effective-processing logs; repeat with both preferences off. |
 
 Tasks integrate serially through pull requests into the effort after the
@@ -1292,3 +1293,26 @@ resolves a path during verification nor claims an at-execution symlink proof.
 The original binding and six-outcome log are immutable fixtures for one new
 [refusal control](../../tests/validation/test_python_invocation_notation.py).
 New captures invoke the measured canonical interpreter directly.
+
+### R34 — Forgejo evidence comments require repository pagination
+
+The installed server returns all issue comments from its per-issue endpoint,
+ignoring `page` and `limit`. Enrollment of the first validated partition
+therefore refused its 72-row response. The original asset, 71 signed chunks,
+attestation, raw responses and failed enrollment log remain preserved.
+
+The [scoped reader](../../validation/issue_comment_pages.py) obtains issue
+identity and creation time from authenticated metadata, then reads ordinary
+comments from the genuinely paginated repository endpoint. It starts one
+second before issue creation, compares exact API/browser issue or pull URLs,
+and decides pagination from every repository row before selecting the issue.
+It refuses repeated identities, foreign scope URLs and unknown filters. The
+4 MiB response, 50-row page, 20-page and 200-request bounds are unchanged.
+Timeline pagination is unsuitable because that handler can filter rows after
+pagination. The generic API pagination loop remains unchanged.
+
+[Five controls](../../tests/validation/test_issue_comment_pages.py) cover late
+target comments after a full foreign page, metadata and URL substitution,
+duplicate/page limits, empty/filter cases and unchanged non-Forgejo/generic
+paths. Their first body execution is reserved for the integrated effort.
+Whole qualification, deployment and physical HDR ON/OFF acceptance remain open.
