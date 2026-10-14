@@ -1123,6 +1123,8 @@ mod tests {
             hevc_configuration: None,
             strip_dolby_vision: false,
             dolby_vision: None,
+            dvh1_parameter_sets: Vec::new(),
+            dvh1_parameter_sets_malformed: false,
             parameter_sets: vec![vec![0x40, 0x01, 0x0c]],
             hdr10_sei: Vec::new(),
         };

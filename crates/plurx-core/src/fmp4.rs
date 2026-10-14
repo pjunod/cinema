@@ -1076,6 +1076,14 @@ pub struct PromotionInputs {
     pub hevc_configuration: Option<crate::hevc_configuration::Proof>,
     /// HEVC VPS/SPS/PPS NAL units (types 32-34), in the order found.
     pub parameter_sets: Vec<Vec<u8>>,
+    /// Opening-sample evidence for FFmpeg's dvh1 completeness-bit omission.
+    /// Separate from missing-type promotion: later GOPs need not repeat it.
+    /// Empty on old persisted indexes, which retain their previous behavior.
+    #[serde(default)]
+    pub dvh1_parameter_sets: Vec<Vec<u8>>,
+    /// Malformed opening evidence must not become an absent later repetition.
+    #[serde(default)]
+    pub dvh1_parameter_sets_malformed: bool,
     /// Prefix-SEI NAL units carrying HDR10 static metadata.
     pub hdr10_sei: Vec<Vec<u8>>,
     /// The Dolby Vision configuration record to write into the served init.
@@ -1154,6 +1162,7 @@ impl PromotionInputs {
             .flatten()
             .and_then(|location| hvcc_nal_array_types(&init.bytes[location.payload]).ok())
             .unwrap_or_default();
+        let dvh1_parameter_sets = dvh1::capture(init, sample, video.nal_length_size);
         PromotionInputs {
             indexed_hdr10_metadata: false,
             hevc_configuration: None,
@@ -1162,6 +1171,8 @@ impl PromotionInputs {
             // source file and the session's own copy options.
             dolby_vision: None,
             strip_dolby_vision: false,
+            dvh1_parameter_sets_malformed: dvh1_parameter_sets.is_err(),
+            dvh1_parameter_sets: dvh1_parameter_sets.unwrap_or_default(),
             parameter_sets: hevc_parameter_set_nals(sample, video.nal_length_size)
                 .into_iter()
                 .filter(|nal| hevc_nal_type(nal).is_some_and(|kind| !configured.contains(&kind)))
@@ -1174,8 +1185,23 @@ impl PromotionInputs {
         }
     }
 
+    /// An absent later tuple is ordinary; a present conflicting tuple is not.
+    /// The opening proof is reused by every planned generation, independently
+    /// of whether its landing GOP repeats the out-of-band configuration.
+    pub fn matches_later_parameter_sets(&self, later: &Self) -> bool {
+        let mut later = later.clone();
+        if later.dvh1_parameter_sets.is_empty() {
+            later
+                .dvh1_parameter_sets
+                .clone_from(&self.dvh1_parameter_sets);
+        }
+        self == &later
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.parameter_sets.is_empty()
+        !self.dvh1_parameter_sets_malformed
+            && self.dvh1_parameter_sets.is_empty()
+            && self.parameter_sets.is_empty()
             && self.hdr10_sei.is_empty()
             && self.dolby_vision.is_none()
             && !self.strip_dolby_vision
@@ -1774,6 +1800,9 @@ fn write_be_u32(bytes: &mut [u8], at: usize, value: u32) -> Result<(), Fmp4Error
     Ok(())
 }
 
+#[path = "fmp4/dvh1.rs"]
+mod dvh1;
+
 #[path = "fmp4/hdr10_index.rs"]
 mod hdr10_index;
 pub use hdr10_index::{
@@ -1800,9 +1829,13 @@ pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, F
                 .into(),
         ));
     }
+    if inputs.dvh1_parameter_sets_malformed {
+        return malformed("dvh1 opening parameter-set evidence is malformed");
+    }
     // Before the first mutator: each one refuses an init with two
     // descriptions, and this removes the repeated one ffmpeg 8 writes.
     let collapsed = collapse_equivalent_hevc_sample_entries(init)? > 0;
+    let dvh1 = dvh1::complete(init, &inputs.dvh1_parameter_sets)?;
     let hevc = promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)?;
     // The removal goes FIRST, and the rewrite below goes last, for the same
     // reason pointing opposite ways: `promote_hdr10_static_metadata_from`
@@ -1836,13 +1869,17 @@ pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, F
         // still the union of all three.
         None => removed,
     };
-    Ok(collapsed || hevc || content_light || hdr10 || dolby_vision)
+    Ok(collapsed || dvh1 || hevc || content_light || hdr10 || dolby_vision)
 }
 
 pub fn promote_hevc_parameter_sets(init: &mut Init, first: &Fragment) -> Result<bool, Fmp4Error> {
     let collapsed = collapse_equivalent_hevc_sample_entries(init)? > 0;
     let inputs = PromotionInputs::from_fragment(first, init);
-    Ok(promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)? || collapsed)
+    if inputs.dvh1_parameter_sets_malformed {
+        return malformed("dvh1 opening parameter-set evidence is malformed");
+    }
+    let dvh1 = dvh1::complete(init, &inputs.dvh1_parameter_sets)?;
+    Ok(promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)? || dvh1 || collapsed)
 }
 
 /// The same surgery, from parameter sets captured somewhere else.
@@ -7883,6 +7920,8 @@ mod tests {
         ));
     }
 
+    include!("fmp4/dvh1_tests.rs");
+
     #[test]
     fn hevc_array_completeness_is_distinct_from_parameter_set_presence() {
         let mut record = vec![0u8; 23];
@@ -9185,6 +9224,8 @@ mod tests {
             hevc_configuration: None,
             dolby_vision: None,
             strip_dolby_vision: false,
+            dvh1_parameter_sets: Vec::new(),
+            dvh1_parameter_sets_malformed: false,
             parameter_sets: vec![vec![0x40, 0x01, 0x0c], vec![0x42, 0x01, 0x01]],
             hdr10_sei: vec![vec![0x4e, 0x01, 0x89]],
         };

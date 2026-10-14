@@ -781,6 +781,16 @@ impl VodServe {
         // The §2 ruling: a single immutable init cannot describe a film whose
         // clean fragments carry varying parameter sets, so the verdict is a
         // scan-time fallback here, never a producer_failed mid-playback.
+        if video.retains_hevc_parameter_sets()
+            && index
+                .as_ref()
+                .is_some_and(|index| !index.promotion.dvh1_parameter_sets.is_empty())
+        {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_source_unsupported",
+                "dvh1 completeness repair cannot retain in-band parameter sets",
+            ));
+        }
         if index
             .as_ref()
             .is_some_and(|index| !index.parameter_sets_constant)
@@ -2555,6 +2565,16 @@ impl VodServe {
         // The §2 ruling: a single immutable init cannot describe a film whose
         // clean fragments carry varying parameter sets, so the verdict is a
         // scan-time fallback here, never a producer_failed mid-playback.
+        if video.retains_hevc_parameter_sets()
+            && index
+                .as_ref()
+                .is_some_and(|index| !index.promotion.dvh1_parameter_sets.is_empty())
+        {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_source_unsupported",
+                "dvh1 completeness repair cannot retain in-band parameter sets",
+            ));
+        }
         if index
             .as_ref()
             .is_some_and(|index| !index.parameter_sets_constant)
