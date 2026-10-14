@@ -293,6 +293,84 @@ func autoCompletedTransferBps(_ sample: PlayerController.AutoCompletedTransfer, 
     return bps.isFinite && bps > 0 ? bps : nil
 }
 
+/// Completed link observations belong to one installed viewer lifetime.
+struct AutoTransferPressureOwner: Equatable {
+    let item: ObjectIdentifier
+    let attempt: String
+    let viewerEpoch: Int
+    let session: String
+    let candidate: String
+    let origin: String
+}
+
+struct AutoTransferPressureObservation {
+    let severe: Bool
+    let mildSamples: Int
+    var urgent: Bool { severe || mildSamples >= 2 }
+}
+
+/// Count actual receipts when they arrive, rather than samples left over at a
+/// timer tick. Replayed, stale and out-of-order bodies cannot reset or renew it.
+struct AutoTransferPressureEvidence {
+    private var owner: AutoTransferPressureOwner?
+    private var receipts: [String: Int] = [:]
+    private var latestCompletedAtMs: Int?
+    private var lastClassifiedAtMs: Int?
+    private var mildCount = 0
+    private var notBeforeMs = 0
+
+    mutating func clear(notBeforeMs: Int = 0) {
+        self = AutoTransferPressureEvidence()
+        self.notBeforeMs = max(0, notBeforeMs)
+    }
+
+    mutating func bind(_ requested: AutoTransferPressureOwner) {
+        if owner != requested {
+            let floor = notBeforeMs
+            clear(notBeforeMs: floor)
+            owner = requested
+        }
+    }
+
+    func owns(_ requested: AutoTransferPressureOwner) -> Bool { owner == requested }
+
+    func mildSamples(nowMs: Int) -> Int {
+        guard let lastClassifiedAtMs, nowMs >= lastClassifiedAtMs,
+              nowMs - lastClassifiedAtMs <= 10_000 else { return 0 }
+        return mildCount
+    }
+
+    mutating func observe(_ sample: PlayerController.AutoCompletedTransfer,
+                          owner requested: AutoTransferPressureOwner, canonicalOrigin: String?,
+                          downsideCost: Double?, knownPeak: Bool, nowMs: Int) -> AutoTransferPressureObservation? {
+        guard owner == requested, sample.installedSessionId == requested.session,
+              sample.installedCandidateId == requested.candidate, canonicalOrigin == requested.origin,
+              !requested.session.isEmpty, !requested.candidate.isEmpty, !requested.origin.isEmpty,
+              sample.statusCode == 200, sample.completedAtMs >= notBeforeMs,
+              let duration = sample.bodyDurationSeconds, duration.isFinite, duration > 0, duration <= 120,
+              let link = autoCompletedTransferBps(sample, nowMs: nowMs),
+              let receipt = sample.receipt, UUID(uuidString: receipt)?.uuidString.lowercased() == receipt,
+              let etag = sample.etag, !etag.isEmpty,
+              let url = URL(string: sample.segmentId), url.pathComponents.contains(requested.session),
+              url.lastPathComponent.range(of: "^seg[0-9]+\\.(m4s|ts)$", options: .regularExpression) != nil,
+              latestCompletedAtMs.map({ sample.completedAtMs >= $0 }) ?? true,
+              receipts[receipt] == nil else { return nil }
+        receipts = receipts.filter { nowMs >= $0.value && nowMs - $0.value <= 10_000 }
+        guard receipts.count < 32 else { return nil }
+        receipts[receipt] = sample.completedAtMs
+        latestCompletedAtMs = sample.completedAtMs
+        guard let cost = downsideCost, cost.isFinite, cost > 0 else {
+            return AutoTransferPressureObservation(severe: false, mildSamples: 0)
+        }
+        if mildSamples(nowMs: nowMs) == 0 { mildCount = 0 }
+        let severe = link < cost * 0.7
+        let mild = link < cost * (knownPeak ? 1.3 : 1.0)
+        mildCount = mild ? min(2, mildCount + 1) : 0
+        lastClassifiedAtMs = sample.completedAtMs
+        return AutoTransferPressureObservation(severe: severe, mildSamples: mildCount)
+    }
+}
+
 /// Catalog exposure permits a bounded observation, not a positive cost verdict.
 func autoUnknownOriginalTrial(_ candidate: QualityCandidate, outputs: [MeasuredCandidateOutput]?) -> Bool {
     candidate.hasValidIdentity && candidate.decoderCompatible && candidate.route == "remux" &&
@@ -2764,7 +2842,7 @@ final class PlayerController: ObservableObject {
     private var autoVoluntary = true
     private var autoExposed = false
     private var autoMildSamples = 0
-    private var autoMildTransferCompletedMs: Int?
+    private var autoTransferPressure = AutoTransferPressureEvidence()
     private var autoDecoderRejected: Set<String> = []
     private var autoDecodePressure = AutoDecodePressureWindow()
     private var autoDecodeQualityResponseUsed = false
@@ -3209,6 +3287,8 @@ final class PlayerController: ObservableObject {
         autoTransferMetricTask?.cancel()
         autoTransferMetricTask = nil
         latestAutoCompletedTransfer = nil
+        autoTransferPressure.clear(notBeforeMs: PlaybackControlSession.monotonicMs())
+        autoMildSamples = 0
         autoLinkClaims.removeAll()
     }
 
@@ -3237,7 +3317,9 @@ final class PlayerController: ObservableObject {
                     // Missing metrics, caches, errors and unknown pacing never
                     // become an unpaced-link sample by observing a stationary clock.
                     guard let transactions = resource.networkTransactionMetrics?.transactionMetrics else { continue }
-                    for transfer in transactions {
+                    for transfer in transactions.sorted(by: {
+                        ($0.responseEndDate ?? .distantPast) < ($1.responseEndDate ?? .distantPast)
+                    }) {
                         guard let end = transfer.responseEndDate,
                               transfer.countOfResponseBodyBytesReceived > 0 else { continue }
                         let age = Date().timeIntervalSince(end)
@@ -3288,8 +3370,7 @@ final class PlayerController: ObservableObject {
                             self.autoStagedTransfers.append(sample)
                             if self.autoStagedTransfers.count > 4 { self.autoStagedTransfers.removeFirst() }
                         } else {
-                            self.latestAutoCompletedTransfer = sample
-                            self.reportCandidateLinkSample(negative: false)
+                            self.observeAutoTransferPressure(sample, item: item)
                         }
                     }
                 }
@@ -3298,6 +3379,40 @@ final class PlayerController: ObservableObject {
             }
         }
         if staged { autoStagedTransferMetricTask = task } else { autoTransferMetricTask = task }
+    }
+
+    private var currentAutoTransferPressureOwner: AutoTransferPressureOwner? {
+        guard let item = player.currentItem, let sessionId, let candidate = autoActiveCandidateId,
+              let origin = Session.shared.canonicalPrimaryOrigin else { return nil }
+        return AutoTransferPressureOwner(item: ObjectIdentifier(item), attempt: playbackAttemptId,
+            viewerEpoch: viewerActionEpoch, session: sessionId, candidate: candidate, origin: origin)
+    }
+
+    private var autoTransferPressureOwnerCurrent: Bool {
+        currentAutoTransferPressureOwner.map(autoTransferPressure.owns) == true
+    }
+
+    private func observeAutoTransferPressure(_ sample: AutoCompletedTransfer, item: AVPlayerItem) {
+        guard player.currentItem === item, let owner = currentAutoTransferPressureOwner else { return }
+        autoTransferPressure.bind(owner)
+        let now = PlaybackControlSession.monotonicMs()
+        // Body observation and positive advisory reporting do not depend on a
+        // catalog arriving first. Only a measured current candidate classifies
+        // pressure, under the same route protocol that can act on it.
+        let enabled = model?.displayAwareAuto == true && model?.autoAbr == true &&
+            model?.displayAwareAutoProtocol == "route-v1" && decision?.displayAwareAutoProtocol == "route-v1" &&
+            autoRouteProtocol == "route-v1" && selectedHeight == nil && !selectedQualityIsOriginal
+        let current = enabled ? measuredCostCatalog(decision?.qualityCandidates ?? []).first(where: {
+            $0.hasValidIdentity && $0.id == owner.candidate
+        }) : nil
+        let cost = current.flatMap { autoDownsideCostBps($0, sample: sample, sessionId: owner.session, nowMs: now) }
+        guard let evidence = autoTransferPressure.observe(sample, owner: owner,
+            canonicalOrigin: sample.origin.flatMap(Session.canonicalOrigin),
+            downsideCost: cost, knownPeak: current?.peakBps != nil, nowMs: now) else { return }
+        latestAutoCompletedTransfer = sample
+        autoMildSamples = autoTransferPressure.mildSamples(nowMs: now)
+        reportCandidateLinkSample(negative: false)
+        if evidence.urgent { tickDisplayAwareAuto(pressureOnly: true) }
     }
 
     private func autoStagedObservationCurrent(_ observation: AutoStagedObservation) -> Bool {
@@ -4251,6 +4366,9 @@ final class PlayerController: ObservableObject {
         recipeRevision.didAttach(requestedRecipeRevision)
         if requestedRecipeRevision == recipeRevision.desired { manualQualityRetention.didAttach() }
         playbackAttemptId = attemptId
+        autoTransferPressure.clear(notBeforeMs: PlaybackControlSession.monotonicMs())
+        latestAutoCompletedTransfer = nil
+        autoMildSamples = 0
         baseMs = 0
         player.play()
         if !wantsPlayback { player.pause() }
@@ -4302,6 +4420,9 @@ final class PlayerController: ObservableObject {
         invalidateResumeAttempt(outcome: "viewer-action")
         let superseded = viewerActionEpoch
         viewerActionEpoch &+= 1
+        autoTransferPressure.clear(notBeforeMs: PlaybackControlSession.monotonicMs())
+        latestAutoCompletedTransfer = nil
+        autoMildSamples = 0
         playbackControl.viewerActionChanged()
         // The viewer has moved on from whatever was being staged for them, so
         // a fault about that destination is no longer about anything.
@@ -5809,6 +5930,9 @@ final class PlayerController: ObservableObject {
         seekOutputWakeup = nil
         restorePreparedIncumbentBufferPreference()
         viewerActionEpoch &+= 1
+        autoTransferPressure.clear(notBeforeMs: PlaybackControlSession.monotonicMs())
+        latestAutoCompletedTransfer = nil
+        autoMildSamples = 0
         pendingControlSequence = nil
         itemObserver?.cancel()
         itemObserver = nil
@@ -6610,6 +6734,9 @@ final class PlayerController: ObservableObject {
         recipeRevision.didAttach(requestedRecipeRevision)
         if requestedRecipeRevision == recipeRevision.desired { manualQualityRetention.didAttach() }
         playbackAttemptId = attemptId
+        autoTransferPressure.clear(notBeforeMs: PlaybackControlSession.monotonicMs())
+        latestAutoCompletedTransfer = nil
+        autoMildSamples = 0
         // Publish the new local-to-film mapping only once the new item is the
         // one whose clock `realPositionMs()` reads. Updating it during session
         // creation mixed the predecessor's local time into the successor's
@@ -11508,6 +11635,8 @@ extension PlayerController {
         autoLastSwitchMs = nil
         autoUpgradeSinceMs = nil
         autoMildSamples = 0
+        autoTransferPressure.clear(notBeforeMs: PlaybackControlSession.monotonicMs())
+        latestAutoCompletedTransfer = nil
         if autoPreparing { autoDesiredCandidate = nil; autoPreparing = false }
     }
 
@@ -11678,7 +11807,7 @@ extension PlayerController {
         let now = PlaybackControlSession.monotonicMs()
         autoUpgradeEvidence.bind(attachment: player.currentItem.map(ObjectIdentifier.init), attempt: playbackAttemptId, nowMs: now)
         let link: Double? = {
-            guard let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
+            guard autoTransferPressureOwnerCurrent, let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
                   !transfer.fromLocalCache, transfer.producerPaced == false,
                   transfer.statusCode == 200, transfer.receipt != nil, transfer.etag != nil,
                   autoTransferOriginCurrent(transfer),
@@ -11692,7 +11821,7 @@ extension PlayerController {
         if severe, let transfer = latestAutoCompletedTransfer {
             autoUpgradeEvidence.cliff(completedAtMs: transfer.completedAtMs, nowMs: now)
         }
-        let mild = autoMildSamples >= 2 && link.map { bps in downsideCost.map { bps < $0 * (current.peakBps == nil ? 1.0 : 1.3) } ?? false } == true
+        let mild = autoTransferPressure.mildSamples(nowMs: now) >= 2 && link.map { bps in downsideCost.map { bps < $0 * (current.peakBps == nil ? 1.0 : 1.3) } ?? false } == true
         let producer = autoActiveProductionPressure(status: sessionStatus,
             observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
             sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds())
@@ -11833,12 +11962,14 @@ extension PlayerController {
             autoStagedProductionAllowsCommit(action) && autoStagedOriginalAllowsCommit(action)
     }
 
-    private func tickDisplayAwareAuto() {
+    private func tickDisplayAwareAuto(pressureOnly: Bool = false) {
         let now = PlaybackControlSession.monotonicMs()
         autoUpgradeEvidence.bind(attachment: player.currentItem.map(ObjectIdentifier.init), attempt: playbackAttemptId, nowMs: now)
-        guard now >= autoNextTickMs else { return }
-        autoNextTickMs = now + 5_000
-        refreshMissingAutoCosts(now: now)
+        if !pressureOnly {
+            guard now >= autoNextTickMs else { return }
+            autoNextTickMs = now + 5_000
+            refreshMissingAutoCosts(now: now)
+        }
         guard model?.displayAwareAuto == true, model?.autoAbr == true,
               model?.displayAwareAutoProtocol == "route-v1",
               decision?.displayAwareAutoProtocol == "route-v1", autoRouteProtocol == "route-v1",
@@ -11849,21 +11980,21 @@ extension PlayerController {
               let offered = decision?.qualityCandidates,
               case let candidates = measuredCostCatalog(offered),
               let current = candidates.first(where: { $0.hasValidIdentity && $0.id == autoActiveCandidateId })
-        else { autoUpgradeSinceMs = nil; return }
+        else { if !pressureOnly { autoUpgradeSinceMs = nil }; return }
         // A viewer boundary re-plans original first, once, on the first
         // evaluation where the playing incumbent has the runway a handoff
         // needs. The incumbent was never held for it.
         // Without a fresh link proof there is no candidate, and the boundary
         // stays owed for the next evaluation rather than being spent on nothing.
         let runway = bufferedRunwaySeconds()
-        if let chosen = autoBoundaryReplan.take(runwaySeconds: runway,
+        if !pressureOnly, let chosen = autoBoundaryReplan.take(runwaySeconds: runway,
                                                 isCurrent: { attemptStillCurrent($0, fence: .autoBoundaryReplanCurrent) },
                                                 produce: { autoOriginalBoundaryCandidate(now: now) }),
            beginAutoBoundaryPreparation(chosen, target: target) {
             return
         }
         let link: Double? = {
-            guard let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
+            guard autoTransferPressureOwnerCurrent, let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
                   !transfer.fromLocalCache, transfer.producerPaced == false,
                   transfer.statusCode == 200, transfer.receipt != nil, transfer.etag != nil,
                   autoTransferOriginCurrent(transfer),
@@ -11888,16 +12019,13 @@ extension PlayerController {
         }
         let currentArea = Int64(current.width) * Int64(current.height)
         let mild = link.map { bps in downsideCost.map { bps < $0 * (current.peakBps == nil ? 1.0 : 1.3) } ?? false } ?? false
-        if !mild { autoMildSamples = 0; autoMildTransferCompletedMs = nil }
-        else if autoMildTransferCompletedMs != latestAutoCompletedTransfer?.completedAtMs {
-            autoMildSamples = min(2, autoMildSamples + 1)
-            autoMildTransferCompletedMs = latestAutoCompletedTransfer?.completedAtMs
-        }
+        autoMildSamples = autoTransferPressure.mildSamples(nowMs: now)
         let producerPressure = autoActiveProductionPressure(status: sessionStatus,
             observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
             sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds())
-        let pressure = ((severe || autoMildSamples >= 2) &&
+        let pressure = ((severe || (mild && autoMildSamples >= 2)) &&
             (current.peakBps != nil || (bufferedRunwaySeconds() ?? 0) < 10)) || producerPressure
+        if pressureOnly && !pressure { return }
         let aspect = Double(current.width) / Double(current.height)
         let neededWidth = min(Double(target.widthPx), Double(target.heightPx) * aspect)
         let neededHeight = min(Double(target.heightPx), Double(target.widthPx) / aspect)

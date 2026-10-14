@@ -2145,3 +2145,99 @@ final class DisplayAwareAutoIntentTests: XCTestCase {
         XCTAssertEqual(object["transport_revision"] as? Int, 4)
     }
 }
+
+final class AutoTransferPressureEvidenceTests: XCTestCase {
+    private let item = NSObject()
+    private var owner: AutoTransferPressureOwner {
+        .init(item: ObjectIdentifier(item), attempt: "attempt", viewerEpoch: 1,
+              session: "session", candidate: "candidate", origin: "https://node")
+    }
+    private func sample(_ receipt: Int, completed: Int = 1_000, duration: Double = 1,
+                        bytes: Int64 = 100_000, status: Int = 200,
+                        session: String = "session", candidate: String = "candidate",
+                        cache: Bool = false, paced: Bool? = false) -> PlayerController.AutoCompletedTransfer {
+        .init(bodyBytes: bytes, bodyDurationSeconds: duration, completedAtMs: completed,
+              origin: "https://node", networkLoad: true, fromLocalCache: cache, producerPaced: paced,
+              statusCode: status, segmentId: "https://node/hls/\(session)/seg\(receipt).m4s",
+              mediaDurationSeconds: 2, receipt: String(format: "00000000-0000-0000-0000-%012d", receipt),
+              etag: "object-\(receipt)", installedSessionId: session, installedCandidateId: candidate)
+    }
+    private func observe(_ sample: PlayerController.AutoCompletedTransfer,
+                         evidence: inout AutoTransferPressureEvidence, now: Int = 1_000,
+                         cost: Double? = 800_000, known: Bool = true,
+                         canonicalOrigin: String? = "https://node") -> AutoTransferPressureObservation? {
+        evidence.observe(sample, owner: owner, canonicalOrigin: canonicalOrigin,
+                         downsideCost: cost, knownPeak: known, nowMs: now)
+    }
+
+    func testDistinctMildReceiptsAtSameClockBecomeUrgentBeforePeriodicTick() {
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        XCTAssertFalse(observe(sample(1), evidence: &evidence)!.urgent)
+        XCTAssertTrue(observe(sample(2), evidence: &evidence)!.urgent)
+        XCTAssertEqual(evidence.mildSamples(nowMs: 1_000), 2)
+        XCTAssertTrue(observe(sample(3, bytes: 50_000), evidence: &evidence)!.severe)
+    }
+
+    func testDuplicateAndOlderReceiptsCannotResetOrRenewPressure() {
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        _ = observe(sample(1), evidence: &evidence)
+        _ = observe(sample(2, completed: 1_001), evidence: &evidence, now: 1_001)
+        XCTAssertNil(observe(sample(2, completed: 1_002, bytes: 1_000_000), evidence: &evidence, now: 1_002))
+        XCTAssertNil(observe(sample(3, completed: 1_000, bytes: 1_000_000), evidence: &evidence, now: 1_002))
+        XCTAssertEqual(evidence.mildSamples(nowMs: 1_002), 2)
+        XCTAssertEqual(evidence.mildSamples(nowMs: 11_002), 0)
+        XCTAssertNil(observe(sample(2, completed: 1_001), evidence: &evidence, now: 11_002))
+    }
+
+    func testInvalidForeignAndUnmeasuredBodiesNeverSupplyPressureAuthority() {
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        for bad in [sample(1, duration: .nan), sample(2, duration: 121), sample(3, bytes: 0),
+                    sample(4, status: 206), sample(5, session: "foreign"), sample(6, candidate: "foreign"),
+                    sample(7, cache: true), sample(8, paced: nil)] {
+            XCTAssertNil(observe(bad, evidence: &evidence))
+        }
+        XCTAssertNil(observe(sample(9), evidence: &evidence, canonicalOrigin: "https://foreign"))
+        XCTAssertEqual(evidence.mildSamples(nowMs: 1_000), 0)
+        // Catalog absence retains a usable owned body, but supplies no urgency.
+        XCTAssertFalse(observe(sample(10), evidence: &evidence, cost: nil)!.urgent)
+        XCTAssertFalse(observe(sample(11), evidence: &evidence, cost: .infinity)!.urgent)
+        XCTAssertEqual(evidence.mildSamples(nowMs: 1_000), 0)
+    }
+
+    func testPressureEvidenceOwnerAndViewerResetRetireAllReceiptCredit() {
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        _ = observe(sample(1), evidence: &evidence)
+        _ = observe(sample(2), evidence: &evidence)
+        let changed = AutoTransferPressureOwner(item: owner.item, attempt: owner.attempt,
+            viewerEpoch: 2, session: owner.session, candidate: owner.candidate, origin: owner.origin)
+        evidence.bind(changed)
+        XCTAssertFalse(evidence.owns(owner)); XCTAssertEqual(evidence.mildSamples(nowMs: 1_000), 0)
+        XCTAssertNil(observe(sample(3), evidence: &evidence))
+        evidence.clear(notBeforeMs: 1_001); XCTAssertFalse(evidence.owns(changed))
+        evidence.bind(owner)
+        XCTAssertNil(observe(sample(1), evidence: &evidence, now: 1_002))
+        XCTAssertFalse(observe(sample(4, completed: 1_002), evidence: &evidence, now: 1_002)!.urgent)
+    }
+
+    func testReceiptWindowIsBoundedAndExpiredMildCreditDoesNotRenew() {
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        for receipt in 1...32 { XCTAssertNotNil(observe(sample(receipt), evidence: &evidence)) }
+        XCTAssertNil(observe(sample(33), evidence: &evidence))
+        XCTAssertEqual(evidence.mildSamples(nowMs: 11_001), 0)
+        XCTAssertFalse(observe(sample(34, completed: 11_001), evidence: &evidence, now: 11_001)!.urgent)
+        XCTAssertTrue(observe(sample(35, completed: 11_001), evidence: &evidence, now: 11_001)!.urgent)
+    }
+
+    func testPressureThresholdsKeepSevereAndTwoMildAuthority() {
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        // Equality at the severe boundary is mild, not severe.
+        let boundary = observe(sample(1, bytes: 70_000), evidence: &evidence)!
+        XCTAssertFalse(boundary.severe); XCTAssertFalse(boundary.urgent)
+        XCTAssertTrue(observe(sample(2, bytes: 69_999), evidence: &evidence)!.severe)
+        let healthy = observe(sample(3, bytes: 130_000), evidence: &evidence)!
+        XCTAssertFalse(healthy.urgent); XCTAssertEqual(evidence.mildSamples(nowMs: 1_000), 0)
+        // Unknown peak preserves the existing 1.0 mild multiplier.
+        XCTAssertFalse(observe(sample(4), evidence: &evidence, known: false)!.urgent)
+        XCTAssertEqual(evidence.mildSamples(nowMs: 1_000), 0)
+    }
+}
