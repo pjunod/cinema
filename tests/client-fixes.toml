@@ -6511,3 +6511,19 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func restorationPreference(currentHint: Double)"
 test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
 test_anchor = "testIncumbentFetchPreferenceLeaseScalesFastPlaybackAndRejectsUnknownFacts"
+
+[[fixes]]
+id = "apple.cadence-small-index-read-budget"
+commits = ["9a2162c5c6b5c56db1eab66b8d70dcd303907721"]
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "static let initialIndexWindowBytes = 4_096"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "testTinyRangedCadenceIndexDoesNotFetchAQuarterMegabyte"
+
+[[fixes]]
+id = "apple.cadence-large-index-adaptive-continuation"
+commits = ["9a2162c5c6b5c56db1eab66b8d70dcd303907721"]
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "var nextReadBytes: Int"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "testLargeAndMultipleMoofsContinueAdaptivelyWithoutReadingMedia"

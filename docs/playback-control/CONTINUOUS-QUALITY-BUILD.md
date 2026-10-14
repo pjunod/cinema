@@ -11301,3 +11301,83 @@ proofs. This is an AVFoundation preference, so new physical evidence must show
 whether it actually frees sufficient capacity. Both final iOS and tvOS build-for-testing targets compile the correction and
 its two regression anchors without executing units. Physical qualification
 remains pending; units stay deferred until final review and batched merge.
+
+### 10.314 — owned fetch preference works; future coverage is the readiness limit
+
+On public `0a7ce34b9`, the strict short TV series completes15 manual changes
+and1 Auto change, with an83.221ms maximum decoded-frame gap. Required720p
+still fails and480p recovers. This failure remains preserved. The incumbent
+preference lease acquires60→16seconds with59.830seconds of actual runway and
+restores60seconds. Identity-joined transfers show no incumbent segment request
+competing with the720p acquisition before the deadline. The correction therefore
+removes the observed speculative contention, but is insufficient by itself.
+At12.024seconds,720p is still metadataReady: its loaded interval is
+298,000–318,010.667ms, the parked item is300,121ms and the moving incumbent is
+312,125ms. Those terminal facts do not prove coverage before the admission cutoff.
+Three cadence probes succeed; cadence success alone does not admit bufferReady.
+All155 owned processes close with zero residuals.
+
+A separate private diagnostic changes only the actor's normal manual-count
+guards from15 to1 and uses the existing explicit native count1 channel. It keeps
+normal Auto scoring, strict link pacing, zero burst, requested rungs and every
+readiness/overlap bound. Auto first establishes1080p, then commits the required
+720p at10Mb/s. The diagnostic completes1 manual and2 Auto changes with no errors
+and a66.753ms maximum decoded-frame gap. It is not full qualification.
+All149 owned processes close with zero residuals; the SDK closes first.
+
+Bounded private snapshots preserve each existing gate's short-circuit order and
+full numerical precision; only diagnostic values round to whole milliseconds.
+The server's200-character detail limit is respected. Missing or unevaluated
+checks remain unknown. Required720p has all earlier readiness gates true, while
+its loaded future rendezvous is false: at2.377seconds its original target is
+153,084ms, incumbent155,461ms and loaded range152,000–156,000ms. At5.554seconds,
+incumbent158,638ms still needs coverage through161,638ms, beyond the160,000ms
+loaded end. At5.761seconds the range reaches162,000ms and the incumbent is
+158,845ms; the unchanged future-point predicate admits with6.239seconds of
+physical overlap left. Neither voluntary-pressure guards nor a failed cadence
+proof explain those measured false predicates.
+
+The earlier failed capture includes three206 metadata reads of262,144bytes,
+each taking443–460ms; two overlap acquisition of the next successor fragment.
+A read-only audit during the new capture inspects16 actual cached720p fragments.
+Each has one1,844–1,856byte moof; complete index metadata and the following mdat
+header fit a1,980–1,992byte prefix. This audit is scoped to the100Mb/s mode-arm
+720p artifact, not an identity-joined10Mb/s downstage transfer. It establishes
+unnecessary metadata bytes, not a new qualification pass or readiness exception.
+
+For the full campaigns, a fresh900.01-second fixture is stream-copied from the
+preserved1,800-second source. Its SHA256 is
+`8b85173c8a49a0e3ba5395c1449462868b3b3d3549572e498663d6f3a93370c9`.
+Independent24-frame prefix and final-second comparisons match the original;
+video/audio codec, raster and cadence are unchanged. Each new campaign must
+measure its own complete output costs and finish all15 manual changes,5 Auto
+changes and both actual3Mb/s downshift/recovery landings before EOF. The shorter
+fixture saves preparation resources; truncation or missing receipts cannot pass.
+No old cost or acceptance proof transfers to this fixture.
+
+Full phone/TV qualification, formal adversarial review and the requested Fable
+checkpoint remain open. No units have executed; the batched merge coordinator
+owns final affected fast-lane execution after review.
+
+### 10.315 — inspect bounded fragment metadata without speculative media bytes
+
+Cadence inspection now begins with a4KiB unknown prefix. Once a box header
+identifies a retained moof, the remaining metadata extent and one following
+extended header determine the next read, capped at the existing256KiB window.
+An incomplete header requests only its remaining8/16-byte header bytes. Media
+payloads are skipped by their declared box extent rather than acquired for
+inspection. Large or multiple moofs still use bounded adaptive continuation
+instead of exhausting the request allowance on small reads.
+
+The existing4MiB retained-index bound,64-request limit,16MiB unranged-response
+limit, exact box tiling, Content-Range validation, terminal HTTP failures,
+deadline and task cancellation are unchanged. The readiness, future-point,
+runway, cadence scope and exposure policies are unchanged. No retries or feature
+gates are introduced.
+
+The regressions cover one4KiB206 request for a small index before a40MB media
+payload, and adaptive completion of3MB/800KB moofs separated by two40MB virtual
+media payloads without downloading those payloads. Both iOS and tvOS
+build-for-testing targets compile the repair and regressions successfully;
+no unit test executes. Physical qualification remains pending on the next
+integrated Apple build240.

@@ -1,6 +1,6 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 239
+Build: 240
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal
@@ -27,3 +27,11 @@ remains pending. The initially attempted503 retry was removed at Paul's directio
 
 [Continuous Quality Build §10.311](../playback-control/CONTINUOUS-QUALITY-BUILD.md)
 preserves the failures, server repairs and evidence limits.
+
+Prepared successor inspection starts with a4KiB fragment-index prefix and expands
+only to finish a declared metadata box or header. It skips media payloads and
+retains the original request, memory, deadline and failure limits. An owned
+incumbent buffer-preference lease reduces speculative shared-link contention
+while preparation keeps its original loaded-media and exposure requirements.
+The focused1manual/2Auto TV diagnostic passes; complete native acceptance remains
+pending. Units remain deferred to final review and batched merge.
