@@ -873,6 +873,8 @@ paths = [
   "crates/plurxd/src/ffmpeg/linux_dolby.rs",
   "crates/plurx-core/src/fmp4.rs",
   "crates/plurx-core/src/fmp4/hdr10_index.rs",
+  "crates/plurx-core/src/fmp4/dvh1.rs",
+  "crates/plurx-core/src/fmp4/dvh1_tests.rs",
   "crates/plurx-core/src/hevc_configuration.rs",
   "crates/plurx-core/src/mediafacts.rs",
   "crates/plurx-core/src/process/**",
