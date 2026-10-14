@@ -11560,3 +11560,68 @@ qualification, final adversarial review and Fable remain the next evidence.
 Authored unit bodies remain deferred through reviews to batched merge. Safari
 iOS automation, independent optical/audio measurements and the broader source
 and pressure matrix remain explicit acceptance limits.
+
+### 10.320 — Apple 243 pressure admission delay and TV launcher failure
+
+The exact Apple 243 phone candidate passes all 15 manual and 5 Auto changes,
+with all twenty typed landing predicates satisfied and a 64.396 ms maximum
+decoded-frame gap. Its separate 3 Mb/s extension fails with a native stall and
+zero low-link landings. Joined low-stage media responses are HTTP 200, and no
+cancellation counter increases before cleanup. The previous HTTP 410 failure
+does not recur in this run; this does not establish which retained-reader branch
+was exercised because ordinary control demand bodies remain unmeasured.
+
+The first 360p proposal starts with 12.986 seconds of actual contiguous runway,
+below the unchanged 16-second future-acquisition protection. It consequently
+uses the observed acquisition anchor, completes its exact initial seek in 6.134
+seconds and exhausts the original 12-second readiness bound. The incumbent is
+then beyond the successor's loaded interval. No failed landing receives credit.
+
+Source diagnosis finds that completed-transfer pressure is evaluated only on a
+five-second tick, while the latest transfer overwrites prior arrivals. The prior
+7.657 Mb/s sample is only the first mild observation; the next 2.925 Mb/s sample
+is severe and starts recovery too late. A repair to process distinct current-owner
+completed receipts promptly is in progress. Severity thresholds, mild two-body
+authority, cooldowns and physical acquisition protection are retained; no new
+buffer-only authority or client HTTP retry is proposed.
+
+Two TV attempts close without a healthy native baseline. The second completes
+four fresh costs but its private launcher reads the install receipt from the
+wrong directory and never launches the SDK. That one-line path is corrected and
+offline startup-input checks pass. This is a harness failure, not native playback
+qualification. Phone and TV supervisors close 226 and 165 owned processes
+respectively with zero residuals; the earlier TV attempt closes 188 with zero.
+
+The shared host records four OOM-counter increments. The bounded kernel window
+contains a killed process whose role and birth are unmeasured. No exact CQ victim
+is established, and the phone's low-link failure is not attributed to that event.
+Sampled allocation and free-memory observations are not continuous peak proofs.
+Fresh exact-source phone/TV acceptance, final adversarial review and Fable remain
+open. Unit bodies executed: zero.
+
+
+### 10.321 — prompt completed-transfer pressure in Apple 244
+
+Apple 244 processes each distinct valid completed incumbent transfer at arrival.
+Its bounded receipt ledger binds item, attempt, viewer epoch, session, candidate
+and canonical origin. Actual viewer/item boundaries retire older completions;
+invalid, stale, duplicate and out-of-order bodies cannot reset or renew pressure.
+Two distinct mild bodies remain necessary, and the existing severe threshold is
+unchanged. Missing catalog costs retain valid body/advisory evidence but authorize
+no urgent pressure action. A pressure-only evaluation skips ordinary upgrade and
+viewer-boundary replanning and does not consume their five-second schedule.
+Cooldown, switch budget, candidate fences and original acquisition bounds remain.
+
+The preserved Apple 243 severe body was reported while presenting and not stalled,
+with 16.784 seconds of actual contiguous runway and age 4 ms. The periodic tick
+uses that exact body 3.794 seconds later. Native selection-to-offer delay is a
+further 1.159 seconds: the first accepted control says staging, and the next
+request starts 1.051 seconds later and returns offered. The one-second staging
+cadence is client-owned. Prompt evidence handling removes scheduling latency;
+it does not guarantee that the later acquisition still has sixteen seconds of
+protection. No reconstructed runway or runtime pass is claimed.
+
+The iOS app and regression targets compile on the committed timing repair;
+unit bodies remain unrun. Separate phone and TV QA products retain their prior
+instrumentation overlays. Exact final artifact binding, focused timing capture,
+fresh full native acceptance and final adversarial/Fable reviews remain open.

@@ -1,6 +1,6 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 243
+Build: 244
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal
@@ -79,3 +79,15 @@ display/audio and broader acceptance limits remain explicit.
 
 [Continuous Quality Build §10.319](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10319--bounded-severe-pressure-acquisition-and-sealed-cached-recovery)
 records the repair boundaries; §10.318 preserves the prior full-run failure.
+
+
+Apple 244 consumes valid owned completed-transfer pressure promptly, with bounded
+receipt deduplication and actual viewer-lifetime completion floors. Normal
+five-second upgrade evaluation, severity thresholds and all physical preparation
+bounds remain unchanged. The recorded severe body was already 3.794 seconds old
+when Apple 243 acted; a further 1.159-second offer delay remains a measured risk.
+Fresh exact-source qualification remains open. All 92 current regression anchors
+are authored and unrun.
+
+[Continuous Quality Build §10.321](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10321--prompt-completed-transfer-pressure-in-apple-244)
+records the timing repair and remaining evidence.

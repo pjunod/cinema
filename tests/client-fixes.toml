@@ -6616,3 +6616,51 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func autoRecoveryCandidate("
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testPressureRescueDoesNotOverrideDecoderOrUnmeasuredProducerRecovery"
+
+[[fixes]]
+id = "apple.transfer-pressure-distinct-receipts"
+commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoTransferPressureEvidence"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testDistinctMildReceiptsAtSameClockBecomeUrgentBeforePeriodicTick"
+
+[[fixes]]
+id = "apple.transfer-pressure-replay-order"
+commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoTransferPressureEvidence"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testDuplicateAndOlderReceiptsCannotResetOrRenewPressure"
+
+[[fixes]]
+id = "apple.transfer-pressure-unknown-body"
+commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoTransferPressureEvidence"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testInvalidForeignAndUnmeasuredBodiesNeverSupplyPressureAuthority"
+
+[[fixes]]
+id = "apple.transfer-pressure-viewer-floor"
+commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoTransferPressureEvidence"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testPressureEvidenceOwnerAndViewerResetRetireAllReceiptCredit"
+
+[[fixes]]
+id = "apple.transfer-pressure-bounded-window"
+commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoTransferPressureEvidence"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testReceiptWindowIsBoundedAndExpiredMildCreditDoesNotRenew"
+
+[[fixes]]
+id = "apple.transfer-pressure-unchanged-thresholds"
+commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoTransferPressureEvidence"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testPressureThresholdsKeepSevereAndTwoMildAuthority"
