@@ -407,6 +407,9 @@ pub struct VodHlsFacts {
 #[derive(Clone)]
 pub(crate) struct ResponseOwner {
     preferred_start_ms: Option<i64>,
+    /// Frozen parent shape; a response-only scalar hint cannot stand in for
+    /// a continuous family's independently owned child playlist.
+    scalar_playlist: bool,
     retained_output: Option<Arc<retained::RetainedVodArtifact>>,
     lifecycle: Arc<Mutex<()>>,
     incarnation: Arc<()>,

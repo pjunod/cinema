@@ -992,6 +992,7 @@ impl Session {
     pub(super) fn response_owner(&self) -> ResponseOwner {
         ResponseOwner {
             preferred_start_ms: self.preferred_start_ms,
+            scalar_playlist: self.children.is_empty(),
             lifecycle: Arc::clone(&self.lifecycle),
             incarnation: Arc::clone(&self.incarnation),
             retained_output: self

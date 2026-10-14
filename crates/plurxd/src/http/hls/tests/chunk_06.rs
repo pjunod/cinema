@@ -2837,6 +2837,7 @@ async fn native_master_preparation_can_wait_six_seconds_for_exact_init() {
     let deadline = started + Duration::from_secs(12);
     let query = || PlaylistQuery {
         native: Some(1),
+        acquisition_start_ms: None,
         subtitle: None,
         diagnostic: None,
     };
@@ -5894,4 +5895,35 @@ fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
     assert_eq!(preparation_catalog_workers(&workers,"local",true,None).len(),1,"ordinary complete1080 excludes partial rows");
     let mut complete = local.clone(); complete.partial=false;
     assert_eq!(preparation_catalog_workers(&[local,complete],"local",true,Some(720)).len(),1,"a fitting complete route suppresses partial fallback");
+}
+
+#[test]
+fn acquisition_query_preserves_integer_offsets_and_legacy_relay_wire_shape() {
+    let query = Query::<PlaylistQuery>::try_from_uri(
+        &"/index.m3u8?acquisition_start_ms=296065&native=1".parse().expect("uri"),
+    ).expect("integer query").0;
+    assert_eq!(query.acquisition_start_ms, Some(296_065));
+    assert_eq!(query.native, Some(1));
+    let absent = Query::<PlaylistQuery>::try_from_uri(&"/index.m3u8".parse().expect("uri")).expect("legacy query").0;
+    assert!(absent.acquisition_start_ms.is_none());
+    let invalid = Query::<PlaylistQuery>::try_from_uri(
+        &"/index.m3u8?acquisition_start_ms=-1".parse().expect("uri"),
+    ).expect("offset validation belongs to frozen rendition").0;
+    assert_eq!(invalid.acquisition_start_ms, Some(-1));
+    for value in ["NaN", "1.5", "9223372036854775808"] {
+        assert!(Query::<PlaylistQuery>::try_from_uri(
+            &format!("/index.m3u8?acquisition_start_ms={value}").parse().expect("uri"),
+        ).is_err());
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "resource", rename_all = "snake_case", deny_unknown_fields)]
+    enum LegacyResource {
+        Playlist { native: Option<u8>, subtitle: Option<i64> },
+    }
+    let resource = RelayResource::Playlist { native: query.native, subtitle: query.subtitle };
+    let wire = serde_json::to_value(resource).expect("legacy wire");
+    assert!(wire.get("acquisition_start_ms").is_none());
+    let LegacyResource::Playlist { native, subtitle } = serde_json::from_value(wire).expect("old strict peer accepts original envelope");
+    assert_eq!(native, Some(1));
+    assert_eq!(subtitle, None);
 }

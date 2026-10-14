@@ -3,6 +3,9 @@ use super::*;
 #[derive(Default, Deserialize)]
 pub struct PlaylistQuery {
     pub native: Option<u8>,
+    /// Response-only VOD acquisition position; invalid offsets retain the
+    /// original attachment hint and never change media ownership or clocks.
+    pub acquisition_start_ms: Option<i64>,
     pub subtitle: Option<i64>,
     /// Temporary physical-device isolation mode for the Apple HDR master.
     /// The session UUID remains the capability; these modes only remove
@@ -150,9 +153,20 @@ pub(super) async fn vod_playlist_before(
     session: &str,
     deadline: Instant,
 ) -> Result<Option<crate::transcode::VodResponsePublication<Vec<u8>>>, ApiError> {
+    vod_playlist_before_with_acquisition_start(state, session, None, deadline).await
+}
+
+pub(super) async fn vod_playlist_before_with_acquisition_start(
+    state: &AppState,
+    session: &str,
+    acquisition_start_ms: Option<i64>,
+    deadline: Instant,
+) -> Result<Option<crate::transcode::VodResponsePublication<Vec<u8>>>, ApiError> {
     tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        state.transcode.vod_playlist(session),
+        state
+            .transcode
+            .vod_playlist_with_acquisition_start(session, acquisition_start_ms),
     )
     .await
     .map_err(|_| response_publication_timeout())

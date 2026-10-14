@@ -2737,8 +2737,17 @@ impl TranscodeManager {
         &self,
         session_id: &str,
     ) -> Option<VodResponsePublication<Vec<u8>>> {
+        self.vod_playlist_with_acquisition_start(session_id, None)
+            .await
+    }
+
+    pub(crate) async fn vod_playlist_with_acquisition_start(
+        &self,
+        session_id: &str,
+        acquisition_start_ms: Option<i64>,
+    ) -> Option<VodResponsePublication<Vec<u8>>> {
         self.vod
-            .playlist(session_id)
+            .playlist_with_acquisition_start(session_id, acquisition_start_ms)
             .await
             .map(|publication| VodResponsePublication {
                 result: publication.result,

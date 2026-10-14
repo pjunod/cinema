@@ -185,6 +185,7 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
                 &request.session_id,
                 PlaylistQuery {
                     native,
+                    acquisition_start_ms: None,
                     subtitle,
                     diagnostic: None,
                 },
@@ -202,6 +203,7 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
                 &request.session_id,
                 PlaylistQuery {
                     native: None,
+                    acquisition_start_ms: None,
                     subtitle,
                     diagnostic,
                 },

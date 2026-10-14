@@ -449,12 +449,26 @@ impl VodServe {
     /// Full immutable rendition with this attachment's fixed acquisition hint.
     /// The preferred start does not trim media or rebase its timestamps.
     pub async fn playlist(&self, session_id: &str) -> Option<VodPublication<Vec<u8>>> {
+        self.playlist_with_acquisition_start(session_id, None).await
+    }
+
+    /// This response's measured acquisition position never changes the stored
+    /// attachment hint or the shared rendition. Invalid hints retain baseline.
+    pub async fn playlist_with_acquisition_start(
+        &self,
+        session_id: &str,
+        acquisition_start_ms: Option<i64>,
+    ) -> Option<VodPublication<Vec<u8>>> {
         let publication = self.session_rendition(session_id).await?;
         let (result, owner) = match publication.result {
             Ok((rendition, _, _)) => (
-                Ok(playlist_with_preferred_start(
+                Ok(playlist_with_acquisition_start(
                     &rendition.playlist,
                     publication.owner.preferred_start_ms,
+                    acquisition_start_ms.filter(|_| {
+                        publication.owner.scalar_playlist && publication.owner.media_child.is_none()
+                    }),
+                    plan_duration_ms(&rendition.plan),
                 )),
                 publication.owner,
             ),
@@ -1491,6 +1505,23 @@ pub(super) fn playlist_with_preferred_start(playlist: &[u8], start_ms: Option<i6
     let Some(start_ms) = start_ms.filter(|start| *start > 0) else {
         return playlist.to_vec();
     };
+    playlist_with_start_tag(playlist, start_ms)
+}
+
+pub(super) fn playlist_with_acquisition_start(
+    playlist: &[u8],
+    attachment_start_ms: Option<i64>,
+    acquisition_start_ms: Option<i64>,
+    duration_ms: i64,
+) -> Vec<u8> {
+    if let Some(start) = acquisition_start_ms.filter(|start| *start >= 0 && *start < duration_ms) {
+        playlist_with_start_tag(playlist, start)
+    } else {
+        playlist_with_preferred_start(playlist, attachment_start_ms)
+    }
+}
+
+fn playlist_with_start_tag(playlist: &[u8], start_ms: i64) -> Vec<u8> {
     // Rendition playlists are generated from validated immutable plans. Keep
     // all their bytes except an existing start tag; never rewrite media URIs,
     // durations, sequence numbers, discontinuities, or the ENDLIST promise.

@@ -5497,3 +5497,49 @@ async fn prepared_vod_start_hint_is_attachment_scoped_and_owner_fenced() {
         untouched
     );
 }
+
+
+#[test]
+fn prepared_acquisition_override_uses_fresh_position_without_mutating_timeline() {
+    let original = b"#EXTM3U\n#EXT-X-VERSION:7\n#EXTINF:2.000,\nseg00147.m4s\n#EXTINF:2.000,\nseg00148.m4s\n#EXT-X-ENDLIST\n";
+    let stale = vod_serve_delivery::playlist_with_preferred_start(original, Some(295_016));
+    let fresh = vod_serve_delivery::playlist_with_acquisition_start(
+        original, Some(295_016), Some(296_065), 900_000,
+    );
+    let text = std::str::from_utf8(&fresh).expect("playlist");
+    let tag = "#EXT-X-START:TIME-OFFSET=296.065,PRECISE=NO\n";
+    assert_eq!(text.matches("#EXT-X-START:").count(), 1);
+    assert_eq!(text.replace(tag, "").as_bytes(), original);
+    assert!(std::str::from_utf8(&stale).expect("playlist").contains("TIME-OFFSET=295.016"));
+    for invalid in [None, Some(-1), Some(900_000), Some(i64::MAX)] {
+        assert_eq!(vod_serve_delivery::playlist_with_acquisition_start(original, Some(295_016), invalid, 900_000), stale);
+    }
+    assert_eq!(vod_serve_delivery::playlist_with_acquisition_start(original, Some(295_016), Some(296_065), 0), stale);
+    let zero = vod_serve_delivery::playlist_with_acquisition_start(&stale, Some(295_016), Some(0), 900_000);
+    let zero_text = std::str::from_utf8(&zero).expect("playlist");
+    assert!(zero_text.contains("TIME-OFFSET=0.000,PRECISE=NO"));
+    assert!(!zero_text.contains("TIME-OFFSET=295.016"));
+}
+
+#[tokio::test]
+async fn prepared_acquisition_override_remains_response_scoped_and_owner_fenced() {
+    let base = crate::test_tempdir().expect("base");
+    let (serve, file) = serve_on(base.path()).await;
+    create(&serve, &file, "acquire-one", "acquire-one-play", &settings()).await;
+    create(&serve, &file, "acquire-two", "acquire-two-play", &settings()).await;
+    let baseline = serve.playlist("acquire-one").await.expect("publication");
+    let unchanged = baseline.result.expect("baseline");
+    let first = serve.playlist_with_acquisition_start("acquire-one", Some(1_125)).await.expect("publication");
+    assert!(first.owner.preferred_start_ms.is_none());
+    assert!(first.owner.scalar_playlist);
+    assert!(std::str::from_utf8(first.result.as_ref().expect("hint")).expect("playlist").contains("TIME-OFFSET=1.125"));
+    let second = serve.playlist_with_acquisition_start("acquire-two", Some(2_250)).await.expect("publication");
+    assert!(std::str::from_utf8(second.result.as_ref().expect("hint")).expect("playlist").contains("TIME-OFFSET=2.250"));
+    assert_eq!(serve.playlist("acquire-one").await.expect("publication").result.expect("baseline"), unchanged);
+    let shared = serve.shared.sessions.lock().await.get("acquire-one").expect("session").rendition.clone().expect("rendition");
+    assert_eq!(shared.playlist, unchanged);
+    assert!(serve.response_owner_is_live("acquire-one", &first.owner).await);
+    serve.end("acquire-one", Terminal::Deleted).await;
+    assert!(!serve.response_owner_is_live("acquire-one", &first.owner).await);
+    assert!(matches!(serve.playlist_with_acquisition_start("acquire-one", Some(1_125)).await.expect("terminal").result, Err(VodError::Gone(Terminal::Deleted))));
+}
