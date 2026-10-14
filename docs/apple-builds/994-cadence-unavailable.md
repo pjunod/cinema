@@ -1,6 +1,6 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 240
+Build: 241
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal
@@ -35,3 +35,17 @@ incumbent buffer-preference lease reduces speculative shared-link contention
 while preparation keeps its original loaded-media and exposure requirements.
 The focused1manual/2Auto TV diagnostic passes; complete native acceptance remains
 pending. Units remain deferred to final review and batched merge.
+
+
+A measured10Mb/s TV capture shows the attachment's acquisition hint1.049seconds
+behind the native preparation target, across a fragment boundary. Prepared
+acquisition now uses the same captured film position as the original seek and
+readiness target. The server applies a valid scalar-VOD hint only to that owned
+response; immutable rendition and attachment state are unchanged. Full native
+qualification remains pending. The legacy relay wire shape remains compatible. Updated remote owners receive
+the optional hint only with current same-heartbeat protocol evidence from the
+local replicated database; older or stale peers retain the original hint. No
+extra HTTP probe or retry is introduced.
+
+[Continuous Quality Build §10.316](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10316--measure-acquisition-clock-lag-before-changing-prepared-hints)
+records the actual hint, early readiness gates and preserved failure evidence.

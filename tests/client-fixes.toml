@@ -6527,3 +6527,20 @@ source = "clients/apple/Sources/HLSFragmentCadence.swift"
 source_anchor = "var nextReadBytes: Int"
 test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
 test_anchor = "testLargeAndMultipleMoofsContinueAdaptivelyWithoutReadingMedia"
+
+
+[[fixes]]
+id = "apple.prepared-acquisition-query-preservation"
+commits = ["7a0f39728e44c34d990a0944776b5fef15d047cd"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "func preparedAcquisitionURL("
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testPreparedAcquisitionPinsCapturedPositionAndPreservesMediaQueries"
+
+[[fixes]]
+id = "apple.prepared-acquisition-fixed-target"
+commits = ["7a0f39728e44c34d990a0944776b5fef15d047cd"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "fields.append("
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testPreparedAcquisitionReplacesStaleHintsAndClampsOnlyNegativePosition"

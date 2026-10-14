@@ -11381,3 +11381,66 @@ media payloads without downloading those payloads. Both iOS and tvOS
 build-for-testing targets compile the repair and regressions successfully;
 no unit test executes. Physical qualification remains pending on the next
 integrated Apple build240.
+
+
+### 10.316 — measure acquisition-clock lag before changing prepared hints
+
+The full Apple240 TV900 capture on `b6ba64703` completes all15 manual changes
+but fails after the first Auto step. Required720p remains metadata-ready,480p
+recovers, and the original Auto deadline expires. The maximum decoded-frame gap
+is63.256ms. Actual cadence inspection now uses4KiB206 responses and completes
+in207ms; smaller metadata reads alone do not resolve readiness. The SDK closes
+and all187 owned backend processes close with zero residuals.
+
+A separate private capture preserves the normal15 manual changes, strict fixed
+links, zero burst, original scoring and every readiness/overlap bound. It reads
+the actual start tag from the playlist response already being delivered; it
+makes no additional media requests. Early buffer facts come from bounded
+snapshots of the existing readiness polls. Identifiers and response ownership
+joins remain on the qualification node; exported facts contain numbers and
+fixed enums only.
+
+For the actual required720p transfer at10Mb/s, the playlist advertises
+`TIME-OFFSET=295.016,PRECISE=NO`; native preparation targets296.065seconds.
+The1.049-second lag crosses the294/296-second fragment boundary. A precise
+playlist/transfer join confirms both ends of the request belong to the10Mb/s
+stage. Matching prior accepted control positions do not, by themselves, prove
+which control exchange created the stage.
+
+At3.464seconds the loaded interval is294.000–297.989seconds, short of the
+original target's two-second runway. By4.311seconds, original-target runway and
+all earlier evaluated admission predicates pass, but the loaded future point
+still fails. At6.973seconds only927ms of allowable wall lead remains, below
+the unchanged1,000ms minimum; the loaded end303.984seconds is2.054seconds short
+of the required306.038seconds. Sufficient buffer geometry appears at8.254seconds,
+after physical admission has expired. No observed row admits the720p successor.
+Skipped predicates remain unknown. Cadence inspection is not admission evidence.
+
+The diagnostic stops after a proven720p failure and a same-owner, healthy480p
+recovery. It awards no second Auto credit or full qualification. The console
+bridge and filter close with exit0, and all174 owned processes close with zero
+residuals. TheTV and phone are released for other sessions.
+
+The next repair binds response-scoped acquisition to the same captured native
+film position used by the prepared item's original seek and readiness target.
+It must retain the immutable rendition, full timeline, exact response owner,
+final alignment, original deadlines and exposure proofs. No client retry or
+feature gate is involved. Updated daemons register the implemented relay protocol in the existing
+heartbeat transaction. A selected remote owner receives the optional hint only
+when its capability belongs to its current heartbeat and committed in-process
+membership. The lookup uses the local replicated database within the original
+request deadline and makes no extra HTTP probe. Missing, stale, rolled-back or
+unsupported claims retain the legacy wire shape and attachment hint. The
+receiving owner applies the same response-scoped scalar-VOD transformation;
+unknown fields are never sent blindly to an older strict relay decoder.
+
+Server and native repairs are committed and compiled. The authored regressions
+cover query preservation, invalid/zero offsets, immutable response ownership,
+actual HTTP publication fences, atomic heartbeat registration and strict old/new
+relay shapes. Both Apple app/test targets compile without unit execution. The
+replicated-storage regression requires `make unit-core` or explicit
+`--features hiqlite-store` when the coordinator runs it. Fresh native
+qualification remains open. Skipping the earlier fragment is not yet a proven
+repair. No units have executed. Formal adversarial
+review starts only after qualification; the requested Fable checkpoint follows
+that review and its fixes, before the batched merge coordinator's fast lane.
