@@ -1,6 +1,6 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 242
+Build: 243
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal
@@ -63,9 +63,19 @@ Earlier phone 241 passes 15 manual/5 Auto but stalls in the separate 3 Mb/s seri
 TV 241 launch is refused asleep. The rejected incumbent-hint-only trial does not
 cancel competing media fetches; observed responses are 200, not 503.
 
-Exact final Apple 242 compilation and full native acceptance remain pending. The 77
-authored regression anchors remain unrun; final adversarial and Fable reviews
-have not begun. Independent display/audio and broader matrix limits remain.
+Apple 242 passes all 15 manual and 5 Auto changes at 80.132 ms maximum decoded
+gap, then fails low-link recovery before any landing. All twelve actual media
+refusals are HTTP 410; no 503 is observed. The preserved failure remains failed.
 
-[Continuous Quality Build §10.317](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10317--acquire-future-media-without-moving-the-viewers-clock)
-records the distinct production failures and focused diagnostic scope.
+Apple 243 ranks minimum measured cost only under severe pressure with limited
+actual protected runway. Unknown facts and other chooser purposes retain their
+ranking. The server separately preserves an exactly sealed live cached Auto
+recovery reader during incumbent waiting; cold, superseded and user-cancelled
+work remains cancelled. Original timing and ownership requirements remain.
+
+Exact combined-source qualification and final adversarial/Fable reviews remain
+pending. All 86 current regression anchors remain unrun. Independent
+display/audio and broader acceptance limits remain explicit.
+
+[Continuous Quality Build §10.319](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10319--bounded-severe-pressure-acquisition-and-sealed-cached-recovery)
+records the repair boundaries; §10.318 preserves the prior full-run failure.

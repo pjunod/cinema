@@ -11493,3 +11493,70 @@ review and the requested Fable checkpoint remain open. The earlier6dac full
 series does not qualify changed242 code. Independent display/audio, Safari iOS
 and the broader source/pressure matrix retain their existing limits. Units stay
 deferred through review to the authorized batched merge coordinator.
+
+### 10.318 — full Apple 242 low-link refusal and exhausted protection
+
+The exact `32422998e` / Apple 242 phone capture passes the original 15 manual and
+5 Auto changes with an 80.132 ms maximum decoded-frame gap and four fresh complete
+output-cost proofs. The separate 3 Mb/s series then stalls with zero low-link
+landings. The SDK/backend are closed; all 216 owned processes have zero residuals.
+The complete campaign is not qualified.
+
+The first 480p pressure attempt advances its acquisition anchor by 6,000 ms and
+acquires the incumbent-buffer preference with 16.871 seconds of actual runway.
+It fails the original six-second metadata bound. The next 360p attempt retains
+ordinary acquisition, advancing by zero; its initial seek to 629,093 ms succeeds,
+but the actual loaded interval is 628,000–639,989.333 ms at the twelve-second
+readiness failure while the incumbent is at 639,866 ms with only 89.251 ms of
+remaining runway. The interval does not supply the required future lead/runway.
+The earlier focused successful 360p probe advanced acquisition by six seconds;
+that diagnostic does not qualify this full capture.
+
+All twelve captured refusals are HTTP 410 on the actual 360p successor; no 503
+is observed. The first refusal occurs 11.526 seconds after the offer, before
+the failed acknowledgement and native stall, with no preceding DELETE. The
+recorded response code is `media_session_ended`; its body cause is unknown.
+Existing cancellation metrics record one `incumbent_waiting` increment at the
+first refusal and no expiry, ownership or intent-cancellation increments. An
+accepted predecessor control exchange finishes one millisecond before that
+refusal. The frozen actor does not preserve ordinary control demand/render-state
+bodies, and the bounded server tail has no exact owner cancellation line; the
+metric supports the incumbent-waiting explanation but does not reconstruct that
+missing request body or prove an exact incarnation-level cause. Bridge teardown
+follows the terminal failure and is not attributed as its cause.
+
+Client pressure selection and server preparation-cancellation repairs are being
+investigated against these preserved facts. Original deadlines, physical
+protection and acceptance remain unchanged. Fresh full phone/TV qualification,
+formal adversarial review and the requested Fable checkpoint remain open; no
+unit bodies have executed.
+
+### 10.319 — bounded severe-pressure acquisition and sealed cached recovery
+
+Apple 243 keeps the existing severe-pressure classification and uses actual
+contiguous incumbent runway and playback rate to choose the lowest measured
+output peak only while the original metadata, overlap and reserve budget is
+limited. Invalid or unknown facts, mild pressure, decoder recovery and ordinary
+selection retain their prior ranking. Candidate identity, decoder, grade,
+rejection and strictly lower-cost fences remain. Measured peak is a cost proxy;
+it does not prove native startup latency. This emergency choice may select 360p
+before the nominal largest fitting 480p; normal headroom policy still governs
+subsequent upgrades. No deadline, readiness requirement or feature gate changes.
+
+The server retains an already primed cached Auto recovery reader during an
+accepted incumbent Waiting/Stalled control only when its private, durable
+retained-output seal, exact live local response owner, original deadline and
+current accepted quality intent all match. Canonical downward Auto and the
+existing validated bounded manual-to-Auto bootstrap are the eligible purposes.
+The reader is authority-only and has no producer children. Cold, remote, stale,
+unknown, contended, voluntary and superseded work retains cancellation. Explicit
+user cancellation remains authoritative. Waiting makes the decision without
+awaiting Store or peer work; late proof publication cannot recreate a removed
+registration, and a retained keeper's exact pending token is preserved.
+
+The earlier Apple 242 full-series pass and low-link failure remain distinct
+evidence in §10.318. Exact combined-source compilation, fresh full phone/TV
+qualification, final adversarial review and Fable remain the next evidence.
+Authored unit bodies remain deferred through reviews to batched merge. Safari
+iOS automation, independent optical/audio measurements and the broader source
+and pressure matrix remain explicit acceptance limits.

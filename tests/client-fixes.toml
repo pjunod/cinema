@@ -6576,3 +6576,43 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "private func preparedAcquisitionTargetHasRunway"
 test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
 test_anchor = "testFutureAcquisitionKeepsObservedClockAndRequiresItsOwnContiguousInterval"
+
+[[fixes]]
+id = "apple.pressure-rescue-acquisition-budget"
+commits = ["a4e676ad2619f258a9360bc16b7e0a5259c440e2"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoPressureNeedsMinimumAcquisitionCost("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testSeverePressureAcquisitionBudgetUsesOriginalBoundsAndActualRate"
+
+[[fixes]]
+id = "apple.pressure-rescue-unknown-facts"
+commits = ["a4e676ad2619f258a9360bc16b7e0a5259c440e2"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoPressureNeedsMinimumAcquisitionCost("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testPressureAcquisitionBudgetPreservesUnknownAndInvalidFacts"
+
+[[fixes]]
+id = "apple.pressure-rescue-measured-cost"
+commits = ["a4e676ad2619f258a9360bc16b7e0a5259c440e2"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoRecoveryCandidate("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testLimitedSeverePressureRanksMeasuredCostRatherThanHeight"
+
+[[fixes]]
+id = "apple.pressure-rescue-candidate-fences"
+commits = ["a4e676ad2619f258a9360bc16b7e0a5259c440e2"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoRecoveryCandidate("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testSeverePressureCostRankingRetainsCandidateFencesAndImprovement"
+
+[[fixes]]
+id = "apple.pressure-rescue-purpose-fences"
+commits = ["a4e676ad2619f258a9360bc16b7e0a5259c440e2"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoRecoveryCandidate("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testPressureRescueDoesNotOverrideDecoderOrUnmeasuredProducerRecovery"
