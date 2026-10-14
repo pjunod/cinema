@@ -122,6 +122,41 @@ ORIGINAL_PYTHON_REPAIR_EDGES = {
 }
 
 
+INTERLEAVED_PYTHON_CAPTURES = {
+    # One complete original effort capture: stdout from its mocked compiler
+    # precedes unittest's terminal. This authority never matches another run.
+    'ed108d64a0792ce0d54f724c31f7888ec0beaaa4e232f6b85a87f5b5294b32fe': {
+        'source': 'bf1eee9c49524d00d1fa13ba01f50153e91f1183',
+        'binding': 'cd626ce71d1216702948b9db385a38046e7f49e78b929565ae9fa8e1799ee025',
+        'id': 'tests.validation.test_unit_openraft_package.OpenraftPackageCase.'
+              'test_current_compile_binds_owned_package_profile_features_and_discovery_without_bodies',
+    },
+}
+
+
+def named_python_capture_text(raw, source, kind, binding_raw):
+    """Parsing projection only; proof custody retains the entire original raw."""
+    text = raw.decode()
+    capture = INTERLEAVED_PYTHON_CAPTURES.get(retention.digest(raw))
+    if capture is None:
+        return text
+    receipts.require(source == capture['source'] and kind == 'validation'
+                     and retention.digest(binding_raw) == capture['binding'],
+                     'Interleaved original Python source, kind or binding differs')
+    identity = capture['id']
+    prefix = identity.rsplit('.', 1)[1] + ' (' + identity + ') ... '
+    lines = text.splitlines(keepends=True)
+    starts = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+    receipts.require(len(starts) == 1, 'Interleaved original Python frame ambiguous')
+    start = starts[0]
+    frame = lines[start:start + 7]
+    receipts.require(len(frame) == 7 and frame[0].startswith(prefix + 'COMPILE_ONLY ')
+                     and frame[1] == 'ADOPTED_COMPLETE_UNIT_COMMAND wal:237\n'
+                     and all(line.startswith('COMPILE_ONLY ') for line in frame[2:6])
+                     and frame[6] == 'ok\n', 'Interleaved original Python terminal differs')
+    return ''.join(lines[:start] + [prefix + 'ok\n'] + lines[start + 7:])
+
+
 def blob(proof, reference):
     receipts.require(isinstance(reference, dict) and set(reference) == {'sha256_ref'},
                      'Unknown source-cohort blob reference')
@@ -597,6 +632,8 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
             command, binding = current_binding(proof, record, raw, candidate, archive_digest)
             if mode == 'python-named':
                 receipts.require(kind != 'android_jvm' and set(coverage) == {'mode'}, 'Unknown named Python coverage')
+                text = clean_log(named_python_capture_text(
+                    raw, record['source_commit'], kind, blob(proof, execution['binding'])))
                 actual = python_rows(text, kind, universe, set(discovery(candidate, 'operations' if kind == 'validation' else 'validation')))
                 receipts.require(len(command) > 4 and command[0] == binding['python_executable']
                                  and command[1:4] == ['-m', 'unittest', '-v']
