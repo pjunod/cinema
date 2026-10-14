@@ -53,10 +53,13 @@ class NativeAppleEvidenceCase(unittest.TestCase):
     def test_native_namespaces_preserve_methods_and_refuse_collisions_and_other_lanes(self):
         template = "Test Case '-[{}.ExampleTests testA]' passed (0.1 seconds).\n"
         for module in ('ReceiptTests', 'plurx_iOSTests', 'plurx_tvOSTests'):
-            self.assertEqual(retention.log_outcomes(template.format(module), 'xctest-class'),
+            started = "Test Case '-[{}.ExampleTests testA]' started.\n".format(module)
+            self.assertEqual(retention.log_outcomes(started + template.format(module), 'xctest-class'),
                              {'ExampleTests/testA': 'pass'})
         for invalid in (template.format('Unknown'), template.format('ReceiptTests') + template.format('plurx_iOSTests'),
-                        template.format('ReceiptTests').replace('testA', 'notATest')):
+                        template.format('ReceiptTests').replace('testA', 'notATest'),
+                        template.format('ReceiptTests').replace('passed', 'passedX'),
+                        template.format('ReceiptTests') + template.format('ReceiptTests').replace('passed', 'unknown')):
             with self.subTest(invalid=invalid), self.assertRaises(receipts.ReceiptError):
                 retention.log_outcomes(invalid, 'xctest-class')
         proof = fixture()

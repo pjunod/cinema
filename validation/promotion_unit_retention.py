@@ -212,14 +212,22 @@ def log_outcomes(log, format_name):
         rows = [(name + '/' + method, {'passed': 'pass', 'failed': 'fail', 'skipped': 'ignored'}[status])
                 for name, method, status in rows]
     elif format_name == 'xctest-class':
-        native = re.findall(r"^Test Case '-\[([^ ]+) ([^]]+)\]' (passed|failed|skipped)", log, re.M)
         rows = []
-        for name, method, status in native:
+        for line in log.splitlines():
+            if not line.startswith('Test Case '):
+                continue
+            native = re.fullmatch(r"Test Case '-\[([^ ]+) ([^]]+)\]' (.+)", line)
+            r.require(native is not None, 'Malformed native XCTest case line')
+            name, method, terminal = native.groups()
             match = re.fullmatch(r'(ReceiptTests|plurx_iOSTests|plurx_tvOSTests)\.([A-Za-z_]\w*)', name)
             r.require(match is not None and re.fullmatch(r'test\w+', method),
                       'Unreviewed native XCTest namespace or selector')
+            if terminal == 'started.':
+                continue
+            status = re.fullmatch(r'(passed|failed|skipped) \([0-9]+(?:\.[0-9]+)? seconds\)\.', terminal)
+            r.require(status is not None, 'Unreviewed native XCTest terminal state')
             rows.append((match[2] + '/' + method,
-                         {'passed': 'pass', 'failed': 'fail', 'skipped': 'ignored'}[status]))
+                         {'passed': 'pass', 'failed': 'fail', 'skipped': 'ignored'}[status[1]]))
     elif format_name == 'xctest-result':
         rows = xctest_result_rows(log)
     elif format_name in {'gradle-summary', 'instrumentation-summary'}:
