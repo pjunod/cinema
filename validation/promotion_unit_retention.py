@@ -86,7 +86,7 @@ def shared_blob(document, item):
     return logs[value]
 
 
-def expanded_document(document):
+def expanded_document(document, objects=None):
     """Authenticate and validate one bounded view of the original signed bytes."""
     if document.get('version') != 2:
         return document
@@ -100,7 +100,7 @@ def expanded_document(document):
               'Unknown or oversized structural suite slots')
     r.require(isinstance(units, dict) and isinstance(units.get('commands'), list)
               and len(units['commands']) <= 512, 'Oversized structural command slots')
-    objects = Objects(units['logs'])
+    objects = objects if objects is not None else Objects(units['logs'])
     if units.get('version') == 2:
         units = commands.expanded_commands(units, document['source_commit'], objects)
     else:
@@ -570,7 +570,7 @@ def runner_api(environment):
                  environment['GITHUB_TOKEN'])
 
 
-def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid):
+def verify_identity(api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid):
     r.require(DIGEST.fullmatch(expected_digest) and digest(raw) == expected_digest,
               'Retention evidence enrollment digest mismatch')
     document = r.bounded_json(raw)
@@ -600,10 +600,18 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
         r.verify_attestor(api, {'repository': repository}, comment['user'])
         attested.append(r.positive(comment['id']))
     r.require(attested, 'Retained units await authenticated writer hash attestation')
-    document = expanded_document(document)
+    return document, pull, repository, attested
+
+
+def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid,
+           *, objects=None, live_logs=None):
+    document, pull, repository, attested = verify_identity(
+        api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid)
+    document = expanded_document(document) if objects is None else expanded_document(document, objects)
     from validation import qualification_unit_continuation as commands
     from validation.unit_evidence_objects import LiveLogs
-    runs, jobs_by_run, live_logs = {}, {}, LiveLogs()
+    runs, jobs_by_run = {}, {}
+    live_logs = live_logs if live_logs is not None else LiveLogs()
     for suites in document['lanes'].values():
         for suite in suites:
             for record in suite['records']:
@@ -642,6 +650,15 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
     return proof
 
 
+def verify_enrollment(api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid):
+    document = r.bounded_json(raw)
+    if document.get('version') == 3:
+        from validation.promotion_unit_bundle import verify_bundle
+        return verify_bundle(api, raw, expected_digest, binding, candidate,
+                             attachment_id, attachment_uuid)
+    return verify(api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--digest', required=True)
@@ -655,7 +672,7 @@ def main():
     api = runner_api(os.environ)
     raw = attachment_bytes(api, binding['pull_request'], args.attachment_id,
                            args.attachment_uuid, args.digest)
-    proof = verify(api, raw, args.digest, binding, os.environ['GITHUB_SHA'],
+    proof = verify_enrollment(api, raw, args.digest, binding, os.environ['GITHUB_SHA'],
                    args.attachment_id, args.attachment_uuid)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

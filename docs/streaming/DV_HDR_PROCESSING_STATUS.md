@@ -1009,6 +1009,7 @@ authorize it. The complete processing pipeline must sustain the existing
 | R23 | Separate candidate reservation from installed Source lifecycle | The remaining Source body reaches `activate_source_media_session` with manually rebuilt principal tables and baseline marker 81. The production ownership-layout guard correctly refuses that mixed state. Retain the original native ID and candidate-only stale membership, racing claim, caps, replay, resource refusal and never-dispatched release controls, with explicit marker 81 and no ordinary session. Move the complete assignment/activation/publication/renewal/no-spawn/terminal accounting tail into a new real installed three-voter fixture. It uses actual selected IDs and credential, manager-published metadata-only ingress boot and installer-owned revision material, retaining held counts 8→7→6 and every late refusal/rollback/replay assertion. No physical producer is started. Independent source review confirms the tail is unchanged except real identity substitutions. PR #1075 landed as `dd742d66c` after all seven exact-head compile-only gate 5042 checks passed. The two effort-only bodies ran once: the candidate passes; the installed lifecycle reaches publication and renewal, then correctly refuses no-spawn release of unsealed custody. The original failure and source/binary/inventory bindings remain preserved; R24 repairs only the installed fixture. |
 | R24 | Seal actual empty installed custody before SQL release controls | The installed lifecycle fixture admitted no driver or producer but never sealed its actual ingress ledger. Read that exact retained empty ledger and seal through the public production CAS before the no-spawn rollback trigger and before the live-route terminal refusal. Preserve an explicit unsealed refusal, every foreign-resource, rollback and replay control, and held counts 8→7→6. No production guard changes and no physical closure claim. PR #1078 landed as `314734701` after all seven exact-head compile-only gate 5050 checks passed. The failed-only installed body then passes on that exact effort with feature-qualified binary, complete 368-ID inventory and serial 8 MiB execution; the candidate pass and original failure remain preserved without replay. |
 | R25 | Supply JVM platform time and dispatcher only in the watched read-after fixture | The original selected watched-write pass predates the diagnostic observer added to the shared authenticated client. Its `Net.client` probe now invokes Android elapsed time and owns a Main scope on the plain JVM, invalidating that earlier result. Construct the same production authenticated client with an injected deterministic clock and install/reset the test Main dispatcher inside this one body with `finally`. Retain all receipt advancement, absence and failed-write clearing assertions and real middleware. No production change. Current affected compilation and normal hooks pass. Exact-head gate 5060 passes all seven jobs and PR #1080 lands on the effort. The missing/invalidated-only Android batch on effort `4a44a2279` passes all 40 selected cases, including this fixture, on measured OpenJDK 25.0.2 with original logs/XML retained and no applicable prior passing body repeated. |
+| R32 | Authenticate two bounded disjoint unit proofs | Proposed after Astra measured the complete retained evidence above the existing 4 MiB envelope limit. A signed two-child manifest binds both independently signed complete proofs to the same live promotion. Every child keeps its existing parser, raw logs, original failures and environment witnesses. Child-local lookups, aggregate 8-suite/512-command/1,024-table-entry bounds and one shared 32 MiB/524,288-node structural budget plus 64 MiB live-CI cache prevent split-proof amplification. Overlapping lane/command/JVM authority and conflicting table aliases refuse the whole bundle. Six new refusal/composition controls are written and await their first execution on the integrated effort; task branches execute no bodies. Exact-head task gate, final qualification and physical acceptance remain owed. |
 | A01 | Current-main fleet build and physical Profile 5, Profile 8 and Profile 7 FEL acceptance on web, Android and Apple TV | Owed after qualification/deployment. Retain startup, stalls, seek/reopen report clearing, stats, screenshots and exact effective-processing logs; repeat with both preferences off. |
 
 Tasks integrate serially through pull requests into the effort after the
@@ -1231,3 +1232,25 @@ the strict named-result parser. Original proof bytes remain unchanged and no
 mocked compiler output becomes compiler evidence. The two new refusal controls
 await an integrated effort execution; the eight passing R30 bodies are not
 repeated. Complete qualification and physical acceptance remain open.
+
+
+### R32 — complete evidence can use two authenticated bounded proofs
+
+The complete retained Core, daemon, workspace, Apple, Python/JVM and Store/WAL
+evidence exceeds one 4 MiB upload even after real filtered native enumeration
+and existing structural deduplication. Astra found no sufficient lossless
+single-envelope representation. A two-child manifest preserves both complete
+canonical partitions with the existing per-attachment limit. Its digest,
+attachment identity and writer attestation use the ordinary enrollment path.
+Each child is independently reauthenticated by the existing verifier, including
+at final qualification; adoption is published only after both pass.
+
+The bundle reader belongs to [promotion_unit_bundle.py](../../validation/promotion_unit_bundle.py),
+with the six focused controls in
+[test_promotion_unit_bundle.py](../../tests/validation/test_promotion_unit_bundle.py).
+The shared [structural budget](../../validation/unit_evidence_objects.py) charges
+both child-local decoders. Inline child slots, recursive bundles, identity drift,
+duplicate attachments/digests, conflicting table entries and overlapping unit
+authority are refused. Unit outcomes, original provenance and source
+applicability remain governed by the existing child validators. The manifest
+does not certify deployment, runtime campaigns or physical HDR playback.
