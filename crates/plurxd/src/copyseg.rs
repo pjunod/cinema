@@ -959,6 +959,18 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                                 counts: SegmentCounts::default(),
                             };
                         };
+                        // Retaining copies knowingly keep in-band definitions.
+                        // They cannot acquire a new out-of-band-only claim.
+                        if retain_hevc_parameter_sets
+                            && !fmp4::PromotionInputs::from_fragment(&fragment, &init)
+                                .dvh1_parameter_sets
+                                .is_empty()
+                        {
+                            return Outcome::InvalidHevcConfiguration(
+                                "dvh1 completeness repair cannot retain in-band parameter sets"
+                                    .into(),
+                            );
+                        }
                         match fmp4::promote_hevc_parameter_sets(&mut init, &fragment) {
                             Ok(true) => tracing::info!(
                                 session = %crate::transcode::session_log_id(session_id),
@@ -1866,6 +1878,61 @@ mod tests {
             fmp4::validate_hevc_sample_entries(&init).expect("valid"),
             fmp4::HevcSampleEntryLayout::Single
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a private FFmpeg dvh1 capture; PLURX_DVH1_CAPTURE"]
+    async fn captured_dvh1_completeness_publishes_and_refuses_retaining_copy() {
+        let feed = std::fs::read(
+            std::env::var("PLURX_DVH1_CAPTURE").expect("valid DV capture test operation"),
+        )
+        .expect("valid DV capture test operation");
+        for retain in [false, true] {
+            let dir = crate::test_tempdir().expect("valid DV capture test operation");
+            let outcome = run(
+                &feed[..],
+                dir.path().to_path_buf(),
+                "test",
+                brisk(),
+                &plain().0,
+                plain().1.with_parameter_set_retention(retain),
+                None,
+            )
+            .await;
+            if retain {
+                assert!(
+                    matches!(outcome, Outcome::InvalidHevcConfiguration(_)),
+                    "{outcome:?}"
+                );
+                assert!(!dir.path().join("init.mp4").exists());
+                assert!(!dir.path().join("index.m3u8").exists());
+            } else {
+                let Outcome::Completed(counts) = outcome else {
+                    panic!("{outcome:?}")
+                };
+                assert!(counts.segments > 0);
+                let mut reader = fmp4::FragmentReader::new();
+                reader.push(
+                    &std::fs::read(dir.path().join("init.mp4"))
+                        .expect("valid DV capture test operation"),
+                );
+                let Some(fmp4::Unit::Init(init)) =
+                    reader.next_unit().expect("valid DV capture test operation")
+                else {
+                    panic!("init")
+                };
+                fmp4::validate_hevc_decoder_configuration(&init)
+                    .expect("valid DV capture test operation");
+                assert_eq!(
+                    fmp4::dolby_vision_record(&init)
+                        .expect("valid DV capture test operation")
+                        .expect("valid DV capture test operation")
+                        .profile,
+                    5
+                );
+                assert!(playlist(dir.path()).contains("#EXT-X-ENDLIST"));
+            }
+        }
     }
 
     /// The whole point, end to end: given a source that offers clean cut

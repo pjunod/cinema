@@ -155,6 +155,19 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/vodencode_manager_tests.rs::transcode::tests::"
             "actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_seek"
         ] = "requires an actual HDR source, reviewed helper bundle and proved VAAPI device"
+        # DV Profile 5 completeness uses private, bounded FFmpeg captures;
+        # keep these operator-run checks distinct from known-red tests.
+        for identity in (
+            "crates/plurx-core/src/fmp4/dvh1_tests.rs::fmp4::tests::"
+            "captured_dvh1_completeness_preserves_dolby_vision_and_publishes",
+            "crates/plurxd/src/copyseg.rs::copyseg::tests::"
+            "captured_dvh1_completeness_publishes_and_refuses_retaining_copy",
+            "crates/plurxd/src/fragindex.rs::fragindex::tests::"
+            "captured_dvh1_completeness_builds_a_constant_index",
+        ):
+            additional_fixture_reasons[identity] = (
+                "needs a private FFmpeg dvh1 capture; PLURX_DVH1_CAPTURE"
+            )
         additional_fixtures = tuple(
             item for item in ignored if item.identity in additional_fixture_reasons
         )
@@ -162,9 +175,9 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 9)
-        # DV repair's actual HDR runtime fixture: 32 -> 33.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 33)
+        self.assertEqual(len(additional_fixtures), 12)
+        # HDR runtime and DV completeness add four private checks: 32 -> 36.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 36)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())
