@@ -199,6 +199,38 @@ final class PreparedCommitRendezvousTests: XCTestCase {
             loadedItemRanges: [10...20], cadence: cadence))
     }
 
+    func testIncumbentFetchPreferenceLeaseProtectsPhysicalOverlapAndReserve() throws {
+        let policy = try XCTUnwrap(PreparedIncumbentBufferPreference(
+            original: 60, actualRunwaySeconds: 54, playbackRate: 1))
+        XCTAssertEqual(policy.hint, 16)
+        XCTAssertEqual(policy.restorationPreference(currentHint: 16), 60)
+        XCTAssertNil(policy.restorationPreference(currentHint: 45),
+            "a foreign owner's changed preference must survive cleanup")
+        XCTAssertNil(PreparedIncumbentBufferPreference(
+            original: 60, actualRunwaySeconds: 15.999, playbackRate: 1))
+        XCTAssertNil(PreparedIncumbentBufferPreference(
+            original: 16, actualRunwaySeconds: 54, playbackRate: 1))
+        XCTAssertNil(PreparedIncumbentBufferPreference(
+            original: 0, actualRunwaySeconds: 54, playbackRate: 1),
+            "zero is automatic buffering, not a positive fetch budget")
+    }
+
+    func testIncumbentFetchPreferenceLeaseScalesFastPlaybackAndRejectsUnknownFacts() throws {
+        let fast = try XCTUnwrap(PreparedIncumbentBufferPreference(
+            original: 60, actualRunwaySeconds: 32, playbackRate: 2))
+        XCTAssertEqual(fast.hint, 32)
+        XCTAssertNil(PreparedIncumbentBufferPreference(
+            original: 60, actualRunwaySeconds: 31.999, playbackRate: 2))
+        for invalid in [Double.nan, .infinity, -.infinity, -1, 0] {
+            XCTAssertNil(PreparedIncumbentBufferPreference(original: 60,
+                actualRunwaySeconds: 54, playbackRate: invalid))
+            XCTAssertNil(PreparedIncumbentBufferPreference(original: invalid,
+                actualRunwaySeconds: 54, playbackRate: 1))
+        }
+        XCTAssertNil(PreparedIncumbentBufferPreference(original: 60,
+            actualRunwaySeconds: .nan, playbackRate: 1))
+    }
+
     func testLoadedRendezvousMapsOriginAndActualPlaybackRate() throws {
         let plan = try XCTUnwrap(PreparedCommitRendezvous.planLoaded(
             stagedFilmPositionMs: 610_000, incumbentFilmPositionMs: 610_000,

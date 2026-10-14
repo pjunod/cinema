@@ -11264,3 +11264,40 @@ point only after a matching cadence interval and actual loaded runway coexist.
 Both Apple app and regression targets compile with build-for-testing without
 unit execution. Physical evidence must establish whether these repairs close
 the Auto failures.
+
+
+### 10.313 — requested acquisition works; speculative incumbent fetching competes with readiness
+
+The short TV diagnostic on public `123ec52bd` uses QA build239. It completes
+15 manual changes and the first Auto step with a79.090ms maximum decoded gap.
+The required720p preparation at10Mb/s fails, and480p subsequently commits.
+This is not an Auto2 pass or full qualification. The SDK closes and all156
+owned backend processes close with zero residuals.
+
+The requested-start hint works:720p first acquires fragments146 and147,
+not0 and1. Those200 responses finish1.673 and3.633seconds after the offer.
+Initial parking reaches293,123ms at3.763seconds, with metadata ready at
+3.774seconds. The measured loaded interval is292,000–295,989.333ms. The
+incumbent is already at296,865ms, so its future point and two-second runway
+require coverage through299,865ms:3,875.667ms beyond that loaded end.
+
+Preparation expires at11.999seconds in metadataReady with no item error,
+zero readiness remaining and zero physical overlap remaining. No cadence
+failure is recorded. The terminal AVFoundation loaded interval is unmeasured;
+it must not be inferred from downloaded bytes. Meanwhile incumbent requests
+fetch media at354–362seconds while playback is near305seconds. Both players
+request speculative forward buffering on the same capped link. Later720p
+fragments finish through10.675seconds, and the next response closes partially
+at11.974seconds. Every observed playback request is200; a503 retry is not
+part of this repair.
+
+The correction gives the incumbent an item-owned forward-buffer
+preference only when its actual contiguous runway already covers the unchanged
+12-second overlap plus the four-second reserve. It reduces speculative
+fetching while visible playback continues. The original preference must be
+restored when preparation ends, without overwriting a newer owner or changing
+loaded media, playback rate, seek policy, deadlines, expected rungs or exposure
+proofs. This is an AVFoundation preference, so new physical evidence must show
+whether it actually frees sufficient capacity. Both final iOS and tvOS build-for-testing targets compile the correction and
+its two regression anchors without executing units. Physical qualification
+remains pending; units stay deferred until final review and batched merge.

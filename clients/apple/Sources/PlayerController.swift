@@ -530,6 +530,31 @@ func preparedCadenceProbeItemMs(
     return interval.contains(Double(item) / 1_000) ? item : nil
 }
 
+/// A temporary fetch preference is safe only while already loaded incumbent
+/// media covers the unchanged physical overlap and its post-swap reserve.
+/// Zero means AVFoundation's automatic policy and is never reduced.
+struct PreparedIncumbentBufferPreference {
+    let original: Double
+    let hint: Double
+
+    init?(original: Double, actualRunwaySeconds: Double, playbackRate: Double) {
+        let wallSeconds = Double(PreparedReplacementBounds.overlapMs
+            + PreparedCommitRendezvous.postSwapReserveMs) / 1_000
+        let protectedSeconds = wallSeconds * max(1, playbackRate)
+        guard original.isFinite, original > 0, actualRunwaySeconds.isFinite,
+              playbackRate.isFinite, playbackRate > 0, protectedSeconds.isFinite,
+              actualRunwaySeconds >= protectedSeconds, original > protectedSeconds else { return nil }
+        self.original = original
+        hint = protectedSeconds
+    }
+
+    /// A later owner may have chosen another preference. Restore only the
+    /// captured item's unchanged lease hint, never overwrite that new choice.
+    func restorationPreference(currentHint: Double) -> Double? {
+        currentHint == hint ? original : nil
+    }
+}
+
 private struct NowPlayingState: Equatable {
     let title: String
     let durationMs: Int
@@ -2637,7 +2662,10 @@ final class PlayerController: ObservableObject {
     }
 
     @Published private(set) var player: AVPlayer {
-        didSet { syncDisplayWake() }
+        didSet {
+            restorePreparedIncumbentBufferPreference()
+            syncDisplayWake()
+        }
     }
     @Published private(set) var stagedSurfacePlayer: AVPlayer?
     private weak var playbackSurface: PlayerSurfaceView?
@@ -3065,6 +3093,9 @@ final class PlayerController: ObservableObject {
     private var preparedCadenceOwner: (item: ObjectIdentifier, player: ObjectIdentifier, epoch: Int, action: String)?
     private var preparedCadenceFailed = false
     private var preparedCadenceGeneration = 0
+    private var preparedIncumbentBufferLease: (item: AVPlayerItem, player: AVPlayer,
+        epoch: Int, actionId: String, policy: PreparedIncumbentBufferPreference)?
+
 
     /// One physical deadline from pipeline construction through exposure.
     private var preparedOverlapStartedAtMs: Int?
@@ -3698,6 +3729,7 @@ final class PlayerController: ObservableObject {
     private(set) var wantsPlayback = true {
         didSet {
             guard wantsPlayback != oldValue else { return }
+            if !wantsPlayback { restorePreparedIncumbentBufferPreference() }
             preparedFrameBudget?.update(
                 nowMs: Int(ProcessInfo.processInfo.systemUptime * 1_000),
                 playbackRequested: wantsPlayback
@@ -3713,6 +3745,7 @@ final class PlayerController: ObservableObject {
     private var preferredRate: Float = 1 {
         didSet {
             if preferredRate != oldValue {
+                restorePreparedIncumbentBufferPreference()
                 applyWarmPredecessorTransport()
                 autoTransportRevision = min(autoTransportRevision + 1, 9_007_199_254_740_991)
                 updateNowPlaying()
@@ -4242,6 +4275,7 @@ final class PlayerController: ObservableObject {
 
     @discardableResult
     private func beginViewerAction() -> Int {
+        restorePreparedIncumbentBufferPreference()
         invalidateResumeAttempt(outcome: "viewer-action")
         let superseded = viewerActionEpoch
         viewerActionEpoch &+= 1
@@ -5750,6 +5784,7 @@ final class PlayerController: ObservableObject {
         seekVideoOutput?.setDelegate(nil, queue: nil)
         seekVideoOutput = nil
         seekOutputWakeup = nil
+        restorePreparedIncumbentBufferPreference()
         viewerActionEpoch &+= 1
         pendingControlSequence = nil
         itemObserver?.cancel()
@@ -12034,6 +12069,7 @@ extension PlayerController: PreparedSuccessorHost {
             requestedStartMs: preparedFilmPositionMs,
             mediaOriginMs: action.mediaOriginMs
         )
+        acquirePreparedIncumbentBufferPreference(action)
         observePreparedLifecycle()
         beginPreparedReadinessMonitor()
         return true
@@ -12089,6 +12125,7 @@ extension PlayerController: PreparedSuccessorHost {
     }
 
     func discardPreparedSuccessor() {
+        restorePreparedIncumbentBufferPreference()
         clearPreparedCadence()
         preparedOverlapStartedAtMs = nil
         // The preparation a boundary asked for is gone with its pipeline.
@@ -12161,6 +12198,7 @@ extension PlayerController: PreparedSuccessorHost {
                 }
             }
             while !Task.isCancelled {
+                self.restorePreparedIncumbentBufferPreferenceIfOwnerMoved()
                 guard self.preparedItem === item,
                       self.preparedPlayer === successor else { return }
                 // A boundary preparation whose owner moved on is withdrawn,
@@ -12318,6 +12356,34 @@ extension PlayerController: PreparedSuccessorHost {
             incumbentFilmPositionMs: realPositionMs(), mediaOriginMs: action.mediaOriginMs,
             playbackRate: Double(rate), overlapRemainingMs: preparedOverlapRemainingMs,
             loadedItemRanges: ranges, cadence: cadence)
+    }
+
+    private func acquirePreparedIncumbentBufferPreference(_ action: PreparedReplacementAction) {
+        restorePreparedIncumbentBufferPreference()
+        guard started, wantsPlayback, let item = player.currentItem,
+              let runway = bufferedRunwaySeconds(),
+              let policy = PreparedIncumbentBufferPreference(
+                original: item.preferredForwardBufferDuration,
+                actualRunwaySeconds: runway, playbackRate: Double(preferredRate)) else { return }
+        preparedIncumbentBufferLease = (item, player, viewerActionEpoch, action.actionId, policy)
+        item.preferredForwardBufferDuration = policy.hint
+        noteSurfaceLogOnly("prepared_incumbent_buffer:phase=acquire:original_seconds=\(policy.original):hint_seconds=\(policy.hint):runway_seconds=\(runway):rate=\(preferredRate):overlap_ms=\(preparedOverlapRemainingMs)")
+    }
+
+    private func restorePreparedIncumbentBufferPreference() {
+        guard let lease = preparedIncumbentBufferLease else { return }
+        preparedIncumbentBufferLease = nil
+        let restore = lease.policy.restorationPreference(currentHint: lease.item.preferredForwardBufferDuration)
+        if let restore { lease.item.preferredForwardBufferDuration = restore }
+        noteSurfaceLogOnly("prepared_incumbent_buffer:phase=restore:restored=\(restore != nil):original_seconds=\(lease.policy.original):hint_seconds=\(lease.policy.hint):overlap_ms=\(preparedOverlapRemainingMs)")
+    }
+
+    private func restorePreparedIncumbentBufferPreferenceIfOwnerMoved() {
+        guard let lease = preparedIncumbentBufferLease else { return }
+        if player !== lease.player || player.currentItem !== lease.item || viewerActionEpoch != lease.epoch ||
+            preparedReplacement.activeAction?.actionId != lease.actionId {
+            restorePreparedIncumbentBufferPreference()
+        }
     }
 
     private func clearPreparedCadence() {
@@ -12585,6 +12651,7 @@ extension PlayerController: PreparedSuccessorHost {
         guard Double(abs(realPositionMs() - rendezvous.filmPositionMs)) <= frameDurationSeconds * 1_000 else {
             return preparedCommitFailure(at: "boundary", deltaMs: realPositionMs() - rendezvous.filmPositionMs)
         }
+        restorePreparedIncumbentBufferPreference()
         let incumbentPlayer = player
         let incumbentVolume = incumbentPlayer.volume
         let incumbentMuted = incumbentPlayer.isMuted
@@ -12927,7 +12994,8 @@ extension PlayerController: PreparedSuccessorHost {
     /// is named once (`AttemptFence.preparedCommit`) and a refusal raises
     /// `attempt_stale` like any other migrated fence.
     private func preparedCommitStillOwned(_ commit: Attempt) -> Bool {
-        attemptStillCurrent(commit, fence: .preparedCommit)
+        restorePreparedIncumbentBufferPreferenceIfOwnerMoved()
+        return attemptStillCurrent(commit, fence: .preparedCommit)
     }
 
     /// Seeking the future rendezvous may load a segment that starts ahead
