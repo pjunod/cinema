@@ -26,6 +26,152 @@ def fixture():
                     'log': log('test a ... ok\ntest b ... ignored\n')}]}]}}
 
 
+def native_xctest_tree(status='Success', count='0'):
+    def typed(kind, **fields):
+        return {'_type': {'_name': kind}, **fields}
+    def string(value):
+        return typed('String', _value=value)
+    def array(*values):
+        return typed('Array', _values=list(values))
+    target = 'plurx-iOSTests'
+    base = 'test://com.apple.xcode/plurx/' + target + '/'
+    leaf = typed('ActionTestMetadata', identifier=string('ExampleTests/testA()'),
+        name=string('testA()'), identifierURL=string(base + 'ExampleTests/testA'),
+        testStatus=string(status), failureSummariesCount=typed('Int', _value=count))
+    def group(name, child):
+        return typed('ActionTestSummaryGroup', name=string(name), identifier=string(name),
+            identifierURL=string(base + name.replace(' ', '%20')), subtests=array(child),
+            expectedFailures=array(), failureSummaries=array())
+    testable = typed('ActionTestableSummary', name=string(target), targetName=string(target),
+        identifierURL=string(base[:-1]), failureSummaries=array(),
+        tests=array(group('Selected tests', group(target + '.xctest', group('ExampleTests', leaf)))))
+    return typed('ActionTestPlanRunSummaries', summaries=array(
+        typed('ActionTestPlanRunSummary', name=string('Test Scheme Action'), testableSummaries=array(testable))))
+
+
+class NativeAppleEvidenceCase(unittest.TestCase):
+    def test_native_namespaces_preserve_methods_and_refuse_collisions_and_other_lanes(self):
+        template = "Test Case '-[{}.ExampleTests testA]' passed (0.1 seconds).\n"
+        for module in ('ReceiptTests', 'plurx_iOSTests', 'plurx_tvOSTests'):
+            started = "Test Case '-[{}.ExampleTests testA]' started.\n".format(module)
+            self.assertEqual(retention.log_outcomes(started + template.format(module), 'xctest-class'),
+                             {'ExampleTests/testA': 'pass'})
+            self.assertEqual(retention.log_outcomes('asynchronous stderr prefix>' + template.format(module),
+                                                   'xctest-class'), {'ExampleTests/testA': 'pass'})
+        for invalid in (template.format('Unknown'), template.format('ReceiptTests') + template.format('plurx_iOSTests'),
+                        template.format('ReceiptTests').replace('testA', 'notATest'),
+                        template.format('ReceiptTests').replace('passed', 'passedX'),
+                        'stderr prefix>' + template.format('ReceiptTests').replace('passed', 'unknown'),
+                        'Test Case malformed>' + template.format('ReceiptTests'),
+                        template.format('ReceiptTests') + template.format('ReceiptTests').replace('passed', 'unknown')):
+            with self.subTest(invalid=invalid), self.assertRaises(receipts.ReceiptError):
+                retention.log_outcomes(invalid, 'xctest-class')
+        proof = fixture()
+        suite = proof['lanes']['rust'][0]
+        suite['ids'] = ['ExampleTests/testA']
+        suite['inventory'] = log('ExampleTests/testA\n')
+        record = suite['records'][0]
+        record.update(format='xctest-class', outcomes={'ExampleTests/testA': 'pass'},
+                      log=log(template.format('ReceiptTests')))
+        with patch.object(retention, 'COHORTS', {'rust': {'core'}}), self.assertRaisesRegex(receipts.ReceiptError, 'outside Apple'):
+            retention.validate(proof, 'd' * 40, differences=lambda a, b: set())
+
+    def test_whole_native_result_preserves_pass_fail_and_skip_without_text_terminals(self):
+        for status, count, outcome in [('Success', '0', 'pass'), ('Failure', '1', 'fail'), ('Skipped', '0', 'ignored')]:
+            tree = native_xctest_tree(status, count)
+            self.assertEqual(retention.log_outcomes(json.dumps(tree), 'xctest-result'), {'ExampleTests/testA': outcome})
+
+    def test_native_result_refuses_target_uri_name_metadata_status_and_count_disagreement(self):
+        def parts(tree):
+            testable = tree['summaries']['_values'][0]['testableSummaries']['_values'][0]
+            group = testable['tests']['_values'][0]['subtests']['_values'][0]['subtests']['_values'][0]
+            return testable, group, group['subtests']['_values'][0]
+        mutations = [
+            lambda t, g, v: t['targetName'].update(_value='foreign'),
+            lambda t, g, v: t['identifierURL'].update(_value='test://foreign/plurx/plurx-iOSTests'),
+            lambda t, g, v: g['name'].update(_value='OtherTests'),
+            lambda t, g, v: g['identifierURL'].update(_value=g['identifierURL']['_value'] + '?query'),
+            lambda t, g, v: v['name'].update(_value='testB()'),
+            lambda t, g, v: v['identifierURL'].update(_value=v['identifierURL']['_value'] + '#fragment'),
+            lambda t, g, v: v['identifierURL'].update(_value=v['identifierURL']['_value'].replace('/testA', '%2FtestA')),
+            lambda t, g, v: v['testStatus'].update(_value='ExpectedFailure'),
+            lambda t, g, v: v['failureSummariesCount'].update(_value='1'),
+            lambda t, g, v: v['failureSummariesCount'].update(_value='-1'),
+            lambda t, g, v: g['expectedFailures']['_values'].append({'_type': {'_name': 'String'}, '_value': 'expected'}),
+            lambda t, g, v: g['subtests']['_values'].append(copy.deepcopy(v)),
+            lambda t, g, v: v.update(unrelated_metadata=copy.deepcopy(v)),
+            lambda t, g, v: v['_type'].update(_name='UnexpectedMetadata'),
+        ]
+        for mutation in mutations:
+            tree = native_xctest_tree()
+            mutation(*parts(tree))
+            with self.subTest(mutation=mutation), self.assertRaises(receipts.ReceiptError):
+                retention.log_outcomes(json.dumps(tree), 'xctest-result')
+        raw = json.dumps(native_xctest_tree()).replace('"_value": "Success"', '"_value": "Success", "_value": "Failure"')
+        with self.assertRaises(receipts.ReceiptError):
+            retention.log_outcomes(raw, 'xctest-result')
+
+    def test_native_result_traversal_and_unowned_nested_metadata_are_bounded(self):
+        tree = native_xctest_tree()
+        tree['unrelated'] = [0] * 65536
+        with self.assertRaisesRegex(receipts.ReceiptError, 'traversal limit'):
+            retention.log_outcomes(json.dumps(tree), 'xctest-result')
+        tree = native_xctest_tree()
+        value = tree
+        for _ in range(65):
+            value['unrelated'] = {}
+            value = value['unrelated']
+        with self.assertRaisesRegex(receipts.ReceiptError, 'traversal limit'):
+            retention.log_outcomes(json.dumps(tree), 'xctest-result')
+
+    def test_shared_blobs_require_version_two_exact_digest_and_existing_embedded_bytes(self):
+        original = log('original native log')
+        digest = original['sha256']
+        document = {'version': 2, 'command_units': {'logs': {digest: original}}}
+        reference = {'sha256_ref': digest}
+        self.assertEqual(retention.shared_blob(document, reference), original)
+        for mutation in (lambda d: d.update(version=1), lambda d: d['command_units']['logs'].clear(),
+                         lambda d: d['command_units']['logs'][digest].update(sha256='0' * 64),
+                         lambda d: d['command_units']['logs'][digest].update(base64=base64.b64encode(b'changed').decode())):
+            changed = copy.deepcopy(document)
+            mutation(changed)
+            with self.subTest(mutation=mutation), self.assertRaises(receipts.ReceiptError):
+                retention.shared_blob(changed, reference)
+
+    def test_shared_manifests_keep_source_candidate_path_hash_and_affected_id_checks(self):
+        def evidence(mutation=lambda value: None):
+            proof = fixture()
+            proof.update(version=2, source_commit='b' * 40,
+                         command_units={'version': 1, 'source_commit': 'b' * 40, 'logs': {}, 'commands': []})
+            record = proof['lanes']['rust'][0]['records'][0]
+            record['source_commit'] = 'a' * 40
+            manifest = {'source_commit': 'a' * 40, 'candidate': 'b' * 40,
+                'changes': {'crates/input.rs': {'before': retention.digest(b'old'),
+                    'after': retention.digest(b'new'), 'affected_ids': []}}}
+            mutation(manifest)
+            item = log(json.dumps(manifest))
+            original = record['log']
+            proof['command_units']['logs'].update({item['sha256']: item, original['sha256']: original})
+            record.update(changes={'sha256_ref': item['sha256']}, log={'sha256_ref': original['sha256']})
+            return proof
+        def validate(proof):
+            with patch.object(retention, 'COHORTS', {'rust': {'core'}}), \
+                 patch('validation.qualification_unit_continuation.validate', return_value={}):
+                return retention.validate(proof, 'b' * 40,
+                    source=lambda commit, path: b'old' if commit == 'a' * 40 else b'new',
+                    differences=lambda before, after: {'crates/input.rs'} if before != after else set())
+        self.assertEqual(validate(evidence())[0]['rust']['passed'], 1)
+        for mutation in (lambda m: m.update(source_commit='c' * 40),
+                         lambda m: m.update(candidate='c' * 40),
+                         lambda m: m['changes'].clear(),
+                         lambda m: m['changes']['crates/input.rs'].update(before='0' * 64),
+                         lambda m: m['changes']['crates/input.rs'].update(after='0' * 64),
+                         lambda m: m['changes']['crates/input.rs'].update(affected_ids=['unknown']),
+                         lambda m: m['changes']['crates/input.rs'].update(affected_ids=['a'])):
+            with self.subTest(mutation=mutation), self.assertRaises(receipts.ReceiptError):
+                validate(evidence(mutation))
+
+
 class RetainedUnitCase(unittest.TestCase):
     def validate(self, proof):
         with patch.object(retention, 'COHORTS', {lane: {suite['name'] for suite in suites}

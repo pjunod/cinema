@@ -1138,10 +1138,35 @@ original source archive: bytes, types and Git executable bits match; every
 tracked mtime and ctime predates execution. The original dirty-path string was
 not captured. Overlapping Kotlin compiler residue is an inference, not a
 reconstructed observation. R27 permits only this exact binding/supplement
-pair and refuses other false-clean captures; its three new controls remain
-effort-only obligations before final qualification.
+pair and refuses other false-clean captures. R27 landed as #1087 on effort
+`52dfb9128` after all seven compile-only checks in gate 5096 passed; its three
+new controls then passed once with native and wrapper exit 0 and clean source.
 
 Both current JVM source sets compiled successfully without executing tests.
 Independent compiled discovery on `da8d67f18` finds 1,149 methods in 664 class
 files; these are membership facts, not runtime outcomes. Full authenticated
 qualification, deployment and the 18 physical HDR ON/OFF cases remain open.
+
+R28 preserves native Apple evidence whose original text omitted a terminal
+line: the whole saved Xcode result tree reports the missing method as Success.
+Explicit Apple-only class and native-result formats retain original namespaces,
+source/runtime review and exact raw trees; they do not invent a text terminal or
+turn namespace normalization into cross-platform execution. Strict hierarchy,
+target/URI/name agreement, failure counts, duplicate identities/JSON keys and
+traversal bounds refuse malformed evidence. Version-two evidence may share
+digest-bound embedded logs and source manifests, retaining every source, path
+hash and affected-ID check within the existing size limit. The six new controls
+remain effort-only obligations after the reviewable task gate and landing.
+
+On effort `52dfb9128`, the complete Python components validate 443 validation
+and 1,042 operations memberships; Android JVM validates 1,149 memberships,
+including 64 actual named passes and 1,085 opaque historical memberships. Store
+and lineage components validate their 368 and one native inventories. Live
+original CI source, scope, job, command and log authentication passed for these
+components. Astra's core source review accounts for 1,899 methods, with 1,895
+actual passing results and four unchanged ignored cases. The one daemon
+diagnostics projection with no original native result passed once on this
+effort. Apple compilation and enumeration find 1,029 iOS and 1,013 tvOS unit
+methods without executing bodies. These are component facts: remaining full
+retention, non-unit qualification, promotion, deployment and physical HDR
+acceptance are still open.

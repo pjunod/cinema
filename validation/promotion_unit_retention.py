@@ -66,6 +66,116 @@ def decoded_log(item):
     return raw.decode('utf-8')
 
 
+def shared_blob(document, item):
+    """Version two may deduplicate embedded evidence, never fetch another source."""
+    if set(item) != {'sha256_ref'}:
+        return item
+    value = item['sha256_ref']
+    r.require(document['version'] == 2 and isinstance(value, str)
+              and DIGEST.fullmatch(value), 'Unknown shared evidence reference')
+    logs = document['command_units']['logs']
+    r.require(isinstance(logs, dict) and value in logs
+              and logs[value].get('sha256') == value, 'Shared evidence unavailable or aliased')
+    decoded_log(logs[value])
+    return logs[value]
+
+
+def xctest_result_rows(raw):
+    """Read the native legacy xcresult hierarchy; provenance is checked separately."""
+    try:
+        tree = r.bounded_json(raw.encode())
+    except (ValueError, RecursionError) as error:
+        raise r.ReceiptError('Malformed native XCTest JSON') from error
+    nodes, metadata = 0, set()
+    def kind(value):
+        header = value.get('_type') if isinstance(value, dict) else None
+        return header.get('_name') if isinstance(header, dict) else None
+    def scan(value, depth=0):
+        nonlocal nodes
+        nodes += 1
+        r.require(nodes <= 65536 and depth <= 64, 'Native XCTest traversal limit')
+        if isinstance(value, dict):
+            if kind(value) == 'ActionTestMetadata':
+                metadata.add(id(value))
+            for child in value.values():
+                scan(child, depth + 1)
+        elif isinstance(value, list):
+            for child in value:
+                scan(child, depth + 1)
+    scan(tree)
+    def typed(value, name):
+        r.require(isinstance(value, dict) and isinstance(value.get('_type'), dict)
+                  and value['_type'].get('_name') == name, 'Unexpected native XCTest node type')
+        return value
+    def string(value):
+        typed(value, 'String')
+        r.require(set(value) == {'_type', '_value'} and isinstance(value['_value'], str),
+                  'Invalid native XCTest string')
+        return value['_value']
+    def array(value):
+        typed(value, 'Array')
+        r.require(set(value) <= {'_type', '_values'} and isinstance(value.get('_values', []), list),
+                  'Invalid native XCTest array')
+        return value.get('_values', [])
+    def empty_fields(value):
+        for field in ('expectedFailures', 'failureSummaries'):
+            if field in value:
+                r.require(not array(value[field]), 'Native XCTest expected/failure metadata requires review')
+    rows, visited = [], set()
+    targets = {'plurx-iOSTests': 'plurx_iOSTests', 'plurx-tvOSTests': 'plurx_tvOSTests'}
+    def group(value, target, parents=()):
+        r.require(len(parents) < 16, 'Native XCTest group depth')
+        if kind(value) == 'ActionTestSummaryGroup':
+            empty_fields(value)
+            name = string(value['name'])
+            identifier = string(value['identifier'])
+            expected = ({'All tests', 'Selected tests'} if not parents else
+                        {target + '.xctest'} if len(parents) == 1 else None)
+            r.require(name == identifier and
+                      ((expected is not None and name in expected) or
+                       (len(parents) == 2 and re.fullmatch(r'[A-Za-z_]\w*', name)))
+                      and string(value['identifierURL']) ==
+                      'test://com.apple.xcode/plurx/' + target + '/' + name.replace(' ', '%20'),
+                      'Invalid native XCTest enclosing group')
+            for child in array(value['subtests']):
+                group(child, target, parents + (name,))
+            return
+        typed(value, 'ActionTestMetadata')
+        visited.add(id(value))
+        empty_fields(value)
+        identifier = string(value['identifier'])
+        match = re.fullmatch(r'([A-Za-z_]\w*)/(test\w+)\(\)', identifier)
+        r.require(match is not None and len(parents) == 3 and parents[-1] == match[1]
+                  and string(value['name']) == match[2] + '()'
+                  and string(value['identifierURL']) ==
+                  'test://com.apple.xcode/plurx/' + target + '/' + match[1] + '/' + match[2],
+                  'Native XCTest target, name or URI disagreement')
+        status = string(value['testStatus'])
+        r.require(status in {'Success', 'Failure', 'Skipped'}, 'Unknown native XCTest status')
+        scalar = typed(value['failureSummariesCount'], 'Int')
+        r.require(set(scalar) == {'_type', '_value'}, 'Invalid native XCTest failure scalar')
+        count = scalar.get('_value')
+        r.require(isinstance(count, str) and re.fullmatch(r'0|[1-9]\d{0,6}', count)
+                  and (int(count) > 0) == (status == 'Failure'),
+                  'Native XCTest failure count contradicts status')
+        rows.append((match[1] + '/' + match[2],
+                     {'Success': 'pass', 'Failure': 'fail', 'Skipped': 'ignored'}[status]))
+    typed(tree, 'ActionTestPlanRunSummaries')
+    for summary in array(tree['summaries']):
+        typed(summary, 'ActionTestPlanRunSummary')
+        for testable in array(summary['testableSummaries']):
+            typed(testable, 'ActionTestableSummary')
+            target = string(testable['targetName'])
+            r.require(target in targets and string(testable['name']) == target
+                      and string(testable['identifierURL']) == 'test://com.apple.xcode/plurx/' + target,
+                      'Unknown native XCTest target')
+            empty_fields(testable)
+            for value in array(testable['tests']):
+                group(value, target)
+    r.require(metadata == visited and rows, 'Native XCTest metadata outside declared hierarchy')
+    return rows
+
+
 def log_outcomes(log, format_name):
     outcomes = {}
     log = re.sub(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', log, flags=re.M)
@@ -101,6 +211,28 @@ def log_outcomes(log, format_name):
         rows = re.findall(r"Test Case '-\[([^ ]+) ([^]]+)\]' (passed|failed|skipped)", log)
         rows = [(name + '/' + method, {'passed': 'pass', 'failed': 'fail', 'skipped': 'ignored'}[status])
                 for name, method, status in rows]
+    elif format_name == 'xctest-class':
+        rows = []
+        for line in log.splitlines():
+            # XCTest stdout can share a line with asynchronous stderr output.
+            start = 0 if line.startswith('Test Case ') else line.find("Test Case '-[")
+            if start < 0:
+                continue
+            line = line[start:]
+            native = re.fullmatch(r"Test Case '-\[([^ ]+) ([^]]+)\]' (.+)", line)
+            r.require(native is not None, 'Malformed native XCTest case line')
+            name, method, terminal = native.groups()
+            match = re.fullmatch(r'(ReceiptTests|plurx_iOSTests|plurx_tvOSTests)\.([A-Za-z_]\w*)', name)
+            r.require(match is not None and re.fullmatch(r'test\w+', method),
+                      'Unreviewed native XCTest namespace or selector')
+            if terminal == 'started.':
+                continue
+            status = re.fullmatch(r'(passed|failed|skipped) \([0-9]+(?:\.[0-9]+)? seconds\)\.', terminal)
+            r.require(status is not None, 'Unreviewed native XCTest terminal state')
+            rows.append((match[2] + '/' + method,
+                         {'passed': 'pass', 'failed': 'fail', 'skipped': 'ignored'}[status[1]]))
+    elif format_name == 'xctest-result':
+        rows = xctest_result_rows(log)
     elif format_name in {'gradle-summary', 'instrumentation-summary'}:
         if format_name == 'gradle-summary':
             rows = [(name + '/' + method, 'fail') for name, method in
@@ -219,6 +351,12 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                 r.require(record['environment'] in compatible,
                           'Unit environment applicability mismatch')
                 changes = record['changes']
+                if set(changes) == {'sha256_ref'}:
+                    manifest = r.bounded_json(decoded_log(shared_blob(document, changes)).encode())
+                    r.require(set(manifest) == {'source_commit', 'candidate', 'changes'}
+                              and manifest['source_commit'] == prior and manifest['candidate'] == frozen,
+                              'Shared applicability manifest source or candidate differs')
+                    changes = manifest['changes']
                 paths = differences(prior, frozen) - protocol_paths
                 r.require(isinstance(changes, dict) and set(changes) == paths,
                           'Unclassified changed unit inputs')
@@ -237,7 +375,9 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                 outcomes = record['outcomes']
                 r.require(isinstance(outcomes, dict) and outcomes and set(outcomes) <= set(ids),
                           'Unknown actual unit outcome')
-                raw_log = decoded_log(record['log'])
+                r.require(record['format'] not in {'xctest-class', 'xctest-result'} or lane == 'apple',
+                          'Native XCTest format outside Apple lane')
+                raw_log = decoded_log(shared_blob(document, record['log']))
                 if record['format'] == 'rust-serial':
                     r.require(re.search(r'--exact(?:\s|$)|--test-threads(?:=| )1(?:\s|$)',
                                         origin['command']),
@@ -409,7 +549,7 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
                               and type(jobs[0]['attempt']) is int and jobs[0]['attempt'] == 1,
                               'Actual CI unit execution identity mismatch')
                     raw_log = api.bytes(f'/actions/jobs/{job_id}/logs')
-                    r.require(digest(raw_log) == record['log']['sha256'],
+                    r.require(digest(raw_log) == shared_blob(document, record['log'])['sha256'],
                               'Authenticated CI log contradicts retained origin')
     command_units = None
     if document.get('version') == 2:
