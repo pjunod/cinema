@@ -379,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
                 api = retention.runner_api(environment)
                 raw = retention.attachment_bytes(api, live_binding['pull_request'],
                     prior_proof['attachment_id'], prior_proof['attachment_uuid'], prior_proof['sha256'])
-                refreshed = retention.verify(api, raw, prior_proof['sha256'], live_binding,
+                refreshed = retention.verify_enrollment(api, raw, prior_proof['sha256'], live_binding,
                     git_object(args.repository, 'HEAD^{commit}'), prior_proof['attachment_id'],
                     prior_proof['attachment_uuid'])
             except ReceiptError as exc:

@@ -31,15 +31,37 @@ class LiveLogs:
         return self.cache[key]
 
 
+class StructuralBudget:
+    """One unchanged traversal budget across independently signed proof tables."""
+    def __init__(self):
+        self.bytes = 0
+        self.nodes = 0
+
+
 class Objects:
     """One proof-local cache; record logs retain their separate decoding rules."""
-    def __init__(self, logs):
+    def __init__(self, logs, budget=None):
         receipts.require(isinstance(logs, dict) and 0 < len(logs) <= 1024,
                          'Missing or oversized structural evidence table')
         self.logs = logs
         self.cache = {}
-        self.bytes = 0
-        self.nodes = 0
+        self.budget = budget if budget is not None else StructuralBudget()
+
+    @property
+    def bytes(self):
+        return self.budget.bytes
+
+    @bytes.setter
+    def bytes(self, value):
+        self.budget.bytes = value
+
+    @property
+    def nodes(self):
+        return self.budget.nodes
+
+    @nodes.setter
+    def nodes(self, value):
+        self.budget.nodes = value
 
     def resolve(self, item, enabled):
         receipts.require(isinstance(item, dict), 'Evidence slot is not an object')
