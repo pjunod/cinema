@@ -124,6 +124,13 @@ class OriginalScopeEvidenceCase(unittest.TestCase):
         with self.assertRaisesRegex(receipts.ReceiptError, 'Duplicate retired original'):
             self.validate_retired(proof, policy)
 
+        proof, policy = self.retired_fixture()
+        records = proof['lanes']['rust'][0]['records']
+        records[0]['sequence'] = 2
+        records[1]['sequence'] = 1
+        with self.assertRaisesRegex(receipts.ReceiptError, 'later applicable successor'):
+            self.validate_retired(proof, policy)
+
     def test_retired_successor_refuses_source_invalidation_and_later_withheld_failure(self):
         for later_failure in (False, True):
             proof, policy = self.retired_fixture()
