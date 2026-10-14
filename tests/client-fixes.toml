@@ -4146,7 +4146,7 @@ test_anchor = "fun lostAcknowledgementReplaysTheSameRequestBeforeNewIntent("
 id = "apple.prepared-track-reconciliation-bounded-by-overlap"
 commits = ["130ab19a0"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "private func reconcilePreparedMediaSelections(to item: AVPlayerItem, overlapStartedAtMs: Int) async -> Bool {"
+source_anchor = "private func reconcilePreparedMediaSelections(to item: AVPlayerItem, successor: AVPlayer,"
 test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
 test_anchor = "func testCancelledMediaSelectionPreparationCannotApplyLateTracks("
 
@@ -6402,3 +6402,96 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "let successor = Session.shared.nextMediaFailoverURL(path,"
 test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
 test_anchor = "func testGrowingPreparationRecoversIngressAndCannotAttachAfterStop()"
+
+# Continuous-quality client corrections: live source/test anchors only.
+# These rows do not assert test execution or playback qualification.
+# The former unavailable-cadence retry was superseded by terminal refusals;
+# its launch-ID correction remains anchored separately below.
+
+[[fixes]]
+id = "apple.staged-selection-before-exposure"
+commits = ["0c2fcd962b5eb07bb79a9b0e603dd61b82f222a2"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func prepareStagedMediaSelections(to item: AVPlayerItem,"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testStagedSelectionsResolveBeforeTheIncumbentIsReplaced"
+
+[[fixes]]
+id = "apple.loaded-future-readiness-before-handoff"
+commits = ["0e3e079d991614781e5008080a1b70cacf730fc8"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func preparedLoadedRendezvous(_ item: AVPlayerItem,"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testStaticOriginalRunwayWaitsForMovingIncumbentFutureCoverage"
+
+[[fixes]]
+id = "apple.access-log-sampling-owned-single-flight"
+commits = ["12eb6b592926a3e58c8cb22cfbb9fbe9e5423690"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "final class PlayerAccessLogSampler"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testAccessLogSamplingRemainsSingleFlightAndRejectsReplacedOwners"
+
+[[fixes]]
+id = "apple.cadence-refusals-remain-terminal"
+commits = ["159c857af68ccd02ed38a607ad851f98385263c4"]
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "guard http.statusCode == 200 || (range != nil && http.statusCode == 206),"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "testRefusedFragmentsAreTerminalAndCancelBodyTransfer"
+
+[[fixes]]
+id = "apple.prepared-preroll-owned-cancellation"
+commits = ["811d49c344897bdcee5c26f85c817419661dcaac"]
+source = "clients/apple/Sources/PlayerSeekCompletion.swift"
+source_anchor = "static func runOwned("
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testPreparedPrerollTimeoutCancelsNativeRequestAndIgnoresLateSuccess"
+
+[[fixes]]
+id = "apple.auto-cost-refresh-complete-output"
+commits = ["89f04485ca5632d7054631d37c1e568469455531"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoNeedsEncodedCostRefresh(_ candidates: [QualityCandidate], outputs: [MeasuredCandidateOutput]?, current: String) -> Bool"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testAutoCostRefreshRequiresUniqueCompleteOutputRatherThanAdvertisedPeak"
+
+[[fixes]]
+id = "apple.rendezvous-preserves-sampling-slack"
+commits = ["a150efc31421b8bec836be9e5acfc7a9f1d2ec55"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "overlapRemainingMs - postSwapReserveMs - PreparedReplacementBounds.pollMs"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testPlannedAnchorToleratesSmallMediaLagWithoutSpendingItsPostSwapReserve"
+
+[[fixes]]
+id = "apple.hidden-successor-clock-ownership"
+commits = ["a9e62b680c1451630ea7d5803996ed349e66f974"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "func clockAnchor("
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testClockAnchorRefusesConsumedLeadAndPreservesPostSwapDeadline"
+
+[[fixes]]
+id = "apple.loaded-rendezvous-original-target"
+commits = ["adb43655fce8768cc1ae0368609593503786986c"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "static func planLoaded("
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testLoadedRendezvousRejectsDisconnectedFutureIsland"
+
+[[fixes]]
+id = "apple.physical-launch-large-explicit-ids"
+commits = ["fd322f23a94f758f6c9ff0b11f013e4a7fbce418"]
+source = "clients/apple/Sources/PlurxApp.swift"
+source_anchor = "return Int(arguments[index + 1]) ?? 0"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPhysicalAcceptanceLaunchPreservesLargeExplicitIDs"
+
+[[fixes]]
+id = "apple.cadence-preparation-before-future-freeze"
+commits = ["80d1bfff39d8765c9c2d957457a901562a1601f6"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func preparedCadenceProbeItemMs("
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testCadenceProbeStaysInsideActualReachableFutureEnvelope"
