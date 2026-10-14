@@ -1,6 +1,6 @@
 # Dolby Vision Profile 5 startup — repairing the muxer's incomplete-array claim
 
-**Status:** implemented and locally qualified; adversarial review approved; device acceptance pending · **Date:** 2026-10-13
+**Status:** built and locally qualified; adversarial review approved; device acceptance pending · **Date:** 2026-10-13
 
 Companion to [PLAYBACK.md](../PLAYBACK.md) (the delivery path). This record
 explains the Apple TV failure for *Taylor Tomlinson: Prodigal Daughter*, the
