@@ -1,5 +1,20 @@
 import Foundation
 
+/// Pin acquisition to the same film position used to prime this prepared item.
+/// Keep unrelated query bytes intact, including credentials and media options.
+func preparedAcquisitionURL(_ url: URL, filmPositionMs: Int) -> URL? {
+    guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+    let key = "acquisition_start_ms"
+    var fields = components.percentEncodedQuery?.components(separatedBy: "&") ?? []
+    fields.removeAll { field in
+        let encodedKey = field.components(separatedBy: "=")[0]
+        return encodedKey.removingPercentEncoding == key
+    }
+    fields.append("\(key)=\(max(0, filmPositionMs))")
+    components.percentEncodedQuery = fields.joined(separator: "&")
+    return components.url
+}
+
 /// Resource URLs and NSError descriptions may contain playback credentials.
 /// Preserve only the typed framework domain and code for retained failures.
 func preparedSuccessorErrorDetail(_ error: NSError?) -> String {

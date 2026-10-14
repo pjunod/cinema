@@ -12013,12 +12013,14 @@ extension PlayerController: PreparedSuccessorHost {
         filmPositionMs: Int
     ) -> Bool {
         discardPreparedSuccessor()
+        let capturedFilmPositionMs = max(0, filmPositionMs)
         // `playlistUrl` was proven node-relative before this action reached
         // the player, so this join cannot reach another origin — the same
         // property the control bootstrap's path check gives the reporter.
         guard started,
               player.currentItem != nil,
-              let url = Session.shared.url(action.playlistUrl)
+              let actionURL = Session.shared.url(action.playlistUrl),
+              let url = preparedAcquisitionURL(actionURL, filmPositionMs: capturedFilmPositionMs)
         else { return false }
         preparedOverlapStartedAtMs = Int(ProcessInfo.processInfo.systemUptime * 1_000)
         let item = AVPlayerItem(url: url)
@@ -12057,7 +12059,7 @@ extension PlayerController: PreparedSuccessorHost {
                 deadlineMs: now + 15_000)
         }
         installAutoTransferMetrics(for: item, staged: true, stagedAction: action)
-        preparedFilmPositionMs = max(0, filmPositionMs)
+        preparedFilmPositionMs = capturedFilmPositionMs
         // The successor's session-relative zero is not the film's. This is the
         // same arithmetic a created session gets, over a raw origin — and it
         // is *recorded* here rather than performed, because the item is one

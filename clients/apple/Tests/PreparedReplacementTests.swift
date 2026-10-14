@@ -2,6 +2,30 @@ import Foundation
 import XCTest
 @testable import plurx
 
+final class PreparedAcquisitionURLTests: XCTestCase {
+    func testPreparedAcquisitionPinsCapturedPositionAndPreservesMediaQueries() throws {
+        let original = try XCTUnwrap(URL(string:
+            "https://example.invalid/media/master.m3u8?native=1&subtitle=en%2Fforced&token=a%2Bb%3D&empty=#track"))
+        let actual = try XCTUnwrap(preparedAcquisitionURL(original, filmPositionMs: 296_065))
+        XCTAssertEqual(actual.absoluteString,
+            "https://example.invalid/media/master.m3u8?native=1&subtitle=en%2Fforced&token=a%2Bb%3D&empty=&acquisition_start_ms=296065#track")
+        XCTAssertEqual(original.query, "native=1&subtitle=en%2Fforced&token=a%2Bb%3D&empty=")
+    }
+
+    func testPreparedAcquisitionReplacesStaleHintsAndClampsOnlyNegativePosition() throws {
+        let original = try XCTUnwrap(URL(string:
+            "https://example.invalid/master.m3u8?acquisition_start_ms=12&native=1&%61cquisition_start_ms=99"))
+        for position in [0, -1, Int.min] {
+            let actual = try XCTUnwrap(preparedAcquisitionURL(original, filmPositionMs: position))
+            XCTAssertEqual(actual.absoluteString,
+                "https://example.invalid/master.m3u8?native=1&acquisition_start_ms=0")
+        }
+        let bare = try XCTUnwrap(URL(string: "https://example.invalid/master.m3u8"))
+        XCTAssertEqual(preparedAcquisitionURL(bare, filmPositionMs: Int.max)?.query,
+                       "acquisition_start_ms=\(Int.max)")
+    }
+}
+
 final class PreparedFailureDiagnosticTests: XCTestCase {
     func testPreparedFailureDiagnosticExcludesResourceCredentials() {
         let secretURL = "https://example.invalid/media?token=private-playback-credential"
