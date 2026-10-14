@@ -258,6 +258,7 @@ impl VodServe {
             session_id.to_owned(),
             Session {
                 children: Vec::new(),
+                preferred_start_ms: None,
                 passive_grant: None,
                 retained_output: None,
                 rendition: Some(Arc::clone(&rendition)),

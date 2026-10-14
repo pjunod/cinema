@@ -1317,6 +1317,10 @@ impl VodServe {
         }
         let mut replacement = Session {
             children: Vec::new(),
+            preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
+                req.start_seconds,
+                duration_ms,
+            ),
             passive_grant: passive_grant.clone(),
             retained_output,
             rendition: Some(Arc::clone(&rendition)),
@@ -2127,6 +2131,10 @@ impl VodServe {
         let duration_ms = plan_duration_ms(&rendition.plan);
         let replacement = Session {
             children: Vec::new(),
+            preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
+                req.start_seconds,
+                duration_ms,
+            ),
             passive_grant: None,
             retained_output: None,
             sdr_master_codecs: false,

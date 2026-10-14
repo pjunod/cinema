@@ -446,11 +446,18 @@ impl VodServe {
                 }))
     }
 
-    /// Immutable playlist bytes: the same bytes for the session's whole life.
+    /// Full immutable rendition with this attachment's fixed acquisition hint.
+    /// The preferred start does not trim media or rebase its timestamps.
     pub async fn playlist(&self, session_id: &str) -> Option<VodPublication<Vec<u8>>> {
         let publication = self.session_rendition(session_id).await?;
         let (result, owner) = match publication.result {
-            Ok((rendition, _, _)) => (Ok(rendition.playlist.clone()), publication.owner),
+            Ok((rendition, _, _)) => (
+                Ok(playlist_with_preferred_start(
+                    &rendition.playlist,
+                    publication.owner.preferred_start_ms,
+                )),
+                publication.owner,
+            ),
             Err(error) => (Err(error), publication.owner),
         };
         Some(VodPublication { result, owner })
@@ -1462,4 +1469,53 @@ async fn read_child_init(
         .await
         .map_err(VodError::Io)?;
     Ok(Some(bytes))
+}
+
+/// HLS uses the start hint only for acquisition. The full playlist remains
+/// seekable, and PRECISE=NO lets the reader begin at the preceding segment;
+/// the player's ordinary ownership-fenced seek still establishes alignment.
+pub(super) fn preferred_playlist_start_ms(start_seconds: f64, duration_ms: i64) -> Option<i64> {
+    let milliseconds = start_seconds * 1_000.0;
+    if !start_seconds.is_finite()
+        || !milliseconds.is_finite()
+        || milliseconds < 1.0
+        || milliseconds >= duration_ms as f64
+        || milliseconds >= i64::MAX as f64
+    {
+        return None;
+    }
+    Some(milliseconds.floor() as i64)
+}
+
+pub(super) fn playlist_with_preferred_start(playlist: &[u8], start_ms: Option<i64>) -> Vec<u8> {
+    let Some(start_ms) = start_ms.filter(|start| *start > 0) else {
+        return playlist.to_vec();
+    };
+    // Rendition playlists are generated from validated immutable plans. Keep
+    // all their bytes except an existing start tag; never rewrite media URIs,
+    // durations, sequence numbers, discontinuities, or the ENDLIST promise.
+    let Ok(text) = std::str::from_utf8(playlist) else {
+        return playlist.to_vec();
+    };
+    let mut lines = text.split_inclusive('\n');
+    let Some(header) = lines
+        .next()
+        .filter(|line| line.ends_with('\n') && line.trim_end() == "#EXTM3U")
+    else {
+        return playlist.to_vec();
+    };
+    let mut output = Vec::with_capacity(playlist.len() + 72);
+    output.extend_from_slice(header.as_bytes());
+    output.extend_from_slice(
+        format!(
+            "#EXT-X-START:TIME-OFFSET={}.{:03},PRECISE=NO\n",
+            start_ms / 1_000,
+            start_ms % 1_000,
+        )
+        .as_bytes(),
+    );
+    for line in lines.filter(|line| !line.trim_start().starts_with("#EXT-X-START:")) {
+        output.extend_from_slice(line.as_bytes());
+    }
+    output
 }

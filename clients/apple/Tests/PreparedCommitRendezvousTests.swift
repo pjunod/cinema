@@ -138,6 +138,67 @@ final class PreparedCommitRendezvousTests: XCTestCase {
             loadedItemRanges: [4...12]), "new bytes cannot extend the physical overlap reserve")
     }
 
+    func testCadencePreparedBeforeFreezeRejectsConsumedFragmentAndAdmitsFreshFuturePoint() throws {
+        let old = PreparedDecodedCadence(frameDurationSeconds: 1 / 24, itemInterval: 314..<316)
+        XCTAssertNil(preparedRendezvousWithCadence(
+            stagedFilmPositionMs: 308_088, incumbentFilmPositionMs: 315_776,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 5_500,
+            loadedItemRanges: [308...320], cadence: old),
+            "the inspected old interval cannot prove the next moving target")
+        let fresh = PreparedDecodedCadence(frameDurationSeconds: 1 / 24, itemInterval: 316..<318)
+        let plan = try XCTUnwrap(preparedRendezvousWithCadence(
+            stagedFilmPositionMs: 308_088, incumbentFilmPositionMs: 315_776,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 5_500,
+            loadedItemRanges: [308...320], cadence: fresh))
+        XCTAssertEqual(plan.filmPositionMs, 317_176)
+        XCTAssertTrue(fresh.covers(itemPositionMs: plan.itemPositionMs))
+        XCTAssertGreaterThanOrEqual(plan.filmPositionMs - 315_776, 1_000)
+        XCTAssertNil(preparedRendezvousWithCadence(
+            stagedFilmPositionMs: 308_088, incumbentFilmPositionMs: 315_776,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 4_094,
+            loadedItemRanges: [308...320], cadence: fresh),
+            "cadence preparation never invents the physical reserve lost in the measured failure")
+    }
+
+    func testCadenceProbeStaysInsideActualReachableFutureEnvelope() throws {
+        let probe = try XCTUnwrap(preparedCadenceProbeItemMs(
+            stagedFilmPositionMs: 308_088, incumbentFilmPositionMs: 315_776,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 5_500,
+            loadedItemRanges: [308...320]))
+        XCTAssertEqual(probe, 317_176)
+        XCTAssertTrue((316.0..<318.0).contains(Double(probe) / 1_000))
+        XCTAssertFalse((318.0..<320.0).contains(Double(probe) / 1_000),
+            "four seconds of speculative lead would inspect an unreachable fragment")
+        XCTAssertEqual(preparedCadenceProbeItemMs(
+            stagedFilmPositionMs: 308_088, incumbentFilmPositionMs: 315_776,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 5_500,
+            loadedItemRanges: [308...318]), 317_176,
+            "actual loaded media can prepare cadence before it has two seconds of final runway")
+        XCTAssertNil(preparedCadenceProbeItemMs(
+            stagedFilmPositionMs: 308_088, incumbentFilmPositionMs: 315_776,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 5_000,
+            loadedItemRanges: [308...320]))
+        XCTAssertNil(preparedCadenceProbeItemMs(
+            stagedFilmPositionMs: 308_088, incumbentFilmPositionMs: 315_776,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 5_500,
+            loadedItemRanges: [308...310, 316...320]),
+            "an unrelated loaded island cannot provide the original interval's cadence")
+    }
+
+    func testFragmentCadenceCannotAuthorizeTheNextIntervalBoundary() throws {
+        let cadence = PreparedDecodedCadence(frameDurationSeconds: 1 / 24, itemInterval: 10..<12)
+        let plan = try XCTUnwrap(preparedRendezvousWithCadence(
+            stagedFilmPositionMs: 10_000, incumbentFilmPositionMs: 10_000,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 12_000,
+            loadedItemRanges: [10...20], cadence: cadence))
+        XCTAssertLessThan(plan.itemPositionMs, 12_000)
+        XCTAssertTrue(cadence.covers(itemPositionMs: plan.itemPositionMs))
+        XCTAssertNil(preparedRendezvousWithCadence(
+            stagedFilmPositionMs: 10_000, incumbentFilmPositionMs: 11_000,
+            mediaOriginMs: 0, playbackRate: 1, overlapRemainingMs: 12_000,
+            loadedItemRanges: [10...20], cadence: cadence))
+    }
+
     func testLoadedRendezvousMapsOriginAndActualPlaybackRate() throws {
         let plan = try XCTUnwrap(PreparedCommitRendezvous.planLoaded(
             stagedFilmPositionMs: 610_000, incumbentFilmPositionMs: 610_000,
@@ -405,6 +466,20 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         let restoreObserver = try XCTUnwrap(body.range(of: "installItemObserver(for: incumbent)"))
         XCTAssertTrue(restore.lowerBound < restoreObserver.lowerBound && restoreSession.lowerBound < restoreObserver.lowerBound,
             "failed first-frame proof restores both incumbent identities before its observation resumes")
+    }
+
+    func testCadencePreparationFinishesBeforeOneTargetIsFrozenAndDisposalCancelsIt() throws {
+        let source = try playerControllerSource()
+        let body = try commitBody()
+        let freeze = try XCTUnwrap(body.range(of: "guard let rendezvous = loadedRendezvous, let cadence = loadedCadence"))
+        let align = try XCTUnwrap(body.range(of: "awaitPreparedAlignment(of: item"))
+        XCTAssertFalse(body[..<align.lowerBound].contains("awaitPreparedFrameDuration"))
+        XCTAssertTrue(freeze.lowerBound < align.lowerBound)
+        let discard = try XCTUnwrap(source.range(of: "func discardPreparedSuccessor()"))
+        XCTAssertTrue(source[discard.upperBound...].hasPrefix(" {\n        clearPreparedCadence()"))
+        XCTAssertTrue(source.contains("self.preparedCadenceGeneration == generation"))
+        XCTAssertTrue(source.contains("self.viewerActionEpoch == epoch"))
+        XCTAssertTrue(source.contains("self.preparedReplacement.activeAction?.actionId == action.actionId"))
     }
 
     func testTheCommitFinishesTheAlignmentBeforeItExposesTheItem() throws {

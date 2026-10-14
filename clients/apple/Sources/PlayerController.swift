@@ -471,6 +471,65 @@ func autoDownsideCostBps(_ candidate: QualityCandidate, sample: PlayerController
     return [candidate.averageBps.flatMap { $0 > 0 ? Double($0) : nil }, measured].compactMap { $0 }.max()
 }
 
+/// A fragment cadence proof is valid only inside the inspected interval.
+/// Cap the loaded planner there before freezing a target; never move a frozen
+/// anchor or borrow timing from a different media fragment.
+func preparedRendezvousWithCadence(
+    stagedFilmPositionMs: Int, incumbentFilmPositionMs: Int, mediaOriginMs: Int,
+    playbackRate: Double, overlapRemainingMs: Int, loadedItemRanges: [ClosedRange<Double>],
+    cadence: PreparedDecodedCadence?
+) -> PreparedCommitRendezvous? {
+    var ranges = loadedItemRanges
+    if let interval = cadence?.itemInterval {
+        guard interval.lowerBound.isFinite, interval.upperBound.isFinite,
+              interval.lowerBound >= 0, interval.upperBound > interval.lowerBound else { return nil }
+        // The cadence interval is half-open; a boundary sample belongs to the
+        // next fragment. One millisecond retains the planner's integer clock.
+        let ceiling = interval.upperBound - 0.001
+            + Double(PreparedReplacementBounds.switchRunwayMs) / 1_000
+        ranges = ranges.compactMap { range in
+            let end = min(range.upperBound, ceiling)
+            return end >= range.lowerBound ? range.lowerBound...end : nil
+        }
+    }
+    guard let plan = PreparedCommitRendezvous.planLoaded(
+        stagedFilmPositionMs: stagedFilmPositionMs, incumbentFilmPositionMs: incumbentFilmPositionMs,
+        mediaOriginMs: mediaOriginMs, playbackRate: playbackRate,
+        overlapRemainingMs: overlapRemainingMs, loadedItemRanges: ranges),
+        cadence?.covers(itemPositionMs: plan.itemPositionMs) ?? true else { return nil }
+    return plan
+}
+
+/// A provisional inspection position is evidence input, never an anchor.
+/// Keep it inside both real loaded media and the same physical future envelope
+/// the final planner can reach after preserving its post-swap reserve.
+func preparedCadenceProbeItemMs(
+    stagedFilmPositionMs: Int, incumbentFilmPositionMs: Int, mediaOriginMs: Int,
+    playbackRate: Double, overlapRemainingMs: Int, loadedItemRanges: [ClosedRange<Double>]
+) -> Int? {
+    if let plan = PreparedCommitRendezvous.planLoaded(
+        stagedFilmPositionMs: stagedFilmPositionMs, incumbentFilmPositionMs: incumbentFilmPositionMs,
+        mediaOriginMs: mediaOriginMs, playbackRate: playbackRate,
+        overlapRemainingMs: overlapRemainingMs, loadedItemRanges: loadedItemRanges) {
+        return plan.itemPositionMs
+    }
+    guard stagedFilmPositionMs >= 0, incumbentFilmPositionMs >= 0, mediaOriginMs >= 0,
+          playbackRate.isFinite, playbackRate > 0,
+          let lead = PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: overlapRemainingMs)
+    else { return nil }
+    let originalSeconds = Double(max(0, stagedFilmPositionMs - mediaOriginMs)) / 1_000
+    guard let interval = PreparedSeekPolicy.contiguousRanges(loadedItemRanges)
+        .first(where: { $0.contains(originalSeconds) }) else { return nil }
+    let physicalCeiling = Double(incumbentFilmPositionMs) + min(16, playbackRate) * Double(lead)
+    let loadedCeiling = Double(mediaOriginMs) + interval.upperBound * 1_000 - 1
+    let filmMs = min(physicalCeiling, loadedCeiling).rounded(.down)
+    guard filmMs.isFinite, filmMs >= Double(max(stagedFilmPositionMs, mediaOriginMs)),
+          filmMs >= Double(incumbentFilmPositionMs), filmMs < Double(Int.max),
+          let film = Int(exactly: filmMs) else { return nil }
+    let item = film - mediaOriginMs
+    return interval.contains(Double(item) / 1_000) ? item : nil
+}
+
 private struct NowPlayingState: Equatable {
     let title: String
     let durationMs: Int
@@ -2999,6 +3058,14 @@ final class PlayerController: ObservableObject {
     private var preparedAlignmentOutcome: Bool?
     private var preparedAlignmentGeneration = 0
     private var preparedFrameBudget: PreparedActiveWallBudget?
+    /// One attachment-owned inspector; its immutable interval proof is reused
+    /// only for that item, player, viewer epoch and prepared action.
+    private var preparedCadenceTask: Task<Void, Never>?
+    private var preparedCadenceProof: PreparedDecodedCadence?
+    private var preparedCadenceOwner: (item: ObjectIdentifier, player: ObjectIdentifier, epoch: Int, action: String)?
+    private var preparedCadenceFailed = false
+    private var preparedCadenceGeneration = 0
+
     /// One physical deadline from pipeline construction through exposure.
     private var preparedOverlapStartedAtMs: Int?
     private var preparedOverlapRemainingMs: Int {
@@ -12022,6 +12089,7 @@ extension PlayerController: PreparedSuccessorHost {
     }
 
     func discardPreparedSuccessor() {
+        clearPreparedCadence()
         preparedOverlapStartedAtMs = nil
         // The preparation a boundary asked for is gone with its pipeline.
         if preparedReplacement.phase != .switching { autoBoundaryAttempt = nil }
@@ -12161,7 +12229,15 @@ extension PlayerController: PreparedSuccessorHost {
                             return
                         }
                         continue
-                    } else if let throughMs = self.preparedBufferedThroughMs(item),
+                    } else {
+                        if let action = self.preparedReplacement.activeAction {
+                            self.prepareCadenceIfNeeded(item, successor: successor, action: action)
+                        }
+                        if self.preparedCadenceFailed {
+                            self.preparedReplacement.abandon(.failed)
+                            return
+                        }
+                        if let throughMs = self.preparedBufferedThroughMs(item),
                               throughMs >= self.preparedFilmPositionMs
                                   + PreparedReplacementBounds.switchRunwayMs,
                               self.preparedOriginalTargetHasRunway(item),
@@ -12169,9 +12245,10 @@ extension PlayerController: PreparedSuccessorHost {
                                   self.autoStagedProductionAllowsCommit($0) && self.autoStagedOriginalAllowsCommit($0) &&
                                       self.preparedLoadedRendezvous(item, action: $0, rate: self.preferredRate) != nil
                               }) == true {
-                        self.preparedReplacement.successorIsBuffered(throughMs: throughMs)
-                        await self.preparedReplacement.commit()
-                        return
+                            self.preparedReplacement.successorIsBuffered(throughMs: throughMs)
+                            await self.preparedReplacement.commit()
+                            return
+                        }
                     }
                 }
                 let delayMs = min(
@@ -12226,7 +12303,7 @@ extension PlayerController: PreparedSuccessorHost {
     /// alone cannot prove a handoff the commit can still reach.
     private func preparedLoadedRendezvous(_ item: AVPlayerItem,
                                          action: PreparedReplacementAction,
-                                         rate: Float) -> PreparedCommitRendezvous? {
+                                         rate: Float, cadence: PreparedDecodedCadence? = nil) -> PreparedCommitRendezvous? {
         let seconds = player.currentTime().seconds
         guard rate.isFinite, rate > 0, seconds.isFinite, seconds >= 0, baseMs >= 0,
               seconds * 1_000 + Double(baseMs) < Double(Int.max) else { return nil }
@@ -12236,11 +12313,75 @@ extension PlayerController: PreparedSuccessorHost {
             guard start.isFinite, end.isFinite, start >= 0, end >= start else { return nil }
             return start...end
         }
-        return PreparedCommitRendezvous.planLoaded(
+        return preparedRendezvousWithCadence(
             stagedFilmPositionMs: preparedFilmPositionMs,
             incumbentFilmPositionMs: realPositionMs(), mediaOriginMs: action.mediaOriginMs,
             playbackRate: Double(rate), overlapRemainingMs: preparedOverlapRemainingMs,
-            loadedItemRanges: ranges)
+            loadedItemRanges: ranges, cadence: cadence)
+    }
+
+    private func clearPreparedCadence() {
+        preparedCadenceGeneration &+= 1
+        preparedCadenceTask?.cancel()
+        preparedCadenceTask = nil
+        preparedCadenceProof = nil
+        preparedCadenceOwner = nil
+        preparedCadenceFailed = false
+    }
+
+    /// Prepare one item-owned cadence proof while loaded media arrives. A
+    /// completed proof is immutable; an adjacent fragment may need a new one.
+    /// The probe reads only this original-target interval's already loaded
+    /// media and shares the preparation's existing deadline.
+    private func prepareCadenceIfNeeded(_ item: AVPlayerItem, successor: AVPlayer,
+                                       action: PreparedReplacementAction) {
+        if let owner = preparedCadenceOwner,
+           owner.item != ObjectIdentifier(item) || owner.player != ObjectIdentifier(successor) ||
+               owner.epoch != viewerActionEpoch || owner.action != action.actionId {
+            clearPreparedCadence()
+        }
+        guard preparedCadenceTask == nil, !preparedCadenceFailed,
+              preparedItem === item, preparedPlayer === successor,
+              preferredRate.isFinite, preferredRate > 0,
+              player.currentTime().seconds.isFinite else { return }
+        if let proof = preparedCadenceProof,
+           preparedLoadedRendezvous(item, action: action, rate: preferredRate, cadence: proof) != nil { return }
+        let ranges = item.loadedTimeRanges.compactMap { value -> ClosedRange<Double>? in
+            let range = value.timeRangeValue
+            let start = range.start.seconds, end = CMTimeRangeGetEnd(range).seconds
+            guard start.isFinite, end.isFinite, start >= 0, end >= start else { return nil }
+            return start...end
+        }
+        guard let probeMs = preparedCadenceProbeItemMs(
+            stagedFilmPositionMs: preparedFilmPositionMs, incumbentFilmPositionMs: realPositionMs(),
+            mediaOriginMs: action.mediaOriginMs, playbackRate: Double(preferredRate),
+            overlapRemainingMs: preparedOverlapRemainingMs, loadedItemRanges: ranges),
+              let opened = preparedReplacement.openedAtMs else { return }
+        let probe = Double(probeMs) / 1_000
+        if let proof = preparedCadenceProof,
+           proof.itemInterval == nil || proof.itemInterval?.contains(probe) == true { return }
+        let remaining = min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs,
+            opened + PreparedReplacementBounds.readinessMs - PlaybackControlSession.monotonicMs())
+        guard remaining > 0 else { return }
+        let generation = preparedCadenceGeneration
+        let epoch = viewerActionEpoch
+        preparedCadenceOwner = (ObjectIdentifier(item), ObjectIdentifier(successor), epoch, action.actionId)
+        preparedCadenceTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.preparedCadenceGeneration == generation { self.preparedCadenceTask = nil }
+            }
+            let proof = await preparedDecodedFrameDuration(of: item, boundMs: remaining,
+                targetItemSeconds: probe) { [weak self] detail in
+                    self?.noteSurfaceLogOnly("prepared_cadence:\(detail)")
+                }
+            guard !Task.isCancelled, self.preparedCadenceGeneration == generation,
+                  self.preparedItem === item, self.preparedPlayer === successor,
+                  self.viewerActionEpoch == epoch,
+                  self.preparedReplacement.activeAction?.actionId == action.actionId else { return }
+            self.preparedCadenceProof = proof
+            self.preparedCadenceFailed = proof == nil
+        }
     }
 
     /// Promote the primed player and its retained layer after item-specific
@@ -12321,12 +12462,11 @@ extension PlayerController: PreparedSuccessorHost {
             return preparedCommitFailure(at: "media-selection")
         }
         let rendezvousRate = preferredRate
-        // Inspection and alignment can each consume their existing bounded
-        // allowance. Pick one future instant before either suspension, rather
-        // than inspecting one fragment then moving the rendezvous beyond it.
-        // Cap that lead at loaded media with two seconds of strict runway,
-        // keeping the post-swap reserve of the original overlap. Track
-        // selection is already complete; no target moves after this choice.
+        // Cadence preparation can consume its existing bounded allowance
+        // while readiness loads media. Choose the final future instant only
+        // when that measured interval and the actual loaded runway agree.
+        // Keep two seconds of strict runway and the original post-swap reserve.
+        // Selection is complete; no target moves after the final choice.
         let incumbentSeconds = player.currentTime().seconds
         guard rendezvousRate.isFinite, rendezvousRate > 0,
               incumbentSeconds.isFinite, incumbentSeconds >= 0, baseMs >= 0,
@@ -12335,8 +12475,10 @@ extension PlayerController: PreparedSuccessorHost {
         }
         // Layer readiness and media selection may consume the lead that
         // admitted readiness. Await actual expansion within the original
-        // deadline, then freeze one target before cadence and exact alignment.
+        // deadline, then freeze one target with interval-valid cadence before
+        // exact alignment.
         var loadedRendezvous: PreparedCommitRendezvous?
+        var loadedCadence: PreparedDecodedCadence?
         while PlaybackControlSession.monotonicMs() < readinessDeadlineMs,
               preparedOverlapRemainingMs > 0 {
             guard !Task.isCancelled, preparedCommitStillOwned(commitAttempt),
@@ -12347,7 +12489,11 @@ extension PlayerController: PreparedSuccessorHost {
                   item.status == .readyToPlay,
                   autoStagedProductionAllowsCommit(action), autoStagedOriginalAllowsCommit(action)
             else { return .refused }
-            if let plan = preparedLoadedRendezvous(item, action: action, rate: rendezvousRate) {
+            prepareCadenceIfNeeded(item, successor: successor, action: action)
+            if preparedCadenceFailed { return preparedCommitFailure(at: "frame-duration") }
+            if let proof = preparedCadenceProof,
+               let plan = preparedLoadedRendezvous(item, action: action, rate: rendezvousRate, cadence: proof) {
+                loadedCadence = proof
                 loadedRendezvous = plan
                 break
             }
@@ -12356,14 +12502,9 @@ extension PlayerController: PreparedSuccessorHost {
             guard remainingMs > 0 else { return .refused }
             try? await Task.sleep(nanoseconds: UInt64(min(PreparedReplacementBounds.pollMs, remainingMs)) * 1_000_000)
         }
-        guard let rendezvous = loadedRendezvous else { return .refused }
-        guard let cadence = await awaitPreparedFrameDuration(of: item,
-                targetItemSeconds: Double(rendezvous.itemPositionMs) / 1000),
-              preparedItem === item, preparedPlayer === successor,
-              preparedCommitStillOwned(commitAttempt), wantsPlayback,
-              preferredRate == rendezvousRate else {
-            return preparedCommitFailure(at: "frame-duration")
-        }
+        guard let rendezvous = loadedRendezvous, let cadence = loadedCadence else { return .refused }
+        // Cadence was prepared before this single frozen target. No track or
+        // media inspection can consume its lead after this point.
         let frameDurationSeconds = cadence.frameDurationSeconds
         guard cadence.covers(itemPositionMs: rendezvous.itemPositionMs) else {
             return preparedCommitFailure(at: "cadence-interval")
@@ -12448,6 +12589,7 @@ extension PlayerController: PreparedSuccessorHost {
         let incumbentVolume = incumbentPlayer.volume
         let incumbentMuted = incumbentPlayer.isMuted
         let exposureRecipeRevision = recipeRevision.desired
+        clearPreparedCadence()
         preparedPlayer = nil
         preparedItem = nil
         preparedVideoOutput = nil
@@ -12776,14 +12918,6 @@ extension PlayerController: PreparedSuccessorHost {
             }
         )
         return result == .finished(true) && ownsPreroll()
-    }
-
-    /// Load cadence from the actual successor track, within the original
-    /// overlap. Unknown cadence retains the incumbent rather than inventing fps.
-    private func awaitPreparedFrameDuration(of item: AVPlayerItem, targetItemSeconds: Double) async -> PreparedDecodedCadence? {
-        await preparedDecodedFrameDuration(of: item, boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs), targetItemSeconds: targetItemSeconds) { [weak self] detail in
-            self?.noteSurfaceLogOnly("prepared_cadence:\(detail)")
-        }
     }
 
     /// Whether the prepared commit captured as `commit` still belongs to the
@@ -14035,7 +14169,8 @@ private func preparedDecodedFrameDuration(
             boundMs: remaining, pollMs: PreparedReplacementBounds.pollMs,
             now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
             sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
-            read: { finished ? (result ?? PreparedDecodedCadence(frameDurationSeconds: 0)) : nil }
+            read: { Task.isCancelled ? PreparedDecodedCadence(frameDurationSeconds: 0)
+                : finished ? (result ?? PreparedDecodedCadence(frameDurationSeconds: 0)) : nil }
         )
         task.cancel()
         if cadence == nil { report?("deadline_exhausted=true") }

@@ -2670,6 +2670,7 @@
             "sess-a".into(),
             Session {
                 children: Vec::new(),
+                preferred_start_ms: None,
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
@@ -2809,6 +2810,7 @@
             "sess-a".into(),
             Session {
                 children: Vec::new(),
+                preferred_start_ms: None,
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,

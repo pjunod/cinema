@@ -2518,6 +2518,7 @@ mod tests {
         };
         let session = Session {
             children: Vec::new(),
+            preferred_start_ms: None,
             passive_grant: None,
             rendition: Some(Arc::clone(&fresh)),
             retained_output: Some(artifact),

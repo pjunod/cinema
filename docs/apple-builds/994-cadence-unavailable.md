@@ -1,6 +1,6 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 235
+Build: 239
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal
@@ -15,7 +15,13 @@ the successor is hidden, under exact staged-item, operation and viewer ownership
 Alignment follows that work; exposing the paused successor no longer waits for
 asynchronous track selection.
 
-Both platform test targets compile. The earlier TV transfer reached720p and an
+The attachment playlist carries a fixed acquisition start hint without trimming
+its timeline. Prepared cadence evidence is acquired before freezing the final
+future target and remains confined to its measured fragment interval.
+
+Both platform app and regression targets compile for the combined startup and
+cadence-ordering repairs without unit execution. Physical evidence remains open.
+The earlier TV transfer reached720p and an
 accepted commit but failed strict continuity; combined-candidate qualification
 remains pending. The initially attempted503 retry was removed at Paul's direction.
 

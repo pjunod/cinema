@@ -10,8 +10,9 @@
 //!   the playlist bytes rendered *once* from the stored plan, the rendition's
 //!   [`InitIdentity`], and a [`ProducerSlot`] driven by a per-rendition task.
 //! - **Sessions are handles** (plan §2.5): auth, TTL, demand attribution, and
-//!   a tombstone when they end for good. They own no media, no timeline, no
-//!   playlist identity; reaping one deletes nothing.
+//!   a tombstone when they end for good. A fixed preferred-start hint guides
+//!   initial acquisition without changing the shared media or timeline;
+//!   reaping one deletes nothing.
 //! - **The segment GET has exactly three outcomes** (plan §2.3): materialized
 //!   bytes now; a bounded block on the [`WaitPool`]; or a typed refusal. An
 //!   unknown name is the caller's 404 and nothing else's.
@@ -405,6 +406,7 @@ pub struct VodHlsFacts {
 /// session that reused the durable session id.
 #[derive(Clone)]
 pub(crate) struct ResponseOwner {
+    preferred_start_ms: Option<i64>,
     retained_output: Option<Arc<retained::RetainedVodArtifact>>,
     lifecycle: Arc<Mutex<()>>,
     incarnation: Arc<()>,

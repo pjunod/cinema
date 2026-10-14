@@ -11227,3 +11227,40 @@ to a codec or hiding it with an application retry. The two short TV attempts
 close68 and52 owned processes with zero residuals. Failed attempts remain
 failed. The full corrected15-manual/five-Auto and3Mb/s recovery/rebound
 campaigns, formal adversarial review and Fable checkpoint remain open.
+
+
+The corrected first-manual TV diagnostic on `0e3e079d9` commits its exact
+10,000ms target within loaded4,000–14,000ms media. It credits one manual
+change, records a54.313ms maximum decoded gap, and closes53 owned processes
+with zero residuals. This is a focused repair proof, not full TV acceptance.
+
+The subsequent full phone campaign on the same public source fails after
+15 of15 manual changes and one of five Auto changes. Maximum decoded gap is
+68.348ms and transport framing remains clean. At the fixed10Mb/s stage,
+720p fetches2,200,764bytes from its first two fragments before the initial
+293,106ms seek starts3.932seconds after the offer. An incumbent1080p fragment
+transfer overlaps those startup reads. The successor does not reach future
+readiness within its original12-second deadline. These timings prove default
+startup acquisition, not a scheduler queue wait.
+
+The following480p attempt prepares its cadence after freezing a315,989ms
+future point. Cadence inspection takes833ms. A decoded incumbent sample
+6.351ms before seeking is already at315,791.667ms, leaving197.333ms of lead;
+the subsequent clock-anchor check sees the incumbent past the target and
+correctly refuses exposure. Auto eventually commits360p, which does not
+satisfy the required720p landing at this stage. The failed run is not accepted
+by changing the expected rung, retry policy or original bounds. All274 owned
+processes close with zero residuals, and the SDK is closed. Startup acquisition
+and cadence ordering repairs remain in progress; full corrected native
+acceptance, adversarial review and the Fable checkpoint remain open.
+
+
+The startup repair gives each authorized VOD attachment a fixed requested-start
+hint using [HLS `EXT-X-START`](https://www.rfc-editor.org/rfc/rfc8216.html#section-4.3.5.2).
+Its media origin, complete rendition graph and exact alignment remain unchanged;
+repeated reads retain the same attachment bytes. Cadence preparation now starts
+while the successor is hidden and loading. Commit chooses its single future
+point only after a matching cadence interval and actual loaded runway coexist.
+Both Apple app and regression targets compile with build-for-testing without
+unit execution. Physical evidence must establish whether these repairs close
+the Auto failures.

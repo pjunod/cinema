@@ -53,6 +53,7 @@
             "sess-a".into(),
             Session {
                 children: Vec::new(),
+                preferred_start_ms: None,
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
@@ -104,6 +105,7 @@
             "sess-a".into(),
             Session {
                 children: Vec::new(),
+                preferred_start_ms: None,
                 passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key: replacement_key,
@@ -3626,6 +3628,7 @@
             "sess-a".into(),
             Session {
                 children: Vec::new(),
+                preferred_start_ms: None,
                 passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key,
@@ -5350,3 +5353,147 @@
         assert!(ready.len > 0, "the next demand gets a fresh generation");
         serve.end("sess-n2b", Terminal::Deleted).await;
     }
+
+#[test]
+fn prepared_vod_start_hint_preserves_full_timeline_and_preceding_acquisition() {
+    let original = b"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2.000,\nseg00000.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:2.000,\nseg00146.m4s\n#EXT-X-ENDLIST\n";
+    let hinted = vod_serve_delivery::playlist_with_preferred_start(original, Some(293_106));
+    let text = std::str::from_utf8(&hinted).expect("validated playlist or attachment");
+    let hint = "#EXT-X-START:TIME-OFFSET=293.106,PRECISE=NO\n";
+    assert_eq!(text.matches("#EXT-X-START:").count(), 1);
+    assert!(text.starts_with(&format!("#EXTM3U\n{hint}")));
+    assert_eq!(text.replace(hint, "").as_bytes(), original);
+    assert_eq!(
+        vod_serve_delivery::playlist_with_preferred_start(original, None),
+        original
+    );
+    assert_eq!(
+        vod_serve_delivery::playlist_with_preferred_start(original, Some(0)),
+        original
+    );
+    let with_old_hint = text.replace(hint, "#EXT-X-START:TIME-OFFSET=0\n");
+    assert_eq!(
+        vod_serve_delivery::playlist_with_preferred_start(with_old_hint.as_bytes(), Some(293_106)),
+        hinted
+    );
+}
+
+#[test]
+fn prepared_vod_start_hint_rejects_nonfinite_negative_and_outside_duration() {
+    for start in [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -1.0,
+        0.0,
+        0.0001,
+        670.0,
+        671.0,
+        f64::MAX,
+    ] {
+        assert_eq!(
+            vod_serve_delivery::preferred_playlist_start_ms(start, 670_000),
+            None
+        );
+    }
+    assert_eq!(
+        vod_serve_delivery::preferred_playlist_start_ms(293.106, 670_000),
+        Some(293_106)
+    );
+    assert_eq!(
+        vod_serve_delivery::preferred_playlist_start_ms(293.1069, 670_000),
+        Some(293_106)
+    );
+    assert_eq!(
+        vod_serve_delivery::preferred_playlist_start_ms(1.0, 0),
+        None
+    );
+    assert_eq!(
+        vod_serve_delivery::preferred_playlist_start_ms(1.0, -1),
+        None
+    );
+}
+
+#[tokio::test]
+async fn prepared_vod_start_hint_is_attachment_scoped_and_owner_fenced() {
+    let base = crate::test_tempdir().expect("base");
+    let (serve, file) = serve_on(base.path()).await;
+    let attribution = VodAttribution {
+        user_name: "test",
+        item_title: "Fixture",
+        supersession_user: "[\"user_id\",1]",
+    };
+    let start = serve
+        .try_create(
+            &request("hinted-play", 4.125),
+            &file,
+            &settings(),
+            attribution,
+            "hinted-session".into(),
+        )
+        .await
+        .expect("create");
+    assert_eq!(start.session_id, "hinted-session");
+    create(&serve, &file, "zero-session", "zero-play", &settings()).await;
+    let first = serve.playlist("hinted-session").await.expect("validated playlist or attachment");
+    assert_eq!(first.owner.preferred_start_ms, Some(4_125));
+    let hinted = first.result.expect("validated playlist or attachment");
+    assert!(
+        std::str::from_utf8(&hinted)
+            .expect("validated playlist or attachment")
+            .contains("#EXT-X-START:TIME-OFFSET=4.125,PRECISE=NO\n")
+    );
+    let zero = serve.playlist("zero-session").await.expect("validated playlist or attachment");
+    assert!(zero.owner.preferred_start_ms.is_none());
+    let untouched = zero.result.expect("validated playlist or attachment");
+    assert!(
+        !std::str::from_utf8(&untouched)
+            .expect("validated playlist or attachment")
+            .contains("#EXT-X-START:")
+    );
+    let rendition = serve
+        .shared
+        .sessions
+        .lock()
+        .await
+        .get("hinted-session")
+        .expect("validated playlist or attachment")
+        .rendition
+        .clone()
+        .expect("validated playlist or attachment");
+    assert_eq!(rendition.playlist, untouched);
+    fetch(&serve, "hinted-session", "seg00000.m4s").await;
+    assert_eq!(
+        serve
+            .playlist("hinted-session")
+            .await
+            .expect("validated playlist or attachment")
+            .result
+            .expect("validated playlist or attachment"),
+        hinted
+    );
+    assert!(
+        serve
+            .response_owner_is_live("hinted-session", &first.owner)
+            .await
+    );
+    serve.end("hinted-session", Terminal::Deleted).await;
+    assert!(
+        !serve
+            .response_owner_is_live("hinted-session", &first.owner)
+            .await
+    );
+    assert!(matches!(
+        serve.playlist("hinted-session").await.expect("validated playlist or attachment").result,
+        Err(VodError::Gone(Terminal::Deleted))
+    ));
+    assert_eq!(
+        serve
+            .playlist("zero-session")
+            .await
+            .expect("validated playlist or attachment")
+            .result
+            .expect("validated playlist or attachment"),
+        untouched
+    );
+}

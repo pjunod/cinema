@@ -775,6 +775,9 @@ pub(super) struct Session {
     /// Private video/audio readers share this parent's authority and cleanup.
     /// They never allocate additional public playback sessions or captions.
     pub(super) children: Vec<ParentMediaReader>,
+    /// Immutable acquisition hint from this attachment's authorized create.
+    /// It never changes the rendition timeline or follows control progress.
+    pub(super) preferred_start_ms: Option<i64>,
     pub(super) rendition: Option<Arc<Rendition>>,
     pub(super) passive_grant: Option<Arc<passive_grant::Grant>>,
     pub(super) retained_output: Option<Arc<retained::RetainedVodArtifact>>,
@@ -988,6 +991,7 @@ impl Session {
 
     pub(super) fn response_owner(&self) -> ResponseOwner {
         ResponseOwner {
+            preferred_start_ms: self.preferred_start_ms,
             lifecycle: Arc::clone(&self.lifecycle),
             incarnation: Arc::clone(&self.incarnation),
             retained_output: self
