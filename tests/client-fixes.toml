@@ -6495,3 +6495,19 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func preparedCadenceProbeItemMs("
 test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
 test_anchor = "testCadenceProbeStaysInsideActualReachableFutureEnvelope"
+
+[[fixes]]
+id = "apple.incumbent-fetch-preference-protects-overlap"
+commits = ["540fe73eb36d404b2e22ab75e4761e26cec4803c"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct PreparedIncumbentBufferPreference"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testIncumbentFetchPreferenceLeaseProtectsPhysicalOverlapAndReserve"
+
+[[fixes]]
+id = "apple.incumbent-fetch-preference-fast-playback"
+commits = ["540fe73eb36d404b2e22ab75e4761e26cec4803c"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func restorationPreference(currentHint: Double)"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testIncumbentFetchPreferenceLeaseScalesFastPlaybackAndRejectsUnknownFacts"
