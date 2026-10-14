@@ -1,0 +1,11 @@
+test_complete_children_are_independently_verified_with_shared_budgets_and_local_tables (tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_complete_children_are_independently_verified_with_shared_budgets_and_local_tables) ... ok
+test_child_identity_recursion_digest_and_repeated_enrollments_refuse (tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_child_identity_recursion_digest_and_repeated_enrollments_refuse) ... ok
+test_foreign_structural_reference_and_conflicting_log_alias_refuse (tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_foreign_structural_reference_and_conflicting_log_alias_refuse) ... ok
+test_inline_slots_and_aggregate_suite_command_and_table_bounds_refuse_before_adoption (tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_inline_slots_and_aggregate_suite_command_and_table_bounds_refuse_before_adoption) ... ok
+test_overlapping_lane_command_jvm_and_failed_child_never_publish_a_union (tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_overlapping_lane_command_jvm_and_failed_child_never_publish_a_union) ... ok
+test_actual_structural_byte_and_node_budgets_accumulate_across_child_local_decoders (tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_actual_structural_byte_and_node_budgets_accumulate_across_child_local_decoders) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.005s
+
+OK

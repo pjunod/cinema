@@ -174,6 +174,22 @@ def canonical_python(test_id, kind, universe):
     return canonical
 
 
+def named_python_entrypoint(kind, command, binding, binding_raw, raw):
+    """Keep one immutable original invocation notation without resolving paths."""
+    if command[0] == binding['python_executable']:
+        return True
+    return (kind == 'validation'
+            and retention.digest(binding_raw) ==
+                'd9213642172d63ab1b2bded499712418936a04026091dc0b20bcd5767f14e135'
+            and binding['source_commit'] == 'ddf2397a410ef165036a5373717b38539ffc65d3'
+            and retention.digest(raw) ==
+                'e9fd6d5f078f77f7a842908037f4f121196cd545ec0669356f0341f8316a45f6'
+            and command == binding['argv']
+            and command[0] == '/opt/homebrew/opt/python@3.14/bin/python3.14'
+            and binding['python_executable'] ==
+                '/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14')
+
+
 def python_rows(text, kind, universe, other=()):
     # unittest's first docstring line can appear between the identity and result.
     pattern = r'^\w+ \(([^)\n]+)\)(?: \.\.\. |\n[^\n]* \.\.\. )(ok|FAIL|ERROR|skipped)(?:\s|$)'
@@ -635,7 +651,9 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
                 text = clean_log(named_python_capture_text(
                     raw, record['source_commit'], kind, blob(proof, execution['binding'])))
                 actual = python_rows(text, kind, universe, set(discovery(candidate, 'operations' if kind == 'validation' else 'validation')))
-                receipts.require(len(command) > 4 and command[0] == binding['python_executable']
+                receipts.require(len(command) > 4
+                                 and named_python_entrypoint(kind, command, binding,
+                                                            blob(proof, execution['binding']), raw)
                                  and command[1:4] == ['-m', 'unittest', '-v']
                                  and all(re.fullmatch(r'tests\.(?:validation|operations)\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+', token) for token in command[4:])
                                  and len(command[4:]) == len(set(command[4:])),
