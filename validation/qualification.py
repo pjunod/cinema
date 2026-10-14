@@ -280,7 +280,7 @@ def build_receipt(
             # Older authenticated retention proofs may still carry their
             # Windows waiver; Windows is no longer a required qualification job.
             assert set(retained['lanes']) <= {'rust', 'apple', 'android_jvm',
-                                              'android_device', 'windows_compile'}
+                                              'android_device', 'web_preflight', 'windows_compile'}
             assert all(row['mode'] == ('explicit-human-waiver' if lane == 'windows_compile'
                                       else 'retained-unit-evidence')
                        for lane, row in retained['lanes'].items())

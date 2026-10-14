@@ -85,6 +85,7 @@ jobs:
       retained_units: ${{ steps.retention.outputs.retained_units }}
       retain_rust: ${{ steps.retention.outputs.retain_rust }}
       retain_apple: ${{ steps.retention.outputs.retain_apple }}
+      retain_web_preflight: ${{ steps.retention.outputs.retain_web_preflight }}
       retain_android_jvm: ${{ steps.retention.outputs.retain_android_jvm }}
       retain_android_device: ${{ steps.retention.outputs.retain_android_device }}
       retain_validation_units: ${{ steps.retention.outputs.retain_validation_units }}
@@ -272,9 +273,15 @@ jobs:
             make operations-check
           fi
       - name: Check the shared player input contract
+        env:
+          RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}
         run: |
-          node tests/playback/player-input-contract.test.js
-          node tests/web/player-dom.test.js
+          if [ "$RETAIN_WEB_PREFLIGHT" = true ]; then
+            echo "Adopted authenticated complete two-script Node preflight"
+          else
+            node tests/playback/player-input-contract.test.js
+            node tests/web/player-dom.test.js
+          fi
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; runtime and compiler surfaces are skipped."
