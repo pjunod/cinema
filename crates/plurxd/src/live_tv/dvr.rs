@@ -3461,6 +3461,10 @@ async fn pump_tuner_fanout(
     });
     let mut probing: Option<ProbeInFlight> = None;
     loop {
+        // Buffered tuner chunks can all be ready without yielding. Give
+        // runnable pumps/writers a turn before their bounded chunk queues
+        // are mistaken for stalled consumers; never wait on a consumer.
+        tokio::task::consume_budget().await;
         let (bytes, held) = match pending.pop_front() {
             Some(bytes) => (bytes, true),
             None => {
@@ -5101,6 +5105,60 @@ mod tests {
             ),
             "one viewer's format change does not lock the channel for the rest of the recording"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_ready_tuner_burst_does_not_evict_a_reading_viewer() {
+        use futures_util::StreamExt as _;
+
+        let metrics = Arc::new(LiveTvMetrics::default());
+        let serving = super::super::LiveTvAuthority::always_ready();
+        let transport = test_transport_with(
+            Vec::new(),
+            serving.admit().expect("serving generation"),
+            metrics,
+            0,
+        );
+        let (reading, mut feed, _reading_cancel) = attach_test_viewer(&transport, "reading");
+        let (stalled, _stalled_feed, _stalled_cancel) = attach_test_viewer(&transport, "stalled");
+        let drained = tokio::spawn(async move {
+            let mut total = 0;
+            while let Some(bytes) = feed.rx.recv().await {
+                feed.queued_bytes
+                    .fetch_sub(bytes.len() as u64, Ordering::AcqRel);
+                total += bytes.len();
+            }
+            total
+        });
+        let chunk_count = VIEWER_QUEUE_CHUNKS * 3;
+        let chunk = bytes::Bytes::from_static(&[0x47; 188]);
+        let expected_bytes = chunk_count * chunk.len();
+        assert!(expected_bytes < VIEWER_QUEUE_BYTES as usize);
+        // Unlike tuner_input, this stream adds no test-only scheduling
+        // opportunity. Buffered HTTP body chunks can all be ready at once.
+        let input = LiveTunerInput {
+            prefix: bytes::Bytes::new(),
+            queued: None,
+            remainder: futures_util::stream::iter(
+                (0..chunk_count).map(move |_| Ok::<_, reqwest::Error>(chunk.clone())),
+            )
+            .boxed(),
+        };
+        let result = pump_tuner_fanout(input, serving, Arc::clone(&transport), None).await;
+        transport.finish(&result);
+        let received = drained.await.expect("drain task");
+        assert_eq!(
+            reading.evicted(),
+            None,
+            "a runnable reader must get CPU before its chunk queue is called stalled"
+        );
+        assert_eq!(received, expected_bytes, "the reader receives every byte");
+        assert_eq!(
+            stalled.evicted(),
+            Some("backlog"),
+            "fair scheduling must not remove the stalled reader's chunk bound"
+        );
+        assert!(matches!(result, Err(LiveTvError::StreamFailed(_))));
     }
 
     #[tokio::test]
