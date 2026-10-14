@@ -255,6 +255,56 @@ final class HLSFragmentCadenceTests: XCTestCase {
         XCTAssertLessThanOrEqual(CadenceStub.served(inspected.host, "/hls/s1/seg0.m4s"), HLSFragmentCadence.indexWindowBytes)
     }
 
+    func testTinyRangedCadenceIndexDoesNotFetchAQuarterMegabyte() async throws {
+        let inspected = try await inspectCopy(try largeCopySegment(payload: 40_000_000, ranges: true))
+        XCTAssertEqual(try XCTUnwrap(inspected.cadence).frameDurationSeconds, 1 / 24.0, accuracy: 1e-9)
+        XCTAssertEqual(CadenceStub.requestedRanges(inspected.host, "/hls/s1/seg0.m4s"), ["bytes=0-4095"])
+        XCTAssertLessThanOrEqual(CadenceStub.served(inspected.host, "/hls/s1/seg0.m4s"), 4_096)
+    }
+
+    func testLargeAndMultipleMoofsContinueAdaptivelyWithoutReadingMedia() async throws {
+        func indexedMoof(padding: Int, decodeTime: UInt32) -> Data {
+            let track = box("tfhd", words([0x20000, 7]))
+                + box("tfdt", words([0, decodeTime]))
+                + box("trun", words([0x100, 2, 1000, 1000]))
+            return box("moof", box("traf", track) + box("free", Data(count: padding)))
+        }
+        let payload = 40_000_000
+        let first = indexedMoof(padding: 3_000_000, decodeTime: 0)
+            + words([UInt32(payload + 8)]) + Data("mdat".utf8)
+        let second = indexedMoof(padding: 800_000, decodeTime: 2000)
+            + words([UInt32(payload + 8)]) + Data("mdat".utf8)
+        let secondOffset = first.count + payload
+        let resource = CadenceStub.Resource(length: secondOffset + second.count + payload, ranges: true) { range in
+            var result = Data(count: range.count)
+            for (offset, bytes) in [(0, first), (secondOffset, second)] {
+                let start = max(range.lowerBound, offset), end = min(range.upperBound, offset + bytes.count)
+                if start < end {
+                    result.replaceSubrange((start - range.lowerBound)..<(end - range.lowerBound),
+                                           with: bytes[(start - offset)..<(end - offset)])
+                }
+            }
+            return result
+        }
+        let host = CadenceStub.host()
+        CadenceStub.install(host, [
+            "/hls/s1/index.m3u8": .text(Self.playlist(map: true)),
+            "/hls/s1/init.mp4": .bytes(initialization()),
+            "/hls/s1/seg0.m4s": resource,
+        ])
+        let cadence = await HLSFragmentCadence.inspect(
+            url: try XCTUnwrap(URL(string: "http://\(host)/hls/s1/index.m3u8")), itemSeconds: 1, boundMs: 4_000,
+            configuration: CadenceStub.configuration())
+        XCTAssertEqual(try XCTUnwrap(cadence).frameDurationSeconds, 1 / 24.0, accuracy: 1e-9)
+        let ranges = CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s")
+        XCTAssertLessThan(ranges.count, 32, "large metadata must not exhaust the original64-request allowance")
+        XCTAssertTrue(ranges.contains { header in
+            let ends = header.dropFirst(6).split(separator: "-").compactMap { Int($0) }
+            return ends.count == 2 && ends[1] - ends[0] + 1 > 4_096
+        })
+        XCTAssertLessThanOrEqual(CadenceStub.served(host, "/hls/s1/seg0.m4s"), first.count + second.count + 8_192)
+    }
+
     /// A server that ignores Range answers with the whole object. Its body is
     /// walked as it arrives, keeping only `moof` bytes, up to the byte cap
     /// the earlier whole-segment read allowed; past the cap it is refused.

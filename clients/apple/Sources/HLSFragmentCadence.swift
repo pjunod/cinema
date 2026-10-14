@@ -160,6 +160,9 @@ enum HLSFragmentCadence {
     /// One ranged read of a segment's box index. A `moof` and the next box
     /// header almost always fit in the first window; a large `mdat` is
     /// stepped over by the next window's offset rather than downloaded.
+    static let initialIndexWindowBytes = 4_096
+    /// A declared large `moof` continues in bounded windows rather than
+    /// spending the request allowance on many small prefix reads.
     static let indexWindowBytes = 262_144
     /// Retained `moof` bytes across one segment.
     static let maximumIndexBytes = 4_194_304
@@ -279,11 +282,12 @@ enum HLSFragmentCadence {
         for _ in 0..<maximumIndexRequests {
             var window = Data()
             var whole: FragmentIndex?
-            let response = try await fetch(url, range: offset..<(offset + indexWindowBytes), limit: maximumUnrangedFragmentBytes,
+            let requestedBytes = walk?.nextReadBytes ?? initialIndexWindowBytes
+            let response = try await fetch(url, range: offset..<(offset + requestedBytes), limit: maximumUnrangedFragmentBytes,
                                            deadline: deadline, session: session, loads: loads) { response, chunk in
                 if response.statusCode == 206 {
                     window.append(chunk)
-                    guard window.count <= indexWindowBytes else { throw Invalid.media }
+                    guard window.count <= requestedBytes else { throw Invalid.media }
                     return true
                 }
                 guard offset == 0, response.expectedContentLength >= 0 else { throw Invalid.media }
@@ -415,6 +419,23 @@ extension HLSFragmentCadence {
 
         /// Where the next read must start: past a box being stepped over.
         var resumeOffset: Int { skipEnd ?? needed }
+
+        /// Read only a small unknown prefix. Once a header names a retained
+        /// box, its remaining extent drives bounded continuation; one following
+        /// header lets the walker skip media without requesting its payload.
+        var nextReadBytes: Int {
+            let available = total - resumeOffset
+            guard available > 0 else { return 0 }
+            if moof != nil {
+                let remaining = moofEnd - needed
+                return min(available, HLSFragmentCadence.indexWindowBytes, remaining + 16)
+            }
+            if !header.isEmpty {
+                let headerLength = header.count >= 4 && header.prefix(4).reduce(0, { ($0 << 8) | Int($1) }) == 1 ? 16 : 8
+                return min(available, max(1, headerLength - header.count))
+            }
+            return min(available, HLSFragmentCadence.initialIndexWindowBytes)
+        }
         var finished: Bool { header.isEmpty && moof == nil && resumeOffset == total && total >= 0 }
 
         private struct Malformed: Error {}
