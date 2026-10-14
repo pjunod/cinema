@@ -14,10 +14,11 @@ import xml.etree.ElementTree as ET
 import urllib.parse
 from validation import python_unit_receipts as r
 
-LANES = {'rust', 'apple', 'android_jvm', 'android_device'}
+LANES = {'rust', 'apple', 'android_jvm', 'android_device', 'web_preflight'}
 COHORTS = {'rust': {'core', 'daemon', 'workspace-contracts'},
            'apple': {'iphone', 'ipad', 'tvos'},
-           'android_jvm': {'jvm'}, 'android_device': {'device'}}
+           'android_jvm': {'jvm'}, 'android_device': {'device'},
+           'web_preflight': {'node-contracts'}}
 PROTOCOL_PATHS = {
     '.github/workflows/ci.yml', 'validation/qualification.py',
     'validation/promotion_unit_retention.py',
@@ -216,6 +217,9 @@ def xctest_result_rows(raw):
 def log_outcomes(log, format_name):
     outcomes = {}
     log = re.sub(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', log, flags=re.M)
+    if format_name == 'node-preflight-4954':
+        from validation import retained_web_preflight as web
+        return web.outcomes(log, git_bytes)
     if format_name == 'rust':
         rows = re.findall(r'^test (.+?) \.\.\. (ok|FAILED|ignored)(?:\s|,|$)', log, re.M)
         rows = [(name, {'ok': 'pass', 'FAILED': 'fail', 'ignored': 'ignored'}[status])
@@ -423,6 +427,9 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                     r.require(re.search(r'--exact(?:\s|$)|--test-threads(?:=| )1(?:\s|$)',
                                         origin['command']),
                               'Split Rust outcomes require actual serial or exact execution')
+                if lane == 'web_preflight' or record['format'] == 'node-preflight-4954':
+                    from validation import retained_web_preflight as web
+                    web.record_contract(lane, suite, record, frozen, raw_log, git_bytes, digest)
                 actual_outcomes = log_outcomes(raw_log, record['format'])
                 extras = set(outcomes) - set(ids)
                 retired = None
@@ -612,7 +619,7 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
     from validation.unit_evidence_objects import LiveLogs
     runs, jobs_by_run = {}, {}
     live_logs = live_logs if live_logs is not None else LiveLogs()
-    for suites in document['lanes'].values():
+    for lane, suites in document['lanes'].items():
         for suite in suites:
             for record in suite['records']:
                 origin = record['origin']
@@ -631,6 +638,9 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
                               and jobs[0]['status'] in {'success', 'failure'}
                               and type(jobs[0]['attempt']) is int and jobs[0]['attempt'] == 1,
                               'Actual CI unit execution identity mismatch')
+                    if lane == 'web_preflight':
+                        from validation import retained_web_preflight as web
+                        web.authenticate(run_id, job_id, jobs[0], git_bytes)
                     raw_log = live_logs.get(api, run_id, job_id)
                     r.require(digest(raw_log) == shared_blob(document, record['log'])['sha256'],
                               'Authenticated CI log contradicts retained origin')
