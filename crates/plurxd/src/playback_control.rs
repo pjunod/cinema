@@ -3240,13 +3240,16 @@ pub(crate) enum PreparedSuccessorObservation {
 /// The bounded client facts accepted with one control sequence.
 ///
 /// The public request contains identity and mutation fences as well as these
-/// observations.  Identity remains on [`LocalControlRequest`]; this owned
-/// projection is what a rolling-session actor may retain after the HTTP
-/// request has returned.  Keeping every policy input together prevents later
+/// observations. Owner identity remains on [`LocalControlRequest`]; the
+/// accepted media-intent envelope stays in this owned projection so a later
+/// local keeper check can reject a revised lifetime or recipe before HTTP
+/// post-acceptance work finishes. This owned projection survives the HTTP
+/// request. Keeping every policy input together prevents later
 /// quality, subtitle, and handoff work from reconstructing state from media
 /// fetches or from whichever compatibility heuristic happened to fire.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PlaybackDemandSnapshot {
+    pub intent: Option<plurx_core::playback::MediaIntentEnvelope>,
     /// Canonical hash of the complete public request, including action
     /// vocabulary. Equal sequence numbers are idempotency keys only for these
     /// exact bytes.
@@ -3303,6 +3306,7 @@ impl RollingStartupSnapshot {
 impl From<&ControlRequestV1> for PlaybackDemandSnapshot {
     fn from(request: &ControlRequestV1) -> Self {
         Self {
+            intent: request.intent.clone(),
             request_fingerprint: request.fingerprint(),
             demand: request.demand,
             position_ms: request.position_ms,
@@ -3410,6 +3414,7 @@ impl PlaybackDemandSnapshot {
     #[cfg(test)]
     pub(crate) fn test_default(platform: ClientPlatform) -> Self {
         Self {
+            intent: None,
             demand: PlaybackDemand::Active,
             position_ms: 10_000,
             buffered_from_ms: Some(9_000),

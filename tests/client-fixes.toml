@@ -4414,7 +4414,8 @@ test_anchor = "fun compactAcknowledgementsUseCurrentLedgerMediaFactsWithoutInven
 id = "apple.layer-readiness-clamped-to-remaining-overlap"
 commits = ["be001d003"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs),"
+source_anchor = '''boundMs: max(0, min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs,
+                readinessDeadlineMs - PlaybackControlSession.monotonicMs())),'''
 test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
 test_anchor = "func testPreparationAndAlignmentConsumeTheSamePhysicalOverlapDeadline("
 
@@ -6506,7 +6507,8 @@ test_anchor = "testIncumbentFetchPreferenceLeaseProtectsPhysicalOverlapAndReserv
 
 [[fixes]]
 id = "apple.incumbent-fetch-preference-fast-playback"
-commits = ["540fe73eb36d404b2e22ab75e4761e26cec4803c"]
+commits = []
+supplements = "apple.incumbent-fetch-preference-protects-overlap"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func restorationPreference(currentHint: Double)"
 test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
@@ -6522,7 +6524,8 @@ test_anchor = "testTinyRangedCadenceIndexDoesNotFetchAQuarterMegabyte"
 
 [[fixes]]
 id = "apple.cadence-large-index-adaptive-continuation"
-commits = ["9a2162c5c6b5c56db1eab66b8d70dcd303907721"]
+commits = []
+supplements = "apple.cadence-small-index-read-budget"
 source = "clients/apple/Sources/HLSFragmentCadence.swift"
 source_anchor = "var nextReadBytes: Int"
 test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
@@ -6539,7 +6542,8 @@ test_anchor = "testPreparedAcquisitionPinsCapturedPositionAndPreservesMediaQueri
 
 [[fixes]]
 id = "apple.prepared-acquisition-fixed-target"
-commits = ["7a0f39728e44c34d990a0944776b5fef15d047cd"]
+commits = []
+supplements = "apple.prepared-acquisition-query-preservation"
 source = "clients/apple/Sources/PreparedReplacement.swift"
 source_anchor = "fields.append("
 test = "clients/apple/Tests/PreparedReplacementTests.swift"
@@ -6555,7 +6559,8 @@ test_anchor = "testAcquisitionPreservesObservedIntentAndBoundsRateScaledLead"
 
 [[fixes]]
 id = "apple.pressure-acquisition-fact-refusal"
-commits = ["1eb39847ab7c39d60003221feeaba9e70a17825d"]
+commits = []
+supplements = "apple.pressure-acquisition-observed-intent"
 source = "clients/apple/Sources/PreparedReplacement.swift"
 source_anchor = "struct PreparedAcquisitionAnchors: Equatable"
 test = "clients/apple/Tests/PreparedReplacementTests.swift"
@@ -6563,7 +6568,8 @@ test_anchor = "testAcquisitionPreservesIdentityForUnprotectedIntentAndInvalidFac
 
 [[fixes]]
 id = "apple.pressure-acquisition-tail-bounds"
-commits = ["1eb39847ab7c39d60003221feeaba9e70a17825d"]
+commits = []
+supplements = "apple.pressure-acquisition-observed-intent"
 source = "clients/apple/Sources/PreparedReplacement.swift"
 source_anchor = "struct PreparedAcquisitionAnchors: Equatable"
 test = "clients/apple/Tests/PreparedReplacementTests.swift"
@@ -6571,7 +6577,8 @@ test_anchor = "testAcquisitionCapsBeforeEOFWithRunwayAndMinimumWallLead"
 
 [[fixes]]
 id = "apple.pressure-acquisition-final-clock"
-commits = ["1eb39847ab7c39d60003221feeaba9e70a17825d"]
+commits = []
+supplements = "apple.pressure-acquisition-observed-intent"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "private func preparedAcquisitionTargetHasRunway"
 test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
@@ -6587,7 +6594,8 @@ test_anchor = "testSeverePressureAcquisitionBudgetUsesOriginalBoundsAndActualRat
 
 [[fixes]]
 id = "apple.pressure-rescue-unknown-facts"
-commits = ["a4e676ad2619f258a9360bc16b7e0a5259c440e2"]
+commits = []
+supplements = "apple.pressure-rescue-acquisition-budget"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func autoPressureNeedsMinimumAcquisitionCost("
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
@@ -6595,7 +6603,8 @@ test_anchor = "testPressureAcquisitionBudgetPreservesUnknownAndInvalidFacts"
 
 [[fixes]]
 id = "apple.pressure-rescue-measured-cost"
-commits = ["a4e676ad2619f258a9360bc16b7e0a5259c440e2"]
+commits = []
+supplements = "apple.pressure-rescue-acquisition-budget"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func autoRecoveryCandidate("
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
@@ -6603,7 +6612,8 @@ test_anchor = "testLimitedSeverePressureRanksMeasuredCostRatherThanHeight"
 
 [[fixes]]
 id = "apple.pressure-rescue-candidate-fences"
-commits = ["a4e676ad2619f258a9360bc16b7e0a5259c440e2"]
+commits = []
+supplements = "apple.pressure-rescue-acquisition-budget"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func autoRecoveryCandidate("
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
@@ -6611,7 +6621,8 @@ test_anchor = "testSeverePressureCostRankingRetainsCandidateFencesAndImprovement
 
 [[fixes]]
 id = "apple.pressure-rescue-purpose-fences"
-commits = ["a4e676ad2619f258a9360bc16b7e0a5259c440e2"]
+commits = []
+supplements = "apple.pressure-rescue-acquisition-budget"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func autoRecoveryCandidate("
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
@@ -6627,7 +6638,8 @@ test_anchor = "testDistinctMildReceiptsAtSameClockBecomeUrgentBeforePeriodicTick
 
 [[fixes]]
 id = "apple.transfer-pressure-replay-order"
-commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918"]
+commits = []
+supplements = "apple.transfer-pressure-distinct-receipts"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "struct AutoTransferPressureEvidence"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
@@ -6635,7 +6647,8 @@ test_anchor = "testDuplicateAndOlderReceiptsCannotResetOrRenewPressure"
 
 [[fixes]]
 id = "apple.transfer-pressure-unknown-body"
-commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918"]
+commits = []
+supplements = "apple.transfer-pressure-distinct-receipts"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "struct AutoTransferPressureEvidence"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
@@ -6643,7 +6656,8 @@ test_anchor = "testInvalidForeignAndUnmeasuredBodiesNeverSupplyPressureAuthority
 
 [[fixes]]
 id = "apple.transfer-pressure-viewer-floor"
-commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918"]
+commits = []
+supplements = "apple.transfer-pressure-distinct-receipts"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "struct AutoTransferPressureEvidence"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
@@ -6651,7 +6665,8 @@ test_anchor = "testPressureEvidenceOwnerAndViewerResetRetireAllReceiptCredit"
 
 [[fixes]]
 id = "apple.transfer-pressure-bounded-window"
-commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918"]
+commits = []
+supplements = "apple.transfer-pressure-distinct-receipts"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "struct AutoTransferPressureEvidence"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
@@ -6659,7 +6674,8 @@ test_anchor = "testReceiptWindowIsBoundedAndExpiredMildCreditDoesNotRenew"
 
 [[fixes]]
 id = "apple.transfer-pressure-unchanged-thresholds"
-commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918"]
+commits = []
+supplements = "apple.transfer-pressure-distinct-receipts"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "struct AutoTransferPressureEvidence"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"

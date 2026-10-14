@@ -383,6 +383,120 @@ impl VodServe {
         owner.file.as_ref().clone()
     }
 
+    /// Feed a retained-reader fixture through the real owner-local acceptance
+    /// state machine. No test-only proof or capacity claim is manufactured.
+    #[cfg(test)]
+    pub(crate) async fn accept_cached_wait_for_test(
+        &self,
+        route: &plurx_core::domain::MediaSessionRoute,
+        request: &crate::playback_control::ControlRequestV1,
+        successor: &str,
+    ) {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let mut sessions = self.shared.sessions.lock().await;
+        let session = sessions
+            .get_mut(&route.session_id)
+            .expect("actual retained attachment");
+        let first = session.last_control_snapshot.is_none();
+        session.playback_id = route.playback_id.clone();
+        let snapshot = crate::playback_control::PlaybackDemandSnapshot::from(request);
+        let mut control = session.control.lock().expect("control lock");
+        let result = control
+            .accept(
+                &route.incarnation_id,
+                u64::try_from(route.owner_epoch).expect("owner epoch"),
+                &request.client_instance_id,
+                request.sequence,
+                crate::playback_control::ControlAcceptance::observed(
+                    snapshot.platform(),
+                    &crate::playback_control::PreparedSuccessorObservation::NotRequested,
+                    None,
+                    snapshot.request_fingerprint.as_deref(),
+                    &snapshot.selection,
+                    snapshot.capabilities.as_ref(),
+                ),
+            )
+            .expect("actual owner-local acceptance");
+        assert_eq!(
+            result.0,
+            crate::playback_control::ControlDisposition::Accepted
+        );
+        control.observe(&snapshot.selection, snapshot.capabilities.as_ref());
+        if first {
+            assert!(control.stage_preparation(
+                successor.to_owned(),
+                route.incarnation_id.clone(),
+                crate::media_sessions::unix_ms() + 30_000,
+                Some(request.selection.desired().digest()),
+            ));
+        }
+        session.last_control_snapshot = Some(snapshot);
+    }
+
+    /// Capture only an exact local accepted predecessor, never a remote or
+    /// reconstructed control snapshot. Busy ownership is unknown.
+    pub(crate) fn cached_prepared_wait_fence(
+        &self,
+        route: &plurx_core::domain::MediaSessionRoute,
+        successor: &str,
+        request: &crate::playback_control::ControlRequestV1,
+    ) -> Option<crate::playback_control::AcceptedControlFence> {
+        let sessions = self.shared.sessions.try_lock().ok()?;
+        let session = sessions.get(&route.session_id)?;
+        if !session.renewable() || session.playback_id != route.playback_id {
+            return None;
+        }
+        let control = session.control.try_lock().ok()?;
+        if control.live_preparation_incarnation() != Some(successor) {
+            return None;
+        }
+        control.accepted_observation(crate::playback_control::AcceptedControlIdentity {
+            generation: route.incarnation_id.clone(),
+            owner_epoch: u64::try_from(route.owner_epoch).ok()?,
+            client_instance_id: request.client_instance_id.clone(),
+            sequence: request.sequence,
+            fingerprint: request.fingerprint()?,
+            desired_digest: request.selection.desired().digest(),
+        })
+    }
+
+    /// Recheck current accepted purpose and owner under nonblocking locks.
+    pub(crate) fn cached_prepared_wait_is_current(
+        &self,
+        predecessor: &str,
+        successor: &str,
+        fence: &crate::playback_control::AcceptedControlFence,
+        intent: Option<&plurx_core::playback::MediaIntentEnvelope>,
+    ) -> bool {
+        let Some(intent) = intent else {
+            return false;
+        };
+        let Ok(sessions) = self.shared.sessions.try_lock() else {
+            return false;
+        };
+        let Some(session) = sessions
+            .get(predecessor)
+            .filter(|session| session.renewable())
+        else {
+            return false;
+        };
+        let Some(snapshot) = session.last_control_snapshot.as_ref() else {
+            return false;
+        };
+        let Ok(control) = session.control.try_lock() else {
+            return false;
+        };
+        snapshot.intent.as_ref() == Some(intent)
+            && snapshot.demand == crate::playback_control::PlaybackDemand::Active
+            && matches!(
+                snapshot.render_state,
+                crate::playback_control::RenderState::Waiting
+                    | crate::playback_control::RenderState::Stalled
+            )
+            && control.live_preparation_incarnation() == Some(successor)
+            && control.observation_is_current(fence)
+    }
+
     /// Issue a private proof only for this exact completed retained reader.
     /// The immutable artifact serves all bytes; its authority-only consumer
     /// cannot request an encoder permit or borrow the incumbent's producer.

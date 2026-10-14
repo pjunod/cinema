@@ -600,6 +600,21 @@ func preparedRendezvousWithCadence(
     return plan
 }
 
+/// Host-clock startup requires loaded media from its earliest item clock
+/// through the frozen target's reserve. Telemetry's gap tolerance is not proof.
+func preparedClockStartupHasRunway(
+    earliestItemMs: Double, rendezvousItemMs: Int, loadedItemRanges: [ClosedRange<Double>]
+) -> Bool {
+    let targetMs = Double(rendezvousItemMs)
+    let requiredEndMs = targetMs + Double(PreparedReplacementBounds.switchRunwayMs)
+    guard earliestItemMs.isFinite, earliestItemMs >= 0, rendezvousItemMs >= 0,
+          targetMs.isFinite, requiredEndMs.isFinite, earliestItemMs <= targetMs else { return false }
+    let earliestSeconds = earliestItemMs / 1_000
+    let runway = PlayerController.bufferedRunwaySeconds(
+        playheadSeconds: earliestSeconds, ranges: loadedItemRanges, joinTolerance: 0)
+    return earliestSeconds + runway >= requiredEndMs / 1_000
+}
+
 /// A provisional inspection position is evidence input, never an anchor.
 /// Keep it inside both real loaded media and the same physical future envelope
 /// the final planner can reach after preserving its post-swap reserve.
@@ -13212,10 +13227,8 @@ extension PlayerController: PreparedSuccessorHost {
             guard start.isFinite, end.isFinite, start >= 0, end >= start else { return nil }
             return start...end
         }
-        let earliestSeconds = anchor.earliestItemMs / 1_000
-        let runway = Self.bufferedRunwaySeconds(playheadSeconds: earliestSeconds, ranges: ranges)
-        let requiredEndMs = Double(rendezvous.itemPositionMs) + Double(PreparedReplacementBounds.switchRunwayMs)
-        return earliestSeconds + runway >= requiredEndMs / 1_000
+        return preparedClockStartupHasRunway(earliestItemMs: anchor.earliestItemMs,
+            rendezvousItemMs: rendezvous.itemPositionMs, loadedItemRanges: ranges)
     }
 
     /// The successor waits at a future film instant while the incumbent

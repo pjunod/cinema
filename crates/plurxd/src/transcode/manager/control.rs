@@ -1180,6 +1180,32 @@ impl TranscodeManager {
         let _ = self.vod.promote_prepared_session(session_id).await;
     }
 
+    pub(crate) fn cached_prepared_wait_fence(
+        &self,
+        route: &plurx_core::domain::MediaSessionRoute,
+        successor: &str,
+        request: &crate::playback_control::ControlRequestV1,
+    ) -> Option<crate::playback_control::AcceptedControlFence> {
+        self.vod
+            .cached_prepared_wait_fence(route, successor, request)
+    }
+
+    pub(crate) fn cached_prepared_wait_is_current(
+        &self,
+        predecessor: &str,
+        successor: &str,
+        fence: &crate::playback_control::AcceptedControlFence,
+        intent: Option<&plurx_core::playback::MediaIntentEnvelope>,
+    ) -> bool {
+        self.vod
+            .cached_prepared_wait_is_current(predecessor, successor, fence, intent)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn preparation_admissions_for_test(&self) -> crate::admission::Admissions {
+        self.admissions.clone()
+    }
+
     pub(crate) fn foreground_media_waiting(&self) -> bool {
         self.admissions.live_capacity_is_waiting()
     }

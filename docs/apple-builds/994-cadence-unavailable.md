@@ -1,6 +1,6 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 244
+Build: 245
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal
@@ -91,3 +91,22 @@ are authored and unrun.
 
 [Continuous Quality Build §10.321](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10321--prompt-completed-transfer-pressure-in-apple-244)
 records the timing repair and remaining evidence.
+
+Apple 244 subsequently passes the complete original decoded-output campaign on
+both physical clients: 15 manual changes, five Auto changes and both genuine
+low-link landings, with all sixteen typed checks satisfied for each landing.
+The maximum gaps are 65.330 ms on iPhone and 68.824 ms on Apple TV. Both runs
+finish with zero errors and zero residual owned processes. Independent optical
+and audio continuity remain unmeasured.
+
+Apple 245 corrects the adversarially identified clock-start gap: loaded media
+must cover the entire earliest-clock-to-target-reserve interval without a
+positive gap. Ordinary telemetry keeps its tolerance. The stale cadence cleanup
+assertion now checks cancellation order before monitor and native preroll
+disposal. The server capacity watcher and history catalog are corrected in the
+same batch. Compilation and exact corrected-source qualification remain pending;
+the 244 pass does not qualify the changed native source. Units remain deferred
+through final reviews and the designated batched merge.
+
+[Continuous Quality Build §10.323](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10323--adversarial-findings-and-apple-245-correction)
+records the corrections; §10.322 preserves the complete 244 results.

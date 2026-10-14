@@ -29,6 +29,15 @@ struct CachedRecoveryOwner {
     bootstrap: bool,
 }
 
+/// Private, bounded authority from an actually accepted incumbent wait.
+#[derive(Clone)]
+struct CachedAcceptedWait {
+    route: MediaSessionRoute,
+    request: crate::playback_control::ControlRequestV1,
+    deadline_unix_ms: i64,
+    fence: crate::playback_control::AcceptedControlFence,
+}
+
 #[derive(Clone)]
 pub(super) struct ActivePreparedSuccessor {
     state: AppState,
@@ -37,6 +46,7 @@ pub(super) struct ActivePreparedSuccessor {
     pub(super) purpose: PreparationPurpose,
     // Issued only after local retained-output seal and successful prime.
     cached_recovery_owner: Option<CachedRecoveryOwner>,
+    cached_accepted_wait: Option<CachedAcceptedWait>,
     planning_registration: Option<Arc<std::sync::atomic::AtomicBool>>,
     quality_intent: Option<QualityIntentIdentity>,
     cancelled: tokio_util::sync::CancellationToken,
@@ -356,6 +366,7 @@ pub(super) fn register_test_preparation(
         preparation,
         purpose,
         cached_recovery_owner: None,
+        cached_accepted_wait: None,
         planning_registration: None,
         quality_intent: None,
         cancelled: cancelled.clone(),
@@ -382,14 +393,26 @@ fn arm_preparation_foreground_watch(active: ActivePreparedSuccessor) {
                 return;
             }
             if active.state.transcode.foreground_media_waiting() {
-                if let Some(active) = take_active_preparation(&active.preparation.incarnation_id) {
+                // Proof is published after this watcher starts. Decide from
+                // the current registered owner, atomically with taking cleanup.
+                let cancelled = {
+                    let mut registered = active_prepared_successors()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match registered.get(&active.preparation.incarnation_id) {
+                        Some(current) if cached_accepted_wait_is_current(current) => None,
+                        Some(_) => registered.remove(&active.preparation.incarnation_id),
+                        None => return,
+                    }
+                };
+                if let Some(active) = cancelled {
                     settle_cancelled_preparation(
                         active,
                         "foreground playback claimed prepared capacity",
                     )
                     .await;
+                    return;
                 }
-                return;
             }
         }
     });
@@ -636,7 +659,13 @@ fn cached_recovery_matches_accepted_wait(
         crate::playback_control::QualitySelection::Auto { candidate_id: None, height: None } => owner.bootstrap,
         _ => false,
     };
-    deadline_unix_ms > now
+    request.demand == crate::playback_control::PlaybackDemand::Active
+        && matches!(
+            request.render_state,
+            crate::playback_control::RenderState::Waiting
+                | crate::playback_control::RenderState::Stalled
+        )
+        && deadline_unix_ms > now
         && active.preparation.deadline_ms > now
         && !active.cancelled.is_cancelled()
         && matches!(active.purpose, PreparationPurpose::SelectionChange)
@@ -654,6 +683,25 @@ fn cached_recovery_matches_accepted_wait(
             .prepared_cached_recovery_is_live(&active.preparation, &owner.owner)
 }
 
+fn cached_accepted_wait_is_current(active: &ActivePreparedSuccessor) -> bool {
+    let Some(wait) = active.cached_accepted_wait.as_ref() else {
+        return false;
+    };
+    wait.fence.still_live()
+        && cached_recovery_matches_accepted_wait(
+            active,
+            &wait.route,
+            &wait.request,
+            wait.deadline_unix_ms,
+        )
+        && active.state.transcode.cached_prepared_wait_is_current(
+            &wait.route.session_id,
+            &active.preparation.incarnation_id,
+            &wait.fence,
+            wait.request.intent.as_ref(),
+        )
+}
+
 pub(super) fn cancel_preparations_for_incumbent_wait(
     playback_id: &str,
     accepted: Option<(
@@ -669,14 +717,43 @@ pub(super) fn cancel_preparations_for_incumbent_wait(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let keep = registered
-            .iter()
-            .filter(|(_, active)| {
-                active.preparation.playback_id == playback_id
-                    && accepted.is_some_and(|(route, request, deadline)| {
-                        cached_recovery_matches_accepted_wait(active, route, request, deadline)
-                    })
+            .iter_mut()
+            .filter_map(|(id, active)| {
+                if active.preparation.playback_id != playback_id {
+                    return None;
+                }
+                let (route, request, deadline) = accepted?;
+                let fresh = (route.owner_node_id == active.state.node_id
+                    && cached_recovery_matches_accepted_wait(active, route, request, deadline))
+                .then(|| {
+                    active.state.transcode.cached_prepared_wait_fence(
+                        route,
+                        &active.preparation.incarnation_id,
+                        request,
+                    )
+                })
+                .flatten();
+                if let Some(fence) = fresh {
+                    // Only exact current acceptance may renew the witness.
+                    active.cached_accepted_wait = Some(CachedAcceptedWait {
+                        route: route.clone(),
+                        request: request.clone(),
+                        deadline_unix_ms: deadline.min(active.preparation.deadline_ms),
+                        fence,
+                    });
+                } else {
+                    // Any older HTTP continuation may arrive after a current
+                    // owner/intent has published its own accepted wait witness.
+                    // Its request is not current authority: retain only the
+                    // independently proved bounded witness, without renewal.
+                    // Missing/expired/changed current authority still refuses;
+                    // accepted=None never reaches this branch.
+                    if !cached_accepted_wait_is_current(active) {
+                        return None;
+                    }
+                }
+                Some((id.clone(), active.planning_registration.clone()))
             })
-            .map(|(id, active)| (id.clone(), active.planning_registration.clone()))
             .collect::<Vec<_>>();
         {
             let mut pending = pending_preparation_candidates()
@@ -2512,6 +2589,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
             preparation: preparation.clone(),
             purpose,
             cached_recovery_owner: None,
+            cached_accepted_wait: None,
             planning_registration: planning_registration.clone(),
             quality_intent,
             cancelled: planning_cancellation
@@ -2812,6 +2890,31 @@ mod quality_cancellation_tests {
 
     #[tokio::test]
     async fn cached_wait_preserves_registered_reader_and_its_pending_token_without_resurrection() {
+        cached_wait_watcher_fixture(None).await;
+    }
+
+    #[tokio::test]
+    async fn cached_accepted_wait_survives_actual_foreground_watcher_capacity_pressure() {
+        for revocation in [
+            "deadline",
+            "preparation_deadline",
+            "unsealed",
+            "unproved",
+            "new_ask",
+            "paused",
+            "recipe_revision",
+            "lifetime",
+            "destination_revision",
+            "transport_revision",
+            "owner_epoch",
+            "owner_incarnation",
+            "reader_retired",
+        ] {
+            cached_wait_watcher_fixture(Some(revocation)).await;
+        }
+    }
+
+    async fn cached_wait_watcher_fixture(watcher_revocation: Option<&str>) {
         let (_output_dir, serve, facts, output_request) =
             crate::vodserve::retained::test_post_attachment_output_facts().await;
         let work = crate::test_tempdir().expect("control fixture");
@@ -2903,13 +3006,21 @@ mod quality_cancellation_tests {
             preparation,
             purpose: PreparationPurpose::SelectionChange,
             cached_recovery_owner: None,
+            cached_accepted_wait: None,
             planning_registration: Some(Arc::clone(&pending.registered)),
             quality_intent: QualityIntentIdentity::from_control(&request),
             cancelled: pending.cancellation_token(),
         };
+        route.session_id = id.to_owned();
+        serve
+            .accept_cached_wait_for_test(&route, &request, &incarnation)
+            .await;
         register_active_preparation(active.clone());
         record_cached_recovery_owner_if_registered(&active, (owner.clone(), false));
         request.sequence += 1;
+        serve
+            .accept_cached_wait_for_test(&route, &request, &incarnation)
+            .await;
         cancel_preparations_for_incumbent_wait(
             &playback,
             Some((&route, &request, unix_ms() + 4_000)),
@@ -2923,8 +3034,271 @@ mod quality_cancellation_tests {
             .lock()
             .expect("registry")
             .contains_key(&incarnation));
-        // A fresh named selection cannot use a different viewer's retained reader.
+        if let Some(revocation) = watcher_revocation {
+            use crate::admission::Priority;
+            let admissions = state.transcode.preparation_admissions_for_test();
+            let held = admissions
+                .try_admit_software(4, 4, Priority::Live)
+                .expect("real occupied resource pool");
+            let mut blocked = admissions.queue_for_slot();
+            assert!(admissions
+                .try_admit_software(4, 1, Priority::Live)
+                .is_none());
+            blocked.mark_capacity_blocked();
+            assert!(state.transcode.foreground_media_waiting());
+            // The captured clone has no cached proof/witness. Production must
+            // consult the actual current entry after accepted wait publication.
+            assert!(active.cached_recovery_owner.is_none());
+            arm_preparation_foreground_watch(active.clone());
+            tokio::time::sleep(Duration::from_millis(90)).await;
+            assert!(
+                active_preparation(&incarnation).is_some(),
+                "real capacity pressure cannot abort the proved accepted keeper"
+            );
+            assert!(!pending.cancelled());
+            // Acceptance is visible before the HTTP path can refresh the
+            // witness. An ordinary same-intent Waiting heartbeat must survive
+            // this exact window even though its sequence and position advance.
+            let delayed_request = request.clone();
+            let original_witness_deadline = active_preparation(&incarnation)
+                .expect("keeper")
+                .cached_accepted_wait
+                .expect("witness")
+                .deadline_unix_ms;
+            request.sequence += 1;
+            request.position_ms += 50;
+            serve
+                .accept_cached_wait_for_test(&route, &request, &incarnation)
+                .await;
+            tokio::time::sleep(Duration::from_millis(90)).await;
+            assert!(
+                active_preparation(&incarnation).is_some(),
+                "same-intent accepted Waiting must not need witness refresh"
+            );
+            assert!(!pending.cancelled());
+            // N's delayed continuation cannot clear or renew the witness
+            // after N+1 is accepted, either before or after N+1 refreshes it.
+            cancel_preparations_for_incumbent_wait(
+                &playback,
+                Some((&route, &delayed_request, original_witness_deadline)),
+            );
+            assert_eq!(
+                active_preparation(&incarnation)
+                    .expect("keeper")
+                    .cached_accepted_wait
+                    .expect("witness")
+                    .deadline_unix_ms,
+                original_witness_deadline
+            );
+            let current_deadline = unix_ms() + 4_000;
+            cancel_preparations_for_incumbent_wait(
+                &playback,
+                Some((&route, &request, current_deadline)),
+            );
+            let renewed_deadline = active_preparation(&incarnation)
+                .expect("keeper")
+                .cached_accepted_wait
+                .expect("renewed witness")
+                .deadline_unix_ms;
+            assert_eq!(
+                renewed_deadline,
+                current_deadline.min(active.preparation.deadline_ms)
+            );
+            assert!(
+                renewed_deadline > original_witness_deadline,
+                "current accepted heartbeat may renew its own bounded witness"
+            );
+            cancel_preparations_for_incumbent_wait(
+                &playback,
+                Some((&route, &delayed_request, original_witness_deadline)),
+            );
+            assert_eq!(
+                active_preparation(&incarnation)
+                    .expect("keeper")
+                    .cached_accepted_wait
+                    .expect("witness")
+                    .deadline_unix_ms,
+                renewed_deadline
+            );
+            assert!(!pending.cancelled());
+            // A stale different-intent/old-owner continuation cannot overrule
+            // a fresh valid current keeper. It cannot renew that witness.
+            let mut different_intent = delayed_request.clone();
+            different_intent
+                .intent
+                .as_mut()
+                .expect("old intent")
+                .lifetime_id
+                .push_str("-old");
+            different_intent
+                .intent
+                .as_mut()
+                .expect("old intent")
+                .recipe_revision += 1;
+            different_intent.selection.quality =
+                crate::playback_control::QualitySelection::Manual { height: 720 };
+            different_intent
+                .intent
+                .as_mut()
+                .expect("old intent")
+                .selection = different_intent.selection.desired();
+            let mut old_owner = route.clone();
+            old_owner.owner_node_id.push_str("-old");
+            cancel_preparations_for_incumbent_wait(
+                &playback,
+                Some((&route, &different_intent, original_witness_deadline)),
+            );
+            cancel_preparations_for_incumbent_wait(
+                &playback,
+                Some((&old_owner, &different_intent, original_witness_deadline)),
+            );
+            assert_eq!(
+                active_preparation(&incarnation)
+                    .expect("current keeper")
+                    .cached_accepted_wait
+                    .expect("current witness")
+                    .deadline_unix_ms,
+                renewed_deadline
+            );
+            assert!(!pending.cancelled());
+            assert!(serve
+                .playlist(id)
+                .await
+                .expect("live cached publication")
+                .result
+                .is_ok());
+            match revocation {
+                "deadline" => {
+                    active_prepared_successors()
+                        .lock()
+                        .expect("registry")
+                        .get_mut(&incarnation)
+                        .expect("keeper")
+                        .cached_accepted_wait
+                        .as_mut()
+                        .expect("accepted witness")
+                        .deadline_unix_ms = unix_ms();
+                }
+                "preparation_deadline" => {
+                    active_prepared_successors()
+                        .lock()
+                        .expect("registry")
+                        .get_mut(&incarnation)
+                        .expect("keeper")
+                        .preparation
+                        .deadline_ms = unix_ms();
+                }
+                "unproved" => {
+                    active_prepared_successors()
+                        .lock()
+                        .expect("registry")
+                        .get_mut(&incarnation)
+                        .expect("keeper")
+                        .cached_accepted_wait = None;
+                }
+                "reader_retired" => {
+                    serve.end(id, crate::vodserve::Terminal::Deleted).await;
+                }
+                "owner_incarnation" => {
+                    active_prepared_successors()
+                        .lock()
+                        .expect("registry")
+                        .get_mut(&incarnation)
+                        .expect("keeper")
+                        .cached_accepted_wait
+                        .as_mut()
+                        .expect("accepted witness")
+                        .route
+                        .incarnation_id = uuid::Uuid::new_v4().to_string();
+                }
+                "unsealed" => {
+                    active_prepared_successors()
+                        .lock()
+                        .expect("registry")
+                        .get_mut(&incarnation)
+                        .expect("keeper")
+                        .cached_recovery_owner = None;
+                }
+                "paused" => {
+                    request.sequence += 1;
+                    request.demand = crate::playback_control::PlaybackDemand::Hold;
+                    request.render_state = crate::playback_control::RenderState::Rendering;
+                    serve
+                        .accept_cached_wait_for_test(&route, &request, &incarnation)
+                        .await;
+                    cancel_preparations_for_incumbent_wait(
+                        &playback,
+                        Some((&route, &delayed_request, original_witness_deadline)),
+                    );
+                    assert!(
+                        active_preparation(&incarnation).is_none(),
+                        "old waiting continuation cannot preserve current non-wait demand"
+                    );
+                }
+                "new_ask" => {
+                    request.sequence += 1;
+                    request.intent.as_mut().expect("intent").recipe_revision += 1;
+                    request.selection.quality =
+                        crate::playback_control::QualitySelection::Manual { height: 720 };
+                    request.intent.as_mut().expect("intent").selection =
+                        request.selection.desired();
+                    serve
+                        .accept_cached_wait_for_test(&route, &request, &incarnation)
+                        .await;
+                    cancel_preparations_for_incumbent_wait(
+                        &playback,
+                        Some((&route, &delayed_request, original_witness_deadline)),
+                    );
+                    assert!(
+                        active_preparation(&incarnation).is_none(),
+                        "old continuation cannot preserve a current new ask"
+                    );
+                }
+                "recipe_revision" | "lifetime" | "destination_revision" | "transport_revision" => {
+                    request.sequence += 1;
+                    let intent = request.intent.as_mut().expect("intent");
+                    match revocation {
+                        "recipe_revision" => intent.recipe_revision += 1,
+                        "lifetime" => intent.lifetime_id = uuid::Uuid::new_v4().to_string(),
+                        "destination_revision" => intent.destination_revision += 1,
+                        "transport_revision" => intent.transport_revision += 1,
+                        _ => unreachable!("finite intent revisions"),
+                    }
+                    // The desired selection and existing observation fence
+                    // stay equal. Current accepted envelope must still revoke
+                    // the keeper before the HTTP cancellation helper runs.
+                    serve
+                        .accept_cached_wait_for_test(&route, &request, &incarnation)
+                        .await;
+                }
+                "owner_epoch" => {
+                    route.owner_epoch += 1;
+                    request.control_epoch += 1;
+                    request.sequence = 1;
+                    serve
+                        .accept_cached_wait_for_test(&route, &request, &incarnation)
+                        .await;
+                }
+                _ => unreachable!("finite watcher revocations"),
+            }
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while active_preparation(&incarnation).is_some() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("actual watcher retires revoked keeper");
+            drop(blocked);
+            drop(held);
+            assert!(!state.transcode.foreground_media_waiting());
+            return;
+        }
+        // A newly accepted revision cannot use an older keeper witness.
         request.intent.as_mut().expect("intent").recipe_revision += 1;
+        request.sequence += 1;
+        serve
+            .accept_cached_wait_for_test(&route, &request, &incarnation)
+            .await;
         cancel_preparations_for_incumbent_wait(
             &playback,
             Some((&route, &request, unix_ms() + 4_000)),

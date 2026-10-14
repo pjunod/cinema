@@ -110,6 +110,27 @@ final class PreparedCommitRendezvousTests: XCTestCase {
             rate: 1, frameDurationSeconds: 1 / 24, overlapRemainingMs: 10_000))
     }
 
+    func testClockStartupRunwayRejectsPositiveGaps() {
+        func permits(_ earliestMs: Double, _ ranges: [ClosedRange<Double>]) -> Bool {
+            preparedClockStartupHasRunway(earliestItemMs: earliestMs,
+                rendezvousItemMs: 25_000, loadedItemRanges: ranges)
+        }
+        XCTAssertFalse(permits(23_800, [24...30]),
+            "a 200ms gap before loaded media cannot authorize hidden clock startup")
+        XCTAssertFalse(permits(24_000, [24...25, 25.2...30]),
+            "a positive gap inside the required interval cannot supply the target reserve")
+        XCTAssertFalse(permits(24_000, [24...25, 27...30]),
+            "a disconnected future island cannot supply the frozen target's reserve")
+        XCTAssertTrue(permits(24_000, [24...30]))
+        XCTAssertTrue(permits(24_000, [25...27, 24...25]),
+            "exactly touching loaded intervals cover the complete startup runway")
+        XCTAssertFalse(permits(24_000, [24...26.999]))
+        for invalid in [Double.nan, .infinity, -.infinity, -1, 25_001] {
+            XCTAssertFalse(permits(invalid, [24...30]))
+        }
+        XCTAssertFalse(permits(24_000, [24...Double.infinity]))
+    }
+
     func testStaticOriginalRunwayWaitsForMovingIncumbentFutureCoverage() throws {
         let original = 5_416
         let initiallyLoaded = [4.0...7.989333333333334]
@@ -534,7 +555,14 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         XCTAssertFalse(body[..<align.lowerBound].contains("awaitPreparedFrameDuration"))
         XCTAssertTrue(freeze.lowerBound < align.lowerBound)
         let discard = try XCTUnwrap(source.range(of: "func discardPreparedSuccessor()"))
-        XCTAssertTrue(source[discard.upperBound...].hasPrefix(" {\n        clearPreparedCadence()"))
+        let disposalEnd = try XCTUnwrap(source.range(of: "private func beginPreparedReadinessMonitor()",
+            range: discard.upperBound..<source.endIndex))
+        let disposal = source[discard.upperBound..<disposalEnd.lowerBound]
+        let clear = try XCTUnwrap(disposal.range(of: "clearPreparedCadence()"))
+        let monitor = try XCTUnwrap(disposal.range(of: "preparedMonitor?.cancel()"))
+        let preroll = try XCTUnwrap(disposal.range(of: "preparedPlayer?.cancelPendingPrerolls()"))
+        XCTAssertTrue(clear.lowerBound < monitor.lowerBound && clear.lowerBound < preroll.lowerBound,
+            "cadence inspection is cancelled before monitor and native preroll disposal")
         XCTAssertTrue(source.contains("self.preparedCadenceGeneration == generation"))
         XCTAssertTrue(source.contains("self.viewerActionEpoch == epoch"))
         XCTAssertTrue(source.contains("self.preparedReplacement.activeAction?.actionId == action.actionId"))

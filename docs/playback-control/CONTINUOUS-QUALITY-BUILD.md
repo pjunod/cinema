@@ -11625,3 +11625,62 @@ The iOS app and regression targets compile on the committed timing repair;
 unit bodies remain unrun. Separate phone and TV QA products retain their prior
 instrumentation overlays. Exact final artifact binding, focused timing capture,
 fresh full native acceptance and final adversarial/Fable reviews remain open.
+
+### 10.322 — completed Apple 244 decoded-output qualification
+
+The committed candidate `f0afcf0a930f0b7008ac3873517cfaa976c696e1`
+completes the original 900-second campaign on both physical clients. Each run
+measures four fresh production costs, then performs 15 manual changes, five Auto
+changes and the separate 3 Mb/s downshift followed by recovery at 25 Mb/s. All
+22 landings on each client satisfy the sixteen typed offer, acknowledgment,
+owner, wire and decoded-frame checks. No failed or diagnostic landing is counted.
+
+| Client | Full-series maximum decoded gap | Low-series maximum decoded gap | Owned processes closed | Residual processes |
+| --- | --- | --- | --- | --- |
+| iPhone, Apple 244 | 62.878 ms | 65.330 ms | 186 | 0 |
+| Apple TV, Apple 244 | 64.774 ms | 68.824 ms | 181 | 0 |
+
+Both original actors finish with zero errors and exit zero. The separately
+verified media-proxy refusal writer, closed journals and normal cleanup support
+zero HTTP 503 and 410 refusals within the actors' known-session HLS GET scope.
+Successful HTTP response journals are capped; their 200/206 counts do not prove
+complete response totals. Non-media API statuses remain unmeasured. No new OOM
+counter increment occurs during these runs. Resource samples do not prove a
+continuous peak or identify the victims of earlier host OOM events.
+
+These are decoded-output results using the preserved QA measurement overlays,
+not independent optical or audio continuity evidence. Safari iOS remains
+deferred, and the broader source, pressure and platform matrix remains open.
+The earlier focused phone diagnostic earns no full-series credit. Both SDK
+wrappers and backends are closed, their transient server runtimes are cleaned
+up, and neither physical device remains reserved by this project.
+
+### 10.323 — adversarial findings and Apple 245 correction
+
+Three independent reviewers inspect the complete accumulated Rust, Apple and
+integration batch after the 244 campaigns close. They identify five actionable
+issues: the foreground-capacity watcher can cancel a cached recovery preserved
+by an accepted waiting report; clock startup can accept a positive unloaded gap
+through a telemetry tolerance; a cadence-disposal source assertion is stale;
+the history catalog contains a missing source anchor; and six corrective commit
+prefixes have more than one catalog owner.
+
+The correction keeps cached recovery authority tied to the current accepted
+wait and current registered owner, rather than exempting every cached reader.
+Hidden clock startup requires strictly contiguous loaded media; ordinary
+telemetry retains its existing tolerance. The cadence assertion checks actual
+cancellation order, and catalog rows retain one owner per corrective commit.
+No preparation deadline, pressure threshold, application HTTP retry or feature
+gate is added or relaxed.
+
+Independent checks of the corrections require a same-intent waiting heartbeat
+and a delayed older HTTP continuation to preserve the current bounded keeper.
+New intent revisions, non-waiting demand and owner movement still revoke it.
+Supplementary catalog rows preserve each additional live source/test obligation
+without claiming the primary corrective commit a second time.
+
+Apple 245 identifies the corrected native source. Its compilation, exact-source
+device qualification and independent review of the corrections remain pending.
+The passing 244 results qualify their recorded source only. Unit bodies executed
+remain zero; affected fast-lane units are deferred to final reviews and the
+designated batched-merge session. Fable readiness is not yet claimed.
