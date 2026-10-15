@@ -2944,7 +2944,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # closes the channel, then the test awaits the JoinHandle and checks every
 # byte received. The two burst regressions share this one spawn site. No
 # production task, timer, process or detached owner is introduced.
-expected_occurrences = 951
+# HTTPS H1 adds four test-only sites in https.rs: one std thread site
+# launches six concurrent identity creators, all retained and joined; another
+# observes FIFO/linked-FIFO reads with a two-second channel deadline and joins
+# successful workers. On a blocking-open regression only, the failed test
+# detaches its blocked worker until the test process exits, so the observer
+# can fail instead of hanging in join. Two tokio sites own finite generated
+# trust (three peers) and private-CA (one peer) servers: awaited on success,
+# owned by the per-test runtime on panic. No production owner or child added.
+expected_occurrences = 955
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5916,7 +5924,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # #844: +1 false positive. end_for_owner awaits `cleanup.wait()` on the
 # existing TerminalCleanup; it is not a child-process wait.
 # P-02 zombie read-back (process/priority.rs): +1, test-only: the same child's reaping `wait()`.
-expected_occurrences = 326
+# HTTPS H1 adds one Barrier::wait site coordinating the six joined test
+# threads racing managed identity creation. This is in-process synchronization,
+# not an OS child wait; no process start, kill, or reap ownership is added.
+expected_occurrences = 327
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

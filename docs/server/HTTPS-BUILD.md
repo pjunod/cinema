@@ -64,6 +64,8 @@ node --test tests/web/settings-sections.test.js
 
 Core storage regressions require `--features hiqlite-store` or `make unit-core`.
 Run affected validation catalog, JS syntax/assets and infrastructure checks.
+H2/H3 must also run the complete rolling-producer ownership inventory module
+before push; its structural counts include test fixtures.
 Update SECURITY/OPERATIONS/API and other maintained claims that public HTTPS
 is absent. New web files require shell/WEB_ASSETS/layout-map updates together.
 
@@ -91,6 +93,7 @@ then graduate it to System. Built source awaiting physical proof is
 | 2026-10-15 | H1 focused evidence | Current-source core `--features hiqlite-store --lib config::`: 22 passed; daemon `--bin plurxd https::tests::`: 8 passed, including normal generated/private-CA trust, unknown trust/hostname rejection and FIFO bounds. Formatting, docs index (4 tests), catalog and infrastructure-name checks passed. |
 | 2026-10-15 | H1 base refresh | Manual effort run #5158 refused authenticated history binding because current main was not an ancestor of the effort. Merged main `a0b8cb72c` into effort normally as `4fb1c1943`, then merged that refreshed effort into H1 without conflicts or rebasing. Earlier H1 results are retained history; the exact combined source has now passed 22 configuration tests, 8 identity/trust tests, all-target compilation, formatting, docs index (4 tests), infrastructure checks and catalog lint. Normal pinned workspace hook is required on the merge commit before push. |
 | 2026-10-15 | H1 landing attribution | Effort run #5161 passed ancestry but exposed incoming main PR #1104's malformed landing subject. Merged exact existing repair `5ac706387`: its `[[landings]]` row binds the immutable SHA, tree, ordered parents and title, retaining mandatory own-tree regression resolution. Parent verified the Forgejo merged PR identity. No Rust changed from `b7b594797`; prior focused Rust results apply to identical source. Verified-landing regression plus docs index passed (5 tests), pinned all-target check passed, and the unauthenticated local history diagnostic returned zero errors with all three PR #1104 own-tree trailers resolved. The manually dispatched gate remains authoritative for live binding. |
+| 2026-10-15 | H1 fixture ownership | Gate #5166 passed history; its only validation failures were the new fixture inventory counts. Reviewed four namespaced spawn sites: six retained/joined identity-creation threads, deadline-observed FIFO reads (joined on success; a regression timeout leaves only a test-process-lifetime worker), and two finite TLS fixture tasks (awaited on success, runtime-owned on panic). One Barrier::wait site is in-process synchronization, not a child-process wait. Counts change 951 to 955 and 326 to 327 without relaxing scope or patterns; no production process or owner is added. Parent reviewed the exact diff; complete inventory plus docs index passed (11 tests), changed FIFO regression passed, and pinned all-target check, catalog and infrastructure checks passed. |
 
 Post-review persistence clarification: rename publishes the revision. A later
 directory-sync error is a committed save with `durability_confirmed: false`;

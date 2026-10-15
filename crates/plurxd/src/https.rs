@@ -541,12 +541,18 @@ mod tests {
         symlink(&path, &link).expect("synthetic HTTPS fixture");
         for path in [path, link] {
             let (send, receive) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
+            // The observer must stay outside the worker: a blocking-open
+            // regression must fail on the deadline rather than hang in join.
+            // Only that failure path detaches a blocked worker, whose lifetime
+            // is then bounded by this test process. Successful work is joined.
+            let worker = std::thread::spawn(move || {
                 let _ = send.send(read_regular(&path, false, false).is_err());
             });
-            assert!(receive
+            let refused = receive
                 .recv_timeout(std::time::Duration::from_secs(2))
-                .expect("FIFO inspection must not block"));
+                .expect("FIFO inspection must not block");
+            worker.join().expect("FIFO inspection worker must settle");
+            assert!(refused);
         }
     }
     #[test]
