@@ -1172,7 +1172,7 @@ async fn run_singleton_takeover_attempt() -> Result<()> {
     let mut provider = ProviderFixture::start().await?;
 
     let initial = start_singleton_probe(&mut cluster, old_owner, &provider.url).await?;
-    if initial.owner_node_id != format!("node-{old_owner}") {
+    if initial.owner_node_id != harness_node_identity(old_owner) {
         bail!("singleton owner identity drifted: {initial:?}");
     }
     provider.expect_call(1).await?;
@@ -1250,7 +1250,7 @@ async fn run_singleton_takeover_attempt() -> Result<()> {
         );
     }
     let (successor_node, successor) = &winners[0];
-    if successor.owner_node_id != format!("node-{successor_node}")
+    if successor.owner_node_id != harness_node_identity(*successor_node)
         || successor.fence != authoritative_old.fence + 1
         || successor.revision != authoritative_old.revision + 1
     {
@@ -3261,7 +3261,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     request: RedeemJoinRequest {
                         token_digest: join_token_digest(&first_issued.token),
                         raft_id: first_issued.raft_id,
-                        node_id: "node-1".to_owned(),
+                        node_id: harness_node_identity(1),
                         hostname: "identity-collision".to_owned(),
                         raft_address: first_spec.raft.clone(),
                         api_address: first_spec.api.clone(),
@@ -3286,7 +3286,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     request: RedeemJoinRequest {
                         token_digest: join_token_digest(&first_issued.token),
                         raft_id: first_issued.raft_id,
-                        node_id: "node-2".to_owned(),
+                        node_id: harness_node_identity(2),
                         hostname: "cluster-node-2".to_owned(),
                         raft_address: first_spec.raft,
                         api_address: first_spec.api,
@@ -3317,7 +3317,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             1,
             Request::SeedLegacyPartialRedemption {
                 token_digest: join_token_digest(&first_issued.token),
-                node_id: "node-2".to_owned(),
+                node_id: harness_node_identity(2),
             },
         )
         .await?
@@ -3350,7 +3350,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     1,
                     Request::SeedLegacyPartialRedemption {
                         token_digest: token_digest.clone(),
-                        node_id: "node-3".to_owned(),
+                        node_id: harness_node_identity(3),
                     },
                 )
                 .await?
@@ -3359,7 +3359,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         let request = RedeemJoinRequest {
             token_digest: token_digest.clone(),
             raft_id: issued.raft_id,
-            node_id: format!("node-{node_id}"),
+            node_id: harness_node_identity(node_id),
             hostname: format!("cluster-node-{node_id}"),
             raft_address: spec.raft,
             api_address: spec.api,
@@ -3531,7 +3531,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             1,
             Request::SignActivityRequest {
-                target_node_id: "node-2".to_owned(),
+                target_node_id: harness_node_identity(2),
                 timestamp_ms: now,
             },
         )
@@ -3559,7 +3559,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             1,
             Request::SignActivityRequest {
-                target_node_id: "node-2".to_owned(),
+                target_node_id: harness_node_identity(2),
                 timestamp_ms: stale_time,
             },
         )
@@ -3584,7 +3584,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             1,
             Request::SignInternalPeerRequest {
-                target_node_id: "node-2".to_owned(),
+                target_node_id: harness_node_identity(2),
                 timestamp_ms: now,
                 nonce: "123e4567-e89b-42d3-a456-426614174000".to_owned(),
                 method: "POST".to_owned(),
@@ -3616,7 +3616,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             1,
             Request::SignInternalPeerRequest {
-                target_node_id: "node-2".to_owned(),
+                target_node_id: harness_node_identity(2),
                 timestamp_ms: stale_time,
                 nonce: "123e4567-e89b-42d3-a456-426614174001".to_owned(),
                 method: "POST".to_owned(),
@@ -4010,7 +4010,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         read_artwork_repair_observation(&mut cluster, leader, paused_claim_item).await?;
     let paused_fence =
         paused_fence.context("expired post-CAS artwork claim never committed its fence")?;
-    if paused_fence.generation != 1 || paused_fence.owner_node_id != format!("node-{leader}") {
+    if paused_fence.generation != 1 || paused_fence.owner_node_id != harness_node_identity(leader) {
         bail!("expired post-CAS artwork claim committed the wrong fence: {paused_fence:?}");
     }
     let election_target = (1..=3)
@@ -4188,7 +4188,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let after_ambiguous_fence =
         after_ambiguous_fence.context("ambiguous repair claim did not apply its one attempt")?;
     if after_ambiguous_fence.generation != 1
-        || after_ambiguous_fence.owner_node_id != format!("node-{handoff}")
+        || after_ambiguous_fence.owner_node_id != harness_node_identity(handoff)
         || after_ambiguous_fence.leader_term != i64::try_from(handoff_term)?
         || after_ambiguous_index
             .zip(before_ambiguous_index)
@@ -4338,7 +4338,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let observer = (1..=3)
         .find(|node_id| *node_id != target)
         .context("choose a surviving membership observer")?;
-    let observer_node_id = format!("node-{observer}");
+    let observer_node_id = harness_node_identity(observer);
     let activity_now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
     let departing_activity_proof = match cluster
         .request(
@@ -4394,7 +4394,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         response => bail!("a live voter's artwork proof was refused: {response:?}"),
     }
     let legacy_artwork_proof =
-        shared_secret_artwork_proof(&format!("node-{target}"), "poster.jpg", activity_now)?;
+        shared_secret_artwork_proof(&harness_node_identity(target), "poster.jpg", activity_now)?;
     match cluster
         .request(
             observer,
@@ -4425,7 +4425,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     // departing node owns instead of refusing forever. Seeded on the target's
     // own process so the fixture's source files exist where its packages say
     // they do.
-    let target_node = format!("node-{target}");
+    let target_node = harness_node_identity(target);
     let departing_job_resource = format!("cluster-check:departing-job:{target_node}");
     let departing_job_lease = match cluster
         .request(
@@ -4537,7 +4537,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             target,
             Request::SignActivityRequest {
-                target_node_id: format!("node-{observer}"),
+                target_node_id: harness_node_identity(observer),
                 timestamp_ms: removed_activity_now,
             },
         )
@@ -4550,8 +4550,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .find(|node_id| *node_id != target && *node_id != observer)
         .context("choose the other surviving voter")?;
     let impersonated_activity_proof = shared_secret_activity_proof(
-        &format!("node-{impersonated_node}"),
-        &format!("node-{observer}"),
+        &harness_node_identity(impersonated_node),
+        &harness_node_identity(observer),
         removed_activity_now,
     )?;
     match cluster
@@ -4839,7 +4839,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     // The re-homed package is ordinary claimable work on its new owner, and
     // the node that just left can no longer publish it.
     let new_owner_voter = (1..=3)
-        .find(|voter| format!("node-{voter}") == new_owner)
+        .find(|voter| harness_node_identity(*voter) == new_owner)
         .context("requeued package landed on a node outside the cluster")?;
     // The package requested mid-removal can share this queue, so claim until
     // the one under test comes out instead of assuming it is first.
@@ -4910,7 +4910,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             target,
             Request::HeartbeatPreservesTombstone {
-                node_id: format!("node-{target}"),
+                node_id: harness_node_identity(target),
             },
         )
         .await?
@@ -4919,7 +4919,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             target,
             Request::TombstoneOfflineFence {
-                node_id: format!("node-{target}"),
+                node_id: harness_node_identity(target),
             },
         )
         .await?
@@ -4952,7 +4952,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             .request(
                 leader,
                 Request::RemoveVoter {
-                    node_id: format!("node-{quorum_target}"),
+                    node_id: harness_node_identity(quorum_target),
                 },
             )
             .await?,
@@ -5246,7 +5246,7 @@ async fn run_leader_self_leave_case() -> Result<()> {
             .request(
                 local_follower,
                 Request::RemoveVoter {
-                    node_id: format!("node-{local_follower}"),
+                    node_id: harness_node_identity(local_follower),
                 },
             )
             .await?,
@@ -5260,7 +5260,7 @@ async fn run_leader_self_leave_case() -> Result<()> {
         .request(
             departed,
             Request::HeartbeatPreservesTombstone {
-                node_id: format!("node-{departed}"),
+                node_id: harness_node_identity(departed),
             },
         )
         .await?
@@ -5328,7 +5328,7 @@ async fn run_degraded_four_voter_leader_self_leave_case() -> Result<()> {
         .request(
             departed,
             Request::HeartbeatPreservesTombstone {
-                node_id: format!("node-{departed}"),
+                node_id: harness_node_identity(departed),
             },
         )
         .await?
@@ -5631,9 +5631,12 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
 
     // Installing this binary activates nothing. Three voters are running it,
     // one of them is not, and the cluster is still on the unactivated range.
-    let pending =
-        wait_for_protocol_pending(&mut cluster, leader, &[format!("node-{OLD_BINARY_VOTER}")])
-            .await?;
+    let pending = wait_for_protocol_pending(
+        &mut cluster,
+        leader,
+        &[harness_node_identity(OLD_BINARY_VOTER)],
+    )
+    .await?;
     if (pending.active_min, pending.active_max) != (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN)
         || (pending.binary_min, pending.binary_max) != (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MAX)
         || pending.learner_protocol_active
@@ -5657,7 +5660,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
             .request(leader, Request::ActivateLearnerProtocol)
             .await?,
         "learner_protocol_upgrade_required",
-        &format!("node-{OLD_BINARY_VOTER}"),
+        &harness_node_identity(OLD_BINARY_VOTER),
     )?;
 
     // Upgrade that node the way an operator does: stop the process, start the
@@ -5714,7 +5717,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
                 request: RedeemJoinRequest {
                     token_digest: join_token_digest(&issued.token),
                     raft_id: issued.raft_id,
-                    node_id: format!("node-{LEARNER}"),
+                    node_id: harness_node_identity(LEARNER),
                     hostname: format!("cluster-node-{LEARNER}"),
                     raft_address: learner_spec.raft.clone(),
                     api_address: learner_spec.api.clone(),
@@ -5758,7 +5761,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
                 request: FinalizeJoinRequest {
                     token_digest: join_token_digest(&issued.token),
                     raft_id: issued.raft_id,
-                    node_id: format!("node-{LEARNER}"),
+                    node_id: harness_node_identity(LEARNER),
                 },
             },
         )
@@ -5783,7 +5786,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     let learner_record = status
         .nodes
         .iter()
-        .find(|node| node.node_id == format!("node-{LEARNER}"))
+        .find(|node| node.node_id == harness_node_identity(LEARNER))
         .context("the admitted learner is missing from the roster")?;
     if status.nodes.len() != 4
         || status.availability != ClusterAvailability::HighAvailability
@@ -5830,7 +5833,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         Response::ClusterJobAttempt {
             acquired: true,
             lease: Some(lease),
-        } if lease.owner_node_id == format!("node-{leader}") => {}
+        } if lease.owner_node_id == harness_node_identity(leader) => {}
         response => bail!("a voter could not take the same cluster job: {response:?}"),
     }
     match cluster
@@ -5844,7 +5847,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     {
         Response::ClusterJobAttempt {
             lease: Some(lease), ..
-        } if lease.owner_node_id == format!("node-{leader}") => {}
+        } if lease.owner_node_id == harness_node_identity(leader) => {}
         response => bail!("the cluster job did not stay with its voter owner: {response:?}"),
     }
 
@@ -6022,7 +6025,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             leader,
             Request::SignInternalPeerRequest {
-                target_node_id: format!("node-{LEARNER}"),
+                target_node_id: harness_node_identity(LEARNER),
                 timestamp_ms: peer_proof_now,
                 nonce: "6f1c1a4e-8f2a-4d3b-9c11-0a4d2f7b5e01".to_owned(),
                 method: "GET".to_owned(),
@@ -6058,7 +6061,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             LEARNER,
             Request::SignInternalPeerRequest {
-                target_node_id: "node-2".to_owned(),
+                target_node_id: harness_node_identity(2),
                 timestamp_ms: peer_proof_now,
                 nonce: "6f1c1a4e-8f2a-4d3b-9c11-0a4d2f7b5e02".to_owned(),
                 method: "POST".to_owned(),
@@ -6094,7 +6097,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             LEARNER,
             Request::SignActivityRequest {
-                target_node_id: "node-2".to_owned(),
+                target_node_id: harness_node_identity(2),
                 timestamp_ms: peer_proof_now,
             },
         )
@@ -6209,7 +6212,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
             .request(leader, Request::DeactivateLearnerProtocol)
             .await?,
         "learner_protocol_in_use",
-        &format!("node-{LEARNER}"),
+        &harness_node_identity(LEARNER),
     )?;
 
     const LEARNER_MEDIA_SESSION: &str = "p6-learner-active-media";
@@ -6217,7 +6220,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             leader,
             Request::SeedActiveMediaSession {
-                node_id: format!("node-{LEARNER}"),
+                node_id: harness_node_identity(LEARNER),
                 session_id: LEARNER_MEDIA_SESSION.to_owned(),
             },
         )
@@ -6231,7 +6234,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             leader,
             Request::RemoveNode {
-                node_id: format!("node-{LEARNER}"),
+                node_id: harness_node_identity(LEARNER),
             },
         )
         .await?
@@ -6257,7 +6260,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             LEARNER,
             Request::HeartbeatPreservesTombstone {
-                node_id: format!("node-{LEARNER}"),
+                node_id: harness_node_identity(LEARNER),
             },
         )
         .await?
@@ -6313,7 +6316,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
                 request: RedeemJoinRequest {
                     token_digest: join_token_digest(&promoted_token.token),
                     raft_id: promoted_token.raft_id,
-                    node_id: format!("node-{PROMOTED}"),
+                    node_id: harness_node_identity(PROMOTED),
                     hostname: format!("cluster-node-{PROMOTED}"),
                     raft_address: promoted_spec.raft.clone(),
                     api_address: promoted_spec.api.clone(),
@@ -6354,7 +6357,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
                 request: FinalizeJoinRequest {
                     token_digest: join_token_digest(&promoted_token.token),
                     raft_id: promoted_token.raft_id,
-                    node_id: format!("node-{PROMOTED}"),
+                    node_id: harness_node_identity(PROMOTED),
                 },
             },
         )
@@ -6370,7 +6373,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             leader,
             Request::PromoteLearner {
-                node_id: format!("node-{PROMOTED}"),
+                node_id: harness_node_identity(PROMOTED),
             },
         )
         .await?
@@ -6397,7 +6400,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         Response::ClusterJobAttempt {
             acquired: true,
             lease: Some(lease),
-        } if lease.owner_node_id == format!("node-{PROMOTED}") => {}
+        } if lease.owner_node_id == harness_node_identity(PROMOTED) => {}
         response => bail!("a promoted learner did not gain voter job authority: {response:?}"),
     }
     let promoted_status = match cluster.request(leader, Request::MembershipStatus).await? {
@@ -6455,7 +6458,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         Response::ClusterJobAttempt {
             acquired: true,
             lease: Some(lease),
-        } if lease.owner_node_id == format!("node-{PROMOTED}") => {}
+        } if lease.owner_node_id == harness_node_identity(PROMOTED) => {}
         response => bail!("a restarted promoted voter did not retain job authority: {response:?}"),
     }
 
@@ -9873,7 +9876,7 @@ async fn handle_request(
                         "INSERT INTO cluster_node_http (node_id, public_http_url) \
                          VALUES ($1, $2)",
                         hiqlite::macros::params!(
-                            format!("node-{node_id}"),
+                            harness_node_identity(node_id),
                             "https://shared-join-lb.invalid"
                         ),
                     )
@@ -10031,7 +10034,7 @@ async fn handle_request(
             let opened = store.clone().context("node store is not open")?;
             let coordinator = StoreCoordinator::new(
                 opened as Arc<dyn plurx_core::store::Store>,
-                format!("node-{}", launch.node_id),
+                harness_node_identity(launch.node_id),
             )?;
             // The production function, compiled from plurxd's own source, with
             // the production authority: this node's live membership manager.
@@ -10092,7 +10095,7 @@ async fn handle_request(
             let name = store_ref(store)?
                 .get_or_init_setting(plurx_core::store::keys::SERVER_NAME, &seed_name)
                 .await?;
-            let node_id = format!("node-{}", launch.node_id);
+            let node_id = harness_node_identity(launch.node_id);
             let advertisement = plurx_compat_plex::gdm::Advertisement {
                 instance_id: INSTANCE_ID,
                 name: &name,
@@ -10650,7 +10653,7 @@ async fn handle_request(
             let opened = store.clone().context("node store is not open")?;
             let coordinator = StoreCoordinator::new(
                 opened.clone() as Arc<dyn plurx_core::store::Store>,
-                format!("node-{}", launch.node_id),
+                harness_node_identity(launch.node_id),
             )?;
             match coordinator
                 .acquire(SINGLETON_RESOURCE, SINGLETON_LEASE_TTL)
@@ -11641,7 +11644,7 @@ async fn validate_artwork_url_claim(
     public_http_url: &str,
     removed_node_id: Option<&str>,
 ) -> Result<Response> {
-    let node_id = format!("node-{}", launch.node_id);
+    let node_id = harness_node_identity(launch.node_id);
     let before = read_artwork_claim(client, &node_id).await?;
     let original = before
         .published
@@ -11813,7 +11816,7 @@ async fn membership_manager_with_artwork_url(
         replication,
         store,
         launch,
-        format!("node-{}", launch.node_id),
+        harness_node_identity(launch.node_id),
         launch.node_id,
         artwork_http,
     )
@@ -13402,6 +13405,16 @@ impl PortReservation {
     }
 }
 
+/// Stable protocol identities for harness voters; paths and Raft IDs stay numeric.
+/// Every u64 maps to a distinct canonical UUID, including IDs above u32::MAX.
+fn harness_node_identity(raft_id: u64) -> String {
+    format!(
+        "{:08x}-0000-4000-8000-0000{:08x}",
+        raft_id >> 32,
+        raft_id & 0xffff_ffff
+    )
+}
+
 /// Reserve a raft and an API port for each of `count` voters, holding every
 /// listener open so another process cannot claim the port between allocation
 /// and bind.
@@ -13525,6 +13538,38 @@ pub fn install_crypto_provider() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn harness_node_identities_are_distinct_canonical_reduction_targets() {
+        let ids = [1, 2, 3, 4, u64::from(u32::MAX) + 1, u64::MAX];
+        let mut identities = std::collections::BTreeSet::new();
+        for id in ids {
+            let identity = harness_node_identity(id);
+            assert!(
+                identities.insert(identity.clone()),
+                "fixture identities collided"
+            );
+            let reference = hiqlite::ReductionFenceReference {
+                version: 1,
+                target_node_id: identity,
+                target_raft_id: id,
+                attempt_id: "01000000-0000-4000-8000-000000000001".to_owned(),
+                barrier_index: 1,
+            };
+            assert!(
+                reference.has_valid_shape(),
+                "fixture is refused by the real protocol"
+            );
+            let legacy = hiqlite::ReductionFenceReference {
+                target_node_id: format!("node-{id}"),
+                ..reference
+            };
+            assert!(
+                !legacy.has_valid_shape(),
+                "the original invalid control must remain refused"
+            );
+        }
+    }
     use plurx_core::cluster::migration::HIQLITE_WAL_SIZE_BYTES;
 
     use super::*;
