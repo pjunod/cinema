@@ -58,6 +58,20 @@ CONTRACTS = {'validation': 'python-source-cohort-v1',
 # Finite original local captures. Unknown historical patch/binary measurements
 # remain unknown. These exact log/source/tool identities authorize no new run.
 LEGACY_PYTHON = {
+    # Incoming named captures are retained with their source representatives;
+    # their actual execution commit and interpreter measurements remain unknown.
+    'c2ee570075789bc59018007c2d9caead7669596e7f10484643753d3760720e85': {
+        'source': 'e08a0680ca1fe0d405c8b3421e5f1f4912ace980',
+        'tool': 'exec-15f40524-4701-41fd-9130-d5973040a947',
+        'count': 2, 'mode': 'python-named', 'selectors': None, 'exit_code': 0,
+        'actual_execution_source_commit': None,
+        'python_patch': None, 'interpreter_sha256': None},
+    '239966f35d143b735aba9c622e74fe2b725fa1f94a9869a6ab43a61e47600fdd': {
+        'source': 'a3983d8a1d8c04e294c84327b6f73cbee5defcc7',
+        'tool': 'exec-7c70d17d-6eb2-4dad-bd49-ba1545a10e67',
+        'count': 1, 'mode': 'python-named', 'selectors': None, 'exit_code': 0,
+        'actual_execution_source_commit': None,
+        'python_patch': None, 'interpreter_sha256': None},
     '7222aea9ea9fa174d94c877d61a5162719f4589528ce053a09caaa20bed99797': {
         'source': '584d72a3453ae2350cde760d01122db70520da29',
         'tool': 'exec-a003587b-d684-4167-a978-4d82381ad0aa',

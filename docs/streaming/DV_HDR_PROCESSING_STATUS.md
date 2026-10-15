@@ -1500,6 +1500,12 @@ retirement, raw-outcome equality and failure/successor ordering stay intact.
 The representative source of the incoming old capture remains distinguished
 from its unknown actual execution commit.
 
+Two additional finite Python capture identities preserve the original named QSV
+shipping checks and documentation-index repair. Their exact raw digest,
+representative source, original tool, count and unknown execution/interpreter
+measurements use the existing named-capture decoder; no parser, writer,
+request, byte, node or runtime rule changes.
+
 One new coexistence/refusal control is owed on the integrated main-bound effort.
 Its eleven negative variants include wrong source/log/extra identity, omitted
 sibling outcome, failed or ignored retirement, failed/ignored/earlier successor,
