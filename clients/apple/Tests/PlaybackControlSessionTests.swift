@@ -114,12 +114,15 @@ private final class ControlGate: @unchecked Sendable {
         armed = true
     }
 
-    func waitIfArmed() {
+    func waitIfArmed(onHold: () -> Void = {}) {
         lock.lock()
         let holding = armed
         if holding { armed = false }
         lock.unlock()
-        if holding { _ = semaphore.wait(timeout: .now() + 5) }
+        if holding {
+            onHold()
+            _ = semaphore.wait(timeout: .now() + 5)
+        }
     }
 
     func release() { semaphore.signal() }
@@ -493,29 +496,29 @@ final class PlaybackControlSessionTests: XCTestCase {
 
     func testEndRevokesATerminalPublicationAlreadyPastTheCaptureGuard() async throws {
         controlExchanges.reset()
-        controlAnswer.set(ControlAction(type: "none"))
-        controlAnswer.setReadiness("pending")
+        // The first response is already terminal. Blocking every scheduled
+        // callback during a pending warm-up would stop the reporter before
+        // it could send the second request: processing-status callbacks now
+        // share this scheduling seam with subtitle readiness.
+        controlAnswer.set(ControlAction(type: "terminal", code: "unsupported", message: "late"))
+        controlAnswer.setReadiness("ready")
         let publicationHeld = DispatchSemaphore(value: 0)
-        let release = DispatchSemaphore(value: 0)
+        let publicationGate = ControlGate()
+        publicationGate.arm()
         let session = PlaybackControlSession(scheduleSubtitleReady: { _ in
-            // onExchange has validated the capture, but has not yet stored
-            // its terminal verdict. Hold that real cross-actor boundary.
-            publicationHeld.signal()
-            _ = release.wait(timeout: .now() + 5)
+            // Hold only the first callback at the real cross-actor boundary.
+            // Later processing/subtitle callbacks must not block publication.
+            publicationGate.waitIfArmed { publicationHeld.signal() }
         })
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         tearDownTransport(session, urlSession)
         defer {
-            release.signal()
+            publicationGate.release()
             controlAnswer.set(ControlAction(type: "none")); controlAnswer.setReadiness(nil)
         }
         session.begin(bootstrap: sessionBootstrap(), transport: transport,
                       observe: { player.observation() })
-        _ = try await waitForExchange { $0.sequence == 2 }
-        controlAnswer.set(ControlAction(type: "terminal", code: "unsupported", message: "late"))
-        controlAnswer.setReadiness("ready")
-        session.reportEvidence()
         let deadline = Date().addingTimeInterval(5)
         var held = false
         while !held, Date() < deadline {
@@ -524,8 +527,10 @@ final class PlaybackControlSessionTests: XCTestCase {
         }
         XCTAssertTrue(held)
         session.end()
-        release.signal()
-        try await Task.sleep(nanoseconds: 100_000_000)
+        publicationGate.release()
+        // Join the reporter before asserting, so nil cannot merely mean that
+        // the attempted late verdict has not reached its publication point.
+        await session.endAndWait()
         XCTAssertNil(session.terminalVerdict, "End revokes publication even after its outer guard passed")
     }
 
@@ -553,13 +558,14 @@ final class PlaybackControlSessionTests: XCTestCase {
         _ = try await waitForExchange { $0.sequence == 2 }
         controlAnswer.setReadiness(unavailable ? "unavailable" : "ready")
         session.playerChanged()
-        let deadline = Date().addingTimeInterval(5)
-        var queued: (@MainActor @Sendable () -> Void)?
-        while queued == nil, Date() < deadline {
-            queued = callbacks.take()
-            if queued == nil { try await Task.sleep(nanoseconds: 20_000_000) }
-        }
-        let staleReady = try XCTUnwrap(queued, "the real session must schedule a readiness callback")
+        // A later request proves the reporter finished processing response3,
+        // whose answer was captured after readiness changed. Hold every queued
+        // callback, including processing-status notifications, across the
+        // lifecycle change; the subtitle callback need not be the first one.
+        _ = try await waitForExchange { $0.sequence >= 4 }
+        var queued: [@MainActor @Sendable () -> Void] = []
+        while let callback = callbacks.take() { queued.append(callback) }
+        XCTAssertFalse(queued.isEmpty, "the real session must schedule callbacks")
 
         if replaceSession == true {
             var next = sessionBootstrap()
@@ -575,7 +581,7 @@ final class PlaybackControlSessionTests: XCTestCase {
             session.end()
         }
         if newIntent { session.clearVerdict() }
-        staleReady()
+        for callback in queued { callback() }
         XCTAssertEqual(deliveries, replaceSession == nil && !newIntent ? 1 : 0,
                        "a queued response loses its authority when its reporting session ends")
         if newIntent {
