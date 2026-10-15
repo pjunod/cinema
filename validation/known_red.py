@@ -18,6 +18,9 @@ RULES = ROOT / "validation/known-red.toml"
 IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 OPTIONAL_CARGO_IDENTITIES = frozenset(
     {
+        # The explicit Metal control exists only on macOS. Its exact source
+        # identity stays inventoried on Linux without inventing a GPU result.
+        "crates/plurxd/src/pipeprobe.rs::pipeprobe::tests::real_neutral_peak_gate_rejects_old_metal_units",
         "crates/plurxd/src/http/mod.rs::http::tests::"
         "sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart",
         "crates/plurxd/tests/sharing_daemon_restart.rs::"
