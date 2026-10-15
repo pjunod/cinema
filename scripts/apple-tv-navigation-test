@@ -80,6 +80,8 @@ def main():
                      options.runtime, capture_output=True).stdout.strip()
         receipt["simulator_udid"] = device
         receipt["runtime"] = options.runtime
+        run("xcrun", "simctl", "boot", device)
+        run("xcrun", "simctl", "bootstatus", device, "-b")
         run("xcodegen", "generate", "--spec", "clients/apple/project.yml")
         command = ["xcodebuild", "test", "-project", "clients/apple/plurx.xcodeproj",
                    "-scheme", "plurx-tvOS-navigation", "-destination", f"id={device}",
@@ -116,16 +118,15 @@ def main():
             if summary_result.returncode == 0:
                 receipt["test_summary"] = json.loads(summary_result.stdout)
         if device:
-            runner_info = derived / "Build/Products/Debug-appletvsimulator/plurx-tvOSUITests-Runner.app/Info.plist"
-            if runner_info.exists():
-                with runner_info.open("rb") as info_file:
-                    runner_id = plistlib.load(info_file)["CFBundleIdentifier"]
-                container = subprocess.run(["xcrun", "simctl", "get_app_container", device, runner_id, "data"],
-                                           text=True, capture_output=True)
-                if container.returncode == 0:
-                    captures = Path(container.stdout.strip()) / "tmp/PlurxNavigationCaptures"
-                    if captures.exists():
-                        shutil.copytree(captures, output / "screenshots", dirs_exist_ok=True)
+            log_path = output / "xcodebuild.log"
+            if log_path.exists():
+                for line in log_path.read_text(errors="replace").splitlines():
+                    if not line.startswith("NAVIGATION_SCREENSHOT_PATH="):
+                        continue
+                    capture = Path(line.split("=", 1)[1])
+                    if device in capture.parts and capture.is_file():
+                        (output / "screenshots").mkdir(exist_ok=True)
+                        shutil.copy2(capture, output / "screenshots" / capture.name)
                         receipt["screenshots"] = str(output / "screenshots")
             subprocess.run(["xcrun", "simctl", "shutdown", device], capture_output=True)
             subprocess.run(["xcrun", "simctl", "delete", device], capture_output=True)
@@ -135,11 +136,17 @@ def main():
                 info = plistlib.load(info_file)
             binary = app / info["CFBundleExecutable"]
             if binary.exists():
+                bundle_hash = hashlib.sha256()
+                for artifact in sorted(path for path in app.rglob("*") if path.is_file()):
+                    bundle_hash.update(str(artifact.relative_to(app)).encode())
+                    bundle_hash.update(b"\0")
+                    bundle_hash.update(artifact.read_bytes())
                 receipt["app_build"] = {
                     "bundle_identifier": info["CFBundleIdentifier"],
                     "version": info.get("CFBundleShortVersionString"),
                     "build": info.get("CFBundleVersion"),
                     "executable_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                    "bundle_sha256": bundle_hash.hexdigest(),
                 }
         receipt["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")

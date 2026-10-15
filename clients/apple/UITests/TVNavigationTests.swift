@@ -221,6 +221,8 @@ final class TVNavigationTests: XCTestCase {
         let expectation = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in target.exists && target.hasFocus }, object: nil)
         let result = XCTWaiter.wait(for: [expectation], timeout: 5)
+        let focusDebug = app.staticTexts["choice-focus-debug"]
+        if focusDebug.exists { print("NATIVE_CHOICE_FOCUS_DEBUG=\(focusDebug.label)") }
         let screenshot = app.screenshot()
         let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("PlurxNavigationCaptures")
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
