@@ -53,6 +53,9 @@ final class RemoteNavigationCoordinator: ObservableObject {
     private let maximumEntries = 512
     private let maximumOrderedKeys = 16_384
     private var pendingFocus = false
+    private var modalEntryPending = false
+    private var modalEntryRealized = false
+    private var modalEntryCompleted = false
     private var modalReturn: (id: UUID, dismissedScope: String, scope: String, key: String?, revision: UInt64)?
     private var focusedRegistration: UUID?
     private struct Destination {
@@ -189,6 +192,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         modalReturn = nil
         modal?.dismiss()
         modal = nil
+        modalEntryPending = false
         if let focusedKey {
             if restoredFocus.count >= maximumScopes { restoredFocus.removeAll() }
             restoredFocus[scope] = focusedKey
@@ -203,6 +207,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         advanceContext()
         modal?.dismiss()
         modal = nil
+        modalEntryPending = false
         requestedFocus = nil
         focusedKey = nil
         focusedRegistration = nil
@@ -242,8 +247,22 @@ final class RemoteNavigationCoordinator: ObservableObject {
         physicalInput()
         action()
     }
+    /// A simultaneous tap may arrive after its Button action opened or closed
+    /// a presentation. Retire network authority, but do not cancel that action's
+    /// newly created focus request from the old control's scope.
+    func physicalControlActivation(scope: String) {
+        guard activeScope == scope, modalReturn?.dismissedScope != scope else {
+            onPhysicalInput()
+            return
+        }
+        physicalInput()
+    }
     func physicalInput() {
+        modalEntryPending = false
         modalReturn = nil
+        retireFocusAuthority()
+    }
+    private func retireFocusAuthority() {
         onPhysicalInput()
         pendingFocus = false
         requestedFocus = focusedKey
@@ -291,8 +310,9 @@ final class RemoteNavigationCoordinator: ObservableObject {
         guard scope == activeScope else { return }
         // Native default focus may settle while a cover animates away. Only a
         // genuine input (physicalInput) cancels that cover's pending return.
-        if modalReturn != nil && pendingFocus && key != requestedFocus { return }
+        if pendingFocus && key != requestedFocus { return }
         if pendingFocus && key == requestedFocus {
+            modalEntryPending = false
             pendingFocus = false
             focusedKey = key
             focusedRegistration = key.flatMap { entries[scope]?[$0]?.id }
@@ -300,7 +320,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
             return
         }
         guard key != focusedKey else { return }
-        physicalInput()
+        retireFocusAuthority()
         focusedKey = key
         focusedRegistration = key.flatMap { entries[scope]?[$0]?.id }
         requestedFocus = key
@@ -319,12 +339,16 @@ final class RemoteNavigationCoordinator: ObservableObject {
         guard modal == nil else { return }
         modalReturn = nil
         modal = (UUID(), scope, activeScope, opener, dismiss)
+        modalEntryPending = true
+        modalEntryRealized = false
+        modalEntryCompleted = false
         advanceContext()
         requestFocus(nil)
     }
     func closeModal(returnFocus override: String? = nil) {
         guard let current = modal else { return }
         modal = nil
+        modalEntryPending = false
         current.dismiss()
         advanceContext()
         let available = orderedKeys[current.parent] ?? []
@@ -350,10 +374,34 @@ final class RemoteNavigationCoordinator: ObservableObject {
         advanceFocus()
         focusRequestRevision = focusRevision
     }
+    /// Called inside the button style's actual native focus environment. The
+    /// outer modifier's background is not inside SwiftUI's focusable button.
+    func nativeControlFocus(scope: String, key: String, focused: Bool) {
+        guard scope == activeScope else { return }
+        if focused {
+            if modalEntryPending && pendingFocus && !modalEntryRealized {
+                modalEntryRealized = true
+                if key != requestedFocus {
+                    requestFocus(requestedFocus, force: true)
+                    return
+                }
+            }
+            physicalFocus(scope: scope, key: key)
+            if modal?.scope == scope, focusedKey == key { modalEntryCompleted = true }
+        } else if focusedKey == key {
+            physicalFocus(scope: scope, key: nil)
+        }
+    }
+    func choiceActionAdmitted(scope: String, key: String) -> Bool {
+        guard modal?.scope == scope, modalEntryCompleted, !pendingFocus,
+              focusedKey == key, let entry = entries[scope]?[key],
+              focusedRegistration == entry.id, !entry.frame.isEmpty else { return false }
+        return true
+    }
     func enterChoicePanel(scope: String, keys: [String], selected: String?) {
         guard modal?.scope == scope else { return }
         setOrder(scope: scope, keys: keys, columns: 1)
-        requestFocus(selected.flatMap { keys.contains($0) ? $0 : nil } ?? keys.first)
+        requestFocus(selected.flatMap { keys.contains($0) ? $0 : nil } ?? keys.first, force: true)
     }
     /// Requests realization and focus; only native acknowledgment authorizes Select.
     @discardableResult
