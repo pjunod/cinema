@@ -100,7 +100,7 @@ class AttemptScopeCensusCase(unittest.TestCase):
             self.assertNotIn(retired, document["fences"])
         self.assertFalse(any(key.startswith(("autoBoundary", "commitPreparedSuccessor::boundary"))
                              for key in document["allowed"]))
-        self.assertEqual(document["allowed"]["setPlaybackRequested::self.viewerActionEpoch == actionEpoch"], 3)
+        self.assertEqual(document["allowed"]["setPlaybackRequested::self.viewerActionEpoch == actionEpoch"], 4)
         self.assertEqual(document["allowed"]["setPlaybackRequested::self.lifecycleGeneration == lifecycle"], 2)
         attempt = repository_read(ATTEMPT_SOURCE)
         source = repository_read(SOURCE)

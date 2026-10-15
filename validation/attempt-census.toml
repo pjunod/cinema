@@ -52,6 +52,21 @@ version = 1
 "isSuperseded::generation != openGeneration" = 1
 "load::initialDecisionGeneration == generation" = 3
 "offerPreparedQualityChange::self.viewerActionEpoch != actionEpoch" = 1
+# Prepared cadence has its own item/player/action owner and probe generation.
+# The record's epoch invalidates an old proof before reuse; the captured epoch
+# refuses an awaited decoder result after a newer viewer action. The owner
+# tuple has not yet been migrated to carry an Attempt; that migration must
+# retain the cadence generation and staged identity checks beside its scopes.
+"prepareCadenceIfNeeded::owner.epoch != viewerActionEpoch" = 1
+"prepareCadenceIfNeeded::self.viewerActionEpoch == epoch" = 1
+# Asset selection resolution can outlive cancellation. The local action epoch
+# and caller-supplied staged ownership closure jointly fence application after
+# each await; this helper can also be called directly before a commit exists.
+"prepareStagedMediaSelections::self.viewerActionEpoch == actionEpoch" = 1
+# A buffer preference lease restores the old item when its saved action moves,
+# rather than authorizing work in the new action. Player, item and action ID
+# movement independently trigger the same restoration beside this inequality.
+"restorePreparedIncumbentBufferPreferenceIfOwnerMoved::viewerActionEpoch != lease.epoch" = 1
 "reconcileNativeMediaSelections::actionEpoch != viewerActionEpoch" = 1
 "reconcileNativeMediaSelections::actionEpoch == viewerActionEpoch" = 1
 "refreshPGSOverlayWindow::self.pgsOverlayItemGeneration == itemGeneration" = 1
@@ -86,8 +101,17 @@ version = 1
 "setPlaybackRequested::self.lifecycleGeneration == lifecycle" = 2
 "setPlaybackRequested::self.openGeneration == attachmentGeneration" = 2
 "setPlaybackRequested::self.seekState.generation == seekGeneration" = 1
-"setPlaybackRequested::self.viewerActionEpoch == actionEpoch" = 3
+# The fourth comparison clears only the Pause publication task that still
+# owns this action. It does not admit a seek or repair on Pause; the existing
+# pre/post-report lifecycle, attachment, item and session fences remain above.
+"setPlaybackRequested::self.viewerActionEpoch == actionEpoch" = 4
 "settleInPlaceSubtitleDestination::destination.generation == seekState.generation" = 1
+# Acquisition may advance only for the Auto preparation that still belongs
+# to the current viewer action. The synchronous entry then rechecks the
+# captured incumbent action alongside its exact player/item before creating
+# the successor; these two comparisons own distinct admission decisions.
+"startPreparedSuccessor::autoPreparedViewerEpoch == viewerActionEpoch" = 1
+"startPreparedSuccessor::viewerActionEpoch == incumbentEpoch" = 1
 "startResumePresentationMonitor::attempt.attachmentGeneration == self.openGeneration" = 1
 "startResumePresentationMonitor::self.lifecycleGeneration == attempt.lifecycleGeneration" = 1
 "startResumePresentationMonitor::self.viewerActionEpoch == attempt.viewerActionEpoch" = 1
@@ -122,6 +146,9 @@ recoveryEvidencePoll = { function = "startRecoveryEvidencePoll", scopes = ["open
 recoveryEvidenceAfterStagedPoll = { function = "startRecoveryEvidencePoll", scopes = ["open"] }
 autoInitialLayout = { function = "load", scopes = ["initialDecision"] }
 autoCatalogRefresh = { function = "refreshAutoCatalogForViewerRecipe", scopes = ["lifecycle", "viewerAction"] }
+# The separate advisory-cost continuation keeps the same scopes, with its own
+# single-use fence so either continuation can be audited independently.
+autoMissingCostCatalogRefresh = { function = "refreshMissingAutoCosts", scopes = ["lifecycle", "viewerAction"] }
 autoQualityOffer = { function = "tickDisplayAwareAuto", scopes = ["lifecycle", "viewerAction"] }
 preparedPipelineRollback = { function = "commitPreparedSuccessor", scopes = ["lifecycle", "open", "seek"] }
 preparedCommit = { function = "preparedCommitStillOwned", scopes = ["viewerAction"] }

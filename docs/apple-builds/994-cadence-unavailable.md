@@ -1,6 +1,8 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 250
+**Status:** open — implementation and named native regressions complete; shipping-binary physical acceptance remains unmeasured.
+
+Build: 251
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal

@@ -11737,7 +11737,7 @@ extension PlayerController {
             }
             guard !Task.isCancelled, self.autoCostRefreshGeneration == generation,
                   !self.autoPreparing, self.preparedPlayer == nil,
-                  self.attemptStillCurrent(attempt, fence: .autoCatalogRefresh),
+                  self.attemptStillCurrent(attempt, fence: .autoMissingCostCatalogRefresh),
                   owner.owns(self.autoCostCatalogOwner(), sameItem: self.player.currentItem === item),
                   let fresh, fresh.decision.fileId == owner.file,
                   fresh.decision.displayAwareAutoProtocol == "route-v1",

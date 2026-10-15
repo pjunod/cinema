@@ -187,6 +187,8 @@ enum AttemptFence: String, CaseIterable, Sendable {
     case autoInitialLayout = "auto_initial_layout"
     /// A catalog refresh belongs to this title and viewer's recipe choice.
     case autoCatalogRefresh = "auto_catalog_refresh"
+    /// Missing-cost refresh retains the same title and viewer-recipe scopes.
+    case autoMissingCostCatalogRefresh = "auto_missing_cost_catalog_refresh"
     /// An asynchronous Auto offer cannot alter a newer title or viewer intent.
     case autoQualityOffer = "auto_quality_offer"
     /// `commitPreparedSuccessor`: failed exposure may restore only the
@@ -226,6 +228,7 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .recoveryEvidenceAfterStagedPoll: return [.open]
         case .autoInitialLayout: return [.initialDecision]
         case .autoCatalogRefresh: return [.lifecycle, .viewerAction]
+        case .autoMissingCostCatalogRefresh: return [.lifecycle, .viewerAction]
         case .autoQualityOffer: return [.lifecycle, .viewerAction]
         case .preparedPipelineRollback: return [.lifecycle, .open, .seek]
         case .preparedCommit: return [.viewerAction]
