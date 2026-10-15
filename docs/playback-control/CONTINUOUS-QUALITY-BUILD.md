@@ -11937,3 +11937,18 @@ Apple methods remain retained; only failed cases are due for rerun, and the
 38 server anchors have not executed yet. No full suite, review or hardware
 campaign is restarted. Final source, per-test and fast-lane receipts belong
 to the promotion record rather than a new hardware claim.
+
+
+The resumed exact bd0 Rust run completes39 named cases:35 pass, four fail in
+fixture setup. Two purpose tests supply a non-UUID incarnation to the real
+eligible-route validator and never reach their target assertions; they now use
+a valid canonical UUID. The manual-to-Auto fixture starts its incumbent at360p
+and requires the ordinary720p cold-start control to be a real upgrade before
+asserting the360p bootstrap ceiling. It no longer assumes an unmeasured1080p
+software production proof, and still checks canonical identity, upgrade catalog,
+audio authority and rolling-media refusal. Private-output control16 reserves
+64MiB while an incumbent already occupies the shared retention budget; its test
+budget now allows128MiB for coexistence. Ordinary completed caching remains zero
+and the zero-output-budget refusal control is unchanged. These are test-only
+repairs; production admission and authority stay unchanged. Retain35 passed Rust
+cases and61 Apple passes; rerun only the four failed cases before final fast lane.

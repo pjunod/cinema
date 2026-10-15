@@ -300,7 +300,9 @@ async fn prepared_copy_consumer(control: u8) {
     if control == 16 {
         playback_settings.completed_cache_bytes = 0;
         preparation_settings.completed_cache_bytes = 0;
-        preparation_settings.output_budget_bytes = 64 << 20;
+        // The private 64 MiB reservation coexists with the incumbent's
+        // already-materialized ordinary output in the shared retention budget.
+        preparation_settings.output_budget_bytes = 128 << 20;
     } else if control == 17 {
         preparation_settings.output_budget_bytes = 0;
     }

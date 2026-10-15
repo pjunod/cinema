@@ -4069,7 +4069,10 @@ mod retained_recovery_tests {
     #[test]
     fn prepared_bootstrap_purpose_refuses_voluntary_upward_foreign_and_missing_decoder() {
         use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
-        let route = crate::media_sessions::takeover_eligible_route("bootstrap", "incarnation");
+        let route = crate::media_sessions::takeover_eligible_route(
+            "bootstrap",
+            "00000000-0000-4000-8000-0000000000a1",
+        );
         let mut manual: crate::media_sessions::RemoteStartRequest =
             serde_json::from_str(&route.recipe_json).expect("durable fixture");
         manual.request.presentation = Presentation::Vod;
@@ -4175,7 +4178,10 @@ mod retained_recovery_tests {
     #[test]
     fn cached_recovery_purpose_requires_downward_auto_identity_grade_and_decoder() {
         use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
-        let route = crate::media_sessions::takeover_eligible_route("bootstrap", "incarnation");
+        let route = crate::media_sessions::takeover_eligible_route(
+            "bootstrap",
+            "00000000-0000-4000-8000-0000000000a1",
+        );
         let mut manual: crate::media_sessions::RemoteStartRequest =
             serde_json::from_str(&route.recipe_json).expect("durable fixture");
         manual.request.presentation = Presentation::Vod;

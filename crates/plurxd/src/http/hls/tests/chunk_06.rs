@@ -5813,6 +5813,9 @@ fn subtitle_playlist_keeps_takeover_and_sliding_discontinuity_epochs() {
 async fn legacy_manual_to_auto_preparation_binds_a_real_non_upgrading_candidate() {
     use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
     let state = resolver_state();
+    // Start below the ordinary cold Auto rung so loss of the bootstrap ceiling
+    // would cause a real upgrade, without assuming unmeasured1080p production.
+    let incumbent_height = 360;
     state.store.put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1").await.expect("Auto policy");
     let library = state.store.create_library(&NewLibrary { name: "Auto bootstrap".into(), kind: LibraryKind::Movies, paths: vec![], anime: false }).await.expect("library");
     let item = state.store.insert_item(&NewItem { library_id: library.id, kind: ItemKind::Movie, parent_id: None, title: "Auto bootstrap".into(), year: None, season_number: None, episode_number: None }).await.expect("item");
@@ -5826,13 +5829,13 @@ async fn legacy_manual_to_auto_preparation_binds_a_real_non_upgrading_candidate(
     let mut predecessor = staged_predecessor_recipe(&route);
     predecessor.request.file_id = id;
     predecessor.request.automatic = false;
-    predecessor.request.kind = crate::transcode::SessionKind::Transcode { height: 720 };
+    predecessor.request.kind = crate::transcode::SessionKind::Transcode { height: incumbent_height };
     let caps = caps_v2(r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"],"display":{"presentation_target":{"width_px":2436,"height_px":1125,"revision":1}}}"#);
     predecessor.decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).expect("decoder"));
     let selection = crate::playback_control::ClientSelection { quality: crate::playback_control::QualitySelection::Auto { height: None, candidate_id: None }, audio_track: None, subtitle: crate::playback_control::SubtitleSelection { mode: crate::playback_control::SubtitleMode::Off, track: None }, audio_offset_ms: 0, codec: crate::playback_control::CodecPolicy::Auto, dynamic_range: crate::playback_control::DynamicRangePolicy::Auto };
     let ordinary = resolve_plan(PlanInputs { snapshot: None, state: &state, user_id: 1, file_id: id, source: Some(&source), network_prior: None, network_identity: None, incumbent_receipt: None }, None,
         CreateSession { playback_id: "ordinary-auto".into(), quality_auto: Some(true), copy: Some(false), caps: Some(caps.clone()), ..bare_create() }).await.expect("unbounded ordinary Auto");
-    assert_eq!(ordinary.height, 1080, "landscape Auto otherwise chooses the source-sized route");
+    assert!(ordinary.height > incumbent_height, "the ordinary Auto control must be a genuine upgrade over the incumbent");
     // The control decoder snapshot has no sink facts. Only the accepted
     // initial playback claim supplies audio authority during a quality replan.
     let mut initial_caps = caps.clone();
@@ -5841,29 +5844,29 @@ async fn legacy_manual_to_auto_preparation_binds_a_real_non_upgrading_candidate(
     assert!(caps.audio_sinks.is_empty());
     predecessor.request.audio_claim = Some(claim.clone());
     predecessor.request.audio_delivery = Some(plurx_core::playback::audio::resolve_audio(source.audio_streams.first(), &claim.profile(), plurx_core::playback::audio::AudioRoute::EncodedVod, 0));
-    let request = plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, 720).await.expect("authoritative bootstrap");
+    let request = plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, incumbent_height).await.expect("authoritative bootstrap");
     assert_eq!(request.audio_claim.as_ref(), Some(&claim), "replanning retains the accepted audio authority");
     assert_eq!(request.audio_delivery.as_ref(), predecessor.request.audio_delivery.as_ref(), "the actual output audio recipe remains unchanged");
     assert!(request.audio_delivery.as_ref().and_then(|audio| audio.presentation_identity()).is_some(), "the fixture exercises real AAC output, not an absent audio track");
     assert!(request.automatic);
     let context = request.candidate_context.as_ref().expect("actual route binding");
-    assert!(request.quality_catalog.as_ref().expect("canonical catalog").candidates.iter().any(|entry| entry.candidate.target_height > 720), "the bootstrap ceiling never erases later upgrade candidates");
+    assert!(request.quality_catalog.as_ref().expect("canonical catalog").candidates.iter().any(|entry| i64::from(entry.candidate.target_height) > incumbent_height), "the bootstrap ceiling never erases later upgrade candidates");
     let selected = request.quality_catalog.as_ref().expect("canonical catalog").candidates.iter().find(|entry| entry.candidate.id == context.candidate_id).expect("bound catalog identity");
     assert!(selected.candidate.identity_matches());
-    assert!(selected.candidate.height <= 720 && selected.candidate.target_height <= 720, "a manual body is not upgrade proof");
+    assert!(i64::from(selected.candidate.height) <= incumbent_height && i64::from(selected.candidate.target_height) <= incumbent_height, "a manual body is not upgrade proof");
     assert_eq!(context.recipe_digest, selected.candidate.recipe_digest);
     assert_eq!(plurx_core::playback::audio::AudioClaim::from_caps(context.canonical_caps.as_ref().expect("actual planned caps")).expect("valid context audio"), Some(claim.clone()));
     let mut no_claim = predecessor.clone();
     no_claim.request.audio_claim = None;
     no_claim.request.audio_delivery = None;
-    let unattributed = plan_preparation_candidate(&state, &no_claim, Some(&caps), None, &selection, &source, 720).await.expect("legacy no-claim route");
+    let unattributed = plan_preparation_candidate(&state, &no_claim, Some(&caps), None, &selection, &source, incumbent_height).await.expect("legacy no-claim route");
     assert!(unattributed.audio_claim.is_none(), "a video snapshot never fabricates an audio claim");
     let mut invalid_claim = predecessor.clone();
     invalid_claim.request.audio_claim.as_mut().expect("claim").sinks[0].max_channels = 0;
-    assert!(plan_preparation_candidate(&state, &invalid_claim, Some(&caps), None, &selection, &source, 720).await.is_err(), "invalid retained audio authority is refused");
+    assert!(plan_preparation_candidate(&state, &invalid_claim, Some(&caps), None, &selection, &source, incumbent_height).await.is_err(), "invalid retained audio authority is refused");
     assert!(predecessor.candidate_id.is_none(), "the incumbent remains honestly unattributed");
     predecessor.request.presentation = crate::transcode::Presentation::Live;
-    assert!(plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, 720).await.is_err(), "a VOD candidate identity cannot authorize rolling bytes");
+    assert!(plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, incumbent_height).await.is_err(), "a VOD candidate identity cannot authorize rolling bytes");
 }
 
 #[test]
