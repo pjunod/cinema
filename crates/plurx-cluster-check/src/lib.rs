@@ -4338,6 +4338,13 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let observer = (1..=3)
         .find(|node_id| *node_id != target)
         .context("choose a surviving membership observer")?;
+    // Keep the earlier heartbeat/write-budget controls explicit. From this
+    // point the live departing voter must publish its own applied progress,
+    // as a daemon does, while the observer waits on the post-fence barrier.
+    cluster
+        .request(target, Request::StartHeartbeatLoop)
+        .await?
+        .require_ok()?;
     let observer_node_id = harness_node_identity(observer);
     let activity_now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
     let departing_activity_proof = match cluster
@@ -5238,6 +5245,10 @@ async fn run_leader_self_leave_case() -> Result<()> {
     cluster.wait_for_voters(&[1, 2, 3]).await?;
 
     let departed = cluster.leader().await?;
+    cluster
+        .request(departed, Request::StartHeartbeatLoop)
+        .await?
+        .require_ok()?;
     let local_follower = (1..=3)
         .find(|node_id| *node_id != departed)
         .context("choose local follower removal refusal")?;
@@ -5320,6 +5331,10 @@ async fn run_degraded_four_voter_leader_self_leave_case() -> Result<()> {
         .collect::<Vec<_>>();
     let unavailable = remaining[0];
     cluster.kill(unavailable).await?;
+    cluster
+        .request(departed, Request::StartHeartbeatLoop)
+        .await?
+        .require_ok()?;
     cluster
         .request(departed, Request::LeaveVoter)
         .await?
@@ -7802,9 +7817,9 @@ pub enum Request {
     ForceHeartbeat,
     /// Start the production heartbeat loop on this process. The normal
     /// harness keeps writes explicit so compaction assertions have no
-    /// background traffic; learner lifecycle cases need the real periodic
-    /// target-local proof while another process waits on a promotion or
-    /// removal barrier.
+    /// background traffic; membership lifecycle cases start this at their
+    /// live transition so the target publishes real periodic applied proof
+    /// while a process waits on a promotion or removal barrier.
     StartHeartbeatLoop,
     /// Take one cluster-wide singleton job through plurxd's own
     /// `acquire_cluster_job`, including its eligibility gate. The harness
