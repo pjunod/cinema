@@ -58,7 +58,7 @@ final class TVNavigationTests: XCTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         for (openerLabel, selectedLabel) in [("Sort", "Title (A–Z)"), ("Filter", "Everything")] {
-            let opener = app.buttons[openerLabel]
+            let opener = app.buttons["library:" + openerLabel.lowercased()]
             reachForSetup(opener, in: app, limit: 8)
             assertFocus(opener, in: app, context: openerLabel + " opener")
             remote.press(.select)
@@ -108,7 +108,7 @@ final class TVNavigationTests: XCTestCase {
         defer { server.stop() }
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
-        let view = app.buttons["View"]
+        let view = app.buttons["library:view"]
         reachForSetup(view, in: app, limit: 8)
         assertFocus(view, in: app, context: "View opener")
         remote.press(.select)
@@ -189,6 +189,10 @@ final class TVNavigationTests: XCTestCase {
 
     /// Bounded setup steering only; never used to prove the measured journey.
     private func reachForSetup(_ target: XCUIElement, in app: XCUIApplication, limit: Int) {
+        guard target.waitForExistence(timeout: 5) else {
+            XCTFail("Setup control is missing: \(app.debugDescription)")
+            return
+        }
         let focused = NSPredicate(format: "hasFocus == true")
         let targetIsTab = app.tabBars.buttons.matching(
             NSPredicate(format: "identifier == %@ AND label == %@", target.identifier, target.label)
@@ -217,7 +221,14 @@ final class TVNavigationTests: XCTestCase {
         let expectation = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in target.exists && target.hasFocus }, object: nil)
         let result = XCTWaiter.wait(for: [expectation], timeout: 5)
-        let capture = XCTAttachment(screenshot: app.screenshot())
+        let screenshot = app.screenshot()
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("PlurxNavigationCaptures")
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let safeName = context.replacingOccurrences(of: "/", with: "-")
+        let nativePath = directory.appendingPathComponent(safeName + ".png")
+        try? screenshot.pngRepresentation.write(to: nativePath)
+        print("NAVIGATION_SCREENSHOT_PATH=\(nativePath.path)")
+        let capture = XCTAttachment(screenshot: screenshot)
         capture.name = context
         capture.lifetime = .keepAlways
         add(capture)

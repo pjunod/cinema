@@ -9,6 +9,7 @@ import datetime
 import hashlib
 import json
 import plistlib
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -36,6 +37,21 @@ def verify_summary(summary, expected):
         raise RuntimeError(f"Incomplete native journey execution: {summary}")
 
 
+def source_snapshot():
+    sha = run("git", "rev-parse", "HEAD", capture_output=True).stdout.strip()
+    dirty = bool(run("git", "status", "--porcelain", capture_output=True).stdout.strip())
+    source = hashlib.sha256()
+    files = run("git", "ls-files", "--cached", "--others", "--exclude-standard",
+                "-z", capture_output=True).stdout.split("\0")
+    for name in sorted(filter(None, files)):
+        path = ROOT / name
+        if path.is_file():
+            source.update(name.encode())
+            source.update(b"\0")
+            source.update(path.read_bytes())
+    return sha, dirty, source.hexdigest()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -49,20 +65,8 @@ def main():
         parser.error("--output must be outside the source checkout")
     output.mkdir(parents=True, exist_ok=False)
     derived = (options.derived_data or (output / "DerivedData")).resolve()
-    sha = run("git", "rev-parse", "HEAD", capture_output=True).stdout.strip()
-    dirty = bool(run("git", "status", "--porcelain", capture_output=True).stdout.strip())
-    # Bind even development runs to exact source content, including untracked
-    # test files. Promotion requires a clean, committed candidate separately.
-    source = hashlib.sha256()
-    files = run("git", "ls-files", "--cached", "--others", "--exclude-standard",
-                "-z", capture_output=True).stdout.split("\0")
-    for name in sorted(filter(None, files)):
-        path = ROOT / name
-        if path.is_file():
-            source.update(name.encode())
-            source.update(b"\0")
-            source.update(path.read_bytes())
-    receipt = {"schema": 1, "source_sha": sha, "source_tree_sha256": source.hexdigest(),
+    sha, dirty, source_hash = source_snapshot()
+    receipt = {"schema": 1, "source_sha": sha, "source_tree_sha256": source_hash,
                "source_dirty": dirty, "derived_data": str(derived), "required_tests": REQUIRED,
                "selected_tests": options.only_testing or REQUIRED,
                "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -81,7 +85,8 @@ def main():
                    "-scheme", "plurx-tvOS-navigation", "-destination", f"id={device}",
                    "-derivedDataPath", str(derived),
                    "-resultBundlePath", receipt["result_bundle"],
-                   "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
+                   "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "never",
+                   "-test-timeouts-enabled", "YES",
                    "-default-test-execution-time-allowance", "180",
                    "-maximum-test-execution-time-allowance", "240", "CODE_SIGNING_ALLOWED=NO"]
         command += [f"-only-testing:plurx-tvOSUITests/{test}"
@@ -96,12 +101,32 @@ def main():
         receipt["test_summary"] = summary
         expected = len(options.only_testing or REQUIRED)
         verify_summary(summary, expected)
+        if source_snapshot() != (sha, dirty, source_hash):
+            raise RuntimeError("Source changed during the native run; this result cannot qualify the candidate")
         receipt["status"] = "passed"
         receipt["qualification"] = False  # Full audit matrix is not implemented yet.
     except (subprocess.CalledProcessError, RuntimeError) as error:
         receipt["error"] = str(error)
     finally:
+        bundle = Path(receipt["result_bundle"])
+        if (bundle / "Info.plist").exists() and "test_summary" not in receipt:
+            summary_result = subprocess.run(
+                ["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(bundle)],
+                text=True, capture_output=True)
+            if summary_result.returncode == 0:
+                receipt["test_summary"] = json.loads(summary_result.stdout)
         if device:
+            runner_info = derived / "Build/Products/Debug-appletvsimulator/plurx-tvOSUITests-Runner.app/Info.plist"
+            if runner_info.exists():
+                with runner_info.open("rb") as info_file:
+                    runner_id = plistlib.load(info_file)["CFBundleIdentifier"]
+                container = subprocess.run(["xcrun", "simctl", "get_app_container", device, runner_id, "data"],
+                                           text=True, capture_output=True)
+                if container.returncode == 0:
+                    captures = Path(container.stdout.strip()) / "tmp/PlurxNavigationCaptures"
+                    if captures.exists():
+                        shutil.copytree(captures, output / "screenshots", dirs_exist_ok=True)
+                        receipt["screenshots"] = str(output / "screenshots")
             subprocess.run(["xcrun", "simctl", "shutdown", device], capture_output=True)
             subprocess.run(["xcrun", "simctl", "delete", device], capture_output=True)
         app = derived / "Build/Products/Debug-appletvsimulator/plurx.app"
