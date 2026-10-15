@@ -6663,7 +6663,7 @@ test_anchor = "testPressureRescueDoesNotOverrideDecoderOrUnmeasuredProducerRecov
 
 [[fixes]]
 id = "apple.transfer-pressure-distinct-receipts"
-commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918"]
+commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918", "f0afcf0a930f0b7008ac3873517cfaa976c696e1"]
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "struct AutoTransferPressureEvidence"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
