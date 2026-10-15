@@ -654,6 +654,18 @@ terminal release in a regression at the owning state transition and record
 before/after accounting in the physical receipt. Never stop another viewer
 to make the capacity test pass.
 
+### October 15 current owner controls
+
+Twelve focused current-source regressions pass for exact cancellation,
+late cancellation, supersession, idle expiry, restart cleanup, compound
+capacity refusal, stopped-producer permit transfer and active-reader
+protection. Their exact commands and individual results are retained in the
+[controlled receipt](evidence/f6-authority-media-20261015.json). The idle
+producer fixture uses the real driver and admission ledger with a finite
+sleep child; it does not claim encoded media or physical reservation
+accounting. That physical acceptance remains open. The original three-minute
+retention observation alone does not prove an ownership leak.
+
 ## 6. F4 — laptop cold/remux Heretic startup remains unreliable
 
 ### Observation and evidence
@@ -816,6 +828,27 @@ frame evidence. Exceeding grace needs a separate bounded terminal outcome.
 Use an isolated fault-injection environment for deterministic regression.
 This document does not request a live cluster partition, voter removal or
 restart campaign. Disabling the guard to hide 503s does not qualify a repair.
+
+### October 15 controlled media qualification
+
+The [controlled receipt](evidence/f6-authority-media-20261015.json) preserves
+an actual realtime H.264 HLS publisher, registered with the existing session
+manager, and an independent frame decoder. A 2,468 ms authority loss keeps
+the same child and registered session. Completed media advances beyond the
+highest segment observed at the loss boundary, and again beyond the recovery
+boundary; independent decoded pictures differ across those observations.
+New admission stays fenced during the loss, fresh admission recovers, and the
+old generation remains invalid. After stable recovery, a separate sustained
+loss retires the still-live producer and completes child cleanup.
+
+The original test used a two-second accelerated grace and correctly failed
+this positive control. Tests now share production's unchanged five-second
+constant. The actual-media control and 25 affected fence regressions pass;
+the initial failure and review's repaired sampling-boundary gap remain
+retained. This is source/media continuity, not a browser frame-gap measure.
+No live cluster fault was injected. The old replicated-operation delay is not
+reproduced here and cannot be attributed from the retained incident excerpt;
+no unrelated quorum incident is substituted as its cause.
 
 ## 9. F7 — residual grade difference and weak synthetic parity evidence
 
