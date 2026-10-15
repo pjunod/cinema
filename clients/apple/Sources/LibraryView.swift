@@ -64,6 +64,14 @@ struct LibraryView: View {
         [GridItem(.adaptive(minimum: model.posterSize.posterWidth), spacing: 18, alignment: .top)]
     }
 
+    private var searchPrompt: Text? {
+        #if os(tvOS)
+        Text("Find a title in this library").foregroundColor(Palette.muted)
+        #else
+        nil
+        #endif
+    }
+
     private var loadKey: String { "\(collection.id):\(sort.rawValue)" }
 
     var body: some View {
@@ -74,8 +82,15 @@ struct LibraryView: View {
                     .remoteContentReturn(to: contentBookmark ?? visibleItems.first.map { "item:\($0.id)" })
                 #endif
             VStack(alignment: .leading, spacing: 12) {
+                #if os(tvOS)
+                Text(collection.title).font(.title2.bold()).foregroundStyle(Palette.onBg)
+                    .accessibilityAddTraits(.isHeader)
+                #endif
                 summary
-                TextField("Find a title in this library", text: $query)
+                TextField("Find a title in this library", text: $query, prompt: searchPrompt)
+                    #if os(tvOS)
+                    .foregroundStyle(Palette.onBg)
+                    #endif
                     #if os(iOS)
                     .textFieldStyle(.roundedBorder)
                     #endif
@@ -121,8 +136,10 @@ struct LibraryView: View {
             }
             .padding(.horizontal, screenHPad)
             .background(Palette.bg.ignoresSafeArea())
+            #if os(tvOS)
+            .navigationTitle("")
+            #else
             .navigationTitle(collection.title)
-            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
             #if os(iOS)
@@ -246,9 +263,16 @@ struct LibraryView: View {
                             Text("\(group.items.count)\(complete ? "" : " loaded")").foregroundColor(Palette.muted)
                             Spacer()
                             Button("View all") { expandedGroup = group.id }
+                            #if os(tvOS)
+                            .shelfActionButtonStyle()
+                            #endif
                             .accessibilityLabel("View all \(group.label) items")
                             .remoteControl("group:\(group.id)", label: "View all \(group.label) items") { expandedGroup = group.id }
                         }
+                        #if os(tvOS)
+                        .padding(.horizontal, 24)
+                        #endif
+                        .tvNavigationFocusSection()
                         ScrollViewReader { rowProxy in
                         ScrollView(.horizontal) {
                             LazyHStack(alignment: .top, spacing: 18) {
@@ -266,7 +290,13 @@ struct LibraryView: View {
                                     .remoteControl("item:\(item.id)", label: item.title) { remoteNavigation.navigate(to: .item(item.id)) }
                                 }
                             }
+                            #if os(tvOS)
+                            // Keep the lifted first/last card and its ring inside
+                            // the horizontal viewport, including large posters.
+                            .padding(24)
+                            #else
                             .padding(.vertical, 12)
+                            #endif
                         }
                         .accessibilityIdentifier("library-row-\(group.id)")
                         .onChange(of: remoteNavigation.focusRequestRevision) { _, _ in
@@ -469,6 +499,10 @@ private struct LibraryGroupView: View {
                 #endif
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    #if os(tvOS)
+                    Text(title).font(.title2.bold()).foregroundStyle(Palette.onBg)
+                        .accessibilityAddTraits(.isHeader)
+                    #endif
                     Text("\(items.count)\(state.complete ? " items" : " loaded · library still loading")")
                         .foregroundColor(Palette.muted)
                     if let error = state.error {
@@ -508,7 +542,11 @@ private struct LibraryGroupView: View {
         .background(Palette.bg.ignoresSafeArea())
         .remoteScope(remoteScope)
         .remoteRestricted(!ownsScope)
+        #if os(tvOS)
+        .navigationTitle("")
+        #else
         .navigationTitle(title)
+        #endif
         .onAppear {
             ownsScope = navigation.attachDestination(token: destinationToken, parent: parentScope, scope: remoteScope, opener: "group:" + groupID, dismiss: dismiss)
             updateOrder()

@@ -51,6 +51,30 @@ final class TVNavigationTests: TVNavigationTestCase {
 
     func testGridToolsAndJump416() throws { try toolsJourney(itemCount: 416, presentation: "grid") }
     func testGridToolsAndJump5000() throws { try toolsJourney(itemCount: 5000, presentation: "grid") }
+    func testRowsViewAllOpensGroupAndBackRestoresHeader() throws {
+        let server = try TVNavigationServer(itemCount: 416)
+        let origin = try server.start()
+        defer { server.stop() }
+        let app = openLibrary(origin: origin, presentation: "rows")
+        defer { app.terminate() }
+        let first = app.buttons["item:1"]
+        reachForSetup(first, in: app, limit: 6)
+        assertFocus(first, in: app, context: "Rows first title before group header")
+        remote.press(.up)
+        let viewAll = app.buttons["View all A items"]
+        assertFocus(viewAll, in: app, context: "Up from first title reaches readable View all")
+        remote.press(.select)
+        let groupTools = app.buttons["group:tools"]
+        reachForSetup(groupTools, in: app, limit: 4)
+        assertFocus(groupTools, in: app, context: "Expanded group has reachable tools")
+        remote.press(.menu)
+        assertFocus(viewAll, in: app, context: "Expanded group Back restores View all")
+        let viewport = app.descendants(matching: .any)
+            .matching(identifier: "library-results").firstMatch.frame
+        XCTAssertLessThanOrEqual(viewAll.frame.maxX, viewport.maxX - 8,
+                                 "The focused group action must retain clearance inside its viewport")
+    }
+
     func testRowsToolsAndJump416() throws { try toolsJourney(itemCount: 416, presentation: "rows") }
     func testRowsToolsAndJump5000() throws { try toolsJourney(itemCount: 5000, presentation: "rows") }
 

@@ -22,6 +22,7 @@ REQUIRED = [
     "TVNavigationTests/testGridToolsAndJump5000",
     "TVNavigationTests/testRowsToolsAndJump416",
     "TVNavigationTests/testRowsToolsAndJump5000",
+    "TVNavigationTests/testRowsViewAllOpensGroupAndBackRestoresHeader",
     "TVNavigationTests/testSortFilterAndGroupingOwnFocusAndRestoreOpeners",
     "TVNavigationTests/testEveryEnabledRootTabReceivesNativeFocus",
     "TVNavigationTests/testEmptyLibraryKeepsToolsAndBackReachable",

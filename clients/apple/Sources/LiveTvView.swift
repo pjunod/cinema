@@ -2773,6 +2773,10 @@ struct LiveTvView: View {
                 .focusEffectDisabled()
                 #endif
         }
+        #if os(tvOS)
+        // The focus lift and outline belong inside the scrolling viewport.
+        .padding(18)
+        #endif
         }
         #if os(tvOS)
         .buttonStyle(TVReadableButtonStyle(prominent: false))

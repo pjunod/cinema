@@ -21,7 +21,9 @@ struct SearchView: View {
         ScrollViewReader { proxy in
             VStack(alignment: .leading, spacing: 18) {
                 #if os(tvOS)
-                TextField("Search movies, shows, and episodes", text: $query)
+                TextField("Search movies, shows, and episodes", text: $query,
+                          prompt: Text("Search movies, shows, and episodes").foregroundColor(Palette.muted))
+                    .foregroundStyle(Palette.onBg)
                     .padding(.horizontal, screenHPad)
                     .padding(.top, 8)
                     .remoteControl("search:field", label: "Search") {}
