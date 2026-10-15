@@ -260,8 +260,10 @@ jobs:
     # The full unit and SQLite suite continues below; contributors may merge
     # after this compile gate and policy pass, then watch that suite on main.
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    timeout-minutes: 10
+    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: "1"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -921,8 +923,10 @@ jobs:
     name: replicated WAL recovery contracts
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "1"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
