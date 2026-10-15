@@ -557,12 +557,14 @@ final class PlaybackControlSessionTests: XCTestCase {
         // consumed before the readiness edge is introduced.
         _ = try await waitForExchange { $0.sequence == 2 }
         controlAnswer.setReadiness(unavailable ? "unavailable" : "ready")
+        let readinessFloor = controlExchanges.all().map(\.sequence).max() ?? 0
         session.playerChanged()
-        // A later request proves the reporter finished processing response3,
-        // whose answer was captured after readiness changed. Hold every queued
-        // callback, including processing-status notifications, across the
-        // lifecycle change; the subtitle callback need not be the first one.
-        _ = try await waitForExchange { $0.sequence >= 4 }
+        // The request after this floor captures the new readiness. One more
+        // request proves its response was processed, even if MainActor was
+        // delayed while the reporter advanced. Hold every queued callback,
+        // including processing-status notifications, across the lifecycle
+        // change; the subtitle callback need not be the first one.
+        _ = try await waitForExchange { $0.sequence >= readinessFloor + 2 }
         var queued: [@MainActor @Sendable () -> Void] = []
         while let callback = callbacks.take() { queued.append(callback) }
         XCTAssertFalse(queued.isEmpty, "the real session must schedule callbacks")
