@@ -206,6 +206,15 @@ def main(argv: list[str]) -> int:
             def stop():
                 page.locator("#live-tv-host").get_by_label("Stop Live TV", exact=True).click()
 
+            def released_with_error():
+                # Terminal failures retain the host for their visible error and
+                # retry controls, after the picture and capability are released.
+                page.locator("#live-tv-status[data-state='error']").wait_for(state="visible")
+                page.wait_for_function("""() => {
+                    const video = document.querySelector('#live-tv-video');
+                    return video.paused && !video.getAttribute('src');
+                }""")
+
             page.goto(host.base_url + "/#/live-tv")
             # A protected channel is drawn, dimmed and unclickable — never
             # hidden, and never quietly playable.
@@ -318,12 +327,12 @@ def main(argv: list[str]) -> int:
                 watch()
                 sessions[active()[0]]["failure"] = failure
                 until(lambda: not active(), "active " + failure + " did not release", timeout=25)
-                page.wait_for_function("document.querySelector('#live-tv-host').hidden")
+                released_with_error()
 
             watch()
             page.get_by_label("Pause", exact=True).click()
             until(lambda: not active(), "paused tuner was renewed instead of released", timeout=42)
-            page.wait_for_function("document.querySelector('#live-tv-host').hidden")
+            released_with_error()
 
             watch()
             # Exercise the shipped visibility handler. Headless Chromium does
