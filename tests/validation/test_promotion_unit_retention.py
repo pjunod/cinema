@@ -532,7 +532,7 @@ class RetainedUnitCase(unittest.TestCase):
         policy['log'] = log(raw)['sha256']
         sources = {
             '.github/workflows/ci.yml': b'env:\n  TEST: true\nconcurrency:\n  group: test\n'
-                b'  android_device:\n    name: test\n',
+                b'jobs:\n  android_device:\n    name: test\n',
             'Makefile': b'ANDROID_IMAGE ?= fixture\n# CI pre-pulls the image fixture\n'
                 b'android-instrumentation-run:\n\tfixture\n.PHONY: android-instrumentation\n',
         }
@@ -542,6 +542,8 @@ class RetainedUnitCase(unittest.TestCase):
         proof = fixture()
         suite = proof['lanes']['rust'][0]
         proof['lanes'] = {'android_device': [suite]}
+        proof.update(version=2, source_commit='d' * 40, command_units={
+            'version': 1, 'source_commit': 'd' * 40, 'logs': {}, 'commands': []})
         suite.update(name='device', ids=[policy['id']], inventory=log(policy['id'] + '\n'),
                      environment=copy.deepcopy(policy['environment']))
         record = suite['records'][0]
@@ -551,9 +553,11 @@ class RetainedUnitCase(unittest.TestCase):
                     'command': policy['command']})
         def validate_command(value, reader=read):
             with patch.object(retention, 'ANDROID_DEVICE_5172', policy), \
-                    patch.object(retention, 'android_device_tree', return_value='a' * 40):
-                return retention.validate(value, 'd' * 40, source=reader,
-                                          differences=lambda before, after: set())
+                    patch.object(retention, 'android_device_tree', return_value='a' * 40), \
+                    patch('validation.qualification_unit_continuation.validate', return_value={}):
+                result = retention.validate(value, 'd' * 40, source=reader,
+                                            differences=lambda before, after: set())
+                return result[0] if value['version'] == 2 else result
         result = validate_command(proof)['android_device']
         self.assertEqual((result['passed'], result['commands_passed'], result['reported_tests']),
                          (1, 1, 78))
@@ -594,6 +598,21 @@ class RetainedUnitCase(unittest.TestCase):
                                                                  'd' * 40, read)
                 else:
                     validate_command(proof, lambda c, p: b'changed' if p == changed_path else read(c, p))
+        old_version = copy.deepcopy(proof)
+        old_version.update(version=1)
+        del old_version['command_units']
+        with self.assertRaises(receipts.ReceiptError):
+            validate_command(old_version)
+        for path, suffix in (
+            ('Makefile', b'\noverride ANDROID_IMAGE := changed\n'),
+            ('Makefile', b'\nandroid-instrumentation-run:\n\tother-runner\n'),
+            ('.github/workflows/ci.yml', b'\nenv:\n  ANDROID_IMAGE: changed\n'),
+            ('.github/workflows/ci.yml', b'\ndefaults:\n  run:\n    shell: other\n'),
+            ('.github/workflows/ci.yml', b"\n'env':\n  ANDROID_IMAGE: changed\n"),
+            ('.github/workflows/ci.yml', b'\ndefaults :\n  run:\n    shell: other\n'),
+        ):
+            with self.subTest(shadow=path, suffix=suffix), self.assertRaises(receipts.ReceiptError):
+                validate_command(proof, lambda c, p: read(c, p) + suffix if p == path else read(c, p))
         job = {'name': 'Android instrumented UI tests', 'status': 'success', 'attempt': 1}
         retention.authenticate_android_device_command(5172, 51191, job)
         for run_id, job_id, altered in (

@@ -55,7 +55,10 @@ ANDROID_DEVICE_5172 = {'source': '050b6ececbc9202492eb7e0675dc994f9f65686b',
  'command': 'PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make '
             'android-instrumentation-run',
  'id': 'make android-instrumentation-run',
- 'inputs': {'clients/android': '9693191eb6d9ff2ea2ef76223a949c432ffcc38f',
+ 'inputs': {'workflow-header': '6a8689fe27aa6629071f9a14353501ab5f6e1212363594c91261e7217b47bcf7',
+            'workflow-root-lines': '6246338bf154754f6fb8c9701fa87d53ab09ffdaee1823827c3a4dd3407839c7',
+            'make-complete': 'f6580041d6fefc3a6381968d4075a8d0418b82dc55fa6f3235f7768a81ddcff9',
+            'clients/android': '9693191eb6d9ff2ea2ef76223a949c432ffcc38f',
             '.github/actions/android-emulator-ready': '40a6f5c3a3a2d2ac57336fbe91bd32d05ad6ac1c',
             'crates/plurxd/src/web/offline-reader.html': '4b1caecca544e437e0a3ae92b3fd030ce8b73d7c433bd5864eee8a31dab1fc35',
             'crates/plurxd/src/web/offline-reader.js': '88c080b27b7470da9bd37598d64d868355bfa5a84ac15f6949561e5d095bf735',
@@ -65,7 +68,8 @@ ANDROID_DEVICE_5172 = {'source': '050b6ececbc9202492eb7e0675dc994f9f65686b',
             'make-android': 'a54c7c30021d36ebb437edb54a09cabc3c72cfd417285d814c6dc2916c58e20d',
             'make-variables': 'fb1f6e257a0a2b995c756a5d77e242faa38592be9164e21eaf1bb755a574196b'},
  'environment': {'platform': 'linux-x64',
-                 'toolchain': {'declared_sdk': 36,
+                 'toolchain': {'declared_compile_sdk': 37,
+                               'declared_target_sdk': 37,
                                'compiler_version': None,
                                'java_version': None,
                                'image_sha256': None,
@@ -109,8 +113,17 @@ def android_device_inputs(source, commit):
         matches = list(re.finditer(pattern, text, re.M | re.S))
         r.require(len(matches) == 1, 'Ambiguous Android command recipe')
         values[name] = digest(matches[0][0].encode())
+    r.require(workflow.count('\njobs:\n') == 1, 'Ambiguous workflow jobs root')
+    # Pin the complete header and every root-level non-comment line. Quoted
+    # or whitespace-spelled duplicate YAML keys cannot shadow the projection.
+    values['workflow-header'] = digest((workflow.split('\njobs:\n', 1)[0] + '\n').encode())
+    values['workflow-root-lines'] = digest(('\n'.join(re.findall(
+        r'^[^\s#].*$', workflow, re.M)) + '\n').encode())
     values['make-variables'] = digest(('\n'.join(re.findall(
         r'^ANDROID_\w+ \?=.*$', makefile, re.M)) + '\n').encode())
+    # The full finite Make identity refuses shadow assignments and repeated
+    # targets outside the Android section, including appended overrides.
+    values['make-complete'] = digest(makefile.encode())
     return values
 
 
@@ -553,6 +566,7 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                     from validation import retained_web_preflight as web
                     web.record_contract(lane, suite, record, frozen, raw_log, git_bytes, digest)
                 if record['format'] == 'instrumentation-command-5172':
+                    r.require(document['version'] == 2, 'Android whole-command adoption requires exact candidate')
                     android_device_record_contract(lane, suite, record, frozen, source)
                 actual_outcomes = log_outcomes(raw_log, record['format'])
                 extras = set(outcomes) - set(ids)
