@@ -3831,13 +3831,7 @@ struct SharedPlayerSessionView: View {
                           pgsOverlay: nil, allowsPictureInPicture: false).ignoresSafeArea()
             #if os(tvOS)
             if !sharedChromeVisible && controller.failure == nil {
-                Color.clear.contentShape(Rectangle()).ignoresSafeArea()
-                    .focusable()
-                    .focusEffectDisabled()
-                    .focused($sharedControl, equals: "reveal")
-                    .accessibilityLabel("Show shared playback controls")
-                    .accessibilityIdentifier("shared-player-reveal")
-                    .playerRemoteAdapter(.surface, state: sharedInputState, apply: applySharedInput)
+                PlayerRevealSurface(state: sharedInputState, apply: applySharedInput, identifier: "shared-player-reveal")
             }
             #endif
             if sharedChromeVisible || controller.failure != nil || (requiresExplicitPlay && controller.plan == nil) {
@@ -3926,9 +3920,11 @@ struct SharedPlayerControls: View {
     @Binding var showingSharedMore: Bool
     var onMenuChange: (Bool) -> Void = { _ in }
     var onInteraction: () -> Void = {}
-    var restoreFocus = "play"
+    @State var restoreFocus = "play"
     var onFocus: (String) -> Void = { _ in }
     @FocusState private var focusedAction: String?
+    @FocusState private var playFocused: Bool
+    @State private var entryFocusSettled = false
     @EnvironmentObject private var navigation: RemoteNavigationCoordinator
     @Environment(\.remoteNavigationScope) private var remoteScope
     @State private var choiceTitle: String?
@@ -3937,10 +3933,20 @@ struct SharedPlayerControls: View {
         HStack(spacing: 16) {
             Button { seek(by: -10_000) } label: { Image(systemName: "gobackward.10") }
                 .accessibilityLabel("Back 10 seconds").accessibilityIdentifier("shared-seek-back").focused($focusedAction, equals: "back")
+                .remoteNativeFocusObservation { actual in
+                    guard actual, !entryFocusSettled, restoreFocus == "play" else { return }
+                    // UIKit has now admitted the newly inserted transport row.
+                    // Reissue an entry request dropped during presentation.
+                    playFocused = false
+                    Task { @MainActor in await Task.yield(); playFocused = true }
+                }
             Button {
                 navigation.performPhysicalAction { Task { await controller.control(controller.playing ? .pause : .play) } }
             } label: { Image(systemName: controller.playing ? "pause.fill" : "play.fill") }
-                .accessibilityLabel(controller.playing ? "Pause" : "Play").accessibilityIdentifier("shared-play-pause").focused($focusedAction, equals: "play")
+                .accessibilityLabel(controller.playing ? "Pause" : "Play").accessibilityIdentifier("shared-play-pause").focused($playFocused)
+                .remoteNativeFocusObservation { actual in
+                    if actual { entryFocusSettled = true; onFocus("play") }
+                }
             Button { seek(by: 10_000) } label: { Image(systemName: "goforward.10") }
                 .accessibilityLabel("Forward 10 seconds").accessibilityIdentifier("shared-seek-forward").focused($focusedAction, equals: "forward")
             #if os(tvOS)
@@ -4000,7 +4006,10 @@ struct SharedPlayerControls: View {
                 .focused($focusedAction, equals: "more")
                 .accessibilityIdentifier("shared-more")
         }
-        .sheet(isPresented: $showingSharedMore, onDismiss: { focusedAction = "more" }) {
+        .sheet(isPresented: $showingSharedMore, onDismiss: {
+            focusedAction = nil
+            Task { @MainActor in await Task.yield(); focusedAction = "more" }
+        }) {
             VStack(spacing: 24) {
                 Text("Shared playback").font(.title)
                 if let reference = plan.subject.context.reference {
@@ -4016,7 +4025,11 @@ struct SharedPlayerControls: View {
         }
         // A preparation waiting for B or priming its successor yields to a
         // viewer action; the switch itself and its settlement do not.
+        // Keep native focus during a serialized TV operation. The controller
+        // rejects competing transport changes; More and Back remain usable.
+        #if os(iOS)
         .disabled(controller.busy && !controller.preparing)
+        #endif
         #if os(tvOS)
         .remoteChoicePresentation(isPresented: Binding(get: { choiceTitle != nil }, set: { if !$0 { choiceTitle = nil; ownedChoices = [] } }), scope: remoteScope + ":physical-choices") {
             if let choiceTitle {
@@ -4029,7 +4042,7 @@ struct SharedPlayerControls: View {
         .onAppear { updateChoiceOrder() }
         .onChange(of: choiceOrder) { _, _ in
             updateChoiceOrder()
-            if let action = focusedAction, !availableFocusActions.contains(action) { focusedAction = "play" }
+            if let action = focusedAction, !availableFocusActions.contains(action) { focusedAction = nil; playFocused = true }
         }
         .onChange(of: choiceTitle) { _, value in onMenuChange(value != nil || showingSharedMore) }
         .onChange(of: showingSharedMore) { _, value in onMenuChange(value || choiceTitle != nil) }
@@ -4037,10 +4050,17 @@ struct SharedPlayerControls: View {
             if let key { onFocus(key) }
             onInteraction()
         }
-        .task {
-            await Task.yield()
-            focusedAction = availableFocusActions.contains(restoreFocus) ? restoreFocus : "play"
-        }
+        .defaultFocus($playFocused, restoreFocus == "play", priority: .userInitiated)
+        .onChange(of: playFocused) { _, value in if value { onFocus("play"); onInteraction() } }
+        .background(RemoteChoiceFocusReadiness {
+            focusedAction = nil
+            playFocused = false
+            Task { @MainActor in
+                await Task.yield()
+                if restoreFocus == "play" || !availableFocusActions.contains(restoreFocus) { playFocused = true }
+                else { focusedAction = restoreFocus }
+            }
+        }.allowsHitTesting(false))
         #endif
     }
     private var choiceOrder: [String] {

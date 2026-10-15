@@ -30,6 +30,7 @@ REQUIRED = [
     "TVPlaybackNavigationTests/testLibraryChannelLayoutHasNamedChoicesAndRestoresOpener",
     "TVPlaybackNavigationTests/testLibraryChannelFutureProgrammeExplainsAvailabilityAndCurrentSelectTunes",
     "TVPlaybackNavigationTests/testSharedLibraryRouteAndBackRestoreActualOpener",
+    "TVSharedPlaybackNavigationTests/testSharedPlaybackRevealQualityReportAndBackRetainSession",
     "TVPlaybackNavigationTests/testLocalMovieHiddenRevealReportAndBackRetainPlayback",
     "TVLiveNavigationTests/testLiveFullscreenRevealMoreReportAndBackRetainSession",
     "TVDvrNavigationTests/testRecordingDetailsRuleConfirmationAndManualChannelReturn",
@@ -38,6 +39,8 @@ REQUIRED = [
     "TVSecondaryNavigationTests/testEpisodeDetailsDoNotStartPlayback",
     "TVSecondaryNavigationTests/testSettingsPickerHelpReportAndExactReturn",
     "TVSecondaryNavigationTests/testSearchKeyboardBackRetrySameQueryAndResultReturn",
+    "TVHomeNavigationTests/testForegroundRefreshRetainsHomeContentAndRetryRecovers",
+    "TVConnectionNavigationTests/testSavedConnectionRecoveryReportAndRetryKeepCredentials",
 ]
 
 

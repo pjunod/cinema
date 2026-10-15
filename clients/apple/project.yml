@@ -260,6 +260,9 @@ schemes:
             - TVLiveNavigationTests
             - TVDvrNavigationTests
             - TVRemoteManagementNavigationTests
+            - TVSharedPlaybackNavigationTests
+            - TVHomeNavigationTests
+            - TVConnectionNavigationTests
 
   plurx-tvOS-physical:
     build:
@@ -276,6 +279,9 @@ schemes:
             - TVLiveNavigationTests
             - TVDvrNavigationTests
             - TVRemoteManagementNavigationTests
+            - TVSharedPlaybackNavigationTests
+            - TVHomeNavigationTests
+            - TVConnectionNavigationTests
 
   plurx-iOS-library-ui:
     build:

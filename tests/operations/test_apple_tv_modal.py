@@ -25,7 +25,7 @@ class AppleTVModalWiringTests(unittest.TestCase):
         self.assertNotIn("RemoteChoiceExitAdapter", panel)
 
     def test_choice_entry_waits_for_native_presentation_realization(self):
-        readiness = SOURCE.split("private struct RemoteChoiceFocusReadiness", 1)[1].split("struct RemoteOwnedPresentationProbe", 1)[0]
+        readiness = SOURCE.split("struct RemoteChoiceFocusReadiness", 1)[1].split("struct RemoteOwnedPresentationProbe", 1)[0]
         self.assertIn("override func viewDidAppear", readiness)
         self.assertIn("ready()", readiness)
         self.assertIn(".background(RemoteChoiceFocusReadiness(ready: nativePresentationReady)", SOURCE)

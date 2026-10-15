@@ -236,6 +236,8 @@ struct SharedLibraryDetailView: View {
     @State private var error: String?
     @State private var remoteLoadGeneration = UUID()
     @State private var loading = false
+    @State private var aboutPresented = false
+    private var detailScope: String { RemoteNavigationCoordinator.routeScope(.sharedItem(reference, library)) }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -246,7 +248,18 @@ struct SharedLibraryDetailView: View {
                     if detail.item.backdropUrl != nil { SharedArtworkImage(subject: detail.item.artworkSubject, backdrop: true).frame(maxWidth: 780).frame(height: 240) }
                     Text(detail.item.title).font(.title.bold())
                     Text([detail.item.kind, detail.item.year.map(String.init)].compactMap { $0 }.joined(separator: " · "))
-                    if let overview = detail.item.overview { Text(overview) }
+                    if let overview = detail.item.overview {
+                        #if os(tvOS)
+                        Text(overview).lineLimit(3)
+                        if !overview.isEmpty {
+                            Button("About", action: openAbout)
+                                .accessibilityIdentifier("shared:about")
+                                .remoteControl("shared:about", label: "About this Shared title", activate: openAbout)
+                        }
+                        #else
+                        Text(overview)
+                        #endif
+                    }
                     if !detail.item.genres.isEmpty { Text(detail.item.genres.joined(separator: " · ")).foregroundStyle(.secondary) }
                     if detail.deliveryStatus != "available" {
                         Label("Playback is unavailable for this Shared title.", systemImage: "info.circle")
@@ -290,19 +303,37 @@ struct SharedLibraryDetailView: View {
         .remoteScrollRealization()
         #if os(tvOS)
         .buttonStyle(TVReadableButtonStyle(prominent: false))
+        .remoteChoicePresentation(isPresented: $aboutPresented, scope: detailScope + ":about") {
+            TVReadableInformation(scope: detailScope + ":about", title: detail?.item.title ?? "About", text: detail?.item.overview ?? "")
+        }
         #endif
         .onAppear { updateRemoteDetailOrder() }
         .onChange(of: detail?.item.hasChildren) { _, _ in updateRemoteDetailOrder() }
+        .onChange(of: detail?.item.overview) { _, _ in updateRemoteDetailOrder() }
         .onChange(of: detail?.files.map(\.id)) { _, _ in navigation.contextChanged(); updateRemoteDetailOrder() }
         .navigationTitle(detail?.item.title ?? "Shared title")
+        #if os(tvOS)
+        .fullScreenCover(isPresented: Binding(get: { playbackPlan != nil }, set: { if !$0 { playbackPlan = nil } })) {
+            if let playbackPlan { SharedPlayerView(plan: playbackPlan, requiresExplicitPlay: remotePreplay).environmentObject(model) }
+        }
+        #else
         .sheet(isPresented: Binding(get: { playbackPlan != nil }, set: { if !$0 { playbackPlan = nil } })) {
             if let playbackPlan { SharedPlayerView(plan: playbackPlan, requiresExplicitPlay: remotePreplay).environmentObject(model) }
         }
+        #endif
         .task(id: reference) { await load() }
         .onDisappear { remoteLoadGeneration = UUID(); remoteViewLifetime = UUID(); preparationTask?.cancel(); preparationTask = nil }
     }
     private func updateRemoteDetailOrder() {
-        navigation.setOrder(scope: RemoteNavigationCoordinator.routeScope(.sharedItem(reference, library)), keys: (detail?.item.hasChildren == true ? ["shared:children"] : []) + (detail?.deliveryStatus == "available" ? (detail?.files ?? []).filter { $0.fileBase != nil }.map { "shared:preplay:" + $0.id } : []) + ["shared:detail-refresh"], columns: 1)
+        var informationKeys: [String] = []
+        #if os(tvOS)
+        if detail?.item.overview?.isEmpty == false { informationKeys = ["shared:about"] }
+        #endif
+        navigation.setOrder(scope: detailScope, keys: informationKeys + (detail?.item.hasChildren == true ? ["shared:children"] : []) + (detail?.deliveryStatus == "available" ? (detail?.files ?? []).filter { $0.fileBase != nil }.map { "shared:preplay:" + $0.id } : []) + ["shared:detail-refresh"], columns: 1)
+    }
+    private func openAbout() {
+        navigation.openModal(scope: detailScope + ":about", opener: "shared:about") { aboutPresented = false }
+        aboutPresented = true
     }
     @MainActor
     private func prepareRemote(_ file: SharedLibraryFile) {

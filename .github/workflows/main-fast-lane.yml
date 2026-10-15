@@ -315,7 +315,7 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true'
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
-    timeout-minutes: 40
+    timeout-minutes: 60
     concurrency:
       group: plurx-apple-silicon-heavy
       cancel-in-progress: false

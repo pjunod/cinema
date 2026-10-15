@@ -332,10 +332,11 @@ struct DiagnosticReportButton: View {
     var category = "other"
     var title: String?
     var owner = "root"
+    var label = "Report a problem"
     @EnvironmentObject private var navigation: RemoteNavigationCoordinator
     @FocusState private var focused: Bool
     var body: some View {
-        Button("Report a problem") {
+        Button(label) {
             DiagnosticReportModel.shared.open(category: category, title: title, owner: owner)
             #if os(tvOS)
             let scope = navigation.activeScope

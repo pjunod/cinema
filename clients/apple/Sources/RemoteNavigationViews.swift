@@ -317,7 +317,7 @@ struct RemoteChoicePanel: View {
 
 /// Native appearance completion is the realization acknowledgment. SwiftUI's
 /// onAppear runs before a full-screen cover can receive focus.
-private struct RemoteChoiceFocusReadiness: UIViewControllerRepresentable {
+struct RemoteChoiceFocusReadiness: UIViewControllerRepresentable {
     let ready: () -> Void
     final class Controller: UIViewController {
         var ready: () -> Void = {}

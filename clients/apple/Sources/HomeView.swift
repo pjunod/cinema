@@ -296,16 +296,31 @@ extension View {
 
 private struct HomeRecoveryRow: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
     let error: String
     let scope: String
+    var returnFocus: String?
     var body: some View {
         HStack(spacing: 24) {
             Text("Couldn't refresh: \(error)").foregroundStyle(Palette.muted)
-            Button("Retry") { Task { await model.loadHome() } }
+                .lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+            Button("Retry") { navigation.performPhysicalAction(retry) }
                 .shelfActionButtonStyle()
                 .accessibilityIdentifier(scope + ":retry")
-                .remoteControl(scope + ":retry", label: "Retry") { Task { await model.loadHome() } }
-        }.padding(.horizontal, screenHPad)
+                .remoteControl(scope + ":retry", label: "Retry", observesPhysicalActivation: false, activate: retry)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, screenHPad)
+        #if os(tvOS)
+        .focusSection()
+        #endif
+    }
+    private func retry() {
+        // The recovery row is removed as soon as loading starts. Move its
+        // focus to surviving content before that removal, not after the
+        // network response when the viewer may have already moved elsewhere.
+        if let returnFocus { navigation.focusControl(scope: scope, key: returnFocus) }
+        Task { await model.loadHome() }
     }
 }
 
@@ -349,7 +364,7 @@ private struct HomeDashboard: View {
                 .padding(.horizontal, screenHPad)
                 #endif
                 if let error = model.homeError {
-                    HomeRecoveryRow(error: error, scope: "home")
+                    HomeRecoveryRow(error: error, scope: "home", returnFocus: remoteKeys.first { $0.hasPrefix("shelf:") } ?? "tab:libraries")
                 }
                 if model.homeLoading && featured == nil {
                     ProgressView().tint(Palette.accent)
@@ -512,7 +527,7 @@ private struct LibrariesDashboard: View {
                     SharedLibrariesEntry().padding(.horizontal, screenHPad).padding(.top, 12)
                 }
                 if let error = model.homeError {
-                    HomeRecoveryRow(error: error, scope: "libraries")
+                    HomeRecoveryRow(error: error, scope: "libraries", returnFocus: "libraries:grouping")
                 }
                 if model.homeLoading && model.libraries.isEmpty {
                     ProgressView()

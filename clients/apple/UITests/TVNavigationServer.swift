@@ -9,7 +9,13 @@ final class TVNavigationServer: @unchecked Sendable {
     private let itemCount: Int
     private let includeShows: Bool
     private let playableTitles: Bool
+    private let playableShared: Bool
     private var failSearch: Bool
+    private let homeTitles: Bool
+    private var failHome = false
+    private var failConnection = false
+    func setHomeFailure(_ value: Bool) { queue.sync { failHome = value } }
+    func setConnectionFailure(_ value: Bool) { queue.sync { failConnection = value } }
 
     func allowSearchSuccess() { queue.sync { failSearch = false } }
     private var requestCounts: [String: Int] = [:]
@@ -17,11 +23,13 @@ final class TVNavigationServer: @unchecked Sendable {
 
     func requestCount(_ path: String) -> Int { queue.sync { requestCounts[path, default: 0] } }
 
-    init(itemCount: Int = 416, includeShows: Bool = false, failSearch: Bool = false, playableTitles: Bool = false) throws {
+    init(itemCount: Int = 416, includeShows: Bool = false, failSearch: Bool = false, playableTitles: Bool = false, playableShared: Bool = false, homeTitles: Bool = false) throws {
         self.itemCount = itemCount
         self.includeShows = includeShows
         self.failSearch = failSearch
         self.playableTitles = playableTitles
+        self.playableShared = playableShared
+        self.homeTitles = homeTitles
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters)
@@ -75,7 +83,7 @@ final class TVNavigationServer: @unchecked Sendable {
             let plainPath = URLComponents(string: "http://fixture" + path)?.path ?? path
             self.requestCounts[plainPath, default: 0] += 1
             self.requestCounts[String(request.prefix(while: { $0 != " " })) + " " + plainPath, default: 0] += 1
-            if plainPath == "/fixture.mp4" {
+            if plainPath == "/fixture.mp4" || plainPath == sharedBase + "/direct" {
                 self.serveVideo(connection, headers: headers)
                 return
             }
@@ -91,7 +99,7 @@ final class TVNavigationServer: @unchecked Sendable {
                 return
             }
             let body = self.response(path, requestBody: requestBody)
-            let status = plainPath == "/api/v1/search" && self.failSearch ? "500 Internal Server Error" : "200 OK"
+            let status = (plainPath == "/api/v1/search" && self.failSearch) || (plainPath == "/api/v1/hubs" && self.failHome) || (plainPath == "/api/v1/me" && self.failConnection) ? "500 Internal Server Error" : "200 OK"
             var response = Data("HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
             response.append(body)
             connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
@@ -131,6 +139,17 @@ final class TVNavigationServer: @unchecked Sendable {
          "ordinal": ordinal, "starts_at_ms": start, "ends_at_ms": end, "item_id": 1, "file_id": 1, "title": title]
     }
 
+    private var sharedBase: String { "/api/v1/shared/imports/11111111-1111-4111-8111-111111111111/files/" + String(repeating: "L", count: 236) }
+    private var sharedReference: [String: Any] {
+        ["import_id": "11111111-1111-4111-8111-111111111111", "server_id": "22222222-2222-4222-8222-222222222222", "catalogue_epoch": "33333333-3333-4333-8333-333333333333", "library_id": "1", "item_id": "1"]
+    }
+    private var sharedBinding: [String: Any] {
+        ["item": sharedReference, "file_id": "5", "revision": String(repeating: "a", count: 64), "lifecycle_generation": 3]
+    }
+    private var sharedItem: [String: Any] {
+        ["source": "shared", "reference": sharedReference, "title": "Shared fixture title", "kind": "movie", "genres": [], "overview": (0..<4).map { "Shared synopsis part \($0 + 1). " + String(repeating: "A readable shared story. ", count: 8) + ($0 == 3 ? "FINAL SHARED SYNOPSIS LINE" : "") }.joined(separator: "\n\n")]
+    }
+
     private func response(_ target: String, requestBody: [String: Any]) -> Data {
         let url = URLComponents(string: "http://fixture" + target)!
         let path = url.path
@@ -144,6 +163,8 @@ final class TVNavigationServer: @unchecked Sendable {
         case "/api/v1/auth/login": value = ["token": "fixture-only", "user": user]
         case "/api/v1/me": value = user
         case "/api/v1/server": value = ["name": "Library fixture", "instance_id": "library-fixture"]
+        case "/api/v1/hubs":
+            value = ["recently_added": homeTitles ? [["id": 1, "library_id": 1, "kind": "movie", "title": "A Movie 0"]] : []]
         case "/api/v1/libraries":
             var libraries: [[String: Any]] = [["id": 1, "name": "Movies", "kind": "movie"]]
             if includeShows { libraries.append(["id": 2, "name": "Shows", "kind": "show"]) }
@@ -176,7 +197,19 @@ final class TVNavigationServer: @unchecked Sendable {
         case "/api/v1/shared/imports/11111111-1111-4111-8111-111111111111/libraries":
             value = ["import_id": "11111111-1111-4111-8111-111111111111", "server_id": "22222222-2222-4222-8222-222222222222", "catalogue_epoch": "33333333-3333-4333-8333-333333333333", "libraries": [["library_id": "1", "name": "Shared fixture movies", "kind": "movie", "anime": false]]]
         case "/api/v1/shared/imports/11111111-1111-4111-8111-111111111111/libraries/1/items":
-            value = ["items": [], "catalogue_revision": 1, "scope_generation": 1, "catalogue_generation": 1]
+            value = ["items": playableShared ? [sharedItem] : [], "catalogue_revision": 1, "scope_generation": 1, "catalogue_generation": 1]
+        case "/api/v1/shared/imports/11111111-1111-4111-8111-111111111111/items/1":
+            value = ["item": sharedItem, "delivery_status": "available", "lifecycle_generation": 3,
+                     "files": [["file_id": "5", "revision": String(repeating: "a", count: 64), "file_base": sharedBase,
+                                "reference": sharedBinding, "size": "100000", "duration_ms": 120000, "container": "mp4", "video_codec": "h264", "width": 640, "height": 360]]]
+        case sharedBase + "/decision":
+            value = ["file_id": "5", "reference": sharedBinding, "method": "direct_play", "play_url": sharedBase + "/direct",
+                     "delivery": ["mode": "direct", "url": sharedBase + "/direct"],
+                     "source": ["container": "mp4", "hdr": "sdr"], "audio": [], "subtitles": [], "delivered_dynamic_range": "sdr"]
+        case sharedBase + "/hls/sessions":
+            let media = Bundle(for: TVNavigationTests.self).url(forResource: "navigation", withExtension: "mp4")!
+            value = ["presentation": "direct", "session_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                     "url": sharedBase + "/direct?session=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "length": (try! Data(contentsOf: media)).count, "mime": "video/mp4"]
         case "/api/v1/dvr/status":
             value = ["enabled": true, "owner_node_id": "fixture", "root": "fixture", "floor_bytes": 0,
                      "slots": ["max": 2, "reserve": 0, "recording": 0], "pad_start_s": 0, "pad_end_s": 0, "reminder_lead_s": 30]

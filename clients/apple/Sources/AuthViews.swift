@@ -71,8 +71,13 @@ private struct AuthScaffold<Content: View>: View {
                     .foregroundColor(Palette.accent)
                     .multilineTextAlignment(.center)
             }
+            #if os(tvOS)
+            DiagnosticReportButton(category: "connection", label: "Help")
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+            #else
             DiagnosticReportButton(category: "connection")
                 .shelfActionButtonStyle()
+            #endif
         }
         .frame(maxWidth: 460)
         .padding(30)
@@ -330,9 +335,13 @@ struct LoginView: View {
             PrimaryButton(title: "Sign in", busy: model.busy, disabled: username.isEmpty || password.isEmpty) { signIn() }
 
             Button("Use a different server") { model.changeServer() }
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                #else
                 .font(.system(.caption, design: .monospaced))
                 .foregroundColor(Palette.muted)
                 .buttonStyle(.plain)
+                #endif
         }
         .onAppear { if username.isEmpty { username = model.username ?? "" } }
     }
