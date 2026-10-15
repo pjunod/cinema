@@ -1448,10 +1448,13 @@ that evidence, before the compiler/runtime fan-out. The original failure is
 preserved. Expected permission-lookup refusals use the existing explicit owner
 enrollment; they are not an evidence-rejection diagnosis.
 
-Only manual promotion with both a promotion PR and retained-evidence digest gets
-a ten-minute scope-job budget. Ordinary diff selection retains two minutes.
-Verifier commands, immutable source binding, writer authorization, API timeouts,
-request/byte/node limits and all runtime deadlines are unchanged. The existing
-aggregate-CI contract checks that conditional budget; only its changed body is
-owed on the integrated effort. Current exact-tree qualification, normal fleet
-deployment and physical HDR acceptance remain open.
+The scope and final-receipt jobs each get a ten-minute orchestration budget.
+The final receipt repeats the same complete live authentication, so fixing only
+scope would defer the identical deadline failure until after the runtime sweep.
+Both use literal values to avoid relying on Forgejo's expression-level fallback
+semantics. Verifier commands, immutable source binding,
+writer authorization, API timeouts, request/byte/node limits and all compiler
+and runtime deadlines are unchanged. The existing aggregate-CI contract checks
+both metadata-job budgets; only its changed body is owed on the integrated
+effort. Current exact-tree qualification, normal fleet deployment and physical
+HDR acceptance remain open.
