@@ -6444,3 +6444,19 @@ source = "clients/apple/Sources/DiagnosticReportView.swift"
 source_anchor = 'Section("Recent safe events")'
 test = "clients/apple/UITests/DiagnosticReportingTests.swift"
 test_anchor = "testTVZIPDownloadsSelectedIncidentAndCloseRevokesNewLink"
+
+[[fixes]]
+id = "apple.tv-native-choice-modal-owner"
+commits = ["d09b3ada6f09a74d4133f34f80d79f7985f24113"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func enterChoicePanel(scope: String, keys: [String], selected: String?)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testChoiceEntrySelectsCurrentValueAndNativeDismissalRestoresOpener()"
+
+[[fixes]]
+id = "apple.tv-choice-return-target-and-host-back"
+commits = ["b7f15a0af070eb187b9f4cfbfb57e75eef72ad0b"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func closeModal(returnFocus override: String? = nil)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testChoiceReturnOverrideRequiresParentOrderAndNativeAcknowledgment()"
