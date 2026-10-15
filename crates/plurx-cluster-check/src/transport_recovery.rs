@@ -3644,9 +3644,7 @@ pub(super) fn process_resources(_client: &Client) -> Result<ProcessResourceCount
 }
 
 fn snapshot_file(root: &Path, node_id: u64) -> Result<SnapshotFileEvidence> {
-    let snapshots = root
-        .join(format!("node-{node_id}"))
-        .join("state_machine/snapshots");
+    let snapshots = super::node_hiqlite_dir(root, node_id).join("state_machine/snapshots");
     let snapshot_id = std::fs::read_to_string(snapshots.join("current"))?
         .trim()
         .to_owned();
@@ -3666,9 +3664,7 @@ fn snapshot_file_by_id(
     {
         bail!("invalid current snapshot pointer {snapshot_id:?}");
     }
-    let snapshots = root
-        .join(format!("node-{node_id}"))
-        .join("state_machine/snapshots");
+    let snapshots = super::node_hiqlite_dir(root, node_id).join("state_machine/snapshots");
     let path = snapshots.join(snapshot_id);
     let mut file = File::open(&path).with_context(|| format!("open snapshot {path:?}"))?;
     let bytes = file.metadata()?.len();
@@ -5333,10 +5329,9 @@ mod tests {
     #[tokio::test]
     async fn installed_snapshot_evidence_survives_rotation_after_threshold_writes() {
         let root = tempfile::tempdir().expect("snapshot rotation fixture root");
-        let source_snapshots = root.path().join("node-1").join("state_machine/snapshots");
-        let target_snapshots = root
-            .path()
-            .join(format!("node-{TARGET_NODE}"))
+        let source_snapshots =
+            super::super::node_hiqlite_dir(root.path(), 1).join("state_machine/snapshots");
+        let target_snapshots = super::super::node_hiqlite_dir(root.path(), TARGET_NODE)
             .join("state_machine/snapshots");
         std::fs::create_dir_all(&source_snapshots).expect("create source snapshot fixture");
         std::fs::create_dir_all(&target_snapshots).expect("create target snapshot fixture");

@@ -297,7 +297,7 @@ def main(argv: list[str]) -> int:
             rows.first.wait_for()
             mode["next"] = "capacity"
             rows.nth(0).click()
-            page.get_by_text("All Live TV slots are busy.", exact=False).wait_for()
+            page.locator("#live-tv-message").filter(has_text="All Live TV slots are busy.").wait_for()
             mode["next"] = "late"
             rows.nth(0).click()
             until(lambda: len(pending) == 1, "late start never reached the tuner")
@@ -360,7 +360,7 @@ def main(argv: list[str]) -> int:
             page.goto(host.base_url + "/#/live-tv")
             assert page.evaluate("Object.keys(localStorage).some(key => key.startsWith('plurx_live_tv_pending_v1:'))")
             rows.nth(0).click()
-            page.get_by_text("90 seconds", exact=False).wait_for()
+            page.locator("#live-tv-message").filter(has_text="90 seconds").wait_for()
             # Nothing new was allocated: the replacement document adopted the
             # outstanding capability rather than opening an eleventh tuner.
             assert active() == [orphan] and len(sessions) == 10, (active(), len(sessions))

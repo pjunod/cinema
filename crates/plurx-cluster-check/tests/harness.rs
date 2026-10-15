@@ -77,13 +77,27 @@ async fn a_one_voter_bootstrap_and_reopen_retain_local_membership_admission() {
                 .expect("real membership setup"),
             "membership manager must retain the startup admission",
         );
-        assert!(matches!(
+        require_ok(
             cluster
-                .request(1, Request::MembershipStatus)
+                .request(1, Request::ForceHeartbeat)
                 .await
-                .expect("real membership status"),
-            Response::MembershipStatus { .. }
-        ));
+                .expect("target heartbeat"),
+            "publish actual voter storage readiness",
+        );
+        let Response::MembershipStatus { status } = cluster
+            .request(1, Request::MembershipStatus)
+            .await
+            .expect("real membership status")
+        else {
+            panic!("membership status must expose the actual local voter");
+        };
+        assert!(
+            status
+                .nodes
+                .iter()
+                .any(|node| node.raft_id == 1 && node.voter_storage_ready),
+            "the production snapshot preflight must inspect the real harness database: {status:?}"
+        );
     }
     cluster
         .shutdown_all()
@@ -1077,9 +1091,9 @@ fn a_voter_config_lands_in_its_own_data_directory() {
         config.nodes[1].addr_raft, launch.nodes[1].raft,
         "peer addresses must come from the launch payload"
     );
-    assert_eq!(config.filename_db, "auth.db");
+    assert_eq!(config.filename_db, "plurx.db");
 
-    let data_dir = root.path().join("node-2");
+    let data_dir = root.path().join("node-2").join("hiqlite");
     assert!(
         data_dir.is_dir(),
         "the voter's data directory must exist after configuration"
