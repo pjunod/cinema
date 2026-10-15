@@ -55,7 +55,8 @@ ANDROID_DEVICE_5172 = {'source': '050b6ececbc9202492eb7e0675dc994f9f65686b',
  'command': 'PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make '
             'android-instrumentation-run',
  'id': 'make android-instrumentation-run',
- 'inputs': {'workflow-header': '6a8689fe27aa6629071f9a14353501ab5f6e1212363594c91261e7217b47bcf7',
+ 'inputs': {'workflow-job-headers': '635c161a430015f6d8e0808fe45dbec305c83ba809db918d81a1a11a13cdd91d',
+            'workflow-header': '6a8689fe27aa6629071f9a14353501ab5f6e1212363594c91261e7217b47bcf7',
             'workflow-root-lines': '6246338bf154754f6fb8c9701fa87d53ab09ffdaee1823827c3a4dd3407839c7',
             'make-complete': 'f6580041d6fefc3a6381968d4075a8d0418b82dc55fa6f3235f7768a81ddcff9',
             'clients/android': '9693191eb6d9ff2ea2ef76223a949c432ffcc38f',
@@ -119,6 +120,8 @@ def android_device_inputs(source, commit):
     values['workflow-header'] = digest((workflow.split('\njobs:\n', 1)[0] + '\n').encode())
     values['workflow-root-lines'] = digest(('\n'.join(re.findall(
         r'^[^\s#].*$', workflow, re.M)) + '\n').encode())
+    values['workflow-job-headers'] = digest(('\n'.join(re.findall(
+        r'^  [^\s#].*$', workflow.split('\njobs:\n', 1)[1], re.M)) + '\n').encode())
     values['make-variables'] = digest(('\n'.join(re.findall(
         r'^ANDROID_\w+ \?=.*$', makefile, re.M)) + '\n').encode())
     # The full finite Make identity refuses shadow assignments and repeated

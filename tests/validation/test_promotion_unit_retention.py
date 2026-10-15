@@ -610,6 +610,7 @@ class RetainedUnitCase(unittest.TestCase):
             ('.github/workflows/ci.yml', b'\ndefaults:\n  run:\n    shell: other\n'),
             ('.github/workflows/ci.yml', b"\n'env':\n  ANDROID_IMAGE: changed\n"),
             ('.github/workflows/ci.yml', b'\ndefaults :\n  run:\n    shell: other\n'),
+            ('.github/workflows/ci.yml', b"\n  other:\n    name: other\n  'android_device':\n    name: shadow\n"),
         ):
             with self.subTest(shadow=path, suffix=suffix), self.assertRaises(receipts.ReceiptError):
                 validate_command(proof, lambda c, p: read(c, p) + suffix if p == path else read(c, p))
