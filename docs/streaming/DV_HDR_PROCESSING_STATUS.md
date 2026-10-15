@@ -1512,3 +1512,12 @@ sibling outcome, failed or ignored retirement, failed/ignored/earlier successor,
 duplicate original and source-invalidated successor. Existing retirement
 controls and applicable core/daemon passes remain retained. Current source
 qualification, deployment and physical HDR acceptance remain open.
+
+
+The first R43 task gate (5154) stops in history before any unit or compiler
+execution. Incoming PR #1104's immutable API merge keeps its raw corrective
+title without the PR number, although all three canonical regression fields
+are present. One existing verified-landing record now binds that exact commit,
+tree, ordered parents, title and PR. It waives no trailer or qualification
+requirement. The original failure remains preserved; the updated exact task
+head still needs its normal compile-only gate.
