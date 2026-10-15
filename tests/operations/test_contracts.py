@@ -1670,6 +1670,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("effort/*|integration/*-into-main)", workflow)
         self.assertIn("scope_event=effort_qualification", workflow)
         self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
+        scope = workflow_job_blocks(".github/workflows/ci.yml")["scope"]
+        self.assertIn(
+            "timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && "
+            "inputs.promotion_pr != '' && inputs.retained_units_sha256 != '' && 10 || 2 }}",
+            scope,
+        )
         fast_rust = workflow.split("  rust_compile:", 1)[1].split(
             "\n  check:", 1
         )[0]

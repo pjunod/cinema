@@ -1433,3 +1433,25 @@ now asserts that job-scoped budget. Its first changed-body execution belongs
 to the integrated effort. The obsolete follow-up gate was cancelled while
 its expensive compiler lanes were still blocked, before dispatching the new
 exact candidate.
+
+
+### R41 — Bound complete retained-evidence verification separately from diff selection
+
+The final `254f6d88a` source compiles and lists all current native memberships
+without unit execution. Its four source-invalidated Python controls pass once.
+Both bounded proof partitions pass the actual validator; all 297 predecessor
+nonstructural objects and 272 unique command authorities remain conserved.
+Authenticated live enrollment passes in 319.38 seconds on the controller.
+
+Promotion 5136 then exhausts the scope job's two-minute deadline while verifying
+that evidence, before the compiler/runtime fan-out. The original failure is
+preserved. Expected permission-lookup refusals use the existing explicit owner
+enrollment; they are not an evidence-rejection diagnosis.
+
+Only manual promotion with both a promotion PR and retained-evidence digest gets
+a ten-minute scope-job budget. Ordinary diff selection retains two minutes.
+Verifier commands, immutable source binding, writer authorization, API timeouts,
+request/byte/node limits and all runtime deadlines are unchanged. The existing
+aggregate-CI contract checks that conditional budget; only its changed body is
+owed on the integrated effort. Current exact-tree qualification, normal fleet
+deployment and physical HDR acceptance remain open.

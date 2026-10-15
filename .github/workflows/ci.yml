@@ -64,7 +64,9 @@ jobs:
   scope:
     name: validation scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 2
+    # Retained manual promotion authenticates the complete historical evidence.
+    # Its measured verifier exceeds two minutes; ordinary diff selection stays bounded.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.promotion_pr != '' && inputs.retained_units_sha256 != '' && 10 || 2 }}
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
       apple: ${{ steps.scope.outputs.apple }}
