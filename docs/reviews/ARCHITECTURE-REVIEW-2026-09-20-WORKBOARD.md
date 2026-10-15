@@ -60,10 +60,12 @@ remove PR600 batch notes copied onto rows they did not describe.
 exposed) owns only `live_tv/dvr.rs`'s buffered-input scheduling correction
 and its existing shared-transport documentation/index/backlog notes on
 `codex/live-tv-backlog-fairness-20261014`. The new real fan-out regression
-evicts a runnable reader on unchanged main `7669f32d4`; cooperative task
-budgeting fixes it without changing byte/slot limits, eviction reasons,
-metrics or encoder/default policy. Four focused IDs pass. Review and
-promotion remain pending. No runtime failure is yet bound to this mechanism;
+evicts a runnable reader on unchanged main `7669f32d4`. The sole review on
+2026-10-15 found a byte-bound variant still failing with chunk-only task
+budgeting; an additional 65-by-64KiB regression reproduced it. Explicit
+per-iteration yielding replaces that incomplete repair without changing
+byte/slot limits, eviction reasons, metrics or encoder/default policy.
+Promotion remains pending. No runtime failure is yet bound to this mechanism;
 no caption/device/capacity acceptance or whole-row closure follows.
 
 **K-03/K-10 and K-04 correction, 2026-10-13:** Paul withdrew the
