@@ -42,7 +42,13 @@ final class TVNavigationTests: TVNavigationTestCase {
             let item = app.buttons["item:\(index + 1)"]
             assertFocus(item, in: app, context: "Jump \(letter) focuses first item")
             let tools = ["view", "sort", "filter", "jump"].map { app.buttons["library:" + $0] }
-            for _ in 0..<6 where !tools.contains(where: { $0.hasFocus }) { remote.press(.left) }
+            var bookmarkID = item.identifier
+            for _ in 0..<6 {
+                if tools.contains(where: { $0.hasFocus }) { break }
+                let focusedItem = app.buttons.matching(NSPredicate(format: "hasFocus == true AND identifier BEGINSWITH %@", "item:")).firstMatch
+                if focusedItem.exists { bookmarkID = focusedItem.identifier }
+                remote.press(.left)
+            }
             guard let reachedTool = tools.first(where: { $0.hasFocus }) else {
                 XCTFail("Tools must receive native focus within six Left presses: \(app.debugDescription)")
                 return
@@ -60,8 +66,10 @@ final class TVNavigationTests: TVNavigationTestCase {
                 assertFocus(tool, in: app, context: "Up reaches " + tool.identifier)
             }
             remote.press(.right)
-            assertFocus(item, in: app, context: "Right restores \(letter) bookmark")
-            previousGroup = (letter, groupIndex)
+            let bookmark = app.buttons[bookmarkID]
+            assertFocus(bookmark, in: app, context: "Right restores exact content entry bookmark")
+            let bookmarkLetter = String(bookmark.label.prefix(1))
+            previousGroup = (bookmarkLetter, Int(bookmarkLetter.unicodeScalars.first!.value) - 65)
         }
     }
 
@@ -131,11 +139,11 @@ final class TVNavigationTests: TVNavigationTestCase {
         assertFocus(grid, in: app, context: "selected Grid on modal entry")
         // Every direction stays within the panel. Mere panel existence is not
         // acceptance: the historical failure moves onto a movie underneath it.
-        for direction: XCUIRemote.Button in [.down, .up, .left, .right] {
+        let moves: [(XCUIRemote.Button, String)] = [(.up, "Rows"), (.down, "Grid"), (.down, "Close"),
+                                                     (.up, "Grid"), (.left, "Grid"), (.right, "Grid")]
+        for (direction, label) in moves {
             remote.press(direction)
-            let choices = [app.buttons["Rows"], grid, app.buttons["Close"]]
-            XCTAssertTrue(choices.contains { $0.exists && $0.hasFocus },
-                          "Modal lost native focus: \(app.debugDescription)")
+            assertFocus(app.buttons[label], in: app, context: "Modal direction reaches " + label)
         }
         remote.press(.menu)
         assertFocus(view, in: app, context: "Back restores View")
@@ -144,6 +152,18 @@ final class TVNavigationTests: TVNavigationTestCase {
         assertFocus(grid, in: app, context: "reopened selection")
         remote.press(.menu)
         assertFocus(view, in: app, context: "second Back restores View")
+        remote.press(.select)
+        assertFocus(grid, in: app, context: "Grid before Rows selection")
+        remote.press(.up)
+        let rows = app.buttons["Rows"]
+        assertFocus(rows, in: app, context: "Rows before Select")
+        remote.press(.select)
+        assertFocus(view, in: app, context: "Select dismisses once and restores View")
+        remote.press(.select)
+        assertFocus(rows, in: app, context: "Selected Rows on next entry")
+        XCTAssertTrue(rows.isSelected, "Rows selection must persist after a single Select")
+        remote.press(.menu)
+        assertFocus(view, in: app, context: "Rows Back restores View")
         remote.press(.menu)
         XCTAssertTrue(app.tabBars.buttons["Libraries"].waitForExistence(timeout: 5),
                       "Back must return to Libraries, not leave the app")

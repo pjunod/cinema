@@ -9,8 +9,7 @@ class TVNavigationTestCase: XCTestCase {
     func openLibrary(origin: String, presentation: String = "grid") -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments += ["-plurx.origin", origin, "-plurx.libraryPresentation", presentation,
-                                "-plurx.libraryGrouping", "category"]
+        app.launchArguments += ["-plurx.origin", origin]
         app.launch()
         if app.textFields["Username"].waitForExistence(timeout: 8) {
             reachForSetup(app.textFields["Username"], in: app, limit: 4)
@@ -40,7 +39,31 @@ class TVNavigationTestCase: XCTestCase {
         remote.press(.select)
         XCTAssertTrue(app.staticTexts["library-loaded-summary"].waitForExistence(timeout: 15),
                       app.debugDescription)
+        establishPresentation(presentation, in: app)
         return app
+    }
+
+    /// Preferences must remain writable. NSArgumentDomain launch overrides
+    /// would defeat a later user choice, so setup uses the ordinary menu.
+    func establishPresentation(_ presentation: String, in app: XCUIApplication) {
+        let view = app.buttons["library:view"]
+        reachForSetup(view, in: app, limit: 8)
+        assertFocus(view, in: app, context: "Presentation setup opener")
+        remote.press(.select)
+        let desired = app.buttons["choice:" + presentation]
+        XCTAssertTrue(desired.waitForExistence(timeout: 5), app.debugDescription)
+        guard let selected = [app.buttons["choice:rows"], app.buttons["choice:grid"]].first(where: { $0.isSelected }) else {
+            XCTFail("View must expose its current selected value: \(app.debugDescription)")
+            return
+        }
+        assertFocus(selected, in: app, context: "Current presentation setup")
+        if selected.identifier == "choice:" + presentation { remote.press(.menu) }
+        else {
+            remote.press(presentation == "rows" ? .up : .down)
+            assertFocus(desired, in: app, context: "Desired presentation setup")
+            remote.press(.select)
+        }
+        assertFocus(view, in: app, context: "Presentation setup restores opener")
     }
 
     func dismissKeyboard(in app: XCUIApplication) {
