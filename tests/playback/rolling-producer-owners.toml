@@ -1,3 +1,13 @@
+# F6 controlled real-media qualification: +1 awaited fence-loop task;
+# +3 awaited sleeps (bounded segment polling, 2468ms loss, stable grace);
+# +2 bounded timeouts for segment observation and independent decode.
+# +2 Command/kill-on-drop/launch sites are the 30s realtime publisher and
+# deadline-bound independent decoder. The publisher is AttemptChild-owned,
+# retired and reaped by the actual manager after sustained authority loss;
+# the decoder output is awaited and kill-on-drop covers its deadline.
+# +1 lifecycle observation is try_wait, proving the negative control starts
+# with a live publisher rather than one that naturally reached its30s EOF.
+# All additions are test-only in transcode/tests/chunk_06.rs.
 # Subtitle batch census, base0c4ae0aa5 -> reviewed worker/owner delivery:
 # +2 publication_ready_at_ms fields belong only to cached_owner_delivery's
 # admitted activation fixtures; no new production publication fence is added.
@@ -443,7 +453,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # kill_on_drop and registered through output_job_owned. A panic is caught and
 # answers Inconclusive; the verdict and the flight-slot removal are one locked
 # step, so the task always ends its flight and settles every waiter.
-expected_occurrences = 115
+expected_occurrences = 116
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
@@ -580,7 +590,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # branch polls every 50 ms, inside a 30 s `tokio::time::timeout`, for the
 # session's first served snapshot before its playlist request. Test-only; it
 # owns no producer and decides nothing.
-expected_occurrences = 77
+expected_occurrences = 80
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -2944,7 +2954,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # closes the channel, then the test awaits the JoinHandle and checks every
 # byte received. The two burst regressions share this one spawn site. No
 # production task, timer, process or detached owner is introduced.
-expected_occurrences = 951
+expected_occurrences = 952
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3174,7 +3184,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # `true` child (`std::process::Command::spawn`) in process::priority::tests.
 # It is never registered by the launcher, the test reaps it with `wait()`
 # after the assertion, and production gains no launch.
-expected_occurrences = 69
+expected_occurrences = 70
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4571,7 +4581,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # leaves. Timeout fails that assertion; it is not a completion receipt.
 # The single adversarial review covered these paths and found no ownership
 # defect. This inventory records the two constructors already in that review.
-expected_occurrences = 1744
+expected_occurrences = 1749
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5015,7 +5025,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # production-copy fixture collection. Each runs finite owned media to
 # completion synchronously before its fixture is released. No task or timer
 # constructor is added; existing probe collector bounds remain unchanged.
-expected_occurrences = 267
+expected_occurrences = 269
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5640,7 +5650,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # F5: +2 `VodServe::status()` calls in the frozen-output reporting tests.
 # Both read the attached rendition in process; neither starts an OS child,
 # spawns a task, or acquires a producer lease.
-expected_occurrences = 755
+expected_occurrences = 757
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5919,7 +5929,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # #844: +1 false positive. end_for_owner awaits `cleanup.wait()` on the
 # existing TerminalCleanup; it is not a child-process wait.
 # P-02 zombie read-back (process/priority.rs): +1, test-only: the same child's reaping `wait()`.
-expected_occurrences = 326
+expected_occurrences = 327
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6127,7 +6137,7 @@ pattern = "kill_on_drop\\s*\\("
 # No repair delta; preserve current main's already reconciled fixture owners.
 # Acceptance root-cause batch: +2 unwind guards on the same two test-only
 # sleep producers; normal settlement is Step::Terminate's confirmed reap.
-expected_occurrences = 103
+expected_occurrences = 105
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

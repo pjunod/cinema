@@ -175,10 +175,9 @@ impl ServingState {
 /// (`http::stream`) resolve a loss through [`SessionGrace`] against this one
 /// bound. New admissions and commits never get it; they refuse a stale
 /// generation exactly as before.
-#[cfg(not(test))]
+// Real-media qualification exercises the same 2468 ms outage and five-second
+// boundary as production; an accelerated test-only budget would retire it.
 pub(crate) const SERVING_FENCE_SESSION_GRACE: Duration = Duration::from_secs(5);
-#[cfg(test)]
-pub(crate) const SERVING_FENCE_SESSION_GRACE: Duration = Duration::from_secs(2);
 
 /// How one loss of serving authority ended for an owner of running work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

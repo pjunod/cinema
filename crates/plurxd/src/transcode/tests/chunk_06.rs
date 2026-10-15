@@ -2423,6 +2423,118 @@
         .unwrap_or_else(|_| panic!("{why}"));
     }
 
+    fn f6_latest_completed_segment(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        std::fs::read_dir(dir).expect("owned media directory")
+            .map(|entry| entry.expect("owned segment entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "ts"))
+            .max()
+    }
+
+    async fn f6_next_decodable_segment(
+        dir: &std::path::Path,
+        after: Option<&std::path::Path>,
+    ) -> std::path::PathBuf {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(path) = f6_latest_completed_segment(dir) {
+                    if after.is_none_or(|previous| path.as_path() > previous) {
+                        return path;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("the actual publisher must advance within ten seconds")
+    }
+
+    async fn f6_decode_frame(executable: &std::path::Path, segment: &std::path::Path) -> String {
+        let mut decoder = tokio::process::Command::new(executable);
+        decoder.args(["-v", "error", "-nostdin", "-i"])
+            .arg(segment)
+            .args(["-map", "0:v:0", "-frames:v", "1", "-f", "framemd5", "-"])
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(10), decoder.output())
+            .await.expect("independent decoder deadline").expect("independent decoder spawn");
+        assert!(output.status.success(), "independent decode failed: {}", String::from_utf8_lossy(&output.stderr));
+        let text = String::from_utf8(output.stdout).expect("ASCII frame digest");
+        text.lines().find(|line| !line.starts_with('#') && line.contains(','))
+            .expect("one independently decoded frame")
+            .rsplit(',').next().expect("frame digest column").trim().to_owned()
+    }
+
+    /// F6's historical 2468 ms outage had zero viewers. Exercise the existing
+    /// grace with one real publisher and independently decode its before,
+    /// during and after media. This establishes media continuity at the owner;
+    /// it does not claim browser presentation or attribute the old quorum lag.
+    #[tokio::test]
+    async fn serving_fence_preserves_real_media_through_2468ms_and_reaps_after_grace() {
+        super::require_ffmpeg();
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+        use plurx_core::store::SqliteStore;
+        let root = crate::test_tempdir().expect("isolated real-media root");
+        let media = root.path().join("media");
+        std::fs::create_dir(&media).expect("owned publisher directory");
+        let executable = crate::ffmpeg::encoder_executable_path().expect("pinned FFmpeg");
+        let mut command = tokio::process::Command::new(&executable);
+        command.args(["-v", "error", "-nostdin", "-re", "-f", "lavfi", "-i",
+            "testsrc2=size=160x120:rate=10", "-t", "30", "-an", "-c:v", "libx264",
+            "-threads", "1", "-preset", "ultrafast", "-g", "10", "-bf", "0",
+            "-hls_time", "1", "-hls_list_size", "0", "-hls_flags", "temp_file+omit_endlist",
+            "-hls_segment_filename"])
+            .arg(media.join("segment%05d.ts"))
+            .arg(media.join("index.m3u8"))
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let child = command.spawn().expect("actual realtime media publisher");
+        let publisher_pid = child.id().expect("live publisher pid");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let fence = crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let manager = Arc::new(TranscodeManager::new(store, root.path().join("manager"),
+            EncoderCaps::default(), Pipeline::Cpu).with_serving_authority(fence.authority()));
+        let existing = watchdog_session(&media, Some(child), false);
+        manager.sessions.lock().await.insert("existing".to_owned(), Arc::clone(&existing));
+        let fence_loop = tokio::spawn(Arc::clone(&manager).serving_fence_loop(fence.subscribe()));
+        let before = f6_next_decodable_segment(&media, None).await;
+        let before_frame = f6_decode_frame(&executable, &before).await;
+        assert_eq!(manager.active_sessions().await, 1, "nonzero owned publisher session");
+        let admitted_generation = fence.authority().admit().expect("initial admission");
+
+        fence.validation_set_ready(false).await;
+        assert!(fence.authority().admit().is_none(), "new admission stays fenced");
+        let loss_boundary = f6_latest_completed_segment(&media).expect("completed media at loss");
+        let loss_started = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(2468)).await;
+        let during = f6_next_decodable_segment(&media, Some(&loss_boundary)).await;
+        let loss_elapsed = loss_started.elapsed();
+        assert!(loss_elapsed < super::manager_control::SERVING_FENCE_SESSION_GRACE,
+            "this positive control must recover inside the grace: {loss_elapsed:?}");
+        fence.validation_set_ready(true).await;
+        let recovery_boundary = f6_latest_completed_segment(&media).expect("completed media at recovery");
+        assert!(!fence.authority().is_current(admitted_generation), "stale generation remains fenced after recovery");
+        assert!(fence.authority().admit().is_some(), "fresh admission recovers");
+        assert!(!existing.control.is_retired());
+        assert_eq!(existing.child.lock().await.as_ref().and_then(|child| child.id()), Some(publisher_pid));
+        let during_frame = f6_decode_frame(&executable, &during).await;
+        let after = f6_next_decodable_segment(&media, Some(&recovery_boundary)).await;
+        let after_frame = f6_decode_frame(&executable, &after).await;
+        assert_ne!(before_frame, during_frame, "actual picture advances during the loss");
+        assert_ne!(during_frame, after_frame, "actual picture advances after recovery");
+        assert_eq!(manager.active_sessions().await, 1);
+        println!("F6 real publisher pid={publisher_pid} loss_ms={} before={} during={} after={} frame_md5={before_frame},{during_frame},{after_frame}",
+            loss_elapsed.as_millis(), before.display(), during.display(), after.display());
+
+        // A fresh sustained loss must still enforce the terminal boundary.
+        tokio::time::sleep(super::manager_control::SERVING_FENCE_SESSION_GRACE).await;
+        assert!(existing.child.lock().await.as_mut().expect("retained publisher")
+            .try_wait().expect("observe actual publisher").is_none(),
+            "the negative control must fence a live child, not naturally ended media");
+        fence.validation_set_ready(false).await;
+        wait_until_retired(&manager, &existing, "sustained loss retires real publisher").await;
+        assert!(existing.child.lock().await.is_none(), "terminal cleanup reaps the child");
+        assert_eq!(manager.active_sessions().await, 0);
+        drop(fence);
+        fence_loop.await.expect("fence loop exits");
+    }
+
     /// The 2026-10-04 incident: a leader restart and a one-second leader stall
     /// each cost every voter its serving authority for under two seconds, and
     /// retiring sessions on that ended healthy playback across the cluster.
