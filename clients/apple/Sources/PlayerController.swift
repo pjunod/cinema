@@ -3749,6 +3749,9 @@ final class PlayerController: ObservableObject {
     var pendingPlaybackIntentForTesting: (targetMs: Int?, generation: Int) {
         (seekState.pendingMs, seekState.generation)
     }
+    var pendingTransportTasksForTesting: (publication: Task<Void, Never>?, seek: Task<Void, Never>?) {
+        (resumeIntentTask, interactiveSeekTask)
+    }
     var resumeOwnershipForTesting: (
         id: String,
         publicationCompleted: Bool,
@@ -4629,6 +4632,16 @@ final class PlayerController: ObservableObject {
                   self.sessionId == currentSession
             else { return }
             self.retainControlSequence(floor)
+            // Pause publishes and retains the destination; only a later Play
+            // may dispatch it or admit repair. A quality change also pins a
+            // seek, so dispatching here on Pause can reopen its recipe and
+            // supersede the prepared owner that Pause just withdrew.
+            guard requested else {
+                if self.viewerActionEpoch == actionEpoch {
+                    self.resumeIntentTask = nil
+                }
+                return
+            }
             if var attempt = self.resumeAttempt,
                attempt.viewerActionEpoch == actionEpoch {
                 attempt.markPublicationCompleted()

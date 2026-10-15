@@ -11726,3 +11726,45 @@ authored but unrun. Compilation and fresh exact-source native qualification are
 pending. The external Fable package remains bound to the earlier ca00c3ed8
 source; this follow-up must be supplied as a separate review delta. Nothing is
 merged, and unit bodies remain deferred to the batched merge coordinator.
+
+
+### 10.325 — preserve Pause intent through publication
+
+The exact Apple 246 phone campaign passes all fifteen manual and five Auto
+landings, including all sixteen typed joins per landing, with a maximum decoded
+frame gap of 66.7594 ms. Its separate low-link campaign fails with a native
+stall and no low-link landing. The first 360p successor reaches metadata and
+buffer readiness, then refuses commit at `clock-anchor`; it does not fail the
+old metadata-readiness stage. The exact frozen rendezvous and clock-gate inputs
+are missing from that observer. A separate QA-only trace is being prepared;
+no larger budget or weaker clock/runway proof is justified by these facts.
+
+Two TV 246 attempts fail before the first manual landing. The first records one
+predecessor 503 `response_state_changed` and eight successor 410s. The second
+records eight successor 410s. The latter's bounded owner trace rules out an
+initial-open drain race: startup finishes before the quality tap. A later
+`issueSeek`, entered by the post-publication transport continuation, advances
+the viewer epoch and creates another session while the manual prepared wait is
+pending. The captured trace does not identify the initiating transport intent
+or establish an audio/HDMI cause. The failed acknowledgements and diagnostic
+connection closure occur after the server sessions have been superseded.
+
+Source inspection exposes an independent correctness bug in that continuation:
+Pause publishes its held intent but then can dispatch a pending seek, retry a
+failed item or admit repair. A quality tap's presentation pin can therefore
+become an unsolicited create while paused. Apple 247 returns after retaining
+Pause's publication floor, preserving the pending destination and selection.
+Only a later Play proceeds through the existing ownership fences to dispatch
+that destination or admit repair. There is no HTTP retry or session-failure
+mask, and no feature switch or acceptance relaxation.
+
+The controlled controller regression holds the actual intent publisher, pauses
+before a coalesced seek can dispatch, and waits for the actual publication and
+seek tasks to settle. Pause must produce no seek or create and preserve its
+pending target; a subsequent published Play dispatches it exactly once. Its
+unit body is authored but unrun under the owner's deferred-test instruction.
+
+The earlier full-series phone pass does not qualify Apple 247. The new source,
+exact native acceptance and external review delta remain pending. All failures
+and original false transport receipts are preserved, and independent optical
+and audio continuity remain unmeasured. Nothing is merged.

@@ -1,6 +1,6 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 246
+Build: 247
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal
@@ -117,3 +117,15 @@ rather than assuming every first failure stops at metadata readiness. The actual
 TV low-link selector case chooses the cheapest measured rescue while all native
 admission deadlines, reserves and ownership fences remain unchanged. Its authored
 regression is deferred with the unit batch; exact-source qualification is pending.
+
+
+Pause now returns after publishing and retaining its control floor. It preserves
+the pending destination and selection instead of dispatching a seek, failed-item
+retry or repair while paused. A later Play retains the existing publication and
+ownership fences before it dispatches the destination once. The controlled
+regression is authored and unrun; compilation and exact-source qualification
+remain pending. TV transport-event attribution and the phone low-link
+`clock-anchor` refusal remain distinct open evidence tasks.
+
+[Continuous Quality Build §10.325](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10325--preserve-pause-intent-through-publication)
+records the measured failures and the correction's scope.
