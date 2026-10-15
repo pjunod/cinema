@@ -4,9 +4,7 @@ import XCTest
 /// Simulator journeys through the shipping authentication, tab shell and routes.
 /// Setup may enter text; the measured navigation uses only the native remote.
 @MainActor
-final class TVNavigationTests: XCTestCase {
-    private let remote = XCUIRemote.shared
-
+final class TVNavigationTests: TVNavigationTestCase {
     func testViewModalOwnsFocusAndBackRestoresOpener416() throws {
         try viewModalJourney(itemCount: 416)
     }
@@ -26,28 +24,44 @@ final class TVNavigationTests: XCTestCase {
         defer { server.stop() }
         let app = openLibrary(origin: origin, presentation: presentation)
         defer { app.terminate() }
+        var previousGroup = (letter: "A", index: 0)
         for (letter, groupIndex) in [("A", 0), ("M", 12), ("Z", 25), ("M", 12)] {
             let jump = app.buttons["library:jump"]
             reachForSetup(jump, in: app, limit: 8)
             assertFocus(jump, in: app, context: "Jump opener")
             remote.press(.select)
-            let firstChoice = app.buttons["choice:A"]
-            XCTAssertTrue(firstChoice.waitForExistence(timeout: 30), app.debugDescription)
-            // Jump has no selection: entry is the first visible group. This
-            // explicit count is setup, separate from the six-press tool bound.
-            assertFocus(firstChoice, in: app, context: "Jump first choice")
-            for _ in 0..<groupIndex { remote.press(.down) }
+            let entry = app.buttons["choice:" + previousGroup.letter]
+            XCTAssertTrue(entry.waitForExistence(timeout: 30), app.debugDescription)
+            assertFocus(entry, in: app, context: "Jump retains selected group")
+            let steps = groupIndex - previousGroup.index
+            for _ in 0..<abs(steps) { remote.press(steps > 0 ? .down : .up) }
             let choice = app.buttons["choice:" + letter]
             assertFocus(choice, in: app, context: "Jump \(letter) choice")
             remote.press(.select)
             let index = (groupIndex * itemCount + 25) / 26
             let item = app.buttons["item:\(index + 1)"]
             assertFocus(item, in: app, context: "Jump \(letter) focuses first item")
-            let tools = app.buttons["library:view"]
-            for _ in 0..<6 where !tools.hasFocus { remote.press(.left) }
-            assertFocus(tools, in: app, context: "Tools within six Left presses")
+            let tools = ["view", "sort", "filter", "jump"].map { app.buttons["library:" + $0] }
+            for _ in 0..<6 where !tools.contains(where: { $0.hasFocus }) { remote.press(.left) }
+            guard let reachedTool = tools.first(where: { $0.hasFocus }) else {
+                XCTFail("Tools must receive native focus within six Left presses: \(app.debugDescription)")
+                return
+            }
+            assertFocus(reachedTool, in: app, context: "Tools within six Left presses")
+            let view = tools[0]
+            for _ in 0..<3 where !view.hasFocus { remote.press(.up) }
+            assertFocus(view, in: app, context: "View within three Up presses inside tools")
+            for tool in tools.dropFirst() {
+                remote.press(.down)
+                assertFocus(tool, in: app, context: "Down reaches " + tool.identifier)
+            }
+            for tool in tools.dropLast().reversed() {
+                remote.press(.up)
+                assertFocus(tool, in: app, context: "Up reaches " + tool.identifier)
+            }
             remote.press(.right)
             assertFocus(item, in: app, context: "Right restores \(letter) bookmark")
+            previousGroup = (letter, groupIndex)
         }
     }
 
@@ -135,106 +149,5 @@ final class TVNavigationTests: XCTestCase {
                       "Back must return to Libraries, not leave the app")
     }
 
-    private func openLibrary(origin: String, presentation: String = "grid") -> XCUIApplication {
-        continueAfterFailure = false
-        let app = XCUIApplication()
-        app.launchArguments += ["-plurx.origin", origin, "-plurx.libraryPresentation", presentation,
-                                "-plurx.libraryGrouping", "category"]
-        app.launch()
-        if app.textFields["Username"].waitForExistence(timeout: 8) {
-            reachForSetup(app.textFields["Username"], in: app, limit: 4)
-            assertFocus(app.textFields["Username"], in: app, context: "Username setup")
-            remote.press(.select)
-            app.textFields["Username"].typeText("fixture")
-            dismissKeyboard(in: app)
-            reachForSetup(app.secureTextFields["Password"], in: app, limit: 4)
-            assertFocus(app.secureTextFields["Password"], in: app, context: "Password setup")
-            remote.press(.select)
-            app.secureTextFields["Password"].typeText("fixture")
-            dismissKeyboard(in: app)
-            let signIn = app.buttons["Sign in"]
-            reachForSetup(signIn, in: app, limit: 4)
-            assertFocus(signIn, in: app, context: "Sign in setup")
-            remote.press(.select)
-        }
-        let libraries = app.tabBars.buttons["Libraries"]
-        XCTAssertTrue(libraries.waitForExistence(timeout: 15), app.debugDescription)
-        reachForSetup(libraries, in: app, limit: 8)
-        assertFocus(libraries, in: app, context: "Libraries tab")
-        remote.press(.select)
-        let open = app.buttons["library-open-category:movie"]
-        XCTAssertTrue(open.waitForExistence(timeout: 10), app.debugDescription)
-        reachForSetup(open, in: app, limit: 8)
-        assertFocus(open, in: app, context: "Movies collection")
-        remote.press(.select)
-        XCTAssertTrue(app.staticTexts["library-loaded-summary"].waitForExistence(timeout: 15),
-                      app.debugDescription)
-        return app
-    }
-
-    private func dismissKeyboard(in app: XCUIApplication) {
-        let keyboard = app.keyboards.firstMatch
-        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            keyboard.exists && keyboard.hasFocus
-        }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed,
-                       "System keyboard must own input before Back")
-        remote.press(.menu)
-        let closed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            !keyboard.exists
-        }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 5), .completed,
-                       "Back must close the system keyboard: \(app.debugDescription)")
-    }
-
-    /// Bounded setup steering only; never used to prove the measured journey.
-    private func reachForSetup(_ target: XCUIElement, in app: XCUIApplication, limit: Int) {
-        guard target.waitForExistence(timeout: 5) else {
-            XCTFail("Setup control is missing: \(app.debugDescription)")
-            return
-        }
-        let focused = NSPredicate(format: "hasFocus == true")
-        let targetIsTab = app.tabBars.buttons.matching(
-            NSPredicate(format: "identifier == %@ AND label == %@", target.identifier, target.label)
-        ).firstMatch.exists
-        for _ in 0..<limit {
-            guard target.exists else { break }
-            if target.hasFocus { return }
-            let current = app.descendants(matching: .any)
-                .matching(NSPredicate(format: "hasFocus == true")).firstMatch
-            guard current.waitForExistence(timeout: 3) else { break }
-            let focusedTab = app.tabBars.buttons.matching(focused).firstMatch
-            if !targetIsTab && focusedTab.exists { remote.press(.down); continue }
-            if targetIsTab && !focusedTab.exists { remote.press(.up); continue }
-            let destination = target.frame
-            let source = current.frame
-            if destination.minY >= source.maxY { remote.press(.down) }
-            else if destination.maxX <= source.minX { remote.press(.left) }
-            else if destination.minX >= source.maxX { remote.press(.right) }
-            else if destination.maxY <= source.minY { remote.press(.up) }
-            else { remote.press(destination.midX > source.midX ? .right : .left) }
-        }
-    }
-
-    private func assertFocus(_ target: XCUIElement, in app: XCUIApplication, context: String,
-                             file: StaticString = #filePath, line: UInt = #line) {
-        let expectation = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in target.exists && target.hasFocus }, object: nil)
-        let result = XCTWaiter.wait(for: [expectation], timeout: 5)
-        let focusDebug = app.staticTexts["choice-focus-debug"]
-        if focusDebug.exists { print("NATIVE_CHOICE_FOCUS_DEBUG=\(focusDebug.label)") }
-        let screenshot = app.screenshot()
-        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("PlurxNavigationCaptures")
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let safeName = context.replacingOccurrences(of: "/", with: "-")
-        let nativePath = directory.appendingPathComponent(safeName + ".png")
-        try? screenshot.pngRepresentation.write(to: nativePath)
-        print("NAVIGATION_SCREENSHOT_PATH=\(nativePath.path)")
-        let capture = XCTAttachment(screenshot: screenshot)
-        capture.name = context
-        capture.lifetime = .keepAlways
-        add(capture)
-        XCTAssertEqual(result, .completed, "\(context): \(app.debugDescription)", file: file, line: line)
-    }
 }
 #endif
