@@ -165,12 +165,15 @@ class MacosDaemonPackageCase(unittest.TestCase):
         self.assertTrue(dwarf.is_symlink())
 
     def test_failed_signing_does_not_publish_or_mutate_source_artifacts(self):
+        from test_subtitle_engine_package import fixture_bundle
+        engine = self.root / "engine"
+        fixture_bundle(engine)
         original_daemon = self.daemon.read_bytes()
         original_native = {p.relative_to(self.package): p.read_bytes()
                            for p in self.package.rglob("*") if p.is_file()}
         with mock.patch.object(TOOL.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "codesign")):
             with self.assertRaises(subprocess.CalledProcessError):
-                TOOL.assemble(self.daemon, self.package, self.output, "-")
+                TOOL.assemble(self.daemon, self.package, self.output, "-", engine_package=engine)
         self.assertFalse(self.output.exists())
         self.assertEqual(self.daemon.read_bytes(), original_daemon)
         self.assertEqual({p.relative_to(self.package): p.read_bytes()

@@ -383,10 +383,14 @@ jobs:
           test "$("$binary" --version)" = "$EXPECT_VERSION"
           mkdir -p ../slice
           cp "$binary" "../slice/plurxd-$ARCH"
+          python3 scripts/build-subtitle-engine --output "$RUNNER_TEMP/subtitle-engine" --architecture "$ARCH" --jobs 3
+          # Artifact upload normalizes permissions; tar preserves the signed
+          # executable's mode and the complete per-slice package directory.
+          tar -C "$RUNNER_TEMP/subtitle-engine" -czf "../slice/subtitle-engine-$ARCH.tar.gz" .
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macos-slice-${{ matrix.arch }}
-          path: slice/plurxd-${{ matrix.arch }}
+          path: slice/
           if-no-files-found: error
           overwrite: true
           retention-days: 7
@@ -424,6 +428,14 @@ jobs:
           test "$(lipo -archs "dist/$name/plurxd")" = "x86_64 arm64"
           test "$("dist/$name/plurxd" --version)" = "$EXPECT_VERSION"
           cp deploy/install deploy/com.plurx.plurxd.plist "dist/$name/"
+          cp deploy/verify-subtitle-engine "dist/$name/"
+          for arch in arm64 x86_64; do
+            mkdir "slice/subtitle-engine-$arch"
+            tar -C "slice/subtitle-engine-$arch" -xzf "slice/subtitle-engine-$arch.tar.gz"
+          done
+          python3 scripts/build-subtitle-engine --output "$PWD/dist/$name/subtitle-engine" \
+            --combine "$PWD/slice/subtitle-engine-arm64" "$PWD/slice/subtitle-engine-x86_64"
+          bash deploy/verify-subtitle-engine "$PWD/dist/$name/subtitle-engine"
           # plurxd reads decoder facts on macOS only through this module; the
           # installer puts it beside the pinned FFprobe.
           python3 scripts/build-macos-source-parser --output "$RUNNER_TEMP/source-parser" --jobs 3
@@ -452,6 +464,7 @@ jobs:
           # discovery runs before the tone-map probe, so once that probe has
           # logged, a missing or unusable module has already said so.
           test -f "$RUNNER_TEMP/prefix/libexec/plurx/jellyfin-ffmpeg-8.1.3-1/plurx-source-parser.wasm"
+          bash ./verify-subtitle-engine "$RUNNER_TEMP/prefix/bin/subtitle-engine"
           log="$HOME/Library/Logs/plurxd.log"
           for _ in $(seq 1 120); do grep -q "plurxd::pipeprobe" "$log" && break; sleep 1; done
           grep -q "plurxd::pipeprobe" "$log"

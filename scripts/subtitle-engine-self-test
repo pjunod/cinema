@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Recognize the shipped speech fixture using production decode/inference argv.
+
+Run as the service account: --engine-package DIR --model PINNED_MODEL
+--decoder ABSOLUTE_FFMPEG. Downloads nothing; writes only temporary scratch.
+The daemon's durable Verify operation additionally checks production ownership,
+resource admission and publication validation. This is packaging smoke evidence.
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parents[1]
+loader = importlib.machinery.SourceFileLoader("subtitle_engine_recipe", str(ROOT / "scripts/build-subtitle-engine"))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+recipe = importlib.util.module_from_spec(spec)
+loader.exec_module(recipe)
+
+
+def check_output(text):
+    if len(text.encode()) > 256 * 1024 or not text.startswith("WEBVTT"):
+        raise ValueError("recognizer did not produce bounded WebVTT")
+    times = re.findall(r"(\d\d):(\d\d):(\d\d)\.(\d{3}) --> (\d\d):(\d\d):(\d\d)\.(\d{3})", text)
+    if not times:
+        raise ValueError("recognizer produced no timed captions")
+    for cue in times:
+        start, end = [int(cue[i]) * 3600000 + int(cue[i + 1]) * 60000 + int(cue[i + 2]) * 1000 + int(cue[i + 3]) for i in [0, 4]]
+        if not 0 <= start < end <= 15000:
+            raise ValueError("recognizer produced invalid fixture timing")
+    words = set(re.findall(r"[a-z]+", text.lower()))
+    if not {"ask", "country", "you"}.issubset(words):
+        raise ValueError("recognizer did not recognize the known speech")
+    return len(times)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--engine-package", type=Path, required=True)
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--decoder", type=Path, required=True)
+    args = parser.parse_args()
+    for path in [args.engine_package, args.model, args.decoder]:
+        if not path.is_absolute() or path.is_symlink():
+            parser.error("paths must be absolute and regular")
+    started = time.monotonic()
+    engine = recipe.verify(args.engine_package)
+    catalog = json.loads((ROOT / "crates/plurxd/src/subtitle_models/catalog.json").read_text())
+    actual = recipe.digest(args.model)
+    model = next((item for item in catalog["models"] if item["sha256"] == actual and item["download_bytes"] == args.model.stat().st_size), None)
+    if model is None:
+        parser.error("model does not match the reviewed catalog")
+    fixture = args.engine_package / "self-test.wav"
+    if recipe.digest(fixture) != "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e":
+        parser.error("package does not carry the qualified speech fixture")
+    with tempfile.TemporaryDirectory(prefix="plurx-subtitle-self-test-") as temporary:
+        scratch = Path(temporary)
+        waveform = scratch / "audio.wav"
+        source = os.open(fixture, os.O_RDONLY)
+        if source != 3:
+            os.dup2(source, 3)
+            os.close(source)
+        decode = [str(args.decoder), "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode", "-y",
+                  "-copyts", "-start_at_zero", "-protocol_whitelist", "file,pipe", "-threads", "2", "-i", "/dev/fd/3",
+                  "-map", "0:a:0", "-vn", "-sn", "-dn", "-af",
+                  "aresample=16000:async=1:first_pts=0:min_comp=0:min_hard_comp=0:max_soft_comp=0",
+                  "-threads", "2", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-fs", "460804097", str(waveform)]
+        result = subprocess.run(decode, env={"LC_ALL": "C"}, pass_fds=(3,), capture_output=True, timeout=60, check=True)
+        os.close(3)
+        if result.stderr:
+            raise ValueError("fixture decode emitted an error")
+        handle = os.open(args.model, os.O_RDONLY)
+        if handle != 5:
+            os.dup2(handle, 5)
+            os.close(handle)
+        base = scratch / "caption"
+        argv = [str(args.engine_package / "whisper-cli"), "--threads", "2", "--processors", "1", "--no-gpu",
+                "--language", "en", "--output-vtt", "--no-prints", "--model", "/dev/fd/5", "--file", str(waveform),
+                "--output-file", str(base)]
+        subprocess.run(argv, env={"LC_ALL": "C"}, pass_fds=(5,), capture_output=True, timeout=180, check=True)
+        os.close(5)
+        text = base.with_suffix(".vtt").read_text()
+        cues = check_output(text)
+    print(json.dumps({"status": "passed", "adapter_contract": engine["adapter_contract"], "platform": engine["platform"],
+                      "engine_sha256": engine["binary_sha256"], "model": model["id"], "model_sha256": actual,
+                      "fixture_sha256": recipe.digest(fixture), "timed_cues": cues, "recognized_words": ["ask", "country", "you"],
+                      "seconds": round(time.monotonic() - started, 3), "effective_uid": os.geteuid(),
+                      "child_environment": {"LC_ALL": "C"}, "held_model_fd": 5, "held_source_fd": 3,
+                      "qualification": "packaging speech diagnostic; movie quality and daemon durable Verify remain separate"}, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

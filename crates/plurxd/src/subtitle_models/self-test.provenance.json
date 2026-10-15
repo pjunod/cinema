@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "source_url": "https://raw.githubusercontent.com/ggml-org/whisper.cpp/306c88f4d1286aec1bf96e544632897886af5501/samples/jfk.wav",
+  "sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+  "bytes": 352078,
+  "upstream_license": "MIT",
+  "license_notice": "licenses/whisper.cpp.LICENSE.txt",
+  "recording": "Excerpt of President John F. Kennedy inaugural address, January 20, 1961; United States government presidential speech. Upstream whisper.cpp distributes this fixture under its repository MIT license.",
+  "historical_source": "https://www.archives.gov/milestone-documents/president-john-f-kennedys-inaugural-address",
+  "expected_words": [
+    "ask",
+    "country",
+    "you"
+  ],
+  "purpose": "Recognizer pipeline diagnostic only; not movie-quality acceptance."
+}
