@@ -880,6 +880,35 @@ project. Like acorn, it never reaches a browser, the binary, or a native client.
 
 ---
 
+## 8. Offline subtitle recognizer and models
+
+Linux Docker images and native macOS packages carry whisper.cpp 1.9.2 at
+commit `306c88f4d1286aec1bf96e544632897886af5501`, including its vendored
+ggml CPU implementation. The recognizer runs as a separate program. Its
+[MIT license](licenses/whisper.cpp.LICENSE.txt), Copyright (c) 2023–2026 The
+ggml authors, travels inside the `subtitle-engine/` package. The recipe pins
+the source archive SHA-256, portable CPU build options and executable digest
+in the package manifest; `scripts/build-subtitle-engine` verifies them.
+
+OpenAI Whisper model weights converted to GGML are separately downloaded
+only after an explicit installation request. The reviewed catalog pins
+immutable revision `5359861c739e955e79d9a303bcbc70fb988958b1` of
+[ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp/tree/5359861c739e955e79d9a303bcbc70fb988958b1),
+exact byte counts and SHA-256 hashes for base.en, base and diagnostic tiny.en.
+The model card declares MIT; the [OpenAI model license](licenses/whisper-models.LICENSE.txt),
+Copyright (c) 2022 OpenAI, travels with the engine distribution.
+
+The small `self-test.wav` speech fixture comes from the pinned whisper.cpp
+source and is redistributed under its MIT repository license. It is an
+excerpt of President John F. Kennedy's January 20, 1961 inaugural address,
+a United States government presidential speech. The adjacent provenance
+record pins its source URL, SHA-256, byte count and historical source. It
+tests recognizer operation and timed output, not movie recognition quality.
+`tests/operations/test_subtitle_engine_package.py` holds the catalog, fixture
+and package identity contracts together.
+
+---
+
 ## Keeping this file honest
 
 This document is a claim about what is in the dependency graph, so it goes
@@ -890,5 +919,5 @@ allow-list, so a new copyleft dependency cannot land quietly. Run it with
 
 `cargo deny` cannot see the parts that are not crates — the web UI bundle,
 the fonts, the client dependencies, the Dockerfile's ffmpeg, the source checked
-into the tree. Update §1, §2, §5, §6 and §7 by hand when those move, in the
+into the tree. Update §1, §2, §5, §6, §7 and §8 by hand when those move, in the
 same commit that moves them.
