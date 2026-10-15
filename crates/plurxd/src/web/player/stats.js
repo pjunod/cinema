@@ -69,6 +69,32 @@ function playbackInfoMarkup(mode,rows,healthWord,healthStatus){
 function playbackInfoHelp(id){
   return ({stream_format:"Codec, scan and cadence; frame dimensions appear in Stream frame.",stream_frame:"Encoded output plan or attached sample; see provenance below.",device_audio:"Speaker or HDMI output only when reported; never inferred from track metadata.",decode_resolution:"Player presentation dimensions; not encoded frame dimensions.",source_resolution:"Source frame metadata or probe.",decode_audio:"Selected stream track; not the device's audio output.",client_loaded:"Contiguous media loaded ahead on this device.",server_ready:"Complete media ahead on the server; separate from the device buffer.",delivery_rate:"Server-completed responses; not confirmed client receipt.",observed_rate:"Player estimate during transfers; bursty by design.",stream_rate:"Stream bitrate; not connection speed.",delivered:"Bytes in server-completed responses, not proof of playback.",stalls:"Player interruptions for this playback, excluding intentional pauses.",status:"Server work state; separate from whether the picture is playing.",status_age:"Age of the most recent server response.",production_actual:"Encoder progress ahead of demand; not loaded video.",production_target:"Pacing policy, not a measurement.",http_wait:"Server responses waiting for publication; not player stalls."})[id]||"";
 }
+// Status already passes the owner's publication fence. Bind it again to the
+// attached client session so a prepared or retired sample cannot fill this UI.
+function statsStreamFormat(p){
+  const h=p&&p.health,f=h&&h.stream_format;
+  if(!p||!p.sessionId||h?.id!==p.sessionId||!f||typeof f!=="object"||Array.isArray(f))return null;
+  const text=value=>typeof value==="string"&&value.length>0&&value.length<=256?value:null;
+  const action=f.video_action==="copy"||f.video_action==="encode"?f.video_action:null;
+  const basis=f.dimensions_basis;
+  const dimensions=!!action&&(basis==="recipe"||basis==="sample"||(basis==="source_copy"&&action==="copy"));
+  const dimension=value=>Number.isSafeInteger(value)&&value>0&&value<=65535?value:null;
+  const width=dimensions?dimension(f.width):null,height=dimensions?dimension(f.height):null;
+  const provenance=basis==="recipe"?(text(f.rendition_id)?"Frozen rendition plan":"Planned output"):
+    basis==="sample"?"Attached stream sample":basis==="source_copy"?"Unchanged video selection":null;
+  const rawCodec=text(f.video_codec);
+  const codec=rawCodec&&(/^(h264|hevc|av1|vp9|vp8|mpeg2video|mpeg4)$/i.test(rawCodec)||
+    /^(avc[13]|hvc1|hev1|dvh1|dvhe|av01|vp09)\.[a-z0-9.]{1,64}$/i.test(rawCodec))?rawCodec.toUpperCase():null;
+  const ratio=f.sample_aspect_ratio;
+  const sar=ratio&&Number.isSafeInteger(ratio.numerator)&&ratio.numerator>0&&
+    Number.isSafeInteger(ratio.denominator)&&ratio.denominator>0?`${ratio.numerator}:${ratio.denominator}`:null;
+  const dynamicRange=["sdr","hdr10","hdr10plus","hlg","dolby_vision"].includes(f.dynamic_range)?f.dynamic_range:null;
+  return {action,width,height,codec,encoder:text(f.encoder),pipeline_label:text(f.pipeline_label),
+    dynamic_range:dynamicRange,provenance,
+    frame:width&&height?`${width}×${height}`:height?`Height ${height}`:"Unavailable",
+    frame_note:width||height?provenance:"No verified encoded output dimensions",
+    sar:dimensions?sar:null};
+}
 function statsToneMapPeak(health){
   if(!health||!Number.isFinite(Number(health.tone_map_peak_nits))||!health.tone_map_peak_source)return null;
   const nits=Math.round(Number(health.tone_map_peak_nits));
@@ -325,9 +351,12 @@ function playbackSamplingTick(v,p){
 function playbackStatsTelemetry(){
   const p=/** @type {Player} */(PLAYER||{}),v=playbackOwnsAttachedMedia(PLAYER)?document.getElementById("video"):null,s=p.source||{},h=p.health||null;
   const audio=p.audio&&p.audio[p.curAudio];
-  const encoder=(h&&h.encoder)||p.encoder||null;
+  const stream=statsStreamFormat(p);
+  const encoder=stream?.encoder||(h&&h.encoder)||p.encoder||null;
   const rung=p.autoHeight?`${p.autoHeight}p`:null;
-  const method=p.vod?"Transcode · cached":p.method==="direct_play"?"Direct play":
+  const method=stream?.action==="copy"?"Remux":stream?.action==="encode"
+    ?(p.vod&&h?.producer_state==="complete"&&h?.admitted?"Transcode · cached":["Transcode",encoder,rung].filter(Boolean).join(" · "))
+    :p.vod?"Transcode · cached":p.method==="direct_play"?"Direct play":
     p.method==="transcode"?["Transcode",encoder,rung].filter(Boolean).join(" · "):"Remux";
   const total=pbTotalSec(),position=pbShownSec();
   const range=playerRangeBadge(s);
@@ -405,10 +434,11 @@ function playbackStatsTelemetry(){
     av_offset:`${p.aoffset||0} ms`,av_offset_note:p.declared&&p.declared!==(p.aoffset||0)?`container ${p.declared>0?"+":""}${p.declared} ms`:null,
     decode_resolution:v&&v.videoWidth>0&&v.videoHeight>0?`${v.videoWidth}×${v.videoHeight}`:"Unavailable",
     decode_resolution_note:v&&v.videoWidth>0&&v.videoHeight>0?"Browser intrinsic dimensions":"Unavailable",
-    stream_frame:"Unavailable",stream_frame_note:"No verified encoded output dimensions",
+    stream_frame:stream?.frame||"Unavailable",stream_frame_note:stream?.frame_note||"No verified encoded output dimensions",
+    stream_pixel_aspect:stream?.sar||"Not measured",stream_pixel_aspect_note:stream?.sar?stream.provenance:null,
     dynamic_range:range?range.panel:null,dynamic_range_mini:range?range.text:null,
-    dynamic_range_note:statsToneMapPeak(h),
-    stream_format:level?.videoCodec||"Not reported",
+    dynamic_range_note:[statsToneMapPeak(h?.id===p.sessionId?h:null),stream?.dynamic_range?stream.provenance:null].filter(Boolean).join(" · ")||null,
+    stream_format:stream?.codec||level?.videoCodec||"Not reported",
     device_audio:"Not reported",decode_audio:null,
     frames,frames_tone:droppedCount==null?"muted":droppedCount===0?"good":droppedCount<3?"warn":"bad",
     frame_rate:frameRate==null?null:`${frameRate.toFixed(1)} fps`,player_state:playbackState,
@@ -433,7 +463,7 @@ function playbackStatsTelemetry(){
     delivery_idle:h&&h.delivered_idle_ms!=null?`${Math.round(h.delivered_idle_ms)} ms`:null,
     status_age:h&&p.healthObservedAt!=null?`${Math.max(0,Math.round(performance.now()-p.healthObservedAt))} ms`:null,
     started_in:p.ttffMs!=null?`${(p.ttffMs/1000).toFixed(1)} s`:null,
-    status,encoder,encode_speed:speed==null?null:`${speed.toFixed(2)}×${h&&h.recent_speed==null?" (avg)":""}`,
+    status,encoder,encoder_note:stream?.pipeline_label?`Renderer: ${stream.pipeline_label} · ${stream.provenance||"Attached recipe"}`:null,encode_speed:speed==null?null:`${speed.toFixed(2)}×${h&&h.recent_speed==null?" (avg)":""}`,
     production_actual:h&&h.production_ahead_seconds!=null?`${Math.max(0,h.production_ahead_seconds).toFixed(1)} s`:null,
     production_target:h&&h.production_target_seconds!=null?`${Math.max(0,h.production_target_seconds).toFixed(1)} s`:null,
     producer_state:h&&h.producer_state?String(h.producer_state):null,
@@ -525,7 +555,9 @@ async function pollSessionHealth(force){
       // A shared session answers in the Shared grammar: its metrics are nested
       // and bound to this session, so read them through the file context.
       const fileContext=playbackFileContextForPlayer(p);
+      const previousRange=statsStreamFormat(p)?.dynamic_range;
       p.health=fileContext.source_ref.kind==="local"? h : sharedPlaybackStatusMetrics(fileContext,h);
+      if(previousRange!==statsStreamFormat(p)?.dynamic_range&&typeof renderPlayerInfo==="function")renderPlayerInfo();
       p.healthObservedAt=performance.now();
       // No surface is raised or restated here: a fault is raised by the event
       // that caused it. A live media wait reads this sample through the

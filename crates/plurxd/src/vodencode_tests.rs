@@ -334,6 +334,59 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
     (file, encoding)
 }
 
+#[tokio::test]
+async fn playback_info_stream_format_is_the_attached_frozen_recipe() {
+    let base = crate::test_tempdir().expect("base");
+    let serve = bare_serve(base.path());
+    let (file, encoding) = encoded_fixture(base.path()).await;
+    let mut rendition = synthetic_rendition(base.path()).await;
+    let live = Arc::get_mut(&mut rendition).expect("unshared rendition");
+    live.recipe.file = file;
+    live.recipe.encoding = Some(Arc::clone(&encoding));
+    let touched = Instant::now();
+    insert_control_session(&serve, "attached-a", rendition.clone(), touched).await;
+    // A saved setting cannot relabel an already frozen rendition as Metal.
+    encoding.store.put_setting(
+        plurx_core::store::keys::MACOS_VIDEO_PROCESSING_ENABLED, "true",
+    ).await.expect("operator preference");
+    let status = serve.status("attached-a").await.expect("attached status");
+    let json = serde_json::to_value(status).expect("status JSON");
+    assert_eq!(json["stream_format"]["video_codec"], "h264");
+    assert_eq!(json["stream_format"]["width"], 256);
+    assert_eq!(json["stream_format"]["height"], 144);
+    assert_eq!(json["stream_format"]["dimensions_basis"], "recipe");
+    assert_eq!(json["stream_format"]["video_action"], "encode");
+    assert_eq!(json["stream_format"]["encoder"], "libx264");
+    assert_eq!(json["stream_format"]["pipeline"], "cpu");
+    assert_eq!(json["stream_format"]["dynamic_range"], "sdr");
+    assert_eq!(json["stream_format"]["rendition_id"], rendition.key);
+    assert_eq!(json["stream_format"]["ffmpeg_build"], encoding.ffmpeg_build);
+    assert!(json["tone_map_peak_nits"].is_null(), "an SDR encode has no HDR tone-map peak");
+    assert_eq!(*serve.shared.sessions.lock().await["attached-a"].last_touch.lock().expect("touch"), touched);
+}
+
+#[tokio::test]
+async fn playback_info_stream_format_copy_does_not_relabel_source_hdr_as_output() {
+    let base = crate::test_tempdir().expect("base");
+    let serve = bare_serve(base.path());
+    let mut rendition = synthetic_rendition(base.path()).await;
+    let live = Arc::get_mut(&mut rendition).expect("unshared rendition");
+    live.recipe.file.video_codec = Some("hevc".into());
+    live.recipe.file.width = Some(3840);
+    live.recipe.file.height = Some(2160);
+    live.recipe.file.hdr = Some("dolby_vision".into());
+    insert_control_session(&serve, "copy-a", rendition, Instant::now()).await;
+    let status = serve.status("copy-a").await.expect("copy status");
+    let json = serde_json::to_value(status).expect("status JSON");
+    assert_eq!(json["stream_format"]["width"], 3840);
+    assert_eq!(json["stream_format"]["height"], 2160);
+    assert_eq!(json["stream_format"]["video_action"], "copy");
+    assert_eq!(json["stream_format"]["dimensions_basis"], "source_copy");
+    assert_eq!(json["stream_format"]["encoder"], "copy");
+    assert!(json["stream_format"]["dynamic_range"].is_null(), "copy can change DV signaling");
+    assert!(json["tone_map_peak_nits"].is_null());
+}
+
 async fn fetched_bytes(serve: &Arc<VodServe>, session: &str, name: &str) -> Vec<u8> {
     let mut ready = fetch(serve, session, name).await;
     let mut bytes = Vec::new();

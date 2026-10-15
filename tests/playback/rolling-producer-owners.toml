@@ -5637,7 +5637,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # F1/N2 landing repair: +2 matches. constant_size_film.status() synchronously
 # waits/reaps its finite fixture child. record_unplaced's decision.status()
 # names the existing MediaLandingFailed verdict and starts no process.
-expected_occurrences = 753
+# F5: +2 `VodServe::status()` calls in the frozen-output reporting tests.
+# Both read the attached rendition in process; neither starts an OS child,
+# spawns a task, or acquires a producer lease.
+expected_occurrences = 755
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
