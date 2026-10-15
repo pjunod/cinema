@@ -23,6 +23,10 @@
 //!    fifty);
 //! 4. it is meaningfully faster than that reference.
 //!
+//! Metal also passes a separate neutral, non-round-peak PQ correctness check.
+//! The colored motion fixture alone masked the former explicit peak-unit bug;
+//! the neutral check never contributes to the 4K throughput measurement.
+//!
 //! Point 4 is a *comparison*, not an absolute threshold, which is what makes
 //! it honest on hardware nobody has measured. Both runs pay the same process
 //! startup on the same fixture, so the overhead cancels and what is left is
@@ -772,7 +776,67 @@ async fn run<T: Tools>(
     candidate: Pipeline,
     encoder: Encoder,
 ) -> Result<Sample, String> {
-    let args = probe_args(fixture, out, candidate, encoder);
+    let sample = run_clip(tools, fixture, out, candidate, encoder, PROBE_HEIGHT).await?;
+    if candidate == Pipeline::VtToneMapMetal {
+        // Preserve the motion fixture's encode clock. The small neutral clip
+        // tests explicit peak correctness, not throughput or an artistic grade.
+        check_neutral_peak(tools, out, encoder)
+            .await
+            .map_err(|why| format!("neutral PQ peak check failed: {why}"))?;
+    }
+    Ok(sample)
+}
+
+async fn check_neutral_peak<T: Tools>(
+    tools: &T,
+    out: &Path,
+    encoder: Encoder,
+) -> Result<(), String> {
+    let work_dir = out.parent().ok_or("probe output has no parent")?;
+    let fixture = neutral_peak_fixture(tools, work_dir).await?;
+    let neutral_out = work_dir.join("pipeprobe-neutral-out.mp4");
+    let result = async {
+        let reference =
+            run_clip(tools, &fixture, &neutral_out, Pipeline::Cpu, encoder, 128).await?;
+        let sample = run_clip(
+            tools,
+            &fixture,
+            &neutral_out,
+            Pipeline::VtToneMapMetal,
+            encoder,
+            128,
+        )
+        .await?;
+        let delta = sample.max_delta(&reference);
+        if delta > MAX_CHANNEL_DELTA {
+            return Err(format!(
+                "output differs from the CPU reference by {delta:.2} levels \
+                 (limit {MAX_CHANNEL_DELTA:.0}, peak {PROBE_PEAK_NITS} nits)"
+            ));
+        }
+        tracing::info!(
+            delta,
+            peak_nits = PROBE_PEAK_NITS,
+            "Metal neutral PQ peak check passed"
+        );
+        Ok(())
+    }
+    .await;
+    let _ = tokio::fs::remove_file(neutral_out).await;
+    result
+}
+
+/// Encode one clip and measure its output. Only the motion clip's elapsed
+/// time is returned by `run`; the neutral gate is a correctness measurement.
+async fn run_clip<T: Tools>(
+    tools: &T,
+    fixture: &Path,
+    out: &Path,
+    candidate: Pipeline,
+    encoder: Encoder,
+    height: i64,
+) -> Result<Sample, String> {
+    let args = probe_args_at_height(fixture, out, candidate, encoder, height);
 
     if candidate == Pipeline::TonemapCuda {
         // Compile the CUDA kernels into the same writable cache playback
@@ -880,6 +944,16 @@ fn check_exit(output: &std::process::Output) -> Result<(), String> {
 /// fiction, and the upload suffix has to be attached to exactly the graphs
 /// that need it.
 fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder) -> Vec<String> {
+    probe_args_at_height(fixture, out, candidate, encoder, PROBE_HEIGHT)
+}
+
+fn probe_args_at_height(
+    fixture: &Path,
+    out: &Path,
+    candidate: Pipeline,
+    encoder: Encoder,
+    height: i64,
+) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
@@ -895,18 +969,18 @@ fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder)
     args.push(fixture.to_string_lossy().into_owned());
 
     // The same absolute source peak, translated into each filter's own unit.
-    let mut vf =
-        match candidate.filters_at_peak(None, PROBE_HEIGHT, Some("hdr10"), Some(PROBE_PEAK_NITS)) {
-            Some(g) => g,
-            // The CPU reference: the tone map `video_filters` builds for an
-            // HDR10 source at this fixture's peak, taken from the one
-            // function that spells it, because a probe that measured a
-            // *different* CPU chain would be comparing against a fiction.
-            None => format!(
-                "{},scale=-2:'min({PROBE_HEIGHT},ih)'",
-                zscale_tone_map_filter("smpte2084", PROBE_PEAK_NITS)
-            ),
-        };
+    let mut vf = match candidate.filters_at_peak(None, height, Some("hdr10"), Some(PROBE_PEAK_NITS))
+    {
+        Some(g) => g,
+        // The CPU reference: the tone map `video_filters` builds for an
+        // HDR10 source at this fixture's peak, taken from the one
+        // function that spells it, because a probe that measured a
+        // *different* CPU chain would be comparing against a fiction.
+        None => format!(
+            "{},scale=-2:'min({height},ih)'",
+            zscale_tone_map_filter("smpte2084", PROBE_PEAK_NITS)
+        ),
+    };
     // The CPU path uploads for a hardware encoder; the vendor graphs already
     // hand over surfaces of the right family. Same rule the real builder uses.
     let vendor_gpu = candidate.keeps_frames_off_the_cpu();
@@ -1120,6 +1194,97 @@ fn fixture_args(path: &Path) -> Vec<String> {
     .iter()
     .map(|a| (*a).to_owned())
     .collect()
+}
+
+/// Limited-range neutral ST 2084 panels: a full peak ramp, near-black
+/// ramp, and narrow midtone ramp. Neutral chroma avoids opposing color errors
+/// cancelling in the broad motion fixture's channel means.
+fn neutral_peak_frame() -> Vec<u8> {
+    let mut frame = Vec::with_capacity(512 * 128 * 3);
+    for y in 0..128 {
+        for x in 0..512 {
+            let t = f64::from(x) / 511.0;
+            let nits = if y < 43 {
+                f64::from(PROBE_PEAK_NITS) * t
+            } else if y < 86 {
+                10.0 * t
+            } else {
+                20.0 + t
+            };
+            let p = (nits / 10_000.0).powf(2610.0 / 16384.0);
+            let pq = ((3424.0 / 4096.0 + 2413.0 / 128.0 * p) / (1.0 + 2392.0 / 128.0 * p))
+                .powf(2523.0 / 32.0);
+            let code = (64.0 + 876.0 * pq).round() as u16;
+            frame.extend_from_slice(&code.to_le_bytes());
+        }
+    }
+    for _ in 0..512 * 128 / 2 {
+        frame.extend_from_slice(&512_u16.to_le_bytes());
+    }
+    frame
+}
+
+async fn neutral_peak_fixture<T: Tools>(tools: &T, work_dir: &Path) -> Result<PathBuf, String> {
+    let path = work_dir.join("hdr10-neutral-1179-v1.mkv");
+    if tokio::fs::metadata(&path).await.is_ok() {
+        return Ok(path);
+    }
+    let raw = work_dir.join("hdr10-neutral-1179-v1.yuv");
+    let pending = work_dir.join("hdr10-neutral-1179-v1.pending.mkv");
+    tokio::fs::write(&raw, neutral_peak_frame().repeat(8))
+        .await
+        .map_err(|e| e.to_string())?;
+    let args = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pixel_format",
+        "yuv420p10le",
+        "-video_size",
+        "512x128",
+        "-framerate",
+        "4",
+        "-i",
+        &raw.to_string_lossy(),
+        "-c:v",
+        "libx265",
+        "-preset",
+        "ultrafast",
+        "-x265-params",
+        &format!(
+            "lossless=1:pools=none:frame-threads=1:log-level=error:\
+             colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:range=limited:\
+             max-cll={PROBE_PEAK_NITS},100"
+        ),
+        "-color_range",
+        "tv",
+        "-colorspace",
+        "bt2020nc",
+        "-color_primaries",
+        "bt2020",
+        "-color_trc",
+        "smpte2084",
+        &pending.to_string_lossy(),
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let result = tools
+        .ffmpeg(args, Stdout::Discard)
+        .await
+        .and_then(|out| check_exit(&out));
+    let _ = tokio::fs::remove_file(raw).await;
+    if let Err(why) = result {
+        let _ = tokio::fs::remove_file(pending).await;
+        return Err(why);
+    }
+    tokio::fs::rename(pending, &path)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(path)
 }
 
 fn diagnostic_summary(stderr: &str) -> String {
@@ -1647,6 +1812,210 @@ mod tests {
         assert!(
             vf.contains("tonemap_videotoolbox=tonemap=hable:tonemap_mode=max:desat=0:"),
             "{vf}"
+        );
+    }
+
+    /// The colored motion fixture passed the former explicit Metal peak units.
+    /// A separate neutral 1179-nit sample must veto that apparent capability.
+    #[tokio::test]
+    async fn neutral_peak_mismatch_prevents_metal_qualification() {
+        let dir = crate::test_tempdir().expect("workdir");
+        std::fs::write(
+            dir.path().join("hdr10-neutral-1179-v1.mkv"),
+            b"cached fixture",
+        )
+        .expect("cached neutral fixture");
+        let tools = Recorded {
+            // Motion encode, then neutral CPU and Metal encodes.
+            ffmpeg: vec![ok_output(""), ok_output(""), ok_output("")],
+            ffprobe: vec![
+                ok_output(BT709_TAGS),
+                ok_output("110,128,128\n"),
+                ok_output(BT709_TAGS),
+                ok_output("117,128,128\n"),
+                ok_output(BT709_TAGS),
+                ok_output("143,128,128\n"),
+            ],
+            ..Recorded::default()
+        };
+        let result = run(
+            &tools,
+            &dir.path().join("hdr.mkv"),
+            &dir.path().join("out.mp4"),
+            Pipeline::VtToneMapMetal,
+            Encoder::VideoToolbox,
+        )
+        .await;
+        let verdict = judge_sample(Pipeline::VtToneMapMetal, result, &sample(119.0, 100.0));
+        assert!(!verdict.passed, "the old graph must not earn Metal parity");
+        let reason = verdict.rejected.expect("a correctness reason");
+        assert!(reason.contains("neutral PQ peak"), "{reason}");
+        assert!(reason.contains("26"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn corrected_neutral_peak_keeps_the_motion_encode_clock() {
+        let dir = crate::test_tempdir().expect("workdir");
+        std::fs::write(
+            dir.path().join("hdr10-neutral-1179-v1.mkv"),
+            b"cached fixture",
+        )
+        .expect("cached neutral fixture");
+        let tools = Recorded {
+            ffmpeg: vec![ok_output(""), ok_output(""), ok_output("")],
+            ffprobe: vec![
+                ok_output(BT709_TAGS),
+                ok_output("110,128,128\n"),
+                ok_output(BT709_TAGS),
+                ok_output("117,128,128\n"),
+                ok_output(BT709_TAGS),
+                ok_output("106,128,128\n"),
+            ],
+            ..Recorded::default()
+        };
+        let result = run(
+            &tools,
+            &dir.path().join("hdr.mkv"),
+            &dir.path().join("out.mp4"),
+            Pipeline::VtToneMapMetal,
+            Encoder::VideoToolbox,
+        )
+        .await
+        .expect("corrected neutral control");
+        assert_eq!(
+            result.y, 110.0,
+            "the primary motion measurement is retained"
+        );
+        let calls = tools.ffmpeg_args.borrow();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[0].iter().any(|arg| arg.contains("h=1080:")));
+        assert!(calls[2].iter().any(|arg| arg.contains("h=128:")));
+        assert!(judge_sample(Pipeline::VtToneMapMetal, Ok(result), &sample(119.0, 100.0)).passed);
+    }
+
+    /// Explicit hardware control: the old motion probe accepts both units,
+    /// whereas the added gate rejects only the former factor-of-ten error.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "requires an Apple Silicon Metal device and pinned Jellyfin FFmpeg"]
+    async fn real_neutral_peak_gate_rejects_old_metal_units() {
+        struct OldPeak;
+        impl Tools for OldPeak {
+            async fn ffmpeg(
+                &self,
+                mut args: Vec<String>,
+                stdout: Stdout,
+            ) -> Result<std::process::Output, String> {
+                for arg in &mut args {
+                    if arg.contains("tonemap_videotoolbox=") {
+                        assert!(
+                            arg.contains(":peak=117.9:"),
+                            "unexpected production peak: {arg}"
+                        );
+                        *arg = arg.replace(":peak=117.9:", ":peak=11.79:");
+                    }
+                }
+                Spawn::default().ffmpeg(args, stdout).await
+            }
+            async fn ffprobe(&self, args: Vec<String>) -> Result<std::process::Output, String> {
+                Spawn::default().ffprobe(args).await
+            }
+        }
+        crate::transcode::require_ffmpeg();
+        assert!(
+            has_filters(&["zscale", "tonemap", "scale_vt", "tonemap_videotoolbox"]).await,
+            "the explicit hardware run needs the pinned full Metal build"
+        );
+        let dir = crate::test_tempdir().expect("workdir");
+        let tools = Spawn::default();
+        let clip = fixture(&tools, dir.path())
+            .await
+            .expect("real HDR10 fixture");
+        let out = dir.path().join("out.mp4");
+        let reference = run_clip(
+            &tools,
+            &clip,
+            &out,
+            Pipeline::Cpu,
+            Encoder::VideoToolbox,
+            PROBE_HEIGHT,
+        )
+        .await
+        .expect("CPU motion reference");
+        let old_motion = run_clip(
+            &OldPeak,
+            &clip,
+            &out,
+            Pipeline::VtToneMapMetal,
+            Encoder::VideoToolbox,
+            PROBE_HEIGHT,
+        )
+        .await
+        .expect("old graph produces an SDR motion clip");
+        assert!(
+            old_motion.max_delta(&reference) <= MAX_CHANNEL_DELTA,
+            "the historical blind spot must actually be reproduced"
+        );
+        eprintln!(
+            "old motion delta={:.4}; unchanged limit={MAX_CHANNEL_DELTA}",
+            old_motion.max_delta(&reference)
+        );
+        let why = run(
+            &OldPeak,
+            &clip,
+            &out,
+            Pipeline::VtToneMapMetal,
+            Encoder::VideoToolbox,
+        )
+        .await
+        .expect_err("the old explicit units must fail the neutral gate");
+        assert!(why.contains("neutral PQ peak"), "{why}");
+        eprintln!("old graph refused: {why}");
+        let corrected = run(
+            &tools,
+            &clip,
+            &out,
+            Pipeline::VtToneMapMetal,
+            Encoder::VideoToolbox,
+        )
+        .await
+        .expect("the corrected graph passes the separate neutral gate");
+        let speedup =
+            decide(&corrected, &reference).expect("corrected graph passes motion parity and speed");
+        eprintln!(
+            "corrected motion delta={:.4}; speedup={speedup:.3}; neutral gate passed",
+            corrected.max_delta(&reference)
+        );
+        let neutral = dir.path().join("hdr10-neutral-1179-v1.mkv");
+        // Matroska can omit container transfer/primaries even though decoded
+        // HEVC frames carry the authored VUI and content-light metadata.
+        let proof = tools.ffprobe([
+            "-v", "error", "-select_streams", "v:0", "-read_intervals", "%+#1",
+            "-show_entries", "frame=color_transfer,color_primaries,color_space,pix_fmt,width,height:frame_side_data",
+            "-of", "json", &neutral.to_string_lossy(),
+        ].into_iter().map(str::to_owned).collect()).await.expect("decoded neutral input");
+        check_exit(&proof).expect("decode the neutral input");
+        let proof: serde_json::Value = serde_json::from_slice(&proof.stdout).expect("frame JSON");
+        let frames = proof["frames"].as_array().expect("decoded frame array");
+        assert!(!frames.is_empty(), "a missing frame is not metadata proof");
+        for frame in frames {
+            assert_eq!(frame["color_transfer"], "smpte2084");
+            assert_eq!(frame["color_primaries"], "bt2020");
+            assert_eq!(frame["color_space"], "bt2020nc");
+            assert_eq!(frame["pix_fmt"], "yuv420p10le");
+            assert_eq!(frame["width"], 512);
+            assert_eq!(frame["height"], 128);
+            assert!(frame["side_data_list"]
+                .as_array()
+                .expect("frame side data")
+                .iter()
+                .any(
+                    |side| side["side_data_type"] == "Content light level metadata"
+                        && side["max_content"] == PROBE_PEAK_NITS
+                ));
+        }
+        eprintln!(
+            "decoded neutral input proves PQ/BT.2020, 512x128 10-bit and MaxCLL={PROBE_PEAK_NITS}"
         );
     }
 
