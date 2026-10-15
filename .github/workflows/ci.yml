@@ -998,8 +998,11 @@ jobs:
     name: replicated WAL recovery contracts
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    # Retained outcomes still require compiling the large current native targets.
+    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "1"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

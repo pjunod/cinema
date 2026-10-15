@@ -1683,6 +1683,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("timeout-minutes: 20", fast_rust)
         for compiler_job in (
             metadata_jobs["rust_compile"],
+            metadata_jobs["cluster_wal"],
             workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
         ):
             compiler_header = compiler_job.split("    steps:", 1)[0]
