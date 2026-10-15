@@ -159,7 +159,10 @@ a supported worker can execute a versioned job.
    catalog pins immutable upstream revisions, expected SHA-256 and exact byte
    lengths. Use bounded HTTPS transfers, bounded redirects to approved hosts,
    service-owned temporary files, disk reservation, verification and atomic
-   publication. A failed/cancelled transfer must not appear installed. Audio
+   publication. A failed/cancelled transfer must not appear installed. Complete
+   checksum-valid bytes may remain as unverified cache after Stop convergence;
+   no automatic job may turn that cache into an accepted installation without
+   a prior successful receipt for the exact current file identity. Audio
    never leaves the server; model installation is the only added network step.
 3. **Start with `base.en` and multilingual `base`.** These are provisional
    first-release choices, subject to the quality/throughput pass. Keep `tiny.en`
@@ -415,8 +418,13 @@ instead of asserting mixed-version safety.
 `license` and `adapter_contract`. Worker records have `node_id`, `label`,
 `eligible`, `observed_at_ms`, `expires_at_ms`, `engine` and `models`.
 Engine status is `available`, `missing` or `unqualified`; model status is
-`missing`, `installed`, `verified`, `verification_failed` or `unknown`.
-Installed bytes without a current validated receipt are never `verified`.
+`missing`, `unverified_cache`, `installed`, `verified`, `verification_failed`
+or `unknown`. Cache without a successful exact-model-file receipt requires an
+explicit Install/Test; it is neither an accepted installation nor `verified`.
+An accepted unchanged model may be `installed` while owned requalification
+runs for the new boot/engine. Automatic Verify dedupe identity binds its typed
+payload, boot, model and engine; stale queued work retires before claim, and
+held/named identities are rechecked after admitted hashing and self-test.
 
 `POST /api/v1/subtitle-transcription/models/{id}/install` and `/verify` take
 `{version: 1, node_ids: [...]}`: nonempty, bounded, unique current members.
@@ -467,6 +475,49 @@ the concrete diff before its gate/merge. No deployment is authorized.
 
 ### 9.3 Integration amendments and current execution — 2026-10-15
 
+**Single-server completion amendment — accepted 2026-10-15.**
+After T1 passes its exact-base gate and lands, consolidate the remaining
+interdependent slices into one integration task PR targeting the current effort:
+T6 corpus attribution, T2 durable contracts, combined T5/watch UI, T3/T4 runtime
+(including known51866 Advanced compatibility), essential regressions and
+maintained Operations/API/Features/ledger updates. Preserve original commits,
+review dispositions and all Regression-Test trailers; reconcile only identical
+fixture/status hunks. The ownership table and leaf ownership below still apply.
+This replaces separate remaining task gates with one normal hook, exact
+integrated-tree focused checks, review and Effort development gate. It does not
+replace the final current-main merge, Main promotion gate or qualification
+receipt. Superseded PRs close only after the surviving integration visibly
+contains their changes.
+
+The acceptance claim is a usable single-server managed setup in the web player: Settings saves
+an enabled choice before readiness; a named local worker installs and verifies
+allowlisted weights; generation during playback publishes the exact requested
+source/audio/language artifact; Off and the current player survive publication;
+explicit Use shows a cue; Activity reloads the exact job. Repeat from the final
+committed package with an empty model store, then prove cancelled first-install
+cache cannot become Ready after restart without fresh intent, explicit recovery
+works, successful unchanged-model restart requalifies automatically, and running
+inference Stop reaps its observed child and scratch without publishing.
+
+Essential local checks cover SQLite and replicated-store admission/publication,
+mode/CAS/source/Stop/provenance fences; manager/config/API/artifact/runtime suites;
+the actual packaged native inference helper; web behavior and both shipped-UI
+browser fixtures. Duration/model/output/publication limits remain safety guards:
+a four-hour admission ceiling is not a four-hour performance or quality promise.
+Test exact refusal boundaries rather than treating unfinished duration runs as
+success. The pressure-stopped two-hour run remains a failed completion attempt.
+
+A nonroot Linux single-server functional package/image run remains essential
+for the Linux installation path; a native macOS pass cannot stand in for it.
+Broader three-node/fleet routing, native-client campaigns, representative
+long-form quality and throughput, release-throughput measurements and upgrade
+campaigns remain explicit follow-up qualification. Their prepared drivers and diagnostic
+results are retained; they do not delay the bounded single-server claim and are
+not represented as supported, qualified fleet behavior. No optional probe or
+translation implementation is added to this integration. Progressive English
+translation remains the next authorized project after current integration and
+its essential acceptance finish, subject to its reviewed P0/P1 prerequisites.
+
 The original task boundaries above remain the review history. T3/T4 now land
 as one compiling integration because manager orchestration, runtime inference
 helpers and configuration validation depend on each other. Review still covers
@@ -477,10 +528,10 @@ or disconnected-module test substitutes for the integrated daemon.
 | Task | Current owner and branch | State and remaining evidence |
 |---|---|---|
 | T0 | Build lead, effort documentation | Reviewed and committed; historical design source retained. |
-| T1 | Packaging Sol session, `codex/subtitle-engine-package` | Built with focused Mac/Linux package checks; task gate and integration acceptance remain. |
-| T2 | Build lead, `codex/subtitle-managed-job-contracts` | Built; pinned formatting/Clippy, schema pair and SQLite/three-voter store contracts passed. Task gate remains; layout fixtures do not qualify cluster restore. |
-| T3/T4 | Build lead, `codex/subtitle-managed-runtime` | Implementation claimed; actual integrated compilation, focused tests and fresh-package/browser acceptance are in progress. |
-| T5 | UI Sol session, `codex/subtitle-usability-web` and `codex/subtitle-model-reasons` | Built with unit/static and actual watch-controller fixtures. Real daemon completion, active playback and exact caption selection still require integration acceptance. |
+| T1 | Packaging Sol session, `codex/subtitle-engine-package` | Gate5210 passed and PR1111 landed as `a378ab927`; essential integrated service acceptance remains. |
+| T2 | Build lead, `codex/subtitle-managed-job-contracts` | Built; pinned formatting/Clippy, schema pair and SQLite/three-voter store contracts passed. Included in the single consolidated candidate; layout fixtures do not qualify cluster restore. |
+| T3/T4 | Build lead, `codex/subtitle-managed-runtime` | Corrected provisional source `1a6b971529` committed normally after `85de7adee`; pinned all-target Clippy, model33/33, HTTP3/3 and UI26/26 pass. The new actual SQLite/reopen/worker-pass regression fences cancelled cache and queued automatic work. Included in the single consolidated candidate; exact-tree checks, package acceptance and its gate remain. |
+| T5 | UI Sol session, `codex/subtitle-usability-web` and `codex/subtitle-model-reasons` | Built with unit/static and actual watch-controller fixtures; provisional real-package browser flow preserved Off/video identity, selected an active cue and reloaded Activity. Maintenance graduation and exact final-tree repetition are included in the single consolidated candidate. |
 | T6 | Build lead and reviewer | Open; final merge tree, promotion gate and scoped qualification receipt required. Movie-length quality/throughput, native Intel and broader deployed fleet remain separate unmet acceptance. |
 
 Leaf ownership in the combined T3/T4 integration is explicit: the packaging
@@ -488,10 +539,29 @@ session owns `subtitle_models/artifacts.rs` and `subtitle_transcription.rs`;
 the UI session owns `subtitle_models/config.rs` and `subtitle_models/api.rs`;
 the build lead owns manager orchestration, state/routes, signed observations,
 queue admission, `JobFence`, process launcher integration and integration tests.
+The Maintenance graduation additionally reserves `web/pages/settings-panels.js`,
+the setup link in `web/detail/preplay-selection.js` and corresponding settings
+tests; moving the permanent setup controls does not imply broader qualification.
 The watch follow-up additionally owns `web/detail/watch-browser.js`,
 `web/player/watch-presentation.js`, `web/player/projection-chrome.js`, the narrow
 `web/app.css` interaction rule, and their web/playback tests. These remain
-separate task diffs and pass the normal hook and required effort gate.
+reviewed slices. The original setup/completion and watch follow-up now form
+part of the single remaining server integration candidate, preserving original
+commits, ownership and regression trailers. Prior task PRs are superseded only
+after that consolidated candidate visibly carries their changes. It must pass
+the normal hook and one required effort gate on its exact integrated base.
+
+Native qualification ownership remains with the UI session on
+`codex/subtitle-native-qualification`: Apple
+`Tests/GeneratedSubtitleAcceptanceTests.swift` and the minimal read-only
+accepted-selection observation in `Sources/PlayerController.swift`; Android
+`GeneratedSubtitleAcceptanceTest.kt`, `GeneratedSubtitleObservationTest.kt`
+and the corresponding internal observation seams in `player/Controller.kt`
+and `player/PlayerScreen.kt`. The demonstrated Android test-host PiP crash
+also reserves the test-only `src/capabilityProbe/AndroidManifest.xml` overlay;
+its correction remains in review and does not change the production manifest.
+No Apple project-file change is required. Simulator/emulator evidence must distinguish the requested menu choice from
+server-accepted selection and the actual current native player.
 
 Managed discovery retains the common `subtitle-transcription:sweep` lease and
 bounded eight-file pages. Its single disposable settings record,
@@ -507,9 +577,14 @@ T6 qualification ownership is also isolated. The engine builder owns
 `codex/subtitle-recognition-qualification`: the recognition driver, attributed
 corpus catalog/reference files, its operations tests and qualification document
 with its index row. The web builder owns `codex/subtitle-native-qualification`:
-`clients/apple/Tests/GeneratedSubtitleAcceptanceTests.swift`, its
-`clients/apple/project.yml` test registration, and
-`clients/android/app/src/androidTest/java/tv/plurx/app/player/GeneratedSubtitleAcceptanceTest.kt`.
+`clients/apple/Tests/GeneratedSubtitleAcceptanceTests.swift`, the minimal
+read-only accepted-selection seam in `clients/apple/Sources/PlayerController.swift`,
+`clients/android/app/src/androidTest/java/tv/plurx/app/player/GeneratedSubtitleAcceptanceTest.kt`,
+the corresponding internal observations in Android `player/Controller.kt` and
+`player/PlayerScreen.kt`, and their focused stale-observation regressions. No
+project-file registration change is required. These observations bind actual
+accepted server selection to the current player/session/item; requested menu
+state alone is not proof that alternate audio was applied.
 Any minimal Android player test seam is separately reviewed. Native test builds
 wait for the first packaged web acceptance and target only simulator/emulator;
 physical-install builds retain the committed merged-main requirement. The build
@@ -530,6 +605,7 @@ Further adversarial findings and dispositions:
 | Managed runtime adapter disagrees with caption storage validation | Admit only the exact qualified managed adapter with closed engine SHA/platform execution provenance. Managed publication matches its payload adapter; legacy publication remains the literal historical adapter with no execution extension. Test actual SQLite and replicated publication/readback plus SQLite reopen and historical JSON compatibility. Logical artifact/profile identity stays unchanged. |
 | Real recognizer output extends beyond decoded media EOF | Managed inference intersects validated cue intervals with the exact decoded PCM sample domain: clip straddling ends, discard wholly later cues, preserve text/IDs/order/overlap, and reject malformed/decreasing starts or empty output. Bind `mono16k-s16-digital-zero-pcm-eof-v1` into the managed pipeline digest and refuse incompatible recipe claims. Advanced output and digest retain prior behavior. The retained CC BY short-film raw output and attribution prove the observed boundary, not universal recognition quality. |
 | Silence produces a hallucinated cue | Reject only nonempty decoded PCM whose actual samples are all digital zero, with bounded cancellable reads before inference. Return `no_speech_detected`; do not treat valid speech/noise quality as model verification failure or add a VAD model. Test actual FFmpeg silence and cancellation/header bounds; broader non-speech classification remains unqualified. |
+| Cancelled install cache becomes Verified after restart | Require a durable successful receipt matching model id/SHA and exact current file identity before automatic verification. Label orphan bytes `unverified_cache`; explicit Install/Test can qualify them. Fence already queued automatic work to its typed payload, boot/model/engine identity, compare held identity after admitted hash, and recheck named identity before receipt. Preserve cancelled-first-install and replaced-inode restart reproductions; successful unchanged installs still reverify automatically. |
 | Publication retry rewrites verification time | Keep receipt bytes immutable, use a fresh ownership-check clock and resolve only the exact successful job/fence receipt. Test lost-reply-style readback with a later clock. |
 
 
@@ -541,15 +617,78 @@ Final qualification must name the integrated committed tree and package.
 
 | Required surface | Evidence available | Remaining acceptance |
 |---|---|---|
-| macOS clean Settings workflow | Qualified engine/model production helper passed with held files and a clean environment; real UI fixture tests pass | Fresh built service package, empty persistent models, actual Settings download/automatic verification/Save/generation/publication/output fetch and live playback |
+| macOS clean Settings workflow | Corrected committed source `1a6b971529` in a production-cfg functional package passed all 13 actual browser checks from missing weights: save enabled, install/automatic verification, generation during playback, exact artifact/VTT fetch, Off/video preservation, explicit Use with active cue and Activity reload | Repeat the final integrated merge tree with the shipping package profile; the unoptimized functional package does not qualify release throughput |
 | Linux clean nonroot image | Pinned CPU engine recognized real speech as a nonroot user; package tests execute on Linux without skips | Complete daemon image with empty persistent models and normal Settings/API install/generate; repeat after upgrade |
-| Download, decode and inference cancellation | Bounded chunk cancellation, no qualification cache on cancelled hash, owned Stop/foreground/shutdown child reaping and scratch/admission lifetime regressions pass | Isolated service cancellation during real transfer and real inference, then successful retry; retain exact job/fence evidence |
+| Download, decode and inference cancellation | Bounded chunk/hash and owned child lifetime regressions pass; provisional service inference Stop/reaping/no-caption and retry passed. Corrected committed-package first Install Stop retained unverified cache, stayed unverified after restart without Install/Test, then explicit Test qualified the same bytes | Final integrated-tree inference/decode and transfer repetition with exact job/fence evidence; preserve the original pre-correction failure separately |
 | Low storage | Preallocation failure/low-budget tests leave no published partial artifact; actual physical reservation succeeds on local storage | Actual isolated ENOSPC or quota-limited filesystem run, with recovery; synthetic budget refusal is not ENOSPC |
-| Restart and stale readiness | Stored caption/execution identity survives SQLite reopen; identity replacement/cache tests and boot-bound receipt logic are covered | Same-data daemon restart without tool/model/PATH overrides; automatic owned verification before current-boot readiness; corrupt model repair and retry |
+| Restart and stale readiness | Corrected committed package retained saved enable, model SHA and exact caption/VTT across same-data restart without Install/Test, reverified after the new boot, and refused automatic readiness for cancelled first-install cache. Provisional corruption refusal, queued-generation block and explicit repair also passed; SQLite reopen/identity tests pass | Repeat on the final integrated shipping package; retain exact package/boot/source identities and the original pre-correction failures |
 | Cluster routing and races | Actual SQLite/three-voter publication, cancellation, source revision and mode/CAS fences pass; two-worker local-source eligibility and queue pagination regressions pass | Isolated multi-process routing with one missing mount/model, worker restart/lease takeover, stale peer observations and partial install refusals |
-| Movie and episode duration | Real short-film and German sample engine timing is being retained separately; exact real-film EOF regression uses attributed raw output | End-to-end managed movie/episode workflow with source-clock bounds and recorded CPU/wall time; representative quality remains a separately scoped claim |
-| Language and audio selection | Actual HTTP tests bind nondefault ordinal, unknown-tag explicit language and exact source identity; closed catalog distinguishes English-only/multilingual support | Real non-English managed service sample; record independent reference/quality limits rather than scoring recognizer output as truth |
-| Web playback and Activity | Shipped watch-controller/attached-video fixtures preserve Off and the video owner; exact safe projections and reload route tests pass | Actual generated caption appears without reload, remains Off until explicit Use, renders after seek and survives exact Activity reload |
-| Apple and Android playback | Generated captions use the existing acquired-caption delivery/index contract; no client code change is required by this implementation | Select and render the generated track on the unchanged supported clients against the isolated server; physical-device build provenance rules still apply |
+| Movie and episode duration | Real short-film and German sample engine timing is retained separately; exact real-film EOF regression uses attributed raw output. A two-hour repeated-speech service attempt stopped at the host-pressure guard after 553.97s, with no publication and independently observed child/scratch retirement | End-to-end managed movie/episode workflow with source-clock bounds and recorded CPU/wall time; representative quality remains a separately scoped claim |
+| Language and audio selection | Actual HTTP tests bind nondefault ordinal, unknown-tag explicit language and exact source identity. Corrected committed service installed Base multilingual, generated the referenced German FLEURS utterance and fetched the exact published VTT; cue end12000ms stayed within12960ms PCM | The one-sample automatic comparison has6 word edits/28 publisher-reference words, with no local human review. Broader language/dialogue quality and final shipping-tree repetition remain open |
+| Web playback and Activity | Corrected committed `1a6b971529` package added the exact artifact without reload, preserved Off/player/attachment/source, rendered an active cue after Use/seek and reloaded the exact Activity job | Repeat on the final integrated shipping package. Raw console receipts retain two established disabled remote-control 503 probes; scoped subtitle passes are not clean-console claims |
+| Apple and Android playback | Native qualification remains open. A retained Android emulator run passed direct1080p with Off, then failed to render selected generated caption1: the fixed direct source exposed only embedded French text and later stalled | Android direct acquired/generated external captions need a separate safe dynamic text owner; a metadata marker or startup preload does not solve publication during playback. No partial correction or native qualification is claimed. Broader Apple/Android/physical acceptance remains follow-up |
 | Upgrade and rollback | Transactional bundle staging, corruption refusal, old-bundle restoration and model retention installer regressions pass | Isolated supported installation upgrade/restart/rollback evidence; never replace the operator's running service for acceptance |
 | Promotion | Task slices reviewed and local focused evidence recorded | Green exact-base effort gates, integrated main merge, full promotion gate and qualification receipt; no red-gate merge or production rollout is authorized |
+
+
+### Prepared cluster follow-up — not included in this candidate
+
+The build lead retains a prepared three-node driver and protocol tests on the
+separate `codex/subtitle-usability-operations` workspace. They are not files or
+runnable commands in this candidate, and no multi-process result is claimed.
+The follow-up must pin an immutable Linux image, use distinct private model
+paths and source mounts, preserve quorum during observed owner loss, and prove
+exact attempt/source/artifact identity, stale readiness and single publication.
+It remains broader fleet qualification rather than a single-server completion
+gate. Existing replicated-store regressions do not substitute for that run.
+
+The macOS Stop experiment retains its original stricter failed assertion:
+complete checksum-valid cache bytes appeared after Stop acknowledgement, while
+the job settled cancelled without a success receipt. The accepted contract
+permits residual unverified cache after bounded Stop convergence, but not
+installation/readiness or automatic completion of stopped work. The separate
+restart experiment found a real bug on provisional `85de7adee`: those orphan
+bytes became Verified without a fresh action. The correction requires a prior
+successful exact-model-identity receipt for automatic enqueue and execution;
+old queued automatic work also carries and checks its boot/model/engine
+identity. Explicit Install/Test may intentionally qualify cache. An unchanged
+previously accepted model remains installed when a redundant operation stops
+(Stop is not uninstall). The original red receipts remain the failing baseline;
+the focused corrected-source regression passed on `1a6b971529` (actual SQLite
+reopen and real `worker_pass` retirement, within model33/33). A separate empty
+root then reproduced the same stopped first-install/cache scenario on the
+corrected committed package: the job stayed cancelled with no result, restart
+without Install/Test left the cache `unverified_cache` with no verification
+time, and explicit Settings Test subsequently qualified the unchanged bytes.
+The corrected package also passed all 13 actual subtitle browser workflow
+checks. These scoped passes preserve, rather than rewrite, the old red
+receipts. Successful experimental receipts already produced by the unreleased
+buggy version are not retrospectively invalidated or claimed to be migrated.
+Final integrated-tree and shipping-package repetition remain required.
+
+
+Current provisional task evidence is bound to commit `1a6b971529cb9a1406a35034ada13cd9b2362c8f`
+and tree `3c435604ae2c1447ab56280978d6c6136fe772b6`. Rust 1.97.1 compiled the
+registered daemon tests; the normal tracked hook passed workspace formatting,
+all-target Clippy with denied warnings, catalog lint and served JavaScript.
+Focused counts are model33/33, HTTP3/3 and web26/26. The reusable cluster driver's
+nine isolation/protocol tests and docs-index four tests also pass, but its
+three-node run is still pending. A standalone corrected-source macOS package
+also built with Rust 1.97.1, one compiler job, explicit source stamp and the
+production-cfg `test` profile; all memory-pressure samples stayed normal.
+The copied daemon's signature and pinned engine/FFmpeg/parser were verified,
+and `--version` reports the exact commit. Fresh-root Stop/cache/restart, explicit recovery and the full browser workflow
+passed on that corrected package; this unoptimized functional package does not
+qualify release throughput.
+These are task-source results; merging a new effort/main base requires
+exact-tree revalidation and normal gates.
+
+### Advanced vocabulary compatibility clarification
+
+Advanced header capability accepts the known GGML vocabularies 51864 (English),
+51865 (99 languages) and 51866 (100, including Cantonese `yue`). This follows
+`whisper_vocab::num_languages` and the language-token table in the pinned
+whisper.cpp source 306c88f4d1286aec1bf96e544632897886af5501. Unknown headers remain
+unadvertised and the 2 GiB bound remains unchanged. This preserves manual-model
+language admission; it does not qualify additional weights. The managed Base
+multilingual catalog remains 99 languages and excludes `yue`.

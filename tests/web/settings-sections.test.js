@@ -196,6 +196,25 @@ function memoryStorage(initial) {
   return { getItem: (k) => (map.has(k) ? map.get(k) : null), setItem: (k, v) => map.set(k, String(v)), map };
 }
 
+test("legacy subtitle setup links route to Maintenance", () => {
+  const r=routing(memoryStorage(),"#/settings/developer/enable-subtitle-transcription");
+  assert.equal(r.settingsRouteTab(r.location.hash),"maintenance");
+  assert.equal(r.settingsTab(),"maintenance");
+  assert.match(shippedConst("SETTINGS_KEPT_MOUNTS"),/maintenance:\["enable-subtitle-transcription"\]/);
+});
+
+test("subtitle setup belongs to Maintenance without a temporary Developer card", () => {
+  const panels=developerPanels(), settings={}, readiness={features:[]};
+  assert.doesNotMatch(panels.developerPanel(settings,readiness),/Configure transcription|Generate subtitles offline/);
+  const maintenance=panels.maintenancePanel(settings,null,readiness);
+  assert.match(maintenance,/Generate subtitles offline/);
+  assert.match(maintenance,/Configure transcription/);
+  assert.match(maintenance,/id="subtitle-transcription-form"/);
+  const card=shippedSource("subtitleTranscriptionCard");
+  assert.match(card,/id:"enable-subtitle-transcription"/);
+  assert.doesNotMatch(card,/devGraduation|Leaves Developer when/);
+});
+
 test("every section is a route, grouped in the rail's order", () => {
   const r = routing(memoryStorage(), "#/settings/playback");
   assert.deepEqual(r.SET_GROUPS.map(([group]) => group), ["Content", "Playback", "Server", "Outside", "Developer"]);
@@ -1125,6 +1144,16 @@ test("a section repaint carries kept settings cards across as live nodes", () =>
   // Analysis keeps the backfill card across its own panel's Save.
   const backfill=make("subbackfillcard"); dom={subbackfillcard:backfill}; active=null;
   assert.deepEqual(keep.capture("analysis").nodes,[backfill]);
+  const setup=make("enable-subtitle-transcription"); setup.savedEnabled=false; setup.unsavedLanguage="sv";
+  dom={"enable-subtitle-transcription":setup}; active=setup.child;
+  const setupKeep=keep.capture("maintenance");
+  const setupReplacement=make("enable-subtitle-transcription"); dom={"enable-subtitle-transcription":setupReplacement};
+  keep.restore(setupKeep);
+  assert.equal(setupReplacement.replaced,setup,"Maintenance keeps the live setup and its saved/unsaved controls");
+  assert.equal(setupReplacement.replaced.savedEnabled,false);
+  assert.equal(setupReplacement.replaced.unsavedLanguage,"sv");
+  assert.equal(setup.child.focused,1);
+
   assert.deepEqual(keep.capture("playback").nodes,[],"other sections redraw everything, as before");
   const render=shippedSource("renderSettings");
   assert.ok(render.indexOf("captureSettingsMounts(tab)")<render.indexOf('innerHTML=`<div class="setlayout">'),"captured before the repaint");

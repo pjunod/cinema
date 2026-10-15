@@ -360,15 +360,13 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}
       <div class="setsection" id="enable-macos-video"><h2>Mac video processing</h2><p>Worker-local compatibility and outstanding visual and streaming qualification.</p></div>${macosVideoProcessingCard(settings,readiness)}
-      <div class="setsection" id="enable-macos-hevc"><h2>Mac HEVC output</h2><p>Independent output negotiation and HDR presentation qualification.</p></div>${macosHevcOutputCard(settings,readiness)}
-      <div class="setsection" id="enable-subtitle-transcription"><h2>Generate subtitles</h2><p>Optional local transcription for media without suitable captions.</p></div>${subtitleTranscriptionCard()}`;
+      <div class="setsection" id="enable-macos-hevc"><h2>Mac HEVC output</h2><p>Independent output negotiation and HDR presentation qualification.</p></div>${macosHevcOutputCard(settings,readiness)}`;
 }
 function subtitleTranscriptionCard(){
   return setCard(`${cardHead("Generate subtitles offline","Create machine-generated captions locally with whisper.cpp.")}
       <p>Runs as background work. You can follow progress and stop queued or running transcription in Activity.</p>
       <button class="sm" onclick="openSubtitleTranscription(this)">Configure transcription</button>
-      <div id="subtitle-transcription-form"></div>
-      ${devGraduation("real transcription, cancellation, source replacement and generated-caption playback are qualified on the supported workers and clients.","the permanent controls move to Settings → Maintenance.")}`);
+      <div id="subtitle-transcription-form"></div>`,{id:"enable-subtitle-transcription"});
 }
 // Async setup and generation results belong to the account and page that
 // requested them. A connected node alone is insufficient after sign-out/sign-in.

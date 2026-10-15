@@ -14,7 +14,7 @@ const file=id=>({id:String(100+Number(id)),filename:'Speech.mp4',available:true,
 const existing=[{index:0,language:'fra',title:'Existing French captions',text:true,codec:'webvtt'}];
 const data=id=>({item:{...movie,id},files:[file(id)],children:[],ancestors:[]});
 test('watch generation survives real controller ledger refresh and preserves attached video',async()=>{
- const browser=await chromium.launch({headless:true});
+ const browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:{})});
  const page=await browser.newPage({viewport:{width:1440,height:1000},hasTouch:!!process.env.WATCH_COARSE});
  const errors=[],decisions=[];let generationReads=0,generationPublished=false;
  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});

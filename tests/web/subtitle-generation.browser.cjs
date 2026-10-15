@@ -35,10 +35,10 @@ test("managed subtitle setup and generation work through browser controls withou
         if(url==="/subtitle-transcription/jobs/generation-one"){const count=++fixture.generationReads;fixture.published=count>=3;return {job_id:"generation-one",kind:"subtitle_transcribe",state:fixture.published?"succeeded":"running",phase:fixture.published?"succeeded":count===1?"decoding":"transcribing",node_id:"worker-one",attempt:1,fence:1,started_at_ms:Date.now()-5000,updated_at_ms:Date.now(),file_id:"42",source_size:"1000",source_mtime:"2000",artifact_key:"artifact-one",result_ref:fixture.published?"artifact-one":null};}
         throw Error("Unimplemented fixture route: "+url);
       };
-      location.hash="#/settings/developer";
+      location.hash="#/settings/maintenance";
     });
-    for(const file of ["core/file-context.js","pages/settings-developer.js","detail/preplay-selection.js","pages/activity.js"])await page.addScriptTag({path:path.join(WEB,file)});
-    await page.evaluate(()=>{document.getElementById("surface").innerHTML='<button onclick="openSubtitleTranscription(this)">Configure transcription</button><div id="subtitle-transcription-form"></div>';window.prePlayPreview=()=>{};});
+    for(const file of ["core/file-context.js","pages/settings-panels.js","pages/settings-developer.js","detail/preplay-selection.js","pages/activity.js"])await page.addScriptTag({path:path.join(WEB,file)});
+    await page.evaluate(()=>{document.getElementById("surface").innerHTML=subtitleTranscriptionCard();window.prePlayPreview=()=>{};});
     await page.getByRole("button",{name:"Configure transcription",exact:true}).click();
     await page.getByRole("button",{name:"Install selected model",exact:true}).waitFor();
     assert.equal(await page.getByLabel("Media worker",{exact:true}).isChecked(),true);

@@ -1,9 +1,10 @@
 # Progressive subtitle translation — build English captions during playback
 
-**Status:** parent and independent engine reviewed R1–R9 design; no translation code
-is authorized to start yet · **Requested:** 2026-10-15 · **Draft base:**
-`73788aa88` · **Execution prerequisite:** complete the current subtitle
-usability effort and freeze its qualified interfaces first.
+**Status:** parent and independent engine reviewed R1–R9 design; implementation
+is authorized after the prerequisite gates below · **Requested:** 2026-10-15 ·
+**Draft base:** `73788aa88` · **Execution prerequisites:** complete the current
+subtitle usability effort, rebase to its qualified interfaces, and review the
+measured P0/P1 contracts before production implementation.
 
 Companion to [offline generation](SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md):
 that effort installs a model and publishes complete same-language captions.
@@ -108,7 +109,8 @@ foreground delivery type and concurrency. Do not extrapolate ARM64 to x86.
 | Lag | Source playback time minus end of the latest usable covered interval containing or preceding that time, with uncovered gaps identified separately. |
 | Seek recovery | Seek acceptance to first correct translated cue at the new source time; include both cached-range and missing-range cases. |
 | Resource interference | Foreground start/stall/seek metrics with and without translation, child CPU, RSS and held I/O. Faster captions do not excuse degraded playback. |
-| Quality | Human bilingual review for omissions, hallucinations, negation, names, dialogue order and timing; compare full-context and chunked translation. WER alone is not a translation-quality score. |
+| Reference-based functional correctness | Compare full-context and chunked output with independently published, human-authored English reference translations for the selected source-language examples. Audit pair identity, rights and hashes. Label alignment/translation scores automated; retain omissions, hallucinations, negation, names, ordering, timing and seam defects rather than treating a score as a human verdict. |
+| Broader translation quality · open | Genuinely bilingual listening/timing review with a recorded rubric and adjudication across dialogue, noise and long-form material. Publisher references and automated diagnostics do not close this separate row; WER alone is not a translation-quality score. |
 
 Experiment with bounded source windows such as 10, 20 and 30 seconds,
 left/right context overlap such as 2 and 5 seconds, and bounded context
@@ -119,6 +121,27 @@ P2, write the chosen production limits and acceptance thresholds into this
 plan with the measured tradeoff. If none meets the approved useful-lag and
 quality budget, do not market realtime; revise the model/adapter or product
 status explicitly. Progressive availability may still be useful while slow.
+
+### 2.2 Functional delivery and broader human quality have separate gates
+
+The user has authorized implementation after current subtitle usability
+completion and reviewed P0/P1 contracts. P0/P1 may release implementation and
+limited-profile functional acceptance using independently published,
+human-authored English reference translations and explicitly automated
+diagnostics. Freeze the selected languages, ordinary single-node playback
+route, startup/lag/resource budgets and timing/seam limits from measured
+examples first. Preserve remaining defects and rejected profiles in the
+receipt. A model's inferred reference is not independent human-authored text.
+
+Broader quality qualification remains **open** until genuinely bilingual
+reviewers listen, assess timing and adjudicate recorded disagreements. No
+such local human verdict is available now. This open row does not impose a
+new permission stop on bounded implementation or the reviewed functional
+profile, and it cannot be presented as broad movie-quality qualification.
+Useful progressive delivery on an ordinary single node, actual selected
+source-language examples, measured lag, correct source timing, Stop and
+resource protection remain required; the staging distinction waives none of
+those functional gates.
 
 ## 3. One immutable translation asset, many playback demands
 
@@ -515,14 +538,14 @@ No deployment or physical build is implied by this plan.
 
 | Milestone | Exclusive owner and files | Acceptance before the next milestone |
 |---|---|---|
-| P0 · characterize | Engine agent: new experiment driver/fixtures under `tests/fixtures/subtitle-translation/` and qualification receipt under `docs/features/`; plan agent owns this plan/index/backlog. No production code. | Reproducible source/package/model hashes, RTF/startup/seek/overlap/quality/resource matrix; selected production bounds and candid supported profile list. |
+| P0 · characterize | Engine agent: new experiment driver/fixtures under `tests/fixtures/subtitle-translation/` and qualification receipt under `docs/features/`; plan agent owns this plan/index/backlog. No production code. | Reproducible source/package/model hashes, independently published human-authored English reference pairs, explicitly automated diagnostics, RTF/startup/seek/overlap/timing/resource matrix, retained defects and selected production bounds/profile list. Broader bilingual quality review remains separately open. |
 | P1 · freeze contracts | Lead: exact new core schema/API/profile/timebase contract; parent review then independent engine/UI review. | Golden DTOs and explicit permission/idempotency/CAS rules, state machine and counterexamples agreed in this document. No implementation starts with an unresolved semantic choice. |
 | P2 · durable asset/ranges | Core agent: new `crates/plurx-core/src/store/subtitle_translation*.rs`, shared job enums/traits/registries and SQLite/Hiqlite wiring/tests. Lead alone integrates shared files. | Genuine SQLite + Hiqlite tests for multi-viewer overlap, Stop/fence/lease/source replacement, out-of-order coverage CAS, restart and quotas. |
 | P3 · engine capability/runtime | Engine agent: new daemon `subtitle_translation/runtime.rs`, translation self-test/profile helpers and engine/model packaging files. Existing `subtitle_transcription.rs` changes only through lead-approved seam. | Foreign→English translation and stable overlap on selected profiles; cancellation/admission/source/failure corpus with no private artifact publication. |
 | P4 · manager/API/admission | Lead: new daemon `subtitle_translation/mod.rs`, `api.rs`, settings, worker/state/route integration and foreground admission. Own shared files from P2 onward. | Auth/revocation, dedup/independent demand lifetimes, fairness, exact manifest publication and safe statuses through real daemon routes. |
 | P5 · web | UI agent: Settings Developer, detail/preplay, watch browser, watch presentation/projection, subtitle track owner and targeted web/browser tests. Declare exact existing filenames in P1 after current effort lands. | Real installed multilingual model; foreign speech+original captions; first partial cues during attached playback; lag/gap/seek/original/Off/Retry/keyboard/fullscreen; no playback reopen. |
 | P6 · native delivery | Apple agent owns native subtitle adapter/UI/tests; Android agent owns Android subtitle adapter/UI/tests. Freeze exact file lists from then-current tree in P1. | Native compile/unit + emulator/simulator controls; separately retain required physical display/PiP/AirPlay receipts before claiming those routes. Unsupported routes remain explicit. |
-| P7 · qualification/promotion | Lead and reviewer: exact candidate, Operations/API/Features updates, canonical receipt, this ledger/index/backlog. | Full matrix below, independent code review, current-main integration, main gate and explicit qualified capability boundaries. |
+| P7 · qualification/promotion | Lead and reviewer: exact candidate, Operations/API/Features updates, canonical receipt, this ledger/index/backlog. | Full functional matrix below for the approved limited profile, independent code review, current-main integration, main gate and explicit capability boundaries. Broader human quality may remain named open and excluded from the claim. |
 
 Existing shared files have one integration owner. Do not concurrently edit
 job registries, routes or player track owners from separate task branches.
@@ -547,7 +570,7 @@ editing it. This table gives ownership, not permission to start early.
 | Web agent, focused regressions | `tests/web/subtitle-generation.test.js`, **new:** `tests/web/subtitle-translation.test.js`, `tests/web/subtitle-translation.browser.cjs`; `tests/playback/web-control.test.js` only for declared existing-owner interactions. Lead owns Makefile/CI inventory registration. |
 | Apple agent, P6A | `clients/apple/Sources/PlayerController.swift`, `PlayerView.swift`, `PlayerItemObserver.swift`, `PlurxAPI.swift`, `SettingsStore.swift`, `SettingsView.swift`; **new:** `ProgressiveSubtitleTranslation.swift`, with focused tests under `clients/apple/Tests/`. No simultaneous other Apple agent edits to these files. |
 | Android agent, P6B | `clients/android/app/src/main/java/tv/plurx/app/player/SharedPlaybackOwner.kt`, `PlayerScreen.kt`, `SubtitlePolicy.kt`; `data/PlurxApi.kt`, `data/SettingsStore.kt`, `ui/SettingsScreen.kt` under the same app source root; **new:** `player/ProgressiveSubtitleTranslation.kt` and matching focused unit/instrumented tests. |
-| Lead/reviewer, P7 | `docs/API.md`, `docs/FEATURES.md`, `docs/OPERATIONS.md`; **new:** `docs/features/PROGRESSIVE-SUBTITLE-TRANSLATION-EVIDENCE.md` plus indexed receipts. Plan agent applies reviewed state changes to its reserved ledger/index/backlog files. |
+| Lead/reviewer, P7 | `docs/API.md`, `docs/FEATURES.md`, `docs/OPERATIONS.md`; **new in the features folder:** `PROGRESSIVE-SUBTITLE-TRANSLATION-EVIDENCE.md` plus indexed receipts. Plan agent applies reviewed state changes to its reserved ledger/index/backlog files. |
 
 Do not reserve a new flag in Settings merely for internal correctness. The
 optional translation enable choice has a user purpose; internal partial
@@ -560,7 +583,8 @@ publication, source fences and admission remain unconditional correctness.
 | Clean setup | Empty model store, packaged engine, cleared inherited model/engine environment. Install and translation-specific verify through named Settings controls; no terminal model work. Preserve saved enable even when unready. |
 | Single-node acceptance floor | At least one ordinary packaged single-node movie route serves video and useful progressive English captions after Settings installation. Record named route/profile and useful measured startup/lag. No success claim based solely on another worker or all-common-routes refusal; encoded exclusions require specific evidence. |
 | Progressive proof | Foreign speech longer than the first processing window, with original captions. At least one correct translated cue is visible while later ranges remain unprocessed. Record manifest revisions, coverage, source position, video/player/attachment identity and screenshots/video. A completed-file track does not pass. |
-| Correct timing/quality | Bilingual human samples including overlaps, names, negation, fast speech and silence. Absolute source times, stable boundaries, no doubled/dropped overlap, no hallucinated silence cues. Retain annotated disagreements and accepted limits. |
+| Limited-profile timing/reference correctness | Actual selected-language speech and independently published human-authored English references; explicitly automated comparisons with timing/seam defects retained. Verify absolute source times, stable boundaries, overlap, names, negation, fast speech and silence against frozen limits. Do not label automatic diagnostics a human listening verdict. |
+| Broader human quality · open separately | Genuinely bilingual listening/timing review across the three-language/dialogue/noise/long-form corpus, recorded rubric, disagreements and adjudication. This row must close before broad translation-quality claims; it may remain visibly open for approved limited-profile functional acceptance. |
 | Slow/unknown capacity | Deliberately slower-than-playback worker, stale observations and no worker. Show actual behind/gap/unknown status, not false playback pressure or realtime. Picture continues and original/Off controls work. |
 | Seek/rate | Forward/backward seeks into covered/uncovered ranges, repeated seeks, pause/resume and playback-rate changes. No pre-seek stale cue; bounded demand churn and measured recovery; no video restart. |
 | Multiple viewers | Same range coalesces; different ranges remain fair; one viewer Stop/logout/disconnect does not cancel another. Admin cancellation prevents late publication. |
@@ -584,12 +608,15 @@ receipts separate. Never convert an unrun device case into a passed checkbox.
 | Native growing-track adapter | Static VTT URL reload is not assumed. Select existing-owner-compatible text/overlay/HLS routes per client after a minimal measured proof. | Native owners |
 | Viewer work-creation permissions | Initial admin-only demand creation/refresh/seek/release. Nonadmin reads cannot schedule; missing ranges stay unavailable until an admin demand produces them. Broader viewer requests require a reviewed permission/quota change. | Parent + lead |
 | Current feature dependency | No translation implementation before subtitle usability is complete; rebase plan/contracts to the final qualified current tree. | Lead |
+| Functional / broader-quality staging | Parent approved the §2.2 distinction. P0/P1 measured profiles and independent human-authored references can release bounded implementation/functional acceptance; new bilingual listening/adjudication remains open for broader quality. No human verdict or generally qualified movie translation is implied. | Parent + engine + lead |
 
 | Review | State as of 2026-10-15 | Disposition |
 |---|---|---|
-| Parent adversarial design review | Completed 2026-10-15; revised R1–R9 and single-node acceptance floor approved in design | No implementation or measurement approval implied; P0/P1 decisions remain open. |
-| Engine independent second review | Completed full-plan review 2026-10-15; R6–R8 and provenance correction recorded below | Parent and engine confirmed revised dispositions in design on 2026-10-15; P0/P1 measurement/protocol decisions remain blocking. No implementation approval implied. |
-| Implementation authorization | Deferred until current feature completes | Plan-only branch contains no translation implementation. |
+| Parent adversarial design review | Completed 2026-10-15; revised R1–R9 and single-node acceptance floor approved in design | Design review does not close the unmeasured P0/P1 prerequisite gates. |
+| Engine independent second review | Completed full-plan review 2026-10-15; R6–R8 and provenance correction recorded below | Parent and engine confirmed revised dispositions in design on 2026-10-15; P0/P1 measurement/protocol decisions remain prerequisite gates. |
+| Implementation authorization | User authorized implementation after current subtitle usability completion and reviewed P0/P1 contracts | These are prerequisite gates, not another user-permission request. This plan-only branch contains no translation implementation. |
+| Functional / broader-quality staging review | Parent approved the staged evidence boundary on 2026-10-15 after prerequisite-input review | §2.2 and §7 retain ordinary single-node progressive delivery and measured correctness/resource gates. Published human-authored references plus labeled automatic diagnostics can support the limited profile; new bilingual listening/adjudication remains open. No measurements or human verdicts fabricated. |
+| Independent staging-amendment review | Engine reviewer read the amendment on 2026-10-15; no blocking weakening or contradiction found | Selected-language reference evidence remains distinct from broader human listening; measured P0/P1 contracts and ordinary single-node, seam/timing, resource and Stop gates remain mandatory. |
 
 ### 8.1 Parent adversarial findings and proposed dispositions
 

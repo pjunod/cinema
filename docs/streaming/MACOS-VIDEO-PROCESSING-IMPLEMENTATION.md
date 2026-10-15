@@ -886,8 +886,8 @@ cargo build --locked --release -p plurxd
 python3 scripts/build-subtitle-engine \
   --output "$mac_build_root/subtitle-engine" --jobs 2
 python3 scripts/package-macos \
-  --daemon target/release/plurxd \
-  --debug-symbols target/release/plurxd.dSYM \
+  --daemon "$PWD/target/release/plurxd" \
+  --debug-symbols "$PWD/target/release/plurxd.dSYM" \
   --ffmpeg-package "$mac_build_root/native-package" \
   --subtitle-engine-package "$mac_build_root/subtitle-engine" \
   --output "$mac_build_root/daemon-package"

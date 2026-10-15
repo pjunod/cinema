@@ -852,7 +852,7 @@ function subtitleGenerationForm(state){
     <p class="hint" id="sg-language-note-${id}">${language?"Confirm that this is the language spoken in the chosen audio track.":"This audio is untagged. Choose its spoken language explicitly."}</p>
     <p class="hint">Model: ${esc(state.models.find(row=>row.id===state.options.model_id)?.label||state.options.model_id||"Advanced existing installation")}. This runs in the background; movie-length work may take a while. Machine-generated captions may contain mistakes.</p>
     ${!state.options.enabled?'<p class="hint">Subtitle generation is disabled. Enable it in Settings before requesting work.</p>':""}
-    <button class="sm" onclick="submitSubtitleGeneration('${id}',this)">Generate from this audio</button> <a href="#/settings/developer/enable-subtitle-transcription">Model setup</a><div id="sg-status-${id}" role="status" aria-live="polite"></div></div>`;
+    <button class="sm" onclick="submitSubtitleGeneration('${id}',this)">Generate from this audio</button> <a href="#/settings/maintenance/enable-subtitle-transcription">Model setup</a><div id="sg-status-${id}" role="status" aria-live="polite"></div></div>`;
 }
 function subtitleGenerationAudioChanged(id){
   const state=subtitleGenerationPanel(id)?._subtitleGeneration;if(!state||!subtitleGenerationCurrent(state))return;

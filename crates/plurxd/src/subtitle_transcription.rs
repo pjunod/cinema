@@ -458,7 +458,7 @@ pub(crate) async fn enqueue_advanced_selected(
         .await
         .map_err(|_| ApiError::ServiceUnavailable("model_verification_failed".into()))?
         .map_err(|_| ApiError::ServiceUnavailable("model_verification_failed".into()))?;
-    if !model.languages.contains(&config.language) {
+    if !model_supports_language(&model, &config.language) {
         return Err(ApiError::BadRequest("model_language_unsupported".into()));
     }
     let request = enqueue_request_selected(file, &config, &model, &command, audio_index)?;
@@ -1294,13 +1294,20 @@ pub(crate) async fn model_languages(path: &str) -> Vec<String> {
 fn languages_for_vocabulary(vocabulary: u32) -> Vec<String> {
     match vocabulary {
         51864 => vec!["en".into()],
-        51865 => plurx_core::store::background_jobs_transcription::WHISPER_LANGUAGES
+        // Pinned whisper.cpp 306c88f4 src/whisper.cpp::whisper_vocab derives
+        // n_languages = n_vocab - 51766: 51865 has 99; 51866 adds yue (ID99).
+        // This is Advanced header capability, not managed model qualification.
+        51865 | 51866 => plurx_core::store::background_jobs_transcription::WHISPER_LANGUAGES
             .iter()
-            .filter(|language| **language != "yue")
+            .filter(|language| vocabulary == 51866 || **language != "yue")
             .map(|language| (*language).into())
             .collect(),
         _ => vec![],
     }
+}
+
+fn model_supports_language(model: &Model, language: &str) -> bool {
+    model.languages.contains(&normalized_language(language))
 }
 
 async fn managed_pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
@@ -2670,13 +2677,22 @@ mod tests {
     async fn advanced_model_languages_uses_bounded_known_ggml_header() {
         let root = crate::test_tempdir().expect("root");
         let path = root.path().join("model.bin");
-        for (vocabulary, expected) in [(51864_u32, 1), (51865, 99), (51866, 0), (0, 0)] {
+        for (vocabulary, expected) in [
+            (51864_u32, 1),
+            (51865, 99),
+            (51866, 100),
+            (51867, 0),
+            (0, 0),
+        ] {
             let mut bytes = 0x67676d6c_u32.to_le_bytes().to_vec();
             bytes.extend(vocabulary.to_le_bytes());
             std::fs::write(&path, bytes).expect("header");
             let languages = model_languages(path.to_str().expect("path")).await;
             assert_eq!(languages.len(), expected);
-            assert!(!languages.iter().any(|code| code == "yue"));
+            assert_eq!(
+                languages.iter().any(|code| code == "yue"),
+                vocabulary == 51866
+            );
         }
         std::fs::write(&path, b"not GGML").expect("unknown");
         assert!(model_languages(path.to_str().expect("path"))
@@ -2690,6 +2706,94 @@ mod tests {
                 .await
                 .is_empty());
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn transcription_duration_admission_keeps_four_hour_ceiling() {
+        let root = crate::test_tempdir().expect("root");
+        let (mut file, _, _, _) = process_fixture(root.path()).await;
+        for (duration, admitted) in [
+            (None, false),
+            (Some(0), false),
+            (Some(-1), false),
+            (Some(MAX_DURATION_MS), true),
+            (Some(MAX_DURATION_MS + 1), false),
+            (Some(i64::MAX), false),
+        ] {
+            file.duration_ms = duration;
+            assert_eq!(eligible(&file), admitted, "duration {duration:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn advanced_known_51866_admits_and_executes_selected_language() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::test_tempdir().expect("root");
+        let (file, _, decoder, whisper) = process_fixture(root.path()).await;
+        let model_path = root.path().join("advanced.bin");
+        let header =
+            |vocabulary: u32| [0x67676d6c_u32.to_le_bytes(), vocabulary.to_le_bytes()].concat();
+        std::fs::write(&model_path, header(51866)).expect("known header");
+        let model = open_model(model_path.to_str().expect("path"))
+            .await
+            .expect("held Advanced model");
+        assert_eq!(model.languages.len(), 100);
+        assert!(model_supports_language(&model, "YUE"));
+        assert!(model_supports_language(&model, "eng"));
+        assert!(!model_supports_language(&model, "xyz"));
+        let config = Settings {
+            language: "yue".into(),
+            ..Default::default()
+        };
+        let request = enqueue_request_selected(&file, &config, &model, &whisper, 0)
+            .expect("accepted selected recipe");
+        assert!(
+            matches!(request.payload, JobPayload::SubtitleTranscribe { ref language, audio_index: 0, .. } if language == "yue")
+        );
+        std::fs::write(&whisper, "#!/bin/sh\nset -eu\nseen=0\nfor arg do test \"$arg\" != yue || seen=1; last=$arg; done\ntest $seen = 1\nprintf 'WEBVTT\\n\\n00:00:00.000 --> 00:00:01.000\\nSynthetic selected speech.\\n' > \"$last.vtt\"\n").expect("adapter");
+        std::fs::set_permissions(&whisper, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let cancel = CancellationToken::new();
+        let vtt = transcribe_selected(
+            root.path(),
+            &file,
+            &config,
+            &whisper,
+            &model,
+            &cancel,
+            decoder.to_str().expect("decoder"),
+            0,
+        )
+        .await
+        .expect("actual selected child");
+        assert!(vtt.contains("Synthetic selected speech."));
+        for (vocabulary, en, yue) in [
+            (51864, true, false),
+            (51865, true, false),
+            (51867, false, false),
+        ] {
+            std::fs::write(&model_path, header(vocabulary)).expect("comparison header");
+            let other = open_model(model_path.to_str().expect("path"))
+                .await
+                .expect("comparison model");
+            assert_eq!(model_supports_language(&other, "en"), en);
+            assert_eq!(model_supports_language(&other, "yue"), yue);
+        }
+        let oversized = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&model_path)
+            .expect("size bound fixture");
+        oversized
+            .set_len(MAX_MODEL_BYTES + 1)
+            .expect("sparse bound");
+        assert!(model_languages(model_path.to_str().expect("path"))
+            .await
+            .is_empty());
+        assert!(open_model(model_path.to_str().expect("path"))
+            .await
+            .is_err());
     }
 
     #[cfg(unix)]
