@@ -410,6 +410,8 @@ def main(argv: list[str]) -> int:
             frames_advance()
             assert active() == [orphan] and len(sessions) == 10, (active(), len(sessions))
             assert page.evaluate("key => localStorage.getItem(key) !== null", hint_key)
+            page.locator("#live-tv-body").get_by_label("Fullscreen", exact=True).click()
+            page.wait_for_function("document.fullscreenElement?.id === 'live-tv-host'")
             stop()
             until(lambda: not active(), "the rejoined session could not be released")
             assert deletes.count(orphan) == lost_attempts + 1, deletes
