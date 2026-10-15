@@ -222,14 +222,18 @@ function continuousSHA256Compress(view,words,state,constants,start,end){
   }
 }
 // Fixed-memory acceleration for LAN HTTP; every engine retains the JS fallback.
+/** @typedef {(view: DataView, words: Uint32Array, state: Uint32Array, constants: Uint32Array, start: number, end: number) => void} ContinuousSHA256Compressor */
+/** @typedef {typeof continuousSHA256Accelerator & {pending?: Promise<ContinuousSHA256Compressor|null>}} ContinuousSHA256AcceleratorLoader */
 async function continuousSHA256Accelerator(){
-  if(continuousSHA256Accelerator.pending)return continuousSHA256Accelerator.pending;
-  return continuousSHA256Accelerator.pending=(async()=>{
+  if((/** @type {ContinuousSHA256AcceleratorLoader} */ (continuousSHA256Accelerator)).pending)return (/** @type {ContinuousSHA256AcceleratorLoader} */ (continuousSHA256Accelerator)).pending;
+  return (/** @type {ContinuousSHA256AcceleratorLoader} */ (continuousSHA256Accelerator)).pending=(async()=>{
     if(typeof WebAssembly!=='object'||typeof atob!=='function')return null;
     try{
       const bytes=Uint8Array.from(atob('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'),value=>value.charCodeAt(0));
       const {instance}=await WebAssembly.instantiate(bytes,{});
-      const {memory,compress,__heap_base}=instance.exports;
+      // These are the fixed module's three exports, rather than arbitrary
+      // WebAssembly.ExportValue entries (which may also be tables or globals).
+      const {memory,compress,__heap_base}=/** @type {{memory: WebAssembly.Memory, compress: (input: number, length: number, output: number) => void, __heap_base: WebAssembly.Global}} */ (/** @type {unknown} */ (instance.exports));
       const base=Number(__heap_base.value),capacity=1024*1024;
       if(base+capacity+32>memory.buffer.byteLength)throw Error('SHA acceleration memory bound');
       const input=new Uint8Array(memory.buffer,base,capacity),output=new Uint32Array(memory.buffer,base+capacity,8);
