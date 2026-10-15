@@ -352,5 +352,10 @@ class PlayerControlsFocusTest {
         info.assertIsFocused()
         info.performKeyInput { pressKey(Key.DirectionRight) }
         pip.assertIsFocused()
+        pip.performKeyInput { pressKey(Key.DirectionRight) }
+        val report = compose.onNodeWithTag("diagnostics-open")
+        report.assertIsFocused()
+        report.performKeyInput { pressKey(Key.DirectionLeft) }
+        pip.assertIsFocused()
     }
 }

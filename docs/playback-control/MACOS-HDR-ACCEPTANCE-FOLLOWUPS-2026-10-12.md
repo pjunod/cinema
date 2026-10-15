@@ -1125,3 +1125,17 @@ still requires its full main promotion gate and qualification receipt. Windows
 compilation is absent by the maintainer's October 11 pipeline amendment; no
 Windows success is claimed. Production deployment and the broader codec,
 caption, optical and device matrices are not inferred from these records.
+
+## October 15 inherited Android navigation prerequisite
+
+Promotion run 5228's Android instrumented suite completes 78 tests with one
+failure: the shared transport-order control expects Right from Playback
+settings to reach Playback info, but the new Report a problem button
+intercepts it. An isolated owned Android TV emulator reproduces the same
+failure in the eight-test focus class. Moving reporting after the contiguous
+standard options restores Settings → Info → Picture in picture. The same
+control now also proves Right reaches reporting afterward and Left returns
+to Picture in picture; no focus assertion is removed. All eight focus tests
+then pass on the owned API36 emulator. Failed baseline/build/test output is
+retained, and no branch app is installed on a physical device. Independent
+review, task qualification and fresh full promotion remain required.
