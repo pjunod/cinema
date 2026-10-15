@@ -1577,7 +1577,7 @@ async fn admit_learner(
                         request: RedeemJoinRequest {
                             token_digest: join_token_digest(&issued.token),
                             raft_id: TARGET_NODE,
-                            node_id: format!("node-{TARGET_NODE}"),
+                            node_id: super::harness_node_identity(TARGET_NODE),
                             hostname: format!("cluster-node-{TARGET_NODE}"),
                             raft_address: target.raft.clone(),
                             api_address: target.api.clone(),
@@ -1661,7 +1661,7 @@ async fn admit_learner(
                         request: FinalizeJoinRequest {
                             token_digest: join_token_digest(&issued.token),
                             raft_id: TARGET_NODE,
-                            node_id: format!("node-{TARGET_NODE}"),
+                            node_id: super::harness_node_identity(TARGET_NODE),
                         },
                     },
                 )
@@ -2184,30 +2184,25 @@ async fn trigger_and_wait_for_snapshot(
 ) -> Result<SnapshotPurgeEvidence> {
     let previous = request_status(cluster, leader).await?.snapshot_index;
     let mut status = observed_phase(diagnostics, "snapshot_trigger", cycle, None, async {
-        for ordinal in 0..TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST.saturating_mul(3) {
-            remaining_before(deadline, "snapshot trigger")?;
-            cluster
-                .request(
-                    leader,
-                    Request::PutSetting {
-                        key: format!(
-                            "cluster.transport-recovery.snapshot.{}.{cycle:02}.{ordinal:04}",
-                            role.label()
-                        ),
-                        value: "snapshot-trigger".to_owned(),
-                    },
-                )
-                .await?
-                .require_ok()?;
-            let status = request_status(cluster, leader).await?;
-            if status
-                .snapshot_index
-                .is_some_and(|snapshot| previous.is_none_or(|old| snapshot > old))
-            {
-                return Ok(status);
+        await_triggered_snapshot(previous, deadline, async |ordinal| {
+            if let Some(ordinal) = ordinal {
+                cluster
+                    .request(
+                        leader,
+                        Request::PutSetting {
+                            key: format!(
+                                "cluster.transport-recovery.snapshot.{}.{cycle:02}.{ordinal:04}",
+                                role.label()
+                            ),
+                            value: "snapshot-trigger".to_owned(),
+                        },
+                    )
+                    .await?
+                    .require_ok()?;
             }
-        }
-        bail!("low-threshold workload did not publish a new snapshot")
+            request_status(cluster, leader).await
+        })
+        .await
     })
     .await?;
     let snapshot = status
@@ -2234,6 +2229,36 @@ async fn trigger_and_wait_for_snapshot(
             .purged_index
             .context("source purged index disappeared")?,
     )
+}
+
+fn is_new_snapshot(current: Option<u64>, previous: Option<u64>) -> bool {
+    current.is_some_and(|snapshot| previous.is_none_or(|old| snapshot > old))
+}
+
+async fn await_triggered_snapshot(
+    previous: Option<u64>,
+    deadline: Instant,
+    mut advance: impl std::ops::AsyncFnMut(Option<u64>) -> Result<RecoveryRuntimeStatus>,
+) -> Result<RecoveryRuntimeStatus> {
+    for ordinal in 0..TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST.saturating_mul(3) {
+        remaining_before(deadline, "snapshot trigger")?;
+        let status = advance(Some(ordinal)).await?;
+        if is_new_snapshot(status.snapshot_index, previous) {
+            return Ok(status);
+        }
+    }
+    // Crossing the log threshold schedules asynchronous snapshot work.
+    // Exhausting the bounded writes is not a publication deadline: an
+    // image may still be copying when the last write is acknowledged.
+    // Spend only the cycle's original remaining time, without more writes.
+    loop {
+        let remaining = remaining_before(deadline, "snapshot publication")?;
+        tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
+        let status = advance(None).await?;
+        if is_new_snapshot(status.snapshot_index, previous) {
+            return Ok(status);
+        }
+    }
 }
 
 fn snapshot_purge_evidence(
@@ -4678,6 +4703,77 @@ mod tests {
             validate_transport_recovery_role_report(&report)
                 .unwrap_or_else(|error| panic!("{cycles}-cycle report failed: {error:#}"));
         }
+    }
+
+    fn pending_snapshot_status(snapshot_index: Option<u64>) -> RecoveryRuntimeStatus {
+        RecoveryRuntimeStatus {
+            last_log_index: Some(1000),
+            snapshot_index,
+            purged_index: None,
+            applied_index: Some(1000),
+            install_ok_count: 0,
+            last_install_observed_at_unix_ms: None,
+            last_install_elapsed_nanos: None,
+            transport: hiqlite::SnapshotTransportStatus {
+                schema_version: 1,
+                observing_node_id: 1,
+                observed_at_unix_ms: 0,
+                owned_async_tasks: 0,
+                observations: Vec::new(),
+                local_request_started_at: None,
+                local_receipt_at: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_snapshot_publication_finishes_without_additional_writes() {
+        let mut writes = Vec::new();
+        let mut observations = [None, Some(41), Some(40), Some(42)].into_iter();
+        let mut publication_polls = 0;
+        let status = await_triggered_snapshot(
+            Some(41),
+            Instant::now() + Duration::from_secs(5),
+            async |ordinal| {
+                if let Some(ordinal) = ordinal {
+                    assert_eq!(publication_polls, 0, "writes restarted during publication");
+                    writes.push(ordinal);
+                    Ok(pending_snapshot_status(Some(41)))
+                } else {
+                    publication_polls += 1;
+                    Ok(pending_snapshot_status(
+                        observations.next().expect("bounded observations"),
+                    ))
+                }
+            },
+        )
+        .await
+        .expect("asynchronous publication can finish after the bounded write burst");
+        assert_eq!(status.snapshot_index, Some(42));
+        assert_eq!(publication_polls, 4);
+        assert_eq!(writes, (0..768).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn unchanged_snapshot_expires_under_the_original_deadline() {
+        let deadline = Instant::now() + Duration::from_millis(750);
+        let mut writes = Vec::new();
+        let mut publication_polls = 0;
+        let error = await_triggered_snapshot(Some(41), deadline, async |ordinal| {
+            if let Some(ordinal) = ordinal {
+                assert_eq!(publication_polls, 0, "expired work must not restart writes");
+                writes.push(ordinal);
+            } else {
+                publication_polls += 1;
+            }
+            Ok(pending_snapshot_status(Some(41)))
+        })
+        .await
+        .expect_err("an unchanged completed snapshot cannot renew the deadline");
+        assert!(error.to_string().contains("snapshot publication"));
+        assert!(Instant::now() >= deadline);
+        assert!(publication_polls > 0);
+        assert_eq!(writes, (0..768).collect::<Vec<_>>());
     }
 
     #[test]
