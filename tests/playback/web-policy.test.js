@@ -4126,6 +4126,104 @@ test("playback-info row builders follow the shared web field list in fixture ord
   }
 });
 
+function attachedOutputTelemetry(player){
+  return new PlaybackContextFunction("player", "policy", `
+    const PLAYER=player, PlaybackPolicy=policy, PLAYBACK_SURFACE={surface:null}, STATS_MODE="debug";
+    const video={videoWidth:2583,videoHeight:1080,paused:true,readyState:4};
+    const document={getElementById:()=>video};
+    const playbackOwnsAttachedMedia=()=>true, pbTotalSec=()=>600, pbShownSec=()=>300;
+    const playerRangeBadge=()=>({panel:"Delivered SDR",text:"HDR10 → SDR"});
+    const preparedSwitchLedger=()=>({}), bufferRunway=()=>12, clockFromSec=String;
+    const playbackModeDetail=()=>"VOD HLS", buildLabel=()=>"test";
+    const vodServerState=()=>"Served from cache",vodHealthWord=()=>"Cached";
+    const decodePredictionLabel=()=>null, playbackSurfaceHistoryText=()=>null;
+    const fmtMbps=String,fmtBytes=String,fmtChannels=String,langName=String;
+    const hdrLabel=String,statsRunwayTone=()=>"good";
+    ${shippedSource("statsCount")}
+    ${shippedSource("statsServerReady")}
+    ${shippedSource("statsHttpWait")}
+    ${shippedSource("statsToneMapPeak")}
+    ${shippedSourceIfPresent("statsStreamFormat")}
+    ${shippedSource("playbackStatsTelemetry")}
+    return playbackStatsTelemetry();
+  `)(player,policy);
+}
+
+test("attached cached output reports its frozen frame and Metal renderer", () => {
+  const player={fileId:15,sessionId:"attached-a",vod:true,method:"transcode",autoHeight:1080,
+    source:{width:3840,height:2160,video_codec:"hevc",hdr:"hdr10"},
+    health:{id:"attached-a",encoder:"vod",producer_state:"complete",admitted:true,
+      stream_format:{rendition_id:"rendition-a",video_action:"encode",dimensions_basis:"recipe",
+        video_codec:"h264",width:1920,height:1080,encoder:"h264_videotoolbox",
+        pipeline:"vt_tonemap_metal",pipeline_label:"GPU tone-map (Metal)",dynamic_range:"sdr"}}};
+  const observed=attachedOutputTelemetry(player);
+  assert.equal(observed.stream_frame,"1920×1080");
+  assert.equal(observed.stream_frame_note,"Frozen rendition plan");
+  assert.equal(observed.decode_resolution,"2583×1080");
+  assert.equal(observed.source_resolution,"3840×2160");
+  assert.equal(observed.stream_format,"H264");
+  assert.equal(observed.encoder,"h264_videotoolbox");
+  assert.match(observed.encoder_note,/GPU tone-map \(Metal\)/);
+});
+
+
+test("output facts follow attached success, refusal, reopen and stop", () => {
+  const metal={rendition_id:"metal-a",video_action:"encode",dimensions_basis:"recipe",video_codec:"h264",width:1920,height:1080,encoder:"h264_videotoolbox",pipeline_label:"GPU tone-map (Metal)",dynamic_range:"sdr"};
+  const p={fileId:15,sessionId:"a",vod:true,method:"transcode",source:{width:3840,height:2160},health:{id:"a",stream_format:metal}};
+  p.directedChange={candidate:{health:{id:"prepared-b",stream_format:{...metal,width:1280,height:720}}}};
+  assert.equal(attachedOutputTelemetry(p).stream_frame,"1920×1080","preparation keeps incumbent facts");
+  p.directedChange=null;
+  assert.equal(attachedOutputTelemetry(p).stream_frame,"1920×1080","refusal keeps incumbent facts");
+  p.sessionId="b";
+  assert.equal(attachedOutputTelemetry(p).stream_frame,"Unavailable","late predecessor status cannot label committed successor");
+  p.health={id:"b",stream_format:{...metal,rendition_id:"cpu-b",width:1280,height:720,encoder:"libx264",pipeline_label:"CPU tone-map"}};
+  assert.equal(attachedOutputTelemetry(p).stream_frame,"1280×720");
+  assert.match(attachedOutputTelemetry(p).encoder_note,/CPU tone-map/);
+  p.sessionId="reopened-c";
+  assert.equal(attachedOutputTelemetry(p).stream_frame,"Unavailable","reopen starts with unknown output");
+  p.sessionId=null;
+  assert.equal(attachedOutputTelemetry(p).stream_frame,"Unavailable","stop cannot retain prior output facts");
+  assert.equal(attachedOutputTelemetry(p).encoder_note,null);
+});
+
+test("output dimensions require a compatible declared basis and never borrow source or player size", () => {
+  const descriptor={video_action:"encode",dimensions_basis:"recipe",video_codec:"h264",height:1080};
+  const p={fileId:15,sessionId:"a",vod:true,method:"transcode",source:{width:3840,height:2160},health:{id:"a",stream_format:descriptor}};
+  assert.equal(attachedOutputTelemetry(p).stream_frame,"Height 1080");
+  for(const bad of [{...descriptor,dimensions_basis:"source_copy",width:3840},
+    {...descriptor,dimensions_basis:"unknown",width:3840},
+    {...descriptor,video_action:null,width:3840},
+    {...descriptor,width:NaN,height:-1},null,[]]){
+    p.health.stream_format=bad;
+    assert.equal(attachedOutputTelemetry(p).stream_frame,"Unavailable");
+  }
+  p.health.stream_format={video_action:"copy",dimensions_basis:"source_copy",video_codec:"hevc",width:704,height:480};
+  assert.equal(attachedOutputTelemetry(p).method,"Remux");
+  assert.equal(attachedOutputTelemetry(p).stream_frame,"704×480");
+  delete p.health.stream_format;
+  assert.equal(attachedOutputTelemetry(p).stream_frame,"Unavailable","older servers remain compatible");
+});
+
+test("range badges use the attached frozen output without asserting display output", () => {
+  const badge=new PlaybackContextFunction("PLAYER",`
+    const RANGE_LONG={hdr10:"HDR10",sdr:"SDR"},RANGE_SHORT={hdr10:"HDR10",sdr:"SDR"};
+    const hdrChip=()=>({cls:"hdr",text:"HDR10",full:"HDR10"}),displayIsHdr=()=>true;
+    ${shippedSource("sourceDynamicRange")}
+    ${shippedSource("sourceDolbyVisionProfile")}
+    ${shippedSource("dynamicRangeReason")}
+    ${shippedSource("dynamicRangeBadge")}
+    ${shippedSource("effectiveHdrProcessing")}
+    ${shippedSource("statsStreamFormat")}
+    ${shippedSource("playerRangeBadge")}
+    return playerRangeBadge(PLAYER.source);
+  `);
+  const p={sessionId:"a",deliveredRange:"hdr10",source:{hdr:"hdr10"},health:{id:"a",stream_format:{video_action:"encode",dimensions_basis:"recipe",dynamic_range:"sdr"}}};
+  assert.equal(badge(p).arrow,"SDR");
+  assert.match(badge(p).full,/display output unverified/);
+  p.sessionId="b";
+  assert.equal(badge(p).arrow,null,"stale status cannot relabel a different attachment");
+});
+
 test("playback info labels tone-map peak provenance without calling policy source truth", () => {
   const summarize = new PlaybackContextFunction(`${shippedSource("statsToneMapPeak")}\nreturn statsToneMapPeak;`)();
   assert.equal(

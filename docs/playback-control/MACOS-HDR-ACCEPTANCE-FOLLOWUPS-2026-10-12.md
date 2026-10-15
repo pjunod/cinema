@@ -748,6 +748,33 @@ and presentation regressions at the discovered seam, including stale replies
 and artifact reuse across preference changes. An actual graph receipt and
 client delivery facts must remain independently inspectable.
 
+### Built repair — local checks passed, qualification pending
+
+The F5 task reuses the existing optional `stream_format` wire contract for
+VOD status. It reads codec, effective dimensions, encoder, renderer, grade
+and tool build from the attached immutable encoding plan. Copy dimensions
+are labelled as an unchanged video selection; source DV labels never stand
+in for its delivered grade. No media probe or strict control-protocol change
+is added. A saved Developer preference cannot relabel an older cached plan.
+
+The web adapter binds the descriptor to the attached status/session, keeps
+source, planned stream and browser intrinsic dimensions separate, and follows
+quality success, refusal, reopen and stop. Planned SAR remains distinct from
+a measurement. Encoder notes name the frozen renderer. The badge follows
+the attached output grade and continues to state that display output is
+unverified. SDR/copy sessions no longer report a fictitious HDR peak; explicit
+GPU peaks use the same frozen-plan provenance as CPU peaks.
+
+The missing server descriptor and hardcoded web `Unavailable` are reproduced
+before the fix. Two focused server tests, 221 web-policy cases, full web
+unit/static checks, Clippy and the input fence pass locally. The two browser
+fixtures initially skipped for a missing Python dependency; isolated reruns
+then prove both startup paths/local seek and subtitle-readiness presentation.
+The [bounded receipt](evidence/f5-output-facts-20261015.json) pins the retained
+failures and controls. Independent review, task gates and actual fresh/cached
+CPU/Metal reporting acceptance are still pending. This is not completion of
+the broader native/direct/rolling output-facts handoff.
+
 ## 8. F6 — serving authority briefly self-fences and startup returns 503
 
 ### Observation and evidence

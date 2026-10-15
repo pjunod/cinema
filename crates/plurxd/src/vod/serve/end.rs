@@ -779,8 +779,10 @@ impl VodServe {
             .encoding
             .as_ref()
             .and_then(|encoding| encoding.active_production_evidence());
+        let tone_map_peak = stream_format::tone_map_peak(&rendition);
         Some(VodPublication {
             result: Ok(VodSessionInfo {
+                stream_format: StreamFormat::for_rendition(&rendition),
                 active_encode_milli_realtime: active_production.map(|proof| proof.milli_realtime),
                 active_encode_age_ms: active_production.map(|proof| {
                     u32::try_from(proof.observed_at.elapsed().as_millis()).unwrap_or(u32::MAX)
@@ -799,22 +801,8 @@ impl VodServe {
                 file_id: rendition.recipe.file.id,
                 target_height,
                 encoder: "vod",
-                tone_map_peak_nits: rendition
-                    .recipe
-                    .encoding
-                    .as_ref()
-                    .filter(|encoding| {
-                        encoding.plan.options().tone_map == plurx_core::transcode::ToneMap::Zscale
-                    })
-                    .map(|encoding| encoding.plan.options().tone_map_peak_nits),
-                tone_map_peak_source: rendition
-                    .recipe
-                    .encoding
-                    .as_ref()
-                    .filter(|encoding| {
-                        encoding.plan.options().tone_map == plurx_core::transcode::ToneMap::Zscale
-                    })
-                    .map(|encoding| encoding.plan.options().tone_map_peak_source.name()),
+                tone_map_peak_nits: tone_map_peak.map(|(nits, _)| nits),
+                tone_map_peak_source: tone_map_peak.map(|(_, source)| source),
                 playlist_shape: "vod",
                 producer_state,
                 producer_hold,

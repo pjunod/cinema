@@ -119,7 +119,10 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    timeout-minutes: 10
+    # Runs5159 and5161 reached plurxd without diagnostics, then exhausted
+    # ten minutes on the shared compiler. Keep all checks and resource bounds;
+    # give this finite compile-only job time to complete and finalize its cache.
+    timeout-minutes: 20
     steps:
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
