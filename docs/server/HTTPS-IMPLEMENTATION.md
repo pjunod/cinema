@@ -1,6 +1,6 @@
 # HTTPS implementation — optional encrypted access to the public API
 
-**Status:** implemented and locally verified; integration and qualification pending · **Written:** 2026-10-15
+**Status:** implementation built; physical acceptance open; merge qualification tracked by task and promotion PRs · **Written:** 2026-10-15
 **Decider:** Paul · **Baseline:** `9eb7f6738`
 
 [Adversarial review](HTTPS-REVIEW.md) is resolved. This is the behavior contract. [HTTPS-BUILD.md](HTTPS-BUILD.md) owns tasks and

@@ -42,7 +42,7 @@ not an instruction to build in that order.
 
 | Project | State | Canonical ledger |
 |---|---|---|
-| Optional public HTTPS | Implementation built and locally verified through H1–H4 checkpoints, now restored into cohesive task PR #1118; combined-candidate local verification passed; integration, final-head effort gate and full promotion remain pending. Physical trust/playback qualification is separate acceptance still owed; HTTPS stays in Developer. Sol 6.1 builds and parent manages/reviews. | [HTTPS build](../server/HTTPS-BUILD.md) |
+| Optional public HTTPS | Implementation built and locally verified through H1–H4 checkpoints, now restored into cohesive task PR #1118; combined-candidate local verification passed; task and promotion PR receipts track required exact-head gates, review and merge qualification. Physical trust/playback qualification is separate acceptance still owed; HTTPS stays in Developer. Sol 6.1 builds and parent manages/reviews. | [HTTPS build](../server/HTTPS-BUILD.md) |
 
 HTTPS workflow amendment (2026-10-15): independently reviewed consolidation
 makes H1–H4 checkpoints of one cohesive task PR #1118, superseding separate

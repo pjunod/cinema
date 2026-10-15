@@ -217,6 +217,86 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn(".env_clear()", command)
         self.assertIn('.env("LC_ALL", "C")', command)
 
+    def test_live_tv_browser_fixture_traverses_master_and_recovers_exact_request(self):
+        import ast
+        from types import SimpleNamespace
+        from urllib.parse import urlsplit
+
+        tree = ast.parse(read("scripts/live-tv-browser"))
+        intercept = next(node for node in ast.walk(tree)
+                         if isinstance(node, ast.FunctionDef) and node.name == "intercept")
+        with tempfile.TemporaryDirectory() as temporary:
+            media = Path(temporary)
+            (media / "0.ts").write_bytes(b"synthetic transport stream")
+            sessions = {"fixture-1": {"opened": 0, "closed": False}}
+            violations = []
+            namespace = {"re": re, "urlsplit": urlsplit, "media": media,
+                         "time": SimpleNamespace(monotonic=lambda: 0),
+                         "sessions": sessions, "violations": violations,
+                         "host": SimpleNamespace(token="fixture-token"),
+                         "channels": [{"id": "one"}], "events": [],
+                         "mode": {"next": "normal"}, "starts_by_id": {},
+                         "start_requests": [], "resumes": [], "retirements": []}
+            namespace["active"] = lambda: [key for key, value in sessions.items() if not value["closed"]]
+            exec(compile(ast.Module(body=[intercept], type_ignores=[]),
+                         "scripts/live-tv-browser", "exec"), namespace)
+
+            def request(path, method="GET", headers=None, body=None):
+                response = {}
+                incoming = SimpleNamespace(
+                    url="http://fixture.invalid/api/v1/live-tv/" + path,
+                    method=method, headers=headers or {}, post_data_json=body)
+                namespace["intercept"](SimpleNamespace(
+                    request=incoming, fulfill=lambda **value: response.update(value)))
+                return response
+
+            def get(suffix, headers=None):
+                return request("sessions/fixture-1/" + suffix, headers=headers)
+
+            master = get("master.m3u8")
+            self.assertEqual(master["content_type"], "application/vnd.apple.mpegurl")
+            variants = [line for line in master["body"].splitlines()
+                        if line and not line.startswith("#")]
+            self.assertEqual(variants, ["index.m3u8"])
+            self.assertIn("#EXT-X-STREAM-INF:", master["body"])
+            playlist = get(variants[0])
+            segments = [line for line in playlist["body"].splitlines()
+                        if line and not line.startswith("#")]
+            self.assertEqual(segments[0], "0.ts")
+            self.assertEqual(get(segments[0])["body"], b"synthetic transport stream")
+            self.assertEqual(violations, [])
+            with self.assertRaises(AssertionError):
+                get("unexpected.m3u8")
+            get("master.m3u8", {"authorization": "Bearer fixture-only"})
+            self.assertEqual(len(violations), 1, "capability reads still flag account credentials")
+            sessions["fixture-1"]["closed"] = True
+            self.assertEqual(get("master.m3u8")["status"], 410)
+
+            auth = {"authorization": "Bearer fixture-token"}
+            request_id = "a" * 32
+            path = "starts/" + request_id
+            activation = request("channels/one/sessions", "POST", auth,
+                                 {"request_id": request_id})["json"]
+            self.assertEqual(namespace["starts_by_id"][request_id], activation["session_id"])
+            self.assertEqual(request("channels/one/sessions", "POST", auth,
+                                     {"request_id": request_id})["json"], activation)
+            self.assertEqual(len(sessions), 2, "replay must not allocate another capability")
+            self.assertEqual(request(path + "/resume", "POST")["status"], 401)
+            self.assertEqual(request(path, "DELETE")["status"], 401)
+            self.assertFalse(sessions[activation["session_id"]]["closed"])
+            self.assertEqual(request("starts/" + "b" * 32 + "/resume", "POST", auth)["status"], 404)
+            resumed = request(path + "/resume", "POST", auth)["json"]
+            self.assertEqual(resumed, {"outcome": "live", "session": activation})
+            self.assertEqual(namespace["resumes"], [request_id])
+            self.assertEqual(len(sessions), 2, "resume must not tune")
+            self.assertEqual(request(path, "DELETE", auth)["json"], {"outcome": "retired"})
+            self.assertEqual(request(path + "/resume", "POST", auth)["json"], {"outcome": "ended"})
+            self.assertEqual(request(path, "DELETE", auth)["json"], {"outcome": "retired"})
+            self.assertEqual(namespace["events"], ["start:fixture-2", "release:fixture-2"])
+            self.assertEqual(request("channels/one/sessions", "POST", auth,
+                                     {"request_id": ""})["status"], 400)
+            self.assertEqual(len(sessions), 2)
+
     def test_private_origin_fetches_use_only_step_scoped_credentials(self):
         checked = 0
         for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
@@ -246,6 +326,57 @@ class OperationsContractCase(unittest.TestCase):
                 script = read(path)
                 self.assertIn('"--mute-audio"', script)
                 self.assertIn("HardwareMediaKeyHandling", script)
+
+    def test_ui_baseline_waits_for_current_boot_caption_probe_and_registered_children(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        harness = runpy.run_path(str(ROOT / "scripts/ui-baseline"), run_name="caption_fixture_contract")
+        wait = harness["SelfHost"].wait_for_caption_probe
+        failure = harness["Fail"]
+        source = read("scripts/ui-baseline")
+        self.assertIn("probe_log_offset = self.log.stat().st_size\n        self.spawn()\n        self.wait_for_caption_probe(probe_log_offset)", source)
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "daemon.log"
+            old = b"caption graph probe complete\n"
+            log.write_bytes(old + b"new boot\n")
+            fixture = SimpleNamespace(log=log, proc=SimpleNamespace(poll=lambda: None),
+                                      base_url="http://fixture.invalid", token="fixture-only")
+            clock, sleeps, reads = [0.0], [], []
+
+            def sleep(seconds):
+                sleeps.append(seconds)
+                clock[0] += seconds
+                if len(sleeps) == 2:
+                    with log.open("ab") as handle:
+                        handle.write(b"caption graph probe complete\n")
+
+            def snapshot(*args, **kwargs):
+                reads.append((args, kwargs))
+                return {"processes": [{"purpose": "Live TV caption probe"}] if len(reads) == 1 else []}
+
+            with patch.dict(wait.__globals__, {"time": SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep), "api": snapshot}):
+                wait(fixture, len(old))
+            self.assertEqual(len(sleeps), 3, "old completion and an inter-graph gap cannot qualify")
+            self.assertEqual(len(reads), 2, "current completion still waits for registered children")
+            self.assertEqual(reads[0][0], (fixture.base_url, "/activity/detail", fixture.token))
+            self.assertLessEqual(reads[0][1]["timeout"], 5)
+            log.write_bytes(old + b"caption graph probe unavailable\n")
+            with self.assertRaises(failure):
+                wait(fixture, len(old))
+            fixture.proc.poll = lambda: 1
+            with self.assertRaises(failure):
+                wait(fixture, len(old))
+            fixture.proc.poll = lambda: None
+            log.write_bytes(old)
+            clock[0] = 0
+            with patch.dict(wait.__globals__, {"time": SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda _: clock.__setitem__(0, 121))}):
+                with self.assertRaises(failure):
+                    wait(fixture, len(old))
+            log.write_bytes(old + b"caption graph probe complete\n")
+            with patch.dict(wait.__globals__, {"api": lambda *args, **kwargs: {}}):
+                with self.assertRaises(failure):
+                    wait(fixture, len(old))
 
     def test_ui_baseline_starts_poll_observation_after_route_settles(self):
         script = read("scripts/ui-baseline")

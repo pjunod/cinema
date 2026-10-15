@@ -1,6 +1,6 @@
 # HTTPS build — checkpoints, ownership and qualification
 
-**Status:** combined implementation locally verified; fresh task gate and promotion pending · **Written:** 2026-10-15
+**Status:** implementation built; physical acceptance open; merge qualification tracked by task and promotion PRs · **Written:** 2026-10-15
 **Owner:** GPT-6.1 Sol builder; parent coordinates and reviews
 
 This canonical ledger executes [the contract](HTTPS-IMPLEMENTATION.md).
@@ -119,6 +119,7 @@ then graduate it to System. Built source awaiting physical proof is
 | 2026-10-15 | H1 bounded CI repair | Effort runs #5174, #5191 and #5197 reached the Rust job's ten-minute wall-clock limit without compiler diagnostics; #5197 spent 87 seconds in setup/cache, leaving about 8m33s for the compile pair. Parent's read-only runner diagnosis found no OOM kill, memory-limit event or disk pressure. Increase only the effort Rust job budget to 20 minutes, retaining all commands, pinned toolchain, runner labels, cache bounds, aggregate gate and service CPU/memory limits. The existing exact-step/command contract now requires the bounded budget: it fails against 10 and passes against 20. Ten focused compile-only, explicit-timeout, preflight, runner-trust, cache and docs-index checks passed, along with catalog/infrastructure/whitespace checks. Rust source remains identical to reviewed `8d4f815c94`; its 22 config and 8 identity test evidence remains applicable. No red gate permits merge; normal hook and a fresh exact-head manual effort gate are still required. |
 | 2026-10-15 | Workflow amendment | Independent workflow review approved one cohesive PR #1118 with H1–H4 checkpoints before any H2–H4 task branch/commit exists. Parent canceled only superseded run #5203; completed checks are history, not green-gate evidence. Separate checkpoint task PRs are superseded; fresh combined-source verification, final-head Effort gate, one fresh adversarial built-code review and full exact-tree promotion qualification remain mandatory. Workflow approval does not approve built code. |
 | 2026-10-15 | Developer browser follow-up | Initial diagnostic sweep stopped after 29 captures once HTTPS heading order, checkbox and SAN presentation defects were confirmed. Reused settings controls/theme, kept the independent error-shell loader, and bounded long identity text to the card. Parent reviewed desktop/mobile captures and exact six-record golden attribution: eight new HTTPS controls/read plus the already-shipped Diagnostic ZIP card from `9ca45b52a` (text later updated by `069615e85` and `8c80b9a81`); all 59 prior focus descriptors remain in order and no DOM/request/registry residual remains. Only the six Developer golden records may change; diagnostic implementation is untouched. All six focused Developer captures passed with 2,171 facts, identical before/after the wrapping-only change. Expanded long-path/public-fingerprint mobile geometry passed: viewport/body 390px, card/scroll 362px (before wrapping, body 617px). Settings 71/71, full request-budget, static web, pinned all-target compile, docs index, catalog and infrastructure checks passed. The Python Playwright cleanup warning is external harness output, not a captured app console/page error; no focused capture failed. Full final-source UI sweep/Live TV companion remain required before merge. |
+| 2026-10-15 | Inherited browser-fixture repairs | The first full sweep captured all 78 pages without app console/page errors but failed 130 structural facts: 104 inherited static Analysis/auth/player facts (`b8bcc7443`, `9ca45b52a`), 14 startup-process facts and 12 Jellyfin readiness facts from concurrent fixtures competing for port 8096. Parent approved only the 104 static facts across 18 records after exact DOM/focus/request attribution. A serial diagnostic stopped after 60 captures, explicitly incomplete, identified the registered Live TV caption-probe child and confirmed Jellyfin reachability met; neither transient was put in the golden. Added a bounded 120-second current-final-boot completion/registered-child wait, without normalizing application facts or requests. The companion exposed inherited master-playlist (`b20982f60`), persistent feedback (`ce0df7640`) and protocol-3 request-hint recovery (`de07dd4cf`) fixture mismatches; only fixtures/assertions changed. Kept strict authentication, same-capability replay/resume, ten allocations/nine confirmed releases, bounded DELETEs and a deliberately unconfirmed capability. Exact detached-media checks use paused/no src or srcObject/NETWORK_EMPTY/HAVE_NOTHING/zero buffers/no HLS or lease; an isolated browser probe proved currentSrc can retain a revoked historical blob URL. The original failures and diagnostic artifacts remain retained. Focused fixture/poll/ownership/docs checks passed 15 tests; existing Live TV lease tests passed 89 cases. Full repaired companion and final solo structural sweep remain merge prerequisites; run #5213 was canceled, not green evidence. |
 
 Post-review persistence clarification: rename publishes the revision. A later
 directory-sync error is a committed save with `durability_confirmed: false`;
@@ -299,12 +300,23 @@ installer, Docker hardware/startup, CI budget/timeout/preflight/runner and cache
 sweep passed all 125 tests. This includes the earlier host-temp-path installer
 case; the earlier default-temp failure remains recorded in §8. Catalog lint
 (3,534 governed files), infrastructure-name and whitespace checks passed.
-The complete PR body carries 62 unique resolvable regression anchors, including
+The complete PR body carries 65 unique resolvable regression anchors, including
 all prior checkpoint anchors and the selected existing regressions.
 
-The normal commit hook remains mandatory before push. Parent must dispatch a
-fresh exact-final-head Effort development gate; no earlier/canceled attempt
-substitutes for it. After effort integration, freeze/fresh-main integration,
-one fresh adversarial built-code review with Sol-owned fixes, full exact-tree
-qualification receipt and Main promotion gate remain pending. No merge,
-deployment, service restart or live HTTPS setting has been performed.
+The normal commit hook remains mandatory before push. A fresh exact-final-head
+Effort development gate is required before task integration; earlier/canceled
+attempts never substitute for it. Promotion requires a frozen candidate with
+current main integrated, one fresh adversarial built-code review with Sol-owned
+fixes, the full exact-tree qualification receipt and Main promotion gate.
+Task and promotion PR receipts record the actual run/tree bindings and merge
+outcomes. This work does not authorize deployment, service restart or live
+HTTPS setting changes.
+
+The browser-fixture follow-up changes only `scripts/ui-baseline`,
+`scripts/live-tv-browser`, their operations contracts and the reviewed golden
+facts. Production Rust and web assets remain identical to `d3abdbc809`; the
+full-source promotion still qualifies the final frozen tree. The repaired
+full browser commands run sequentially to preserve the fixture's default
+Jellyfin listener. Their external results and the fresh final-head Effort gate
+are required before merge and are recorded in task/promotion PR receipts.
+Synthetic fixtures do not establish physical HTTPS trust/playback acceptance.

@@ -459,7 +459,7 @@ catalog|analysis@1280x860|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
 catalog|analysis@1280x860|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|analysis@1280x860|dom|div.px-user > div.px-pop|1
 catalog|analysis@1280x860|dom|div.row > button.ghost.sm[disabled text]|2
-catalog|analysis@1280x860|dom|div.row > button.ghost.sm[text]|1
+catalog|analysis@1280x860|dom|div.row > button.ghost.sm[text]|2
 catalog|analysis@1280x860|dom|div.row > label[text]|1
 catalog|analysis@1280x860|dom|div.row > span[text]|1
 catalog|analysis@1280x860|dom|label[text] > select|1
@@ -496,15 +496,16 @@ catalog|analysis@1280x860|focus|011|button.ghost.sm "Pause"
 catalog|analysis@1280x860|focus|012|button.ghost.sm "Refresh history"
 catalog|analysis@1280x860|focus|013|button.ghost.sm "Settings"
 catalog|analysis@1280x860|focus|014|button.ghost.sm "Reconcile analysis…"
-catalog|analysis@1280x860|focus|015|button.ghost.sm "Analysis settings"
-catalog|analysis@1280x860|focus|016|input#analysis-search "Search analysis work"
-catalog|analysis@1280x860|focus|017|button.on "All 0"
-catalog|analysis@1280x860|focus|018|button "Unfinished"
-catalog|analysis@1280x860|focus|019|button "Attention"
-catalog|analysis@1280x860|focus|020|button "Expected"
-catalog|analysis@1280x860|focus|021|button "Ready"
-catalog|analysis@1280x860|focus|022|select "10 25 50 100"
-catalog|analysis@1280x860|focus|023|<wrap>
+catalog|analysis@1280x860|focus|015|button.ghost.sm "Index coverage…"
+catalog|analysis@1280x860|focus|016|button.ghost.sm "Analysis settings"
+catalog|analysis@1280x860|focus|017|input#analysis-search "Search analysis work"
+catalog|analysis@1280x860|focus|018|button.on "All 0"
+catalog|analysis@1280x860|focus|019|button "Unfinished"
+catalog|analysis@1280x860|focus|020|button "Attention"
+catalog|analysis@1280x860|focus|021|button "Expected"
+catalog|analysis@1280x860|focus|022|button "Ready"
+catalog|analysis@1280x860|focus|023|select "10 25 50 100"
+catalog|analysis@1280x860|focus|024|<wrap>
 catalog|analysis@1280x860|req|GET /api/v1/activity|2
 catalog|analysis@1280x860|req|GET /api/v1/analysis/jobs|1
 catalog|analysis@1280x860|req|GET /api/v1/analysis/summary|1
@@ -578,7 +579,7 @@ catalog|analysis@390x780|dom|div.px-pop > div#lookmenu.amenu.lookmenu|1
 catalog|analysis@390x780|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|analysis@390x780|dom|div.px-user > div.px-pop|1
 catalog|analysis@390x780|dom|div.row > button.ghost.sm[disabled text]|2
-catalog|analysis@390x780|dom|div.row > button.ghost.sm[text]|1
+catalog|analysis@390x780|dom|div.row > button.ghost.sm[text]|2
 catalog|analysis@390x780|dom|div.row > label[text]|1
 catalog|analysis@390x780|dom|div.row > span[text]|1
 catalog|analysis@390x780|dom|label[text] > select|1
@@ -608,22 +609,23 @@ catalog|analysis@390x780|focus|004|button.ghost.sm "Pause"
 catalog|analysis@390x780|focus|005|button.ghost.sm "Refresh history"
 catalog|analysis@390x780|focus|006|button.ghost.sm "Settings"
 catalog|analysis@390x780|focus|007|button.ghost.sm "Reconcile analysis…"
-catalog|analysis@390x780|focus|008|button.ghost.sm "Analysis settings"
-catalog|analysis@390x780|focus|009|input#analysis-search "Search analysis work"
-catalog|analysis@390x780|focus|010|button.on "All 0"
-catalog|analysis@390x780|focus|011|button "Unfinished"
-catalog|analysis@390x780|focus|012|button "Attention"
-catalog|analysis@390x780|focus|013|button "Expected"
-catalog|analysis@390x780|focus|014|button "Ready"
-catalog|analysis@390x780|focus|015|select "10 25 50 100"
-catalog|analysis@390x780|focus|016|a.px-tab "Home"
-catalog|analysis@390x780|focus|017|a.px-tab "Channels"
-catalog|analysis@390x780|focus|018|a.px-tab "Recordings"
-catalog|analysis@390x780|focus|019|button.px-tab "Libraries"
-catalog|analysis@390x780|focus|020|button.px-tab "Search"
-catalog|analysis@390x780|focus|021|a.px-tab "Shared"
-catalog|analysis@390x780|focus|022|a.px-tab.on "Activity"
-catalog|analysis@390x780|focus|023|<wrap>
+catalog|analysis@390x780|focus|008|button.ghost.sm "Index coverage…"
+catalog|analysis@390x780|focus|009|button.ghost.sm "Analysis settings"
+catalog|analysis@390x780|focus|010|input#analysis-search "Search analysis work"
+catalog|analysis@390x780|focus|011|button.on "All 0"
+catalog|analysis@390x780|focus|012|button "Unfinished"
+catalog|analysis@390x780|focus|013|button "Attention"
+catalog|analysis@390x780|focus|014|button "Expected"
+catalog|analysis@390x780|focus|015|button "Ready"
+catalog|analysis@390x780|focus|016|select "10 25 50 100"
+catalog|analysis@390x780|focus|017|a.px-tab "Home"
+catalog|analysis@390x780|focus|018|a.px-tab "Channels"
+catalog|analysis@390x780|focus|019|a.px-tab "Recordings"
+catalog|analysis@390x780|focus|020|button.px-tab "Libraries"
+catalog|analysis@390x780|focus|021|button.px-tab "Search"
+catalog|analysis@390x780|focus|022|a.px-tab "Shared"
+catalog|analysis@390x780|focus|023|a.px-tab.on "Activity"
+catalog|analysis@390x780|focus|024|<wrap>
 catalog|analysis@390x780|req|GET /api/v1/activity|2
 catalog|analysis@390x780|req|GET /api/v1/analysis/jobs|1
 catalog|analysis@390x780|req|GET /api/v1/analysis/summary|1
@@ -637,6 +639,7 @@ catalog|auth@1280x860|dom|details.connectqr > summary[text]|1
 catalog|auth@1280x860|dom|div#app > div.center|1
 catalog|auth@1280x860|dom|div.center > form#af.auth.card|1
 catalog|auth@1280x860|dom|form#af.auth.card > button#ab[text]|1
+catalog|auth@1280x860|dom|form#af.auth.card > button[type=button text]|1
 catalog|auth@1280x860|dom|form#af.auth.card > details.connectqr|1
 catalog|auth@1280x860|dom|form#af.auth.card > div#aerr.err|1
 catalog|auth@1280x860|dom|form#af.auth.card > div.logo[text]|1
@@ -650,7 +653,8 @@ catalog|auth@1280x860|focus|000|input#u
 catalog|auth@1280x860|focus|001|input#p
 catalog|auth@1280x860|focus|002|summary "Connect an app with a QR code"
 catalog|auth@1280x860|focus|003|button#ab "Sign in"
-catalog|auth@1280x860|focus|004|<wrap>
+catalog|auth@1280x860|focus|004|button "Help · Report a problem"
+catalog|auth@1280x860|focus|005|<wrap>
 catalog|auth@1280x860|req|GET /api/v1/server|1
 catalog|auth@390x780|dom|^ > div#app|1
 catalog|auth@390x780|dom|details.connectqr > img|1
@@ -659,6 +663,7 @@ catalog|auth@390x780|dom|details.connectqr > summary[text]|1
 catalog|auth@390x780|dom|div#app > div.center|1
 catalog|auth@390x780|dom|div.center > form#af.auth.card|1
 catalog|auth@390x780|dom|form#af.auth.card > button#ab[text]|1
+catalog|auth@390x780|dom|form#af.auth.card > button[type=button text]|1
 catalog|auth@390x780|dom|form#af.auth.card > details.connectqr|1
 catalog|auth@390x780|dom|form#af.auth.card > div#aerr.err|1
 catalog|auth@390x780|dom|form#af.auth.card > div.logo[text]|1
@@ -672,7 +677,8 @@ catalog|auth@390x780|focus|000|input#u
 catalog|auth@390x780|focus|001|input#p
 catalog|auth@390x780|focus|002|summary "Connect an app with a QR code"
 catalog|auth@390x780|focus|003|button#ab "Sign in"
-catalog|auth@390x780|focus|004|<wrap>
+catalog|auth@390x780|focus|004|button "Help · Report a problem"
+catalog|auth@390x780|focus|005|<wrap>
 catalog|auth@390x780|req|GET /api/v1/server|1
 catalog|category@1280x860|dom|^ > div#app|1
 catalog|category@1280x860|dom|a > span.px-lbl[text]|10
@@ -2536,6 +2542,7 @@ catalog|player@1280x860|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|player@1280x860|dom|div.px-user > div.px-pop|1
 catalog|player@1280x860|dom|div.row > button#apbtn.pbtn[text]|1
 catalog|player@1280x860|dom|div.row > button#pbclose.pbtn[text]|1
+catalog|player@1280x860|dom|div.row > button#pbdiagnostics.pbtn[text]|1
 catalog|player@1280x860|dom|div.row > button#statsbtn.pbtn[aria-expanded=false aria-haspopup=dialog text]|1
 catalog|player@1280x860|dom|div.statshd > button.statsx[aria-label=* text]|1
 catalog|player@1280x860|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
@@ -2709,6 +2716,7 @@ catalog|player@390x780|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|player@390x780|dom|div.px-user > div.px-pop|1
 catalog|player@390x780|dom|div.row > button#apbtn.pbtn[text]|1
 catalog|player@390x780|dom|div.row > button#pbclose.pbtn[text]|1
+catalog|player@390x780|dom|div.row > button#pbdiagnostics.pbtn[text]|1
 catalog|player@390x780|dom|div.row > button#statsbtn.pbtn[aria-expanded=false aria-haspopup=dialog text]|1
 catalog|player@390x780|dom|div.statshd > button.statsx[aria-label=* text]|1
 catalog|player@390x780|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
@@ -4376,7 +4384,7 @@ classic|analysis@1280x860|dom|div.analysis-search > input#analysis-search[aria-l
 classic|analysis@1280x860|dom|div.clrefusal[text] > b[text]|1
 classic|analysis@1280x860|dom|div.clrefusal[text] > button.ghost.sm[text]|1
 classic|analysis@1280x860|dom|div.row > button.ghost.sm[disabled text]|2
-classic|analysis@1280x860|dom|div.row > button.ghost.sm[text]|1
+classic|analysis@1280x860|dom|div.row > button.ghost.sm[text]|2
 classic|analysis@1280x860|dom|div.row > label[text]|1
 classic|analysis@1280x860|dom|div.row > span[text]|1
 classic|analysis@1280x860|dom|div.topctl > button.ghost.mobile-search.sm[aria-expanded=false aria-controls=* aria-label=* text]|1
@@ -4415,15 +4423,16 @@ classic|analysis@1280x860|focus|011|button.ghost.sm "Pause"
 classic|analysis@1280x860|focus|012|button.ghost.sm "Refresh history"
 classic|analysis@1280x860|focus|013|button.ghost.sm "Settings"
 classic|analysis@1280x860|focus|014|button.ghost.sm "Reconcile analysis…"
-classic|analysis@1280x860|focus|015|button.ghost.sm "Analysis settings"
-classic|analysis@1280x860|focus|016|input#analysis-search "Search analysis work"
-classic|analysis@1280x860|focus|017|button.on "All 0"
-classic|analysis@1280x860|focus|018|button "Unfinished"
-classic|analysis@1280x860|focus|019|button "Attention"
-classic|analysis@1280x860|focus|020|button "Expected"
-classic|analysis@1280x860|focus|021|button "Ready"
-classic|analysis@1280x860|focus|022|select "10 25 50 100"
-classic|analysis@1280x860|focus|023|<wrap>
+classic|analysis@1280x860|focus|015|button.ghost.sm "Index coverage…"
+classic|analysis@1280x860|focus|016|button.ghost.sm "Analysis settings"
+classic|analysis@1280x860|focus|017|input#analysis-search "Search analysis work"
+classic|analysis@1280x860|focus|018|button.on "All 0"
+classic|analysis@1280x860|focus|019|button "Unfinished"
+classic|analysis@1280x860|focus|020|button "Attention"
+classic|analysis@1280x860|focus|021|button "Expected"
+classic|analysis@1280x860|focus|022|button "Ready"
+classic|analysis@1280x860|focus|023|select "10 25 50 100"
+classic|analysis@1280x860|focus|024|<wrap>
 classic|analysis@1280x860|req|GET /api/v1/activity|2
 classic|analysis@1280x860|req|GET /api/v1/analysis/jobs|1
 classic|analysis@1280x860|req|GET /api/v1/analysis/summary|1
@@ -4467,7 +4476,7 @@ classic|analysis@390x780|dom|div.analysis-search > input#analysis-search[aria-la
 classic|analysis@390x780|dom|div.clrefusal[text] > b[text]|1
 classic|analysis@390x780|dom|div.clrefusal[text] > button.ghost.sm[text]|1
 classic|analysis@390x780|dom|div.row > button.ghost.sm[disabled text]|2
-classic|analysis@390x780|dom|div.row > button.ghost.sm[text]|1
+classic|analysis@390x780|dom|div.row > button.ghost.sm[text]|2
 classic|analysis@390x780|dom|div.row > label[text]|1
 classic|analysis@390x780|dom|div.row > span[text]|1
 classic|analysis@390x780|dom|div.topctl > button.ghost.mobile-search.sm[aria-expanded=false aria-controls=* aria-label=* text]|1
@@ -4506,15 +4515,16 @@ classic|analysis@390x780|focus|011|button.ghost.sm "Pause"
 classic|analysis@390x780|focus|012|button.ghost.sm "Refresh history"
 classic|analysis@390x780|focus|013|button.ghost.sm "Settings"
 classic|analysis@390x780|focus|014|button.ghost.sm "Reconcile analysis…"
-classic|analysis@390x780|focus|015|button.ghost.sm "Analysis settings"
-classic|analysis@390x780|focus|016|input#analysis-search "Search analysis work"
-classic|analysis@390x780|focus|017|button.on "All 0"
-classic|analysis@390x780|focus|018|button "Unfinished"
-classic|analysis@390x780|focus|019|button "Attention"
-classic|analysis@390x780|focus|020|button "Expected"
-classic|analysis@390x780|focus|021|button "Ready"
-classic|analysis@390x780|focus|022|select "10 25 50 100"
-classic|analysis@390x780|focus|023|<wrap>
+classic|analysis@390x780|focus|015|button.ghost.sm "Index coverage…"
+classic|analysis@390x780|focus|016|button.ghost.sm "Analysis settings"
+classic|analysis@390x780|focus|017|input#analysis-search "Search analysis work"
+classic|analysis@390x780|focus|018|button.on "All 0"
+classic|analysis@390x780|focus|019|button "Unfinished"
+classic|analysis@390x780|focus|020|button "Attention"
+classic|analysis@390x780|focus|021|button "Expected"
+classic|analysis@390x780|focus|022|button "Ready"
+classic|analysis@390x780|focus|023|select "10 25 50 100"
+classic|analysis@390x780|focus|024|<wrap>
 classic|analysis@390x780|req|GET /api/v1/activity|2
 classic|analysis@390x780|req|GET /api/v1/analysis/jobs|1
 classic|analysis@390x780|req|GET /api/v1/analysis/summary|1
@@ -4528,6 +4538,7 @@ classic|auth@1280x860|dom|details.connectqr > summary[text]|1
 classic|auth@1280x860|dom|div#app > div.center|1
 classic|auth@1280x860|dom|div.center > form#af.auth.card|1
 classic|auth@1280x860|dom|form#af.auth.card > button#ab[text]|1
+classic|auth@1280x860|dom|form#af.auth.card > button[type=button text]|1
 classic|auth@1280x860|dom|form#af.auth.card > details.connectqr|1
 classic|auth@1280x860|dom|form#af.auth.card > div#aerr.err|1
 classic|auth@1280x860|dom|form#af.auth.card > div.logo[text]|1
@@ -4541,7 +4552,8 @@ classic|auth@1280x860|focus|000|input#u
 classic|auth@1280x860|focus|001|input#p
 classic|auth@1280x860|focus|002|summary "Connect an app with a QR code"
 classic|auth@1280x860|focus|003|button#ab "Sign in"
-classic|auth@1280x860|focus|004|<wrap>
+classic|auth@1280x860|focus|004|button "Help · Report a problem"
+classic|auth@1280x860|focus|005|<wrap>
 classic|auth@1280x860|req|GET /api/v1/server|1
 classic|auth@390x780|dom|^ > div#app|1
 classic|auth@390x780|dom|details.connectqr > img|1
@@ -4550,6 +4562,7 @@ classic|auth@390x780|dom|details.connectqr > summary[text]|1
 classic|auth@390x780|dom|div#app > div.center|1
 classic|auth@390x780|dom|div.center > form#af.auth.card|1
 classic|auth@390x780|dom|form#af.auth.card > button#ab[text]|1
+classic|auth@390x780|dom|form#af.auth.card > button[type=button text]|1
 classic|auth@390x780|dom|form#af.auth.card > details.connectqr|1
 classic|auth@390x780|dom|form#af.auth.card > div#aerr.err|1
 classic|auth@390x780|dom|form#af.auth.card > div.logo[text]|1
@@ -4563,7 +4576,8 @@ classic|auth@390x780|focus|000|input#u
 classic|auth@390x780|focus|001|input#p
 classic|auth@390x780|focus|002|summary "Connect an app with a QR code"
 classic|auth@390x780|focus|003|button#ab "Sign in"
-classic|auth@390x780|focus|004|<wrap>
+classic|auth@390x780|focus|004|button "Help · Report a problem"
+classic|auth@390x780|focus|005|<wrap>
 classic|auth@390x780|req|GET /api/v1/server|1
 classic|category@1280x860|dom|^ > div#app|1
 classic|category@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
@@ -6050,6 +6064,7 @@ classic|player@1280x860|dom|div.phnav > a.pgback[aria-label=* text]|1
 classic|player@1280x860|dom|div.phnav > div.crumbs|1
 classic|player@1280x860|dom|div.row > button#apbtn.pbtn[text]|1
 classic|player@1280x860|dom|div.row > button#pbclose.pbtn[text]|1
+classic|player@1280x860|dom|div.row > button#pbdiagnostics.pbtn[text]|1
 classic|player@1280x860|dom|div.row > button#statsbtn.pbtn[aria-expanded=false aria-haspopup=dialog text]|1
 classic|player@1280x860|dom|div.statshd > button.statsx[aria-label=* text]|1
 classic|player@1280x860|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
@@ -6198,6 +6213,7 @@ classic|player@390x780|dom|div.phnav > a.pgback[aria-label=* text]|1
 classic|player@390x780|dom|div.phnav > div.crumbs|1
 classic|player@390x780|dom|div.row > button#apbtn.pbtn[text]|1
 classic|player@390x780|dom|div.row > button#pbclose.pbtn[text]|1
+classic|player@390x780|dom|div.row > button#pbdiagnostics.pbtn[text]|1
 classic|player@390x780|dom|div.row > button#statsbtn.pbtn[aria-expanded=false aria-haspopup=dialog text]|1
 classic|player@390x780|dom|div.statshd > button.statsx[aria-label=* text]|1
 classic|player@390x780|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
@@ -7726,7 +7742,7 @@ theater|analysis@1280x860|dom|div.analysis-search > input#analysis-search[aria-l
 theater|analysis@1280x860|dom|div.clrefusal[text] > b[text]|1
 theater|analysis@1280x860|dom|div.clrefusal[text] > button.ghost.sm[text]|1
 theater|analysis@1280x860|dom|div.row > button.ghost.sm[disabled text]|2
-theater|analysis@1280x860|dom|div.row > button.ghost.sm[text]|1
+theater|analysis@1280x860|dom|div.row > button.ghost.sm[text]|2
 theater|analysis@1280x860|dom|div.row > label[text]|1
 theater|analysis@1280x860|dom|div.row > span[text]|1
 theater|analysis@1280x860|dom|div.th-ctl > div.th-pop|2
@@ -7770,15 +7786,16 @@ theater|analysis@1280x860|focus|011|button.ghost.sm "Pause"
 theater|analysis@1280x860|focus|012|button.ghost.sm "Refresh history"
 theater|analysis@1280x860|focus|013|button.ghost.sm "Settings"
 theater|analysis@1280x860|focus|014|button.ghost.sm "Reconcile analysis…"
-theater|analysis@1280x860|focus|015|button.ghost.sm "Analysis settings"
-theater|analysis@1280x860|focus|016|input#analysis-search "Search analysis work"
-theater|analysis@1280x860|focus|017|button.on "All 0"
-theater|analysis@1280x860|focus|018|button "Unfinished"
-theater|analysis@1280x860|focus|019|button "Attention"
-theater|analysis@1280x860|focus|020|button "Expected"
-theater|analysis@1280x860|focus|021|button "Ready"
-theater|analysis@1280x860|focus|022|select "10 25 50 100"
-theater|analysis@1280x860|focus|023|<wrap>
+theater|analysis@1280x860|focus|015|button.ghost.sm "Index coverage…"
+theater|analysis@1280x860|focus|016|button.ghost.sm "Analysis settings"
+theater|analysis@1280x860|focus|017|input#analysis-search "Search analysis work"
+theater|analysis@1280x860|focus|018|button.on "All 0"
+theater|analysis@1280x860|focus|019|button "Unfinished"
+theater|analysis@1280x860|focus|020|button "Attention"
+theater|analysis@1280x860|focus|021|button "Expected"
+theater|analysis@1280x860|focus|022|button "Ready"
+theater|analysis@1280x860|focus|023|select "10 25 50 100"
+theater|analysis@1280x860|focus|024|<wrap>
 theater|analysis@1280x860|req|GET /api/v1/activity|2
 theater|analysis@1280x860|req|GET /api/v1/analysis/jobs|1
 theater|analysis@1280x860|req|GET /api/v1/analysis/summary|1
@@ -7819,7 +7836,7 @@ theater|analysis@390x780|dom|div.analysis-search > input#analysis-search[aria-la
 theater|analysis@390x780|dom|div.clrefusal[text] > b[text]|1
 theater|analysis@390x780|dom|div.clrefusal[text] > button.ghost.sm[text]|1
 theater|analysis@390x780|dom|div.row > button.ghost.sm[disabled text]|2
-theater|analysis@390x780|dom|div.row > button.ghost.sm[text]|1
+theater|analysis@390x780|dom|div.row > button.ghost.sm[text]|2
 theater|analysis@390x780|dom|div.row > label[text]|1
 theater|analysis@390x780|dom|div.row > span[text]|1
 theater|analysis@390x780|dom|div.th-ctl > div.th-pop|2
@@ -7856,22 +7873,23 @@ theater|analysis@390x780|focus|004|button.ghost.sm "Pause"
 theater|analysis@390x780|focus|005|button.ghost.sm "Refresh history"
 theater|analysis@390x780|focus|006|button.ghost.sm "Settings"
 theater|analysis@390x780|focus|007|button.ghost.sm "Reconcile analysis…"
-theater|analysis@390x780|focus|008|button.ghost.sm "Analysis settings"
-theater|analysis@390x780|focus|009|input#analysis-search "Search analysis work"
-theater|analysis@390x780|focus|010|button.on "All 0"
-theater|analysis@390x780|focus|011|button "Unfinished"
-theater|analysis@390x780|focus|012|button "Attention"
-theater|analysis@390x780|focus|013|button "Expected"
-theater|analysis@390x780|focus|014|button "Ready"
-theater|analysis@390x780|focus|015|select "10 25 50 100"
-theater|analysis@390x780|focus|016|a "Home"
-theater|analysis@390x780|focus|017|a "Shared libraries"
-theater|analysis@390x780|focus|018|a "Live TV"
-theater|analysis@390x780|focus|019|a "Recordings"
-theater|analysis@390x780|focus|020|a "Library channels"
-theater|analysis@390x780|focus|021|a.on "Activity"
-theater|analysis@390x780|focus|022|a "Settings"
-theater|analysis@390x780|focus|023|<wrap>
+theater|analysis@390x780|focus|008|button.ghost.sm "Index coverage…"
+theater|analysis@390x780|focus|009|button.ghost.sm "Analysis settings"
+theater|analysis@390x780|focus|010|input#analysis-search "Search analysis work"
+theater|analysis@390x780|focus|011|button.on "All 0"
+theater|analysis@390x780|focus|012|button "Unfinished"
+theater|analysis@390x780|focus|013|button "Attention"
+theater|analysis@390x780|focus|014|button "Expected"
+theater|analysis@390x780|focus|015|button "Ready"
+theater|analysis@390x780|focus|016|select "10 25 50 100"
+theater|analysis@390x780|focus|017|a "Home"
+theater|analysis@390x780|focus|018|a "Shared libraries"
+theater|analysis@390x780|focus|019|a "Live TV"
+theater|analysis@390x780|focus|020|a "Recordings"
+theater|analysis@390x780|focus|021|a "Library channels"
+theater|analysis@390x780|focus|022|a.on "Activity"
+theater|analysis@390x780|focus|023|a "Settings"
+theater|analysis@390x780|focus|024|<wrap>
 theater|analysis@390x780|req|GET /api/v1/activity|2
 theater|analysis@390x780|req|GET /api/v1/analysis/jobs|1
 theater|analysis@390x780|req|GET /api/v1/analysis/summary|1
@@ -7885,6 +7903,7 @@ theater|auth@1280x860|dom|details.connectqr > summary[text]|1
 theater|auth@1280x860|dom|div#app > div.center|1
 theater|auth@1280x860|dom|div.center > form#af.auth.card|1
 theater|auth@1280x860|dom|form#af.auth.card > button#ab[text]|1
+theater|auth@1280x860|dom|form#af.auth.card > button[type=button text]|1
 theater|auth@1280x860|dom|form#af.auth.card > details.connectqr|1
 theater|auth@1280x860|dom|form#af.auth.card > div#aerr.err|1
 theater|auth@1280x860|dom|form#af.auth.card > div.logo[text]|1
@@ -7898,7 +7917,8 @@ theater|auth@1280x860|focus|000|input#u
 theater|auth@1280x860|focus|001|input#p
 theater|auth@1280x860|focus|002|summary "Connect an app with a QR code"
 theater|auth@1280x860|focus|003|button#ab "Sign in"
-theater|auth@1280x860|focus|004|<wrap>
+theater|auth@1280x860|focus|004|button "Help · Report a problem"
+theater|auth@1280x860|focus|005|<wrap>
 theater|auth@1280x860|req|GET /api/v1/server|1
 theater|auth@390x780|dom|^ > div#app|1
 theater|auth@390x780|dom|details.connectqr > img|1
@@ -7907,6 +7927,7 @@ theater|auth@390x780|dom|details.connectqr > summary[text]|1
 theater|auth@390x780|dom|div#app > div.center|1
 theater|auth@390x780|dom|div.center > form#af.auth.card|1
 theater|auth@390x780|dom|form#af.auth.card > button#ab[text]|1
+theater|auth@390x780|dom|form#af.auth.card > button[type=button text]|1
 theater|auth@390x780|dom|form#af.auth.card > details.connectqr|1
 theater|auth@390x780|dom|form#af.auth.card > div#aerr.err|1
 theater|auth@390x780|dom|form#af.auth.card > div.logo[text]|1
@@ -7920,7 +7941,8 @@ theater|auth@390x780|focus|000|input#u
 theater|auth@390x780|focus|001|input#p
 theater|auth@390x780|focus|002|summary "Connect an app with a QR code"
 theater|auth@390x780|focus|003|button#ab "Sign in"
-theater|auth@390x780|focus|004|<wrap>
+theater|auth@390x780|focus|004|button "Help · Report a problem"
+theater|auth@390x780|focus|005|<wrap>
 theater|auth@390x780|req|GET /api/v1/server|1
 theater|category@1280x860|dom|^ > div#app|1
 theater|category@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
@@ -9442,6 +9464,7 @@ theater|player@1280x860|dom|div.phnav > a.pgback[aria-label=* text]|1
 theater|player@1280x860|dom|div.phnav > div.crumbs|1
 theater|player@1280x860|dom|div.row > button#apbtn.pbtn[text]|1
 theater|player@1280x860|dom|div.row > button#pbclose.pbtn[text]|1
+theater|player@1280x860|dom|div.row > button#pbdiagnostics.pbtn[text]|1
 theater|player@1280x860|dom|div.row > button#statsbtn.pbtn[aria-expanded=false aria-haspopup=dialog text]|1
 theater|player@1280x860|dom|div.statshd > button.statsx[aria-label=* text]|1
 theater|player@1280x860|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1
@@ -9590,6 +9613,7 @@ theater|player@390x780|dom|div.phnav > a.pgback[aria-label=* text]|1
 theater|player@390x780|dom|div.phnav > div.crumbs|1
 theater|player@390x780|dom|div.row > button#apbtn.pbtn[text]|1
 theater|player@390x780|dom|div.row > button#pbclose.pbtn[text]|1
+theater|player@390x780|dom|div.row > button#pbdiagnostics.pbtn[text]|1
 theater|player@390x780|dom|div.row > button#statsbtn.pbtn[aria-expanded=false aria-haspopup=dialog text]|1
 theater|player@390x780|dom|div.statshd > button.statsx[aria-label=* text]|1
 theater|player@390x780|dom|div.statshd > div.statsmodes[role=radiogroup aria-label=*]|1

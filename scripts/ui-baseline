@@ -747,8 +747,41 @@ class SelfHost:
         # A fresh process has no such memory, and reads the frozen database.
         self.stop()
         self.freeze_database()
+        probe_log_offset = self.log.stat().st_size
         self.spawn()
+        self.wait_for_caption_probe(probe_log_offset)
         self.discover()
+
+    def wait_for_caption_probe(self, log_offset):
+        """Wait for this boot's real proof, then its registered children to settle.
+
+        An empty process snapshot between graph attempts is not completion.
+        Keep the Activity golden about the settled fixture, without removing
+        any child from the product UI or accepting a prior boot's log marker.
+        """
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            if self.proc.poll() is not None:
+                raise Fail(f"plurxd exited during caption probe; see {self.log}")
+            with self.log.open("rb") as handle:
+                handle.seek(log_offset)
+                current_boot = handle.read()
+            if b"caption graph probe unavailable" in current_boot:
+                raise Fail(f"caption probe failed in the fixture boot; see {self.log}")
+            if b"caption graph probe complete" in current_boot:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                snapshot = api(self.base_url, "/activity/detail", self.token,
+                               timeout=min(5, remaining))
+                children = snapshot.get("processes")
+                if not isinstance(children, list):
+                    raise Fail("fixture caption-probe child inventory is unavailable")
+                if not any(row.get("purpose") == "Live TV caption probe" for row in children):
+                    print("READY   current-boot caption probe complete; registered children settled", flush=True)
+                    return
+            time.sleep(0.2)
+        raise Fail(f"fixture caption probe did not settle within 120s; see {self.log}")
 
     def spend_activation_recovery_boot(self):
         """Abort one activation attempt so the next boot stays on SQLite.
