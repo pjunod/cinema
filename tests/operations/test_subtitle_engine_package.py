@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,54 @@ def fixture_bundle(directory):
     return facts
 
 
+def portable_installer_verifier(directory):
+    """Exercise shell validation portably, never simulate native qualification.
+
+    The production installer keeps its absolute macOS system tools. This test
+    copy adapts only their file/JSON/hash formats; codesign explicitly refuses.
+    Native macOS assertions also run the original unmodified verifier.
+    """
+    adapter = directory / "system-tool-fixture.py"
+    adapter.write_text(r'''import hashlib
+import json
+from pathlib import Path
+import plistlib
+import re
+import sys
+
+mode, *args = sys.argv[1:]
+if mode == "plutil":
+    assert args[0] == "-extract" and args[3:5] == ["-o", "-"]
+    value = json.loads(Path(args[5]).read_text())
+    for part in re.split(r"(?<!\\)\.", args[1]):
+        value = value[part.replace(r"\.", ".")]
+    if args[2] == "xml1":
+        sys.stdout.buffer.write(plistlib.dumps(value, fmt=plistlib.FMT_XML, sort_keys=True))
+    else:
+        assert args[2] == "raw"
+        print(value)
+elif mode == "stat":
+    assert args[:2] == ["-f", "%z"]
+    print(Path(args[2]).stat().st_size)
+elif mode == "shasum":
+    assert args[:2] == ["-a", "256"]
+    data = Path(args[2]).read_bytes() if len(args) == 3 else sys.stdin.buffer.read()
+    print(hashlib.sha256(data).hexdigest())
+elif mode == "codesign":
+    print("native signature qualification deliberately unavailable in portable fixture", file=sys.stderr)
+    sys.exit(99)
+else:
+    raise AssertionError(mode)
+''')
+    source = (ROOT / "deploy/verify-subtitle-engine").read_text()
+    for tool in ["plutil", "stat", "shasum", "codesign"]:
+        source = source.replace("/usr/bin/" + tool,
+            " ".join(shlex.quote(part) for part in [sys.executable, str(adapter), tool]))
+    verifier = directory / "portable-verifier"
+    verifier.write_text(source)
+    return verifier
+
+
 class SubtitleEnginePackageCase(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -51,6 +100,16 @@ class SubtitleEnginePackageCase(unittest.TestCase):
         self.root = Path(temporary.name)
         self.package = self.root / "engine"
         self.facts = fixture_bundle(self.package)
+
+    @property
+    def portable_verifier(self):
+        verifier = self.root / "portable-verifier"
+        return verifier if verifier.exists() else portable_installer_verifier(self.root)
+
+    def installer_verifiers(self):
+        yield self.portable_verifier
+        if sys.platform == "darwin":
+            yield ROOT / "deploy/verify-subtitle-engine"
 
     def test_engine_identity_rejects_changed_binary_source_options_and_companions(self):
         self.assertEqual(TOOL.verify(self.package), self.facts)
@@ -121,21 +180,28 @@ class SubtitleEnginePackageCase(unittest.TestCase):
             with self.assertRaises(ValueError):
                 SMOKE.check_output(text)
 
-    @unittest.skipUnless(sys.platform == "darwin", "macOS system verifier")
     def test_macos_installer_real_verifier_rejects_changed_binary_before_execution(self):
         (self.package / "whisper-cli").write_bytes(b"changed executable")
-        result = subprocess.run(["/bin/bash", str(ROOT / "deploy/verify-subtitle-engine"), str(self.package)], capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("executable length mismatch", result.stderr)
+        for verifier in self.installer_verifiers():
+            with self.subTest(verifier=verifier.name):
+                result = subprocess.run(["/bin/bash", str(verifier), str(self.package)], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("executable length mismatch", result.stderr)
 
-    @unittest.skipUnless(sys.platform == "darwin", "macOS system verifier")
     def test_macos_installer_rejects_unqualified_and_extra_build_options(self):
         for options in [dict(self.facts["build_options"], GGML_NATIVE="ON"), dict(self.facts["build_options"], UNKNOWN="ON")]:
             facts = dict(self.facts, build_options=options)
             (self.package / "subtitle-engine.json").write_text(json.dumps(facts))
-            result = subprocess.run(["/bin/bash", str(ROOT / "deploy/verify-subtitle-engine"), str(self.package)], capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("unqualified build options", result.stderr)
+            for verifier in self.installer_verifiers():
+                with self.subTest(verifier=verifier.name, options=options):
+                    result = subprocess.run(["/bin/bash", str(verifier), str(self.package)], capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("unqualified build options", result.stderr)
+
+    def test_portable_verifier_reaches_but_never_fakes_native_signature_qualification(self):
+        result = subprocess.run(["/bin/bash", str(self.portable_verifier), str(self.package)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 99, result.stderr)
+        self.assertIn("native signature qualification deliberately unavailable", result.stderr)
 
 
 if __name__ == "__main__":
