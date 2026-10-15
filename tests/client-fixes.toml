@@ -6724,3 +6724,12 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func autoPressureNeedsMinimumAcquisitionCost("
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testSeverePressureAcquisitionBudgetUsesOriginalBoundsAndActualRate"
+
+
+[[fixes]]
+id = "apple.pause-publication-retains-pending-destination"
+commits = ["af82338f1ff45c6ccb07df3c6ebb08f7a7b907b4"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func setPlaybackRequested(_ requested: Bool, viewerOrigin: Bool) {"
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "testPausePublicationRetainsPendingSeekUntilPlayDispatchesOnce"
