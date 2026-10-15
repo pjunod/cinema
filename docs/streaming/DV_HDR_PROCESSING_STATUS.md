@@ -2,7 +2,7 @@
 
 **Status:** built for supported bounded routes and merged to `main`; full-suite
 qualification, broader reference and hardware acceptance open ·
-**Updated:** 2026-10-10 · **Integration:** merged to `main` as `c96142ac` (#968)
+**Updated:** 2026-10-15 · **Integration:** merged to `main` as `c96142ac` (#968)
 
 Companion to the [build handoff](DV_HDR_PROCESSING_BUILD.md) and
 [source feasibility findings](DV_HDR_PROCESSING_FEASIBILITY.md). This is the
@@ -1521,3 +1521,69 @@ are present. One existing verified-landing record now binds that exact commit,
 tree, ordered parents, title and PR. It waives no trailer or qualification
 requirement. The original failure remains preserved; the updated exact task
 head still needs its normal compile-only gate.
+
+
+### R44 — Current membership and browser fixtures
+
+PR #1121 lands in the effort as `d3b45761f` after all seven exact-head
+compile-only checks pass in run 5202. The fixture uses the daemon database
+layout, starts target heartbeats at live removal transitions, and tests a
+candidate below the supported bootstrap schema. Production admission,
+compatibility, deadlines and storage thresholds are unchanged.
+
+On that main-bound effort, the four affected Rust controls pass once:
+readiness after bootstrap/reopen, the voter configuration directory, the
+complete request/FTS/preflight protocol, and snapshot evidence across rotation.
+The affected Python script-syntax control passes once in 1.007 seconds.
+No applicable prior passing body is selected again.
+
+The actual browser fixture passes on `47947df9a`: decoded H.264/AAC frames
+advance, terminal failures retain visible feedback after release, and a real
+lost DELETE leaves an owner-bound hint. After the real liveness interval,
+reload rejoins the same session without an eleventh allocation; final Stop
+confirms the tenth release and removes its hint. The effort integration changes
+only CI inputs, so the consumed browser, fake API and server inputs are
+unchanged. This synthetic fixture is not physical HDR acceptance.
+
+The source-bound cluster serving/failure-drill campaign exits zero on
+`73b06b9fc`, with its verified commit supplied through the supported runtime
+`GITHUB_SHA` input for the source-only checkout. The earlier missing-identity
+failure remains preserved. The later, separate topology campaign reports zero
+errors and zero Authority queries but rejects 512 local queries against its
+stale 256-query contract. R46 addresses that exact mismatch; no topology
+success is claimed from this failed command.
+
+### R45 — Compiler and WAL placement within existing memory limits
+
+PR #1119 lands as `45a8ab1c7` after all seven exact-head compile-only checks
+pass in run 5191 and independent source review clears its final patch.
+The main and effort compiler jobs and retained WAL compilation use the existing
+larger-memory topology queue with one Cargo job. Their 20-minute compiler and
+30-minute WAL deadlines, commands, cache policy and retained-unit requirements
+are preserved; no shared runner configuration changes.
+
+Read-only measurements distinguish the original guest timeout from later
+bare-metal reclamation: general executors reclaim above a 4 GiB soft limit,
+while the selected existing executor has a 24 GiB soft limit. The one changed
+workflow contract passes once on `45a8ab1c7` in 1.099 seconds. It remains
+applicable after R44 and is not repeated.
+
+**How to read these results:** green task gates establish policy and compiler
+acceptance. They do not grant a main qualification receipt, deploy the repair,
+or establish HDR playback on a physical display.
+
+### R46 — Count both local queries in each bounded catalogue read
+
+Each of the 256 catalogue operations checks the local preference and reads the
+item under the same bounded permit. The exact expected SQL count is therefore
+512. Runtime checking, artifact validation and the pinned JSON schema use that
+count while still requiring zero read errors and zero consistent queries.
+The existing schema/validator control rejects the old 256 count and both
+one-query deviations, 511 and 513. Latency samples still represent 256 complete
+catalogue operations; this does not reduce the workload or hide its preference
+lookup cost.
+
+The changed schema control is reserved for one execution on the main-bound
+effort after task integration. Its actual three/four-voter campaign, complete
+current-main qualification, normal fleet deployment and all 18 physical HDR
+ON/OFF cases remain open. Original captures and failures remain intact.
