@@ -897,6 +897,8 @@ mod manager_publication;
 mod manager_rolling_retained;
 #[path = "transcode/manager/start.rs"]
 mod manager_start;
+#[cfg(test)]
+pub(crate) use manager_start::rolling_copy_video_options;
 // split: end manager
 
 // split: begin retention

@@ -110,3 +110,89 @@ pub(super) fn complete(init: &mut Init, opening: &[Vec<u8>]) -> Result<bool, Fmp
     }
     Ok(true)
 }
+
+/// Prove that removing in-band definitions from this rolling fragment loses
+/// nothing. Unlike a sampled census, every NAL in every video sample is read
+/// strictly before the caller can publish or buffer any of the fragment.
+/// The caller keeps this same repaired init for the lifetime of the stream.
+pub fn validate_rolling_dvh1_fragment(init: &Init, fragment: &Fragment) -> Result<(), Fmp4Error> {
+    if init
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Video)
+        .count()
+        != 1
+    {
+        return malformed("rolling dvh1 proof requires exactly one video track");
+    }
+    if validate_hevc_sample_entries(init)? != HevcSampleEntryLayout::Single {
+        return malformed("rolling dvh1 proof requires one sample description");
+    }
+    let location = locate_hvcc(&init.bytes)?
+        .ok_or_else(|| Fmp4Error::Malformed("rolling dvh1 proof has no hvcC".into()))?;
+    if !is_dvh1(&init.bytes, &location) {
+        return malformed("rolling dvh1 proof requires dvh1");
+    }
+    let configured = canonical(
+        hvcc_parameter_set_nals(&init.bytes[location.payload])?
+            .into_iter()
+            .map(<[u8]>::to_vec),
+    );
+    let video = init
+        .video()
+        .ok_or_else(|| Fmp4Error::Malformed("rolling dvh1 proof has no video".into()))?;
+    if fragment
+        .tracks
+        .iter()
+        .any(|track| !init.tracks.iter().any(|known| known.id == track.track_id))
+    {
+        return malformed("rolling dvh1 fragment names an unknown track");
+    }
+    if fragment
+        .tracks
+        .iter()
+        .any(|track| track.track_id == video.id)
+    {
+        validate_hevc_sample_description_reference(init, fragment)?;
+    }
+    for track in fragment
+        .tracks
+        .iter()
+        .filter(|track| track.track_id == video.id)
+    {
+        for run in &track.runs {
+            let mut start = run.data_offset;
+            for sample in &run.samples {
+                if start < fragment.mdat_payload.start {
+                    return malformed("rolling dvh1 sample begins outside mdat");
+                }
+                let end = start
+                    .checked_add(sample.size as usize)
+                    .filter(|end| *end <= fragment.bytes.len() && *end <= fragment.mdat_payload.end)
+                    .ok_or_else(|| {
+                        Fmp4Error::Malformed("rolling dvh1 sample exceeds its fragment".into())
+                    })?;
+                let bytes = &fragment.bytes[start..end];
+                if bytes.is_empty() {
+                    return malformed("rolling dvh1 sample is empty");
+                }
+                let mut invalid = false;
+                visit_length_prefixed_hevc_nals(bytes, video.nal_length_size, |framed, kind| {
+                    let nal = &framed[usize::from(video.nal_length_size)..];
+                    invalid |= nal.len() < 2
+                        || nal[0] & 0x80 != 0
+                        || nal[1] & 7 == 0
+                        || (matches!(kind, Some(32..=34))
+                            && !configured
+                                .iter()
+                                .any(|known| known.as_slice() == without_trailing_zero_bytes(nal)));
+                })?;
+                if invalid {
+                    return malformed("rolling dvh1 sample contradicts its decoder configuration");
+                }
+                start = end;
+            }
+        }
+    }
+    Ok(())
+}

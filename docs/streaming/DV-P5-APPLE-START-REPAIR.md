@@ -1,6 +1,6 @@
 # Dolby Vision Profile 5 startup — repairing the muxer's incomplete-array claim
 
-**Status:** built and locally qualified; adversarial review approved; device acceptance pending · **Date:** 2026-10-13
+**Status:** rolling follow-up built; qualification and device acceptance pending · **Updated:** 2026-10-15
 
 Companion to [PLAYBACK.md](../PLAYBACK.md) (the delivery path). This record
 explains the Apple TV failure for *Taylor Tomlinson: Prodigal Daughter*, the
@@ -50,8 +50,8 @@ remains strict.
 Only the parameter-array completeness bits change. Dolby Vision records,
 RPUs, picture data and audio are preserved. The ordinary segment merge
 continues to remove the promoted in-band VPS/SPS/PPS from `dvh1` media.
-Known retaining-copy recipes cannot use this repair: the live producer and
-both VOD creation paths refuse that combination before publication.
+VOD retaining-copy recipes still cannot use this repair. The rolling producer
+uses the per-sample proof below when it would otherwise retain these definitions.
 
 The opening tuple is persisted separately from missing-array promotion in
 `PromotionInputs.dvh1_parameter_sets`, with an empty serde default for old
@@ -128,3 +128,54 @@ cargo check -p plurxd --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 python3 -m unittest tests.operations.test_docs_index tests.operations.test_infra_names
 ```
+
+## Physical acceptance exposed the missing rolling integration
+
+The October 15 physical Apple TV run used production build 237 against merged
+server revision `9eb7f6738`. The client selected preserved Profile 5 for file
+91; VOD preparation was pending. Startup still failed with 502 because
+`rolling_copy_video_options` unconditionally retains HEVC parameter sets,
+and the new completeness guard refused that combination. The original private
+capture regression proved a non-retaining copy that production never selected.
+It did not establish successful playback. All four peers were confirmed on
+the new revision before this run; the remaining failure was not version skew.
+
+The follow-up keeps rolling retention as the default. Only a `dvh1` init
+whose incomplete arrays are repaired from an exact matching opening tuple
+enters the guarded path. Before writing the init, and before buffering each
+subsequent fragment, it strictly parses every NAL in every video sample.
+Every present VPS/SPS/PPS must match the repaired init; partial identical
+repetitions and absence are allowed. Truncated framing, empty samples, invalid
+NAL headers, unknown tracks, conflicting definitions, invalid sample-description
+references and a replacement init terminate the producer. No unsafe fragment
+reaches the segmenter, no legacy retry is permitted, and a failed stream does
+not acquire ENDLIST. Only verified redundant parameter sets are stripped;
+pictures, RPUs and audio are copied unchanged.
+
+This is a bounded publication proof, not a whole-film stability assertion.
+A future contradictory fragment can terminate playback, but cannot publish
+pictures under a configuration they contradict. VOD's whole-source proof and
+retaining-copy restrictions are unchanged. The conditional rolling transform
+version participates in the retained-output binding, preventing reuse of old
+retaining output under the new contract.
+
+The replacement capture regression obtains the real rolling options and a
+23-byte-hvcC probe, proves safe publication, compares all RPU/picture and audio
+payloads, and injects conflicts into initial and later non-key samples. It also
+checks malformed later data and a second init, verifies previously published
+fragments remain valid, and refuses ENDLIST after failure. The always-on core
+regression covers malformed lengths and headers, absence, partial matching
+repetitions and invalid description selection. Device acceptance must still
+be repeated after the follow-up lands and is deployed.
+
+The follow-up received adversarial approval after correcting the reader-level
+replacement-init gap and checking sample offsets against `mdat`, not merely
+the containing byte buffer. The proof requires exactly one video track.
+Local Rust 1.97.1 results: the full fMP4 group passed 92 tests (three optional
+capture tests skipped), the two guarded-rolling regressions passed, and
+workspace all-target Clippy with denied warnings passed. The private 12-second
+capture has SHA-256
+`6556231eed4c47efacc4ad7ade289cc8bf15e1582883242eb0bb219eef3b2cf9`.
+The fixture-policy, documentation-index and infrastructure-name checks passed
+all 29 tests. A compiler lint found two identical rejection branches; they
+were combined without a lint exemption or a change in the rejection rules.
