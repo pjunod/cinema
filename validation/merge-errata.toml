@@ -47,6 +47,10 @@ version = 1
 enforce_after = "448e803daba8ec7706350aedbe0562fd99454644"
 
 [[errata]]
+commit = "d6b59715563b3de1a681eb481c4d6a23ac6b7366"
+reason = "Corrective commit d6b59715 reached main through merge a0b8cb72c5bab2bc9a1010c9708959087ecaba47, whose subject 'fix(streaming): prove DV parameter sets before rolling publication' omits a PR number and is not recognized as a landing. Both immutable commits carry Regression-Test fields for crates/plurx-core/src/fmp4/dvh1_tests.rs::rolling_dvh1_guard_checks_every_sample_and_strict_nal_framing, ::rolling_dvh1_reader_rejects_replacement_init_after_arming, and crates/plurxd/src/copyseg.rs::captured_dvh1_rolling_options_publish_and_reject_unproven_samples; all three resolve in the merge tree. Apple TV effort run 5163 reported this inherited history failure. This permanent erratum records the malformed landing subject without rewriting history, moving the boundary, waiving future evidence, or claiming another runtime test."
+
+[[errata]]
 commit = "e2dfc6b77aa965e039b111038bb15a6ca352aab1"
 reason = "PR #512 landed corrective commit 1831ee898 (refuse empty caption audit results) without a Regression-Test trailer in its immutable merge message. The existing regression is tests/operations/test_live_tv_caption_audit.py::test_audit_requires_one_completed_test; fast lane #2976 passed on the reviewed head. PR #516 records this omission after fast lane #3000 found it. Future landing messages must carry the checked trailer."
 
