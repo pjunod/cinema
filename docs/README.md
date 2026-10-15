@@ -603,6 +603,8 @@ Two rounds of performance work, each with its plan, review, and response.
 | File | Answers | |
 |---|---|---|
 | [HDR-REFERENCE-SCORING.md](performance/HDR-REFERENCE-SCORING.md) | Independent bounded PQ code-domain metrics/census and explicitly graded BT.709 reference provenance for SDR VMAF; diagnostic evidence does not close genuine corpus, GPU or physical acceptance. | open |
+| [TONEMAP-SEGMENT-CONSISTENCY.md](performance/TONEMAP-SEGMENT-CONSISTENCY.md) | Exact source-frame and rational-PTS comparison of continuous and restarted tone-map filters; separate from seek, encoded-HLS and display acceptance. | open |
+| [Tone-map reset receipt](performance/evidence/tonemap-reset-20261015.json) | Four authored CPU/Metal campaigns, exact raw-frame and rational-PTS results, the preserved fixture failure and metadata-only correction proof. | done |
 | [PERF-PLAN.md](performance/PERF-PLAN.md) | Round one: where the seconds go, and the plan to get them back. | built |
 | [PERF-PLAN-REVIEW.md](performance/PERF-PLAN-REVIEW.md) | What to correct before implementing it. | done |
 | [PERF-REVIEW-RESPONSE.md](performance/PERF-REVIEW-RESPONSE.md) | What the review got right, what already shipped, what changed. | done |
