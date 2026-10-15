@@ -154,14 +154,7 @@ final class TVPhysicalInputTests: XCTestCase {
 
         // Grouping is a saved user preference. Establish the named fixture
         // through ordinary UI, and restore it even if navigation/paging fails.
-        let category = app.buttons["Category"]
-        let library = app.buttons["Library"]
-        XCTAssertTrue(category.waitForExistence(timeout: 10) && library.exists,
-                      "Library grouping choices are unavailable")
-        let originalGrouping = try XCTUnwrap(
-            category.isSelected != library.isSelected
-                ? (category.isSelected ? "Category" : "Library") : nil,
-            "Could not observe the current library grouping")
+        let originalGrouping = try currentLibraryGrouping(in: app)
         defer {
             // Relaunch returns from a collection detail to the ordinary root;
             // it retains the account and lets cleanup use the same controls.
@@ -332,21 +325,35 @@ final class TVPhysicalInputTests: XCTestCase {
         return reached
     }
 
+    private func currentLibraryGrouping(in app: XCUIApplication) throws -> String {
+        let grouping = app.buttons["Group by"]
+        XCTAssertTrue(grouping.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(focus(grouping, in: app), "Could not focus Group by")
+        remote.press(.select)
+        let category = app.buttons["Category"]
+        let library = app.buttons["Library"]
+        XCTAssertTrue(category.waitForExistence(timeout: 5) && library.exists,
+                      "Group by must expose Category and Library choices")
+        let selected = try XCTUnwrap(category.isSelected != library.isSelected
+                                    ? (category.isSelected ? "Category" : "Library") : nil,
+                                    "Could not observe selected grouping in the choice panel")
+        remote.press(.menu)
+        XCTAssertTrue(grouping.hasFocus, "Group by Back must restore its opener")
+        return selected
+    }
+
     private func setLibraryGrouping(_ label: String, in app: XCUIApplication) -> Bool {
+        let grouping = app.buttons["Group by"]
+        guard grouping.waitForExistence(timeout: 10), focus(grouping, in: app) else { return false }
+        remote.press(.select)
         let choice = app.buttons[label]
-        guard choice.waitForExistence(timeout: 10) else { return false }
-        if !choice.isSelected {
-            guard focus(choice, in: app) else { return false }
-            // A tvOS segmented picker can select while focus moves onto it.
-            if !choice.isSelected { remote.press(.select) }
-        }
-        let end = Date().addingTimeInterval(5)
-        while Date() < end {
-            if choice.exists && choice.isSelected { return true }
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        attachScreen(app, name: "library-grouping-not-selected")
-        return false
+        guard choice.waitForExistence(timeout: 5) else { return false }
+        // Two choices plus Close: no unbounded search through background cards.
+        for _ in 0..<2 where !choice.hasFocus { remote.press(.down) }
+        for _ in 0..<2 where !choice.hasFocus { remote.press(.up) }
+        guard choice.hasFocus else { return false }
+        remote.press(.select)
+        return (try? currentLibraryGrouping(in: app)) == label
     }
 
     private func loadedCount(_ label: String) throws -> Int {

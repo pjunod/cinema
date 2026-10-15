@@ -493,8 +493,8 @@ final class PlaybackControlSessionTests: XCTestCase {
 
     func testEndRevokesATerminalPublicationAlreadyPastTheCaptureGuard() async throws {
         controlExchanges.reset()
-        controlAnswer.set(ControlAction(type: "none"))
-        controlAnswer.setReadiness("pending")
+        controlAnswer.set(ControlAction(type: "terminal", code: "unsupported", message: "late"))
+        controlAnswer.setReadiness("ready")
         let publicationHeld = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
         let session = PlaybackControlSession(scheduleSubtitleReady: { _ in
@@ -512,10 +512,9 @@ final class PlaybackControlSessionTests: XCTestCase {
         }
         session.begin(bootstrap: sessionBootstrap(), transport: transport,
                       observe: { player.observation() })
-        _ = try await waitForExchange { $0.sequence == 2 }
-        controlAnswer.set(ControlAction(type: "terminal", code: "unsupported", message: "late"))
-        controlAnswer.setReadiness("ready")
-        session.reportEvidence()
+        // The first response is terminal. Hold its first scheduled
+        // publication after capture validation, before the verdict store.
+        // Processing metadata is scheduled even without a subtitle edge.
         let deadline = Date().addingTimeInterval(5)
         var held = false
         while !held, Date() < deadline {
@@ -553,13 +552,13 @@ final class PlaybackControlSessionTests: XCTestCase {
         _ = try await waitForExchange { $0.sequence == 2 }
         controlAnswer.setReadiness(unavailable ? "unavailable" : "ready")
         session.playerChanged()
-        let deadline = Date().addingTimeInterval(5)
-        var queued: (@MainActor @Sendable () -> Void)?
-        while queued == nil, Date() < deadline {
-            queued = callbacks.take()
-            if queued == nil { try await Task.sleep(nanoseconds: 20_000_000) }
-        }
-        let staleReady = try XCTUnwrap(queued, "the real session must schedule a readiness callback")
+        // A following request proves the readiness response has finished
+        // scheduling all of its publications. Processing metadata shares this
+        // queue, so retaining just its first callback would miss readiness.
+        _ = try await waitForExchange { $0.sequence >= 4 }
+        var queued: [@MainActor @Sendable () -> Void] = []
+        while let callback = callbacks.take() { queued.append(callback) }
+        XCTAssertFalse(queued.isEmpty, "the real session must schedule publications")
 
         if replaceSession == true {
             var next = sessionBootstrap()
@@ -575,7 +574,7 @@ final class PlaybackControlSessionTests: XCTestCase {
             session.end()
         }
         if newIntent { session.clearVerdict() }
-        staleReady()
+        queued.forEach { $0() }
         XCTAssertEqual(deliveries, replaceSession == nil && !newIntent ? 1 : 0,
                        "a queued response loses its authority when its reporting session ends")
         if newIntent {

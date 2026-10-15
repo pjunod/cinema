@@ -350,7 +350,7 @@ test_anchor = "liveConfigurationLeavesTheTargetOffsetToThePlaylist"
 id = "apple.live-tv-fullscreen-focus"
 commits = ["861c6e24"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = ".focusable(!overlayVisible && !temporaryGuide)"
+source_anchor = "if !overlayVisible && !temporaryGuide {"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheRevealLayerIsNotFocusableWhileTheOverlayOrTheGuideIsVisible"
 
@@ -1259,7 +1259,7 @@ test_anchor = "a refused picture-in-picture never latches the retention flag"
 id = "apple.live-tv-ten-foot-surface-keeps-something-focusable"
 commits = ["9268f5f6"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = ".focused($focusedControl, equals: FocusTarget.reveal)"
+source_anchor = "LiveTvRevealSurface(state: { liveInputState }"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidden"
 
@@ -2229,7 +2229,7 @@ test_anchor = "theReorderBodyCarriesTheIdsAsJsonStringsInOrder"
 id = "apple.live-tv-reveal-layer-reports-its-real-state"
 commits = ["c7709372"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = ".revealSurface,"
+source_anchor = "LiveTvRevealSurface(state: { liveInputState }"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheRevealLayerReportsTheStateItIsInRatherThanTheOneItWants"
 
@@ -4686,7 +4686,7 @@ test_anchor = "fun titleRowsUseServerKeysAndKeepEveryItemInPagerOrder()"
 id = "apple.native-library-refresh-retains-rows"
 commits = ["a7dbd3542a3e8786ac3802b9ad933312f916cf55"]
 source = "clients/apple/Sources/LibraryGridCoordinator.swift"
-source_anchor = "if !preservingRowsDuringRefresh || current.complete {"
+source_anchor = "if !preservingItemsDuringRefresh || current.complete || (!rowsEnabled && current.decided.count >= preservedItemCount) {"
 test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
 test_anchor = "func testReturningRefreshesWatchStateWithoutDroppingLateRows()"
 
@@ -6444,3 +6444,81 @@ source = "clients/apple/Sources/DiagnosticReportView.swift"
 source_anchor = 'Section("Recent safe events")'
 test = "clients/apple/UITests/DiagnosticReportingTests.swift"
 test_anchor = "testTVZIPDownloadsSelectedIncidentAndCloseRevokesNewLink"
+
+[[fixes]]
+id = "apple.tv-native-choice-modal-owner"
+commits = ["d09b3ada6f09a74d4133f34f80d79f7985f24113"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func enterChoicePanel(scope: String, keys: [String], selected: String?)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testChoiceEntrySelectsCurrentValueAndNativeDismissalRestoresOpener()"
+
+[[fixes]]
+id = "apple.tv-choice-return-target-and-host-back"
+commits = ["b7f15a0af070eb187b9f4cfbfb57e75eef72ad0b"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func closeModal(returnFocus override: String? = nil)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testChoiceReturnOverrideRequiresParentOrderAndNativeAcknowledgment()"
+
+[[fixes]]
+id = "apple.tv-selected-native-focus-and-activation-order"
+# Integrated from the task workspace into this actual corrective commit.
+commits = ["e0477e3ccae2bafd181be6800332b3d94a8e61fb"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func physicalControlActivation(scope: String)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testLateControlTapRetiresAuthorityWithoutCancelingNewPresentationIntent()"
+
+[[fixes]]
+id = "apple.tv-actual-style-focus-entry-admission"
+commits = []
+supplements = "apple.tv-selected-native-focus-and-activation-order"
+source = "clients/apple/Sources/RemoteNavigationViews.swift"
+source_anchor = "func remoteNativeFocus(_ actuallyFocused: Bool)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testActualStyleFocusKeepsPendingEntryInertUntilNativeAcknowledgment()"
+
+[[fixes]]
+id = "apple.tv-dismiss-return-survives-native-settlement"
+commits = []
+supplements = "apple.tv-selected-native-focus-and-activation-order"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "restoration.intent == physicalIntent"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testEarlyNativeTargetAcknowledgmentCannotRetirePostDismissalReturn()"
+
+[[fixes]]
+id = "apple.tv-tab-change-defers-content-entry"
+commits = []
+supplements = "apple.tv-selected-native-focus-and-activation-order"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "requestFocus(changedTab ? nil : restoredFocus[scope], force: changedTab)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testTabMovementDefersContentFocusWhileSameTabBackRestoresBookmark()"
+
+
+[[fixes]]
+id = "apple.tv-recovery-visible-during-discovery"
+commits = ["b1067e120b2b24ee56ab277f6468d66f35ed70b1"]
+source = "clients/apple/Sources/AppModel.swift"
+source_anchor = "guard recoveryAttempt == attempt, phase == .reconnectFailed else { return }"
+test = "clients/apple/UITests/TVConnectionNavigationTests.swift"
+test_anchor = "func testSavedConnectionRecoveryReportAndRetryKeepCredentials()"
+
+[[fixes]]
+id = "apple.tv-shared-playback-and-readable-about"
+commits = []
+supplements = "apple.tv-recovery-visible-during-discovery"
+source = "clients/apple/Sources/SharedLibrariesView.swift"
+source_anchor = "TVReadableInformation("
+test = "clients/apple/UITests/TVSharedPlaybackNavigationTests.swift"
+test_anchor = "func testSharedPlaybackRevealQualityReportAndBackRetainSession()"
+
+[[fixes]]
+id = "apple.tv-row-header-native-focus-and-clearance"
+commits = ["3cd66d8992727ba97bb1217b25b87eda48d2a48f"]
+source = "clients/apple/Sources/LibraryView.swift"
+source_anchor = ".tvNavigationFocusSection()"
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "func testRowsViewAllOpensGroupAndBackRestoresHeader()"

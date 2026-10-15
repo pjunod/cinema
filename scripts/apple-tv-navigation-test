@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""Run native tvOS navigation tests on an isolated simulator; retain a receipt.
+
+No receipt is a qualification unless the complete required suite passes.
+The result bundle preserves failed assertions and native screenshots.
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import plistlib
+import shutil
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+REQUIRED = [
+    "TVNavigationTests/testViewModalOwnsFocusAndBackRestoresOpener416",
+    "TVNavigationTests/testViewModalOwnsFocusAndBackRestoresOpener5000",
+    "TVNavigationTests/testGridToolsAndJump416",
+    "TVNavigationTests/testGridToolsAndJump5000",
+    "TVNavigationTests/testRowsToolsAndJump416",
+    "TVNavigationTests/testRowsToolsAndJump5000",
+    "TVNavigationTests/testRowsViewAllOpensGroupAndBackRestoresHeader",
+    "TVNavigationTests/testSortFilterAndGroupingOwnFocusAndRestoreOpeners",
+    "TVNavigationTests/testEveryEnabledRootTabReceivesNativeFocus",
+    "TVNavigationTests/testEmptyLibraryKeepsToolsAndBackReachable",
+    "TVNavigationTests/testSingleMovieLibraryKeepsToolsAndBackReachable",
+    "TVPlaybackNavigationTests/testLibraryChannelHiddenRevealMoreReportAndCloseRetainSession",
+    "TVPlaybackNavigationTests/testLibraryChannelLayoutHasNamedChoicesAndRestoresOpener",
+    "TVPlaybackNavigationTests/testLibraryChannelFutureProgrammeExplainsAvailabilityAndCurrentSelectTunes",
+    "TVPlaybackNavigationTests/testSharedLibraryRouteAndBackRestoreActualOpener",
+    "TVSharedPlaybackNavigationTests/testSharedPlaybackRevealQualityReportAndBackRetainSession",
+    "TVPlaybackNavigationTests/testLocalMovieHiddenRevealReportAndBackRetainPlayback",
+    "TVLiveNavigationTests/testLiveFullscreenRevealMoreReportAndBackRetainSession",
+    "TVDvrNavigationTests/testRecordingDetailsRuleConfirmationAndManualChannelReturn",
+    "TVRemoteManagementNavigationTests/testPairingRevocationAndRegistrationResetStartSafeAndRestoreOpeners",
+    "TVSecondaryNavigationTests/testMovieAboutReadsFinalRegionAndRestoresMovie",
+    "TVSecondaryNavigationTests/testEpisodeDetailsDoNotStartPlayback",
+    "TVSecondaryNavigationTests/testSettingsPickerHelpReportAndExactReturn",
+    "TVSecondaryNavigationTests/testSearchKeyboardBackRetrySameQueryAndResultReturn",
+    "TVHomeNavigationTests/testForegroundRefreshRetainsHomeContentAndRetryRecovers",
+    "TVConnectionNavigationTests/testSavedConnectionRecoveryReportAndRetryKeepCredentials",
+]
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, cwd=ROOT, text=True, check=True, **kwargs)
+
+
+def verify_summary(summary, expected):
+    if (summary.get("passedTests") != expected or summary.get("failedTests") != 0
+            or summary.get("skippedTests") != 0):
+        raise RuntimeError(f"Incomplete native journey execution: {summary}")
+
+
+def source_snapshot():
+    sha = run("git", "rev-parse", "HEAD", capture_output=True).stdout.strip()
+    dirty = bool(run("git", "status", "--porcelain", capture_output=True).stdout.strip())
+    source = hashlib.sha256()
+    files = run("git", "ls-files", "--cached", "--others", "--exclude-standard",
+                "-z", capture_output=True).stdout.split("\0")
+    for name in sorted(filter(None, files)):
+        path = ROOT / name
+        if path.is_file():
+            source.update(name.encode())
+            source.update(b"\0")
+            source.update(path.read_bytes())
+    return sha, dirty, source.hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--only-testing", action="append", default=[],
+                        help="Focused development run; never a complete qualification")
+    parser.add_argument("--derived-data", type=Path, help="Reusable isolated build cache")
+    parser.add_argument("--runtime", default="com.apple.CoreSimulator.SimRuntime.tvOS-26-5")
+    options = parser.parse_args()
+    output = options.output.resolve()
+    if output == ROOT or ROOT in output.parents:
+        parser.error("--output must be outside the source checkout")
+    output.mkdir(parents=True, exist_ok=False)
+    derived = (options.derived_data or (output / "DerivedData")).resolve()
+    sha, dirty, source_hash = source_snapshot()
+    receipt = {"schema": 1, "source_sha": sha, "source_tree_sha256": source_hash,
+               "source_dirty": dirty, "derived_data": str(derived), "required_tests": REQUIRED,
+               "selected_tests": options.only_testing or REQUIRED,
+               "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+               "status": "failed", "qualification": False, "coverage_scope": "Native library, root, details, settings, DVR, reporting and playback journeys; physical accessibility and lifecycle acceptance separate",
+               "result_bundle": str(output / "navigation.xcresult")}
+    device = None
+    try:
+        receipt["xcode"] = run("xcodebuild", "-version", capture_output=True).stdout.strip()
+        device = run("xcrun", "simctl", "create", "Plurx navigation isolated",
+                     "com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K",
+                     options.runtime, capture_output=True).stdout.strip()
+        receipt["simulator_udid"] = device
+        receipt["runtime"] = options.runtime
+        run("xcrun", "simctl", "boot", device)
+        run("xcrun", "simctl", "bootstatus", device, "-b")
+        run("xcodegen", "generate", "--spec", "clients/apple/project.yml")
+        command = ["xcodebuild", "test", "-project", "clients/apple/plurx.xcodeproj",
+                   "-scheme", "plurx-tvOS-navigation", "-destination", f"id={device}",
+                   "-derivedDataPath", str(derived),
+                   "-resultBundlePath", receipt["result_bundle"],
+                   "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "never",
+                   "-test-timeouts-enabled", "YES",
+                   "-default-test-execution-time-allowance", "180",
+                   "-maximum-test-execution-time-allowance", "240", "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"]
+        command += [f"-only-testing:plurx-tvOSUITests/{test}"
+                    for test in (options.only_testing or REQUIRED)]
+        receipt["command"] = command
+        with (output / "xcodebuild.log").open("w") as log:
+            run(*command, stdout=log, stderr=subprocess.STDOUT)
+        # xcodebuild can succeed while a test selection is empty. Require the
+        # result summary's exact executed count and no skips, not only exit 0.
+        summary = json.loads(run("xcrun", "xcresulttool", "get", "test-results", "summary",
+                                 "--path", receipt["result_bundle"], capture_output=True).stdout)
+        receipt["test_summary"] = summary
+        expected = len(options.only_testing or REQUIRED)
+        verify_summary(summary, expected)
+        if source_snapshot() != (sha, dirty, source_hash):
+            raise RuntimeError("Source changed during the native run; this result cannot qualify the candidate")
+        receipt["status"] = "passed"
+        receipt["native_suite_complete"] = not options.only_testing
+        receipt["qualification"] = False  # Physical/accessibility acceptance is separate.
+    except (subprocess.CalledProcessError, RuntimeError) as error:
+        receipt["error"] = str(error)
+    finally:
+        bundle = Path(receipt["result_bundle"])
+        if (bundle / "Info.plist").exists() and "test_summary" not in receipt:
+            summary_result = subprocess.run(
+                ["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(bundle)],
+                text=True, capture_output=True)
+            if summary_result.returncode == 0:
+                receipt["test_summary"] = json.loads(summary_result.stdout)
+        if device:
+            log_path = output / "xcodebuild.log"
+            if log_path.exists():
+                for line in log_path.read_text(errors="replace").splitlines():
+                    if not line.startswith("NAVIGATION_SCREENSHOT_PATH="):
+                        continue
+                    capture = Path(line.split("=", 1)[1])
+                    if device in capture.parts and capture.is_file():
+                        (output / "screenshots").mkdir(exist_ok=True)
+                        shutil.copy2(capture, output / "screenshots" / capture.name)
+                        receipt["screenshots"] = str(output / "screenshots")
+            subprocess.run(["xcrun", "simctl", "shutdown", device], capture_output=True)
+            subprocess.run(["xcrun", "simctl", "delete", device], capture_output=True)
+        app = derived / "Build/Products/Debug-appletvsimulator/plurx.app"
+        if (app / "Info.plist").exists():
+            with (app / "Info.plist").open("rb") as info_file:
+                info = plistlib.load(info_file)
+            binary = app / info["CFBundleExecutable"]
+            if binary.exists():
+                bundle_hash = hashlib.sha256()
+                for artifact in sorted(path for path in app.rglob("*") if path.is_file()):
+                    bundle_hash.update(str(artifact.relative_to(app)).encode())
+                    bundle_hash.update(b"\0")
+                    bundle_hash.update(artifact.read_bytes())
+                receipt["app_build"] = {
+                    "bundle_identifier": info["CFBundleIdentifier"],
+                    "version": info.get("CFBundleShortVersionString"),
+                    "build": info.get("CFBundleVersion"),
+                    "executable_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                    "bundle_sha256": bundle_hash.hexdigest(),
+                }
+        receipt["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    print(output / "receipt.json")
+    return 0 if receipt["status"] == "passed" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

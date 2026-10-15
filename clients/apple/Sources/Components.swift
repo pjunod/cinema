@@ -328,16 +328,26 @@ struct EpisodeCard: View {
 
     var body: some View {
         #if os(tvOS)
-        Button {
-            perform(tvEpisodeCardSelectionAction())
-        } label: {
-            cardContent
-        }
-        .posterButtonStyle()
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(episodeCardPlayAccessibilityLabel(item))
-        .accessibilityValue(tvEpisodeCardAccessibilityValue(item, isStarting: isStarting))
-        .modifier(RemoteEpisodePlayModifier(shelf: remoteShelf, item: item, onPlay: onPlay))
+        VStack(alignment: .leading, spacing: 14) {
+            Button {
+                perform(tvEpisodeCardSelectionAction())
+            } label: {
+                cardContent
+            }
+            .posterButtonStyle()
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(episodeCardPlayAccessibilityLabel(item))
+            .accessibilityValue(tvEpisodeCardAccessibilityValue(item, isStarting: isStarting))
+            .modifier(RemoteEpisodePlayModifier(shelf: remoteShelf, item: item, onPlay: onPlay))
+            NavigationLink(value: Route.item(item.id)) {
+                Label("Episode details", systemImage: "info.circle")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+            .accessibilityLabel(episodeCardDetailsAccessibilityLabel(item))
+            .accessibilityIdentifier("episode-details:\(item.id)")
+            .modifier(RemoteEpisodeDetailsModifier(shelf: remoteShelf, item: item))
+        }.frame(width: width, alignment: .leading)
         #else
         VStack(alignment: .leading, spacing: 8) {
             Button {
@@ -456,6 +466,112 @@ struct EpisodeCard: View {
     }
 }
 
+private struct RemoteEpisodeDetailsModifier: ViewModifier {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    let shelf: String?
+    let item: Item
+    func body(content: Content) -> some View {
+        if let shelf {
+            content.remoteControl(shelf + ":details:\(item.id)", label: "Details for " + item.title) {
+                navigation.navigate(to: .item(item.id))
+            }
+        } else { content }
+    }
+}
+
+/// A readable TV information destination with its own native presentation.
+struct TVReadableInformation: View {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    let scope: String
+    let title: String
+    let text: String
+
+    /// Bound each focus region so even a single long paragraph can be read
+    /// to its end without requiring a focus rectangle taller than the sheet.
+    static func readingRegions(_ text: String, limit: Int = 360) -> [String] {
+        let limit = max(1, limit)
+        var regions: [String] = []
+        var region = ""
+        let paragraphs = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n\n")
+        for paragraph in paragraphs {
+            for token in paragraph.split(whereSeparator: \.isWhitespace).map(String.init) {
+                var word = token
+                if word.count > limit, !region.isEmpty { regions.append(region); region = "" }
+                while word.count > limit {
+                    regions.append(String(word.prefix(limit)))
+                    word = String(word.dropFirst(limit))
+                }
+                if !region.isEmpty, region.count + word.count + 1 > limit {
+                    regions.append(region)
+                    region = ""
+                }
+                if !region.isEmpty { region += " " }
+                region += word
+            }
+            if !region.isEmpty { regions.append(region); region = "" }
+        }
+        return regions
+    }
+    private var regions: [String] { Self.readingRegions(text) }
+    private var keys: [String] { regions.indices.map { "info:paragraph:\($0)" } + ["info:close"] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text(title).font(.title.bold())
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 24) {
+                        ForEach(Array(regions.enumerated()), id: \.offset) { index, region in
+                            // A native button supplies the focus environment to
+                            // its style. This reading target has no activation;
+                            // VoiceOver still describes it as static text.
+                            Button {} label: { Text(region).font(.body).fixedSize(horizontal: false, vertical: true) }
+                                .buttonStyle(TVReadableParagraphStyle())
+                                .accessibilityRemoveTraits(.isButton)
+                                .accessibilityAddTraits(.isStaticText)
+                                .id("info:paragraph:\(index)")
+                                .accessibilityIdentifier("info:paragraph:\(index)")
+                                .remoteControl("info:paragraph:\(index)", label: "Synopsis part \(index + 1)") {}
+                        }
+                    }
+                }
+                .onChange(of: navigation.focusRequestRevision) { _, _ in
+                    guard navigation.activeScope == scope, let key = navigation.requestedFocus else { return }
+                    proxy.scrollTo(key, anchor: .center)
+                }
+            }
+            Button("Close") { navigation.closeModal() }
+                .shelfActionButtonStyle()
+                .remoteControl("info:close", label: "Close") { navigation.closeModal() }
+        }
+        .padding(44)
+        .frame(maxWidth: 1100, maxHeight: 800)
+        .background(Palette.surface)
+        .remoteScope(scope)
+        .onAppear {
+            navigation.setOrder(scope: scope, keys: keys, columns: 1)
+            if let first = keys.first { navigation.focusControl(scope: scope, key: first) }
+        }
+    }
+}
+
+private struct TVReadableParagraphStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { Region(configuration: configuration) }
+    private struct Region: View {
+        let configuration: ButtonStyle.Configuration
+        @Environment(\.isFocused) private var focused
+        var body: some View {
+            configuration.label
+                .foregroundStyle(Palette.onBg)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(focused ? Palette.surfaceHi : .clear, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(focused ? Palette.onBg : .clear, lineWidth: 3))
+                .remoteNativeFocus(focused)
+        }
+    }
+}
+
 struct EpisodeMediaSummary: View {
     let badges: [ItemMetadataBadge]
 
@@ -556,7 +672,7 @@ struct MediaRow: View {
     var onPlayEpisode: ((Item) -> Void)?
 
     var body: some View {
-        if !items.isEmpty {
+        if !items.isEmpty || destination != nil {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(title)
@@ -566,7 +682,9 @@ struct MediaRow: View {
                         .font(.headline.weight(.semibold))
                         #endif
                         .foregroundColor(Palette.onBg)
+                    #if os(iOS)
                     Spacer()
+                    #endif
                     if let destination {
                         NavigationLink(value: Route.collection(destination)) {
                             HStack(spacing: 8) {
@@ -580,6 +698,9 @@ struct MediaRow: View {
                         .accessibilityIdentifier("library-open-\(destination.id)")
                         .remoteControl("collection:" + destination.id, label: destination.title) { remoteNavigation.navigate(to: .collection(destination)) }
                     }
+                    #if os(tvOS)
+                    Spacer()
+                    #endif
                 }
                 .padding(.horizontal, screenHPad)
 
@@ -627,9 +748,9 @@ struct MediaRow: View {
                     .padding(.horizontal, screenHPad)
 
                 }
-                .onChange(of: remoteNavigation.requestedFocus) { _, key in
-                    guard let shelf = remoteShelf, let key, key.hasPrefix(shelf + ":item:"),
-                          let id = Int(key.dropFirst((shelf + ":item:").count)) else { return }
+                .onChange(of: remoteNavigation.focusRequestRevision) { _, _ in
+                    guard let shelf = remoteShelf, let key = remoteNavigation.requestedFocus,
+                          let id = Self.realizedItemID(key: key, shelf: shelf) else { return }
                     proxy.scrollTo(id, anchor: .center)
                 }
                 }
@@ -637,6 +758,14 @@ struct MediaRow: View {
             .padding(.vertical, 10)
             .tvNavigationFocusSection()
         }
+    }
+
+    static func realizedItemID(key: String, shelf: String) -> Int? {
+        for action in ["item", "details"] {
+            let prefix = shelf + ":" + action + ":"
+            if key.hasPrefix(prefix) { return Int(key.dropFirst(prefix.count)) }
+        }
+        return nil
     }
 
     private var shelfSpacing: CGFloat {
@@ -752,7 +881,8 @@ struct ComingSoonRow: View {
                     .padding(.horizontal, screenHPad)
 
                 }
-                .onChange(of: navigation.requestedFocus) { _, key in
+                .onChange(of: navigation.focusRequestRevision) { _, _ in
+                    let key = navigation.requestedFocus
                     let prefix = "shelf:3:comingsoon:"
                     guard navigation.activeScope == "home", let key, key.hasPrefix(prefix) else { return }
                     let id = String(key.dropFirst(prefix.count))
