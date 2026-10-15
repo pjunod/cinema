@@ -2104,6 +2104,9 @@ assert.equal(context.ACT_TIMER, null);
         effort = read(".github/workflows/effort-ci.yml")
         effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
+        # Whole-job budget includes checkout/toolchain/cache setup plus the
+        # unchanged all-target compile and vendored denied-warning Clippy.
+        self.assertRegex(effort_jobs["rust_compile"], r"(?m)^    timeout-minutes: 20$")
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
         # PR #962 raised the main fast lane's preflight to fifteen minutes so
         # its receipt publications finish; the effort gate keeps ten.
