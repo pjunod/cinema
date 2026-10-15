@@ -24,6 +24,10 @@ REQUIRED = [
     "TVNavigationTests/testRowsToolsAndJump5000",
     "TVNavigationTests/testSortFilterAndGroupingOwnFocusAndRestoreOpeners",
     "TVNavigationTests/testEveryEnabledRootTabReceivesNativeFocus",
+    "TVSecondaryNavigationTests/testMovieAboutReadsFinalRegionAndRestoresMovie",
+    "TVSecondaryNavigationTests/testEpisodeDetailsDoNotStartPlayback",
+    "TVSecondaryNavigationTests/testSettingsPickerHelpReportAndExactReturn",
+    "TVSecondaryNavigationTests/testSearchKeyboardBackRetrySameQueryAndResultReturn",
 ]
 
 
@@ -70,7 +74,7 @@ def main():
                "source_dirty": dirty, "derived_data": str(derived), "required_tests": REQUIRED,
                "selected_tests": options.only_testing or REQUIRED,
                "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-               "status": "failed", "qualification": False, "coverage_scope": "T0 browse/root journeys; full audit matrix pending",
+               "status": "failed", "qualification": False, "coverage_scope": "T0 browse/root and secondary journeys; full audit matrix pending",
                "result_bundle": str(output / "navigation.xcresult")}
     device = None
     try:

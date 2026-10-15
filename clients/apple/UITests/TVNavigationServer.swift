@@ -7,13 +7,19 @@ final class TVNavigationServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "tv-navigation-fixture")
 
     private let itemCount: Int
+    private let includeShows: Bool
+    private var failSearch: Bool
+
+    func allowSearchSuccess() { queue.sync { failSearch = false } }
     private var requestCounts: [String: Int] = [:]
     private let epoch = Int64(Date().timeIntervalSince1970 * 1000)
 
     func requestCount(_ path: String) -> Int { queue.sync { requestCounts[path, default: 0] } }
 
-    init(itemCount: Int = 416) throws {
+    init(itemCount: Int = 416, includeShows: Bool = false, failSearch: Bool = false) throws {
         self.itemCount = itemCount
+        self.includeShows = includeShows
+        self.failSearch = failSearch
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters)
@@ -71,7 +77,8 @@ final class TVNavigationServer: @unchecked Sendable {
                 return
             }
             let body = self.response(path, requestBody: requestBody)
-            var response = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+            let status = plainPath == "/api/v1/search" && self.failSearch ? "500 Internal Server Error" : "200 OK"
+            var response = Data("HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
             response.append(body)
             connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
         }
@@ -111,7 +118,32 @@ final class TVNavigationServer: @unchecked Sendable {
         case "/api/v1/auth/login": value = ["token": "fixture-only", "user": user]
         case "/api/v1/me": value = user
         case "/api/v1/server": value = ["name": "Library fixture", "instance_id": "library-fixture"]
-        case "/api/v1/libraries": value = [["id": 1, "name": "Movies", "kind": "movie"]]
+        case "/api/v1/libraries":
+            var libraries: [[String: Any]] = [["id": 1, "name": "Movies", "kind": "movie"]]
+            if includeShows { libraries.append(["id": 2, "name": "Shows", "kind": "show"]) }
+            value = libraries
+        case "/api/v1/libraries/2/items":
+            value = ["items": [["id": 10001, "library_id": 2, "kind": "show", "title": "Fixture show"]], "total": 1]
+        case "/api/v1/items/1":
+            let paragraphs = (0..<4).map { index in
+                "Synopsis section \(index + 1). " + String(repeating: "A synthetic sentence for television reading. ", count: 5)
+                + (index == 3 ? "FINAL SYNOPSIS LINE." : "")
+            }
+            value = ["item": ["id": 1, "library_id": 1, "kind": "movie", "title": "A Movie 0",
+                              "overview": paragraphs.joined(separator: "\n\n")], "files": []]
+        case "/api/v1/items/10001":
+            value = ["item": ["id": 10001, "library_id": 2, "kind": "show", "title": "Fixture show"],
+                     "files": [], "children": [["id": 10002, "library_id": 2, "kind": "season",
+                                                   "title": "Fixture season", "season_number": 1]]]
+        case "/api/v1/items/10002":
+            value = ["item": ["id": 10002, "library_id": 2, "kind": "season", "title": "Fixture season"],
+                     "files": [], "children": [["id": 10003, "library_id": 2, "kind": "episode",
+                                                   "title": "Fixture episode", "season_number": 1, "episode_number": 1]]]
+        case "/api/v1/items/10003":
+            value = ["item": ["id": 10003, "library_id": 2, "kind": "episode", "title": "Fixture episode",
+                              "overview": "Synthetic episode information without starting playback."], "files": []]
+        case "/api/v1/search":
+            value = ["results": [["id": 1, "library_id": 1, "kind": "movie", "title": "A Movie 0"]]]
         case "/api/v1/library-channels":
             let recipe: [String: Any] = ["version": 1, "library_ids": [1], "kinds": ["movie"],
                 "genres_any": [], "tags_any": [], "keywords_any": [], "include_item_ids": [1],

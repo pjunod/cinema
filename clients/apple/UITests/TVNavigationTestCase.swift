@@ -6,7 +6,7 @@ import XCTest
 class TVNavigationTestCase: XCTestCase {
     let remote = XCUIRemote.shared
 
-    func openLibrary(origin: String, presentation: String = "grid") -> XCUIApplication {
+    func openLibrary(origin: String, presentation: String = "grid", collectionID: String = "movie") -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments += ["-plurx.origin", origin]
@@ -32,7 +32,7 @@ class TVNavigationTestCase: XCTestCase {
         reachForSetup(libraries, in: app, limit: 8)
         assertFocus(libraries, in: app, context: "Libraries tab")
         remote.press(.select)
-        let open = app.buttons["library-open-category:movie"]
+        let open = app.buttons["library-open-category:" + collectionID]
         XCTAssertTrue(open.waitForExistence(timeout: 10), app.debugDescription)
         reachForSetup(open, in: app, limit: 8)
         assertFocus(open, in: app, context: "Movies collection")
@@ -93,7 +93,7 @@ class TVNavigationTestCase: XCTestCase {
         ).firstMatch.exists
         for _ in 0..<limit {
             guard target.exists else { break }
-            if target.hasFocus { return }
+            if hasNativeFocus(target, in: app) { return }
             let current = app.descendants(matching: .any)
                 .matching(NSPredicate(format: "hasFocus == true")).firstMatch
             guard current.waitForExistence(timeout: 3) else { break }
@@ -102,7 +102,11 @@ class TVNavigationTestCase: XCTestCase {
             if targetIsTab && !focusedTab.exists { remote.press(.up); continue }
             let destination = target.frame
             let source = current.frame
-            if destination.minY >= source.maxY { remote.press(.down) }
+            if abs(destination.midX - source.midX) < min(destination.width, source.width) / 2
+                && abs(destination.midY - source.midY) > min(destination.height, source.height) / 2 {
+                remote.press(destination.midY > source.midY ? .down : .up)
+            }
+            else if destination.minY >= source.maxY { remote.press(.down) }
             else if destination.maxX <= source.minX { remote.press(.left) }
             else if destination.minX >= source.maxX { remote.press(.right) }
             else if destination.maxY <= source.minY { remote.press(.up) }
@@ -110,10 +114,28 @@ class TVNavigationTestCase: XCTestCase {
         }
     }
 
+    /// SwiftUI's native menu picker focuses an anonymous leaf inside its
+    /// identified Button. Accept only that observed exact-frame descendant,
+    /// never a nearby row, a larger ancestor, existence or hittability.
+    func hasNativeFocus(_ target: XCUIElement, in app: XCUIApplication) -> Bool {
+        guard target.exists else { return false }
+        if target.hasFocus { return true }
+        guard !target.identifier.isEmpty,
+              app.descendants(matching: .any).matching(identifier: target.identifier).count == 1 else { return false }
+        let focused = NSPredicate(format: "hasFocus == true")
+        let proxy = target.descendants(matching: .other).matching(focused).firstMatch
+        guard proxy.exists, proxy.descendants(matching: .any).matching(focused).count == 0 else { return false }
+        let expected = target.frame
+        let actual = proxy.frame
+        return expected.width > 0 && expected.height > 0
+            && abs(expected.minX - actual.minX) <= 1 && abs(expected.minY - actual.minY) <= 1
+            && abs(expected.width - actual.width) <= 1 && abs(expected.height - actual.height) <= 1
+    }
+
     func assertFocus(_ target: XCUIElement, in app: XCUIApplication, context: String,
                              file: StaticString = #filePath, line: UInt = #line) {
         let expectation = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in target.exists && target.hasFocus }, object: nil)
+            predicate: NSPredicate { _, _ in self.hasNativeFocus(target, in: app) }, object: nil)
         let result = XCTWaiter.wait(for: [expectation], timeout: 5)
         let focusDebug = app.staticTexts["choice-focus-debug"]
         if focusDebug.exists { print("NATIVE_CHOICE_FOCUS_DEBUG=\(focusDebug.label)") }

@@ -255,6 +255,7 @@ schemes:
         - name: plurx-tvOSUITests
           selectedTests:
             - TVNavigationTests
+            - TVSecondaryNavigationTests
 
   plurx-tvOS-physical:
     build:
@@ -266,6 +267,7 @@ schemes:
         - name: plurx-tvOSUITests
           skippedTests:
             - TVNavigationTests
+            - TVSecondaryNavigationTests
 
   plurx-iOS-library-ui:
     build:

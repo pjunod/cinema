@@ -91,7 +91,7 @@ final class TVNavigationTests: TVNavigationTestCase {
         remote.press(.menu)
         let grouping = app.buttons["Group by"]
         XCTAssertTrue(grouping.waitForExistence(timeout: 5), app.debugDescription)
-        reachForSetup(grouping, in: app, limit: 8)
+        remote.press(.up)
         assertFocus(grouping, in: app, context: "Group by opener")
         remote.press(.select)
         assertFocus(app.buttons["Category"], in: app, context: "Group by selected category")
@@ -115,8 +115,9 @@ final class TVNavigationTests: TVNavigationTestCase {
             remote.press(.right)
             let tab = app.tabBars.buttons[label]
             assertFocus(tab, in: app, context: label + " root tab")
-            remote.press(.select)
-            XCTAssertTrue(tab.isSelected, label + " must remain the selected route")
+            let selected = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in tab.isSelected }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed,
+                           label + " must become the selected route: " + app.debugDescription)
         }
         for label in ["Search", "Channels", "Recordings", "Live TV", "Libraries", "Home"] {
             remote.press(.left)
