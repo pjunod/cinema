@@ -685,6 +685,7 @@ struct PlayerView: View {
     /// remote-control quality change against the initial session open.
     var initialHeight: Int? = nil
     var diagnosticProbesEnabled = false
+    var returnToChannel: (() -> Void)? = nil
     var onPlayNext: ((PlayContext) -> Void)?
     /// Hands the owning detail screen the last on-screen position immediately.
     /// The server progress write is intentionally best-effort and asynchronous;
@@ -878,7 +879,7 @@ struct PlayerView: View {
         .remoteScope(remoteScope)
         .background(RemoteOwnedPresentationProbe(navigation: remoteNavigation, token: remoteOwner, scope: remoteScope))
         .remoteRestricted(showStats && statsMode != .mini)
-        .overlay {
+        .remoteChoicePresentation(isPresented: Binding(get: { remoteTrackMenu != nil }, set: { if !$0 { remoteTrackMenu = nil } }), scope: remoteScope + ":tracks") {
             if let kind = remoteTrackMenu {
                 RemoteChoicePanel(scope: remoteScope + ":tracks", title: kind.rawValue.capitalized, choices: remoteChoices(kind))
             }
@@ -2310,8 +2311,11 @@ struct PlayerView: View {
             if !controller.subtitles.isEmpty { subtitleMenu }
             if !controller.qualityRungs.isEmpty { qualityMenu }
             settingsMenu
+            if let returnToChannel { Button("Return to channel", action: returnToChannel) }
             statsButton
+            #if os(iOS)
             DiagnosticReportButton(category: "playback", title: controller.diagnosticTitle, owner: "player")
+            #endif
             if pictureInPicture.isSupported { pictureInPictureButton }
         }
     }
@@ -2477,10 +2481,13 @@ struct PlayerView: View {
             optionMenuPanel("Playback settings") { autoplaySettingsButton }
         }
         #else
-        Menu { autoplaySettingsButton } label: {
-            Image(systemName: "gearshape.fill")
+        Menu {
+            autoplaySettingsButton
+            DiagnosticReportButton(category: "playback", title: controller.diagnosticTitle, owner: "player")
+        } label: {
+            Image(systemName: "ellipsis")
         }
-        .accessibilityLabel("Playback settings")
+        .accessibilityLabel("More")
         .buttonStyle(TVPlayerControlButtonStyle())
         .focusEffectDisabled()
         .focused($focusedControl, equals: .settings)
@@ -3719,6 +3726,14 @@ struct SharedPlayerSessionView: View {
     @EnvironmentObject private var remotePlayback: RemotePlaybackAdapter
     @State private var remoteOwner = UUID()
     @Environment(\.dismiss) private var dismiss
+    @State private var sharedChromeVisible = true
+    @State private var sharedMenuPresented = false
+    @State private var lastSharedAction = "play"
+    @State private var sharedChromeGeneration = 0
+    @StateObject private var sharedPictureInPicture = PictureInPictureController()
+    #if os(tvOS)
+    @FocusState private var sharedControl: String?
+    #endif
     @State private var ended = false
     @State private var findingNext = false
     private var remoteScope: String {
@@ -3765,30 +3780,88 @@ struct SharedPlayerSessionView: View {
         }))
         navigation.contextChanged()
     }
-    var body: some View {
-        VStack(spacing: 12) {
-            Text(plan.subject.title).font(.headline)
-            VideoPlayer(player: controller.player).allowsHitTesting(false)
-            if requiresExplicitPlay, controller.plan == nil {
-                Text("Shared file is ready. Press Play to start.").foregroundStyle(.secondary)
-                Button("Play Shared title") {
-                    navigation.physicalInput()
-                    let identity = navigation.epoch
-                    Task { _ = await startOwnedShared(permit: { remotePlayback.owner?.token == remoteOwner && navigation.epoch == identity && navigation.activeScope == remoteScope }) }
-                }
+    private func sharedInputState() -> PlayerInputState {
+        if sharedMenuPresented { return .menu }
+        if controller.failure != nil { return .failed }
+        return sharedChromeVisible ? .transport : .hidden
+    }
+
+    private func applySharedInput(_ outcome: PlayerInputOutcome, _ input: PlayerContractInput) -> Bool {
+        sharedChromeGeneration += 1
+        switch outcome {
+        case .reveal: sharedChromeVisible = true
+        case .hide: sharedChromeVisible = false
+        case .togglePlay:
+            if controller.remoteStartAvailable {
+                navigation.physicalInput()
+                let identity = navigation.epoch
+                Task { _ = await startOwnedShared(permit: { remotePlayback.owner?.token == remoteOwner && navigation.epoch == identity && navigation.activeScope == remoteScope }) }
+            } else {
+                navigation.performPhysicalAction { Task { await controller.control(controller.playing ? .pause : .play) } }
             }
-            if controller.starting { ProgressView("Starting Shared playback") }
-            if controller.isDirect {
-                Text("Shared direct play").font(.caption).foregroundStyle(.secondary)
-            } else if let summary = controller.statusSummary {
-                Text(summary).font(.caption).foregroundStyle(.secondary)
-            }
-            if let notice = controller.notice { Text(notice).font(.caption).foregroundStyle(.secondary) }
-            if let failure = controller.failure { Text(failure).foregroundStyle(.secondary) }
-            if findingNext { ProgressView("Finding the next episode") }
-            if controller.playback != nil, let current = controller.plan { SharedPlayerControls(controller: controller, plan: current) }
-            Button("Close") { navigation.performPhysicalAction { controller.beginStop(); dismiss() } }
+        case .closeMenu: navigation.closeModal()
+        case .exit:
+            navigation.performPhysicalAction { controller.beginStop(); dismiss() }
+        default: return false
         }
+        return true
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Color.black.ignoresSafeArea()
+            PlayerSurface(player: controller.player, pictureInPicture: sharedPictureInPicture,
+                          pgsOverlay: nil, allowsPictureInPicture: false).ignoresSafeArea()
+            #if os(tvOS)
+            Color.clear.contentShape(Rectangle())
+                .focusable(!sharedChromeVisible)
+                .focused($sharedControl, equals: "reveal")
+                .accessibilityHidden(true)
+                .playerRemoteAdapter(.surface, state: sharedInputState, apply: applySharedInput)
+            #endif
+            if sharedChromeVisible || controller.failure != nil || (requiresExplicitPlay && controller.plan == nil) {
+                VStack(spacing: 12) {
+                    Text(plan.subject.title).font(.headline)
+                    if requiresExplicitPlay, controller.plan == nil {
+                        Text("Shared file is ready. Press Play to start.").foregroundStyle(.secondary)
+                        Button("Play Shared title") {
+                            navigation.physicalInput()
+                            let identity = navigation.epoch
+                            Task { _ = await startOwnedShared(permit: { remotePlayback.owner?.token == remoteOwner && navigation.epoch == identity && navigation.activeScope == remoteScope }) }
+                        }
+                    }
+                    if controller.starting { ProgressView("Starting Shared playback") }
+                    if controller.isDirect {
+                        Text("Shared direct play").font(.caption).foregroundStyle(.secondary)
+                    } else if let summary = controller.statusSummary {
+                        Text(summary).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let notice = controller.notice { Text(notice).font(.caption).foregroundStyle(.secondary) }
+                    if let failure = controller.failure { Text(failure).foregroundStyle(.secondary) }
+                    if findingNext { ProgressView("Finding the next episode") }
+                    if controller.playback != nil, let current = controller.plan {
+                        SharedPlayerControls(controller: controller, plan: current, onMenuChange: { sharedMenuPresented = $0; sharedChromeGeneration += 1 }, onInteraction: { sharedChromeGeneration += 1 }, restoreFocus: lastSharedAction, onFocus: { lastSharedAction = $0 })
+                    }
+                    Button("Close") { navigation.performPhysicalAction { controller.beginStop(); dismiss() } }
+                        #if os(tvOS)
+                        .focused($sharedControl, equals: "close")
+                        #endif
+                }.padding(32).frame(maxWidth: .infinity).background(.ultraThinMaterial)
+            }
+        }
+        #if os(tvOS)
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
+        .playerRemoteAdapter(.root, state: sharedInputState, apply: applySharedInput)
+        .onChange(of: sharedChromeVisible) { _, visible in sharedControl = visible ? nil : "reveal" }
+        .onChange(of: sharedControl) { _, _ in sharedChromeGeneration += 1 }
+        .onChange(of: controller.playing) { _, _ in sharedChromeGeneration += 1 }
+        .task(id: sharedChromeGeneration) {
+            guard sharedChromeVisible, !sharedMenuPresented, controller.playing else { return }
+            do { try await Task.sleep(nanoseconds: PlayerView.controlAutoHideDelayNanoseconds) } catch { return }
+            guard !Task.isCancelled, !sharedMenuPresented else { return }
+            sharedChromeVisible = false
+        }
+        #endif
         .remoteScope(remoteScope)
         .background(RemoteOwnedPresentationProbe(navigation: navigation, token: remoteOwner, scope: remoteScope))
         .onAppear { attachRemoteOwner() }
@@ -3819,40 +3892,46 @@ struct SharedPlayerSessionView: View {
 struct SharedPlayerControls: View {
     @ObservedObject var controller: SharedPlayerController
     let plan: SharedPlaybackPlan
+    var onMenuChange: (Bool) -> Void = { _ in }
+    var onInteraction: () -> Void = {}
+    var restoreFocus = "play"
+    var onFocus: (String) -> Void = { _ in }
+    @FocusState private var focusedAction: String?
     @EnvironmentObject private var navigation: RemoteNavigationCoordinator
     @Environment(\.remoteNavigationScope) private var remoteScope
+    @State private var showingSharedMore = false
     @State private var choiceTitle: String?
     @State private var ownedChoices: [RemoteChoice] = []
     var body: some View {
         HStack(spacing: 16) {
             Button { seek(by: -10_000) } label: { Image(systemName: "gobackward.10") }
-                .accessibilityLabel("Back 10 seconds").accessibilityIdentifier("shared-seek-back")
+                .accessibilityLabel("Back 10 seconds").accessibilityIdentifier("shared-seek-back").focused($focusedAction, equals: "back")
             Button {
                 navigation.performPhysicalAction { Task { await controller.control(controller.playing ? .pause : .play) } }
             } label: { Image(systemName: controller.playing ? "pause.fill" : "play.fill") }
-                .accessibilityLabel(controller.playing ? "Pause" : "Play").accessibilityIdentifier("shared-play-pause")
+                .accessibilityLabel(controller.playing ? "Pause" : "Play").accessibilityIdentifier("shared-play-pause").focused($focusedAction, equals: "play")
             Button { seek(by: 10_000) } label: { Image(systemName: "goforward.10") }
-                .accessibilityLabel("Forward 10 seconds").accessibilityIdentifier("shared-seek-forward")
+                .accessibilityLabel("Forward 10 seconds").accessibilityIdentifier("shared-seek-forward").focused($focusedAction, equals: "forward")
             #if os(tvOS)
             Button("Quality") {
                 openChoices("Quality", choices: PlaybackQuality.allCases.map { quality in
                     RemoteChoice(id: quality.rawValue, label: quality.label, selected: plan.rawQuality == quality) { Task { await controller.change(SharedDirectedChange(quality: quality)) } }
                 })
             }.accessibilityIdentifier("shared-quality")
+                .focused($focusedAction, equals: "quality")
+                .remoteControl("shared:quality", label: "Quality") { openQualityChoices() }
             if let tracks = plan.decision.presentation.audio, tracks.count > 1 {
-                Button("Audio") {
-                    openChoices("Audio", choices: tracks.map { track in
-                        RemoteChoice(id: String(track.index), label: Self.label(track.title, track.language, fallback: "Track \(track.index)"), selected: (plan.rawAudioIndex ?? plan.decision.presentation.delivery?.audio) == track.index) { Task { await controller.change(SharedDirectedChange(audioIndex: .some(track.index))) } }
-                    })
-                }.accessibilityIdentifier("shared-audio")
+                Button("Audio") { openAudioChoices() }
+                    .accessibilityIdentifier("shared-audio")
+                    .focused($focusedAction, equals: "audio")
+                    .remoteControl("shared:audio", label: "Audio") { openAudioChoices() }
             }
             let natives = (plan.decision.presentation.subtitles ?? []).filter(\.isNativeHLS)
             if !natives.isEmpty {
-                Button("Subtitles") {
-                    openChoices("Subtitles", choices: [RemoteChoice(id: "off", label: "Off", selected: plan.rawSubtitleIndex == nil) { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(nil))) } }] + natives.map { track in
-                        RemoteChoice(id: String(track.index), label: Self.label(track.title, track.language, fallback: "Subtitle \(track.index)"), selected: plan.rawSubtitleIndex == track.index) { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(track.index))) } }
-                    })
-                }.accessibilityIdentifier("shared-subtitles")
+                Button("Subtitles") { openSubtitleChoices() }
+                    .accessibilityIdentifier("shared-subtitles")
+                    .focused($focusedAction, equals: "subtitles")
+                    .remoteControl("shared:subtitles", label: "Subtitles") { openSubtitleChoices() }
             }
             #else
             Menu("Quality") {
@@ -3886,12 +3965,29 @@ struct SharedPlayerControls: View {
                 }.accessibilityIdentifier("shared-subtitles")
             }
             #endif
+            Button("More") { showingSharedMore = true }
+                .focused($focusedAction, equals: "more")
+                .accessibilityIdentifier("shared-more")
+        }
+        .sheet(isPresented: $showingSharedMore, onDismiss: { focusedAction = "more" }) {
+            VStack(spacing: 24) {
+                Text("Shared playback").font(.title)
+                if let reference = plan.subject.context.reference {
+                    Text("Source · " + String(reference.serverId.prefix(8))).foregroundStyle(.secondary)
+                }
+                DiagnosticReportButton(category: "playback", title: plan.subject.title, owner: "shared-player-more")
+                Button("Close") { showingSharedMore = false }
+            }.padding(48)
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                #endif
+                .diagnosticReportHost(owner: "shared-player-more")
         }
         // A preparation waiting for B or priming its successor yields to a
         // viewer action; the switch itself and its settlement do not.
         .disabled(controller.busy && !controller.preparing)
         #if os(tvOS)
-        .overlay(alignment: .bottom) {
+        .remoteChoicePresentation(isPresented: Binding(get: { choiceTitle != nil }, set: { if !$0 { choiceTitle = nil; ownedChoices = [] } }), scope: remoteScope + ":physical-choices") {
             if let choiceTitle {
                 RemoteChoicePanel(scope: remoteScope + ":physical-choices", title: choiceTitle, choices: ownedChoices)
             }
@@ -3899,7 +3995,39 @@ struct SharedPlayerControls: View {
         // v1 intentionally exposes shared transport only. The physical owned
         // choice surface fences network credits rather than inventing track IDs.
         .remoteRestricted(choiceTitle != nil)
+        .onAppear {
+            var keys = ["shared:quality"]
+            if (plan.decision.presentation.audio?.count ?? 0) > 1 { keys.append("shared:audio") }
+            if (plan.decision.presentation.subtitles ?? []).contains(where: \.isNativeHLS) { keys.append("shared:subtitles") }
+            navigation.setOrder(scope: remoteScope, keys: keys, columns: 1)
+        }
+        .onChange(of: choiceTitle) { _, value in onMenuChange(value != nil || showingSharedMore) }
+        .onChange(of: showingSharedMore) { _, value in onMenuChange(value || choiceTitle != nil) }
+        .onChange(of: focusedAction) { _, key in
+            if let key { onFocus(key) }
+            onInteraction()
+        }
+        .task { await Task.yield(); focusedAction = restoreFocus }
         #endif
+    }
+    private func openAudioChoices() {
+        let tracks = plan.decision.presentation.audio ?? []
+        openChoices("Audio", choices: tracks.map { track in
+                        RemoteChoice(id: String(track.index), label: Self.label(track.title, track.language, fallback: "Track \(track.index)"), selected: (plan.rawAudioIndex ?? plan.decision.presentation.delivery?.audio) == track.index) { Task { await controller.change(SharedDirectedChange(audioIndex: .some(track.index))) } }
+                    })
+
+    }
+    private func openSubtitleChoices() {
+        let natives = (plan.decision.presentation.subtitles ?? []).filter(\.isNativeHLS)
+        openChoices("Subtitles", choices: [RemoteChoice(id: "off", label: "Off", selected: plan.rawSubtitleIndex == nil) { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(nil))) } }] + natives.map { track in
+                        RemoteChoice(id: String(track.index), label: Self.label(track.title, track.language, fallback: "Subtitle \(track.index)"), selected: plan.rawSubtitleIndex == track.index) { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(track.index))) } }
+                    })
+
+    }
+    private func openQualityChoices() {
+        openChoices("Quality", choices: PlaybackQuality.allCases.map { quality in
+            RemoteChoice(id: quality.rawValue, label: quality.label, selected: plan.rawQuality == quality) { Task { await controller.change(SharedDirectedChange(quality: quality)) } }
+        })
     }
     private func openChoices(_ title: String, choices: [RemoteChoice]) {
         guard choiceTitle == nil, !navigation.hasOwnedModal else { return }

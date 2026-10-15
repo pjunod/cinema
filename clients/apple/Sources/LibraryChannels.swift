@@ -90,6 +90,9 @@ struct LibraryChannelProgramme: Codable, Identifiable, Equatable {
     let title: String
 
     var id: String { "\(channelId):\(generationId):\(cycle):\(ordinal)" }
+
+    /// The schedule is half-open: the exact end belongs to the next programme.
+    func isOnNow(atMs now: Int64) -> Bool { startsAtMs <= now && now < endsAtMs }
 }
 
 struct LibraryChannel: Codable, Identifiable, Equatable {
@@ -825,13 +828,26 @@ final class LibraryChannelPlayerController: ObservableObject {
 
 struct LibraryChannelsView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var channelNavigation: RemoteNavigationCoordinator
+    @State private var channelOwner = UUID()
+    @State private var channelCoverOwner = UUID()
     @StateObject private var controller = LibraryChannelPlayerController.shared
     @State private var editing: LibraryChannel?
     @State private var creating = false
     @State private var creationSeed: LibraryChannelCreationSeed?
     @State private var personalPlayback: PlayContext?
     @State private var returnChannel: LibraryChannel?
-    @State private var focusedProgrammeId: String?
+    @FocusState private var focusedProgrammeId: String?
+    @State private var programmeDetails: LibraryChannelProgramme?
+    @State private var programmeOpenerId: String?
+    @State private var showingLayout = false
+    @State private var channelChromeVisible = true
+    @State private var channelMore = false
+    @State private var chromeGeneration = 0
+    @StateObject private var channelPictureInPicture = PictureInPictureController()
+    #if os(tvOS)
+    @FocusState private var channelControl: String?
+    #endif
     @State private var fullscreen = false
     @AppStorage("libraryChannelTVLayout") private var tvLayout = "guide_preview"
 
@@ -885,10 +901,8 @@ struct LibraryChannelsView: View {
             }
             #else
             ToolbarItem(placement: .primaryAction) {
-                Button(layoutLabel) {
-                    tvLayout = tvLayout == "guide_preview" ? "guide_over_picture"
-                        : (tvLayout == "guide_over_picture" ? "channel_browser" : "guide_preview")
-                }
+                Button(layoutLabel) { openChannelLayout() }.accessibilityIdentifier("channel-layout")
+                    .remoteControl("channel:layout", label: "Layout") { openChannelLayout() }
                 .buttonStyle(TVReadableButtonStyle(prominent: false))
             }
             #endif
@@ -912,28 +926,48 @@ struct LibraryChannelsView: View {
                 Task { await controller.tune(channel) }
             }
         }) { context in
-            ZStack(alignment: .topTrailing) {
-                PlayerView(
-                    itemId: context.itemId, fileId: context.fileId, startMs: 0,
-                    durationMs: context.durationMs, title: context.title,
-                    progressOffsetMs: 0, itemDurationMs: nil,
-                    subtitle: nil, year: nil, airDate: nil, overview: context.overview,
-                    selection: .none, onPlayNext: { personalPlayback = $0 },
-                    onPlaybackStopped: { _ in }
-                ).environmentObject(model)
-                Button("Return to channel") { personalPlayback = nil }
-                    #if os(tvOS)
-                    .buttonStyle(TVReadableButtonStyle(prominent: true))
-                    #else
-                    .buttonStyle(.borderedProminent)
-                    #endif
-                    .padding()
-            }
+            PlayerView(
+                itemId: context.itemId, fileId: context.fileId, startMs: 0,
+                durationMs: context.durationMs, title: context.title,
+                overview: context.overview, selection: .none,
+                returnToChannel: { personalPlayback = nil },
+                onPlayNext: { personalPlayback = $0 }, onPlaybackStopped: { _ in }
+            ).environmentObject(model)
         }
         .fullScreenCover(isPresented: $fullscreen) {
             channelFullscreenSurface
+                .remoteScope("library-channel-player")
+                .background(RemoteOwnedPresentationProbe(navigation: channelNavigation, token: channelCoverOwner, scope: "library-channel-player"))
+                .onDisappear { channelNavigation.detachPresentation(channelCoverOwner) }
                 .diagnosticReportHost(owner: "channel-player")
-                .overlay(alignment: .topTrailing) { DiagnosticReportButton(category: "playback", owner: "channel-player").buttonStyle(.bordered).padding(24) }
+
+        }
+        .remoteScope("library-channels")
+        .background(RemoteOwnedPresentationProbe(navigation: channelNavigation, token: channelOwner, scope: "library-channels"))
+        .remoteChoicePresentation(isPresented: $showingLayout, scope: "library-channels:layout") {
+            RemoteChoicePanel(scope: "library-channels:layout", title: "Layout", choices:
+                ["guide_preview", "guide_over_picture", "channel_browser"].map { layout in
+                    RemoteChoice(id: layout, label: layoutName(layout), selected: tvLayout == layout) { tvLayout = layout }
+                })
+        }
+        .sheet(item: $programmeDetails, onDismiss: {
+            focusedProgrammeId = controller.programmes.contains(where: { $0.id == programmeOpenerId })
+                ? programmeOpenerId : controller.programmes.first?.id
+        }) { programme in
+            VStack(alignment: .leading, spacing: 20) {
+                Text(programme.title).font(.title).accessibilityIdentifier("channel-programme-title")
+                Text(Date(timeIntervalSince1970: Double(programme.startsAtMs) / 1_000), style: .date)
+                Text(Date(timeIntervalSince1970: Double(programme.startsAtMs) / 1_000), style: .time)
+                Text(programme.startsAtMs > Int64(Date().timeIntervalSince1970 * 1_000)
+                     ? "This programme has not started. Watch the channel to join the current programme."
+                     : "This programme has ended. Watch the channel to join the current programme.")
+                Text("Ends at \(Date(timeIntervalSince1970: Double(programme.endsAtMs) / 1_000).formatted(date: .omitted, time: .shortened))")
+                if let channel = controller.channels.first(where: { $0.id == programme.channelId }) {
+                    Button("Watch channel") { programmeDetails = nil; Task { await controller.tune(channel) } }
+                        .disabled(!channel.enabled || controller.busy)
+                }
+                Button("Close") { programmeDetails = nil }
+            }.padding(48)
         }
         .task {
             await controller.load(model: model)
@@ -943,7 +977,21 @@ struct LibraryChannelsView: View {
             }
         }
         .onDisappear {
+            channelNavigation.detachPresentation(channelOwner)
             if !fullscreen { Task { await controller.stop() } }
+        }
+    }
+
+    private func openChannelLayout() {
+        channelNavigation.openModal(scope: "library-channels:layout", opener: "channel:layout") { showingLayout = false }
+        showingLayout = true
+    }
+
+    private func layoutName(_ value: String) -> String {
+        switch value {
+        case "guide_over_picture": "Guide over picture"
+        case "channel_browser": "Channel browser"
+        default: "Guide + preview"
         }
     }
 
@@ -1004,28 +1052,89 @@ struct LibraryChannelsView: View {
     }
 
     private var channelFullscreenSurface: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .bottom) {
             Color.black.ignoresSafeArea()
-            VideoPlayer(player: controller.player).ignoresSafeArea()
-            VStack(alignment: .trailing, spacing: 12) {
-                Button("Return to channels") { fullscreen = false }
-                if controller.watching != nil {
-                    Button(controller.paused || controller.systemPaused ? "Resume live" : "Pause") {
-                        Task { await controller.togglePause() }
-                    }
-                    Button("Stop") {
-                        fullscreen = false
-                        Task { await controller.stop() }
+            PlayerSurface(player: controller.player, pictureInPicture: channelPictureInPicture,
+                          pgsOverlay: nil, allowsPictureInPicture: false).ignoresSafeArea()
+            #if os(tvOS)
+            Color.clear.contentShape(Rectangle())
+                .focusable(!channelChromeVisible)
+                .focused($channelControl, equals: "reveal")
+                .accessibilityHidden(true)
+                .liveTvRemoteAdapter(.revealSurface, state: channelInputState, apply: applyChannelInput)
+            #endif
+            if channelChromeVisible {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text(controller.title ?? controller.watching?.name ?? "Library channel").font(.title2)
+                    if let error = controller.playbackError { Text(error).foregroundStyle(.white) }
+                    HStack(spacing: 20) {
+                        Button("Return to channels") { fullscreen = false }
+                            #if os(tvOS)
+                            .focused($channelControl, equals: "return")
+                            #endif
+                        Button(controller.paused || controller.systemPaused ? "Resume live" : "Pause") {
+                            chromeGeneration += 1
+                            Task { await controller.togglePause() }
+                        }
+                        #if os(tvOS)
+                        .focused($channelControl, equals: "play")
+                        #endif
+                        Button("More") { channelMore = true }.accessibilityIdentifier("channel-player-more")
+                        #if os(tvOS)
+                        .focused($channelControl, equals: "more")
+                        #endif
                     }
                 }
+                .padding(32).frame(maxWidth: .infinity, alignment: .leading)
+                .background(.ultraThinMaterial)
             }
-            #if os(tvOS)
-            .buttonStyle(TVReadableButtonStyle(prominent: true))
-            #else
-            .buttonStyle(.borderedProminent)
-            #endif
-            .padding()
         }
+        #if os(tvOS)
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
+        .liveTvRemoteAdapter(.root, state: channelInputState, apply: applyChannelInput)
+        .onChange(of: channelChromeVisible) { _, visible in channelControl = visible ? "play" : "reveal" }
+        .onChange(of: channelControl) { _, _ in chromeGeneration += 1 }
+        #endif
+        .onAppear { channelChromeVisible = true; chromeGeneration += 1 }
+        .task(id: chromeGeneration) {
+            guard channelChromeVisible, !channelMore, !controller.paused, !controller.systemPaused else { return }
+            do { try await Task.sleep(nanoseconds: LiveTvInputRouting.overlayAutoHideNanoseconds) } catch { return }
+            guard !Task.isCancelled, !channelMore else { return }
+            channelChromeVisible = false
+        }
+        .sheet(isPresented: $channelMore, onDismiss: {
+            chromeGeneration += 1
+            #if os(tvOS)
+            channelControl = "more"
+            #endif
+        }) {
+            VStack(spacing: 24) {
+                Text("Channel options").font(.title)
+                DiagnosticReportButton(category: "playback", owner: "channel-player-more")
+                Button("Stop channel") { channelMore = false; fullscreen = false; Task { await controller.stop() } }
+                Button("Close") { channelMore = false }
+            }.padding(48).diagnosticReportHost(owner: "channel-player-more")
+        }
+        .onChange(of: controller.paused) { _, _ in chromeGeneration += 1 }
+        .onChange(of: controller.systemPaused) { _, _ in chromeGeneration += 1 }
+    }
+
+    private func channelInputState() -> LiveTvInputState {
+        channelMore ? .menu : (channelChromeVisible ? .fullscreenControls : .fullscreenHidden)
+    }
+
+    private func applyChannelInput(_ outcome: LiveTvInputOutcome, _ input: LiveTvContractInput) -> Bool {
+        chromeGeneration += 1
+        switch outcome {
+        case .reveal: channelChromeVisible = true
+        case .hide: channelChromeVisible = false
+        case .toggleChrome: channelChromeVisible.toggle()
+        case .closePanel: channelMore = false
+        case .returnBrowser: fullscreen = false
+        case .togglePlay: Task { await controller.togglePause() }
+        default: return false
+        }
+        return true
     }
 
     private var channelList: some View {
@@ -1052,10 +1161,11 @@ struct LibraryChannelsView: View {
                                         && controller.resolved?.occurrence.ordinal == programme.ordinal
                                         && controller.resolved?.occurrence.cycle == programme.cycle
                                     Button {
-                                        focusedProgrammeId = programme.id
-                                        if programme.startsAtMs <= Int64(Date().timeIntervalSince1970 * 1_000)
-                                            && programme.endsAtMs > Int64(Date().timeIntervalSince1970 * 1_000) {
+                                        if programme.isOnNow(atMs: Int64(Date().timeIntervalSince1970 * 1_000)) {
                                             Task { await controller.tune(channel) }
+                                        } else {
+                                            programmeOpenerId = programme.id
+                                            programmeDetails = programme
                                         }
                                     } label: {
                                         VStack(alignment: .leading) {
@@ -1072,6 +1182,7 @@ struct LibraryChannelsView: View {
                                     .buttonStyle(.bordered)
                                     .tint(isPlaying ? Palette.accent : nil)
                                     #endif
+                                    .focused($focusedProgrammeId, equals: programme.id)
                                     .accessibilityValue(focusedProgrammeId == programme.id ? "Focused programme" : "")
                                 }
                             }
