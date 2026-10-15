@@ -6460,3 +6460,20 @@ source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
 source_anchor = "func closeModal(returnFocus override: String? = nil)"
 test = "clients/apple/Tests/RemoteNavigationTests.swift"
 test_anchor = "func testChoiceReturnOverrideRequiresParentOrderAndNativeAcknowledgment()"
+
+[[fixes]]
+id = "apple.tv-selected-native-focus-and-activation-order"
+commits = ["398840a6557a549dbc884668ec10de7a68806400"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func physicalControlActivation(scope: String)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testLateControlTapRetiresAuthorityWithoutCancelingNewPresentationIntent()"
+
+[[fixes]]
+id = "apple.tv-actual-style-focus-entry-admission"
+commits = []
+supplements = "apple.tv-selected-native-focus-and-activation-order"
+source = "clients/apple/Sources/RemoteNavigationViews.swift"
+source_anchor = "func remoteNativeFocus(_ actuallyFocused: Bool)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testActualStyleFocusKeepsPendingEntryInertUntilNativeAcknowledgment()"
