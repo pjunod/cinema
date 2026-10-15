@@ -899,6 +899,160 @@ def original_openraft_capture(record, item, raw):
                      'Original Openraft full native execution scope differs')
     return body
 
+SERIAL_ROTATION_CAPTURE = {
+    'source': 'd3b45761ff6dc380f239fb2846381aa6eaa671f8',
+    'log': 'c7f455b029b0488eb351007554afa5502bd52f31fdb1bb8eab51f0536434c187',
+    'binding': '76ef02bd2e623828bebe494c2f50ef7eba2548d5a362b6bdae6c417f8e3cf662',
+    'compiler': '2444b5fca288153df5749be028bb7b2b4d17ba3752b4405ee867e86405b85fce',
+    'observation': 'f9ed693148a293e3e1410d6835b975f86edaa69ef598d369b603173386409ba7',
+    'test': 'transport_recovery::tests::installed_snapshot_evidence_survives_rotation_after_threshold_writes',
+}
+
+
+def serial_rotation_environment(record, item, canonical_environment):
+    """One isolated historical body retains its measured serial scheduling.
+
+    This tempfile-only case ran alone, so no sibling body could be scheduled
+    concurrently. This compatibility rule authorizes only the pinned capture;
+    it does not equate serial and default scheduling for another execution.
+    """
+    capture = SERIAL_ROTATION_CAPTURE
+    actual = record['environment']
+    origin = record.get('origin', {})
+    witness = origin.get('execution', {}) if isinstance(origin, dict) else {}
+    return (item['name'] == 'transport:1'
+            and record['source_commit'] == capture['source']
+            and record['log'] == {'sha256_ref': capture['log']}
+            and origin.get('kind') == 'attested-local'
+            and isinstance(witness, dict) and witness.get('mode') == 'original-serial-rotation'
+            and canonical_environment['runtime']['test_threads'] == 'libtest-default'
+            and actual == {**canonical_environment, 'runtime': {
+                **canonical_environment['runtime'], 'test_threads': 1}})
+
+
+def original_serial_rotation(record, item, raw, source_commands=historical_canonical):
+    """Consume whole original bytes and sidecars, without invented log frames."""
+    capture = SERIAL_ROTATION_CAPTURE
+    witness = record['origin']['execution']
+    receipts.require(set(witness) == {'mode', 'first_line', 'binding', 'compiler', 'observation'}
+                     and witness['mode'] == 'original-serial-rotation' and witness['first_line'] == 1
+                     and item['name'] == 'transport:1' and record['source_commit'] == capture['source']
+                     and record['origin']['kind'] == 'attested-local'
+                     and retention.digest(raw.encode()) == capture['log'],
+                     'Original serial rotation capture differs')
+    documents = {}
+    for field in ('binding', 'compiler', 'observation'):
+        original = retention.decoded_log(witness[field])
+        receipts.require(retention.digest(original.encode()) == capture[field],
+                         'Original serial rotation sidecar substitution')
+        documents[field] = original
+    binding = receipts.bounded_json(documents['binding'].encode())
+    observation = receipts.bounded_json(documents['observation'].encode())
+    receipts.require(observation['exit'] == 0 and observation['stderr'] == ''
+                     and observation['original_result_sha256'] == capture['binding'],
+                     'Preserved rotation binary observation failed')
+    measured = receipts.bounded_json(observation['stdout'].encode())
+    argv = ['cargo', 'test', '--locked', '--offline', '-p', 'plurx-cluster-check', '--lib',
+            capture['test'], '--', '--exact', '--test-threads=1']
+    receipts.require(binding['source_commit'] == capture['source']
+                     and binding['branch'] == 'effort/dv-hdr-repair'
+                     and binding['source_archive_sha256'] == source_archive_digest(capture['source'])
+                     and binding['state'] == 'PASS' and binding['source_clean_before'] is True
+                     and binding['source_clean_after'] is True and binding['unit_bodies_executed'] == 4
+                     and len(binding['commands']) == 6 and record['exit_code'] == 0
+                     and binding['rustc'] == RUSTC_VERSION and binding['platform'] == 'linux-x86_64'
+                     and record['origin']['command'] == shlex.join(argv),
+                     'Original rotation source, runtime or actual Cargo argv differs')
+    command = binding['commands'][5]
+    binary = binding['binaries']['lib']
+    receipts.require(command['index'] == 6 and command['kind'] == 'unit' and command['argv'] == argv
+                     and command['native_exit'] == 0 and command.get('refusal') is None
+                     and command['log_sha256'] == capture['log'] and command['log_bytes'] == len(raw.encode())
+                     and command['test_id'] == capture['test']
+                     and command['binary_sha256_before'] == command['binary_sha256_after'] == binary['sha256']
+                     and command['actual_features'] == binary['features'] == record['environment']['features'] == [],
+                     'Original rotation command, completion or feature graph differs')
+    compiler_command = binding['commands'][1]
+    receipts.require(compiler_command['index'] == 2 and compiler_command['kind'] == 'compile-only'
+                     and compiler_command['native_exit'] == 0
+                     and compiler_command['argv'] == ['cargo', 'test', '--locked', '--offline', '-p',
+                         'plurx-cluster-check', '--lib', '--no-run', '--message-format=json']
+                     and compiler_command['log_sha256'] == capture['compiler'],
+                     'Original rotation compiler command differs')
+    artifacts = []
+    for line in documents['compiler'].splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if (value.get('reason') == 'compiler-artifact' and value.get('executable')
+                and value.get('profile', {}).get('test') and value['target']['kind'] == ['lib']
+                and value['target']['name'] == 'plurx_cluster_check'):
+            artifacts.append(value)
+    receipts.require(len(artifacts) == 1 and artifacts[0]['executable'] == binary['path']
+                     and artifacts[0]['features'] == binary['features']
+                     and artifacts[0]['profile'] == binary['profile'] == record['environment']['runtime']['profile'],
+                     'Original rotation Cargo artifact differs')
+    fp = measured['fingerprint']
+    suffix = Path(binary['path']).name.rsplit('-', 1)[-1]
+    fp_path = Path(measured['fingerprint_path'])
+    receipts.require(measured['unit_bodies_executed'] == 0 and measured['binary_path'] == binary['path']
+                     and measured['binary_sha256'] == binary['sha256']
+                     and retention.DIGEST.fullmatch(binary['sha256']) and re.fullmatch(r'[0-9a-f]{16}', suffix)
+                     and Path(binary['path']).name == 'plurx_cluster_check-' + suffix
+                     and fp_path.name == 'test-lib-plurx_cluster_check.json'
+                     and fp_path.parent.name == 'plurx-cluster-check-' + suffix
+                     and fp_path.parent.parent.name == '.fingerprint'
+                     and fp.get('rustc') == RUSTC_FINGERPRINT and fp.get('compile_kind') == 0
+                     and fp.get('rustflags') == [] and json.loads(fp.get('features', 'null')) == []
+                     and fp.get('profile') == TEST_PROFILE_FINGERPRINTS[binary['profile']['debuginfo']],
+                     'Preserved matching rotation binary or fingerprint differs')
+    canonical = source_commands(capture['source'])['transport:1']
+    receipts.require(rust_identity(item['invocation']) == rust_identity(canonical)
+                     and record['environment']['runtime']['test_threads'] == 1
+                     and record['environment']['runtime']['rust_min_stack'] is None
+                     and re.findall(r'^\s*Running unittests src/lib.rs \(([^)]+)\)$', raw, re.M) == [binary['path']],
+                     'Original rotation canonical target or measured scheduling differs')
+    actual = retention.log_outcomes(raw, 'rust')
+    receipts.require(actual == {capture['test']: 'pass'}
+                     and record['coverage'] == {'mode': 'rust', 'first_line': 1,
+                         'last_line': len(raw.splitlines()), 'format': 'rust', 'outcomes': actual}
+                     and len(re.findall(r'^test result:', raw, re.M)) == 1,
+                     'Original rotation must remain one whole passing body')
+    require_native_terminals(raw, actual, record['exit_code'], record['origin']['command'])
+    return raw
+
+
+def local_binary_target(identity, item, witness, argv):
+    """Resolve one missing-only child against the complete implicit footprint."""
+    if not implicit_cluster_target(identity):
+        return identity
+    inventory = item['inventory']
+    ids = target_inventory(inventory, inventory['source_commit'], identity)
+    selectors = [arg for arg in argv[1:] if not arg.startswith('-')]
+    receipts.require(len(selectors) == 1 and selectors[0] in ids,
+                     'Implicit missing-only selector lacks current command authority')
+    selected = selectors[0]
+    binary_stem = Path(witness['binary_path']).name.rsplit('-', 1)[0]
+    fingerprint_name = Path(witness['fingerprint_path']).name
+    matching = []
+    for target in inventory['targets']:
+        kind = {('lib',): 'lib', ('bin',): 'bin', ('test',): 'integration-test'}[tuple(target['kind'])]
+        if (binary_stem == target['name'].replace('-', '_')
+                and fingerprint_name == 'test-' + kind + '-' + target['name'] + '.json'):
+            matching.append(target)
+    receipts.require(len(matching) == 1, 'Implicit native binary/fingerprint target is ambiguous')
+    target = matching[0]
+    raw = retention.decoded_log(target['list_log'])
+    roster = [line.removesuffix(': test') for line in raw.splitlines() if line.endswith(': test')]
+    receipts.require(selected in select_ids(roster, identity)
+                     and target['features'] == witness['features'],
+                     'Implicit missing-only selector or graph belongs to another target')
+    flag = {('lib',): {'--lib': True}, ('bin',): {'--bin': target['name']},
+            ('test',): {'--test': target['name']}}[tuple(target['kind'])]
+    return {**identity, 'cargo': {**identity['cargo'], **flag}}
+
+
 def bound_execution(record, item, raw, source_commands=historical_canonical):
     """No receipt-selected slice can remove another outcome from one execution."""
     kind = item['name'].split(':')[0]
@@ -908,6 +1062,8 @@ def bound_execution(record, item, raw, source_commands=historical_canonical):
     lines = raw.splitlines()
     first = witness['first_line']
     receipts.require(type(first) is int and 0 < first <= len(lines), 'Invalid command anchor')
+    if witness['mode'] == 'original-serial-rotation':
+        return original_serial_rotation(record, item, raw, source_commands)
     if witness['mode'] == 'local-openraft-original':
         return original_openraft_capture(record, item, raw)
     if witness['mode']=='local-original-capture':
@@ -948,7 +1104,8 @@ def bound_execution(record, item, raw, source_commands=historical_canonical):
         # Native argv may select a missing-only subset of the canonical cohort.
         receipts.require(witness['binary_path']==argv[0], 'Native argv is not the preserved binary witness')
         suffix=Path(argv[0]).name.rsplit('-',1)[-1]
-        package,stem,fingerprint_name=native_target_paths(target,record['source_commit'])
+        path_identity = local_binary_target(target, item, witness, argv)
+        package,stem,fingerprint_name=native_target_paths(path_identity,record['source_commit'])
         fingerprint_path=Path(witness['fingerprint_path'])
         receipts.require(re.fullmatch(r'[0-9a-f]{8,64}',suffix) is not None
                          and Path(argv[0]).name==stem+'-'+suffix
@@ -1334,7 +1491,9 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
             sequence = record['sequence']
             receipts.require(type(sequence) is int and sequence > 0 and sequence not in sequences,
                              'Ambiguous actual execution chronology');sequences.add(sequence)
-            receipts.require(record['environment'] == environment, 'Actual runtime environment differs')
+            receipts.require(record['environment'] == environment
+                             or serial_rotation_environment(record, item, environment),
+                             'Actual runtime environment differs')
             if kind in RUST_KINDS:
                 rust_environment(record['environment'],identity,record['source_commit'])
             origin = record['origin'];receipts.require(set(origin) == {'kind', 'identity', 'command', 'execution'}

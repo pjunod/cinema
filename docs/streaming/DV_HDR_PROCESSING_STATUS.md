@@ -1583,7 +1583,37 @@ one-query deviations, 511 and 513. Latency samples still represent 256 complete
 catalogue operations; this does not reduce the workload or hide its preference
 lookup cost.
 
-The changed schema control is reserved for one execution on the main-bound
-effort after task integration. Its actual three/four-voter campaign, complete
-current-main qualification, normal fleet deployment and all 18 physical HDR
-ON/OFF cases remain open. Original captures and failures remain intact.
+PR #1124 lands as `d326ed2d6` after all seven current-head task checks pass
+in run 5221, with current `main` already integrated. The actual three/four-voter
+campaign records 256 operations, 512 local SQL calls, zero consistent queries
+and zero errors in each topology. Its original source identity is retained;
+imported main changes no Rust or topology input. The updated served web source
+also passes its complete synthetic browser campaign. Its changed schema control
+passes once on main-bound effort `d326ed2d6` under actual default scheduling,
+with the native binary and compiler fingerprint unchanged across execution.
+Complete current-main
+qualification, normal deployment and all 18 physical HDR ON/OFF cases remain
+open. Original captures and failures remain intact.
+
+### R47 — Retain measured execution and complete target authority
+
+The existing snapshot-rotation regression passed once on the main-bound effort
+with one selected body and explicit serial scheduling. Its original Cargo
+output, complete sidecar and compiler artifact are preserved. A separate
+read-only observation confirms that the recorded binary hash still matches
+its compiler fingerprint. A finite decoder binds those exact objects and
+retains the actual serial runtime; it does not invent command headers, remove
+the recorded offline argument or label the execution as default scheduling.
+Its compatibility policy is limited to this isolated temporary-directory case.
+
+New missing-only native captures for implicit package commands retain the
+complete compiled target footprint. Binary stem and fingerprint target kind
+jointly select one target, and its native roster must contain the exact
+canonical-filtered selector. Default scheduling remains default. A library-only
+build cannot claim whole-package compilation, and an auxiliary matching test
+cannot disappear from the inventory.
+
+Astra reviewed both designs without executing units. The existing runtime
+mismatch control gains substitution, scheduling, partial-capture and target
+authority refusal cases; its changed body is owed once after task integration.
+This decoder work supplies no new playback, deployment or qualification result.
