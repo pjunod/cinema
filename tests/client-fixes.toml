@@ -6781,8 +6781,7 @@ test_anchor = "testFragmentIndexWalkFailsClosedPastSixtyFourRequestsOnManyFragme
 
 [[fixes]]
 id = "apple.incumbent-lease-membership-rounding-strict-gap"
-commits = []
-supplements = "server.cached-wait-contended-session-retains-witness"
+commits = ["6e527f6fcb92b7da55339f3e4d33b40cfa9ade10"]
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "guard let runway = bufferedRunwaySeconds(gapTolerance: 0)"
 test = "clients/apple/Tests/PlayerResumeTests.swift"
@@ -6791,7 +6790,7 @@ test_anchor = "testIncumbentFetchPreferenceLeaseRejectsPositiveGapInsideProtecte
 [[fixes]]
 id = "server.cached-wait-playing-hidden-by-sessions-contention"
 commits = []
-supplements = "server.cached-wait-contended-session-retains-witness"
+supplements = "apple.incumbent-lease-membership-rounding-strict-gap"
 source = "crates/plurxd/src/http/hls/preparation.rs"
 source_anchor = "fn arm_preparation_foreground_watch("
 test = "crates/plurxd/src/http/hls/preparation.rs"
