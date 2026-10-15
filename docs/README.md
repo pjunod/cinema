@@ -347,7 +347,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [HEVC-COLOR-FIX-STATUS.html](streaming/HEVC-COLOR-FIX-STATUS.html) | Current implementation, decision, review and merge status for the HEVC color repair. | open |
 | [HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md](streaming/HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md) | Why copied HEVC turns pink and green, the matched-pixel reproduction, and the implemented proof-before-stripping containment with an unrestricted Developer override. | open |
 | [HEVC-COLOR-CORRUPTION-REVIEW.md](streaming/HEVC-COLOR-CORRUPTION-REVIEW.md) | Independent adversarial review of the HEVC color diagnosis and implementation, with objections, amendments and remaining delivery gates. | open |
-| [DV-P5-APPLE-START-REPAIR.md](streaming/DV-P5-APPLE-START-REPAIR.md) | Why a P5 Apple TV start fails before publication, the matching-tuple header repair, adversarial findings and qualification limits. | built |
+| [DV-P5-APPLE-START-REPAIR.md](streaming/DV-P5-APPLE-START-REPAIR.md) | Why a P5 Apple TV start fails before publication, the matching-tuple header repair, per-sample rolling guard, adversarial findings and qualification limits. | built |
 | [DV-DELIVERY-FINDINGS.md](streaming/DV-DELIVERY-FINDINGS.md) | Why Dolby Vision titles arrive as HDR10 or lower. | open |
 | [DV_HDR_PROCESSING_PLAN.md](streaming/DV_HDR_PROCESSING_PLAN.md) | FEL-aware DV to HDR10 and Profile 7 to 8.1 proposal: quality measurements, controls and fallbacks. | open |
 | [DV_HDR_PROCESSING_BUILD.md](streaming/DV_HDR_PROCESSING_BUILD.md) | Sol 6.1 implementation handoff: backend feasibility, integration contracts, benchmarks and qualification. | open |
