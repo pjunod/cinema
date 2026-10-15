@@ -39,3 +39,20 @@ replacement and renewed trust on expiry. Show expiry in status and explain
 the workflow; advance warning is useful but does not change identity policy.
 Source implementation, real sockets, final review, gates and physical trust
 acceptance remain owned by the build ledger. No live configuration changed.
+
+## 4. Independent workflow amendment review — 2026-10-15
+
+A separate workflow review approved consolidating H1–H4 into checkpoints of
+one cohesive implementation task PR #1118 before any H2–H4 task branch,
+commit or intermediate landing exists. The same builder owns shared files;
+this does not invoke the disjoint-task exception or remove a validation
+surface. Parent canceled only superseded run #5203 before its head changed;
+completed checks remain history and cannot count as a green task gate.
+
+Conditions: amend the canonical plan before restoring drafts, preserve all
+prior findings/failures, verify combined current source locally and through
+the normal hook, then require a fresh exact-final-head Effort gate. Final
+freeze/fresh-main integration, exactly one fresh adversarial built-code review
+with Sol-owned fixes, full qualification receipt and Main promotion gate remain
+mandatory. Parent manages and reviews; Sol implements. This verdict approves
+task sizing only, not built-code correctness or physical/device acceptance.

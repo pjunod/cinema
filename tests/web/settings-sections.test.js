@@ -2176,3 +2176,106 @@ test("Mac processing exposes every independent implemented graph while preservin
   assert.match(requirements.find(row=>row.id==="deinterlace").detail,/HDR interlaced sources keep the existing processing path/);
   assert.doesNotMatch(html,/Dolby Vision, HLG, burns and interlaced sources retain their existing routes/);
 });
+
+test("HTTPS card keeps exact node revision, env ownership, public facts and a token-free IPv6 link",()=>{
+  const url=new Function("location",`${shippedSource("httpsConnectionUrl")} return httpsConnectionUrl;`)({href:"http://user:secret@[::1]:32400/path?token=SECRET#/settings/developer"});
+  assert.equal(url({active:{enabled:true,port:32443}}),"https://[::1]:32443/");
+  assert.equal(url({active:{enabled:false,port:32443}}),null);
+  const render=new Function("esc","setCard","cardHead","devGraduation","httpsConnectionUrl",`${shippedSource("httpsSettingsCard")} return httpsSettingsCard;`)(esc,value=>value,title=>title,(waiting,then)=>waiting+then,url);
+  const value={node_id:'node"local',revision:"9007199254740993",saved:{enabled:false,port:32443,cert_file:"",key_file:"",sans:["localhost"]},desired:{enabled:true,port:32443,cert_file:"",key_file:"",sans:["localhost"]},active:{enabled:false,port:32443,cert_file:"",key_file:"",sans:["localhost"]},restart_required:true,overrides:["port"],durability_confirmed:false};
+  const html=render(value);
+  assert.match(html,/node&quot;local/);assert.match(html,/9007199254740993/);
+  assert.match(html,/id="https-port"[^>]* disabled/);assert.match(html,/id="https-enabled"[^>]* checked/);
+  assert.match(html,/require this node to restart/);assert.match(html,/server or inside its container/);
+  assert.match(html,/directory sync/);assert.match(html,/physical-device qualification/);assert.match(html,/Settings → System/);
+  assert.doesNotMatch(html,/PRIVATE KEY|token=|Download active/);
+  value.active.enabled=true;value.certificate={mode:"generated",expires_at_seconds:1900000000,sha256:"abc",sans:["localhost"]};
+  assert.match(render(value),/Download active public certificate chain/);
+  assert.match(render(value),/unverified HTTPS address/);
+});
+
+test("HTTPS reads cannot overwrite a newer successful PUT or paint errors after a newer PUT",async()=>{
+  for(const failure of [false,true]){
+  let resolveRead,rejectRead,request;
+  const before={node_id:"node-one",revision:"9007199254740993",desired:{enabled:false,port:32443,cert_file:"",key_file:"",sans:["localhost"]},overrides:["port"]};
+  const saved={...before,revision:"9007199254740994"};
+  const mount={innerHTML:"old"};const error={textContent:""};
+  const nodes={"settings-https":mount,"https-error":error,"https-enabled":{checked:true},"https-port":{value:"1"},"https-cert":{value:""},"https-key":{value:""},"https-sans":{value:"localhost"}};
+  const harness=new Function("document","api","settingsCurrent","applyHttpsSettings","toast",`
+    let SETTINGS_HTTPS_EPOCH=0;const PAGE_RENDER_GENERATION=1;
+    const SETTINGS_DATA={https:arguments[5]},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+    const SETTINGS_ENDPOINTS={https:()=>arguments[6]()};
+    ${shippedSource("loadSettingsKey")}
+    ${shippedSource("saveHttpsSettings")}
+    return {read:()=>loadSettingsKey("https",1),save:saveHttpsSettings,data:SETTINGS_DATA};
+  `)({getElementById:id=>nodes[id]},async(path,options)=>{assert.equal(path,"/system/https");request=options.body;return saved;},()=>true,value=>{mount.innerHTML=value.revision;},()=>{},before,()=>new Promise((done,reject)=>{resolveRead=done;rejectRead=reject;}));
+  const oldRead=harness.read().catch(error=>error);
+  await harness.save({disabled:false});
+  assert.equal(request.revision,"9007199254740993");assert.equal(request.node_id,"node-one");
+  assert.equal(request.desired.port,32443,"env-owned input must be sent unchanged");
+  assert.equal(request.desired.enabled,true);
+  if(failure)rejectRead(Error("obsolete GET failed"));else resolveRead(before);
+  const stale=await oldRead;
+  assert.equal(stale.staleHttps,true);assert.equal(harness.data.https,saved);assert.equal(mount.innerHTML,saved.revision);
+  }
+});
+
+test("HTTPS isolated loader ignores late navigation and reports its own failure",async()=>{
+  let resolve,generation=1,paints=[];
+  const load=new Function("loadSettingsKey","settingsCurrent","applyHttpsSettings",`${shippedSource("loadHttpsCard")} return loadHttpsCard;`)(
+    ()=>new Promise(done=>{resolve=done;}),expected=>expected===generation,(...args)=>paints.push(args));
+  const pending=load(1);generation=2;resolve({node_id:"old"});await pending;assert.equal(paints.length,0);
+  const fail=new Function("loadSettingsKey","settingsCurrent","applyHttpsSettings",`${shippedSource("loadHttpsCard")} return loadHttpsCard;`)(
+    async()=>{throw Error("local read failed");},()=>true,(...args)=>paints.push(args));
+  await fail(2);assert.deepEqual(paints,[[null,"local read failed"]]);
+});
+
+test("Developer keeps replicated settings error and Retry while loading only its independent HTTPS card",async()=>{
+  const body={innerHTML:""};let localLoads=0,current=true,painted=0;
+  const load=new Function("location","settingsManifest","loadSettingsKey","settingsCurrent","document","esc","httpsSettingsMount","loadHttpsCard","setPageFailure","setPagePhase","SETTINGS_DATA",`${shippedSource("loadSettingsTab")} return loadSettingsTab;`)(
+    {hash:"#/settings/developer"},()=>({required:["settings"],secondary:["developerReadiness","https"]}),async()=>{throw Error("replicated settings unavailable");},()=>current,
+    {getElementById:()=>body},esc,()=>'<div id="settings-https">local card</div>',async()=>{localLoads++;painted++;},()=>{},()=>{},{});
+  assert.equal(await load(1,"developer"),false);assert.equal(localLoads,1);assert.equal(painted,1);
+  assert.match(body.innerHTML,/replicated settings unavailable/);assert.match(body.innerHTML,/retrySettingsTab/);assert.match(body.innerHTML,/settings-https/);
+  current=false;await load(1,"developer");assert.equal(localLoads,1,"stale required failure must never mount local controls");
+});
+
+test("HTTPS save conflicts require explicit reload and certificate download stays authenticated on this origin",async()=>{
+  const nodes={"settings-https":{},"https-error":{textContent:""},"https-enabled":{checked:false},"https-port":{value:"32443"},"https-cert":{value:""},"https-key":{value:""},"https-sans":{value:"localhost"}};
+  let calls=0;
+  const save=new Function("document","api","settingsCurrent",`
+    let SETTINGS_HTTPS_EPOCH=0;const PAGE_RENDER_GENERATION=1;
+    const SETTINGS_DATA={https:{node_id:"addressed-node",revision:"1",desired:{port:32443},overrides:[]}};
+    ${shippedSource("saveHttpsSettings")} return saveHttpsSettings;`)(
+      {getElementById:id=>nodes[id]},async()=>{calls++;throw Object.assign(Error("changed elsewhere"),{status:409});},()=>true);
+  const button={disabled:false};await save(button);
+  assert.equal(calls,1);assert.equal(button.disabled,false);assert.match(nodes["https-error"].textContent,/Reload this node/);
+  let clicked=0,revoked,route,options;
+  const link={click(){clicked++;}};
+  const download=new Function("api","settingsCurrent","document","URL","PAGE_RENDER_GENERATION",`${shippedSource("downloadHttpsCertificate")}
+return downloadHttpsCertificate;`)(
+    async(path,request)=>{route=path;options=request;return {blob:async()=>"PUBLIC CERTIFICATE"};},()=>true,
+    {createElement:()=>link,getElementById:id=>nodes[id]},
+    {createObjectURL:blob=>{assert.equal(blob,"PUBLIC CERTIFICATE");return "blob:local-certificate";},revokeObjectURL:url=>{revoked=url;}},1);
+  await download({disabled:false,isConnected:true});
+  assert.equal(route,"/system/https/certificate");assert.deepEqual(options,{raw:true});
+  assert.equal(clicked,1);assert.equal(link.href,"blob:local-certificate");assert.equal(revoked,link.href);
+  assert.equal(link.download,"plurx-https-certificate.pem");
+});
+
+test("HTTPS unavailable card retries independently of replicated settings",async()=>{
+  let calls=0;const paints=[];const value={node_id:"local-node",revision:"5"};
+  const retry=new Function("applyHttpsSettings",`
+    let SETTINGS_HTTPS_EPOCH=0;const PAGE_RENDER_GENERATION=1;
+    const SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+    const SETTINGS_ENDPOINTS={https:async()=>{if(++arguments[1].calls===1)throw Error("local unavailable");return arguments[2];}};
+    const settingsCurrent=()=>true;
+    ${shippedSource("loadSettingsKey")}
+    ${shippedSource("loadHttpsCard")}
+    ${shippedSource("reloadHttpsSettings")}
+    return {first:()=>loadHttpsCard(1),retry:reloadHttpsSettings,data:SETTINGS_DATA};
+  `)((...args)=>paints.push(args),{calls},value);
+  await retry.first();assert.deepEqual(paints,[[null,"local unavailable"]]);
+  await retry.retry({disabled:false});assert.deepEqual(paints,[[null,"local unavailable"],[value]]);
+  assert.equal(retry.data.https,value);
+});

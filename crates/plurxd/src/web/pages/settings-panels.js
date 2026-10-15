@@ -111,7 +111,7 @@ function settingsPanel(tab,d){
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="sharing")      return sharingManagementPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
-  if(tab==="developer")    return developerPanel(d.settings,d.developerReadiness)+cinemaRemoteLocalCards();
+  if(tab==="developer")    return httpsSettingsMount(d.https)+developerPanel(d.settings,d.developerReadiness)+cinemaRemoteLocalCards();
   return librariesPanel(d.libs,d.status,d.settings,d.dvConversions);
 }
 // The section header: name, one line of summary, the section's bulk actions.

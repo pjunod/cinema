@@ -40,8 +40,6 @@ mod fragindex;
 mod fragment_index_cluster;
 mod hevc_census;
 mod http;
-// H1 identity regressions compile before H2 adds the production listener.
-#[cfg(test)]
 mod https;
 mod job_lease;
 mod library_search;
@@ -2179,6 +2177,7 @@ async fn boot_observing(
         Some(owner) if owner.tasks.lock().await.is_some() => Some(owner),
         _ => None,
     };
+    let prepared_https = https::Prepared::open(&config).await?;
     let Boot {
         source_activation_at_boot,
         store,
@@ -2228,6 +2227,13 @@ async fn boot_observing(
         system,
         logs,
     );
+    state.https = Some(Arc::new(https::Control::new(
+        node_id.clone(),
+        config.clone(),
+        prepared_https
+            .as_ref()
+            .map(|prepared| prepared.identity.clone()),
+    )?));
     state
         .sharing
         .observe_source_activation_at_boot(source_activation_at_boot);
@@ -2314,6 +2320,13 @@ async fn boot_observing(
     } else {
         None
     };
+    let public_listener_stop = tokio_util::sync::CancellationToken::new();
+    let https_serving = https::Serving::start(
+        prepared_https,
+        app.clone(),
+        public_listener_stop.clone(),
+        leave_shutdown.clone(),
+    );
     #[cfg(windows)]
     crate::windows_service::report_listener_ready()?;
     trigger_shutdown_registration_failpoint("after-listener-bind");
@@ -2355,21 +2368,26 @@ async fn boot_observing(
         }
         // The main listener stops accepting when this future completes;
         // the Jellyfin standard port stops at the same moment.
+        public_listener_stop.cancel();
         jellyfin_stop.cancel();
     };
     let served = if let Some(owner) = observation {
-        match owner.serve_normal(app, shutdown).await {
-            Ok(drain) => {
-                let drain = drain.and(jellyfin.drain().await);
-                drain_serving_state(progress, mdns).await.map(|()| drain)
-            }
-            Err(error) => Err(error),
-        }
+        serve_observed(
+            owner,
+            app,
+            jellyfin,
+            https_serving,
+            progress,
+            mdns,
+            shutdown,
+        )
+        .await
     } else {
         serve(
             listener.expect("normal startup owns its listener"),
             app,
             jellyfin,
+            https_serving,
             progress,
             mdns,
             shutdown,
@@ -3560,17 +3578,38 @@ async fn serve(
     listener: tokio::net::TcpListener,
     app: axum::Router,
     jellyfin: JellyfinStandardListener,
+    https: https::Serving,
     progress: Arc<crate::progress::ProgressCoalescer>,
     mdns: Option<mdns_sd::ServiceDaemon>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<HttpDrain> {
     // The shutdown future stops both listeners at once; the standard port
     // finishes draining before progress is flushed, like the main one.
-    let drain = serve_http(listener, app, shutdown, HTTP_TIMEOUTS)
-        .await?
-        .and(jellyfin.drain().await);
-    drain_serving_state(progress, mdns).await?;
-    Ok(drain)
+    let main = serve_http(listener, app, shutdown, HTTP_TIMEOUTS).await;
+    let tls = https.drain().await;
+    let jellyfin = jellyfin.drain().await;
+    let cleanup = drain_serving_state(progress, mdns).await;
+    main.and_then(|main| tls.map(|tls| main.and(tls).and(jellyfin)))
+        .and_then(|drain| cleanup.map(|()| drain))
+}
+
+/// The observation socket transfers its router per request, but shares the
+/// same TLS/Jellyfin/progress ownership order as ordinary startup.
+async fn serve_observed(
+    owner: Arc<StartupObservationHttp>,
+    app: axum::Router,
+    jellyfin: JellyfinStandardListener,
+    https: https::Serving,
+    progress: Arc<crate::progress::ProgressCoalescer>,
+    mdns: Option<mdns_sd::ServiceDaemon>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<HttpDrain> {
+    let main = owner.serve_normal(app, shutdown).await;
+    let tls = https.drain().await;
+    let jellyfin = jellyfin.drain().await;
+    let cleanup = drain_serving_state(progress, mdns).await;
+    main.and_then(|main| tls.map(|tls| main.and(tls).and(jellyfin)))
+        .and_then(|drain| cleanup.map(|()| drain))
 }
 
 /// How `serve_http`'s shutdown drain ended. Only `Complete` proves that no
@@ -3966,6 +4005,9 @@ async fn serve_http<A: HttpAcceptor>(
         });
     }
 
+    // Cancel owned pending TLS handshakes before waiting on active bodies.
+    // This also releases the listening socket immediately on shutdown.
+    drop(listener);
     let _ = drain_started.send(());
     connection_shutdown.cancel();
     let connections_drained = async { while connections.join_next().await.is_some() {} };
@@ -6858,6 +6900,7 @@ mod startup_tests {
             listener,
             app,
             JellyfinStandardListener::default(),
+            https::Serving::default(),
             progress,
             Some(daemon),
             async move {
@@ -6946,6 +6989,7 @@ mod startup_tests {
             listener,
             app,
             JellyfinStandardListener::default(),
+            https::Serving::default(),
             progress,
             None,
             async move {
@@ -7373,6 +7417,244 @@ mod startup_tests {
         )
     }
 
+    #[tokio::test]
+    async fn https_prepared_socket_is_released_when_later_http_boot_binding_fails() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let occupied_http = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("occupied HTTP");
+        let tls_reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve TLS");
+        let tls_address = tls_reservation.local_addr().expect("TLS address");
+        drop(tls_reservation);
+        let mut config = config_in(root.path());
+        config.server.bind = occupied_http.local_addr().expect("HTTP address");
+        config.server.https.enabled = true;
+        config.server.https.port = tls_address.port();
+        let handle = plurx_core::cluster::open_store(&config)
+            .await
+            .expect("store");
+        let catalogue = plurx_core::store::CatalogueReader::authority(handle.store.clone());
+        let result = boot(
+            config,
+            Boot {
+                source_activation_at_boot: None,
+                store: handle.store,
+                catalogue,
+                replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
+                membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
+                identity: handle.identity,
+                credential_key: handle.credential_key,
+                backup_client: None,
+                dirs: create_dirs(root.path()).expect("dirs"),
+                encoder_caps: Default::default(),
+                system: Default::default(),
+                logs: logbuf::LogBuffers {
+                    general: Arc::new(logbuf::LogBuffer::new(64)),
+                    cluster: Arc::new(logbuf::LogBuffer::new(64)),
+                },
+            },
+            advertiser_that_fails,
+            std::future::pending(),
+        )
+        .await;
+        assert!(result.is_err(), "real HTTP boot bind must fail");
+        assert!(
+            root.path()
+                .join("https")
+                .join(https::MANAGED_IDENTITY_FILE)
+                .exists(),
+            "TLS preparation occurred before later startup failed"
+        );
+        tokio::net::TcpListener::bind(tls_address)
+            .await
+            .expect("failed boot must release prepared TLS socket");
+    }
+
+    #[tokio::test]
+    async fn https_and_http_share_full_router_auth_and_both_startup_owners_drain() {
+        for observed in [false, true] {
+            let root = crate::test_tempdir().expect("tempdir");
+            let state = booted_state(root.path());
+            let progress = state.progress.clone();
+            let daemon_stop = state.shutdown.clone();
+            let app = http::router(state);
+            let plain_socket = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("HTTP");
+            let plain_address = plain_socket.local_addr().expect("HTTP address");
+            let reservation = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("reserve TLS port");
+            let tls_address = reservation.local_addr().expect("TLS address");
+            drop(reservation);
+            let mut plain_socket = Some(plain_socket);
+            let observer = if observed {
+                drop(plain_socket.take());
+                let owner = Arc::new(StartupObservationHttp::new(plain_address));
+                owner
+                    .start(
+                        plurx_core::cluster::membership::MembershipManager::unavailable(),
+                        "pending-node".into(),
+                    )
+                    .await
+                    .expect("pending owner");
+                let pending = reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .expect("client")
+                    .get(format!("http://{plain_address}/api/v1/server"))
+                    .send()
+                    .await
+                    .expect("pending response");
+                assert_eq!(pending.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+                assert!(
+                    tokio::net::TcpStream::connect(tls_address).await.is_err(),
+                    "observation-only phase is HTTP"
+                );
+                Some(owner)
+            } else {
+                None
+            };
+            // Reacquire only for the ordinary owner; the observation owner keeps
+            // its original socket and changes the router in place.
+            let ordinary = if observer.is_none() {
+                plain_socket.take()
+            } else {
+                None
+            };
+            let mut config = config_in(root.path());
+            config.server.https.enabled = true;
+            config.server.https.port = tls_address.port();
+            let prepared = https::Prepared::open(&config)
+                .await
+                .expect("prepare TLS")
+                .expect("enabled");
+            let root_cert = reqwest::Certificate::from_pem(&prepared.identity.public_chain_pem())
+                .expect("loaded public chain");
+            let listener_stop = tokio_util::sync::CancellationToken::new();
+            let tls = https::Serving::start(
+                Some(prepared),
+                app.clone(),
+                listener_stop.clone(),
+                daemon_stop,
+            );
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let shutdown = async move {
+                let _ = stopped.await;
+                listener_stop.cancel();
+            };
+            let server = if let Some(owner) = observer {
+                tokio::spawn(serve_observed(
+                    owner,
+                    app,
+                    JellyfinStandardListener::default(),
+                    tls,
+                    progress,
+                    None,
+                    shutdown,
+                ))
+            } else {
+                tokio::spawn(serve(
+                    ordinary.expect("ordinary listener"),
+                    app,
+                    JellyfinStandardListener::default(),
+                    tls,
+                    progress,
+                    None,
+                    shutdown,
+                ))
+            };
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .add_root_certificate(root_cert)
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("normally trusted client");
+            for scheme in ["http", "https"] {
+                let address = if scheme == "http" {
+                    plain_address.to_string()
+                } else {
+                    format!("localhost:{}", tls_address.port())
+                };
+                let base = format!("{scheme}://{address}");
+                assert!(client
+                    .get(format!("{base}/healthz"))
+                    .send()
+                    .await
+                    .expect("health")
+                    .status()
+                    .is_success());
+                let info: serde_json::Value = client
+                    .get(format!("{base}/api/v1/server"))
+                    .send()
+                    .await
+                    .expect("bootstrap")
+                    .json()
+                    .await
+                    .expect("info");
+                assert_eq!(info["node_id"], "test-node");
+                let qr = client
+                    .get(format!("{base}/connect.svg?origin={base}"))
+                    .send()
+                    .await
+                    .expect("QR response")
+                    .error_for_status()
+                    .expect("QR preserves current origin");
+                assert!(qr
+                    .headers()
+                    .get("content-type")
+                    .expect("SVG type")
+                    .to_str()
+                    .expect("type text")
+                    .starts_with("image/svg+xml"));
+                assert!(qr.text().await.expect("QR SVG").contains("<svg"));
+                for (path, expected) in [
+                    ("/api/v1/me", reqwest::StatusCode::UNAUTHORIZED),
+                    ("/api/v1/settings", reqwest::StatusCode::UNAUTHORIZED),
+                    ("/api/v1/files/1/direct", reqwest::StatusCode::UNAUTHORIZED),
+                    (
+                        "/api/v1/images/missing.jpg",
+                        reqwest::StatusCode::UNAUTHORIZED,
+                    ),
+                    // HLS uses an opaque capability; unknown sessions retain
+                    // their existing 404 behavior on both public transports.
+                    (
+                        "/api/v1/hls/00000000-0000-0000-0000-000000000000/index.m3u8",
+                        reqwest::StatusCode::NOT_FOUND,
+                    ),
+                ] {
+                    assert_eq!(
+                        client
+                            .get(format!("{base}{path}"))
+                            .send()
+                            .await
+                            .expect("guarded response")
+                            .status(),
+                        expected,
+                        "{scheme} {path}"
+                    );
+                }
+            }
+            stop.send(()).expect("stop");
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(8), server)
+                    .await
+                    .expect("bounded drain")
+                    .expect("join")
+                    .expect("serve"),
+                HttpDrain::Complete
+            );
+            tokio::net::TcpListener::bind(plain_address)
+                .await
+                .expect("HTTP port released");
+            tokio::net::TcpListener::bind(tls_address)
+                .await
+                .expect("TLS port released");
+        }
+    }
+
     #[test]
     fn the_assembled_state_carries_the_configured_identity_and_directories() {
         let tmp = crate::test_tempdir().expect("tempdir");
@@ -7418,6 +7700,7 @@ mod startup_tests {
             listener,
             app,
             JellyfinStandardListener::default(),
+            https::Serving::default(),
             progress,
             None,
             async move {
@@ -7495,6 +7778,7 @@ mod startup_tests {
             listener,
             app,
             JellyfinStandardListener::default(),
+            https::Serving::default(),
             progress,
             None,
             async move {
@@ -9025,6 +9309,7 @@ mod startup_tests {
             listener,
             app,
             JellyfinStandardListener::default(),
+            https::Serving::default(),
             progress,
             None,
             async move {

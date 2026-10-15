@@ -579,7 +579,7 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 | File | Answers | |
 |---|---|---|
 | [HTTPS-IMPLEMENTATION.md](server/HTTPS-IMPLEMENTATION.md) | Optional public HTTPS, certificate ownership and administration contract. | open |
-| [HTTPS-REVIEW.md](server/HTTPS-REVIEW.md) | Adversarial HTTPS design findings and their disposition before implementation. | done |
+| [HTTPS-REVIEW.md](server/HTTPS-REVIEW.md) | Adversarial HTTPS design findings plus independent single-task workflow amendment and remaining code-review boundary. | done |
 | [HTTPS-BUILD.md](server/HTTPS-BUILD.md) | HTTPS build ownership, milestones and qualification ledger. | open |
 | [DETAIL-READS-AND-STORAGE-AVAILABILITY.md](server/DETAIL-READS-AND-STORAGE-AVAILABILITY.md) | Implementation plan from the 2026-09-20 architecture review: why an item-detail page stalls on an unmounted share, and how the index badge is decided without loading the index. | open |
 | [TELEMETRY-BACKPRESSURE.md](server/TELEMETRY-BACKPRESSURE.md) | Implementation plan from the 2026-09-20 architecture review: what bounds playback telemetry when the node-local writer is slow, and why the metrics survive retention being turned off. | open |

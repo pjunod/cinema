@@ -866,7 +866,7 @@ test("Settings loads only the active tab manifest", () => {
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness", "settings"] },
     sharing: { required: ["sharingStatus", "sharingImports", "sharingExports"], secondary: [] },
     integrations: { required: ["settings", "trakt"], secondary: [] },
-    developer: { required: ["settings"], secondary: ["developerReadiness"] },
+    developer: { required: ["settings"], secondary: ["developerReadiness", "https"] },
   });
   const view = shippedSource("viewSettings");
   assert.doesNotMatch(view, /Promise\.all\(\[\s*api/,
@@ -1695,7 +1695,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     // The switches paint from the settings snapshot; the advisory prerequisite
     // readings arrive behind them because one of them asks membership for the
     // local applied roster.
-    developer:{required:["/settings"],secondary:["/developer/readiness"]},
+    developer:{required:["/settings"],secondary:["/developer/readiness","/system/https"]},
     standalone:{tab:"cluster",clustered:false,required:[],secondary:[]},
     sqlite:{tab:"cluster",legacy:true,roster:{unavailable:true,code:"membership_unavailable"},required:["/cluster/nodes"],secondary:[]},
   };
@@ -1711,7 +1711,7 @@ test("Settings executes exact required and secondary waves for every tab", async
       "patchSettingsSecondary","patchSettingsSecondaryError","refreshLogs","refreshClusterLogs",
       "setPageFailure","setPagePhase","document",
       `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
-         SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
+         SETTINGS_HTTPS_EPOCH=0,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
          DV_SETTINGS_POLL_AT=0; const DV_PROGRESS_POLL_MS=10000;
        const SERVER={cluster_enabled:${expected.legacy?"undefined":expected.clustered!==false}};
        ${shippedSource("settingsClusterEnabled")};
@@ -1766,7 +1766,7 @@ test("Settings cannot paint an old tab after a tab switch", async () => {
     "patchSettingsSecondary","patchSettingsSecondaryError","refreshLogs","refreshClusterLogs",
     "setPageFailure","setPagePhase","document",
     `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
-       SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+       SETTINGS_HTTPS_EPOCH=0,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
      ${shippedSource("settingsCurrent")};${shippedSource("cacheSettings")};${shippedSource("cacheTrakt")};
      const SERVER={cluster_enabled:true};
      ${shippedSource("settingsClusterEnabled")};${shippedSource("settingsManifest")};
@@ -1789,7 +1789,7 @@ test("Settings coalesces shared transports while fencing each generation's commi
   const endpoints={settings:deferred,sys:deferred};
   const harness=new Function("SETTINGS_ENDPOINTS",
     `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
-       SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+       SETTINGS_HTTPS_EPOCH=0,SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
      const cacheSettings=(value)=>{SETTINGS=value;SETTINGS_DATA.settings=value;SETTINGS_LOADED.add("settings");return value;};
      const cacheTrakt=(value)=>{TRAKT=value;SETTINGS_DATA.trakt=value;SETTINGS_LOADED.add("trakt");return value;};
      ${shippedSource("loadSettingsKey")};

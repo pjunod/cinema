@@ -75,18 +75,43 @@ an operator choice.
 Installation, firewall, upgrade, and removal commands are in the
 [Windows deploy runbook](../deploy/README.md#run-as-a-service--windows).
 
-### HTTPS configuration and identity — implementation in progress
+### Optional HTTPS and persistent identity
 
-The [HTTPS build ledger](server/HTTPS-BUILD.md) records the staged work.
-H1 adds configuration and tested identity primitives; the production listener
-and Developer editor remain separate H2/H3 milestones. These instructions
-name the final on-disk format so recovery does not depend on guessing it.
+HTTPS is off by default. In Settings → Developer → HTTPS, edit the addressed
+node, save, then restart that node to activate the desired configuration.
+The additional listener defaults to port `32443` on `server.bind`'s IP; the
+existing HTTP listener remains available. Saving never restarts the service.
+The card distinguishes saved intent, environment-overridden desired intent,
+and the listener/certificate actually loaded in this process. It remains
+usable when replicated settings cannot load, subject to ordinary admin auth
+and the node's existing removal/serving fences.
+
+Leave both certificate paths empty for a persistent self-signed identity. Add
+every DNS name and concrete IP clients will use before first enable; startup
+creates the identity, and saving alone creates no key. Alternatively, enter
+absolute paths to a leaf-first PEM chain and matching unencrypted private key.
+These are paths on the server or inside its container, never on the browser's
+computer. Supplied material is loaded at restart. With Docker, publish the
+chosen container port explicitly and mount supplied files read-only; see
+[deployment instructions](../deploy/README.md#optional-native-https).
+
+After restart, verify the active fingerprint and download the **active public
+certificate chain** from the card. A generated self-signed certificate needs
+explicit client trust and matching SAN coverage. A supplied chain needs the
+appropriate issuing CA trust. Browser and native trust stores differ; the
+unverified address link neither installs trust nor tests connectivity and opens
+a new origin that needs its own sign-in. No credential is copied into it.
+Physical browser/native trust and real playback qualification remain open in
+[the build ledger](server/HTTPS-BUILD.md); the permanent switch stays Developer
+until that acceptance is recorded, then moves to System.
 
 `[server.https]` accepts `enabled`, `port` (default `32443`), absolute
 `cert_file`/`key_file` paths and `sans`. Both paths empty select a generated
 identity; both supplied select a leaf-first PEM chain and one unencrypted
 private key. Settings are node-local and never enter the replicated Store.
-Existing HTTP and discovery continue using their current port.
+Existing HTTP, Bonjour/GDM discovery and internal cluster transports keep
+their current addresses. HTTPS is manually selected by URL; enabling it does
+not force clients to use encryption or add a redirect/HSTS policy.
 
 Precedence is defaults → TOML → `<data_dir>/https-settings.json` → explicitly
 present HTTPS environment variables. `PLURX_DATA_DIR` selects the directory
@@ -96,7 +121,8 @@ before the local file is read. The HTTPS variables are `PLURX_HTTPS_ENABLED`,
 generated mode when both are empty. An override masks its stored choice;
 saving another field must not copy the override into that stored choice.
 
-The local file is at most 16 KiB and has this exact versioned envelope:
+The admin API uses a canonical decimal-string revision; manual file edits use
+an integer u64. The local file is at most 16 KiB and has this exact versioned envelope:
 
 ```json
 {"version":1,"revision":1,"settings":{"enabled":false,"port":32443,"cert_file":"","key_file":"","sans":["localhost","127.0.0.1","::1"]}}
@@ -128,7 +154,7 @@ environment value, increment the local revision, securely back up and remove
 `https/identity.pem`, then restart. Removing only the identity recreates the
 old SAN coverage. Verify the replacement public fingerprint and explicitly
 re-trust its certificate. Never install or distribute the combined private
-bundle as a public trust certificate; the later admin download exports only
+bundle as a public trust certificate; the admin download exports only
 the loaded public chain. Supplied renewals are loaded on restart.
 
 To recover from enabled TLS with broken material, stop the service, set
@@ -3254,6 +3280,11 @@ membership addresses and token-file paths are intentionally file-only:
 | Env var | TOML | Default | What it does |
 |---|---|---|---|
 | `PLURX_BIND` | `server.bind` | `0.0.0.0:32400` | Address the HTTP API binds to |
+| `PLURX_HTTPS_ENABLED` | `server.https.enabled` | `false` | Additional public HTTPS listener after restart; existing HTTP remains available |
+| `PLURX_HTTPS_PORT` | `server.https.port` | `32443` | HTTPS port on `server.bind`'s IP; must not collide with configured listeners |
+| `PLURX_HTTPS_CERT_FILE` | `server.https.cert_file` | empty | Absolute server/container leaf-first certificate-chain PEM path; empty with key empty selects persistent generated identity |
+| `PLURX_HTTPS_KEY_FILE` | `server.https.key_file` | empty | Absolute server/container matching unencrypted private-key PEM path; never returned in API responses |
+| `PLURX_HTTPS_SANS` | `server.https.sans` | localhost and loopback IPs | Comma-separated generated DNS names/IPs; concrete bind IP is also added. Existing generated SAN changes require explicit replacement while stopped |
 | `PLURX_JELLYFIN_PORT` | `server.jellyfin_port` | `8096` | Port on `PLURX_BIND`'s address where Jellyfin clients reach the compatibility facade at the server root, so a host name alone is enough; `0` = off. Best-effort: a taken port is logged and shown in Settings → Developer, and `/jellyfin` on the main port still works |
 | `PLURX_TRUSTED_PROXIES` | `server.trusted_proxies` | empty | Comma-separated proxy CIDRs whose appended `X-Forwarded-For` hops the login throttle may trust. Keep empty unless those peers overwrite or append the header correctly |
 | `PLURX_SERVER_NAME` | `server.name` | `plurx` | Bootstrap seed for the human-visible server name. The replicated setting is authoritative after first boot; rename it through the admin API |
@@ -3365,6 +3396,7 @@ turn it off and start playback again.
 | Port | Proto | Purpose |
 |---|---|---|
 | 32400 | TCP | HTTP API + web app (and the Plex-compat façade) |
+| 32443 | TCP + TLS | Optional additional public HTTPS API/web listener; off by default, restart required; HTTP/discovery retained |
 | 32401 | TCP + TLS | Raft replication between voters; never expose it as public cleartext |
 | 32402 | TCP + TLS | Authenticated internal cluster API; never expose it as public cleartext |
 | 32414 | UDP | GDM discovery so Plex/Kodi clients find the server on the LAN |

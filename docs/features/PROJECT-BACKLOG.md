@@ -42,7 +42,13 @@ not an instruction to build in that order.
 
 | Project | State | Canonical ledger |
 |---|---|---|
-| Optional public HTTPS | Claimed; design adversarially reviewed, Sol 6.1 builds on effort/https-support and parent manages/reviews. | [HTTPS build](../server/HTTPS-BUILD.md) |
+| Optional public HTTPS | Implementation built and locally verified through H1–H4 checkpoints, now restored into cohesive task PR #1118; combined-candidate local verification passed; integration, final-head effort gate and full promotion remain pending. Physical trust/playback qualification is separate acceptance still owed; HTTPS stays in Developer. Sol 6.1 builds and parent manages/reviews. | [HTTPS build](../server/HTTPS-BUILD.md) |
+
+HTTPS workflow amendment (2026-10-15): independently reviewed consolidation
+makes H1–H4 checkpoints of one cohesive task PR #1118, superseding separate
+checkpoint PRs before any H2–H4 landing. Combined-source local checks, a fresh
+final-head Effort gate, final adversarial code review and full exact-tree main
+promotion qualification remain required; this is not built-code approval.
 
 ### 2.1 Video, playback and client projects
 

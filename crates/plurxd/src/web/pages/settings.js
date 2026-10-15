@@ -69,12 +69,14 @@ function statusText(st,lastScanAt){
 let SETTINGS=null, TRAKT=null, TRAKT_EDIT=false, SETTINGS_TICKING=null;
 let LOGS_RUN=null, CLUSTER_LOGS_RUN=null;
 let SETTINGS_DATA={}, SETTINGS_LOADED=new Set(), SETTINGS_LOADS=new Map();
+let SETTINGS_HTTPS_EPOCH=0;
 const SETTINGS_ENDPOINTS={
   libs:()=>api("/libraries"),settings:()=>api("/settings"),status:()=>api("/scan/status"),
   dvConversions:()=>api("/dv-conversions"),
   sys:()=>api("/system"),users:()=>api("/users"),trakt:()=>api("/trakt/status"),
   sharingStatus:()=>sharingManagementRead("/sharing/status"),sharingImports:()=>sharingManagementRead("/sharing/imports"),sharingExports:()=>sharingManagementRead("/sharing/exports"),
   developerReadiness:()=>api("/developer/readiness"),
+  https:()=>api("/system/https"),
   analysis:()=>api("/analysis/summary"),
   playbackEvents:()=>api(`/system/playback-events?since=${Date.now()-7*24*60*60*1000}&limit=2000`),
   cluster:()=>api("/cluster/nodes").catch(error=>{
@@ -113,7 +115,7 @@ const SETTINGS_MANIFEST={
   cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness","settings"]},
   sharing:{required:["sharingStatus","sharingImports","sharingExports"],secondary:[]},
   integrations:{required:["settings","trakt"],secondary:[]},
-  developer:{required:["settings"],secondary:["developerReadiness"]},
+  developer:{required:["settings"],secondary:["developerReadiness","https"]},
 };
 // The configured mode, not the current peer count or a failed status read,
 // determines whether cluster controls apply. /server is loaded before routing.
@@ -143,17 +145,25 @@ function settingsCurrent(generation,tab){
 }
 function loadSettingsKey(key,generation,cacheResult=true){
   if(SETTINGS_LOADED.has(key)) return Promise.resolve(SETTINGS_DATA[key]);
-  const active=SETTINGS_LOADS.get(key);
+  const httpsEpoch=SETTINGS_HTTPS_EPOCH;
+  const candidate=SETTINGS_LOADS.get(key);
+  const active=key==="https"&&candidate?.httpsEpoch!==httpsEpoch?null:candidate;
   let transport=active&&active.promise;
   if(!transport){
     transport=SETTINGS_ENDPOINTS[key]();
-    const entry={promise:transport};
+    const entry={promise:transport,httpsEpoch};
     SETTINGS_LOADS.set(key,entry);
     transport.finally(()=>{
       if(SETTINGS_LOADS.get(key)===entry) SETTINGS_LOADS.delete(key);
     }).catch(()=>{});
   }
+  const fenceHttps=()=>{
+    if(key==="https"&&httpsEpoch!==SETTINGS_HTTPS_EPOCH){
+      throw Object.assign(new Error("Superseded HTTPS read"),{staleHttps:true});
+    }
+  };
   return transport.then(value=>{
+    fenceHttps();
     if(generation!==PAGE_RENDER_GENERATION||!cacheResult) return value;
     SETTINGS_DATA[key]=value; SETTINGS_LOADED.add(key);
     if(key==="dvConversions") DV_SETTINGS_POLL_AT=Date.now()+DV_PROGRESS_POLL_MS;
@@ -161,6 +171,9 @@ function loadSettingsKey(key,generation,cacheResult=true){
     if(key==="trakt") cacheTrakt(value);
     if(key==="cluster") CLUSTER_LOADED=true;
     return value;
+  },error=>{
+    fenceHttps();
+    throw error;
   });
 }
 function settingsTabsHtml(tab){
@@ -194,6 +207,7 @@ function settingsShell(tab){
   return `<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div></div>`;
 }
 function patchSettingsSecondary(tab,key,value){
+  if(tab==="developer"&&key==="https") applyHttpsSettings(value);
   if(tab==="metadata"&&key==="libs"){
     const mount=document.getElementById("metadata-libraries");
     if(mount) mount.innerHTML=keyBackfillHtml(SETTINGS_DATA.libs||[]);
@@ -230,6 +244,7 @@ function patchSettingsSecondary(tab,key,value){
   }
 }
 function patchSettingsSecondaryError(tab,key,error){
+  if(tab==="developer"&&key==="https") applyHttpsSettings(null,error&&error.message||"request failed");
   const message=esc(error&&error.message||"request failed");
   if(tab==="metadata"&&key==="libs"){
     const mount=document.getElementById("metadata-libraries");
@@ -260,6 +275,11 @@ async function loadSettingsTab(generation,tab){
     if(!settingsCurrent(generation,tab)) return;
     const body=document.getElementById("setbody");
     if(body) body.innerHTML=`<div class="empty">${esc(error.message)}<div style="margin-top:12px"><button class="ghost sm" onclick="retrySettingsTab()">Retry</button></div></div>`;
+    if(tab==="developer"&&body){
+      body.innerHTML+=httpsSettingsMount(SETTINGS_DATA.https);
+      await loadHttpsCard(generation);
+      if(!settingsCurrent(generation,tab)) return false;
+    }
     setPageFailure(route,generation,"render_error");
     setPagePhase(route,generation,"content"); setPagePhase(route,generation,"settled");
     return false;
@@ -275,6 +295,7 @@ async function loadSettingsTab(generation,tab){
     return loadSettingsKey(key,generation,!staged).then(value=>{
       if(settingsCurrent(generation,tab)) patchSettingsSecondary(tab,key,value);
     }).catch(error=>{
+      if(error?.staleHttps) return;
       if(error&&error.status===401) throw error;
       if(settingsCurrent(generation,tab)){
         patchSettingsSecondaryError(tab,key,error);

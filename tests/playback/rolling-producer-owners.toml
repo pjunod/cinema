@@ -2952,7 +2952,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # can fail instead of hanging in join. Two tokio sites own finite generated
 # trust (three peers) and private-CA (one peer) servers: awaited on success,
 # owned by the per-test runtime on panic. No production owner or child added.
-expected_occurrences = 955
+# HTTPS H2: +1 awaited startup identity spawn_blocking (bounded regular-file
+# work, no socket until it returns); +4 finite transport regression servers
+# explicitly stopped and joined; +2 full-router test branch tasks joined after
+# ordinary/observation shutdown. Per-test runtime owns unwind cleanup. The
+# production TLS server itself is the JoinSet-owned method-spawn below.
+# HTTPS H3: +1 blocking settings worker retains its owned mutex through
+# read-only preflight, atomic publication and in-memory adoption even when
+# its HTTP waiter disappears. It performs bounded regular-file work and no
+# process launch. +1 cancellation regression waiter is aborted and awaited;
+# the test then acquires the worker-held guard to observe completed file work
+# and adoption before temporary directory teardown.
+expected_occurrences = 964
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3182,7 +3193,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # `true` child (`std::process::Command::spawn`) in process::priority::tests.
 # It is never registered by the launcher, the test reaps it with `wait()`
 # after the assertion, and production gains no launch.
-expected_occurrences = 69
+# HTTPS H2: +1 JoinSet.spawn owns the sole public TLS serving future. Fatal
+# completion cancels daemon shutdown and returns Err; normal stop joins the
+# task before progress/census flush. Dropping the owner aborts the JoinSet.
+# Handshakes are owned futures in a capped queue, never detached tasks.
+expected_occurrences = 70
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4579,7 +4594,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # leaves. Timeout fails that assertion; it is not a completion receipt.
 # The single adversarial review covered these paths and found no ownership
 # defect. This inventory records the two constructors already in that review.
-expected_occurrences = 1744
+# HTTPS H2: +1 production per-handshake deadline, owned by the capped future
+# queue and cancelled on listener drop; +7 finite regression timers: bounded
+# slot observation/debounce sleep, three pending-peer EOF observations, fatal
+# task stop observation and the full-router serving-task join bound.
+# HTTPS H3: +3 cancellation-regression timers: publication deadline,
+# a short observation that the worker still holds its guard, and completed
+# adoption deadline. All are awaited in the fixture; the bounded blocking
+# channel observer always releases the worker on timeout/disconnection.
+expected_occurrences = 1755
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5645,7 +5668,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # F1/N2 landing repair: +2 matches. constant_size_film.status() synchronously
 # waits/reaps its finite fixture child. record_unplaced's decision.status()
 # names the existing MediaLandingFailed verdict and starts no process.
-expected_occurrences = 753
+# HTTPS H2: +1 JoinSet.spawn is the single owned TLS server (no OS child),
+# plus three response.status() assertions in the full-router startup tests.
+# These broad syntactic matches add no process or reaping obligation.
+# HTTPS H3: +3 status reads, not launches: sanitized JsonRejection's body
+# limit classification and two HTTP certificate/fenced-response assertions.
+# No OS process, producer or child-reaping obligation is added.
+expected_occurrences = 760
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

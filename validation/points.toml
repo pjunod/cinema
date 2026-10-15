@@ -733,6 +733,7 @@ paths = [
   "crates/plurxd/src/http/extract.rs",
   "crates/plurxd/src/http/mod.rs",
   "crates/plurxd/src/http/system.rs",
+  "crates/plurxd/src/http/https_admin.rs",
   "scripts/cluster-page-latency",
   "tests/benchmark/test_cluster_page_latency.py",
 ]
@@ -747,6 +748,7 @@ paths = [
   "crates/plurxd/Cargo.toml",
   "crates/plurxd/src/availability.rs",
   "crates/plurxd/src/{cachekeep,https,logbuf,main,panics,redact,schedule,state,storeprobe,telemetry}.rs",
+  "crates/plurxd/src/https/**",
   "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/reader_formats.rs",

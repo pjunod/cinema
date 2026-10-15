@@ -26,6 +26,7 @@ pub(crate) mod extract;
 pub(crate) mod file_grants;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 pub(crate) mod hls;
+mod https_admin;
 pub(crate) mod images;
 pub(crate) mod index_coverage;
 pub(crate) mod internal_activity;
@@ -515,6 +516,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/trakt/link"
         | "/api/v1/trakt/sync"
         | "/api/v1/system"
+        | "/api/v1/system/https"
+        | "/api/v1/system/https/certificate"
         | "/api/v1/system/logs"
         | "/api/v1/system/playback-events"
         | "/api/v1/system/library-shape"
@@ -1506,6 +1509,8 @@ pub fn router(state: AppState) -> Router {
         .route("/me", get(auth::me))
         .route("/features", get(system::features))
         .route("/settings", get(system::get_settings))
+        .route("/system/https", get(https_admin::get))
+        .route("/system/https/certificate", get(https_admin::certificate))
         .route(
             "/subtitle-transcription",
             get(crate::subtitle_transcription::settings),
@@ -1694,6 +1699,10 @@ pub fn router(state: AppState) -> Router {
             post(crate::subtitle_transcription::enqueue),
         )
         .route("/settings", put(system::update_settings))
+        .route(
+            "/system/https",
+            put(https_admin::put).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route(
             "/subtitle-provider",
             put(subtitle_downloads::update_settings),
@@ -2312,6 +2321,9 @@ const NODE_MAINTENANCE_JSON: &str = r#"{"code":"node_maintenance","message":"thi
 /// refused, including catalogue browsing that may lead a client to select this
 /// ingress for a new stream.
 fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
+    if https_admin::eligible(method, path) {
+        return true;
+    }
     if method == Method::GET
         && (matches!(path, "/" | "/healthz" | "/readyz" | "/metrics")
             || path.starts_with("/assets/")
@@ -2441,7 +2453,8 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
 /// admitted only through the existing serving fence, so a learner also needs
 /// a fresh quorum/apply proof before any node-local work starts.
 fn learner_route_eligible(method: &Method, path: &str) -> bool {
-    if remote::eligible(method, path)
+    if https_admin::eligible(method, path)
+        || remote::eligible(method, path)
         || crate::diagnostics::eligible(method, path)
         || crate::diagnostics_delivery::eligible(method, path)
     {
@@ -2623,15 +2636,40 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     node_local_get || node_local_create || node_local_close || live_keepalive
 }
 
-async fn cluster_capacity_gate(
-    State(state): State<AppState>,
-    request: Request<axum::body::Body>,
-    next: Next,
-) -> Response {
-    let path = request.uri().path();
-    let method = request.method();
-    if state.membership.local_maintenance_active() && !maintenance_route_eligible(method, path) {
-        return (
+fn capacity_role_refusal(
+    role: Option<LocalServingRole>,
+    method: &Method,
+    path: &str,
+) -> Option<Response> {
+    match role {
+        Some(LocalServingRole::Unclustered | LocalServingRole::Voter) => None,
+        Some(LocalServingRole::Learner) if learner_route_eligible(method, path) => None,
+        Some(LocalServingRole::Learner) => Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, "application/json")],
+                LEARNER_ROUTE_INELIGIBLE_JSON,
+            )
+                .into_response(),
+        ),
+        Some(LocalServingRole::Fenced) if matches!(path, "/healthz" | "/metrics") => None,
+        Some(LocalServingRole::Fenced) | None => Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [
+                    (header::CONTENT_TYPE, "application/json"),
+                    (header::RETRY_AFTER, "1"),
+                ],
+                NODE_REMOVAL_FENCED_JSON,
+            )
+                .into_response(),
+        ),
+    }
+}
+
+fn capacity_maintenance_refusal(active: bool, method: &Method, path: &str) -> Option<Response> {
+    (active && !maintenance_route_eligible(method, path)).then(|| {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
             [
                 (header::CONTENT_TYPE, "application/json"),
@@ -2639,32 +2677,27 @@ async fn cluster_capacity_gate(
             ],
             NODE_MAINTENANCE_JSON,
         )
-            .into_response();
+            .into_response()
+    })
+}
+
+async fn cluster_capacity_gate(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if let Some(refusal) = capacity_maintenance_refusal(
+        state.membership.local_maintenance_active(),
+        request.method(),
+        request.uri().path(),
+    ) {
+        return refusal;
     }
-    match state.membership.local_serving_role().await {
-        Ok(LocalServingRole::Unclustered | LocalServingRole::Voter) => next.run(request).await,
-        Ok(LocalServingRole::Learner) if learner_route_eligible(method, path) => {
-            next.run(request).await
-        }
-        Ok(LocalServingRole::Learner) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(header::CONTENT_TYPE, "application/json")],
-            LEARNER_ROUTE_INELIGIBLE_JSON,
-        )
-            .into_response(),
-        Ok(LocalServingRole::Fenced) if matches!(path, "/healthz" | "/metrics") => {
-            next.run(request).await
-        }
-        Ok(LocalServingRole::Fenced) | Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [
-                (header::CONTENT_TYPE, "application/json"),
-                (header::RETRY_AFTER, "1"),
-            ],
-            NODE_REMOVAL_FENCED_JSON,
-        )
-            .into_response(),
+    let role = state.membership.local_serving_role().await.ok();
+    if let Some(refusal) = capacity_role_refusal(role, request.method(), request.uri().path()) {
+        return refusal;
     }
+    next.run(request).await
 }
 
 fn safe_trace_target(uri: &Uri) -> String {
@@ -5316,6 +5349,338 @@ mod tests {
                 .as_deref(),
             Some("1")
         );
+    }
+
+    #[test]
+    fn local_https_route_matrix_is_exact_for_learner_and_maintenance() {
+        for method in [Method::GET, Method::PUT] {
+            assert!(learner_route_eligible(&method, https_admin::PATH));
+            assert!(maintenance_route_eligible(&method, https_admin::PATH));
+        }
+        assert!(learner_route_eligible(
+            &Method::GET,
+            https_admin::CERTIFICATE_PATH
+        ));
+        assert!(maintenance_route_eligible(
+            &Method::GET,
+            https_admin::CERTIFICATE_PATH
+        ));
+        for (method, path) in [
+            (Method::POST, https_admin::PATH),
+            (Method::DELETE, https_admin::PATH),
+            (Method::PATCH, https_admin::PATH),
+            (Method::HEAD, https_admin::PATH),
+            (Method::PUT, https_admin::CERTIFICATE_PATH),
+            (Method::HEAD, https_admin::CERTIFICATE_PATH),
+            (Method::GET, "/api/v1/system/https/other"),
+            (Method::PUT, "/api/v1/system/https/"),
+            (Method::GET, "/api/v1/system/https-other"),
+        ] {
+            assert!(!learner_route_eligible(&method, path), "{method} {path}");
+            assert!(
+                !maintenance_route_eligible(&method, path),
+                "{method} {path}"
+            );
+        }
+    }
+
+    fn local_https_state(root: &std::path::Path, enabled: bool) -> AppState {
+        let mut state = test_state_without_router();
+        let mut config = plurx_core::config::Config::default();
+        config.storage.data_dir = root.to_path_buf();
+        config.server.https.enabled = enabled;
+        config
+            .resolve_https(Default::default())
+            .expect("local intent");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs() as i64;
+        let identity = crate::https::Identity::load(&config.server.https, root, now, true)
+            .expect("identity")
+            .map(Arc::new);
+        state.https = Some(Arc::new(
+            crate::https::Control::new(state.node_id.clone(), config, identity).expect("control"),
+        ));
+        state
+    }
+
+    #[tokio::test]
+    async fn local_https_api_requires_admin_and_guards_node_revision_and_input() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let state = local_https_state(root.path(), false);
+        let app = router(state.clone());
+        for path in [https_admin::PATH, https_admin::CERTIFICATE_PATH] {
+            assert_eq!(
+                call(&app, get(path, None)).await.0,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            call(&app, put(https_admin::PATH, None, json!({}))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let admin = setup_admin(&app).await;
+        let response = app
+            .clone()
+            .oneshot(get(https_admin::PATH, Some(&admin)))
+            .await
+            .expect("response");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let (status, before) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(before["revision"], "0");
+        let request = json!({"node_id":before["node_id"],"revision":before["revision"],"desired":before["desired"]});
+        for (field, value, code) in [
+            ("node_id", json!("another-node"), "https_node_conflict"),
+            ("revision", json!("1"), "https_revision_conflict"),
+        ] {
+            let mut wrong = request.clone();
+            wrong[field] = value;
+            let (status, body) = call(&app, put(https_admin::PATH, Some(&admin), wrong)).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["code"], code);
+        }
+        for body in [
+            json!({"PRIVATE-PEM-MARKER":true}),
+            json!({"node_id":"x","revision":{"PRIVATE-PEM-MARKER":true},"desired":{}}),
+        ] {
+            let (status, body) = call(&app, put(https_admin::PATH, Some(&admin), body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(!body.to_string().contains("PRIVATE-PEM-MARKER"));
+        }
+        let (status, body) = call(
+            &app,
+            put(
+                https_admin::PATH,
+                Some(&admin),
+                json!({"padding":"PRIVATE-PEM-MARKER".repeat(2000)}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(!body.to_string().contains("PRIVATE-PEM-MARKER"));
+        let mut invalid = request.clone();
+        invalid["desired"]["port"] = json!(0);
+        assert_eq!(
+            call(&app, put(https_admin::PATH, Some(&admin), invalid))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let mut enable = request.clone();
+        enable["desired"]["enabled"] = json!(true);
+        let ((a, one), (b, two)) = tokio::join!(
+            call(&app, put(https_admin::PATH, Some(&admin), enable.clone())),
+            call(&app, put(https_admin::PATH, Some(&admin), enable))
+        );
+        assert!(
+            (a == StatusCode::OK && b == StatusCode::CONFLICT)
+                || (b == StatusCode::OK && a == StatusCode::CONFLICT),
+            "{a} {one} / {b} {two}"
+        );
+        let (_, after) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+        assert_eq!(after["revision"], "1");
+        assert_eq!(after["active"]["enabled"], false);
+        assert_eq!(after["desired"]["enabled"], true);
+        assert_eq!(after["restart_required"], true);
+        assert!(!root.path().join("https").exists());
+        assert_eq!(
+            call(&app, get(https_admin::CERTIFICATE_PATH, Some(&admin)))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            state
+                .store
+                .get_setting("https")
+                .await
+                .expect("no Store setting"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn local_https_certificate_exports_only_loaded_public_chain_even_after_disk_replacement()
+    {
+        use rustls::pki_types::pem::PemObject;
+        use sha2::Digest;
+        let root = crate::test_tempdir().expect("tempdir");
+        let state = local_https_state(root.path(), true);
+        let app = router(state);
+        let admin = setup_admin(&app).await;
+        let (_, snapshot) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+        let source = root
+            .path()
+            .join("https")
+            .join(crate::https::MANAGED_IDENTITY_FILE);
+        std::fs::write(source, "invalid replacement PRIVATE-PEM-MARKER")
+            .expect("replace source after startup");
+        let response = app
+            .clone()
+            .oneshot(get(https_admin::CERTIFICATE_PATH, Some(&admin)))
+            .await
+            .expect("download");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/x-pem-file"
+        );
+        assert!(response.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .expect("attachment")
+            .starts_with("attachment;"));
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let text = std::str::from_utf8(&bytes).expect("PEM");
+        assert!(!text.contains("PRIVATE") && !text.contains("invalid replacement"));
+        let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(&bytes)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("public certificates");
+        assert_eq!(certificates.len(), 1);
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(&certificates[0])),
+            snapshot["certificate"]["sha256"]
+        );
+        let (_, again) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+        assert_eq!(again["certificate"], snapshot["certificate"]);
+        let mut desired = snapshot["desired"].clone();
+        desired["enabled"] = json!(false);
+        let (status,disabled)=call(&app,put(https_admin::PATH,Some(&admin),json!({"node_id":snapshot["node_id"],"revision":snapshot["revision"],"desired":desired}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(disabled["saved"]["enabled"], false);
+        assert_eq!(disabled["desired"]["enabled"], false);
+        assert_eq!(disabled["active"]["enabled"], true);
+        assert_eq!(disabled["restart_required"], true);
+        assert_eq!(disabled["certificate"], snapshot["certificate"]);
+        desired["enabled"] = json!(true);
+        assert_eq!(call(&app,put(https_admin::PATH,Some(&admin),json!({"node_id":disabled["node_id"],"revision":disabled["revision"],"desired":desired}))).await.0,StatusCode::BAD_REQUEST);
+        let (_, after) = call(&app, get(https_admin::PATH, Some(&admin))).await;
+        assert_eq!(after["revision"], disabled["revision"]);
+        assert_eq!(after["certificate"], snapshot["certificate"]);
+    }
+
+    #[tokio::test]
+    async fn local_https_admin_auth_survives_exact_learner_and_maintenance_admission() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let state = local_https_state(root.path(), false);
+        let app = router(state.clone());
+        let admin = setup_admin(&app).await;
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    "/api/v1/users",
+                    Some(&admin),
+                    json!({"username":"https-reader","password":"longenough"})
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({"username":"https-reader","password":"longenough"}),
+            ),
+        )
+        .await;
+        let reader = login["token"].as_str().expect("reader token");
+        // Inject facts at the same shared decision boundary as the production
+        // gate. No second Hiqlite cluster or alternate authorization is used.
+        for (role, maintenance) in [
+            (LocalServingRole::Unclustered, false),
+            (LocalServingRole::Learner, false),
+            (LocalServingRole::Voter, true),
+        ] {
+            let admitted = app.clone().layer(axum::middleware::from_fn(
+                move |request: Request<Body>, next: Next| async move {
+                    if let Some(response) = capacity_maintenance_refusal(
+                        maintenance,
+                        request.method(),
+                        request.uri().path(),
+                    ) {
+                        return response;
+                    }
+                    if let Some(response) =
+                        capacity_role_refusal(Some(role), request.method(), request.uri().path())
+                    {
+                        return response;
+                    }
+                    next.run(request).await
+                },
+            ));
+            for path in [https_admin::PATH, https_admin::CERTIFICATE_PATH] {
+                assert_eq!(
+                    call(&admitted, get(path, None)).await.0,
+                    StatusCode::UNAUTHORIZED
+                );
+                assert_eq!(
+                    call(&admitted, get(path, Some(reader))).await.0,
+                    StatusCode::FORBIDDEN
+                );
+                let expected = if path == https_admin::PATH {
+                    StatusCode::OK
+                } else {
+                    StatusCode::NOT_FOUND
+                };
+                assert_eq!(call(&admitted, get(path, Some(&admin))).await.0, expected);
+            }
+            let (_, snapshot) = call(&admitted, get(https_admin::PATH, Some(&admin))).await;
+            let request = json!({"node_id":snapshot["node_id"],"revision":snapshot["revision"],"desired":snapshot["desired"]});
+            assert_eq!(
+                call(&admitted, put(https_admin::PATH, None, request.clone()))
+                    .await
+                    .0,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                call(
+                    &admitted,
+                    put(https_admin::PATH, Some(reader), request.clone())
+                )
+                .await
+                .0,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(
+                call(&admitted, put(https_admin::PATH, Some(&admin), request))
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+            if maintenance || matches!(role, LocalServingRole::Learner) {
+                assert_eq!(
+                    call(&admitted, get("/api/v1/settings", Some(&admin)))
+                        .await
+                        .0,
+                    StatusCode::SERVICE_UNAVAILABLE
+                );
+            }
+        }
+        // The exception grants nothing to fenced/unknown nodes.
+        for role in [Some(LocalServingRole::Fenced), None] {
+            let response =
+                capacity_role_refusal(role, &Method::GET, https_admin::PATH).expect("fenced");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            assert_eq!(body.as_ref(), NODE_REMOVAL_FENCED_JSON.as_bytes());
+        }
     }
 
     fn test_app() -> Router {

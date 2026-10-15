@@ -1,4 +1,9 @@
 //! Public HTTPS identity, independent of sharing pins and replicated settings.
+mod admin;
+mod transport;
+pub(crate) use admin::{Control, SaveError, Update};
+pub(crate) use transport::{Prepared, Serving};
+
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use plurx_core::config::https::HttpsConfig;
@@ -10,7 +15,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{Ipv4Addr, Ipv6Addr},
     path::Path,
     sync::Arc,
 };
@@ -405,7 +410,7 @@ mod tests {
             enabled: true,
             ..Default::default()
         }
-        .normalize(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+        .normalize(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED))
         .expect("synthetic HTTPS fixture")
     }
     fn directory() -> tempfile::TempDir {
