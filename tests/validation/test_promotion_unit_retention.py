@@ -523,6 +523,110 @@ class RetainedUnitCase(unittest.TestCase):
         with self.assertRaises(receipts.ReceiptError):
             self.validate(proof)
 
+        # The fixed historical instrumentation summary proves one whole command.
+        # Source declarations and assumption skips are not measured named passes.
+        policy = copy.deepcopy(retention.ANDROID_DEVICE_5172)
+        raw = ('[command]/usr/bin/sh -c ' + policy['command'] + '\n'
+               'tv.plurx.app.ExampleTest:.\nTime: 133.708\n\nOK (78 tests)\n'
+               '🏁  Job succeeded\n')
+        policy['log'] = log(raw)['sha256']
+        sources = {
+            '.github/workflows/ci.yml': b'env:\n  TEST: true\nconcurrency:\n  group: test\n'
+                b'jobs:\n  android_device:\n    name: test\n',
+            'Makefile': b'ANDROID_IMAGE ?= fixture\n# CI pre-pulls the image fixture\n'
+                b'android-instrumentation-run:\n\tfixture\n.PHONY: android-instrumentation\n',
+        }
+        read = lambda commit, path: sources.get(path, b'reader')
+        with patch.object(retention, 'android_device_tree', return_value='a' * 40):
+            policy['inputs'] = retention.android_device_inputs(read, policy['source'])
+        proof = fixture()
+        suite = proof['lanes']['rust'][0]
+        proof['lanes'] = {'android_device': [suite]}
+        proof.update(version=2, source_commit='d' * 40, command_units={
+            'version': 1, 'source_commit': 'd' * 40,
+            'logs': {log(raw)['sha256']: log(raw)}, 'commands': []})
+        suite.update(name='device', ids=[policy['id']], inventory=log(policy['id'] + '\n'),
+                     environment=copy.deepcopy(policy['environment']))
+        record = suite['records'][0]
+        record.update(source_commit=policy['source'], environment=copy.deepcopy(policy['environment']),
+            format='instrumentation-command-5172', outcomes={policy['id']: 'pass'}, log=log(raw),
+            origin={'kind': 'authenticated-ci', 'identity': policy['identity'],
+                    'command': policy['command']})
+        def validate_command(value, reader=read):
+            with patch.object(retention, 'ANDROID_DEVICE_5172', policy), \
+                    patch.object(retention, 'android_device_tree', return_value='a' * 40), \
+                    patch('validation.qualification_unit_continuation.validate', return_value={}):
+                result = retention.validate(value, 'd' * 40, source=reader,
+                                            differences=lambda before, after: set())
+                return result[0] if value['version'] == 2 else result
+        result = validate_command(proof)['android_device']
+        self.assertEqual((result['passed'], result['commands_passed'], result['reported_tests']),
+                         (1, 1, 78))
+        self.assertEqual(result['accounting'], 'whole-command-success')
+        for field in ('named_body_outcomes', 'passed_body_count', 'ignored_body_count'):
+            self.assertIsNone(result[field])
+        for mutate in (
+            lambda s, r: s.update(name='other'),
+            lambda s, r: r.update(source_commit='e' * 40),
+            lambda s, r: r['origin'].update(kind='attested-local'),
+            lambda s, r: r['origin'].update(identity='run:5172/job:51192'),
+            lambda s, r: r['origin'].update(command=policy['command'] + ' -e class Example'),
+            lambda s, r: r.update(log=log(raw + 'OK (78 tests)\n')),
+            lambda s, r: r.update(log=log(raw.replace('78 tests', '77 tests'))),
+            lambda s, r: r.update(log=log(raw.replace('[command]/usr/bin/sh -c ', ''))),
+            lambda s, r: r.update(outcomes={'Example/test': 'pass'}),
+            lambda s, r: s['records'].append(copy.deepcopy(r)),
+            lambda s, r: s['environment']['source_scope'].update(test_declarations=77),
+            lambda s, r: r['environment']['toolchain'].update(apk_sha256='a' * 64),
+            lambda s, r: s.update(aggregate={'total': 78, 'failed': 0, 'baseline_sequence': 1}),
+        ):
+            changed = copy.deepcopy(proof)
+            changed_suite = changed['lanes']['android_device'][0]
+            mutate(changed_suite, changed_suite['records'][0])
+            with self.subTest(mutation=mutate), self.assertRaises(receipts.ReceiptError):
+                validate_command(changed)
+        for path in policy['inputs']:
+            if path.startswith('workflow-') or path.startswith('make-'):
+                changed_path = ('.github/workflows/ci.yml' if path.startswith('workflow-')
+                                else 'Makefile')
+            else:
+                changed_path = path
+            with self.subTest(consumed_input=path), self.assertRaises(receipts.ReceiptError):
+                if path in ('clients/android', '.github/actions/android-emulator-ready'):
+                    with patch.object(retention, 'ANDROID_DEVICE_5172', policy), \
+                            patch.object(retention, 'android_device_tree', return_value='e' * 40):
+                        retention.android_device_record_contract('android_device', suite, record,
+                                                                 'd' * 40, read)
+                else:
+                    validate_command(proof, lambda c, p: b'changed' if p == changed_path else read(c, p))
+        old_version = copy.deepcopy(proof)
+        old_version.update(version=1)
+        del old_version['command_units']
+        with self.assertRaises(receipts.ReceiptError):
+            validate_command(old_version)
+        for path, suffix in (
+            ('Makefile', b'\noverride ANDROID_IMAGE := changed\n'),
+            ('Makefile', b'\nandroid-instrumentation-run:\n\tother-runner\n'),
+            ('.github/workflows/ci.yml', b'\nenv:\n  ANDROID_IMAGE: changed\n'),
+            ('.github/workflows/ci.yml', b'\ndefaults:\n  run:\n    shell: other\n'),
+            ('.github/workflows/ci.yml', b"\n'env':\n  ANDROID_IMAGE: changed\n"),
+            ('.github/workflows/ci.yml', b'\ndefaults :\n  run:\n    shell: other\n'),
+            ('.github/workflows/ci.yml', b"\n  other:\n    name: other\n  'android_device':\n    name: shadow\n"),
+        ):
+            with self.subTest(shadow=path, suffix=suffix), self.assertRaises(receipts.ReceiptError):
+                validate_command(proof, lambda c, p: read(c, p) + suffix if p == path else read(c, p))
+        job = {'name': 'Android instrumented UI tests', 'status': 'success', 'attempt': 1}
+        retention.authenticate_android_device_command(5172, 51191, job)
+        for run_id, job_id, altered in (
+            (5173, 51191, job), (5172, 51192, job),
+            (5172, 51191, {**job, 'status': 'failure'}),
+            (5172, 51191, {**job, 'attempt': 2}),
+            (5172, 51191, {**job, 'attempt': True}),
+            (5172, 51191, {**job, 'name': 'other'}),
+        ):
+            with self.assertRaises(receipts.ReceiptError):
+                retention.authenticate_android_device_command(run_id, job_id, altered)
+
     def test_failed_unit_cannot_be_reclassified_as_ignored(self):
         proof = fixture()
         suite = proof['lanes']['rust'][0]

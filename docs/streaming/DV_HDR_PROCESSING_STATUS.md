@@ -1615,5 +1615,23 @@ cannot disappear from the inventory.
 
 Astra reviewed both designs without executing units. The existing runtime
 mismatch control gains substitution, scheduling, partial-capture and target
-authority refusal cases; its changed body is owed once after task integration.
+authority refusal cases; its changed body passed once on integrated effort
+`c6d80bf30`.
 This decoder work supplies no new playback, deployment or qualification result.
+
+### R48 — Preserve the successful Android instrumentation command
+
+The original promotion's Android instrumentation job succeeded and reported
+78 cases. Its complete log has class headings and a summary, but no named
+method outcomes. Fixture assumptions mean that this is not evidence of 78
+executed passing bodies. A finite adoption format retains one successful
+`make android-instrumentation-run` command with 78 reported cases; named pass
+and ignored counts remain unknown.
+
+The format binds the original source, successful job, attempt and complete log,
+the Android and emulator source trees, shared reader assets, and consumed
+workflow and Make recipes. Changed selectors, runner, inputs, scope, raw output
+or job status refuse retention. Existing per-ID and failed-aggregate formats
+remain unchanged. Astra reviewed the design. The expanded existing aggregate
+Android control is owed once on the integrated effort; no task unit executes.
+Current-main qualification, deployment and all physical HDR cases remain open.
