@@ -366,9 +366,13 @@ struct ReconnectView: View {
             }
 
             Button("Use a different server") { model.changeServer() }
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                #else
                 .font(.system(.caption, design: .monospaced))
                 .foregroundColor(Palette.muted)
                 .buttonStyle(.plain)
+                #endif
         }
     }
 }

@@ -578,7 +578,7 @@ observed behavior and remaining limits, not pixel-for-pixel equivalence.
 | R07 | Compact Live toolbar; named channel actions; channel layouts use explicit choices; future programmes open information. | Native Live/channel journeys pass individually; Live browse and fullscreen captures inspected. Guide paging and reminder expiry are separate outstanding matrix rows. |
 | R08 | Title-first recording row spans the content width, opens detail and returns exactly; rule confirmation starts on Keep; manual scheduling uses named channels. | Native journey and actual row/confirmation captures inspected. Destructive commit and disappearing-row stress remain separate from safe cancellation. |
 | R09 | Help is a visible category; reporting offers an explicit phone export and Advanced controls. Instructions wrap fully. | Native Settings/report journey and corrected instruction capture inspected. Physical couch-distance QR scanning remains open. |
-| R10 | Retry, different server and Help are in the connection form. Help uses secondary styling. Recovery is visible during discovery, and late discovery cannot override a newer retry/server choice. | Native five-second recovery, report return and saved-sign-in reuse pass individually; final candidate capture review required. |
+| R10 | Retry, different server and Help are in the connection form. Help uses secondary styling. Recovery is visible during discovery, and late discovery cannot override a newer retry/server choice. | Native five-second recovery, direct Down through Retry → server choice → Help, report return and saved-sign-in reuse pass individually. Actual recovery captures inspected. |
 | R11 | Shared Source remains visible; full-screen playback uses the common remote grammar; About exposes every synopsis region and restores its opener. | Native Shared journey and final-paragraph capture inspected. The existing file-specific detail layout is retained; the plate's hero composition is illustrative. Shared authorization and controller ownership remain separate. |
 | R12 | Required native suite rejects missing/skipped tests, records source/app hashes, preserves failures, and blocks the affected Apple promotion paths. | Gate wiring and runner tests pass. No physical qualification or release is claimed by a simulator receipt. |
 
@@ -768,8 +768,16 @@ The runner now requires 25 native journeys, including Shared playback, Home
 foreground recovery and saved-connection recovery. An earlier combined run was
 intentionally interrupted after passing six journeys when independent visual
 validation exposed additional recovery work; that partial result is retained
-and is not a passing suite. The final integrated native run and physical
-acceptance remain open. Do not mark the project complete when only Movies passes.
+and is not a passing suite. A later combined run exposed a test setup defect in Live TV: geometric
+snapshot discovery consumed the four-second idle interval without sending a
+remote event, so the controls correctly hid before the helper read their
+frames. The retained failing trace shows that interval. The replacement
+journey sends Right through each of the four named fullscreen controls,
+asserts actual focus after each press and then verifies report/Back/session
+retention; its focused rerun passes. It uses unique fullscreen identifiers to
+exclude similarly named covered controls. The full suite must pass on the
+updated candidate; these diagnoses do not turn failed runs into qualification.
+The final integrated native run and physical acceptance remain open. Do not mark the project complete when only Movies passes.
 
 **Non-goals:** no server transport rewrite, removal of diagnostic capture,
 feature enablement policy change, new hidden remote gestures, or redesign of

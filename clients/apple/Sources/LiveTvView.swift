@@ -4308,6 +4308,7 @@ struct LiveTvView: View {
                 Label("Guide", systemImage: "rectangle.grid.3x2")
             }
             .focused(focus, equals: .pillGuide)
+            .accessibilityIdentifier("live-player-guide")
             .remoteControl("live:guide", label: "Guide") { openTemporaryGuide() }
             // Focus on the list is requested when the cover has gone
             // (`restoreBrowseFocusAfterCover`), not here while it is still up.
@@ -4315,11 +4316,13 @@ struct LiveTvView: View {
                 Label("Channels", systemImage: "list.bullet")
             }
             .focused(focus, equals: .pillChannels)
+            .accessibilityIdentifier("live-player-channels")
             .remoteControl("live:channels", label: "Channels") { browse = .list; fullscreen = false }
             Button { coverSheetOpener = .pillInfo; showStreamInfo() } label: {
                 Label("Info", systemImage: "info.circle")
             }
             .focused(focus, equals: .pillInfo)
+            .accessibilityIdentifier("live-player-info")
             Button { coverSheetOpener = .pillMore; showingMore = true } label: {
                 Label("More", systemImage: "ellipsis")
             }

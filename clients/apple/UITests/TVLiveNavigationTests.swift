@@ -30,8 +30,14 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         remote.press(.right)
         assertFocus(pause, in: app, context: "Live first Right reveals Pause")
         let more = app.buttons["live-player-more"]
-        reachForSetup(more, in: app, limit: 8)
-        assertFocus(more, in: app, context: "Live More")
+        XCTAssertEqual(pause.label, "Pause", "The reveal press must not pause playback")
+        // Exercise the actual four-step transport row. Generic geometric
+        // discovery can spend the entire idle-hide interval taking snapshots
+        // without delivering any remote input.
+        for (identifier, name) in [("live-player-guide", "Guide"), ("live-player-channels", "Channels"), ("live-player-info", "Info"), ("live-player-more", "More")] {
+            remote.press(.right)
+            assertFocus(app.buttons[identifier], in: app, context: "Live Right reaches " + name)
+        }
         remote.press(.select)
         let report = app.buttons["diagnostics-open"]
         reachForSetup(report, in: app, limit: 10)

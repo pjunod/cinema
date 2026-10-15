@@ -16,9 +16,11 @@ final class TVConnectionNavigationTests: TVNavigationTestCase {
         XCTAssertTrue(retry.waitForExistence(timeout: 5), app.debugDescription)
         reachForSetup(retry, in: app, limit: 4)
         assertFocus(retry, in: app, context: "Saved connection Retry")
+        remote.press(.down)
+        assertFocus(app.buttons["Use a different server"], in: app, context: "Connection server choice below Retry")
         let report = app.buttons["diagnostics-open"]
         XCTAssertEqual(report.label, "Help")
-        reachForSetup(report, in: app, limit: 4)
+        remote.press(.down)
         assertFocus(report, in: app, context: "Connection report stays in the form")
         remote.press(.select)
         assertFocus(app.buttons["diagnostics-done"], in: app, context: "Connection report safe entry")

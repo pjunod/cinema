@@ -59,7 +59,7 @@ async function stopLiveTv(){
   else { LIVE_TV.pendingChannel=null; LIVE_TV.preview=null; }
   const serial=++LIVE_TV.serial;
   LIVE_TV.starting=null; LIVE_TV.tuningChannel=null;
-  liveTvPlaybackState("idle","");
+  liveTvPlaybackState("idle","Stopping live TV…");
   const host=document.getElementById("live-tv-host");
   // `document.exitFullscreen()` resolves before Chromium dispatches its
   // fullscreenchange event. Move out of `full` first so that late event cannot
@@ -83,6 +83,13 @@ async function stopLiveTv(){
     if(host) host.hidden=true;
   }
   const stopped=await stopping; if(!stopped.ok) throw stopped.error;
+  // A release reply belongs to the Stop that sent it, not a later channel.
+  // A false result is a local no-op, not an owner acknowledgement: an
+  // unanswered Start can still retain the hint needed to retire its tuner.
+  if(serial===LIVE_TV.serial) liveTvMessage(stopped.value===true
+    ?"Live TV stopped. Select a channel to watch."
+    :LIVE_TV.hint?"Playback stopped locally. Tuner release is unconfirmed."
+      :"Playback stopped locally. Select a channel to watch.");
   return stopped.value;
 }
 async function watchLiveTv(index,isCompatibilityRetry=false){
