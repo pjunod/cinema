@@ -1149,3 +1149,11 @@ Production callback scheduling and playback fences are unchanged. Both entire
 affected classes pass locally: 137 tests, zero failures, on Xcode 27.0 and an
 owned iOS 26.5 simulator. No branch app is installed on a physical device.
 Independent review, the task gate and fresh full promotion remain required.
+
+Apple task gate 5234 reaches its ten-minute preflight deadline during the
+full operations sweep, after all 359 validation tests pass. Its partial
+operations output is not a completed suite or retained success. Preserve
+the failed log and raise only the effort preflight to the existing fast
+lane's finite 15-minute receipt-publication budget. Every history, policy,
+validation and operations check remains required; the full main preflight
+keeps its existing budget. The exact-head task gate must run again.

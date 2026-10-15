@@ -2177,10 +2177,10 @@ assert.equal(context.ACT_TIMER, null);
         effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
-        # PR #962 raised the main fast lane's preflight to fifteen minutes so
-        # its receipt publications finish; the effort gate keeps ten.
+        # Both receipt-producing preflights retain a finite fifteen-minute
+        # budget so the full history/contracts can publish their evidence.
         self.assertIn("timeout-minutes: 15", fast_jobs["preflight"])
-        self.assertIn("timeout-minutes: 10", effort_jobs["preflight"])
+        self.assertIn("timeout-minutes: 15", effort_jobs["preflight"])
         fast_rust_steps = workflow_step_blocks(fast_jobs["rust_compile"])
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")
@@ -3726,7 +3726,7 @@ assert.equal(context.ACT_TIMER, null);
                 preflight = workflow_job_blocks(
                     f".github/workflows/{workflow}.yml"
                 )["preflight"]
-                budget = 15 if workflow == "main-fast-lane" else 10
+                budget = 10 if workflow == "ci" else 15
                 self.assertIn(f"timeout-minutes: {budget}", preflight)
                 for command in (
                     "make history-check",
