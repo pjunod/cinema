@@ -42,6 +42,7 @@ final class TVSharedPlaybackNavigationTests: TVNavigationTestCase {
         let hidden = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !pause.exists }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 10), .completed, app.debugDescription)
         assertFocus(app.buttons["shared-player-reveal"], in: app, context: "Hidden shared video owns remote focus")
+        assertHiddenFixtureVideoIsUnobstructed(in: app)
         remote.press(.right)
         assertFocus(pause, in: app, context: "Shared first Right reveals Pause")
         remote.press(.select)

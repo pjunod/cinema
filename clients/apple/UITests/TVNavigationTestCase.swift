@@ -1,5 +1,6 @@
 #if os(tvOS)
 import XCTest
+import UIKit
 
 /// Shared shipping-route setup; measured assertions always observe native focus.
 @MainActor
@@ -132,6 +133,45 @@ class TVNavigationTestCase: XCTestCase {
         return expected.width > 0 && expected.height > 0
             && abs(expected.minX - actual.minX) <= 1 && abs(expected.minY - actual.minY) <= 1
             && abs(expected.width - actual.width) <= 1 && abs(expected.height - actual.height) <= 1
+    }
+
+    /// The navigation movie/HLS fixtures are solid black. Native focus must
+    /// remain on the reveal target without painting a button over that video.
+    func assertHiddenFixtureVideoIsUnobstructed(in app: XCUIApplication,
+                                               file: StaticString = #filePath, line: UInt = #line) {
+        let screenshot = app.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = "Hidden video must contain no visible focus control"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        guard let image = screenshot.image.cgImage else {
+            XCTFail("Missing screenshot pixels", file: file, line: line)
+            return
+        }
+        let width = 128, height = 72
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let rendered = pixels.withUnsafeMutableBytes { bytes -> Bool in
+            guard let context = CGContext(data: bytes.baseAddress, width: width, height: height,
+                                          bitsPerComponent: 8, bytesPerRow: width * 4,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                                            | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        XCTAssertTrue(rendered, "Could not inspect screenshot pixels", file: file, line: line)
+        var brightPixels = 0
+        for y in (height / 3)..<(height * 2 / 3) {
+            for x in (width / 3)..<(width * 2 / 3) {
+                let offset = (y * width + x) * 4
+                if pixels[offset] > 32 || pixels[offset + 1] > 32 || pixels[offset + 2] > 32 {
+                    brightPixels += 1
+                }
+            }
+        }
+        XCTAssertLessThanOrEqual(brightPixels, 1,
+                                "Hidden video has \(brightPixels) bright center pixels; the focus target must not draw chrome",
+                                file: file, line: line)
     }
 
     func assertFocus(_ target: XCUIElement, in app: XCUIApplication, context: String,

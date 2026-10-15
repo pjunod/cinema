@@ -27,6 +27,7 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         let hidden = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !pause.exists }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 10), .completed, app.debugDescription)
         assertFocus(app.buttons["live-player-reveal"], in: app, context: "Hidden Live TV owns remote focus")
+        assertHiddenFixtureVideoIsUnobstructed(in: app)
         remote.press(.right)
         assertFocus(pause, in: app, context: "Live first Right reveals Pause")
         let more = app.buttons["live-player-more"]

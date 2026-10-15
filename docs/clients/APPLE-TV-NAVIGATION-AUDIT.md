@@ -537,6 +537,29 @@ all enabled tabs in both directions after visiting content, plus detail Back
 restoration and feature-removal fallback. This new finding comes from the
 implementation's whole-app tests, not the original source-only audit.
 
+### F31 · P1 · N — hidden playback paints a white focus box over video
+
+**Evidence:** after build 239 was installed, the owner reported a white rounded
+box centered on playing video which disappeared when controls appeared. The
+retained native hidden-video capture contains the same box. The earlier visual
+review missed it: native focus assertions passed without checking whether the
+focus target painted visible chrome. The new screenshot assertion fails on the
+old implementation with 148 bright pixels in the solid-black fixture's center.
+
+**Fix:** the shared reveal target keeps its native Button and remote routing,
+but uses an explicit label-only ButtonStyle. tvOS PlainButtonStyle paints a
+focused bezel even when its label is clear and focus effects are disabled.
+Movies, Live TV, library channels and Shared playback all use this target.
+
+**Proof:** each of the four existing native playback journeys now checks the
+actual screenshot pixels after asserting native hidden-target focus, then
+continues through reveal, More/report and exact Back/session restoration.
+The black MP4 and HLS fixtures make visible control chrome a measurable
+failure. Earlier 26-journey receipts remain input evidence; they do not prove
+this missing visual assertion. All four corrected journeys pass, and the hidden movie and Live captures were
+visually checked. The corrected build 239 is installed on the paired Apple TV.
+Final promotion stays held until the correction and the updated gate pass.
+
 ## 6. Proposed renderings — consistent interaction before decoration
 
 The [gallery](apple-tv-navigation/index.html) includes twelve annotated design

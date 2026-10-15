@@ -330,6 +330,12 @@ struct PlayerRevealSurface: View {
     }
 }
 
+/// tvOS PlainButtonStyle still paints a focused bezel over a clear label.
+/// Keep the native button/input semantics, but render only our clear label.
+private struct PlaybackRevealButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { configuration.label }
+}
+
 private struct NativePlaybackRevealTarget: View {
     let identifier: String
     let enabled: () -> Bool
@@ -341,7 +347,7 @@ private struct NativePlaybackRevealTarget: View {
         Button { if enabled() { reveal() } } label: {
             Color.clear.contentShape(Rectangle()).frame(width: 120, height: 120)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PlaybackRevealButtonStyle())
         .focusEffectDisabled()
         .focused($focused)
         .accessibilityLabel("Show playback controls")

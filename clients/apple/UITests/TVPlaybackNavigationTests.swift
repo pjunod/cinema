@@ -25,6 +25,7 @@ final class TVPlaybackNavigationTests: TVNavigationTestCase {
         waitUntil("Local controls hide", app: app, timeout: 10) { !pause.exists }
         XCTAssertFalse(app.buttons["diagnostics-open"].exists)
         assertFocus(app.buttons["player-reveal"], in: app, context: "Hidden local video owns remote focus")
+        assertHiddenFixtureVideoIsUnobstructed(in: app)
         remote.press(.right)
         assertFocus(pause, in: app, context: "Local first Right reveals Play Pause")
         let decisions = server.requestCount("/api/v1/files/1/decision")
@@ -69,6 +70,7 @@ final class TVPlaybackNavigationTests: TVNavigationTestCase {
 
         let reveal = app.descendants(matching: .any)["channel-player-reveal"]
         assertFocus(reveal, in: app, context: "Hidden channel surface owns the native remote")
+        assertHiddenFixtureVideoIsUnobstructed(in: app)
         remote.press(.playPause)
         XCTAssertTrue(app.buttons["Resume live"].firstMatch.waitForExistence(timeout: 5),
                       "Play/Pause must reach the existing transport owner from native reveal")
