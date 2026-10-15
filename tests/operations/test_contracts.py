@@ -1681,6 +1681,20 @@ assert.equal(context.ACT_TIMER, null);
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
         self.assertIn("timeout-minutes: 20", fast_rust)
+        for compiler_job in (
+            metadata_jobs["rust_compile"],
+            metadata_jobs["cluster_wal"],
+            workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
+        ):
+            compiler_header = compiler_job.split("    steps:", 1)[0]
+            self.assertIn(
+                "runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]",
+                compiler_header,
+            )
+            self.assertRegex(
+                compiler_header,
+                r'(?m)^      CARGO_BUILD_JOBS: "1"$',
+            )
         self.assertIn("run: make effort-rust-check", fast_rust)
         self.assertNotIn("cargo test", fast_rust)
         fast_finalize = fast_rust.split(
