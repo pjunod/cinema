@@ -634,7 +634,12 @@ impl WorkerObservation {
                     && model.model_sha256.len() == 64
                     && matches!(
                         model.status.as_str(),
-                        "missing" | "installed" | "verified" | "verification_failed" | "unknown"
+                        "missing"
+                            | "unverified_cache"
+                            | "installed"
+                            | "verified"
+                            | "verification_failed"
+                            | "unknown"
                     )
                     && model
                         .reason
@@ -676,7 +681,11 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
             .read()
             .await
             .contains(&spec.id);
-        let verified = !failed
+        let accepted = opened.as_ref().ok().is_some_and(|identity| {
+            accepted_model_identity(&state.node_id, spec, *identity, receipt)
+        });
+        let verified = accepted
+            && !failed
             && opened.as_ref().ok().zip(engine).zip(receipt).is_some_and(
                 |((model, engine), receipt)| {
                     receipt.boot_id == state.subtitle_models.boot_id
@@ -686,7 +695,9 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
                         && receipt.engine_file_identity == artifacts::identity_key(engine.identity)
                 },
             );
-        let status = if failed {
+        let status = if opened.is_ok() && !accepted {
+            "unverified_cache"
+        } else if failed {
             "verification_failed"
         } else if verified {
             "verified"
@@ -713,17 +724,9 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
                 None
             },
         });
-        let automatic_key = opened.as_ref().ok().zip(engine).map(|(model, engine)| {
-            format!(
-                "{}:{}:{}",
-                spec.id,
-                artifacts::identity_key(*model),
-                artifacts::identity_key(engine.identity)
-            )
-        });
         if !verified && !failed {
-            if let Some(key) = automatic_key {
-                schedule_automatic_verification(state, spec, &key).await?;
+            if let Some((model, engine)) = opened.as_ref().ok().zip(engine) {
+                requalify_accepted_model(state, spec, *model, engine.identity, receipt).await?;
             }
         }
     }
@@ -774,6 +777,128 @@ async fn refresh_local(state: &AppState) -> Result<(), StoreError> {
     };
     *state.subtitle_models.local.write().await = Some((Instant::now(), observation));
     Ok(())
+}
+
+fn accepted_model_identity(
+    node_id: &str,
+    spec: &CatalogModel,
+    identity: plurx_core::fs_secure::FileIdentity,
+    receipt: Option<&plurx_core::store::background_jobs_transcription::SubtitleModelReceipt>,
+) -> bool {
+    receipt.is_some_and(|receipt| {
+        receipt.node_id == node_id
+            && receipt.model_id == spec.id
+            && receipt.model_sha256 == spec.sha256
+            && receipt.model_file_identity == artifacts::identity_key(identity)
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ModelOperationOrigin<'a> {
+    Explicit,
+    Automatic {
+        boot_id: &'a str,
+        identity_sha: &'a str,
+    },
+}
+
+fn model_operation_origin<'a>(
+    job: &'a BackgroundJob,
+    payload: &JobPayload,
+) -> Option<ModelOperationOrigin<'a>> {
+    let JobPayload::SubtitleModelOperation { action, .. } = payload else {
+        return None;
+    };
+    let digest = hex::encode(Sha256::digest(serde_json::to_vec(payload).ok()?));
+    let prefix = format!("subtitle-model:{digest}:");
+    let suffix = job.dedupe_key.strip_prefix(&prefix)?;
+    if suffix == "request" {
+        return Some(ModelOperationOrigin::Explicit);
+    }
+    let (boot_id, identity_sha) = suffix.split_once(':')?;
+    (*action == ModelAction::Verify
+        && uuid::Uuid::parse_str(boot_id).is_ok()
+        && identity_sha.len() == 64
+        && identity_sha
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some(ModelOperationOrigin::Automatic {
+        boot_id,
+        identity_sha,
+    })
+}
+
+fn automatic_model_operation_current(
+    state: &AppState,
+    job: &BackgroundJob,
+    payload: &JobPayload,
+    spec: &CatalogModel,
+    model: plurx_core::fs_secure::FileIdentity,
+    engine: plurx_core::fs_secure::FileIdentity,
+    receipt: Option<&plurx_core::store::background_jobs_transcription::SubtitleModelReceipt>,
+) -> bool {
+    let Some(ModelOperationOrigin::Automatic {
+        boot_id,
+        identity_sha,
+    }) = model_operation_origin(job, payload)
+    else {
+        return false;
+    };
+    let key = format!(
+        "{}:{}:{}",
+        spec.id,
+        artifacts::identity_key(model),
+        artifacts::identity_key(engine)
+    );
+    boot_id == state.subtitle_models.boot_id
+        && accepted_model_identity(&state.node_id, spec, model, receipt)
+        && identity_sha == hex::encode(Sha256::digest(key.as_bytes()))
+}
+
+async fn retire_obsolete_model_operation(
+    state: &AppState,
+    job: &BackgroundJob,
+    spec: &CatalogModel,
+) -> Result<(), StoreError> {
+    state
+        .store
+        .cancel_job(plurx_core::store::background_jobs::CancelJob {
+            job_id: job.id.clone(),
+            now_ms: crate::state::clock_ms(),
+        })
+        .await?;
+    // A failed or stale queued attempt must not suppress a fresh current-boot
+    // verification. Durable admission still coalesces an already-current job.
+    state
+        .subtitle_models
+        .automatic_verifications
+        .write()
+        .await
+        .remove(&spec.id);
+    Ok(())
+}
+
+/// Only a successfully accepted installation may be requalified automatically.
+/// A cancelled/crashed first install or replacement can leave immutable cache
+/// bytes, but those bytes do not carry permission to finish the stopped work.
+/// Explicit Install/Test may deliberately qualify them in its own fenced job.
+async fn requalify_accepted_model(
+    state: &AppState,
+    spec: &CatalogModel,
+    model: plurx_core::fs_secure::FileIdentity,
+    engine: plurx_core::fs_secure::FileIdentity,
+    receipt: Option<&plurx_core::store::background_jobs_transcription::SubtitleModelReceipt>,
+) -> Result<bool, StoreError> {
+    if !accepted_model_identity(&state.node_id, spec, model, receipt) {
+        return Ok(false);
+    }
+    let key = format!(
+        "{}:{}:{}",
+        spec.id,
+        artifacts::identity_key(model),
+        artifacts::identity_key(engine)
+    );
+    schedule_automatic_verification(state, spec, &key).await
 }
 
 async fn schedule_automatic_verification(
@@ -1074,6 +1199,34 @@ pub(crate) async fn worker_pass(
                 .await;
             continue;
         }
+        let generation = matches!(payload, JobPayload::SubtitleTranscribeManaged { .. });
+        let automatic_model_identity = if !generation {
+            match model_operation_origin(&candidate, &payload) {
+                Some(ModelOperationOrigin::Explicit) => None,
+                Some(ModelOperationOrigin::Automatic { boot_id, .. }) => {
+                    let model = artifacts::model_identity(&state.subtitle_models.root, spec)
+                        .await
+                        .ok();
+                    let receipts = state.store.subtitle_model_receipts(&state.node_id).await?;
+                    let receipt = receipts.iter().find(|receipt| receipt.model_id == spec.id);
+                    if boot_id != state.subtitle_models.boot_id
+                        || !model.is_some_and(|model| {
+                            accepted_model_identity(&state.node_id, spec, model, receipt)
+                        })
+                    {
+                        retire_obsolete_model_operation(state, &candidate, spec).await?;
+                        continue;
+                    }
+                    model
+                }
+                None => {
+                    retire_obsolete_model_operation(state, &candidate, spec).await?;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         let engine = match artifacts::inspect_engine().await {
             Ok(engine) => engine,
             Err(_) => {
@@ -1084,7 +1237,22 @@ pub(crate) async fn worker_pass(
                 continue;
             }
         };
-        let generation = matches!(payload, JobPayload::SubtitleTranscribeManaged { .. });
+        if let Some(model) = automatic_model_identity {
+            let receipts = state.store.subtitle_model_receipts(&state.node_id).await?;
+            let receipt = receipts.iter().find(|receipt| receipt.model_id == spec.id);
+            if !automatic_model_operation_current(
+                state,
+                &candidate,
+                &payload,
+                spec,
+                model,
+                engine.identity,
+                receipt,
+            ) {
+                retire_obsolete_model_operation(state, &candidate, spec).await?;
+                continue;
+            }
+        }
         let model_identity = if generation {
             let model = match artifacts::model_identity(&state.subtitle_models.root, spec).await {
                 Ok(model) => model,
@@ -1230,6 +1398,9 @@ pub(crate) async fn worker_pass(
                             .await?
                         }
                     };
+                    if automatic_model_identity.is_some_and(|accepted| accepted != model.identity) {
+                        return Err(StoreError::Task("automatic_verification_obsolete".into()));
+                    }
                     let admission = match preadmission {
                         Some(admission) => admission,
                         None => state.transcode.admit_fragment().await.ok_or_else(|| {
@@ -1253,6 +1424,19 @@ pub(crate) async fn worker_pass(
                     .await?;
                     if cancel.is_cancelled() {
                         return Err(StoreError::Task("worker_interrupted".into()));
+                    }
+                    let named = artifacts::model_identity(&state.subtitle_models.root, spec)
+                        .await
+                        .map_err(StoreError::Task)?;
+                    if named != model.identity {
+                        return Err(StoreError::Task(
+                            if automatic_model_identity.is_some() {
+                                "automatic_verification_obsolete"
+                            } else {
+                                "artifact_changed"
+                            }
+                            .into(),
+                        ));
                     }
                     let receipt =
                         plurx_core::store::background_jobs_transcription::SubtitleModelReceipt {
@@ -1361,7 +1545,19 @@ pub(crate) async fn worker_pass(
             }
             Err(error) => {
                 let reason = error.to_string();
-                if cancel.is_cancelled()
+                if reason.contains("automatic_verification_obsolete") {
+                    let _ = fence
+                        .settle(JobSettlement::Stop {
+                            error_code: "automatic_verification_obsolete".into(),
+                        })
+                        .await;
+                    state
+                        .subtitle_models
+                        .automatic_verifications
+                        .write()
+                        .await
+                        .remove(&spec.id);
+                } else if cancel.is_cancelled()
                     || shutdown.is_cancelled()
                     || reason.contains("waiting_for_playback_capacity")
                     || reason.contains("worker_interrupted")
@@ -1493,6 +1689,377 @@ mod tests {
             std::sync::Arc::new(crate::logbuf::LogBuffer::new(64)),
         )
     }
+    fn persistent_state(root: &Path, database: &Path) -> AppState {
+        let mut state = state(root);
+        state.store = std::sync::Arc::new(SqliteStore::open(database).expect("persistent SQLite"));
+        state.subtitle_models = std::sync::Arc::new(Runtime::new(root));
+        state
+    }
+
+    async fn model_receipt_fixture(
+        state: &AppState,
+        identity: plurx_core::fs_secure::FileIdentity,
+        action: ModelAction,
+        cancelled: bool,
+    ) {
+        use plurx_core::store::{
+            background_jobs::{JobKind, JobSettlement, SettleJob},
+            background_jobs_transcription::{PublishSubtitleModel, SubtitleModelReceipt},
+        };
+        let spec = &catalog().models[0];
+        let outcome = enqueue_model_operation(state, spec, &state.node_id, action, None)
+            .await
+            .expect("explicit operation");
+        let EnqueueOutcome::Accepted { job_id, .. } = outcome else {
+            panic!("fresh explicit operation: {outcome:?}");
+        };
+        let queued = state
+            .store
+            .background_job(&job_id)
+            .await
+            .expect("read")
+            .expect("job");
+        let now = crate::state::clock_ms();
+        let ClaimOutcome::Claimed { job } = state
+            .store
+            .claim_artifact_job(ClaimJob {
+                job_id: job_id.clone(),
+                expected_revision: queued.revision,
+                node_id: state.node_id.clone(),
+                boot_id: state.subtitle_models.boot_id.clone(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::SubtitleModelOperation,
+                payload_version: 1,
+                now_ms: now,
+                dispatched_at_ms: now,
+            })
+            .await
+            .expect("claim")
+        else {
+            panic!("owned model operation");
+        };
+        let source = job.supported_payload().expect("typed operation");
+        let token = job.token.expect("owned token");
+        let receipt = SubtitleModelReceipt {
+            node_id: state.node_id.clone(),
+            boot_id: state.subtitle_models.boot_id.clone(),
+            model_id: spec.id.clone(),
+            model_sha256: spec.sha256.clone(),
+            adapter_contract: catalog().adapter_contract.clone(),
+            engine_sha256: "e".repeat(64),
+            model_file_identity: artifacts::identity_key(identity),
+            engine_file_identity: "engine-original".into(),
+            job_id: job_id.clone(),
+            fence: token.fence,
+            verified_at_ms: now + 1,
+        };
+        if cancelled {
+            // Refresh can run while Install owns bytes but before it has a receipt.
+            let receipts = state
+                .store
+                .subtitle_model_receipts(&state.node_id)
+                .await
+                .expect("receipts");
+            let prior = receipts.iter().find(|receipt| receipt.model_id == spec.id);
+            assert!(
+                !requalify_accepted_model(state, spec, identity, identity, prior)
+                    .await
+                    .expect("refresh during install")
+            );
+            let stopped = state
+                .store
+                .cancel_job(CancelJob {
+                    job_id,
+                    now_ms: now + 1,
+                })
+                .await
+                .expect("Stop")
+                .expect("stopped job");
+            assert!(!state
+                .store
+                .publish_subtitle_model(PublishSubtitleModel {
+                    token,
+                    source,
+                    receipt,
+                    now_ms: now + 2,
+                })
+                .await
+                .expect("fenced ready publication"));
+            assert!(state
+                .store
+                .settle_job(SettleJob {
+                    token: stopped.token.expect("current cancelling token"),
+                    settlement: JobSettlement::Cancel,
+                    now_ms: now + 2,
+                })
+                .await
+                .expect("retire stopped attempt"));
+        } else {
+            assert!(state
+                .store
+                .publish_subtitle_model(PublishSubtitleModel {
+                    token,
+                    source,
+                    receipt,
+                    now_ms: now + 1,
+                })
+                .await
+                .expect("successful fenced receipt"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_install_cache_cannot_requalify_after_restart_or_replacement() {
+        use plurx_core::fs_secure::std_file_identity;
+        let root = crate::test_tempdir().expect("private root");
+        let database = root.path().join("eligibility.sqlite");
+        let spec = &catalog().models[0];
+        let model_root = root.path().join("subtitle-models");
+        std::fs::create_dir(&model_root).expect("model root");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&model_root, std::fs::Permissions::from_mode(0o700))
+            .expect("private models");
+        let cached_path = model_root.join(format!("{}.bin", spec.sha256));
+        // Only filesystem identity and durable receipt eligibility are under
+        // test here; these bytes do not claim to be a recognizer model.
+        let cache = std::fs::File::create(&cached_path).expect("cache");
+        cache
+            .set_len(spec.download_bytes)
+            .expect("sparse metadata fixture");
+        cache
+            .set_permissions(std::fs::Permissions::from_mode(0o400))
+            .expect("model permissions");
+        drop(cache);
+        let held = std::fs::File::open(&cached_path).expect("held original cache");
+        let original = std_file_identity(&held).expect("identity");
+        let initial = persistent_state(root.path(), &database);
+        model_receipt_fixture(&initial, original, ModelAction::Install, true).await;
+        assert!(initial
+            .store
+            .subtitle_model_receipts(&initial.node_id)
+            .await
+            .expect("receipts")
+            .is_empty());
+        initial.shutdown.cancel();
+        drop(initial);
+
+        let rebooted = persistent_state(root.path(), &database);
+        assert!(
+            !requalify_accepted_model(&rebooted, spec, original, original, None)
+                .await
+                .expect("cancelled cache stays ineligible after actual SQLite reopen")
+        );
+        assert!(rebooted
+            .subtitle_models
+            .automatic_verifications
+            .read()
+            .await
+            .is_empty());
+        // A fresh explicit Test deliberately qualifies already downloaded cache.
+        model_receipt_fixture(&rebooted, original, ModelAction::Verify, false).await;
+        let accepted_boot = rebooted.subtitle_models.boot_id.clone();
+        rebooted.shutdown.cancel();
+        drop(rebooted);
+
+        let next_boot = persistent_state(root.path(), &database);
+        assert_ne!(next_boot.subtitle_models.boot_id, accepted_boot);
+        let receipts = next_boot
+            .store
+            .subtitle_model_receipts(&next_boot.node_id)
+            .await
+            .expect("durable receipt");
+        let prior = receipts.first().expect("successful explicit Test receipt");
+        assert!(accepted_model_identity(
+            &next_boot.node_id,
+            spec,
+            original,
+            Some(prior)
+        ));
+        let changed_engine = plurx_core::fs_secure::FileIdentity {
+            inode: original.inode.saturating_add(1),
+            ..original
+        };
+        assert!(
+            requalify_accepted_model(&next_boot, spec, original, changed_engine, Some(prior))
+                .await
+                .expect(
+                    "successful unchanged installation requalifies across boot and engine change"
+                )
+        );
+        let candidates = next_boot
+            .store
+            .job_candidates(plurx_core::store::background_jobs::CandidateQuery {
+                node_id: next_boot.node_id.clone(),
+                kinds: vec![plurx_core::store::background_jobs::JobKind::SubtitleModelOperation],
+                after: None,
+                now_ms: crate::state::clock_ms() + 10,
+                limit: 32,
+            })
+            .await
+            .expect("automatic Verify");
+        assert_eq!(candidates.jobs.len(), 1);
+        let auto = candidates.jobs[0].clone();
+        assert!(matches!(
+            auto.supported_payload().expect("automatic payload"),
+            JobPayload::SubtitleModelOperation {
+                action: ModelAction::Verify,
+                ..
+            }
+        ));
+        let automatic_payload = auto.supported_payload().expect("automatic payload");
+        assert!(automatic_model_operation_current(
+            &next_boot,
+            &auto,
+            &automatic_payload,
+            spec,
+            original,
+            changed_engine,
+            Some(prior)
+        ));
+        let mut old_boot_auto = auto.clone();
+        old_boot_auto.dedupe_key = auto
+            .dedupe_key
+            .replace(&next_boot.subtitle_models.boot_id, &accepted_boot);
+        assert!(
+            !automatic_model_operation_current(
+                &next_boot,
+                &old_boot_auto,
+                &automatic_payload,
+                spec,
+                original,
+                changed_engine,
+                Some(prior)
+            ),
+            "old-boot automatic work cannot claim unchanged accepted bytes"
+        );
+        let mut malformed = auto.clone();
+        malformed.dedupe_key.push_str(":extra");
+        assert!(model_operation_origin(&malformed, &automatic_payload).is_none());
+        malformed.dedupe_key = "subtitle-model:not-the-payload-digest:request".into();
+        assert!(model_operation_origin(&malformed, &automatic_payload).is_none());
+        let digest = hex::encode(Sha256::digest(
+            serde_json::to_vec(&automatic_payload).expect("typed payload"),
+        ));
+        malformed.dedupe_key = format!("subtitle-model:{digest}:request");
+        assert_eq!(
+            model_operation_origin(&malformed, &automatic_payload),
+            Some(ModelOperationOrigin::Explicit)
+        );
+        malformed.dedupe_key = format!("subtitle-model:{digest}:not-a-boot:{}", "a".repeat(64));
+        assert!(model_operation_origin(&malformed, &automatic_payload).is_none());
+
+        // Retaining the old descriptor prevents inode reuse. Equal-length new
+        // bytes cannot inherit the successful old receipt just through a name.
+        let replacement = root.path().join("replacement.bin");
+        let replacement_file = std::fs::File::create(&replacement).expect("replacement");
+        replacement_file
+            .set_len(spec.download_bytes)
+            .expect("same-length replacement");
+        replacement_file
+            .set_permissions(std::fs::Permissions::from_mode(0o400))
+            .expect("replacement permissions");
+        drop(replacement_file);
+        std::fs::rename(&replacement, &cached_path).expect("replace path");
+        let replaced = std_file_identity(&std::fs::File::open(&cached_path).expect("new cache"))
+            .expect("new identity");
+        assert_ne!(original, replaced);
+        model_receipt_fixture(&next_boot, replaced, ModelAction::Install, true).await;
+        assert_eq!(
+            next_boot
+                .store
+                .background_job(&auto.id)
+                .await
+                .expect("auto job")
+                .expect("auto job")
+                .state,
+            JobState::Queued,
+            "auto A remains queued throughout the cancelled replacement B"
+        );
+        assert!(
+            !automatic_model_operation_current(
+                &next_boot,
+                &auto,
+                &automatic_payload,
+                spec,
+                replaced,
+                changed_engine,
+                Some(prior)
+            ),
+            "queued automatic A cannot qualify cancelled replacement B"
+        );
+        worker_pass(&next_boot, &next_boot.shutdown)
+            .await
+            .expect("real worker retires queued stale auto A before engine access");
+        assert_eq!(
+            next_boot
+                .store
+                .background_job(&auto.id)
+                .await
+                .expect("retired auto")
+                .expect("retired auto")
+                .state,
+            JobState::Cancelled
+        );
+        let observation = next_boot
+            .subtitle_models
+            .local_observation()
+            .await
+            .expect("worker refresh");
+        let orphan = observation
+            .models
+            .iter()
+            .find(|model| model.model_id == spec.id)
+            .expect("cached model projection");
+        assert_eq!(orphan.status, "unverified_cache");
+        assert!(orphan.verified_at_ms.is_none());
+        assert!(observation.bounded(&next_boot.node_id));
+
+        assert!(!accepted_model_identity(
+            &next_boot.node_id,
+            spec,
+            replaced,
+            Some(prior)
+        ));
+        next_boot.shutdown.cancel();
+        drop(next_boot);
+
+        let final_boot = persistent_state(root.path(), &database);
+        let receipts = final_boot
+            .store
+            .subtitle_model_receipts(&final_boot.node_id)
+            .await
+            .expect("older receipt persists");
+        assert!(!requalify_accepted_model(
+            &final_boot,
+            spec,
+            replaced,
+            changed_engine,
+            receipts.first()
+        )
+        .await
+        .expect("cancelled replacement cannot resurrect on another boot"));
+        // Fresh explicit Install intentionally completes the orphan cache.
+        model_receipt_fixture(&final_boot, replaced, ModelAction::Install, false).await;
+        let receipts = final_boot
+            .store
+            .subtitle_model_receipts(&final_boot.node_id)
+            .await
+            .expect("replacement accepted");
+        assert!(accepted_model_identity(
+            &final_boot.node_id,
+            spec,
+            replaced,
+            receipts.first()
+        ));
+        assert!(!accepted_model_identity(
+            "another-node",
+            spec,
+            replaced,
+            receipts.first()
+        ));
+        final_boot.shutdown.cancel();
+    }
+
     #[test]
     fn managed_normalization_revision_is_bound_and_stale_recipes_are_not_executable() {
         let model = &catalog().models[0];

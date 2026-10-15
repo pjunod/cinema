@@ -30,6 +30,15 @@ test("managed setup preserves enable despite unavailable readiness and escapes w
   const h=harness();const html=h.ctx.subtitleTranscriptionForm(config,{models:[model],workers:[{node_id:"node",label:"<worker>",eligible:false,observed_at_ms:0,expires_at_ms:0,engine:{status:"available"},models:[{model_id:"base",status:"verified",verified_at_ms:1}]}]});
   assert.match(html,/id="st-enabled" type="checkbox" checked/);assert.match(html,/>Save<\/button>/);assert.match(html,/&lt;worker&gt;/);assert.match(html,/observation is stale; readiness is unknown/);assert.doesNotMatch(html,/Save<\/button>.*disabled/);assert.doesNotMatch(html,/>verified · engine/);
 });
+test("cancelled cached model stays unverified with explicit Install and Test available",()=>{
+  const h=harness();const now=Date.now();const worker={node_id:"worker",label:"Named worker",eligible:true,observed_at_ms:now,expires_at_ms:now+60000,engine:{status:"available"},models:[{model_id:"base",status:"unverified_cache",verified_at_ms:null}]};
+  const html=h.ctx.subtitleModelEvidence({models:[model],workers:[worker]},"base");
+  assert.match(html,/Download cached · install to finish setup/);assert.doesNotMatch(html,/ · verified · engine|tested /);
+  assert.match(html,/name="st-worker" value="worker" checked/);
+  assert.match(html,/<button class="sm" onclick="subtitleModelOperation\('install',this\)">Install selected model<\/button>/);
+  assert.match(html,/<button class="sm" onclick="subtitleModelOperation\('verify',this\)">Test selected model<\/button>/);
+  assert.equal(h.ctx.subtitleModelStatus("PRIVATE /worker/path"),"unknown");
+});
 test("managed Save uses CAS and preserves newer unsaved edits",async()=>{
   const h=harness(),panel=h.settings();let finish;h.ctx.respond=()=>new Promise(resolve=>finish=resolve);const pending=h.ctx.saveSubtitleTranscription(element());h.nodes["st-language"].value="fr";h.ctx.subtitleSetupEdited();finish({...config,revision:"2"});await pending;
   assert.equal(h.calls[0].path,"/subtitle-transcription/managed");assert.equal(h.calls[0].init.body.expected_revision,"1");assert.equal(h.calls[0].init.body.enabled,true);assert.equal(h.calls[0].init.body.language,"en");assert.equal(h.nodes["st-language"].value,"fr");assert.equal(panel.innerHTML,"");assert.equal(panel._subtitleSetup.revision,"2");assert.match(h.nodes["st-status"].textContent,/newer edits are still unsaved/);
@@ -112,8 +121,10 @@ test("unavailable catalog observations never hide saved enable or Save",async()=
 });
 test("model failure reasons distinguish network storage integrity and engine repair actions",()=>{
   const h=harness();
-  for(const [code,pattern]of [["insufficient_disk",/could not safely reserve model storage.*Free space or check its storage support.*retry Install/],["model_download_failed",/network access.*retry Install/],["model_verification_failed",/integrity or transcription test.*Retry Install/],["engine_unavailable",/supported server package.*run Test/],["waiting_for_worker",/worker to take this job/],["worker_observation_unavailable",/Current worker status is unavailable.*Refresh worker status/],["worker_not_current",/no longer a current cluster member.*choose a current worker/]])assert.match(h.ctx.subtitleReason(code),pattern);
+  for(const [code,pattern]of [["insufficient_disk",/could not safely reserve model storage.*Free space or check its storage support.*retry Install/],["model_download_failed",/network access.*retry Install/],["model_verification_failed",/integrity or transcription test.*Retry Install/],["engine_unavailable",/supported server package.*run Test/],["waiting_for_worker",/worker to take this job/],["worker_observation_unavailable",/Current worker status is unavailable.*Refresh worker status/],["worker_not_current",/no longer a current cluster member.*choose a current worker/],["worker_source_unavailable",/Waiting for a verified worker with access to this media source/],["no_speech_detected",/selected audio is silent.*Choose another audio track/]])assert.match(h.ctx.subtitleReason(code),pattern);
   assert.doesNotMatch(h.ctx.subtitleReason("insufficient_disk"),/disk is full/);
+  assert.doesNotMatch(h.ctx.subtitleReason("worker_source_unavailable"),/model|download|playback capacity|source changed/i);
+  assert.doesNotMatch(h.ctx.subtitleReason("no_speech_detected"),/model|corrupt|verification/i);
   const html=h.ctx.subtitleModelOperationsHtml({catalog:{workers:[{node_id:"ready",label:"Ready worker"},{node_id:"space",label:"Storage worker"}]},operationRows:[{node_id:"ready",outcome:"accepted",job_id:"install-one",job:{state:"running",phase:"verifying"}},{node_id:"space",outcome:"insufficient_disk"}]});
   assert.match(html,/Ready worker: verifying/);assert.match(html,/Storage worker: storage unavailable.*could not safely reserve model storage/);assert.match(html,/activity\/jobs\/install-one/);
   const unknown=h.ctx.subtitleReason("PRIVATE /srv/process/stdout");assert.doesNotMatch(unknown,/PRIVATE|\/srv\/process/);
