@@ -67,6 +67,9 @@ const MIN_SPEEDUP: f64 = 1.2;
 /// on every channel, a clipped one near 0 or 255, and either is tens of levels
 /// away from a real image.
 const MAX_CHANNEL_DELTA: f64 = 24.0;
+// Separate neutral correctness contract: a 203-nit Hable white differs by
+// 10.23 levels despite passing the unchanged broad motion tolerance.
+const MAX_NEUTRAL_WHITE_DELTA: f64 = 2.0;
 
 /// Fixture geometry. 4K because the question is about 4K: a 1080p probe would
 /// pass on hardware that cannot hold realtime at the resolution that actually
@@ -744,7 +747,10 @@ fn judge_sample(
         Ok(s) => s,
         Err(e) => {
             tracing::info!(pipeline = candidate.name(), reason = %e, "tone-map graph rejected");
-            return reject(e, None);
+            let unavailable = e.starts_with("not available on this platform");
+            let mut verdict = reject(e, None);
+            verdict.unavailable = unavailable;
+            return verdict;
         }
     };
     let speedup = reference.elapsed.as_secs_f64() / sample.elapsed.as_secs_f64().max(0.001);
@@ -808,10 +814,10 @@ async fn check_neutral_peak<T: Tools>(
         )
         .await?;
         let delta = sample.max_delta(&reference);
-        if delta > MAX_CHANNEL_DELTA {
+        if delta > MAX_NEUTRAL_WHITE_DELTA {
             return Err(format!(
                 "output differs from the CPU reference by {delta:.2} levels \
-                 (limit {MAX_CHANNEL_DELTA:.0}, peak {PROBE_PEAK_NITS} nits)"
+                 (limit {MAX_NEUTRAL_WHITE_DELTA:.0}, peak {PROBE_PEAK_NITS} nits)"
             ));
         }
         tracing::info!(
@@ -933,7 +939,18 @@ fn check_exit(output: &std::process::Output) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
-    Err(diagnostic_summary(&String::from_utf8_lossy(&output.stderr)))
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // An older pinned package has Metal but cannot express the corrected
+    // Hable white. This is a missing capability, not a memory/decoder failure.
+    if stderr.contains("Error applying option 'reference_white' to filter 'tonemap_videotoolbox'")
+        && stderr.contains("Option not found")
+    {
+        return Err(
+            "not available on this platform — this FFmpeg build lacks Metal Hable reference_white"
+                .to_owned(),
+        );
+    }
+    Err(diagnostic_summary(&stderr))
 }
 
 /// The exact ffmpeg command one candidate is measured with.
@@ -1869,7 +1886,7 @@ mod tests {
                 ok_output(BT709_TAGS),
                 ok_output("117,128,128\n"),
                 ok_output(BT709_TAGS),
-                ok_output("106,128,128\n"),
+                ok_output("117,128,128\n"),
             ],
             ..Recorded::default()
         };
@@ -1893,6 +1910,52 @@ mod tests {
         assert!(judge_sample(Pipeline::VtToneMapMetal, Ok(result), &sample(119.0, 100.0)).passed);
     }
 
+    #[tokio::test]
+    async fn neutral_reference_white_mismatch_prevents_metal_qualification() {
+        let dir = crate::test_tempdir().expect("workdir");
+        std::fs::write(
+            dir.path().join("hdr10-neutral-1179-v1.mkv"),
+            b"cached fixture",
+        )
+        .expect("cached neutral fixture");
+        let tools = Recorded {
+            ffmpeg: vec![ok_output(""), ok_output(""), ok_output("")],
+            ffprobe: vec![
+                ok_output(BT709_TAGS),
+                ok_output("110,128,128\n"),
+                ok_output(BT709_TAGS),
+                ok_output("117,128,128\n"),
+                ok_output(BT709_TAGS),
+                ok_output("106.78,128,128\n"),
+            ],
+            ..Recorded::default()
+        };
+        let result = run(
+            &tools,
+            &dir.path().join("hdr.mkv"),
+            &dir.path().join("out.mp4"),
+            Pipeline::VtToneMapMetal,
+            Encoder::VideoToolbox,
+        )
+        .await;
+        let why = result.expect_err("the old 203-nit white must not pass");
+        assert!(why.contains("neutral PQ peak"), "{why}");
+        assert!(why.contains("limit 2"), "{why}");
+    }
+
+    #[test]
+    fn missing_metal_reference_white_is_an_unavailable_capability() {
+        let output = failed_output("Error applying option 'reference_white' to filter 'tonemap_videotoolbox': Option not found").expect("captured failure");
+        let why = check_exit(&output).expect_err("old package cannot express the graph");
+        assert!(why.starts_with("not available on this platform"), "{why}");
+        let verdict = judge_sample(Pipeline::VtToneMapMetal, Err(why), &sample(117.0, 100.0));
+        assert!(!verdict.passed && verdict.unavailable);
+        for diagnostic in ["Error applying option 'reference_white' to filter 'tonemap_videotoolbox': out of range", "Option not found", "decoder failed"] {
+            let output = failed_output(diagnostic).expect("captured failure");
+            assert_eq!(check_exit(&output).expect_err("other tool failure"), diagnostic);
+        }
+    }
+
     /// Explicit hardware control: the old motion probe accepts both units,
     /// whereas the added gate rejects only the former factor-of-ten error.
     #[cfg(target_os = "macos")]
@@ -1912,7 +1975,9 @@ mod tests {
                             arg.contains(":peak=117.9:"),
                             "unexpected production peak: {arg}"
                         );
-                        *arg = arg.replace(":peak=117.9:", ":peak=11.79:");
+                        *arg = arg
+                            .replace(":reference_white=100", "")
+                            .replace(":peak=117.9:", ":peak=11.79:");
                     }
                 }
                 Spawn::default().ffmpeg(args, stdout).await
