@@ -1343,12 +1343,26 @@ harness now polls after the burst
 under the same original cycle deadline, without additional writes. Newer-index,
 purge, retained-log and actual transport proofs remain required. Three focused
 controls cover UUID admission, delayed publication and unchanged-index expiry;
-their first execution belongs to the integrated effort.
+all three pass once on integrated effort `0e6bc1c98` on macOS. The two
+transport controls also pass once on Linux with actual default scheduling
+(0.20 and 0.75 seconds), without replaying the original 70 applicable passes.
 
 The original failures remain recorded. Compiler timeouts, daemon readiness,
 web focus baselines, Android transport focus and the package source download
 still require separate diagnosis or qualification. No repair deployment or
 physical HDR acceptance is claimed.
+
+### R37 — Preserve Android transport option adjacency
+
+Promotion 5127 ran 78 Android instrumentation cases; the shared transport-order
+case failed because the diagnostics action intercepted Settings → Info focus.
+The report action now follows optional PiP, preserving Tracks → Settings → Info
+→ PiP and keeping diagnostic reporting available with its original generation
+binding. The existing failed case remains the regression; no duplicate body is
+added. Android build 173 and current generated claims identify the correction.
+Only the current JVM build-input digest changes; historical captures retain
+their original inputs. Local application and instrumentation-source compilation
+pass. Physical HDR acceptance and integrated failed-only execution remain open.
 
 
 ### R38 — Serialize daemon activity fixtures and refresh the UI baseline
