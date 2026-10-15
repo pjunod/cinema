@@ -185,6 +185,26 @@ final class PlayerResumeTests: XCTestCase {
         controller.discardPreparedSuccessor()
         XCTAssertEqual(player.item.preferredForwardBufferDuration, 45,
             "Restoration must preserve a later owner's preference")
+
+        // A tolerated prior range must not shadow the interval containing the
+        // current clock. The historical gap is behind the protected window.
+        player.item.positionSeconds = 10
+        player.item.ranges = [0...9.9, 10...40]
+        player.item.preferredForwardBufferDuration = 60
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds()), 30, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(gapTolerance: 0)), 30, accuracy: 0.001)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 10_000))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 16)
+        controller.discardPreparedSuccessor()
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 60)
+
+        // A positive gap ahead of that same clock remains disqualifying.
+        player.item.ranges = [0...9.9, 10...15, 15.1...40]
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds()), 30, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(gapTolerance: 0)), 5, accuracy: 0.001)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 10_000))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 60)
+        controller.discardPreparedSuccessor()
     }
 
     func testHeartstopperRunwayQualifiesAndBoundaryCasesDoNot() {

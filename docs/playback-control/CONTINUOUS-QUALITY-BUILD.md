@@ -11848,3 +11848,39 @@ only failures rerun. Only mobile builds intended for physical installation and
 those installs require committed main source. Simulator/test-only mobile and
 non-mobile TV work are exempt. Physical new-source iOS qualification remains
 pending until an authorized main build. Nothing is merged or authorized to merge.
+
+
+### 10.328 — prefer the range actually containing the playhead
+
+Source inspection of the S2 tolerance split finds one new false refusal:
+at playhead 10 seconds, ranges [0, 9.9] and [10, 40] make tolerant first-match
+membership choose the earlier range. With strict gap tolerance it then returns
+zero runway, despite 30 seconds of actual current coverage. Apple 250 first
+selects an interval actually containing the playhead and only then falls back
+to tolerant membership for timebase rounding. Ordinary 0.25-second joining
+and zero-tolerance clock admission retain their behavior. A gap behind the
+playhead cannot hide current coverage; a positive gap ahead still refuses
+the physical preference lease.
+
+The actual-controller regression now covers both cases: current coverage
+acquires the 16-second preference and restores 60 seconds, while a gap ahead
+keeps the original preference. Prior 5 ms rounding, internal gap, touching,
+restoration and later-owner cases remain. Bodies are authored, not executed.
+
+The superseded Apple 249 campaign r4 stopped before READY/native launch after
+three cost proofs. All 161 process births are absent; no unit, resource or
+media failure is inferred. Its earlier r3 completed all four costs but refused
+production-idle admission before SDK; all 175 births are absent. A later census
+measures production Plurx running, without recording the original combined
+assertion operands. All three contacted validation owners deny TV use. The
+owner authorized closing idle production Plurx; the next reviewed harness
+performs exact identity-revalidated closure at READY and persists the original
+idle operands before the unchanged assertion, within the same 65-second cutoff.
+It changes neither product code nor scoring, and does not prove why the
+production process reappeared. No previous false or stopped receipt is rewritten.
+
+Apple 249 compilation and exact-source proof remain valid for that historical
+tree. Apple 250 compilation and physical TV qualification are pending. New
+physical mobile builds/installations await authorized committed main source.
+The final unit lane remains deferred to the batched integrated candidate;
+nothing is merged or authorized to merge. Canonical acceptance remains partial.

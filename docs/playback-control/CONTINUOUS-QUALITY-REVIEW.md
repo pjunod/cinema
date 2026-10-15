@@ -188,3 +188,18 @@ Apple 249 extends the existing actual-controller lease regression and adds
 The latter holds the real sessions mutex while accepting Rendering, proves
 bounded witness survival without renewal, then requires cancellation after
 release. No unit body has run; compilation is reported separately.
+
+
+### S2 follow-up — current coverage precedes rounding fallback
+
+Source inspection after the split identifies an actual new corner: a nearby
+range ending behind the playhead shadows a later range containing it. Apple
+250 prefers exact membership, then preserves the existing tolerant fallback.
+The same actual-controller regression covers current coverage, the stale
+preceding range, a positive gap ahead, admission and restoration. No body ran.
+The review context and bounded evidence are recorded in build §10.328.
+
+Superseded 249 r4 stopped before READY and SDK; it is not a media failure.
+Changed-source compilation and qualification remain pending. Final Fable
+follow-up must assess the Apple 250 source, rather than treating the compiled
+Apple 249 packet as the final candidate. No merge is authorized.

@@ -1,6 +1,6 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 249
+Build: 250
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal
@@ -150,3 +150,11 @@ and server cached-witness contention without changing authority or deadlines.
 Fable accepts the preceding F1/F2/N6 corrections; changed-source compilation and
 TV qualification remain open. Units stay deferred, physical mobile builds await
 main, and nothing is authorized to merge.
+
+
+Apple 250 prefers a range actually containing the playhead before the existing
+rounding fallback. A nearby old range cannot suppress known current runway;
+positive future gaps still prevent the physical lease. Ordinary telemetry and
+strict clock admission preserve their behavior. The controller regression is
+extended, unrun. Superseded249 preparation stopped before SDK; new-source
+compilation and TV evidence remain pending. No merge is authorized.

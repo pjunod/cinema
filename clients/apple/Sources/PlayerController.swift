@@ -4076,7 +4076,10 @@ final class PlayerController: ObservableObject {
                     && $0.upperBound >= $0.lowerBound
             }
             .sorted { $0.lowerBound < $1.lowerBound }
-        guard let start = ranges.firstIndex(where: {
+        // A tolerated range just behind the clock must not shadow media that
+        // actually contains it, especially when internal gaps are forbidden.
+        let containing = ranges.firstIndex(where: { $0.contains(playheadSeconds) })
+        guard let start = containing ?? ranges.firstIndex(where: {
             $0.lowerBound <= playheadSeconds + joinTolerance
                 && $0.upperBound >= playheadSeconds - joinTolerance
         }) else { return 0 }
