@@ -543,7 +543,8 @@ class RetainedUnitCase(unittest.TestCase):
         suite = proof['lanes']['rust'][0]
         proof['lanes'] = {'android_device': [suite]}
         proof.update(version=2, source_commit='d' * 40, command_units={
-            'version': 1, 'source_commit': 'd' * 40, 'logs': {}, 'commands': []})
+            'version': 1, 'source_commit': 'd' * 40,
+            'logs': {log(raw)['sha256']: log(raw)}, 'commands': []})
         suite.update(name='device', ids=[policy['id']], inventory=log(policy['id'] + '\n'),
                      environment=copy.deepcopy(policy['environment']))
         record = suite['records'][0]
