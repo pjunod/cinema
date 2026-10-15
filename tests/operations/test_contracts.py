@@ -1677,6 +1677,7 @@ assert.equal(context.ACT_TIMER, null);
             "\n  cluster_store_legacy:", 1
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
+        self.assertIn("timeout-minutes: 20", fast_rust)
         self.assertIn("run: make effort-rust-check", fast_rust)
         self.assertNotIn("cargo test", fast_rust)
         fast_finalize = fast_rust.split(

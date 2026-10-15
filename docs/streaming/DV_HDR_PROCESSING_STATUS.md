@@ -1414,3 +1414,22 @@ This permits the two genuinely missing Linux outcomes to be captured without
 replaying 70 applicable passes. It invents no Linux result from a macOS pass
 and does not turn serial scheduling into default scheduling. Current proof,
 full promotion, deployment and physical HDR acceptance remain open.
+
+
+### R40 — Give full-source compilation the established effort budget
+
+Promotion 5127's compile-only Rust lane exhausted ten minutes without a Rust
+diagnostic. The same source compiled successfully on another allowed runner
+in the R37 effort gate: 16 minutes 51 seconds including setup and vendor
+Clippy. Its actual service had a three-core CPU quota and the existing
+six/seven-GiB memory thresholds; read-only samples showed continued compiler
+progress and no new OOM events. These observations do not prove a CPU or
+memory root cause.
+
+Only the full workflow's compile-only Rust job now has the existing effort
+lane's 20-minute budget. Compiler commands, warnings, required gates and all
+runtime/admission deadlines are unchanged. The existing aggregate-CI contract
+now asserts that job-scoped budget. Its first changed-body execution belongs
+to the integrated effort. The obsolete follow-up gate was cancelled while
+its expensive compiler lanes were still blocked, before dispatching the new
+exact candidate.
