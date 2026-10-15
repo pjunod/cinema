@@ -1,6 +1,11 @@
 package tv.plurx.app.data
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.test.resetMain
 import kotlinx.serialization.json.*
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -12,6 +17,7 @@ import org.junit.After
 import org.junit.Before
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class SharedLibraryTest {
     private val first = SharedLibraryIdentity("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333", "9007199254740993")
     private val other = SharedLibraryIdentity("44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666", "9007199254740993")
@@ -21,8 +27,14 @@ class SharedLibraryTest {
     private var handler: (Request) -> Pair<Int, JsonObject> = { 500 to buildJsonObject {} }
     private var commitIndex: String? = null
     private var transportFailure = false
-    @Before fun setup() { Session.origin = "https://b.test"; Session.token = "fixture-bearer" }
-    @After fun teardown() { Session.token = null; Session.origin = "" }
+    @Before fun setup() {
+        Dispatchers.setMain(StandardTestDispatcher())
+        Session.origin = "https://b.test"; Session.token = "fixture-bearer"
+    }
+    @After fun teardown() {
+        Session.token = null; Session.origin = ""
+        Dispatchers.resetMain()
+    }
     private fun client(): SharedLibraryClient = SharedLibraryClient.forTest(OkHttpClient.Builder().addInterceptor { chain ->
         val request = chain.request(); requests += request
         if (transportFailure) throw java.io.IOException("owned failed-write fixture")
@@ -44,7 +56,7 @@ class SharedLibraryTest {
         val account = client()
         fun floor(): String? {
             var result: String? = null
-            val owned = Net.client.newBuilder().dispatcher(okhttp3.Dispatcher()).connectionPool(okhttp3.ConnectionPool())
+            val owned = Net.authenticatedClient { System.nanoTime() / 1_000_000 }.newBuilder().dispatcher(okhttp3.Dispatcher()).connectionPool(okhttp3.ConnectionPool())
                 .eventListener(okhttp3.EventListener.NONE).addInterceptor { chain ->
                     result = chain.request().header("X-Plurx-Read-After")
                     Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")

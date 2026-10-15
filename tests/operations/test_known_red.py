@@ -149,6 +149,19 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/fragindex.rs::fragindex::tests::"
             "real_source_shared_read_differential"
         ] = "reads a whole real source several times; run by hand on the target storage"
+        # DV Profile 5 completeness uses private, bounded FFmpeg captures;
+        # keep these operator-run checks distinct from known-red tests.
+        for identity in (
+            "crates/plurx-core/src/fmp4/dvh1_tests.rs::fmp4::tests::"
+            "captured_dvh1_completeness_preserves_dolby_vision_and_publishes",
+            "crates/plurxd/src/copyseg.rs::copyseg::tests::"
+            "captured_dvh1_rolling_options_publish_and_reject_unproven_samples",
+            "crates/plurxd/src/fragindex.rs::fragindex::tests::"
+            "captured_dvh1_completeness_builds_a_constant_index",
+        ):
+            additional_fixture_reasons[identity] = (
+                "needs a private FFmpeg dvh1 capture; PLURX_DVH1_CAPTURE"
+            )
         additional_fixtures = tuple(
             item for item in ignored if item.identity in additional_fixture_reasons
         )
@@ -156,9 +169,9 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 8)
-        # Shared-read indexing's real-source differential: 31 -> 32.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 32)
+        self.assertEqual(len(additional_fixtures), 11)
+        # DV completeness adds three private capture checks: 32 -> 35.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 35)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())

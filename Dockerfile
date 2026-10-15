@@ -288,7 +288,7 @@ RUN ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
     && ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe \
     && apt-get -o Acquire::Retries=3 update \
     && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-        build-essential clang cmake curl git jq lld llvm make nasm ninja-build \
+        build-essential clang cmake curl git jq libssl-dev lld llvm make nasm ninja-build \
         pkg-config python3 python3-venv \
     && python3 -m venv /opt/playwright-venv \
     && /opt/playwright-venv/bin/pip install --no-cache-dir 'playwright==1.62.0' \
@@ -404,12 +404,42 @@ USER root
 RUN rm -rf /usr/lib/jellyfin-ffmpeg/lib
 COPY --from=linux-dolby-install /usr/lib/jellyfin-ffmpeg /usr/lib/jellyfin-ffmpeg
 COPY --from=linux-dolby-install /usr/local/lib/plurx/ffprobe /usr/local/lib/plurx/ffprobe
+# Debian ffmpeg pulls in a second Media SDK through libavcodec. Let apt
+# remove its reverse dependents, retaining leaf libraries (no autoremove),
+# then prove every required system provider retains its shipping bytes.
+# The ELF audit supplies the inventory; the shipping base supplies the baseline.
+RUN cut -c67- /usr/lib/jellyfin-ffmpeg/provenance/system-elf-sha256.txt \
+    | while IFS= read -r path; do sha256sum "$path" || exit; done \
+        > /usr/lib/jellyfin-ffmpeg/provenance/shipping-system-elf-sha256.txt \
+    && apt-get purge -y libmfx1 \
+    && ! dpkg-query -W -f='${db:Status-Status}' libmfx1 2>/dev/null | grep -qx installed \
+    && sha256sum -c /usr/lib/jellyfin-ffmpeg/provenance/shipping-system-elf-sha256.txt \
+    && ln -sfn /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/bin/ffmpeg \
+    && ln -sfn /usr/lib/jellyfin-ffmpeg/ffprobe /usr/bin/ffprobe \
+    && dpkg-query -W -f='${Package}=${Version}\n' | LC_ALL=C sort \
+        > /usr/share/doc/plurx/media-runtime-packages.txt \
+    && rm -rf /var/log/apt/* /var/log/*.log /var/cache/ldconfig/aux-cache
 
 FROM runtime AS runtime-dolby-amd64
 USER root
 RUN rm -rf /usr/lib/jellyfin-ffmpeg/lib
 COPY --from=linux-dolby-install /usr/lib/jellyfin-ffmpeg /usr/lib/jellyfin-ffmpeg
 COPY --from=linux-dolby-install /usr/local/lib/plurx/ffprobe /usr/local/lib/plurx/ffprobe
+# Debian ffmpeg pulls in a second Media SDK through libavcodec. Let apt
+# remove its reverse dependents, retaining leaf libraries (no autoremove),
+# then prove every required system provider retains its shipping bytes.
+# The ELF audit supplies the inventory; the shipping base supplies the baseline.
+RUN cut -c67- /usr/lib/jellyfin-ffmpeg/provenance/system-elf-sha256.txt \
+    | while IFS= read -r path; do sha256sum "$path" || exit; done \
+        > /usr/lib/jellyfin-ffmpeg/provenance/shipping-system-elf-sha256.txt \
+    && apt-get purge -y libmfx1 \
+    && ! dpkg-query -W -f='${db:Status-Status}' libmfx1 2>/dev/null | grep -qx installed \
+    && sha256sum -c /usr/lib/jellyfin-ffmpeg/provenance/shipping-system-elf-sha256.txt \
+    && ln -sfn /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/bin/ffmpeg \
+    && ln -sfn /usr/lib/jellyfin-ffmpeg/ffprobe /usr/bin/ffprobe \
+    && dpkg-query -W -f='${Package}=${Version}\n' | LC_ALL=C sort \
+        > /usr/share/doc/plurx/media-runtime-packages.txt \
+    && rm -rf /var/log/apt/* /var/log/*.log /var/cache/ldconfig/aux-cache
 USER plurx
 
 # Preserve the incumbent default Docker target. make docker selects

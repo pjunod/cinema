@@ -15,6 +15,21 @@ PR title alone) counts as having claimed or finished work. It lives in the
 repository so every vendor reads and writes it the same way: through git and
 the Forgejo API, with no vendor-specific tooling.
 
+**Bounded L-03 web follow-up, 2026-10-15:** root
+`codex://threads/01a0c165-d718-73a1-93e9-e81380017705` owns only the Stop
+feedback repair on `codex/live-tv-stop-feedback-20261015`: web
+`pages/live-tv-controls.js`, its focused/existing web test fixtures, the
+new test family's CI input registration and these ledger/index/backlog
+updates. Original authorship and other playback work remain untouched.
+The observed stale Playing live paragraph reproduces in a source-executing
+test; the pending/confirmed-release/newer-channel feedback correction has local
+evidence in the [shared-transport ledger](../features/LIVE-TV-SHARED-TRANSPORT.md#execution-log).
+The sole review's unconfirmed-Start P2 reproduces through the shipped Lease
+and is repaired; five focused cases pass. Promotion remains pending in #1107.
+No tuner/lease/default,
+runtime deployment or full-row acceptance change; four bounded closures
+and45acceptance-open remain unchanged.
+
 **Promoted to main, 2026-10-04:** the effort branch
 `effort/architecture-review-2026-09-20` landed on `main` as `4cfd1bdd1`
 (#793) on 2026-10-04, without the pre-merge relevance check that was planned
@@ -54,6 +69,19 @@ device-evidence prompt. Four rows are closed (K-02, K-07, P-01, P-04) and 45
 remain acceptance-open; no row closes from this pass. The 2026-10-11 notes
 also correct stale text on S-13, S-14, C-05, S-02, K-06, P-02 and A-05 and
 remove PR600 batch notes copied onto rows they did not describe.
+
+**L-03 source correction, 2026-10-14 UTC:** root session
+`01a0c165-d718-73a1-93e9-e81380017705` (Codex; exact runtime model ID not
+exposed) owns only `live_tv/dvr.rs`'s buffered-input scheduling correction
+and its existing shared-transport documentation/index/backlog notes on
+`codex/live-tv-backlog-fairness-20261014`. The new real fan-out regression
+evicts a runnable reader on unchanged main `7669f32d4`. The sole review on
+2026-10-15 found a byte-bound variant still failing with chunk-only task
+budgeting; an additional 65-by-64KiB regression reproduced it. Explicit
+per-iteration yielding replaces that incomplete repair without changing
+byte/slot limits, eviction reasons, metrics or encoder/default policy.
+Promotion remains pending. No runtime failure is yet bound to this mechanism;
+no caption/device/capacity acceptance or whole-row closure follows.
 
 **K-03/K-10 and K-04 correction, 2026-10-13:** Paul withdrew the
 twelve-hour uninterrupted/deployment-free qualification requirement. The

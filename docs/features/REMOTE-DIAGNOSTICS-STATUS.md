@@ -1,10 +1,10 @@
 # Remote diagnostics status — ownership, implementation and release evidence
 
-**Status:** open — web/phone ZIP export qualified; native TV transfer and physical acceptance open.
+**Status:** open — archive software is built and qualified; promotion receipt is in #1081, physical/signed sampling remains separate.
 **Updated:** 2026-10-13 · **Planning baseline:** `8d7bc723e`.
 
 The [build contract](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md#current-direction--attach-a-zip-to-a-bug-report) defines the current archive-attachment release.
-Hosted submission is deferred; native TV file transfer is unfinished. This file is the canonical execution ledger.
+Hosted submission is deferred; web/phone export and native TV transfer have current software qualification. This file is the canonical execution ledger.
 The [project backlog](PROJECT-BACKLOG.md) indexes the effort rather than
 duplicating its evidence.
 
@@ -14,17 +14,17 @@ duplicating its evidence.
 |---|---|
 | User authorization | 2026-10-13: produce a diagnostic ZIP users can attach to bug/issue reports. This supersedes hosted rollout and the private-pilot approval. Normal qualification and green merge continue; no production service changes. |
 | Implementation owner | GPT-6.1 Sol · chat `01a13167-0996-7723-a0fb-fa64421a384d` |
-| Qualification pull request | #1066 |
-| Intended effort | Implementation merged into `main`; qualification follows on `codex/remote-diagnostics-qualification` |
+| Qualification pull request | #1081 |
+| Intended effort | Archive implementation merged into `main`; TV follow-up #1081 on `codex/diagnostics-tv-archive` |
 | Task branch convention | Normal commits batched into qualification follow-up PRs |
 | Planning source | `8d7bc723e47f326eb213dce7857dd4b36f261867` |
-| Implementation workspace/base | Independent clone in temporary owner storage; original landing `8040f862c3458245480065e11dec643fbfe370b3`, current main base `96e4c49e9`, diagnostic corrections `a343ffb12`, archive-flow correction `069615e85` on the integrated current base; the exact final gate/landing receipt is maintained in #1066; user checkouts remain untouched. |
+| Implementation workspace/base | Independent owned clone; current main base `cd5c8ddf1`, archive landing `569678f25` (#1066). TV product commits `8c80b9a81` and `77ae61186`, native witnesses `5616f0f4b`; review correction `d0f0df4d9`; focused qualification passes and all three final-review findings are corrected. User checkouts untouched. |
 | Compiler loop | Pinned local Rust/cargo 1.97.1; warm isolated target; fresh landed-main all-target check passed. |
-| Plan review | Original review: 12 findings corrected. One follow-up review complete: two P1 history findings corrected; focused qualification recorded in §24. |
-| Promotion/deployment | PR #1037 merged 2026-10-13, all eight checks passed on `6bc7235a0`; no production changes by this chat. Another rollout placed the landing on two nodes and exposed a router startup failure; recovery owner is recorded in §22. Isolated qualification continues. |
-| Current checks | Original #1037: eight checks passed and all 32 landing anchors verified. Follow-up: normal hooks, affected native compilation and focused regressions passed; all-target pinned check and composed startup passed on integrated `468a06545`. Follow-up fast gate/landing receipt is in #1066. |
+| Plan review | Original review: 12 findings corrected; history follow-up: two findings corrected. One final TV-archive review found three issues, all corrected with focused regressions in §26; no repeated review cycle. |
+| Promotion/deployment | #1037 and archive-first #1066 merged. #1066 landing `569678f2513695bb9f7b1923ed2c39af6dd19043`, eight required passes. Hosted/private service rollout cancelled by the archive direction; no production changes by this chat. |
+| Current checks | #1066 merged with eight required passes. TV download source compiles on Apple TV and Android; focused single-download/expiry/cancellation tests pass. Apple TV shipped remote UI passes selected-incident download and close revocation; Android TV export/QR, D-pad, recovery and default Select-to-edit pass four tests. iOS/tvOS capture/wire suites each pass eleven cases; Android capture/wire/download suites pass twelve. One final review complete; three findings corrected and focused qualification repeated. The exact required gate and landing receipt are maintained in #1081. |
 | Native file ownership | K04 receipt integration holds Session.swift, PlurxAPI.swift, Session.kt and Net.kt; qualification preserves those files. |
-| Next action | Finish #1066 only on its required green gate; qualify physical sharing and implement native TV archive transfer separately. Web/phone ZIP export is built and qualified on owned software devices. Hosted delivery and the approved private pilot are superseded by Paul’s archive-first direction. |
+| Next action | Software archive work is complete. #1081 carries its authoritative required-gate and landing receipt; signed/physical sampling is separate acceptance work. Hosted delivery remains deferred; no service or fleet installation. |
 
 Read current AGENTS and pipeline amendments. Isolate implementation from the
 shared checkout and preserve unrelated `Claude outputs/` artifacts.
@@ -45,7 +45,7 @@ index/backlog rows; the builder adopts them together in a normal commit.
 | B07 | Android mobile/TV reporting | Landed; software evidence recorded | Merged PR #1037 | Closed recorder, private account store, encrypted authority, resumable transport, ZIP/share and TV QR/approval dialog written; app, JVM regression sources and test APK compiled; normal hook passed; signed release and physical acceptance owed |
 | B08 | Reproduction, connection checks, diagnostic adapters | Landed; software evidence recorded | Merged PR #1037 | MetricKit/ApplicationExitInfo adapters normalize supported account-attributed evidence; original reproduction identity/recovery and Android bounded checks implemented; 22-case shared event fixture; physical provider delivery remains open |
 | B09 | Composed security/resource/device qualification | Browser software verified; physical open | Merged PR #1037 | Global capture limits/expiry and authority cleanup tightened; real local support/browser/passkey acceptance passed; physical matrix and native overhead measurements remain open |
-| B10 | Operations, exact-candidate promotion and rollout | Merged; rollout preparation active | Merged PR #1037 | Operations/runbook landed; one review and all 12 corrections complete; eight fast checks passed; merge verified at `8040f862c`; isolated qualification/read-only deployment audit active |
+| B10 | Operations, exact-candidate promotion and rollout | Merged; hosted rollout cancelled | Merged PR #1037 | Operations/runbook landed; one review and all 12 corrections complete; eight fast checks passed; merge verified at `8040f862c`; isolated qualification/read-only deployment audit active |
 
 Replace “Not started” with claimed/building/built/software verified/physical
 verified/promoted as evidence warrants. “Built” never means deployed.
@@ -53,34 +53,26 @@ Every command receipt states source commit, command, result, platform and
 artifact location. Keep failure evidence and distinguish pre-existing faults
 from regressions. Record test absence as absence, not a passing check.
 
-## 3. First-release acceptance matrix
+## 3. Current archive acceptance matrix
 
-| Surface | Implementation | Software evidence | Physical/real delivery | Remaining |
-|---|---|---|---|---|
-| Web desktop/mobile/all layouts | Built B05 | Types/syntax/hook, focused wire/recorder and composed browser flow passed | None | Remaining browser failure matrix and real-device qualification |
-| Browser TV | Built B05 | Types/syntax/hook passed | None | Remote focus + physical phone handoff |
-| iPhone/iPad | Built B06 | Seven focused cases and actual offline capture/consent/relaunch UI passed | None | Share/send and physical runtime acceptance |
-| Apple TV | Built B06 | Seven focused simulator cases and real remote offline capture/consent/relaunch UI passed | None | Direct send + physical phone on separate network |
-| Android phone/tablet | Built B07 | Seven focused JVM cases; actual navigation/recovery instrumentation and process-relaunch UI passed | None | UI share/send, tablet and signed release acceptance |
-| Android/Google TV | Built B07 | Debug app/JVM/test APK compiled | None | D-pad/send + phone on separate network |
-| Cinema snapshots / multiple workers | Built B02 | Pinned compiler passed | None | Real two-user/two-node HTTP and peer-failure behavior |
-| Support upload service | Built B03 | Compiler, composed upload/delete/restore-fence and five focused durability/receipt cases passed | None | Disk-full, retention and remaining failure matrix |
-| Phone completion page | Built B04 | Real browser claim, approval, disconnected-TV submission passed | None | Real QR/manual claim, TV approval, submission |
-| Operator inbox | Built B04 | Real browser passkey login, escaped description, final ZIP and deletion passed | None | Passkey/inbox runtime and deployment qualification |
-| Privacy/resource/retention | Built | Browser canaries, ZIP/inbox, deletion and observer bounds passed; restore fixes rechecked | None | Native/device overhead and remaining failure matrix |
+| Surface | Implementation | Software evidence | Remaining acceptance |
+|---|---|---|---|
+| Web desktop/mobile | Merged #1066 | Actual anonymous/authenticated ZIP downloads, selected identity, inventory hashes and no support calls passed | Physical browser/device sampling |
+| iPhone/iPad | Merged #1066 | Exact ZIP file, real system share sheet and retained incident recovery passed | Signed/physical file sharing |
+| Android phone | Merged #1066 | Actual readable ZIP share URI, selected incident and recovery passed | Signed/physical recipient sampling |
+| Apple TV | Local HTTP archive transfer built in follow-up | Current-source bounded download/expiry/cancellation tests and shipped remote UI pass | Promotion receipt in #1081; signed/physical QR and LAN sampling |
+| Android/Google TV | Local HTTP archive transfer built in follow-up | Current-source socket/expiry/cancellation/identity tests and shipped TV UI pass | Promotion receipt in #1081; signed/physical D-pad and LAN sampling |
+| Capture, privacy and recovery | Merged #1037/#1066 | Shared wire fixtures, bounded typed events, title opt-in, frozen history and deletion regressions passed | Real provider evidence and native overhead sampling |
+| Hosted upload/inbox | Deferred | Historical #1037 software receipts retained | Outside current archive release; no deployment required |
 
 ## 4. Decisions and external inputs
 
-The plan supplies build defaults so implementation can proceed. Production
-support hostname/hosting, TLS, operator identity enrollment and real
-publisher credentials remain deployment inputs, not permission to invent or
-publish them. Physical devices and signed release artifacts are acceptance
-inputs. Use isolated synthetic/local service fixtures until those exist.
-
-No first-release scope has been deferred. Record proposed deviations here
-with the affected contract, reason, replacement evidence and whether a user
-decision is actually necessary. Routine module/file choices belong to the
-builder; weakening authorization or dropping a required client does not.
+Paul's archive direction supersedes hosted upload, inbox and hosted phone
+handoff. No DNS/TLS/provider answer or service installation is needed. The TV
+local transfer uses trusted Wi-Fi and an explicit, temporary unencrypted HTTP
+capability. Phone-to-TV reachability is required; isolated guest networks are
+not qualification fixtures. Signed/physical sampling is acceptance evidence,
+separate from implementation and owned software-device proof.
 
 ## 5. Evidence and handoff history
 
@@ -748,3 +740,135 @@ client-fix anchors. The later playback landing `96e4c49e9` changes no native
 product/test inputs; native receipts remain applicable after source comparison.
 Its focused browser rendezvous checks were included in the latest-base web run.
 The exact final head, fast-gate outcome and landing are maintained in #1066.
+
+## 26. Finish the TV archive — 2026-10-13
+
+Paul instructed the owner to continue until done after #1066's archive-first
+landing. The remaining implementation exports the TV's actual selected ZIP
+through an explicit, foreground-only local listener. Its QR opens a phone page
+with a Download button. GET previews do not consume the single-download POST
+capability. No support enrollment, external upload or service installation is
+involved. The interface warns that trusted Wi-Fi is required and local HTTP is
+unencrypted. Privacy choices and incident changes revoke the active link.
+
+The endpoint binds a private IPv4 interface, has a five-minute wall/monotonic
+lifetime, accepts at most 32 bounded requests with an 8 KiB header ceiling,
+and closes sockets on report/background/authorization retirement. It serves
+only the frozen in-memory ZIP, with attachment/no-store headers and no cross-origin referrer disclosure.
+Focused tests cover exact bytes, rejected capabilities/cross-origin/body
+framing, one-download use, expiry and cancellation. Final source, UI results,
+review and gate receipts will be recorded before merge. Apple237/Android171
+are source build claims, not physical installations.
+
+Qualification receipts: Apple TV's actual remote-driven report interface passed
+one ZIP/selected-ID/close-revocation case. iOS and tvOS capture/wire suites each
+passed eleven tests. Android app and test APKs compile; capture/wire/local
+socket tests passed eleven cases. Actual Android TV UI passed three cases:
+QR decoding and selected report download, D-pad privacy traversal and exact-ID
+relaunch recovery. Android socket close originally crashed the app's accept
+thread; the normal cancellation exception is now handled and the corrected
+instrumentation passes. A timestamp-only recovery selector matched two saved
+incidents; it now uses the report's unique ID. Failed receipts are retained,
+not counted as passes. Owned software devices prove neither signed physical
+installs nor guest-network reachability.
+
+The single final adversarial review of #1081 found three issues, all corrected:
+Android dispatcher-return cancellation could discard an unowned listener;
+cleanup now retains the handle in the caller frame and a forced cancellation
+regression proves immediate socket retirement. Inputs remained editable during
+final persistence; both native forms now lock category/description/privacy
+while busy, and Android ignores edits during that window. The actual browser
+POST returned 403 because no-referrer produced an incompatible Origin. Both
+local pages now use same-origin referrer policy, with no cross-origin referrer
+disclosure. The real compiled Android endpoint plus a phone-sized Chromium form
+now returns GET200/POST200 and the exact ZIP attachment; the retained failing
+GET200/POST403 receipt is not qualification. Android capture/wire/local download
+now passes twelve tests, including creation cancellation. Actual Android TV UI
+passes three cases including locked export input and later edit/close revocation;
+Apple TV actual remote UI passes one selected archive/close case. iOS/tvOS
+capture/wire suites each pass eleven on the corrected source. The local history
+check caught duplicate witness rows; one witness per corrective commit is the
+repository policy and the catalog is corrected before the ready gate.
+
+The reproducible browser regression is retained at
+`tests/web/diagnostics-tv-archive-browser.cjs`; compile the Android app first,
+select the JDK with `JAVA_HOME`, and run it with installed Playwright and an
+optional `CINEMA_BROWSER_EXECUTABLE`. It exercises the real compiled local
+endpoint and a phone-sized browser form, then compares the downloaded file byte
+for byte. One executed case passes on the corrected source. It is focused local
+evidence; the fast lane does not run this browser/native bridge.
+
+The first ready fast gate caught two policy mismatches, not compiler errors:
+the Apple qualification fragment's index still said open while its header said
+built, and the existing diagnostic description's physical-key handling lived
+outside the allowed shared form adapter. The index now matches built; the
+unchanged Down-to-privacy behavior is decoded inside `AuthTextField`, with a
+nullable explicit focus target that preserves other forms' defaults. The fence
+itself is unchanged. Its focused contract, TV D-pad and existing Select-to-edit
+regressions are required before the corrected candidate is pushed. The current
+source iPhone UI class executes two passes (share sheet and recovery) plus one
+TV-only skip; the earlier single-method zero-test receipt is not a pass.
+Android phone actual attachment and recovery execute two passing cases.
+
+Both failed gate contracts now pass in a focused 75-test docs/build/fence run.
+The corrected Android app/test APKs compile; actual Android TV qualification
+passes four cases including the shared form’s default Select-to-edit behavior.
+The field adapter movement changes no archive protocol, Apple source, capture,
+wire or storage inputs; their recorded current-source results remain applicable.
+The final required gate and exact landing are in #1081. No production service,
+proxy or real-device installation is part of this archive release.
+
+Main's qualified cluster-observation landing `201313f58` was integrated
+normally before the final push. It changes documentation, the observation
+script and its operation tests, with no Rust/web/native product or client-test
+inputs changed. Both projects’ index/backlog rows are preserved. The source
+comparison retains the applicable native/browser/archive receipts; the focused
+current-base docs/fence and bounded-observation contracts run again, and the
+normal pinned hook checks the exact merged source before publication.
+
+
+The green candidate `575126ae1` passed all eight checks on run5046. Before
+merge, main advanced to the qualified playback landing `b35eebb6b`. The
+combined source preserves both regression catalogs and documentation entries;
+Apple build238 replaces the colliding claim237. The new Apple and Rust inputs
+were qualified before another push. Android171 and the archive protocol
+source are unchanged; the existing executed Android and browser receipts
+remain applicable. No hardware or fleet installation is part of this step.
+
+
+The playback-base source passes 60 iOS and 54 tvOS focused tests, the pinned
+all-target Clippy/format hook, 22 focused Rust playback regressions and all81
+contracts. The history audit passes with both projects’ client witnesses.
+A subsequent actual TV report check reproduced remote focus stopping before
+ZIP export when the captured preview has many nonfocusable rows. The TV now
+puts that preview after every report/history action, and its rows accept remote
+focus so the content remains readable. The same populated-report download
+check passes after the correction; export and relaunch recovery pass together on the corrected source. The failed run is kept
+as a failure, including its zero-test runner restart.
+
+
+The final TV preview correction is `f777976ce`. Its failed fixture contains
+all30 preview rows. The final tvOS report-screen class executes export/close
+revocation and offline same-incident relaunch recovery: two passes, one
+phone-share-only skip, zero failures. The corrected source passes the normal
+pinned compiler hook. Apple238/Android171 are the final claims. The13 original
+landing regression fields plus the TV recovery field remain mandatory; #1081
+records the exact final gate and landing. Signed/physical sampling is separate.
+
+
+Before publication, main advanced again to the qualified prepared-clock
+landing `f1bffab59`. Its web code, tests and bounded diagnostic-fence witness
+are preserved. The diagnostic consent markers surround the shared form call;
+Down-key decoding remains in AuthTextField. The obsolete key-import allowance
+is removed because this screen no longer imports or decodes keys. Android
+runtime behavior and all Apple inputs are unchanged by this integration.
+Focused web/fence checks and the pinned hook qualify this combined source.
+
+
+Main's CI-prerequisite/Android-fixture repair and final SDR evidence landings
+advance the base to `cd5c8ddf1`. Their build contracts, fixture and witness are
+preserved. Production archive, playback and web source files do not change
+from the qualified candidate161d96f68. The fresh normal pinned hook and focused
+build-contract/Android-fixture checks qualify this integration; completed
+native UI, archive and web runtime results remain applicable by source digest.
+The prior candidate's gate5058 and the exact final gate are recorded in #1081.

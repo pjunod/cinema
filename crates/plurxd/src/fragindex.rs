@@ -959,7 +959,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                         match promotion {
                             None => promotion = Some(here),
                             Some(ref canonical) => {
-                                if &here != canonical {
+                                if !canonical.matches_later_parameter_sets(&here) {
                                     // A film whose clean starts disagree cannot
                                     // be described by one immutable init. Not a
                                     // failure — a fact, recorded so the title
@@ -1225,6 +1225,13 @@ fn identity_for_transform(
 ) -> SourceIdentity {
     let mut recipe = transcode::copy_video_args(file, video);
     if matches!(file.video_codec.as_deref(), Some("hevc" | "h265")) {
+        // A failed pre-repair P5 index is a terminal persisted refusal.
+        // Move only the affected recipe so it can rebuild after upgrading.
+        if !video.retains_hevc_parameter_sets()
+            && transcode::hevc_copy_tag_for_source(file, video.preserves_dolby_vision()) == "dvh1"
+        {
+            recipe.push("--plurx-dvh1-completeness=1".into());
+        }
         recipe.push(format!(
             "--plurx-hdr10-index={}",
             fmp4::HDR10_INDEX_METADATA_REVISION
@@ -3241,6 +3248,108 @@ mod tests {
             "non-keyframe maximum must reach the immutable init"
         );
     }
+    #[tokio::test]
+    #[ignore = "needs a private FFmpeg dvh1 capture; PLURX_DVH1_CAPTURE"]
+    async fn captured_dvh1_completeness_builds_a_constant_index() {
+        let feed = std::fs::read(
+            std::env::var("PLURX_DVH1_CAPTURE").expect("valid DV capture test operation"),
+        )
+        .expect("valid DV capture test operation");
+        let outcome = index_stream(&feed[..], identity(), None, DolbyVisionPass::Untouched).await;
+        let IndexOutcome::Built(index) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert!(index.parameter_sets_constant);
+        assert_eq!(index.promotion.dvh1_parameter_sets.len(), 3);
+        let mut reader = FragmentReader::new();
+        reader.push(&feed);
+        let Some(Unit::Init(init)) = reader.next_unit().expect("valid DV capture test operation")
+        else {
+            panic!("init")
+        };
+        let identity = crate::renditiondir::InitIdentity::establish(&init, index.promotion.clone())
+            .expect("valid DV capture test operation");
+        let restored: PromotionInputs = serde_json::from_str(
+            &serde_json::to_string(&index.promotion).expect("valid DV capture test operation"),
+        )
+        .expect("valid DV capture test operation");
+        let restored = crate::renditiondir::InitIdentity::establish(&init, restored)
+            .expect("valid DV capture test operation");
+        let served = restored
+            .served_init_for(&init)
+            .expect("valid DV capture test operation");
+        assert_eq!(
+            served.bytes,
+            identity
+                .served_init_for(&init)
+                .expect("valid DV capture test operation")
+                .bytes
+        );
+        fmp4::validate_hevc_decoder_configuration(&served)
+            .expect("valid DV capture test operation");
+        assert_eq!(
+            fmp4::dolby_vision_record(&served)
+                .expect("valid DV capture test operation")
+                .expect("valid DV capture test operation")
+                .profile,
+            5
+        );
+    }
+
+    #[test]
+    fn dvh1_completeness_revision_retries_only_affected_copy_indexes() {
+        for (hdr, format, preserve, retain, affected) in [
+            (
+                "dolby_vision",
+                "Dolby Vision · Profile 5",
+                true,
+                false,
+                true,
+            ),
+            (
+                "dolby_vision",
+                "Dolby Vision · Profile 5",
+                true,
+                true,
+                false,
+            ),
+            (
+                "dolby_vision",
+                "Dolby Vision · Profile 5",
+                false,
+                false,
+                false,
+            ),
+            (
+                "dolby_vision",
+                "Dolby Vision · Profile 8 (HDR10-compatible)",
+                true,
+                false,
+                false,
+            ),
+            ("hdr10", "HDR10", false, false, false),
+        ] {
+            let file = hevc_file(Some(hdr), Some(format));
+            let video = transcode::CopyVideoOptions::new(true, preserve)
+                .with_parameter_set_retention(retain);
+            let mut old_recipe = transcode::copy_video_args(&file, video);
+            old_recipe.push(format!(
+                "--plurx-hdr10-index={}",
+                fmp4::HDR10_INDEX_METADATA_REVISION
+            ));
+            old_recipe.push(format!(
+                "--plurx-hevc-proof={}",
+                plurx_core::hevc_configuration::REVISION
+            ));
+            assert_eq!(
+                identity_for(&file, video).argv_fingerprint
+                    != plurx_core::segplan::argv_fingerprint(&old_recipe),
+                affected,
+                "{format} preserve={preserve} retain={retain}"
+            );
+        }
+    }
+
     #[test]
     fn hdr10_metadata_revision_invalidates_local_copy_indexes() {
         let file = hevc_file(Some("hdr10"), Some("HDR10"));
@@ -4862,6 +4971,8 @@ mod tests {
             hevc_configuration: None,
             strip_dolby_vision: false,
             dolby_vision: None,
+            dvh1_parameter_sets: Vec::new(),
+            dvh1_parameter_sets_malformed: false,
             parameter_sets: vec![vec![0x40, 0x01, 0x0c]],
             hdr10_sei: Vec::new(),
         };
@@ -4870,6 +4981,8 @@ mod tests {
             hevc_configuration: None,
             strip_dolby_vision: false,
             dolby_vision: None,
+            dvh1_parameter_sets: Vec::new(),
+            dvh1_parameter_sets_malformed: false,
             parameter_sets: vec![vec![0x40, 0x01, 0x0d]],
             hdr10_sei: Vec::new(),
         };

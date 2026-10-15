@@ -1950,7 +1950,7 @@ impl TranscodeManager {
                 audio_delivery,
             )
         };
-        let logical = serde_json::to_vec(&serde_json::json!({
+        let mut logical = serde_json::json!({
             "file": &file,
             "kind": SessionKind::Copy {
                 aac: options.transcode_audio,
@@ -1960,8 +1960,17 @@ impl TranscodeManager {
             "audio_index": audio_index,
             "audio": audio_delivery,
             "args": canonical_args,
-        }))
-        .ok();
+        });
+        // This transform runs after FFmpeg, so its version is not in argv.
+        // Keep completed rolling output from aliasing the old retaining bytes.
+        if segmenting
+            && video_options.retains_hevc_parameter_sets()
+            && transcode::hevc_copy_tag_for_source(&file, video_options.preserves_dolby_vision())
+                == "dvh1"
+        {
+            logical["copyseg_dvh1_guard"] = serde_json::json!(1);
+        }
+        let logical = serde_json::to_vec(&logical).ok();
         let rolling_provenance =
             if start_seconds == 0.0 && takeover.is_none() && retained_budget.is_some() {
                 match logical {
@@ -2534,17 +2543,13 @@ impl TranscodeManager {
     }
 }
 
-/// The copy pipeline a rolling HEVC session runs: always keeping the source's
-/// in-band parameter sets.
-///
-/// A rolling copy has no whole-film proof that deleting them is lossless, and
-/// no index identity to keep stable, so it takes the one packaging that is
-/// correct for every source: the definitions travel with the pictures that
-/// use them (`docs/streaming/HEVC-IN-BAND-PARAMETER-SETS.md`). That is what
-/// lets a title with no header proof yet — or one whose headers change, like
-/// UNABOMBER — play correctly through the rolling fallback instead of being
-/// refused or painted pink and green. Non-HEVC sources are unaffected.
-pub(super) fn rolling_copy_video_options(
+/// Rolling copies retain HEVC parameter sets by default, avoiding deletion
+/// without a whole-film stability proof. An incomplete dvh1 muxer claim is the
+/// narrow exception: copyseg proves every sample against the repaired init
+/// before buffering it, then strips only identical definitions. A contradiction
+/// terminates that stream before the unsafe fragment can be published.
+/// Non-HEVC sources and VOD's whole-source admission are unaffected.
+pub(crate) fn rolling_copy_video_options(
     file: &plurx_core::domain::MediaFile,
     probe_json: Option<&str>,
     have_dovi: bool,
