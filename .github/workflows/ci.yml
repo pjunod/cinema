@@ -64,7 +64,9 @@ jobs:
   scope:
     name: validation scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 2
+    # Complete retained-evidence authentication exceeds the old two-minute budget.
+    # Use a literal bound instead of relying on expression-level fallback semantics.
+    timeout-minutes: 10
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
       apple: ${{ steps.scope.outputs.apple }}
@@ -1930,7 +1932,8 @@ jobs:
       - android_device
       - package_smoke
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 2
+    # The exact-tree receipt repeats complete live evidence authentication.
+    timeout-minutes: 10
     steps:
       - name: Require every selected job to pass
         env:
