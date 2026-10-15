@@ -16624,6 +16624,7 @@ mod tests {
         delivered_bps: Option<i64>,
     ) -> HlsSessionInfo {
         HlsSessionInfo::Vod(Box::new(crate::vodserve::VodSessionInfo {
+            stream_format: None,
             active_encode_milli_realtime: None,
             active_encode_age_ms: None,
             active_encode_active_ms: None,
