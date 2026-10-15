@@ -295,9 +295,12 @@ jobs:
     # The full unit and SQLite suite continues below; contributors may merge
     # after this compile gate and policy pass, then watch that suite on main.
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    # Match the effort compiler budget for cold source and smaller runners.
+    # The full workspace check exceeded this budget on the 8-GiB guest.
+    # Use the existing bare-metal compiler capacity without raising its limit.
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, baremetal]
     timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: "1"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

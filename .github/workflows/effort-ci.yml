@@ -132,7 +132,7 @@ jobs:
     name: effort Rust compile
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, baremetal]
     # Includes toolchain/cache setup and every-target compilation on cold runners.
     timeout-minutes: 20
     env:
