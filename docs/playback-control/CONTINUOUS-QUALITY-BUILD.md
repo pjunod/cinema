@@ -11778,9 +11778,11 @@ as definite invalidity by the foreground watcher. The corrected probes distingui
 unknown from definite false. Only an already sealed, unexpired accepted witness
 survives unknown; unknown cannot mint or renew one. Cancellation, fence liveness,
 accepted/preparation deadlines and the owner tombstone remain lock-free revocations.
-Owner, intent and snapshot changes behind a busy sessions table become observable
-when it unlocks; until then only the existing witness survives, bounded by the
-earlier accepted/preparation deadline. A definite accepted-state failure still
+Owner-epoch rollover, desired-intent changes and attachment invalidation clear
+the shared atomic accepted fence and revoke lock-free. Only render-state snapshot
+changes such as Playing remain behind the busy sessions table and become
+observable when it unlocks; until then only the existing witness survives,
+bounded by the earlier accepted/preparation deadline. A definite accepted-state failure still
 beats an unknown reader probe.
 No asynchronous wait is introduced under the preparation registry lock.
 
@@ -11884,3 +11886,38 @@ tree. Apple 250 compilation and physical TV qualification are pending. New
 physical mobile builds/installations await authorized committed main source.
 The final unit lane remains deferred to the batched integrated candidate;
 nothing is merged or authorized to merge. Canonical acceptance remains partial.
+
+
+### 10.329 — close the Apple250 re-review follow-ups
+
+Fable re-reviewed exact Apple250 source and its TV evidence and found no blocker
+in the correction delta. The TV250 observer completed 15 manual, five actual
+Auto and two low-link transitions: 22 landings with 16 typed checks each, zero
+reported errors and a 67.0887 ms maximum decoded gap. All 199 recorded backend
+births are absent. Original SDK wrapper false/exit1 after intentional completed
+stop remains preserved; completed decoded measurements are adjudicated separately.
+This does not prove shipping-binary, optical, audio or menu continuity.
+
+Apple251 addresses the two low-severity follow-ups without restarting hardware
+or full review. R1 chooses the membership-qualified fallback with greatest upper
+bound when no interval actually contains the clock. At playhead10 with ranges
+[9.8,9.95] and [10.02,40], the future rounding-qualified range yields30 seconds;
+it does not join a positive gap inside the protected window. The existing actual
+controller regression covers this admission and restoration to60.
+
+For P1, zero forward buffering means AVFoundation automatic, not a smaller
+explicit budget. An automatic incumbent may take the same16-second lease only
+when existing contiguous runway covers the unchanged overlap and reserve.
+Cleanup restores zero only while the captured item still has the lease hint;
+a later owner's preference remains untouched. Explicit positive preferences at
+or below the protected reserve remain ineligible. Policy and actual-controller
+regressions cover automatic acquisition/restoration, later ownership, insufficient
+runway and a positive internal gap. No feature gate or HTTP retry is added.
+
+S4 wording above now distinguishes lock-free atomic owner/intent/attachment
+revocation from Playing snapshots hidden behind the sessions lock. The owner
+has authorized final fast-lane units and merge directly; no batched merge session
+exists. Each required test must pass once on the integrated candidate, with only
+failures rerun. Compilation and final unit evidence are pending at this source
+checkpoint. New physical mobile builds/installations remain main-only; no new
+hardware campaign is requested or claimed for251.

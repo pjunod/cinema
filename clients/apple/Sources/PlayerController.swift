@@ -649,7 +649,8 @@ func preparedCadenceProbeItemMs(
 
 /// A temporary fetch preference is safe only while already loaded incumbent
 /// media covers the unchanged physical overlap and its post-swap reserve.
-/// Zero means AVFoundation's automatic policy and is never reduced.
+/// Zero means AVFoundation's automatic policy. It may take the same bounded
+/// lease as an explicit preference and is restored to automatic afterward.
 struct PreparedIncumbentBufferPreference {
     let original: Double
     let hint: Double
@@ -658,9 +659,10 @@ struct PreparedIncumbentBufferPreference {
         let wallSeconds = Double(PreparedReplacementBounds.overlapMs
             + PreparedCommitRendezvous.postSwapReserveMs) / 1_000
         let protectedSeconds = wallSeconds * max(1, playbackRate)
-        guard original.isFinite, original > 0, actualRunwaySeconds.isFinite,
+        guard original.isFinite, original >= 0, actualRunwaySeconds.isFinite,
               playbackRate.isFinite, playbackRate > 0, protectedSeconds.isFinite,
-              actualRunwaySeconds >= protectedSeconds, original > protectedSeconds else { return nil }
+              actualRunwaySeconds >= protectedSeconds,
+              original == 0 || original > protectedSeconds else { return nil }
         self.original = original
         hint = protectedSeconds
     }
@@ -4079,10 +4081,13 @@ final class PlayerController: ObservableObject {
         // A tolerated range just behind the clock must not shadow media that
         // actually contains it, especially when internal gaps are forbidden.
         let containing = ranges.firstIndex(where: { $0.contains(playheadSeconds) })
-        guard let start = containing ?? ranges.firstIndex(where: {
-            $0.lowerBound <= playheadSeconds + joinTolerance
-                && $0.upperBound >= playheadSeconds - joinTolerance
-        }) else { return 0 }
+        // If only rounding-tolerant membership is available, prefer the range
+        // reaching furthest ahead rather than an already consumed sliver.
+        let fallback = ranges.indices.filter {
+            ranges[$0].lowerBound <= playheadSeconds + joinTolerance
+                && ranges[$0].upperBound >= playheadSeconds - joinTolerance
+        }.max { ranges[$0].upperBound < ranges[$1].upperBound }
+        guard let start = containing ?? fallback else { return 0 }
         var end = ranges[start].upperBound
         for range in ranges.dropFirst(start + 1) {
             guard range.lowerBound <= end + gapTolerance else { break }

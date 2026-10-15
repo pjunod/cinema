@@ -203,3 +203,23 @@ Superseded 249 r4 stopped before READY and SDK; it is not a media failure.
 Changed-source compilation and qualification remain pending. Final Fable
 follow-up must assess the Apple 250 source, rather than treating the compiled
 Apple 249 packet as the final candidate. No merge is authorized.
+
+
+## 7. Fable Apple250 re-review — follow-ups for direct promotion
+
+**Updated:** 2026-10-15. The re-review clears S1–S5 and E1 with no blocker in
+the correction delta and accepts TV250 evidence within its stated decoded-output
+scope. Apple251 closes R1 by preferring the greatest-end tolerant fallback and
+P1 by allowing automatic zero buffering to take a protected lease, restoring
+zero without overwriting later ownership. Both use actual-controller regressions.
+S4 is corrected: owner epoch, desired intent and attachment revoke through the
+atomic accepted fence without waiting for sessions; Playing snapshots may wait.
+R2 extra HTTP-path contention telemetry is optional and is not added: the bounded
+watcher-tail count cannot establish all contention-path execution or absence.
+F1 remains covered by authored real-lock fixtures, now due for final unit execution.
+
+The owner authorized direct merge after each required unit passes once, with
+only failures rerun. No batched merge session exists. This supersedes the earlier
+merge hold and deferred-unit checkpoint; it does not restart full review or the
+hardware campaign. TV250 does not qualify changed251 hardware; new physical
+mobile builds and installs await main. Canonical ledger: §10.329.

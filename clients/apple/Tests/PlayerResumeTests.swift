@@ -205,6 +205,62 @@ final class PlayerResumeTests: XCTestCase {
         XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 10_000))
         XCTAssertEqual(player.item.preferredForwardBufferDuration, 60)
         controller.discardPreparedSuccessor()
+
+        // Neither interval contains the clock. The future rounding-qualified
+        // range must win over a stale sliver without joining positive gaps.
+        player.item.ranges = [9.8...9.95, 10.02...40]
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds()), 30, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(gapTolerance: 0)), 30, accuracy: 0.001)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 10_000))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 16)
+        controller.discardPreparedSuccessor()
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 60)
+    }
+
+    func testAutomaticIncumbentFetchPreferenceLeaseRestoresAutomaticAndPreservesLaterOwner() throws {
+        let player = ResumePlayer()
+        player.item.positionSeconds = 0
+        player.item.ranges = [0...40]
+        player.item.preferredForwardBufferDuration = 0
+        let controller = PlayerController(player: player,
+            requestPlaybackDecision: { _, _, _, _ in
+                try await Task.sleep(for: .seconds(3_600))
+                throw CancellationError()
+            })
+        let credentials = Session.shared.credentials
+        Session.shared.setCredentials(origin: "http://127.0.0.1:1", token: nil)
+        defer {
+            controller.stop()
+            Session.shared.setCredentials(origin: credentials.origin, token: credentials.token)
+        }
+        controller.start(model: AppModel(), itemId: 1, fileId: 1, startMs: 0,
+            durationMs: 600_000, title: "Automatic physical lease")
+        let sessionId = "7f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01"
+        let action = try XCTUnwrap(PreparedReplacementAction(ControlAction(
+            type: PlaybackControl.prepareActionType,
+            actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+            sessionId: sessionId,
+            playlistUrl: "/api/v1/hls/\(sessionId)/master.m3u8",
+            mediaOriginMs: 0,
+            effectiveSelection: EffectiveSelection(
+                qualityAuto: false, height: 720, audioTrack: nil, subtitleBurn: nil,
+                audioOffsetMs: 0, codec: "source", dynamicRange: nil))))
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 16)
+        controller.discardPreparedSuccessor()
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 0)
+
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        player.item.preferredForwardBufferDuration = 45
+        controller.discardPreparedSuccessor()
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 45)
+
+        player.item.preferredForwardBufferDuration = 0
+        player.item.ranges = [0...5, 5.1...40]
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 0,
+            "automatic buffering still requires contiguous protected runway")
+        controller.discardPreparedSuccessor()
     }
 
     func testHeartstopperRunwayQualifiesAndBoundaryCasesDoNot() {

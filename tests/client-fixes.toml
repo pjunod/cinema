@@ -6795,3 +6795,13 @@ source = "crates/plurxd/src/http/hls/preparation.rs"
 source_anchor = "fn arm_preparation_foreground_watch("
 test = "crates/plurxd/src/http/hls/preparation.rs"
 test_anchor = "cached_accepted_wait_defers_playing_revocation_until_session_lock_releases"
+
+
+[[fixes]]
+id = "apple.automatic-incumbent-buffer-lease-restoration"
+commits = []
+supplements = "apple.incumbent-lease-membership-rounding-strict-gap"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct PreparedIncumbentBufferPreference"
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "testAutomaticIncumbentFetchPreferenceLeaseRestoresAutomaticAndPreservesLaterOwner"

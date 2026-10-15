@@ -257,9 +257,16 @@ final class PreparedCommitRendezvousTests: XCTestCase {
             original: 60, actualRunwaySeconds: 15.999, playbackRate: 1))
         XCTAssertNil(PreparedIncumbentBufferPreference(
             original: 16, actualRunwaySeconds: 54, playbackRate: 1))
+        let automatic = try XCTUnwrap(PreparedIncumbentBufferPreference(
+            original: 0, actualRunwaySeconds: 54, playbackRate: 1))
+        XCTAssertEqual(automatic.hint, 16)
+        XCTAssertEqual(automatic.restorationPreference(currentHint: 16), 0)
+        XCTAssertNil(automatic.restorationPreference(currentHint: 45))
         XCTAssertNil(PreparedIncumbentBufferPreference(
-            original: 0, actualRunwaySeconds: 54, playbackRate: 1),
-            "zero is automatic buffering, not a positive fetch budget")
+            original: 0, actualRunwaySeconds: 15.999, playbackRate: 1))
+        XCTAssertNil(PreparedIncumbentBufferPreference(
+            original: 8, actualRunwaySeconds: 54, playbackRate: 1),
+            "an explicit smaller preference must not be increased")
     }
 
     func testIncumbentFetchPreferenceLeaseScalesFastPlaybackAndRejectsUnknownFacts() throws {
@@ -271,8 +278,10 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         for invalid in [Double.nan, .infinity, -.infinity, -1, 0] {
             XCTAssertNil(PreparedIncumbentBufferPreference(original: 60,
                 actualRunwaySeconds: 54, playbackRate: invalid))
-            XCTAssertNil(PreparedIncumbentBufferPreference(original: invalid,
-                actualRunwaySeconds: 54, playbackRate: 1))
+            if invalid != 0 {
+                XCTAssertNil(PreparedIncumbentBufferPreference(original: invalid,
+                    actualRunwaySeconds: 54, playbackRate: 1))
+            }
         }
         XCTAssertNil(PreparedIncumbentBufferPreference(original: 60,
             actualRunwaySeconds: .nan, playbackRate: 1))
