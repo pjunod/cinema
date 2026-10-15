@@ -56,7 +56,8 @@ final class RemoteNavigationCoordinator: ObservableObject {
     private var modalEntryPending = false
     private var modalEntryRealized = false
     private var modalEntryCompleted = false
-    private var modalReturn: (id: UUID, dismissedScope: String, scope: String, key: String?, revision: UInt64)?
+    private var modalReturn: (id: UUID, dismissedScope: String, scope: String, key: String?, intent: UUID)?
+    private var physicalIntent = UUID()
     private var focusedRegistration: UUID?
     private struct Destination {
         let token: UUID
@@ -184,6 +185,9 @@ final class RemoteNavigationCoordinator: ObservableObject {
     func synchronizeRoute() {
         let currentPath = paths[selectedTab] ?? []
         guard rootScope != scope || observedTab != selectedTab || observedPath != currentPath else { return }
+        #if os(tvOS)
+        let changedTab = observedTab != selectedTab
+        #endif
         observedTab = selectedTab
         observedPath = currentPath
         // A repeated item ID still denotes a different native route lifetime.
@@ -199,7 +203,13 @@ final class RemoteNavigationCoordinator: ObservableObject {
         }
         scope = rootScope
         advanceContext()
+        #if os(tvOS)
+        // Tab movement remains in the native tab bar. Its Down action enters
+        // content; only same-tab route returns restore content immediately.
+        requestFocus(changedTab ? nil : restoredFocus[scope], force: changedTab)
+        #else
         requestFocus(restoredFocus[scope])
+        #endif
     }
     /// Suspension retires command contexts without discarding the visible UI.
     func invalidate() {
@@ -258,6 +268,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         physicalInput()
     }
     func physicalInput() {
+        physicalIntent = UUID()
         modalEntryPending = false
         modalReturn = nil
         retireFocusAuthority()
@@ -355,7 +366,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         let preferred = override.flatMap { available.contains($0) ? $0 : nil } ?? current.returnFocus
         let target = preferred.flatMap { available.isEmpty || available.contains($0) ? $0 : nil } ?? available.first
         requestFocus(target)
-        modalReturn = (current.id, current.scope, current.parent, target, focusRevision)
+        modalReturn = (current.id, current.scope, current.parent, target, physicalIntent)
     }
     /// The native presenter calls this after its covered controls become eligible
     /// again. Reissue the request even when the key did not change. A newer
@@ -366,7 +377,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
               identity == nil || restoration.id == identity else { return }
         modalReturn = nil
         guard modal == nil, restoration.scope == activeScope,
-              restoration.revision == focusRevision else { return }
+              restoration.intent == physicalIntent else { return }
         requestedFocus = restoration.key
         focusedKey = nil
         focusedRegistration = nil

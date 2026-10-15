@@ -49,6 +49,43 @@ final class RemoteNavigationTests: XCTestCase {
         XCTAssertEqual(navigation.requestedFocus, "item:416")
         XCTAssertEqual(retired, 2)
     }
+    #if os(tvOS)
+    @MainActor
+    func testTabMovementDefersContentFocusWhileSameTabBackRestoresBookmark() {
+        let navigation = RemoteNavigationCoordinator()
+        navigation.presentationBlocked = { false }
+        navigation.physicalFocus(scope: "home", key: "movie")
+        navigation.navigate(to: .item(42))
+        XCTAssertEqual(navigation.dispatch(.back, context: navigation.context), .applied)
+        XCTAssertEqual(navigation.requestedFocus, "movie")
+        navigation.selectedTab = .libraries
+        navigation.synchronizeRoute()
+        XCTAssertNil(navigation.requestedFocus)
+        navigation.physicalFocus(scope: "libraries", key: "see-all")
+        navigation.selectedTab = .home
+        navigation.synchronizeRoute()
+        XCTAssertNil(navigation.requestedFocus)
+        XCTAssertNil(navigation.focusedKey)
+    }
+    #endif
+    @MainActor
+    func testEarlyNativeTargetAcknowledgmentCannotRetirePostDismissalReturn() {
+        let navigation = RemoteNavigationCoordinator()
+        navigation.presentationBlocked = { false }
+        navigation.setOrder(scope: "home", keys: ["jump", "item:1"], columns: 1)
+        navigation.openModal(scope: "jump-menu", opener: "jump") {}
+        navigation.closeModal(returnFocus: "item:1")
+        navigation.nativeControlFocus(scope: "home", key: "item:1", focused: true)
+        navigation.nativeControlFocus(scope: "home", key: "jump", focused: true)
+        XCTAssertEqual(navigation.focusedKey, "jump")
+        navigation.modalPresentationDismissed(scope: "jump-menu")
+        XCTAssertEqual(navigation.requestedFocus, "item:1")
+        XCTAssertNil(navigation.focusedKey)
+        navigation.physicalInput()
+        let revision = navigation.focusRevision
+        navigation.modalPresentationDismissed(scope: "jump-menu")
+        XCTAssertEqual(navigation.focusRevision, revision)
+    }
     @MainActor
     func testUnchangedNativeFocusCannotCancelPendingTargetButCanAcknowledgeIt() {
         let navigation = RemoteNavigationCoordinator()
