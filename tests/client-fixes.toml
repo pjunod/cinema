@@ -6777,3 +6777,22 @@ source = "clients/apple/Sources/HLSFragmentCadence.swift"
 source_anchor = "enum HLSFragmentCadence"
 test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
 test_anchor = "testFragmentIndexWalkFailsClosedPastSixtyFourRequestsOnManyFragments"
+
+
+[[fixes]]
+id = "apple.incumbent-lease-membership-rounding-strict-gap"
+commits = []
+supplements = "server.cached-wait-contended-session-retains-witness"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "guard let runway = bufferedRunwaySeconds(gapTolerance: 0)"
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "testIncumbentFetchPreferenceLeaseRejectsPositiveGapInsideProtectedWindow"
+
+[[fixes]]
+id = "server.cached-wait-playing-hidden-by-sessions-contention"
+commits = []
+supplements = "server.cached-wait-contended-session-retains-witness"
+source = "crates/plurxd/src/http/hls/preparation.rs"
+source_anchor = "fn arm_preparation_foreground_watch("
+test = "crates/plurxd/src/http/hls/preparation.rs"
+test_anchor = "cached_accepted_wait_defers_playing_revocation_until_session_lock_releases"

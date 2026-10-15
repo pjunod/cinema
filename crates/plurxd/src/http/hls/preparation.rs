@@ -376,6 +376,7 @@ pub(super) fn register_test_preparation(
 
 fn arm_preparation_foreground_watch(active: ActivePreparedSuccessor) {
     tokio::spawn(async move {
+        let mut reported_cached_contention = false;
         loop {
             tokio::select! {
                 () = active.cancelled.cancelled() => {
@@ -395,20 +396,59 @@ fn arm_preparation_foreground_watch(active: ActivePreparedSuccessor) {
             if active.state.transcode.foreground_media_waiting() {
                 // Proof is published after this watcher starts. Decide from
                 // the current registered owner, atomically with taking cleanup.
-                let cancelled = {
+                let (cancelled, contention_notice) = {
                     let mut registered = active_prepared_successors()
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match registered.get(&active.preparation.incarnation_id) {
-                        Some(current)
-                            if cached_accepted_wait_is_current(current) != Some(false) =>
-                        {
-                            None
-                        }
-                        Some(_) => registered.remove(&active.preparation.incarnation_id),
+                        Some(current) => match cached_accepted_wait_is_current(current) {
+                            Some(false) => {
+                                (registered.remove(&active.preparation.incarnation_id), None)
+                            }
+                            Some(true) => (None, None),
+                            None => {
+                                let notice = (!reported_cached_contention)
+                                    .then(|| {
+                                        current.cached_accepted_wait.as_ref().map(|wait| {
+                                            let now = unix_ms();
+                                            (
+                                                crate::transcode::session_log_id(
+                                                    &current.preparation.session_id,
+                                                ),
+                                                crate::transcode::session_log_id(
+                                                    &current.preparation.incarnation_id,
+                                                ),
+                                                wait.deadline_unix_ms.saturating_sub(now).max(0),
+                                                current
+                                                    .preparation
+                                                    .deadline_ms
+                                                    .saturating_sub(now)
+                                                    .max(0),
+                                            )
+                                        })
+                                    })
+                                    .flatten();
+                                (None, notice)
+                            }
+                        },
                         None => return,
                     }
                 };
+                if let Some((
+                    successor,
+                    preparation,
+                    witness_remaining_ms,
+                    preparation_remaining_ms,
+                )) = contention_notice
+                {
+                    // One attributable product event per exact watcher, emitted
+                    // outside the registry lock, not on each 25 ms busy tick.
+                    reported_cached_contention = true;
+                    tracing::info!(target: "plurxd::auto_prepare", phase = "cached_wait_watch",
+                        outcome = "lock_contention_preserved", sample = "first_per_watcher",
+                        %successor, %preparation, witness_remaining_ms, preparation_remaining_ms,
+                        "Cached recovery preserves existing wait witness under lock contention");
+                }
                 if let Some(active) = cancelled {
                     settle_cancelled_preparation(
                         active,
@@ -2948,6 +2988,11 @@ mod quality_cancellation_tests {
         cached_wait_watcher_fixture(Some("contended_control_witness")).await;
     }
 
+    #[tokio::test]
+    async fn cached_accepted_wait_defers_playing_revocation_until_session_lock_releases() {
+        cached_wait_watcher_fixture(Some("contended_sessions_playing")).await;
+    }
+
     async fn cached_wait_watcher_fixture(watcher_revocation: Option<&str>) {
         let (_output_dir, serve, facts, output_request) =
             crate::vodserve::retained::test_post_attachment_output_facts().await;
@@ -3090,6 +3135,46 @@ mod quality_cancellation_tests {
                 "real capacity pressure cannot abort the proved accepted keeper"
             );
             assert!(!pending.cancelled());
+            if revocation == "contended_sessions_playing" {
+                let original_deadline = active_preparation(&incarnation)
+                    .expect("cached keeper")
+                    .cached_accepted_wait
+                    .expect("existing witness")
+                    .deadline_unix_ms;
+                request.sequence += 1;
+                request.render_state = crate::playback_control::RenderState::Rendering;
+                serve
+                    .accept_cached_wait_while_sessions_held_for_test(
+                        &route,
+                        &request,
+                        &incarnation,
+                        async {
+                            // The actual accepted snapshot is now Playing, but both
+                            // probes are unknown while this same sessions lock is held.
+                            tokio::time::sleep(Duration::from_millis(90)).await;
+                            let keeper =
+                                active_preparation(&incarnation).expect("unknown retains keeper");
+                            let witness =
+                                keeper.cached_accepted_wait.expect("existing witness only");
+                            assert_eq!(witness.deadline_unix_ms, original_deadline);
+                            assert!(witness.fence.still_live());
+                            assert!(!pending.cancelled());
+                        },
+                    )
+                    .await;
+                tokio::time::timeout(Duration::from_millis(150), async {
+                    while active_preparation(&incarnation).is_some() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("Playing cancels on watcher polls after sessions lock release");
+                assert!(pending.cancelled());
+                drop(blocked);
+                drop(held);
+                assert!(!state.transcode.foreground_media_waiting());
+                return;
+            }
             if let Some(lock) = revocation.strip_prefix("contended_") {
                 let original = active_preparation(&incarnation)
                     .expect("cached keeper")

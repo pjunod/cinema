@@ -150,3 +150,41 @@ The owner subsequently clarified that the main-only build/install instruction
 applies to mobile apps only. iPhone and Android builds/installations stay held;
 Apple TV qualification resumes on the corrected source. No merge is authorized.
 Unit bodies remain unexecuted under the explicit deferred-test instruction.
+
+
+## 6. Fable follow-up — Apple 248 accepted with one admission risk
+
+**Updated:** 2026-10-15. Fable verified the Apple 248 source and final hardware
+packages, accepting F1/F2/N6 with no blocker. Desk execution of regression
+bodies is not test execution. The review identifies the following corrections:
+
+| Finding | Disposition | Evidence still required |
+|---|---|---|
+| S1: stale comment says unknown cancels | Clarify that unknown preserves only an existing unexpired witness and cannot mint/renew it. | Compile and source inspection. |
+| S2: strict gap tolerance also rejects membership rounding | Apple 249 splits membership and gap tolerances; the lease retains 0.25-second membership while requiring zero inter-range gap. Clock-startup remains strict for both. | Extended actual-controller regression, compilation and changed-source TV campaign. |
+| S3: duplicate tombstone check | Remove the redundant inner condition; retain the pre-lock rejection. | Compile. |
+| S4: ledger overstates revocation observable behind a busy sessions table | §10.326 now names lock-free revocations and the accepted/preparation bound while sessions remain busy. | Sessions-held invalidation regression where authored; unit execution stays deferred. |
+| S5: missing contexts | Include `playback_control.rs` (`AcceptedControlFence::still_live`) and Apple `PreparedReplacement.swift` (`preparedAcquisitionURL`) in the next package. | Rehash exact committed inputs. |
+| E1: previous TV pass does not prove corrected paths executed | Add attributable watcher-unknown and lease acquire/refuse diagnostics without altering authority or acceptance. | Preserved TV248 logs subsequently yield 22 acquisitions and 22 successful restorations; no refusal count exists in old source. Count future observations separately; do not force contention on shared hardware. |
+
+E2–E8 are accepted limits: no lock-contention hardware cause is established;
+SDK exit 1 remains a false wrapper, with completed measurements adjudicated
+separately. App absence at a census is not clean-shutdown proof. TV measurements
+cover public source under an inverse-verified observer patch, not the shipping
+binary. Phone 247 does not qualify changed mobile source. Recorded settled
+known-session HLS GET refusal absence is not a blanket route/lifetime claim.
+Optical/audio/menu continuity remain unmeasured. No unit bodies or CI lanes have
+run on correction commits; final batched qualification remains mandatory before
+an authorized merge. The owner still prohibits merging this work now.
+
+The mobile policy is physical-only: new mobile builds intended for installation
+and installs require committed main source; Simulator/emulator/CI/test-only
+mobile builds are exempt and cannot later be reused physically. TV work is
+exempt. The earlier broad policy-stop remains historical, not the current rule.
+
+
+Apple 249 extends the existing actual-controller lease regression and adds
+`crates/plurxd/src/http/hls/preparation.rs::cached_accepted_wait_defers_playing_revocation_until_session_lock_releases`.
+The latter holds the real sessions mutex while accepting Rendering, proves
+bounded witness survival without renewal, then requires cancellation after
+release. No unit body has run; compilation is reported separately.

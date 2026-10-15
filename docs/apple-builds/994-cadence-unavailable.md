@@ -1,6 +1,6 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 248
+Build: 249
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal
@@ -140,3 +140,13 @@ installs remain subject to the owner's main-only rule; no merge is authorized.
 
 [Continuous Quality Build §10.326](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10326--preserve-bounded-cached-witnesses-during-lock-contention)
 records the Fable corrections and remaining acceptance.
+
+
+Apple 249 separates playhead-membership rounding tolerance from inter-range gap
+continuity. The incumbent fetch-preference lease allows 0.25-second membership
+rounding but cannot bridge a positive protected-window gap. Clock-startup proof
+retains strict membership and gaps. Product diagnostics attribute lease refusal
+and server cached-witness contention without changing authority or deadlines.
+Fable accepts the preceding F1/F2/N6 corrections; changed-source compilation and
+TV qualification remain open. Units stay deferred, physical mobile builds await
+main, and nothing is authorized to merge.

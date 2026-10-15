@@ -3022,8 +3022,9 @@ async fn control_local_with_observation(
     if incumbent_waiting {
         // Cold and voluntary preparation must release spare capacity. A sealed,
         // exact cached Auto recovery holds no encoder and may resolve this wait.
-        // Its liveness/intent check never awaits; unknown still cancels under
-        // the original exchange deadline and detached settlement ownership.
+        // Its liveness/intent check never awaits. Unknown preserves only an
+        // existing unexpired witness; it never mints or renews one. The
+        // original exchange deadline and detached settlement owner remain.
         cancel_preparations_for_incumbent_wait(
             &route.playback_id,
             Some((route, &request, deadline_unix_ms)),

@@ -392,45 +392,62 @@ impl VodServe {
         request: &crate::playback_control::ControlRequestV1,
         successor: &str,
     ) {
+        self.accept_cached_wait_while_sessions_held_for_test(route, request, successor, async {})
+            .await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn accept_cached_wait_while_sessions_held_for_test(
+        &self,
+        route: &plurx_core::domain::MediaSessionRoute,
+        request: &crate::playback_control::ControlRequestV1,
+        successor: &str,
+        observation: impl std::future::Future<Output = ()>,
+    ) {
         tokio::time::sleep(Duration::from_millis(250)).await;
         let mut sessions = self.shared.sessions.lock().await;
-        let session = sessions
-            .get_mut(&route.session_id)
-            .expect("actual retained attachment");
-        let first = session.last_control_snapshot.is_none();
-        session.playback_id = route.playback_id.clone();
-        let snapshot = crate::playback_control::PlaybackDemandSnapshot::from(request);
-        let mut control = session.control.lock().expect("control lock");
-        let result = control
-            .accept(
-                &route.incarnation_id,
-                u64::try_from(route.owner_epoch).expect("owner epoch"),
-                &request.client_instance_id,
-                request.sequence,
-                crate::playback_control::ControlAcceptance::observed(
-                    snapshot.platform(),
-                    &crate::playback_control::PreparedSuccessorObservation::NotRequested,
-                    None,
-                    snapshot.request_fingerprint.as_deref(),
-                    &snapshot.selection,
-                    snapshot.capabilities.as_ref(),
-                ),
-            )
-            .expect("actual owner-local acceptance");
-        assert_eq!(
-            result.0,
-            crate::playback_control::ControlDisposition::Accepted
-        );
-        control.observe(&snapshot.selection, snapshot.capabilities.as_ref());
-        if first {
-            assert!(control.stage_preparation(
-                successor.to_owned(),
-                route.incarnation_id.clone(),
-                crate::media_sessions::unix_ms() + 30_000,
-                Some(request.selection.desired().digest()),
-            ));
+        {
+            let session = sessions
+                .get_mut(&route.session_id)
+                .expect("actual retained attachment");
+            let first = session.last_control_snapshot.is_none();
+            session.playback_id = route.playback_id.clone();
+            let snapshot = crate::playback_control::PlaybackDemandSnapshot::from(request);
+            let mut control = session.control.lock().expect("control lock");
+            let result = control
+                .accept(
+                    &route.incarnation_id,
+                    u64::try_from(route.owner_epoch).expect("owner epoch"),
+                    &request.client_instance_id,
+                    request.sequence,
+                    crate::playback_control::ControlAcceptance::observed(
+                        snapshot.platform(),
+                        &crate::playback_control::PreparedSuccessorObservation::NotRequested,
+                        None,
+                        snapshot.request_fingerprint.as_deref(),
+                        &snapshot.selection,
+                        snapshot.capabilities.as_ref(),
+                    ),
+                )
+                .expect("actual owner-local acceptance");
+            assert_eq!(
+                result.0,
+                crate::playback_control::ControlDisposition::Accepted
+            );
+            control.observe(&snapshot.selection, snapshot.capabilities.as_ref());
+            if first {
+                assert!(control.stage_preparation(
+                    successor.to_owned(),
+                    route.incarnation_id.clone(),
+                    crate::media_sessions::unix_ms() + 30_000,
+                    Some(request.selection.desired().digest()),
+                ));
+            }
+            session.last_control_snapshot = Some(snapshot);
         }
-        session.last_control_snapshot = Some(snapshot);
+        // Keep only the real async sessions mutex across the observation.
+        // The accepted-control std mutex is released before awaiting.
+        observation.await;
     }
 
     #[cfg(test)]
@@ -591,7 +608,6 @@ impl VodServe {
             || !Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
             || !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
             || !session.children.is_empty()
-            || owner.tombstone.is_some()
         {
             return Some(false);
         }

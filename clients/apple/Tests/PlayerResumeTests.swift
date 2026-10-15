@@ -158,13 +158,24 @@ final class PlayerResumeTests: XCTestCase {
                 audioOffsetMs: 0, codec: "source", dynamicRange: nil))))
 
         XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds()), 40, accuracy: 0.001)
-        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(joinTolerance: 0)), 5, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(joinTolerance: 0, gapTolerance: 0)), 5, accuracy: 0.001)
         XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
         XCTAssertEqual(player.item.preferredForwardBufferDuration, 60,
             "A positive gap inside the protected window must prevent physical buffer reduction")
         controller.discardPreparedSuccessor()
 
-        player.item.ranges = [0...5, 5...40]
+        // Timebase rounding may put the playhead just before the first range.
+        // Keep membership tolerance without allowing a positive internal gap.
+        player.item.ranges = [0.005...5, 5.1...40]
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds()), 40, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(gapTolerance: 0)), 5, accuracy: 0.001)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 60)
+        controller.discardPreparedSuccessor()
+
+        player.item.ranges = [0.005...5, 5...40]
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(joinTolerance: 0, gapTolerance: 0)), 0)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(gapTolerance: 0)), 40, accuracy: 0.001)
         XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
         XCTAssertEqual(player.item.preferredForwardBufferDuration, 16)
         controller.discardPreparedSuccessor()

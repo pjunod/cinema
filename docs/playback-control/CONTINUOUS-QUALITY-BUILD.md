@@ -11776,8 +11776,12 @@ Fable's external source review identifies a major cached-recovery cancellation
 bug: nonblocking lifecycle, session, control or reader lock contention was read
 as definite invalidity by the foreground watcher. The corrected probes distinguish
 unknown from definite false. Only an already sealed, unexpired accepted witness
-survives unknown; unknown cannot mint or renew one. Independent definitive owner,
-intent, snapshot, cancellation, fence and deadline failures still revoke it.
+survives unknown; unknown cannot mint or renew one. Cancellation, fence liveness,
+accepted/preparation deadlines and the owner tombstone remain lock-free revocations.
+Owner, intent and snapshot changes behind a busy sessions table become observable
+when it unlocks; until then only the existing witness survives, bounded by the
+earlier accepted/preparation deadline. A definite accepted-state failure still
+beats an unknown reader probe.
 No asynchronous wait is introduced under the preparation registry lock.
 
 Apple 248 also requires zero positive-gap tolerance when acquiring the physical
@@ -11802,3 +11806,45 @@ phone 247 clock diagnostic was safely stopped before READY/native launch, with
 all 159 owned process identities absent and no playback acceptance credit.
 The low-link clock refusal remains undiagnosed; no weakened deadline, runway,
 reserve, ownership condition or client HTTP retry is introduced. Nothing merges.
+
+
+### 10.327 — separate lease membership from protected-window continuity
+
+Fable's follow-up review of Apple 248 (`53e0ef051`) finds no blocker in F1,
+F2 or the cadence request-bound regression, but identifies a lease admission
+risk: zero tolerance also rejects a playhead a few milliseconds outside the
+first loaded range. Apple 249 separates playhead membership tolerance from
+inter-range gap tolerance. The physical incumbent lease keeps the ordinary
+0.25-second membership allowance while refusing every positive gap between
+ranges inside its protected window. Clock-startup admission retains its prior
+zero tolerance for both checks; ordinary telemetry keeps both defaults.
+
+Product diagnostics identify a lease refusal by bounded reason and log an
+acquisition/restoration through the existing surface channel. The server
+foreground watcher identifies preserved unknown authority without creating or
+renewing a witness. These observations do not change admission or scoring.
+The comment at the incumbent-wait call site and redundant tombstone check are
+corrected; the accepted-fence and acquisition-URL contexts accompany the next
+review package. No HTTP retry, gate, deadline or buffer reserve is added.
+
+The previous exact Apple 248 TV observer campaign completes 15 manual changes,
+five actual Auto changes and both low-link landings. All 22 landings satisfy
+16 typed checks, with zero campaign errors and a 64.504 ms maximum decoded gap.
+The existing phone 247 clock observer separately completes the same series at
+61.052 ms; it does not qualify Apple 248 or 249 mobile source. A follow-up read-only projection of the preserved TV client-log journal finds
+22 lease acquisitions (60 to 16 seconds) and 22 successful restorations. This
+proves delivered acquisition/restoration observations, not all invocations or
+zero refusals: the old source did not emit refusal telemetry. No capture proves
+execution of the F1 contention branch, or the S2 rounding case on hardware. The original
+SDK wrappers remain false after intentional completed-capture stop/exit 1;
+completed decoded measurements are accepted separately from normal SDK exit.
+Owned app absence is a census, not a campaign-bound proof of clean app exit.
+Server process births are independently absent (TV 168, phone 187). Optical,
+audio and menu continuity remain unmeasured; old failed captures remain failed.
+
+New source compilation and TV regression qualification remain pending. Unit
+bodies are deferred to the final batched candidate and must each pass once;
+only failures rerun. Only mobile builds intended for physical installation and
+those installs require committed main source. Simulator/test-only mobile and
+non-mobile TV work are exempt. Physical new-source iOS qualification remains
+pending until an authorized main build. Nothing is merged or authorized to merge.

@@ -613,7 +613,7 @@ func preparedClockStartupHasRunway(
           targetMs.isFinite, requiredEndMs.isFinite, earliestItemMs <= targetMs else { return false }
     let earliestSeconds = earliestItemMs / 1_000
     let runway = PlayerController.bufferedRunwaySeconds(
-        playheadSeconds: earliestSeconds, ranges: loadedItemRanges, joinTolerance: 0)
+        playheadSeconds: earliestSeconds, ranges: loadedItemRanges, joinTolerance: 0, gapTolerance: 0)
     return earliestSeconds + runway >= requiredEndMs / 1_000
 }
 
@@ -4042,7 +4042,7 @@ final class PlayerController: ObservableObject {
     /// Runway of the item currently attached, or `nil` when there is no item
     /// or no usable clock. `nil` means "unknown", which the delivery watchdog
     /// must not read as "healthy".
-    func bufferedRunwaySeconds(joinTolerance: Double = 0.25) -> Double? {
+    func bufferedRunwaySeconds(joinTolerance: Double = 0.25, gapTolerance: Double = 0.25) -> Double? {
         guard let item = player.currentItem else { return nil }
         let playhead = item.currentTime().seconds
         guard playhead.isFinite else { return nil }
@@ -4054,17 +4054,19 @@ final class PlayerController: ObservableObject {
             return start...end
         }
         return Self.bufferedRunwaySeconds(
-            playheadSeconds: playhead, ranges: ranges, joinTolerance: joinTolerance
+            playheadSeconds: playhead, ranges: ranges, joinTolerance: joinTolerance, gapTolerance: gapTolerance
         )
     }
 
     /// Playable seconds contiguous with the current clock. A later buffered
     /// island beyond a gap is not runway: AVPlayer still has to stop before it
-    /// can reach it.
+    /// can reach it. Playhead membership tolerates timebase rounding separately
+    /// from the gaps permitted between buffered ranges.
     nonisolated static func bufferedRunwaySeconds(
         playheadSeconds: Double,
         ranges: [ClosedRange<Double>],
-        joinTolerance: Double = 0.25
+        joinTolerance: Double = 0.25,
+        gapTolerance: Double = 0.25
     ) -> Double {
         guard playheadSeconds.isFinite else { return 0 }
         let ranges = ranges
@@ -4080,7 +4082,7 @@ final class PlayerController: ObservableObject {
         }) else { return 0 }
         var end = ranges[start].upperBound
         for range in ranges.dropFirst(start + 1) {
-            guard range.lowerBound <= end + joinTolerance else { break }
+            guard range.lowerBound <= end + gapTolerance else { break }
             end = max(end, range.upperBound)
         }
         return max(0, end - playheadSeconds)
@@ -12562,14 +12564,40 @@ extension PlayerController: PreparedSuccessorHost {
             loadedItemRanges: ranges, cadence: cadence)
     }
 
+    private enum PreparedIncumbentBufferRefusal: String {
+        case playbackNotRequested = "playback_not_requested"
+        case itemMissing = "item_missing"
+        case runwayUnknown = "runway_unknown"
+        case policyIneligible = "policy_ineligible"
+    }
+
+    private func notePreparedIncumbentBufferRefusal(
+        _ reason: PreparedIncumbentBufferRefusal, runway: Double? = nil, original: Double? = nil
+    ) {
+        func fact(_ value: Double?) -> String {
+            guard let value, value.isFinite else { return "unknown" }
+            return String(value)
+        }
+        noteSurfaceLogOnly("prepared_incumbent_buffer:phase=refuse:reason=\(reason.rawValue):runway_seconds=\(fact(runway)):original_seconds=\(fact(original)):rate=\(preferredRate)")
+    }
+
     private func acquirePreparedIncumbentBufferPreference(_ action: PreparedReplacementAction) {
         restorePreparedIncumbentBufferPreference()
-        // A physical protection lease cannot bridge telemetry's tolerated gaps.
-        guard started, wantsPlayback, let item = player.currentItem,
-              let runway = bufferedRunwaySeconds(joinTolerance: 0),
-              let policy = PreparedIncumbentBufferPreference(
-                original: item.preferredForwardBufferDuration,
-                actualRunwaySeconds: runway, playbackRate: Double(preferredRate)) else { return }
+        guard started else { return }
+        guard wantsPlayback else { notePreparedIncumbentBufferRefusal(.playbackNotRequested); return }
+        guard let item = player.currentItem else { notePreparedIncumbentBufferRefusal(.itemMissing); return }
+        // Membership tolerates clock rounding; a physical lease cannot bridge gaps.
+        guard let runway = bufferedRunwaySeconds(gapTolerance: 0) else {
+            notePreparedIncumbentBufferRefusal(.runwayUnknown, original: item.preferredForwardBufferDuration)
+            return
+        }
+        guard let policy = PreparedIncumbentBufferPreference(
+            original: item.preferredForwardBufferDuration,
+            actualRunwaySeconds: runway, playbackRate: Double(preferredRate)) else {
+            notePreparedIncumbentBufferRefusal(.policyIneligible, runway: runway,
+                original: item.preferredForwardBufferDuration)
+            return
+        }
         preparedIncumbentBufferLease = (item, player, viewerActionEpoch, action.actionId, policy)
         item.preferredForwardBufferDuration = policy.hint
         noteSurfaceLogOnly("prepared_incumbent_buffer:phase=acquire:original_seconds=\(policy.original):hint_seconds=\(policy.hint):runway_seconds=\(runway):rate=\(preferredRate):overlap_ms=\(preparedOverlapRemainingMs)")
