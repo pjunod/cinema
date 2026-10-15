@@ -48,7 +48,8 @@ use plurx_core::cluster::migration::status::{
     ReplicationHealth, ReplicationMonitor, ReplicationStatus,
 };
 use plurx_core::cluster::migration::{
-    production_hiqlite_defaults_with_read_pool, ActivationMarker,
+    production_hiqlite_defaults_with_read_pool, ActivationMarker, HIQLITE_ACTIVE_DIRNAME,
+    HIQLITE_DATABASE_FILENAME,
 };
 use plurx_core::cluster::ClusterIdentity;
 use plurx_core::domain::{
@@ -64,7 +65,7 @@ use plurx_core::store::{
     LibraryStore, MediaStore, OfflinePackageStore, PlaybackTelemetryStore, ReconcileOutcome,
     RootFingerprintStatus, SettingsStore, SubtitleSourcePublication, TraktStore,
     TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore, AUTH_PROTOCOL_MAX,
-    AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION,
+    AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_BASELINE_VERSION, AUTH_SCHEMA_VERSION,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -4338,6 +4339,13 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let observer = (1..=3)
         .find(|node_id| *node_id != target)
         .context("choose a surviving membership observer")?;
+    // Keep the earlier heartbeat/write-budget controls explicit. From this
+    // point the live departing voter must publish its own applied progress,
+    // as a daemon does, while the observer waits on the post-fence barrier.
+    cluster
+        .request(target, Request::StartHeartbeatLoop)
+        .await?
+        .require_ok()?;
     let observer_node_id = harness_node_identity(observer);
     let activity_now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
     let departing_activity_proof = match cluster
@@ -5238,6 +5246,10 @@ async fn run_leader_self_leave_case() -> Result<()> {
     cluster.wait_for_voters(&[1, 2, 3]).await?;
 
     let departed = cluster.leader().await?;
+    cluster
+        .request(departed, Request::StartHeartbeatLoop)
+        .await?
+        .require_ok()?;
     let local_follower = (1..=3)
         .find(|node_id| *node_id != departed)
         .context("choose local follower removal refusal")?;
@@ -5320,6 +5332,10 @@ async fn run_degraded_four_voter_leader_self_leave_case() -> Result<()> {
         .collect::<Vec<_>>();
     let unavailable = remaining[0];
     cluster.kill(unavailable).await?;
+    cluster
+        .request(departed, Request::StartHeartbeatLoop)
+        .await?
+        .require_ok()?;
     cluster
         .request(departed, Request::LeaveVoter)
         .await?
@@ -7802,9 +7818,9 @@ pub enum Request {
     ForceHeartbeat,
     /// Start the production heartbeat loop on this process. The normal
     /// harness keeps writes explicit so compaction assertions have no
-    /// background traffic; learner lifecycle cases need the real periodic
-    /// target-local proof while another process waits on a promotion or
-    /// removal barrier.
+    /// background traffic; membership lifecycle cases start this at their
+    /// live transition so the target publishes real periodic applied proof
+    /// while a process waits on a promotion or removal barrier.
     StartHeartbeatLoop,
     /// Take one cluster-wide singleton job through plurxd's own
     /// `acquire_cluster_job`, including its eligibility gate. The harness
@@ -9482,12 +9498,10 @@ pub async fn prove_local_fts_rebuild(
     baseline: &CatalogView,
     voter: u64,
 ) -> Result<()> {
-    let path = cluster
-        .root
-        .join(format!("node-{voter}"))
+    let path = node_hiqlite_dir(&cluster.root, voter)
         .join("state_machine")
         .join("db")
-        .join("auth.db");
+        .join(HIQLITE_DATABASE_FILENAME);
     let connection = rusqlite::Connection::open_with_flags(
         &path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -9764,8 +9778,8 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
     };
     let replication = ReplicationMonitor::replicated(
         client.clone(),
-        launch.root.join(format!("node-{}", launch.node_id)),
-        "auth.db",
+        node_hiqlite_dir(&launch.root, launch.node_id),
+        HIQLITE_DATABASE_FILENAME,
     );
     let (passive_shutdown, passive_shutdown_signal) = tokio::sync::oneshot::channel();
     tokio::spawn(replication.clone().passive_metrics_loop(async move {
@@ -13231,14 +13245,16 @@ pub async fn preflight_voter(preflight: Preflight) -> Result<()> {
     }
 }
 
-/// Start a candidate voter one schema version behind and return the refusal it
-/// printed. Any other exit status is itself a failure.
+/// Start a candidate below the supported bootstrap schema and return its
+/// refusal. The optional current schema can be newer than the cluster's
+/// bootstrap baseline, so current-minus-one is not necessarily incompatible.
+/// Any other exit status is itself a failure.
 pub async fn run_incompatible_preflight(executable: &Path, specs: &[NodeSpec]) -> Result<String> {
     run_preflight(
         executable,
         specs,
         ClusterCompatibility {
-            schema_version: AUTH_SCHEMA_VERSION - 1,
+            schema_version: AUTH_SCHEMA_BASELINE_VERSION - 1,
             ..ClusterCompatibility::CURRENT
         },
         Some(42),
@@ -13302,6 +13318,11 @@ async fn run_preflight(
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
+fn node_hiqlite_dir(root: &Path, node_id: u64) -> PathBuf {
+    root.join(format!("node-{node_id}"))
+        .join(HIQLITE_ACTIVE_DIRNAME)
+}
+
 /// Build the hiqlite configuration for one voter and create its data dir.
 pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
     let mut defaults = production_hiqlite_defaults_with_read_pool(launch.read_pool_size);
@@ -13317,7 +13338,7 @@ pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
         defaults.raft_config.replication_lag_threshold =
             validation_raft_config.replication_lag_threshold;
     }
-    let data_dir = launch.root.join(format!("node-{}", launch.node_id));
+    let data_dir = node_hiqlite_dir(&launch.root, launch.node_id);
     std::fs::create_dir_all(&data_dir)?;
     Ok(NodeConfig {
         node_id: launch.node_id,
@@ -13333,7 +13354,7 @@ pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
         listen_addr_api: Cow::Owned(launch.listen_addr.clone()),
         listen_addr_raft: Cow::Owned(launch.listen_addr.clone()),
         data_dir: Cow::Owned(data_dir.to_string_lossy().into_owned()),
-        filename_db: Cow::Borrowed("auth.db"),
+        filename_db: Cow::Borrowed(HIQLITE_DATABASE_FILENAME),
         secret_raft: RAFT_SECRET.to_owned(),
         secret_api: API_SECRET.to_owned(),
         tls_raft: Some(ServerTlsConfig::TlsAutoCertificates),
