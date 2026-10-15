@@ -70,8 +70,11 @@ class OriginalScopeEvidenceCase(unittest.TestCase):
         suite['records'].append(second)
         return proof, policy
 
-    def validate_retired(self, proof, policy, differences=lambda a, b: set(), source=lambda a, b: None):
+    def validate_retired(self, proof, policy, differences=lambda a, b: set(), source=lambda a, b: None,
+                         second_policy=None):
         with patch.object(retention, 'RETIRED_DAEMON', policy), \
+                patch.object(retention, 'RETIRED_DVH1_DAEMON',
+                             retention.RETIRED_DVH1_DAEMON if second_policy is None else second_policy), \
                 patch.object(retention, 'COHORTS', {'rust': {proof['lanes']['rust'][0]['name']}}), \
                 patch('validation.qualification_unit_continuation.validate', return_value={}):
             return retention.validate(proof, 'b' * 40, differences=differences, source=source)
@@ -150,6 +153,79 @@ class OriginalScopeEvidenceCase(unittest.TestCase):
                 self.validate_retired(proof, policy,
                     differences=lambda a, b: {'crates/input.rs'} if a != b else set(),
                     source=lambda commit, path: b'new' if commit == 'b' * 40 else b'old')
+
+    def test_two_finite_retirements_keep_mixed_logs_and_refuse_wrong_context_or_successor(self):
+        def paired():
+            proof, first_policy = self.retired_fixture()
+            suite = proof['lanes']['rust'][0]
+            second_policy = dict(retention.RETIRED_DVH1_DAEMON)
+            old, successor = second_policy['id'], second_policy['successor']
+            original = copy.deepcopy(suite['records'][0])
+            original.update(sequence=3, source_commit=second_policy['source'],
+                            outcomes={'b': 'pass', old: 'pass'},
+                            log=log('test b ... ok\ntest ' + old + ' ... ok\n'))
+            second_policy['log'] = original['log']['sha256']
+            repaired = copy.deepcopy(suite['records'][1])
+            repaired.update(sequence=4, outcomes={successor: 'pass'},
+                            log=log('test ' + successor + ' ... ok\n'))
+            suite['ids'] += ['b', successor]
+            suite['inventory'] = log('\n'.join(suite['ids']) + '\n')
+            suite['records'] += [original, repaired]
+            return proof, first_policy, second_policy
+
+        proof, first_policy, second_policy = paired()
+        original = copy.deepcopy(proof)
+        adopted, _ = self.validate_retired(proof, first_policy, second_policy=second_policy)
+        self.assertEqual(adopted['rust']['passed'], 4)
+        retired = adopted['rust']['retired_original_passes']
+        self.assertEqual({(r['source_commit'], r['log_sha256'], r['test_id'], r['successor'])
+                          for r in retired},
+                         {(p['source'], p['log'], p['id'], p['successor'])
+                          for p in (first_policy, second_policy)})
+        self.assertEqual(proof, original, 'both original mixed logs stay intact')
+
+        for fault in ('source', 'log', 'extra', 'omitted-sibling', 'retired-fail',
+                      'retired-ignored', 'successor-fail', 'successor-ignored',
+                      'successor-earlier', 'duplicate', 'invalidated-successor'):
+            proof, first_policy, second_policy = paired()
+            records = proof['lanes']['rust'][0]['records']
+            original, repaired = records[2:]
+            differences, source = lambda a, b: set(), lambda a, b: None
+            if fault == 'source':
+                original['source_commit'] = 'a' * 40
+            elif fault == 'log':
+                original['log'] = log('test b ... ok\n')
+            elif fault == 'extra':
+                original['outcomes']['unreviewed'] = 'pass'
+            elif fault == 'omitted-sibling':
+                del original['outcomes']['b']
+            elif fault in ('retired-fail', 'retired-ignored'):
+                status, native = ('fail', 'FAILED') if fault == 'retired-fail' else ('ignored', 'ignored')
+                original['outcomes'][second_policy['id']] = status
+                original['log'] = log('test b ... ok\ntest ' + second_policy['id'] + ' ... ' + native + '\n')
+                second_policy['log'] = original['log']['sha256']
+            elif fault in ('successor-fail', 'successor-ignored'):
+                status, native = ('fail', 'FAILED') if fault == 'successor-fail' else ('ignored', 'ignored')
+                repaired.update(outcomes={second_policy['successor']: status},
+                                log=log('test ' + second_policy['successor'] + ' ... ' + native + '\n'))
+            elif fault == 'successor-earlier':
+                original['sequence'], repaired['sequence'] = 4, 3
+            elif fault == 'duplicate':
+                duplicate = copy.deepcopy(original)
+                duplicate['sequence'] = 5
+                records.append(duplicate)
+            else:
+                repaired['source_commit'] = 'a' * 40
+                for record in records:
+                    if record['source_commit'] != 'b' * 40:
+                        record['changes'] = {'crates/input.rs': {
+                            'before': retention.digest(b'old'), 'after': retention.digest(b'new'),
+                            'affected_ids': [second_policy['successor']] if record is repaired else []}}
+                differences = lambda a, b: {'crates/input.rs'} if a != b else set()
+                source = lambda commit, path: b'new' if commit == 'b' * 40 else b'old'
+            with self.subTest(fault=fault), self.assertRaises(receipts.ReceiptError):
+                self.validate_retired(proof, first_policy, differences=differences, source=source,
+                                      second_policy=second_policy)
 
     def test_structural_slots_bound_before_decode_and_duplicate_canonical_names_refuse(self):
         from validation import qualification_unit_continuation as commands
