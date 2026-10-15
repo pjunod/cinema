@@ -27,12 +27,24 @@ keeps bare FFmpeg callers on the audited Jellyfin executables, and refreshes
 the installed-package inventory. The incumbent and arm64 targets are unchanged.
 The isolated candidate preserves all 43 system providers and all 121
 distributed library objects; AC-4, Dolby filter and loader checks pass.
-Intel QSV graph and ordinary-API qualification remain pending the explicitly
-approved transfer of the new candidate images. Existing AMD/VA-API and Mac
+The [dependency retirement receipt](MACOS-VIDEO-PROCESSING-EVIDENCE.md#46-qsv-shipping-dependency-retirement--2026-10-15) binds the exact installer and shipping-stage proof.
+Intel QSV graph and ordinary-API qualification remain pending explicit
+approval to transfer the new candidate images. Existing AMD/VA-API and Mac
 receipts remain retained.
-Task-owned qualification resources are being inventoried for cleanup after
-reusable evidence and inputs are secured. No cleanup or QSV pass is claimed
-before its receipt exists.
+Prior AMD and Intel receipts, scripts and synthetic controls are preserved in
+verified durable archives (41 and 348 members respectively). The redundant
+builder checkout was removed after its three source files matched the
+implementation commit. The temporary Metal toolchain was removed and Xcode
+reports it uninstalled. Intel qualification images and inputs remain reserved
+for the pending checks; final remote scratch and compiler-cache cleanup follows
+acceptance and durable publication.
+
+The remaining order is: approved image transfer; finite raw and ordinary-API
+Intel QSV qualification; one adversarial review of the frozen candidate;
+address findings; final focused regressions and fast lane; merge and final
+cleanup. No unit tests have run for this closeout. The previously nominated
+batch-merge session is stopped; merge ownership awaits the operator's reply.
+A separate task's stopped merge worker will not be resumed implicitly.
 
 
 **October 13 Air follow-up.** Renewed NAS access permits the real HDR10-to-SDR
