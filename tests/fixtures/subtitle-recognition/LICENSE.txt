@@ -1,0 +1,39 @@
+Speech qualification fixtures: source attribution and changes
+
+fleurs-de.wav and the publisher text in fleurs-de.reference.json/catalog.json:
+FLEURS: Few-shot Learning Evaluation of Universal Representations of Speech
+Alexis Conneau, Min Ma, Simran Khanuja, Yu Zhang, Vera Axelrod,
+Siddharth Dalmia, Jason Riesa, Clara Rivera and Ankur Bapna (2022), Google.
+Source: https://huggingface.co/datasets/google/fleurs
+Immutable revision: 70bb2e84b976b7e960aa89f1c648e09c59f894dd
+SPDX-License-Identifier: CC-BY-4.0
+https://creativecommons.org/licenses/by/4.0/
+Full license: ../../../licenses/CC-BY-4.0.txt
+Changes: extracted one WAV from the German development archive. Audio bytes
+and the selected publisher reference text are unmodified; provenance metadata
+was added. The runtime diagnostic separately decodes a temporary PCM copy.
+
+TOS-en.srt and base-film.raw.vtt:
+Tears of Steel, (CC) Blender Foundation | mango.blender.org
+Source film/project: https://mango.blender.org/
+Source/license: https://mango.blender.org/sharing/
+Publisher reference: https://download.blender.org/demo/movies/ToS/subtitles/TOS-en.srt
+SPDX-License-Identifier: CC-BY-3.0
+https://creativecommons.org/licenses/by/3.0/
+Full license: ../../../licenses/CC-BY-3.0.txt
+Changes: publisher SRT is unmodified, including original line endings.
+base-film.raw.vtt is a machine transcription of the source audio, retained
+unnormalized as a timing regression input, not a human-audited transcript.
+No soundtrack-album files are included.
+
+kafka-first-paragraph.txt:
+Franz Kafka, Die Verwandlung (1917 text), public domain in the USA.
+Source: https://www.gutenberg.org/ebooks/22367
+Only the underlying book paragraph is extracted; line breaks were joined.
+No Project Gutenberg branding or license is applied to the underlying text.
+Verify applicable rights outside the USA. LibriVox audio is not redistributed.
+
+JFK input remains in crates/plurxd/src/subtitle_models/self-test.wav with its
+adjacent self-test.provenance.json and the upstream MIT notice in licenses/.
+Derived noise/silence/repetition recipes introduce no other external content.
+Driver, tests and provenance metadata retain the repository source-code terms.

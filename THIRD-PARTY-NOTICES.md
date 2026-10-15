@@ -859,6 +859,19 @@ the tree, so it is redistributed with every clone the way the Gradle wrapper in
 | Component | Version | Where | License | Copyright |
 |---|---|---|---|---|
 | [acorn](https://github.com/acornjs/acorn) | 8.18.0 | `tests/vendor/acorn.js` | MIT — [full text](licenses/acorn-MIT.txt) | Copyright (c) 2012-2022 by various contributors |
+| [Google FLEURS](https://huggingface.co/datasets/google/fleurs) | `70bb2e84b976b7e960aa89f1c648e09c59f894dd` | `tests/fixtures/subtitle-recognition/fleurs-de.wav` and publisher reference text | CC BY 4.0 — [full text](licenses/CC-BY-4.0.txt) | Conneau, Ma, Khanuja, Zhang, Axelrod, Dalmia, Riesa, Rivera and Bapna (2022), Google |
+| [Tears of Steel](https://mango.blender.org/) | 2012 official short film | `tests/fixtures/subtitle-recognition/TOS-en.srt` and derived `base-film.raw.vtt` | CC BY 3.0 — [full text](licenses/CC-BY-3.0.txt) | (CC) Blender Foundation \| mango.blender.org |
+
+The speech fixture directory carries adjacent `LICENSE.txt` attribution,
+license/source URLs, exact source/reference hashes and change descriptions.
+The single FLEURS WAV and publisher reference text are extracted without
+changes; only provenance metadata was added. The Blender SRT preserves its
+original bytes; the raw VTT is a machine transcription, not a reviewed
+reference. These test assets are not bundled with the daemon; compiled test
+executables can embed the small raw-VTT timing regression input. The Kafka
+book excerpt is public domain in the USA; its joined-line extraction is
+identified separately in that notice. No external movie or audiobook file
+is redistributed with the repository.
 
 `tests/web/asset-order.test.js` needs a real JavaScript parser: it refuses a
 web-asset order in which a file runs something at load that names a binding
