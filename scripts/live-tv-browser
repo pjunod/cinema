@@ -145,6 +145,11 @@ def main(argv: list[str]) -> int:
                     route.fulfill(status=204)
                 elif suffix == "status":
                     route.fulfill(json={"state": "active", "owner_node_id": "fixture-owner", "encoder": "fixture", "output_height": 180})
+                elif suffix == "master.m3u8":
+                    route.fulfill(content_type="application/vnd.apple.mpegurl", body=(
+                        "#EXTM3U\n#EXT-X-VERSION:3\n"
+                        "#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=320x180\nindex.m3u8\n"
+                    ))
                 elif suffix == "index.m3u8":
                     end = min(44, 3 + int((time.monotonic() - session["opened"]) / 2))
                     first = max(0, end - 5)
@@ -152,7 +157,7 @@ def main(argv: list[str]) -> int:
                     playlist += "".join("#EXTINF:2.000000,\n%d.ts\n" % i for i in range(first, end + 1))
                     route.fulfill(content_type="application/vnd.apple.mpegurl", body=playlist)
                 else:
-                    assert re.fullmatch(r"\d+\.ts", suffix or "")
+                    assert re.fullmatch(r"\d+\.ts", suffix or ""), "unexpected Live TV fixture resource: " + request.url
                     route.fulfill(content_type="video/mp2t", body=(media / suffix).read_bytes())
 
             def observe(request):
