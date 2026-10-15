@@ -6522,3 +6522,11 @@ source = "clients/apple/Sources/LibraryView.swift"
 source_anchor = ".tvNavigationFocusSection()"
 test = "clients/apple/UITests/TVNavigationTests.swift"
 test_anchor = "func testRowsViewAllOpensGroupAndBackRestoresHeader()"
+
+[[fixes]]
+id = "apple.tv-hidden-playback-does-not-paint-native-bezel"
+commits = ["035b8e80a985927ab4ea19f4f40c0b261ca31b84"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = ".buttonStyle(PlaybackRevealButtonStyle())"
+test = "clients/apple/UITests/TVPlaybackNavigationTests.swift"
+test_anchor = "func testLocalMovieHiddenRevealReportAndBackRetainPlayback()"
