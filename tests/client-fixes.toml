@@ -6477,3 +6477,20 @@ source = "clients/apple/Sources/RemoteNavigationViews.swift"
 source_anchor = "func remoteNativeFocus(_ actuallyFocused: Bool)"
 test = "clients/apple/Tests/RemoteNavigationTests.swift"
 test_anchor = "func testActualStyleFocusKeepsPendingEntryInertUntilNativeAcknowledgment()"
+
+[[fixes]]
+id = "apple.tv-dismiss-return-survives-native-settlement"
+commits = ["17f6fa65b"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "restoration.intent == physicalIntent"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testEarlyNativeTargetAcknowledgmentCannotRetirePostDismissalReturn()"
+
+[[fixes]]
+id = "apple.tv-tab-change-defers-content-entry"
+commits = []
+supplements = "apple.tv-dismiss-return-survives-native-settlement"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "requestFocus(changedTab ? nil : restoredFocus[scope], force: changedTab)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testTabMovementDefersContentFocusWhileSameTabBackRestoresBookmark()"
