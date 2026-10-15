@@ -287,8 +287,10 @@ final class LiveTvTests: XCTestCase {
             encoding: .utf8)
         XCTAssertTrue(source.contains("Button(\"Fullscreen\") { fullscreen = true }"))
         XCTAssertTrue(source.contains(".fullScreenCover(isPresented: $fullscreen)"))
-        XCTAssertTrue(source.contains("VideoPlayer(player: controller.player).ignoresSafeArea()"),
-                      "fullscreen must reuse the active channel player instead of opening another session")
+        XCTAssertTrue(source.contains("PlayerSurface(player: controller.player, pictureInPicture: channelPictureInPicture"),
+                      "fullscreen must reuse the active channel player without a second AVKit control owner")
+        XCTAssertTrue(source.contains(".liveTvRemoteAdapter(.root, state: channelInputState, apply: applyChannelInput)"))
+        XCTAssertTrue(source.contains("if channelChromeVisible {"), "all channel controls must belong to revealable chrome")
         XCTAssertTrue(source.contains("if controller.watching != nil && !fullscreen {"),
                       "only one surface should render the shared player while fullscreen is open")
         XCTAssertTrue(source.contains("Button(\"Return to channels\") { fullscreen = false }"))
