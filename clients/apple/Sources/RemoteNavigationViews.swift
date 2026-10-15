@@ -147,6 +147,7 @@ struct RemoteChoice: Identifiable {
     let id: String
     let label: String
     let selected: Bool
+    var returnFocus: String? = nil
     let choose: () -> Void
 }
 
@@ -168,7 +169,7 @@ struct RemoteChoicePanel: View {
                 Button {
                     guard admission() == nil else { return }
                     choice.choose()
-                    navigation.closeModal()
+                    navigation.closeModal(returnFocus: choice.returnFocus)
                 } label: {
                     HStack {
                         Text(choice.label)
@@ -183,7 +184,7 @@ struct RemoteChoicePanel: View {
                 .accessibilityAddTraits(choice.selected ? .isSelected : [])
                 .remoteControl("choice:" + choice.id, label: choice.label, admission: admission) {
                     choice.choose()
-                    navigation.closeModal()
+                    navigation.closeModal(returnFocus: choice.returnFocus)
                 }
             }
             Button("Close") { if admission() == nil { navigation.closeModal() } }
@@ -208,9 +209,6 @@ struct RemoteChoicePanel: View {
                                         keys: choices.map { "choice:" + $0.id } + ["choice:close"],
                                         selected: choices.first(where: \.selected).map { "choice:" + $0.id })
         }
-        #if os(tvOS)
-        .modifier(RemoteChoiceExitAdapter(navigation: navigation))
-        #endif
         }
     }
 }
@@ -256,7 +254,9 @@ private struct RemoteChoicePresentation<Panel: View>: ViewModifier {
     let scope: String
     let panel: () -> Panel
 
+    @ViewBuilder
     func body(content: Content) -> some View {
+        #if os(tvOS)
         content.fullScreenCover(isPresented: $isPresented, onDismiss: {
             navigation.detachPresentation(token)
             navigation.modalPresentationDismissed(scope: presentedScope ?? scope, identity: modalIdentity)
@@ -269,7 +269,11 @@ private struct RemoteChoicePresentation<Panel: View>: ViewModifier {
             .background(RemoteOwnedPresentationProbe(navigation: navigation, token: token, scope: scope))
             .interactiveDismissDisabled()
             .onAppear { presentedScope = scope; modalIdentity = navigation.ownedModalIdentity }
+            .modifier(RemoteChoiceExitAdapter(navigation: navigation))
         }
+        #else
+        content.overlay { if isPresented { panel() } }
+        #endif
     }
 }
 

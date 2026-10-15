@@ -322,13 +322,14 @@ final class RemoteNavigationCoordinator: ObservableObject {
         advanceContext()
         requestFocus(nil)
     }
-    func closeModal() {
+    func closeModal(returnFocus override: String? = nil) {
         guard let current = modal else { return }
         modal = nil
         current.dismiss()
         advanceContext()
         let available = orderedKeys[current.parent] ?? []
-        let target = current.returnFocus.flatMap { available.isEmpty || available.contains($0) ? $0 : nil } ?? available.first
+        let preferred = override.flatMap { available.contains($0) ? $0 : nil } ?? current.returnFocus
+        let target = preferred.flatMap { available.isEmpty || available.contains($0) ? $0 : nil } ?? available.first
         requestFocus(target)
         modalReturn = (current.id, current.scope, current.parent, target, focusRevision)
     }
