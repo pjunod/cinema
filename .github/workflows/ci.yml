@@ -294,7 +294,8 @@ jobs:
     # after this compile gate and policy pass, then watch that suite on main.
     if: needs.scope.outputs.rust == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    timeout-minutes: 10
+    # Match the effort compiler budget for cold source and smaller runners.
+    timeout-minutes: 20
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

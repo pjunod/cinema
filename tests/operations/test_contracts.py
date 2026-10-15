@@ -1677,6 +1677,7 @@ assert.equal(context.ACT_TIMER, null);
             "\n  cluster_store_legacy:", 1
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
+        self.assertIn("timeout-minutes: 20", fast_rust)
         self.assertIn("run: make effort-rust-check", fast_rust)
         self.assertNotIn("cargo test", fast_rust)
         fast_finalize = fast_rust.split(
@@ -3331,7 +3332,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(contract_commands), 7)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=70", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=72", contract_commands[1])
         self.assertIn("PLURX_EXPECT_TEST_NAMES=", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])

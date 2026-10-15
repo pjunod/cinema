@@ -1343,7 +1343,9 @@ harness now polls after the burst
 under the same original cycle deadline, without additional writes. Newer-index,
 purge, retained-log and actual transport proofs remain required. Three focused
 controls cover UUID admission, delayed publication and unchanged-index expiry;
-their first execution belongs to the integrated effort.
+all three pass once on integrated effort `0e6bc1c98` on macOS. The two
+transport controls also pass once on Linux with actual default scheduling
+(0.20 and 0.75 seconds), without replaying the original 70 applicable passes.
 
 The original failures remain recorded. Compiler timeouts, daemon readiness,
 web focus baselines, Android transport focus and the package source download
@@ -1361,3 +1363,73 @@ added. Android build 173 and current generated claims identify the correction.
 Only the current JVM build-input digest changes; historical captures retain
 their original inputs. Local application and instrumentation-source compilation
 pass. Physical HDR acceptance and integrated failed-only execution remain open.
+
+
+### R38 — Serialize daemon activity fixtures and refresh the UI baseline
+
+Promotion 5127 passed the seven activation cases and two activity parsers,
+but its six concurrent real-daemon activity cases exhausted their unchanged
+readiness budgets. The failed-only Linux continuation passed one case in
+74.99 seconds and the remaining five in 303.73 seconds with serial libtest
+scheduling. It repeated none of the applicable passing cases. That probe
+used a different FFmpeg build from CI; it supports startup contention without
+proving the complete CI environment or a GPU cause.
+
+Only the activity integration invocation now uses `--test-threads=1`.
+Activation retains its existing scheduling and process mutex. Every activity
+case retains its four-worker Tokio runtime, concurrent requests, original
+readiness deadline and assertions. Full promotion still executes this lane.
+
+The normal self-hosted UI baseline update captured all 78 routes, layouts and
+viewports: 10,597 structural facts with no console or page errors. Reviewed
+changes add the existing index-coverage action, sign-in/player reporting
+controls and Developer reporting card, with their resulting focus positions.
+Request counts and existing focus labels are unchanged. The capture used the
+previous committed effort's server binary; its embedded web source is identical
+to the current effort. The ordinary qualification comparison remains required.
+
+Original failures remain preserved. Main promotion, deployment and physical
+HDR acceptance remain open.
+
+
+### R39 — Capture missing native cases with their actual default scheduling
+
+The first current Linux cluster-check compilation and native listing after
+R36 passed with no unit bodies: 145 full cases, including 72 transport cases.
+The normal exact-count guard and its existing operations control now require
+72 rather than the previous 70. The UUID control's focused macOS pass is
+separate; only the two new transport controls enter this Linux cohort.
+
+The existing local-binary evidence adapter previously accepted only serial
+single-case execution. Its additional default-scheduled form requires one
+exact selector, matching canonical scheduling, the recorded absence of
+`RUST_TEST_THREADS`, an unambiguous allowed argv and one complete native result
+terminal. Source archive, compiler fingerprint, target, features, binary
+custody and complete outcomes remain required. Existing serial records and
+their schema are unchanged. The existing runtime mismatch control gains
+positive and refusal cases; its first changed-body execution and the changed
+operations count control belong to the integrated main-bound effort.
+
+This permits the two genuinely missing Linux outcomes to be captured without
+replaying 70 applicable passes. It invents no Linux result from a macOS pass
+and does not turn serial scheduling into default scheduling. Current proof,
+full promotion, deployment and physical HDR acceptance remain open.
+
+
+### R40 — Give full-source compilation the established effort budget
+
+Promotion 5127's compile-only Rust lane exhausted ten minutes without a Rust
+diagnostic. The same source compiled successfully on another allowed runner
+in the R37 effort gate: 16 minutes 51 seconds including setup and vendor
+Clippy. Its actual service had a three-core CPU quota and the existing
+six/seven-GiB memory thresholds; read-only samples showed continued compiler
+progress and no new OOM events. These observations do not prove a CPU or
+memory root cause.
+
+Only the full workflow's compile-only Rust job now has the existing effort
+lane's 20-minute budget. Compiler commands, warnings, required gates and all
+runtime/admission deadlines are unchanged. The existing aggregate-CI contract
+now asserts that job-scoped budget. Its first changed-body execution belongs
+to the integrated effort. The obsolete follow-up gate was cancelled while
+its expensive compiler lanes were still blocked, before dispatching the new
+exact candidate.

@@ -333,6 +333,46 @@ class CompleteCommandUnitCase(unittest.TestCase):
         proof=fixture();proof['commands'][0]['records'][0]['environment']['features']=[]
         with self.assertRaises(receipts.ReceiptError):self.validate(proof)
 
+        import json
+        proof=fixture();default=proof['commands'][0]
+        default['invocation']=COMMAND.removesuffix(' -- --test-threads=1')
+        default['environment']['runtime']['test_threads']='libtest-default'
+        proof['logs']={}
+        for row in default['records']:
+            row['environment']['runtime']['test_threads']='libtest-default'
+            row['origin']['execution']['harness_environment']={'RUST_TEST_THREADS':None}
+            words=shlex.split(row['origin']['command']);words.remove('--test-threads=1')
+            row['origin']['command']=shlex.join(words)
+            name=next(iter(row['coverage']['outcomes']))
+            raw=log('COMMAND '+json.dumps(words)+'\nrunning 1 test\ntest '+name+' ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored;\nNATIVE_EXIT 0\n')
+            row['log']={'sha256_ref':raw['sha256']};proof['logs'][raw['sha256']]=raw
+        self.assertIn('store_contract',self.validate(proof,commands={'store_contract:1':default['invocation']}))
+
+        item=fixture()['commands'][0]
+        item['invocation']=COMMAND.removesuffix(' -- --test-threads=1')
+        record=item['records'][0]
+        record['environment']['runtime']['test_threads']='libtest-default'
+        record['origin']['execution']['harness_environment']={'RUST_TEST_THREADS':None}
+        argv=['/owned/store_contract-deadbeef','a','--exact','--nocapture']
+        def inspect(changed=record, words=argv, terminal='test result: ok. 1 passed; 0 failed; 0 ignored;'):
+            changed=copy.deepcopy(changed);changed['origin']['command']=shlex.join(words)
+            raw='COMMAND '+json.dumps(words)+'\nrunning 1 test\ntest a ... ok\n'+terminal+'\nNATIVE_EXIT 0\n'
+            with patch.object(q,'source_archive_digest',return_value='d'*64):
+                return q.bound_execution(changed,item,raw)
+        self.assertIn('test a ... ok',inspect())
+        for words in [argv+['--test-threads=1'],argv+['--exact'],argv+['--skip','b'],
+                      argv+['b'],argv+['--list'],argv+['--ignored'],argv+['--bench'],
+                      argv+['--unknown'],argv[0:2]+['--nocapture']]:
+            with self.subTest(words=words),self.assertRaises(receipts.ReceiptError):inspect(words=words)
+        for terminal in ['', 'test result: ok. 0 passed; 0 failed; 0 ignored;',
+                         'test result: ok. 1 passed; 0 failed; 0 ignored;\ntest result: ok. 0 passed; 0 failed; 0 ignored;']:
+            with self.subTest(terminal=terminal),self.assertRaises(receipts.ReceiptError):inspect(terminal=terminal)
+        missing=copy.deepcopy(record);del missing['origin']['execution']['harness_environment']
+        overridden=copy.deepcopy(record);overridden['origin']['execution']['harness_environment']['RUST_TEST_THREADS']='1'
+        serial=copy.deepcopy(record);serial['environment']['runtime']['test_threads']=1
+        for altered in [missing,overridden,serial]:
+            with self.assertRaises(receipts.ReceiptError):inspect(changed=altered)
+
     def test_tampered_shared_log_and_unknown_outcome_refuse(self):
         proof=fixture();next(iter(proof['logs'].values()))['sha256']='0'*64
         with self.assertRaises(receipts.ReceiptError):self.validate(proof)
