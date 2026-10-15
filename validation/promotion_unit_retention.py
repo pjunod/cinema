@@ -47,6 +47,114 @@ RETIRED_DVH1_DAEMON = {
 
 
 
+# Finite adoption of the intact successful Android job in promotion 5172.
+# Its summary includes assumption skips: one command passed, not 78 named bodies.
+ANDROID_DEVICE_5172 = {'source': '050b6ececbc9202492eb7e0675dc994f9f65686b',
+ 'log': '4a58a7353d0622a549c7e2eece27609b36a262d5322efc5ad5e57510a6bcadfe',
+ 'identity': 'run:5172/job:51191',
+ 'command': 'PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make '
+            'android-instrumentation-run',
+ 'id': 'make android-instrumentation-run',
+ 'inputs': {'clients/android': '9693191eb6d9ff2ea2ef76223a949c432ffcc38f',
+            '.github/actions/android-emulator-ready': '40a6f5c3a3a2d2ac57336fbe91bd32d05ad6ac1c',
+            'crates/plurxd/src/web/offline-reader.html': '4b1caecca544e437e0a3ae92b3fd030ce8b73d7c433bd5864eee8a31dab1fc35',
+            'crates/plurxd/src/web/offline-reader.js': '88c080b27b7470da9bd37598d64d868355bfa5a84ac15f6949561e5d095bf735',
+            'crates/plurxd/src/web/reader.js': 'bf983e43fc293c8a84e2dbb66d12765c29f9451e6209d8c050c3aa36566d54b8',
+            'workflow-global': '57af3bcff467a05fb7865f2d22b5c759a2833e403f7c922a72590ee38b7d9494',
+            'workflow-device': 'cbd67038eb4e522bac5b9332b1edcdf6d2d2ae3fc2d249c6378d2823dd18387c',
+            'make-android': 'a54c7c30021d36ebb437edb54a09cabc3c72cfd417285d814c6dc2916c58e20d',
+            'make-variables': 'fb1f6e257a0a2b995c756a5d77e242faa38592be9164e21eaf1bb755a574196b'},
+ 'environment': {'platform': 'linux-x64',
+                 'toolchain': {'declared_sdk': 36,
+                               'compiler_version': None,
+                               'java_version': None,
+                               'image_sha256': None,
+                               'apk_sha256': None},
+                 'features': [],
+                 'runtime': {'api': 36,
+                             'target': 'android-tv',
+                             'arch': 'x86',
+                             'profile': 'tv_1080p',
+                             'app_version': 173},
+                 'source_scope': {'classes': 34,
+                                  'test_declarations': 78,
+                                  'basis': 'source declarations; named execution outcomes '
+                                           'unknown'}}}
+
+
+def android_device_tree(commit, path):
+    return subprocess.check_output(['git', 'rev-parse', r.sha(commit) + ':' + path],
+                                   text=True).strip()
+
+
+def android_device_inputs(source, commit):
+    paths = ('crates/plurxd/src/web/offline-reader.html',
+             'crates/plurxd/src/web/offline-reader.js', 'crates/plurxd/src/web/reader.js')
+    values = {path: android_device_tree(commit, path)
+              for path in ('clients/android', '.github/actions/android-emulator-ready')}
+    for path in paths:
+        raw = source(commit, path)
+        r.require(raw is not None, 'Missing Android command input')
+        values[path] = digest(raw)
+    workflow = source(commit, '.github/workflows/ci.yml')
+    makefile = source(commit, 'Makefile')
+    r.require(workflow is not None and makefile is not None, 'Missing Android command recipe')
+    workflow, makefile = workflow.decode(), makefile.decode()
+    patterns = {
+        'workflow-global': (workflow, r'^env:\n(.*?)(?=^concurrency:)'),
+        'workflow-device': (workflow, r'^  android_device:\n.*?(?=^  [A-Za-z_]+:|\Z)'),
+        'make-android': (makefile, r'^# CI pre-pulls the image.*?(?=^\.PHONY: android-instrumentation\n)'),
+    }
+    for name, (text, pattern) in patterns.items():
+        matches = list(re.finditer(pattern, text, re.M | re.S))
+        r.require(len(matches) == 1, 'Ambiguous Android command recipe')
+        values[name] = digest(matches[0][0].encode())
+    values['make-variables'] = digest(('\n'.join(re.findall(
+        r'^ANDROID_\w+ \?=.*$', makefile, re.M)) + '\n').encode())
+    return values
+
+
+def android_device_command_outcomes(raw):
+    policy = ANDROID_DEVICE_5172
+    r.require(digest(raw.encode()) == policy['log'], 'Unknown complete Android command capture')
+    text = re.sub(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', raw, flags=re.M)
+    execution = '[command]/usr/bin/sh -c ' + policy['command']
+    r.require(text.splitlines().count(execution) == 1
+              and text.splitlines().count('OK (78 tests)') == 1
+              and text.splitlines().count('Time: 133.708') == 1
+              and text.splitlines().count('🏁  Job succeeded') == 1
+              and text.index(execution) < text.index('Time: 133.708')
+              < text.index('OK (78 tests)') < text.index('🏁  Job succeeded'),
+              'Incomplete or ambiguous Android command result')
+    # The complete raw digest binds all 37 native heading rows and the
+    # interleaved probe output. Dot rows cannot establish named outcomes.
+    return {policy['id']: 'pass'}
+
+
+def android_device_record_contract(lane, suite, record, candidate, source):
+    policy = ANDROID_DEVICE_5172
+    r.require(lane == 'android_device' and suite['name'] == 'device'
+              and suite['ids'] == [policy['id']] and len(suite['records']) == 1
+              and 'aggregate' not in suite and 'compatible_environments' not in suite
+              and record['source_commit'] == policy['source'] and record['sequence'] == 1
+              and record['origin'] == {'kind': 'authenticated-ci',
+                  'identity': policy['identity'], 'command': policy['command']}
+              and suite['environment'] == record['environment'] == policy['environment']
+              and record['outcomes'] == {policy['id']: 'pass'},
+              'Android whole-command source, scope or environment differs')
+    r.require(android_device_inputs(source, policy['source']) == policy['inputs']
+              and android_device_inputs(source, candidate) == policy['inputs'],
+              'Android whole-command consumed inputs changed')
+
+
+def authenticate_android_device_command(run_id, job_id, job):
+    r.require((run_id, job_id) == (5172, 51191)
+              and job.get('status') == 'success' and job.get('attempt') == 1
+              and type(job.get('attempt')) is int
+              and job.get('name') == 'Android instrumented UI tests',
+              'Android whole-command job identity or success differs')
+
+
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
@@ -227,6 +335,8 @@ def xctest_result_rows(raw):
 
 
 def log_outcomes(log, format_name):
+    if format_name == 'instrumentation-command-5172':
+        return android_device_command_outcomes(log)
     outcomes = {}
     log = re.sub(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', log, flags=re.M)
     if format_name == 'node-preflight-4954':
@@ -442,6 +552,8 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                 if lane == 'web_preflight' or record['format'] == 'node-preflight-4954':
                     from validation import retained_web_preflight as web
                     web.record_contract(lane, suite, record, frozen, raw_log, git_bytes, digest)
+                if record['format'] == 'instrumentation-command-5172':
+                    android_device_record_contract(lane, suite, record, frozen, source)
                 actual_outcomes = log_outcomes(raw_log, record['format'])
                 extras = set(outcomes) - set(ids)
                 retired = None
@@ -512,6 +624,11 @@ def validate(document, candidate, source=git_bytes, differences=changed):
         adopted[lane] = {'mode': 'retained-unit-evidence', 'passed': lane_count,
                          'suites': sorted(suite_names),
                          'accounting': 'aggregate-cohort-derived' if any('aggregate' in s for s in suites) else 'literal-per-ID'}
+        if any(record['format'] == 'instrumentation-command-5172'
+               for suite in suites for record in suite['records']):
+            adopted[lane].update(accounting='whole-command-success', commands_passed=1,
+                reported_tests=78, named_body_outcomes=None, passed_body_count=None,
+                ignored_body_count=None)
         if lane_retired:
             adopted[lane]['retired_original_passes'] = lane_retired
     waiver = document['windows_waiver']
@@ -661,6 +778,8 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
                     if lane == 'web_preflight':
                         from validation import retained_web_preflight as web
                         web.authenticate(run_id, job_id, jobs[0], git_bytes)
+                    if record['format'] == 'instrumentation-command-5172':
+                        authenticate_android_device_command(run_id, job_id, jobs[0])
                     raw_log = live_logs.get(api, run_id, job_id)
                     r.require(digest(raw_log) == shared_blob(document, record['log'])['sha256'],
                               'Authenticated CI log contradicts retained origin')
