@@ -55,6 +55,19 @@ remain acceptance-open; no row closes from this pass. The 2026-10-11 notes
 also correct stale text on S-13, S-14, C-05, S-02, K-06, P-02 and A-05 and
 remove PR600 batch notes copied onto rows they did not describe.
 
+**L-03 source correction, 2026-10-14 UTC:** root session
+`01a0c165-d718-73a1-93e9-e81380017705` (Codex; exact runtime model ID not
+exposed) owns only `live_tv/dvr.rs`'s buffered-input scheduling correction
+and its existing shared-transport documentation/index/backlog notes on
+`codex/live-tv-backlog-fairness-20261014`. The new real fan-out regression
+evicts a runnable reader on unchanged main `7669f32d4`. The sole review on
+2026-10-15 found a byte-bound variant still failing with chunk-only task
+budgeting; an additional 65-by-64KiB regression reproduced it. Explicit
+per-iteration yielding replaces that incomplete repair without changing
+byte/slot limits, eviction reasons, metrics or encoder/default policy.
+Promotion remains pending. No runtime failure is yet bound to this mechanism;
+no caption/device/capacity acceptance or whole-row closure follows.
+
 **K-03/K-10 and K-04 correction, 2026-10-13:** Paul withdrew the
 twelve-hour uninterrupted/deployment-free qualification requirement. The
 [K-03 protocol](../cluster/REPLICATED-WRITE-RATE-HYGIENE.md) and
