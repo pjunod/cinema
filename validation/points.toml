@@ -747,6 +747,9 @@ contract = "The single server binary exposes stable native endpoints, coordinate
 paths = [
   "crates/plurxd/Cargo.toml",
   "crates/plurxd/src/availability.rs",
+  "crates/plurxd/src/subtitle_models/*.rs",
+  "crates/plurxd/src/http/tests/subtitle_generation.rs",
+  "tests/fixtures/subtitle-recognition/{base-film.raw.vtt,base-film.provenance.json}",
   "crates/plurxd/src/{cachekeep,logbuf,main,panics,redact,schedule,state,storeprobe,telemetry}.rs",
   "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
@@ -1267,7 +1270,7 @@ paths = [
   "scripts/qualify-subtitle-recognition",
   "tests/fixtures/subtitle-recognition/**",
   "docs/features/SUBTITLE-RECOGNITION-QUALIFICATION.md",
-  "crates/plurxd/src/subtitle_models/**",
+  "crates/plurxd/src/subtitle_models/{catalog.json,self-test.provenance.json,self-test.wav}",
   "scripts/macos-source-parser.entitlements",
   "scripts/macos-source-parser-licenses/**",
   "scripts/prepare-macos-video-ffmpeg",

@@ -97,6 +97,19 @@ pub(super) async fn publish<T: QueueSql>(
             "caption does not match its transcription source".into(),
         ));
     }
+    if let JobPayload::SubtitleTranscribeManaged { profile, .. } = &input.source {
+        if provenance.adapter != profile.adapter_contract
+            || !super::downloaded_subtitles::valid_managed_provenance(provenance)
+        {
+            return Err(StoreError::Task(
+                "caption does not match its managed execution provenance".into(),
+            ));
+        }
+    } else if provenance.adapter != "whisper.cpp" || provenance.execution.is_some() {
+        return Err(StoreError::Task(
+            "caption does not match its legacy execution provenance".into(),
+        ));
+    }
     super::downloaded_subtitles::encode(&input.caption)?;
     let body = encode(
         &serde_json::to_value(&input).map_err(|error| StoreError::Task(error.to_string()))?,
@@ -274,7 +287,8 @@ pub(super) async fn publish_model<T: QueueSql>(
         || receipt.model_id != *model_id
         || receipt.model_sha256 != *model_sha256
         || receipt.adapter_contract != *adapter_contract
-        || receipt.verified_at_ms != input.now_ms
+        || receipt.verified_at_ms < 0
+        || receipt.verified_at_ms > input.now_ms
         || !super::background_jobs::digest(&receipt.engine_sha256)
         || receipt.model_file_identity.is_empty()
         || receipt.model_file_identity.len() > 1024

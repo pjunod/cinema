@@ -168,9 +168,11 @@ a supported worker can execute a versioned job.
    meet the chosen performance budget. Do not download every model by default.
 4. **Store models by verified digest outside disposable runtime cache.** Show
    disk usage and installed nodes. Bound concurrent installation per node;
-   retain the previous working model after an upgrade failure. Removal must
-   refuse an artifact referenced by accepted/running jobs and explain why.
-   Keep an Advanced existing-installation mode for operators with local models.
+   retain the previous working model after an upgrade failure. This release
+   exposes Install and Verify only; it has no model-removal API or UI. Any future
+   removal operation must refuse an artifact referenced by accepted/running
+   jobs and explain why. Keep an Advanced existing-installation mode for
+   operators with local models.
 
 Upstream documents GGML model files, a separate `whisper-cli` build, and
 approximate model storage of 75 MiB for tiny, 142 MiB for base and 466 MiB for
@@ -402,7 +404,7 @@ separate configuration and disables legacy discovery while preserving
 Advanced command/path. An explicit return to Advanced copies the chosen
 on/off, interval and language into legacy JSON. Existing legacy PUT is a
 last-writer-wins Advanced activation; its returned state identifies the mode.
-A stale old browser is therefore a competing admin write, never a second
+The managed GET then reports Advanced mode; the legacy stored JSON keeps its original fields. A stale old browser is therefore a competing admin write, never a second
 active mode. An old server writing legacy settings cannot update the managed
 revision; new workers detect divergence and report configuration conflict
 instead of asserting mixed-version safety.
@@ -424,12 +426,13 @@ URL and destination; no caller URL/path enters a download.
 
 `GET /api/v1/files/{id}/subtitles/transcribe` returns `version`, exact string
 `file_id`, `source_size`, `source_mtime`, selected config summary,
-`audio_tracks: [{index, language, title, default}]`, and
+`audio_tracks: [{index, language, normalized_language, title, default}]`, public
+`subtitle_streams`, and
 `captions: [{index, artifact_key, source_size, source_mtime}]` with string
 revision fields. Version 1 POST carries those expected revision strings plus
 `audio_index`, `language`, `model_id`. `{}` retains the default legacy entry
 point. Unknown request versions and source changes are refused. Successful
-admission returns exact `job_id`, `artifact_key` and source identity in
+admission returns exact string `file_id`, `job_id`, `artifact_key` and source identity in
 addition to the existing outcome.
 
 `GET /api/v1/subtitle-transcription/jobs/{job_id}` exposes only a safe DTO:
@@ -461,3 +464,92 @@ configuration_conflict. Unknown values render a safe generic fallback.
 T1 and T2 can build concurrently. T3 and T4 branch from the updated effort.
 Every task PR targets `effort/subtitle-generation-usability`; parent reviews
 the concrete diff before its gate/merge. No deployment is authorized.
+
+### 9.3 Integration amendments and current execution — 2026-10-15
+
+The original task boundaries above remain the review history. T3/T4 now land
+as one compiling integration because manager orchestration, runtime inference
+helpers and configuration validation depend on each other. Review still covers
+three slices separately: HTTP/configuration and queue ingress; secure artifacts
+and inference; worker routing, admission and publication. No inert worker stub
+or disconnected-module test substitutes for the integrated daemon.
+
+| Task | Current owner and branch | State and remaining evidence |
+|---|---|---|
+| T0 | Build lead, effort documentation | Reviewed and committed; historical design source retained. |
+| T1 | Packaging Sol session, `codex/subtitle-engine-package` | Built with focused Mac/Linux package checks; task gate and integration acceptance remain. |
+| T2 | Build lead, `codex/subtitle-managed-job-contracts` | Built; pinned formatting/Clippy, schema pair and SQLite/three-voter store contracts passed. Task gate remains; layout fixtures do not qualify cluster restore. |
+| T3/T4 | Build lead, `codex/subtitle-managed-runtime` | Implementation claimed; actual integrated compilation, focused tests and fresh-package/browser acceptance are in progress. |
+| T5 | UI Sol session, `codex/subtitle-usability-web` and `codex/subtitle-model-reasons` | Built with unit/static and actual watch-controller fixtures. Real daemon completion, active playback and exact caption selection still require integration acceptance. |
+| T6 | Build lead and reviewer | Open; final merge tree, promotion gate and scoped qualification receipt required. Movie-length quality/throughput, native Intel and broader deployed fleet remain separate unmet acceptance. |
+
+Leaf ownership in the combined T3/T4 integration is explicit: the packaging
+session owns `subtitle_models/artifacts.rs` and `subtitle_transcription.rs`;
+the UI session owns `subtitle_models/config.rs` and `subtitle_models/api.rs`;
+the build lead owns manager orchestration, state/routes, signed observations,
+queue admission, `JobFence`, process launcher integration and integration tests.
+The watch follow-up additionally owns `web/detail/watch-browser.js`,
+`web/player/watch-presentation.js`, `web/player/projection-chrome.js`, the narrow
+`web/app.css` interaction rule, and their web/playback tests. These remain
+separate task diffs and pass the normal hook and required effort gate.
+
+Managed discovery retains the common `subtitle-transcription:sweep` lease and
+bounded eight-file pages. Its single disposable settings record,
+`subtitles.transcription.managed.schedule.v1`, contains version, configuration
+revision, next-run time and cursor. A record from another revision is due
+immediately at cursor zero: an old sweep cannot postpone a changed or reenabled
+configuration by publishing an obsolete timestamp. Interval zero performs no
+sweep. Discovery chooses only known, matching spoken-language tags; untagged
+audio still needs an explicit title request. Existing queued payloads retain
+their accepted profile when defaults change.
+
+T6 qualification ownership is also isolated. The engine builder owns
+`codex/subtitle-recognition-qualification`: the recognition driver, attributed
+corpus catalog/reference files, its operations tests and qualification document
+with its index row. The web builder owns `codex/subtitle-native-qualification`:
+`clients/apple/Tests/GeneratedSubtitleAcceptanceTests.swift`, its
+`clients/apple/project.yml` test registration, and
+`clients/android/app/src/androidTest/java/tv/plurx/app/player/GeneratedSubtitleAcceptanceTest.kt`.
+Any minimal Android player test seam is separately reviewed. Native test builds
+wait for the first packaged web acceptance and target only simulator/emulator;
+physical-install builds retain the committed merged-main requirement. The build
+lead owns integrated package/service evidence and the final ledger reconciliation.
+
+Further adversarial findings and dispositions:
+
+| Finding | Required disposition and evidence |
+|---|---|
+| macOS rejects Mach-O execution through `/dev/fd` | Copy the held verified executable into the private per-attempt directory with exclusive/nofollow creation, exact size/hash and original identity checks. Execute the owner-only absolute copy; retain descriptors until reap, then clean it. Linux keeps held executable descriptor execution. A real production-helper package test is required. |
+| Cleared child environment was repopulated by the common launcher | Add an explicit CPU child path with LC_ALL only and absolute executable enforcement. An actual child test seeds hostile/sentinel ambient loader, GPU and proxy values and proves omission; existing launcher behavior remains covered. |
+| One worker lacks the source mount | Check local source access before claim and revalidate the held source after claim. Local access failure yields for another worker; authoritative source revision changes retire obsolete work. Test both worker eligibility and globally changed source. |
+| First ineligible queue page starves later work | Keep a bounded keyset cursor across passes and wrap at the end. More than 32 ineligible jobs must not hide a later model operation forever. |
+| Failed automatic Verify admission becomes permanently suppressed | Mark scheduling only after accepted/current existing admission. Queue-full/error remains retriable; bound remembered identities per catalog model and distinguish replaced local identities. |
+| Cold or replaced model hashing bypasses CPU admission | Observe model identity with bounded metadata only, and hash only after admission under the owned cancellable operation. Compare the verified identity with the preclaim receipt. Cancellation checks each bounded read and joins the blocking task; refresh timeouts cannot detach large model hashing. |
+| Shutdown cancels a sibling token rather than the active child | Pass the manager-owned cancellation token through the inference helpers and derive their child token from it. Test an actual running child is reaped before private scratch and admission retire. |
+| Long inference expires worker observations | Refresh bounded cached local facts while the owned operation is pending; bound each refresh and preserve Stop/shutdown and child cleanup. Expired or missing peer evidence remains unknown. |
+| Managed runtime adapter disagrees with caption storage validation | Admit only the exact qualified managed adapter with closed engine SHA/platform execution provenance. Managed publication matches its payload adapter; legacy publication remains the literal historical adapter with no execution extension. Test actual SQLite and replicated publication/readback plus SQLite reopen and historical JSON compatibility. Logical artifact/profile identity stays unchanged. |
+| Real recognizer output extends beyond decoded media EOF | Managed inference intersects validated cue intervals with the exact decoded PCM sample domain: clip straddling ends, discard wholly later cues, preserve text/IDs/order/overlap, and reject malformed/decreasing starts or empty output. Bind `mono16k-s16-digital-zero-pcm-eof-v1` into the managed pipeline digest and refuse incompatible recipe claims. Advanced output and digest retain prior behavior. The retained CC BY short-film raw output and attribution prove the observed boundary, not universal recognition quality. |
+| Silence produces a hallucinated cue | Reject only nonempty decoded PCM whose actual samples are all digital zero, with bounded cancellable reads before inference. Return `no_speech_detected`; do not treat valid speech/noise quality as model verification failure or add a VAD model. Test actual FFmpeg silence and cancellation/header bounds; broader non-speech classification remains unqualified. |
+| Publication retry rewrites verification time | Keep receipt bytes immutable, use a fresh ownership-check clock and resolve only the exact successful job/fence receipt. Test lost-reply-style readback with a later clock. |
+
+
+### Qualification ledger · integration snapshot, 2026-10-15
+
+These rows distinguish implementation evidence from acceptance. Passing a small
+fixture does not close a longer workload, different platform or client row.
+Final qualification must name the integrated committed tree and package.
+
+| Required surface | Evidence available | Remaining acceptance |
+|---|---|---|
+| macOS clean Settings workflow | Qualified engine/model production helper passed with held files and a clean environment; real UI fixture tests pass | Fresh built service package, empty persistent models, actual Settings download/automatic verification/Save/generation/publication/output fetch and live playback |
+| Linux clean nonroot image | Pinned CPU engine recognized real speech as a nonroot user; package tests execute on Linux without skips | Complete daemon image with empty persistent models and normal Settings/API install/generate; repeat after upgrade |
+| Download, decode and inference cancellation | Bounded chunk cancellation, no qualification cache on cancelled hash, owned Stop/foreground/shutdown child reaping and scratch/admission lifetime regressions pass | Isolated service cancellation during real transfer and real inference, then successful retry; retain exact job/fence evidence |
+| Low storage | Preallocation failure/low-budget tests leave no published partial artifact; actual physical reservation succeeds on local storage | Actual isolated ENOSPC or quota-limited filesystem run, with recovery; synthetic budget refusal is not ENOSPC |
+| Restart and stale readiness | Stored caption/execution identity survives SQLite reopen; identity replacement/cache tests and boot-bound receipt logic are covered | Same-data daemon restart without tool/model/PATH overrides; automatic owned verification before current-boot readiness; corrupt model repair and retry |
+| Cluster routing and races | Actual SQLite/three-voter publication, cancellation, source revision and mode/CAS fences pass; two-worker local-source eligibility and queue pagination regressions pass | Isolated multi-process routing with one missing mount/model, worker restart/lease takeover, stale peer observations and partial install refusals |
+| Movie and episode duration | Real short-film and German sample engine timing is being retained separately; exact real-film EOF regression uses attributed raw output | End-to-end managed movie/episode workflow with source-clock bounds and recorded CPU/wall time; representative quality remains a separately scoped claim |
+| Language and audio selection | Actual HTTP tests bind nondefault ordinal, unknown-tag explicit language and exact source identity; closed catalog distinguishes English-only/multilingual support | Real non-English managed service sample; record independent reference/quality limits rather than scoring recognizer output as truth |
+| Web playback and Activity | Shipped watch-controller/attached-video fixtures preserve Off and the video owner; exact safe projections and reload route tests pass | Actual generated caption appears without reload, remains Off until explicit Use, renders after seek and survives exact Activity reload |
+| Apple and Android playback | Generated captions use the existing acquired-caption delivery/index contract; no client code change is required by this implementation | Select and render the generated track on the unchanged supported clients against the isolated server; physical-device build provenance rules still apply |
+| Upgrade and rollback | Transactional bundle staging, corruption refusal, old-bundle restoration and model retention installer regressions pass | Isolated supported installation upgrade/restart/rollback evidence; never replace the operator's running service for acceptance |
+| Promotion | Task slices reviewed and local focused evidence recorded | Green exact-base effort gates, integrated main merge, full promotion gate and qualification receipt; no red-gate merge or production rollout is authorized |
