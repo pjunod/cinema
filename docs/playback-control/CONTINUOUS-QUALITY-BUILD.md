@@ -11684,3 +11684,45 @@ device qualification and independent review of the corrections remain pending.
 The passing 244 results qualify their recorded source only. Unit bodies executed
 remain zero; affected fast-lane units are deferred to final reviews and the
 designated batched-merge session. Fable readiness is not yet claimed.
+
+
+### 10.324 — physical Apple 245 evidence and complete rescue budgeting
+
+Fresh build245 captures retain the original fixed-link, 900-second campaign.
+The phone completes15 manual changes,5 Auto changes and both3→25Mb/s low-link
+landings. All22 landings pass sixteen typed joins, with17,858 decoded frames,
+66.693ms maximum decoded gap, zero errors and211 owned processes closed with
+zero residuals. Its observer is deliberately stopped after the actual full and
+low verdicts; the SDK returns1 rather than an expected signal exit. The original
+controller verdict stays false. Completed playback measurements and owned
+cleanup are accepted separately; normal SDK exit and the CLI cancellation reason
+remain unproven. This is not optical/audio continuity evidence.
+
+The TV completes the same15manual/5Auto main series at83.323ms maximum gap, but
+its active1080p incumbent genuinely stalls during the separate3Mb/s phase.
+Its20 main-series landings satisfy all sixteen joins. The failed full campaign
+closes214 owned processes with zero residuals. The first rescue selects720p
+with23.027seconds of sampled runway and22.692seconds at preparation. That
+candidate receives HTTP200 media but fails the six-second metadata bound.
+The later360p candidate acquires without a future headstart and remains behind
+the moving incumbent; its final loaded interval lacks3.400seconds of required
+future coverage. The later480p candidate also fails. These failed observations
+remain preserved; no pass or server-refusal absence is inferred from them.
+
+The severe-pressure acquisition budget previously counted a first metadata
+failure plus a protected second attempt:6+12+4seconds. A first attempt can
+instead become metadata-ready and consume its full twelve-second overlap.
+Apple246 therefore budgets both full overlaps plus the unchanged reserve:
+12+12+4seconds. Under the measured23-second case, existing severe authority
+selects the cheapest measured compatible lower candidate while the original
+sixteen-second future-acquisition protection can still hold. Ample runway and
+non-severe evidence retain ordinary fitting-rung selection. This selection
+budget is not a guarantee against control, queue or network latency.
+
+No pressure threshold, candidate fence, cooldown, upgrade clock, metadata or
+overlap deadline, loaded-range proof or reserve changes. No HTTP retry, feature
+switch or relaxed acceptance is added. The actual-trace selector regression is
+authored but unrun. Compilation and fresh exact-source native qualification are
+pending. The external Fable package remains bound to the earlier ca00c3ed8
+source; this follow-up must be supplied as a separate review delta. Nothing is
+merged, and unit bodies remain deferred to the batched merge coordinator.

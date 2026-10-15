@@ -1,6 +1,6 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 245
+Build: 246
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal
@@ -110,3 +110,10 @@ through final reviews and the designated batched merge.
 
 [Continuous Quality Build §10.323](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10323--adversarial-findings-and-apple-245-correction)
 records the corrections; §10.322 preserves the complete 244 results.
+
+
+The severe-pressure rescue budget now counts a failed preparation's full overlap,
+rather than assuming every first failure stops at metadata readiness. The actual
+TV low-link selector case chooses the cheapest measured rescue while all native
+admission deadlines, reserves and ownership fences remain unchanged. Its authored
+regression is deferred with the unit batch; exact-source qualification is pending.

@@ -500,13 +500,14 @@ func autoTrialMayCommit(requestedId: String?, offeredId: String?, requestedTarge
 }
 
 /// A severe cliff gets one protected acquisition attempt when actual loaded
-/// runway cannot afford a metadata failure followed by another protected try.
+/// runway cannot afford a failed preparation followed by another protected try.
+/// A metadata-ready attempt may spend its entire overlap before failing.
 func autoPressureNeedsMinimumAcquisitionCost(severe: Bool, runwaySeconds: Double?,
                                             playbackRate: Double) -> Bool {
     guard severe, let runwaySeconds, runwaySeconds.isFinite, runwaySeconds >= 0,
           playbackRate.isFinite, playbackRate > 0 else { return false }
-    let wallSeconds = Double(PreparedReplacementBounds.metadataMs
-        + PreparedReplacementBounds.overlapMs + PreparedCommitRendezvous.postSwapReserveMs) / 1_000
+    let wallSeconds = Double(2 * PreparedReplacementBounds.overlapMs
+        + PreparedCommitRendezvous.postSwapReserveMs) / 1_000
     let requiredRunway = wallSeconds * max(1, playbackRate)
     return requiredRunway.isFinite && runwaySeconds < requiredRunway
 }

@@ -1834,17 +1834,42 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertTrue(autoPressureNeedsMinimumAcquisitionCost(severe: true,
             runwaySeconds: 16.8696, playbackRate: 1))
         XCTAssertTrue(autoPressureNeedsMinimumAcquisitionCost(severe: true,
-            runwaySeconds: 21.999, playbackRate: 1))
+            runwaySeconds: 27.999, playbackRate: 1))
         XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: true,
-            runwaySeconds: 22, playbackRate: 1))
+            runwaySeconds: 28, playbackRate: 1))
         XCTAssertTrue(autoPressureNeedsMinimumAcquisitionCost(severe: true,
-            runwaySeconds: 43.999, playbackRate: 2))
+            runwaySeconds: 55.999, playbackRate: 2))
         XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: true,
-            runwaySeconds: 44, playbackRate: 2))
+            runwaySeconds: 56, playbackRate: 2))
         XCTAssertTrue(autoPressureNeedsMinimumAcquisitionCost(severe: true,
-            runwaySeconds: 21.999, playbackRate: 0.5))
+            runwaySeconds: 27.999, playbackRate: 0.5))
         XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: false,
             runwaySeconds: 0, playbackRate: 1))
+    }
+
+    func testSeverePressureRescueBudgetPreservesActualTVLowLinkOpportunity() {
+        let current = candidate(1_080, peak: 8_814_676)
+        let ladder = [candidate(720, peak: 4_566_988), candidate(480, peak: 2_423_504),
+                      candidate(360, peak: 1_523_496)]
+        let completedLink = 5_669_000.0
+        let severe = completedLink < Double(current.peakBps!) * 0.7
+        XCTAssertTrue(severe)
+        for runway in [23.027, 22.692] {
+            let minimizeCost = autoPressureNeedsMinimumAcquisitionCost(
+                severe: severe, runwaySeconds: runway, playbackRate: 1)
+            XCTAssertTrue(minimizeCost,
+                "a failed attempt can consume twelve seconds before the next preparation")
+            XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+                linkCeiling: completedLink, currentCost: Double(current.peakBps!),
+                minimumAcquisitionCost: minimizeCost)?.height, 360)
+        }
+        for (isSevere, runway) in [(true, 28.0), (true, 30.0), (false, 23.027)] {
+            XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+                linkCeiling: completedLink, currentCost: Double(current.peakBps!),
+                minimumAcquisitionCost: autoPressureNeedsMinimumAcquisitionCost(
+                    severe: isSevere, runwaySeconds: runway, playbackRate: 1))?.height, 720,
+                "ample runway or non-severe evidence retains ordinary fitting-rung selection")
+        }
     }
 
     func testPressureAcquisitionBudgetPreservesUnknownAndInvalidFacts() {
