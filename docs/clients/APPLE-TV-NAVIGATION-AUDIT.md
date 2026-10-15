@@ -82,7 +82,7 @@ not a claim of a reproduced defect.
 | Surface and states inspected | Current evidence / findings | Remaining acceptance |
 |---|---|---|
 | Connect, discovery, login, reconnect, loading | Source: auth scaffold, busy/disabled controls, root diagnostics; F11, F22, F26 | Discovery list growth, keyboard open/close, timeout, invalid credentials and recovery with a remote |
-| Root tabs, hidden server features, stacked destinations | Source: `HomeView`, path binding and scope synchronization; F05, F29 | Every tab in both directions, feature disabled while selected, repeated Back, suspend/resume |
+| Root tabs, hidden server features, stacked destinations | Native tab reentry steals focus into prior content; source: `HomeView`, path binding and scope synchronization; F05, F29, F30 | Every tab in both directions, feature disabled while selected, repeated Back, suspend/resume |
 | Home Classic and Theater, Continue Watching, Next Up, Recently Added, Coming Soon | Source: shelves and Theater hero; F09, F27 | First/last card to adjacent rows, data refresh while focused, hero playback return |
 | Libraries dashboard, category/library grouping, shared entry | Source: shared choice panel and shelf headings; F01–F03, F09 | Grouping open/select/cancel; See All from far end of every shelf |
 | Movie/show/home-video collection, Rows/Grid, filters, sorting, title narrowing | Native View-menu reproduction; all other states source; F01–F05 | Rows and Grid at 0/1/416/5,000 items; every sort/filter, all poster sizes |
@@ -522,6 +522,21 @@ physical tests to the actual UI before treating their existence as protection.
 **Proof:** deliberately remove modal focus entry in a control branch; the
 required simulator journey fails and prevents qualification. R12.
 
+### F30 · P1 · N/S — returning to a root tab steals focus into its content
+
+**Evidence:** the shipping-route fixture test returned from Movies to Libraries,
+focused its root tab, moved Left to Home, then Right to Libraries. The next
+native focus was Movies' See All button rather than the Libraries tab. No Down
+or Select was issued. `synchronizeRoute()` requested the stored content target
+on a tab change, interrupting native horizontal tab navigation.
+
+**Fix:** retain the content bookmark, but do not request it while switching
+root tabs. Down enters content through native spatial navigation. Returning
+from a destination within the same tab still restores its opener. **Proof:**
+all enabled tabs in both directions after visiting content, plus detail Back
+restoration and feature-removal fallback. This new finding comes from the
+implementation's whole-app tests, not the original source-only audit.
+
 ## 6. Proposed renderings — consistent interaction before decoration
 
 The [gallery](apple-tv-navigation/index.html) includes twelve annotated design
@@ -704,22 +719,29 @@ effort gate and focused regression requirements. Final promotion follows
 [the development pipeline](../DEVELOPMENT_PIPELINE.md). The implementation base
 is `a0b8cb72c`; the earlier baseline above remains the historical audit source.
 The coordinating agent owns integration, adversarial review and final acceptance;
-three GPT-6.1 Sol work sessions implement bounded packages. Task PRs are open;
+three GPT-6.1 Sol work sessions implemented bounded packages. They reached
+their usage limits; the coordinating agent continues integration and native
+validation on `codex/tv-navigation-integration`. Existing task PRs are open;
 none of the packages is a qualified release merely because it compiles.
 
 | Package | Scope and principal files | Dependency | Acceptance / state |
 |---|---|---|---|
-| T0 · Harness and contract | `project.yml`, TV UI fixtures/tests, affected-Apple workflows | None | **Built, expanding:** shipping app through fixture server and normal login; native remote reproduces background focus behind View. Strict runner retains failures, rejects empty/skipped execution and binds source. Required gate wiring in progress. |
-| T1 · Modal ownership | `RemoteNavigationViews`, coordinator, adapters; every caller | T0 | **Repairing:** [PR #1109](http://forge.lan:3000/noirr/plurx/pulls/1109). Native cover traps background and readable rows render; runtime still starts on Rows when Grid is selected. This failed assertion blocks acceptance despite passing reducer tests. |
-| T2 · Playback presentation | `LiveTvView`, `LibraryChannels`, `PlayerView`, diagnostics | T1 | **Implemented; native acceptance pending:** [PR #1110](http://forge.lan:3000/noirr/plurx/pulls/1110). Reports inside More, shared reveal/Back, current-versus-future programme behavior, explicit layouts. Both Release simulator builds and 16 focused tests pass. |
-| T3 · Browsing and details | `LibraryView`, `HomeView`, `SearchView`, `DetailView`, `Components` | T1 | **Implemented; native acceptance pending:** bounded tools sidebar, identity restoration, explicit Jump loading, episode details and complete synopsis, fixed Search query and recovery. Native directional handling retained; logical/unit tests alone do not prove the bounded remote path. |
-| T4 · Secondary screens and visual consistency | DVR, Settings, diagnostics, remotes, theme, info | T1; serialize shared-file work with T2/T3 | **In progress:** Settings categories, simplified reports, safe recording/remotes confirmations, readable rows, Reduce Motion and stable Info mode focus. |
+| T0 · Harness and contract | `project.yml`, TV UI fixtures/tests, affected-Apple workflows | None | **Built, expanding:** [PR #1112](http://forge.lan:3000/noirr/plurx/pulls/1112). Shipping app through fixture server and normal login. Strict runner retains failures, rejects empty/skipped execution and binds source and app bundle. Required native gate wiring built; a static guard now requires every fixture journey in the runner and navigation scheme and excludes those fixtures from the physical scheme. Simulator builds use ad hoc signing so Keychain-backed setup is real. Full matrix remains open. |
+| T1 · Modal ownership | `RemoteNavigationViews`, coordinator, adapters; every caller | T0 | **Partly proven:** [PR #1109](http://forge.lan:3000/noirr/plurx/pulls/1109). Native View journeys pass at 416 and 5,000 items, including selected Grid entry, directional confinement, Rows commit/reopen and exact opener restoration. Cross-target Jump return and every enabled root tab now pass native journeys. Modal close retains the parent order without retaining authorization, and reissues focus after the covered view returns. The coordinator has 28 passing unit regressions. |
+| T2 · Playback presentation | `LiveTvView`, `LibraryChannels`, `PlayerView`, diagnostics | T1 | **Partly proven:** [PR #1110](http://forge.lan:3000/noirr/plurx/pulls/1110). Native future-programme details/Close and current-programme single-session behavior pass; explicit layout change/reopen/Back passes. Library-channel hidden Play/Pause, first-direction reveal, More → Report → Back and session retention now pass. Reports moved inside More. Ordinary movie and Live TV native journeys also pass: hidden picture → reveal → More → Report → Back retains the playback session and returns to the original item/channel. Shared playback focus remains under repair; no parity claim is made for it yet. |
+| T3 · Browsing and details | `LibraryView`, `HomeView`, `SearchView`, `DetailView`, `Components` | T1 | **Partly proven:** bounded tools sidebar, identity restoration, explicit Jump loading, episode details and complete synopsis, fixed Search query and recovery. Native full synopsis/Back and unchanged-query Search Retry/result return pass. Full Grid/Rows journeys now pass at 416 and 5,000 titles, including Jump A/M/Z/M, bounded tools access and exact content return. Empty and single-title libraries pass. Eleven focused browsing unit regressions and iOS simulator compilation pass; the synopsis has a visible focus cue. |
+| T4 · Secondary screens and visual consistency | DVR, Settings, diagnostics, remotes, theme, info | T1; serialize shared-file work with T2/T3 | **Partly proven:** native Settings quality selection/Back, Help → phone QR report → Advanced → Done/Back, recording details, safe rule cancellation and named manual channel selection pass. DVR title rows span the content region so Down from a middle category cannot hit a gap. Remote pairing revocation and registration reset now pass safe Cancel entry and exact opener return in an ad hoc signed simulator build. The fixture uses the normal saved-server identity and Keychain registration. DVR title scaling and report instruction wrapping are corrected and visually checked after passing native reruns. Final comparison across all designs remains open. |
 | T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | **Open:** F29; exact integrated source, every inventory route, visual comparison and physical matrix. No device acceptance or deployment claimed. |
 
-**First repair should combine T0's reproducer with T1's menu fix and the small
-T2 reporting-placement change.** That addresses the user's immediate blockers
-while the remaining audit drives the broader cleanup. Do not mark the project
-complete when only Movies passes.
+**Integrated development evidence, October 15:** the full 1,037-test tvOS unit
+suite passes. The callback race tests now retain every queued publication rather
+than mistaking processing metadata for subtitle readiness; Live TV wiring checks
+follow the native reveal adapter and presented focus region. The documentation,
+infrastructure-name, modal wiring and native-runner static checks pass (24
+tests). Native evidence is retained in external source-bound receipts; these
+focused runs are development evidence, not the final whole-app qualification.
+The final integrated native suite, visual comparison and physical acceptance
+remain open. Do not mark the project complete when only Movies passes.
 
 **Non-goals:** no server transport rewrite, removal of diagnostic capture,
 feature enablement policy change, new hidden remote gestures, or redesign of

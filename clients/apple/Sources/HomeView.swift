@@ -196,36 +196,50 @@ struct HomeView: View {
     private var tvTabs: some View {
         TabView(selection: $remoteNavigation.selectedTab) {
             HomeDashboard()
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("root-screen-Home")
                 .tabItem { Label("Home", systemImage: "house") }
                 .tag(HomeTab.home)
 
             LibrariesDashboard()
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("root-screen-Libraries")
                 .tabItem { Label("Libraries", systemImage: "rectangle.stack") }
                 .tag(HomeTab.libraries)
 
             if HomeTab.liveTv.isVisible(model.features) {
                 LiveTvView(onLeave: { selectedTab = .home })
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("root-screen-Live TV")
                     .tabItem { Label("Live TV", systemImage: "tv") }
                     .tag(HomeTab.liveTv)
             }
 
             if HomeTab.recordings.isVisible(model.features) {
                 DvrRecordingsRootView()
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("root-screen-Recordings")
                     .tabItem { Label(recordingsTabLabel, systemImage: "record.circle") }
                     .tag(HomeTab.recordings)
             }
 
             if HomeTab.libraryChannels.isVisible(model.features) {
                 LibraryChannelsView()
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("root-screen-Channels")
                     .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
                     .tag(HomeTab.libraryChannels)
             }
 
             SearchView()
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("root-screen-Search")
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
                 .tag(HomeTab.search)
 
             SettingsView()
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("root-screen-Settings")
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(HomeTab.settings)
         }
@@ -280,6 +294,21 @@ extension View {
     fileprivate func appDestinations() -> some View { modifier(AppDestinations()) }
 }
 
+private struct HomeRecoveryRow: View {
+    @EnvironmentObject private var model: AppModel
+    let error: String
+    let scope: String
+    var body: some View {
+        HStack(spacing: 24) {
+            Text("Couldn't refresh: \(error)").foregroundStyle(Palette.muted)
+            Button("Retry") { Task { await model.loadHome() } }
+                .shelfActionButtonStyle()
+                .accessibilityIdentifier(scope + ":retry")
+                .remoteControl(scope + ":retry", label: "Retry") { Task { await model.loadHome() } }
+        }.padding(.horizontal, screenHPad)
+    }
+}
+
 private struct HomeDashboard: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
@@ -316,17 +345,15 @@ private struct HomeDashboard: View {
                     Button("Search") { remoteNavigation.selectedTab = .search; remoteNavigation.synchronizeRoute() }
                         .remoteControl("tab:search", label: "Search") { remoteNavigation.selectedTab = .search; remoteNavigation.synchronizeRoute() }
                 }
+                .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
                 .padding(.horizontal, screenHPad)
                 #endif
-                if model.homeLoading {
+                if let error = model.homeError {
+                    HomeRecoveryRow(error: error, scope: "home")
+                }
+                if model.homeLoading && featured == nil {
                     ProgressView().tint(Palette.accent)
                         .frame(maxWidth: .infinity).padding(.top, 80)
-                } else if let error = model.homeError {
-                    ContentUnavailableView(
-                        "Server unavailable",
-                        systemImage: "exclamationmark.triangle",
-                        description: Text(error)
-                    )
                 } else {
                     homeContent
                 }
@@ -337,7 +364,8 @@ private struct HomeDashboard: View {
         .remoteScope("home")
         .onAppear { updateRemoteOrder() }
         .onChange(of: remoteKeys) { _, _ in updateRemoteOrder() }
-        .onChange(of: remoteNavigation.requestedFocus) { _, key in
+        .onChange(of: remoteNavigation.focusRequestRevision) { _, _ in
+            let key = remoteNavigation.requestedFocus
             guard remoteNavigation.activeScope == "home", let key, key.hasPrefix("shelf:"),
                   let shelf = key.split(separator: ":").dropFirst().first else { return }
             proxy.scrollTo("shelf:" + shelf, anchor: .center)
@@ -356,7 +384,7 @@ private struct HomeDashboard: View {
         #else
         let tabs: [String] = []
         #endif
-        return tabs + shelves.enumerated().flatMap { index, items in
+        return tabs + (model.homeError == nil ? [] : ["home:retry"]) + shelves.enumerated().flatMap { index, items in
             items.map { "shelf:\(index):item:\($0.id)" }
         } + model.comingSoon.filter { $0.itemId != nil }.map { "shelf:3:comingsoon:" + $0.id }
     }
@@ -483,25 +511,25 @@ private struct LibrariesDashboard: View {
                 if model.features.sharedLibraries {
                     SharedLibrariesEntry().padding(.horizontal, screenHPad).padding(.top, 12)
                 }
-                if model.homeLoading {
+                if let error = model.homeError {
+                    HomeRecoveryRow(error: error, scope: "libraries")
+                }
+                if model.homeLoading && model.libraries.isEmpty {
                     ProgressView()
                         .tint(Palette.accent)
                         .frame(maxWidth: .infinity)
                         .padding(.top, 80)
-                } else if let error = model.homeError {
-                    ContentUnavailableView(
-                        "Server unavailable",
-                        systemImage: "exclamationmark.triangle",
-                        description: Text(error)
-                    )
                 } else if model.libraries.isEmpty {
                     ContentUnavailableView(
                         "Your library is empty",
                         systemImage: "rectangle.stack",
-                        description: Text("Add a library in the Cinema web app, then pull to refresh.")
+                        description: Text("Add a library in the Cinema web app, then refresh.")
                     )
                     .frame(maxWidth: .infinity)
                     .padding(.top, 80)
+                    Button("Refresh") { Task { await model.loadHome() } }
+                        .shelfActionButtonStyle()
+                        .remoteControl("libraries:refresh", label: "Refresh libraries") { Task { await model.loadHome() } }
                 } else {
                     libraryHeading
                     ForEach(model.libraryCollections()) { collection in
@@ -518,7 +546,7 @@ private struct LibrariesDashboard: View {
         }
         .background(Palette.bg.ignoresSafeArea())
         .remoteScope("libraries")
-        .overlay {
+        .remoteChoicePresentation(isPresented: $groupingMenu, scope: "libraries:grouping") {
             if groupingMenu {
                 RemoteChoicePanel(scope: "libraries:grouping", title: "Group by", choices: LibraryGrouping.allCases.map { grouping in
                     RemoteChoice(id: grouping.rawValue, label: grouping.label, selected: model.libraryGrouping == grouping) { model.setLibraryGrouping(grouping) }
@@ -528,6 +556,7 @@ private struct LibrariesDashboard: View {
         .onAppear { updateRemoteOrder() }
         .onChange(of: model.libraryCollections().map(\.id)) { _, _ in updateRemoteOrder() }
         .onChange(of: model.features.sharedLibraries) { _, _ in updateRemoteOrder() }
+        .onChange(of: model.homeError) { _, _ in updateRemoteOrder() }
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
         .refreshable { await model.loadHome() }
@@ -542,7 +571,7 @@ private struct LibrariesDashboard: View {
         #endif
         // A Cinema remote must not be offered an entry that is not on screen.
         let shared = model.features.sharedLibraries ? ["libraries:shared"] : []
-        remoteNavigation.setOrder(scope: "libraries", keys: grouping + shared + model.libraryCollections().map { "collection:" + $0.id }, columns: 1)
+        remoteNavigation.setOrder(scope: "libraries", keys: grouping + shared + (model.homeError == nil ? [] : ["libraries:retry"]) + (model.libraries.isEmpty ? ["libraries:refresh"] : []) + model.libraryCollections().map { "collection:" + $0.id }, columns: 1)
     }
     private func openGrouping() {
         remoteNavigation.openModal(scope: "libraries:grouping", opener: "libraries:grouping") { groupingMenu = false }
@@ -558,11 +587,13 @@ private struct LibrariesDashboard: View {
                 .font(.headline.weight(.semibold))
                 #endif
                 .foregroundColor(Palette.onBg)
-            Spacer()
             #if os(tvOS)
             Button("Group by") { openGrouping() }
+                .shelfActionButtonStyle()
                 .remoteControl("libraries:grouping", label: "Group by") { openGrouping() }
+            Spacer()
             #else
+            Spacer()
             Picker("Group by", selection: Binding(get: { model.libraryGrouping }, set: { model.setLibraryGrouping($0) })) {
                 ForEach(LibraryGrouping.allCases) { grouping in Text(grouping.label).tag(grouping) }
             }

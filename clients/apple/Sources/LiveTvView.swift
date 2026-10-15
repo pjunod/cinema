@@ -1304,6 +1304,7 @@ private struct LiveTvChannelButtonStyle: ButtonStyle {
     fileprivate struct Body: View {
         let configuration: ButtonStyle.Configuration
         @Environment(\.isFocused) private var isFocused
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
             // The row owns its own padding and its playing ring; the style
@@ -1319,8 +1320,9 @@ private struct LiveTvChannelButtonStyle: ButtonStyle {
                         .stroke(isFocused ? Palette.onBg : .clear,
                                 lineWidth: isFocused ? 3 : 0)
                 }
-                .scaleEffect(isFocused ? 1.012 : (configuration.isPressed ? 0.99 : 1))
-                .animation(.easeOut(duration: 0.12), value: isFocused)
+                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.012 : (configuration.isPressed ? 0.99 : 1)))
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isFocused)
+                .remoteNativeFocus(isFocused)
         }
     }
 }
@@ -1336,6 +1338,7 @@ private struct LiveTvGuideButtonStyle: ButtonStyle {
     fileprivate struct Body: View {
         let configuration: ButtonStyle.Configuration
         @Environment(\.isFocused) private var isFocused
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
             configuration.label
@@ -1345,9 +1348,10 @@ private struct LiveTvGuideButtonStyle: ButtonStyle {
                         .stroke(isFocused ? Palette.accent : .clear,
                                 lineWidth: isFocused ? 4 : 0)
                 }
-                .scaleEffect(isFocused ? 1.018 : (configuration.isPressed ? 0.99 : 1))
+                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.018 : (configuration.isPressed ? 0.99 : 1)))
                 .shadow(color: Palette.accent.opacity(isFocused ? 0.28 : 0), radius: 10)
-                .animation(.easeOut(duration: 0.1), value: isFocused)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.1), value: isFocused)
+                .remoteNativeFocus(isFocused)
         }
     }
 }
@@ -1365,6 +1369,7 @@ private struct LiveTvPictureButtonStyle: ButtonStyle {
     fileprivate struct Body: View {
         let configuration: ButtonStyle.Configuration
         @Environment(\.isFocused) private var isFocused
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
             configuration.label
@@ -1372,7 +1377,8 @@ private struct LiveTvPictureButtonStyle: ButtonStyle {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(isFocused ? Palette.accent : .clear, lineWidth: isFocused ? 4 : 0)
                 }
-                .animation(.easeOut(duration: 0.12), value: isFocused)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isFocused)
+                .remoteNativeFocus(isFocused)
         }
     }
 }
@@ -2019,6 +2025,8 @@ struct LiveTvView: View {
     @State private var showingInfo = false
     @State private var showingDvrActivity = false
     @State private var showingMore = false
+    @State private var showingReminderActions = false
+    @FocusState private var morePanelFocus: String?
     @State private var showingLayout = false
     @State private var mobileGuideGrid = SettingsStore().liveTvMobileGuideUsesGrid
     @State private var scheduleChannelId: String?
@@ -2049,7 +2057,7 @@ struct LiveTvView: View {
     /// focus ran the page's toolbar bookkeeping.
     private enum FocusTarget: Hashable {
         // Page toolbar.
-        case channels, guide, recordings, favorites, search, layout, more
+        case channels, guide, recordings, favorites, search, layout, more, guideTime, captions
         // The detail region — the picture and the programme actions beside
         // the On now list, or in the stage above the guide grid. Reached and
         // left by explicit moves (`moveDetailFocus`), so a viewer who goes
@@ -2066,7 +2074,7 @@ struct LiveTvView: View {
 
         var isToolbar: Bool {
             switch self {
-            case .channels, .guide, .recordings, .favorites, .search, .layout, .more: true
+            case .channels, .guide, .recordings, .favorites, .search, .layout, .more, .guideTime, .captions: true
             default: false
             }
         }
@@ -2342,7 +2350,7 @@ struct LiveTvView: View {
         .background(Palette.bg)
         .remoteScope("live-tv")
         .remoteRestricted(showingSearch || showingInfo || showingMore || showingLayout || detail != nil || showingDvrActivity || showingTouchRecordings)
-        .overlay { liveRemoteMenu }
+        .remoteChoicePresentation(isPresented: Binding(get: { remoteMenu != nil }, set: { if !$0 { remoteMenu = nil } }), scope: "live-tv:" + (remoteMenu ?? "menu")) { liveRemoteMenu }
         .onAppear { attachLiveRemote(); updateLiveRemoteOrder() }
         .onChange(of: browse) { _, _ in remoteNavigation.contextChanged(); updateLiveRemoteOrder() }
         .onChange(of: visibleChannels.map(\.id)) { _, _ in updateLiveRemoteOrder() }
@@ -2389,11 +2397,8 @@ struct LiveTvView: View {
             fullscreenSurface
                 .background(RemoteOwnedPresentationProbe(navigation: remoteNavigation, token: remoteOwner, scope: "live-tv"))
                 .diagnosticReportHost(owner: "live-player")
-                .overlay(alignment: .topTrailing) {
-                    DiagnosticReportButton(category: "playback", owner: "live-player").buttonStyle(.bordered).padding(24)
-                }
                 .remoteScope("live-tv")
-                .overlay { liveRemoteMenu }
+                .remoteChoicePresentation(isPresented: Binding(get: { remoteMenu != nil }, set: { if !$0 { remoteMenu = nil } }), scope: "live-tv:" + (remoteMenu ?? "menu")) { liveRemoteMenu }
                 .remoteRestricted(showingSearch || showingInfo || showingMore || showingLayout || detail != nil || showingDvrActivity)
                 .onDisappear { remoteNavigation.detachPresentation(remoteOwner); attachLiveRemote() }
                 .sheet(item: $detail, onDismiss: { returnGuideFocusAfterProgrammeSheet() }) {
@@ -2618,6 +2623,7 @@ struct LiveTvView: View {
             ReminderOverlay(
                 reminder: reminder,
                 now: now,
+                interactive: !fullscreen,
                 watch: {
                     Task { await dvr.ack(reminder) }
                     guard let channel = live.channels.first(where: { $0.id == reminder.channelId })
@@ -2699,8 +2705,10 @@ struct LiveTvView: View {
     }
 
     private var morePanel: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 18) {
             Text("Live TV").font(LiveTvType.title)
+            Button(favoritesOnly ? "Show all channels" : "Favorites only") { favoritesOnly.toggle() }
             Button("Layout") {
                 showingMore = false
                 showingLayout = true
@@ -2747,6 +2755,9 @@ struct LiveTvView: View {
                     .focusEffectDisabled()
                     #endif
             }
+            Button("Reminder actions") { showingReminderActions = true }
+                .disabled(dvr.current == nil)
+            DiagnosticReportButton(category: "playback", owner: "live-player-more")
             Button("Leave Live TV") {
                 showingMore = false
                 Task { await live.stop(); onLeave() }
@@ -2756,14 +2767,53 @@ struct LiveTvView: View {
             .focusEffectDisabled()
             #endif
             Button("Close") { showingMore = false }
+                .focused($morePanelFocus, equals: "close")
                 #if os(tvOS)
                 .buttonStyle(TVReadableButtonStyle(prominent: true))
                 .focusEffectDisabled()
                 #endif
         }
+        }
+        #if os(tvOS)
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
+        #endif
         .padding(48)
         .frame(minWidth: 420, minHeight: 360, alignment: .topLeading)
         .background(Palette.bg)
+        .diagnosticReportHost(owner: "live-player-more")
+        .sheet(isPresented: $showingReminderActions, onDismiss: { morePanelFocus = "close" }) {
+            VStack(alignment: .leading, spacing: 24) {
+                if let reminder = dvr.current {
+                    Text(reminder.title).font(LiveTvType.title)
+                    Button("Watch") {
+                        Task { await dvr.ack(reminder) }
+                        if let channel = live.channels.first(where: { $0.id == reminder.channelId }) { selectAiring(channel) }
+                        showingReminderActions = false
+                        showingMore = false
+                    }
+                    if !reminder.covered {
+                        Button("Record") {
+                            Task {
+                                await dvr.record(channelId: reminder.channelId, airingStart: reminder.airingStart)
+                                await dvr.ack(reminder)
+                            }
+                            showingReminderActions = false
+                        }
+                    }
+                    Button("Dismiss reminder") {
+                        Task { await dvr.ack(reminder) }
+                        showingReminderActions = false
+                    }
+                }
+                Button("Close") { showingReminderActions = false }
+            }.padding(48)
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                #endif
+        }
+        .onChange(of: dvr.current?.id) { _, _ in
+            if showingReminderActions { showingReminderActions = false }
+        }
     }
 
     /// Television keeps its remote toolbar; touch gives the view selector and
@@ -2782,33 +2832,18 @@ struct LiveTvView: View {
                     .focused($focusedControl, equals: .recordings)
             }
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.outline, lineWidth: 1))
-            Text(toolbarSummary).font(LiveTvType.secondary).foregroundStyle(Palette.muted)
+            Text(toolbarSummary).font(LiveTvType.secondary).foregroundStyle(Palette.muted).lineLimit(1)
             Spacer(minLength: 8)
-            // Toggling a filter keeps focus on the button that was pressed.
-            // It used to jump into the list — from the Guide page too — so
-            // pressing it twice meant finding it twice.
-            Button { favoritesOnly.toggle() } label: {
-                Label("Favorites", systemImage: favoritesOnly ? "star.fill" : "star")
-            }
-            .buttonStyle(TVReadableButtonStyle(prominent: favoritesOnly, compact: true))
-            .focusEffectDisabled()
-            .focused($focusedControl, equals: .favorites)
             Button { showingSearch = true } label: {
-                Label(query.isEmpty ? "Search" : "Search: \(query)", systemImage: "magnifyingglass")
+                Label("Search", systemImage: "magnifyingglass")
             }
             .buttonStyle(TVReadableButtonStyle(prominent: !query.isEmpty, compact: true))
             .focusEffectDisabled()
             .focused($focusedControl, equals: .search)
-            Button { showingLayout = true } label: {
-                Label("Layout", systemImage: "rectangle.3.group")
-            }
-            .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
-            .focusEffectDisabled()
-            .focused($focusedControl, equals: .layout)
             Button("Guide time") { openLiveRemoteMenu("guide-time", opener: "live:guide-time") }
+                .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+                .focused($focusedControl, equals: .guideTime)
                 .remoteControl("live:guide-time", label: "Guide time") { openLiveRemoteMenu("guide-time", opener: "live:guide-time") }
-            Button("Captions") { openLiveRemoteMenu("tracks", opener: "live:captions") }
-                .remoteControl("live:captions", label: "Captions", enabled: live.playing) { openLiveRemoteMenu("tracks", opener: "live:captions") }
             Button { showingMore = true } label: {
                 Label("More", systemImage: "ellipsis")
             }
@@ -3736,8 +3771,9 @@ struct LiveTvView: View {
                 }
             }
         }
-        .onChange(of: remoteNavigation.requestedFocus) { _, key in
-            guard remoteNavigation.activeScope == "live-tv", let key, key.hasPrefix("live:channel:") else { return }
+        .onChange(of: remoteNavigation.focusRequestRevision) { _, _ in
+            guard remoteNavigation.activeScope == "live-tv",
+                  let key = remoteNavigation.requestedFocus, key.hasPrefix("live:channel:") else { return }
             scroll.scrollTo(String(key.dropFirst(13)), anchor: .center)
         }
         .onChange(of: focusedChannelId) { _, channelId in
@@ -4230,7 +4266,8 @@ struct LiveTvView: View {
 
     private func liveBottomBand(
         channel: LiveTvChannel?,
-        airing: LiveTvAiring
+        airing: LiveTvAiring,
+        focus: FocusState<FocusTarget?>.Binding
     ) -> some View {
         VStack(alignment: .leading, spacing: 28) {
             liveIdentityRow(channel: channel, airing: airing)
@@ -4247,16 +4284,16 @@ struct LiveTvView: View {
                 }
                 .buttonStyle(LiveSurfacePillStyle())
                 .focusEffectDisabled()
-                .focused($focusedControl, equals: .pillActivity)
+                .focused(focus, equals: .pillActivity)
             }
-            liveSurfaceButtons
+            liveSurfaceButtons(focus: focus)
         }
         .padding(.horizontal, 80)
         .padding(.bottom, 64)
         .foregroundStyle(.white)
     }
 
-    private var liveSurfaceButtons: some View {
+    private func liveSurfaceButtons(focus: FocusState<FocusTarget?>.Binding) -> some View {
         HStack(spacing: 16) {
             Button { live.togglePause() } label: {
                 Label(
@@ -4264,28 +4301,30 @@ struct LiveTvView: View {
                     systemImage: live.paused || live.systemPaused ? "play.fill" : "pause.fill"
                 )
             }
-            .focused($focusedControl, equals: .pillPlay)
+            .focused(focus, equals: .pillPlay)
+            .accessibilityIdentifier("live-player-play")
             .remoteControl("live:play", label: live.paused ? "Play live" : "Pause") { live.togglePause() }
             Button { openTemporaryGuide() } label: {
                 Label("Guide", systemImage: "rectangle.grid.3x2")
             }
-            .focused($focusedControl, equals: .pillGuide)
+            .focused(focus, equals: .pillGuide)
             .remoteControl("live:guide", label: "Guide") { openTemporaryGuide() }
             // Focus on the list is requested when the cover has gone
             // (`restoreBrowseFocusAfterCover`), not here while it is still up.
             Button { browse = .list; fullscreen = false } label: {
                 Label("Channels", systemImage: "list.bullet")
             }
-            .focused($focusedControl, equals: .pillChannels)
+            .focused(focus, equals: .pillChannels)
             .remoteControl("live:channels", label: "Channels") { browse = .list; fullscreen = false }
             Button { coverSheetOpener = .pillInfo; showStreamInfo() } label: {
                 Label("Info", systemImage: "info.circle")
             }
-            .focused($focusedControl, equals: .pillInfo)
+            .focused(focus, equals: .pillInfo)
             Button { coverSheetOpener = .pillMore; showingMore = true } label: {
                 Label("More", systemImage: "ellipsis")
             }
-            .focused($focusedControl, equals: .pillMore)
+            .focused(focus, equals: .pillMore)
+            .accessibilityIdentifier("live-player-more")
             Spacer()
             Text("MENU hides · PLAY/PAUSE \(live.paused ? "resumes" : "pauses")")
                 .font(LiveTvType.surfaceHint)
@@ -4309,33 +4348,9 @@ struct LiveTvView: View {
                           pgsOverlay: nil, allowsPictureInPicture: true)
                 .ignoresSafeArea()
             #if os(tvOS)
-            // tvOS delivers move/exit/playPause commands only to the focused
-            // view and its ancestors, and `PlayerSurfaceView` refuses focus.
-            // Without this layer the overlay's own four-second auto-hide
-            // removed the last focusable view from the cover and the surface
-            // went permanently deaf — every `hidden → reveal` row of the
-            // contract unreachable, with no way back to any chrome. The finite
-            // player solves it the same way (PlayerView.swift's `.reveal`).
-            Color.clear
-                .contentShape(Rectangle())
-                .focusable(!overlayVisible && !temporaryGuide)
-                .focused($focusedControl, equals: FocusTarget.reveal)
-                .accessibilityHidden(true)
-                // `liveInputState`, never a hardcoded `.fullscreenHidden`.
-                // This layer takes every direction through `onMoveCommand`,
-                // so while it holds focus the engine never sees one - and
-                // `focusable(false)` does not relocate focus until the next
-                // focus update, so it can hold focus for a moment after the
-                // overlay is back. Asserting the hidden state made that
-                // moment permanent: every direction routed to `reveal`, which
-                // re-showed an overlay that was already up. Reporting the
-                // real state routes it to `focusControl` instead, which
-                // returns false and lets the framework move focus off.
-                .liveTvRemoteAdapter(
-                    .revealSurface,
-                    state: { liveInputState },
-                    apply: { outcome, _ in applyLiveOutcome(outcome) }
-                )
+            if !overlayVisible && !temporaryGuide {
+                LiveTvRevealSurface(state: { liveInputState }, apply: { outcome, _ in applyLiveOutcome(outcome) })
+            }
             #endif
             #if os(tvOS)
             liveWaitingTile
@@ -4359,7 +4374,11 @@ struct LiveTvView: View {
                         endPoint: .bottom
                     )
                     .frame(height: 520)
-                    liveBottomBand(channel: channel, airing: airing)
+                    NativePlaybackFocusRegion(preferred: FocusTarget.pillPlay, requested: focusedControl,
+                                              changed: { overlayGeneration &+= 1 },
+                                              focusChanged: { focusedControl = $0 }) { focus in
+                        liveBottomBand(channel: channel, airing: airing, focus: focus)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             }

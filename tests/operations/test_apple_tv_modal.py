@@ -23,3 +23,16 @@ class AppleTVModalWiringTests(unittest.TestCase):
         self.assertIn(".remoteChoiceFocusScope(focusNamespace)", panel)
         self.assertIn("closeModal(returnFocus: choice.returnFocus)", panel)
         self.assertNotIn("RemoteChoiceExitAdapter", panel)
+
+    def test_choice_entry_waits_for_native_presentation_realization(self):
+        readiness = SOURCE.split("private struct RemoteChoiceFocusReadiness", 1)[1].split("struct RemoteOwnedPresentationProbe", 1)[0]
+        self.assertIn("override func viewDidAppear", readiness)
+        self.assertIn("ready()", readiness)
+        self.assertIn(".background(RemoteChoiceFocusReadiness(ready: nativePresentationReady)", SOURCE)
+
+    def test_native_style_acknowledgment_and_physical_activation_precede_choice_effect(self):
+        self.assertIn("func remoteNativeFocus(_ actuallyFocused: Bool)", SOURCE)
+        self.assertIn(".remoteNativeFocus(focused)", SOURCE)
+        self.assertIn("ReportID(focused: focused, requestRevision: requestRevision,", SOURCE)
+        self.assertIn("observesPhysicalActivation: false", SOURCE)
+        self.assertIn("navigation.performPhysicalAction { commit(choice) }", SOURCE)

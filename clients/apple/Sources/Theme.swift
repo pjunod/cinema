@@ -118,6 +118,7 @@ struct TVReadableButtonStyle: ButtonStyle {
     /// pair is the toolbar size (48 pt) — the default 66 pt pair stays the
     /// sheet size, where a button is the only thing on the line.
     var compact: Bool = false
+    var focusScale: CGFloat = 1.045
 
     static func foregroundColor(prominent: Bool, focused: Bool) -> Color {
         prominent ? Palette.buttonInk : Palette.onBg
@@ -128,14 +129,16 @@ struct TVReadableButtonStyle: ButtonStyle {
     }
 
     func makeBody(configuration: Configuration) -> Body {
-        Body(configuration: configuration, prominent: prominent, compact: compact)
+        Body(configuration: configuration, prominent: prominent, compact: compact, focusScale: focusScale)
     }
 
     struct Body: View {
         let configuration: ButtonStyle.Configuration
         let prominent: Bool
         var compact: Bool = false
+        var focusScale: CGFloat = 1.045
         @Environment(\.isFocused) private var isFocused
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @Environment(\.isEnabled) private var isEnabled
 
         private var radius: CGFloat { compact ? 10 : 14 }
@@ -166,11 +169,12 @@ struct TVReadableButtonStyle: ButtonStyle {
                             lineWidth: isFocused ? 4 : 1
                         )
                 }
-                .scaleEffect(isFocused ? 1.045 : (configuration.isPressed ? 0.98 : 1))
+                .scaleEffect(reduceMotion ? 1 : (isFocused ? focusScale : (configuration.isPressed ? 0.98 : 1)))
                 .shadow(color: Palette.accent.opacity(isFocused ? 0.3 : 0), radius: 16, y: 7)
                 .opacity(isEnabled ? 1 : 0.45)
-                .animation(.easeOut(duration: 0.14), value: isFocused)
-                .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isFocused)
+                .remoteNativeFocus(isFocused)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: configuration.isPressed)
         }
     }
 }
@@ -185,6 +189,7 @@ struct LiveSurfacePillStyle: ButtonStyle {
     private struct Renderer: View {
         let configuration: ButtonStyle.Configuration
         @Environment(\.isFocused) private var isFocused
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
             configuration.label
@@ -205,13 +210,14 @@ struct LiveSurfacePillStyle: ButtonStyle {
                             lineWidth: isFocused ? 4 : 1
                         )
                 }
-                .scaleEffect(isFocused ? 1.045 : (configuration.isPressed ? 0.98 : 1))
+                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.045 : (configuration.isPressed ? 0.98 : 1)))
                 .shadow(
                     color: Palette.accent.opacity(isFocused ? 0.35 : 0),
                     radius: 14,
                     y: 10
                 )
-                .animation(.easeOut(duration: 0.14), value: isFocused)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isFocused)
+                .remoteNativeFocus(isFocused)
         }
     }
 }
@@ -230,6 +236,7 @@ struct TVShelfActionButtonStyle: ButtonStyle {
     struct Body: View {
         let configuration: ButtonStyle.Configuration
         @Environment(\.isFocused) private var isFocused
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
             configuration.label
@@ -242,14 +249,15 @@ struct TVShelfActionButtonStyle: ButtonStyle {
                     in: Capsule()
                 )
                 .brightness(isFocused ? 0.08 : 0)
-                .scaleEffect(isFocused ? 1.07 : (configuration.isPressed ? 0.97 : 1))
+                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.07 : (configuration.isPressed ? 0.97 : 1)))
                 .shadow(
                     color: Palette.accent.opacity(isFocused ? 0.42 : 0),
                     radius: 14,
                     y: 6
                 )
-                .animation(.easeOut(duration: 0.14), value: isFocused)
-                .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isFocused)
+                .remoteNativeFocus(isFocused)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: configuration.isPressed)
         }
     }
 }
@@ -270,6 +278,7 @@ struct TVPlayerControlButtonStyle: ButtonStyle {
     struct Body: View {
         let configuration: ButtonStyle.Configuration
         @Environment(\.isFocused) private var isFocused
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @Environment(\.isEnabled) private var isEnabled
 
         var body: some View {
@@ -297,11 +306,12 @@ struct TVPlayerControlButtonStyle: ButtonStyle {
                             lineWidth: isFocused ? 1 : 0.5
                         )
                 }
-                .scaleEffect(isFocused ? 1.035 : (configuration.isPressed ? 0.97 : 1))
+                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.035 : (configuration.isPressed ? 0.97 : 1)))
                 .shadow(color: .black.opacity(isFocused ? 0.55 : 0), radius: 8, y: 4)
                 .opacity(isEnabled ? 1 : 0.42)
-                .animation(.easeOut(duration: 0.12), value: isFocused)
-                .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isFocused)
+                .remoteNativeFocus(isFocused)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: configuration.isPressed)
         }
     }
 }
@@ -338,6 +348,7 @@ struct TVHeroButtonStyle: ButtonStyle {
     struct Body: View {
         let configuration: ButtonStyle.Configuration
         @Environment(\.isFocused) private var isFocused
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
             configuration.label
@@ -346,14 +357,15 @@ struct TVHeroButtonStyle: ButtonStyle {
                         .stroke(Palette.accent.opacity(isFocused ? 0.95 : 0.18),
                                 lineWidth: isFocused ? 4 : 1)
                 }
-                .scaleEffect(isFocused ? 1.012 : (configuration.isPressed ? 0.994 : 1))
+                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.012 : (configuration.isPressed ? 0.994 : 1)))
                 .shadow(
                     color: Palette.accent.opacity(isFocused ? 0.22 : 0),
                     radius: 20,
                     y: 8
                 )
-                .animation(.easeOut(duration: 0.15), value: isFocused)
-                .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isFocused)
+                .remoteNativeFocus(isFocused)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: configuration.isPressed)
         }
     }
 }
@@ -377,6 +389,7 @@ struct TVMediaCardButtonStyle: ButtonStyle {
     struct Body: View {
         let configuration: ButtonStyle.Configuration
         @Environment(\.isFocused) private var isFocused
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
             let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
@@ -400,10 +413,11 @@ struct TVMediaCardButtonStyle: ButtonStyle {
                     }
                     .opacity(isFocused ? 1 : 0)
                 }
-                .scaleEffect(isFocused ? 1.035 : (configuration.isPressed ? 0.985 : 1))
+                .scaleEffect(reduceMotion ? 1 : (isFocused ? 1.035 : (configuration.isPressed ? 0.985 : 1)))
                 .shadow(color: .black.opacity(isFocused ? 0.72 : 0), radius: 19, y: 10)
-                .animation(.easeOut(duration: 0.14), value: isFocused)
-                .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isFocused)
+                .remoteNativeFocus(isFocused)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: configuration.isPressed)
         }
     }
 }
@@ -413,6 +427,7 @@ struct TVMediaCardButtonStyle: ButtonStyle {
 /// Touch-sized counterpart to the Apple TV player control. It carries the same
 /// dark, hairline-outlined formatting without importing tvOS focus behavior.
 struct IOSPlayerControlButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     static let width: CGFloat = 40
     static let height: CGFloat = 36
     static let iconSize: CGFloat = 17
@@ -433,7 +448,7 @@ struct IOSPlayerControlButtonStyle: ButtonStyle {
             }
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
             .opacity(configuration.isPressed ? 0.76 : 1)
-            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: configuration.isPressed)
     }
 }
 
@@ -441,6 +456,7 @@ struct IOSPlayerControlButtonStyle: ButtonStyle {
 /// styles add horizontal chrome outside an already-flexible label, which can
 /// paint past a compact detail column's trailing inset.
 struct IOSFullWidthActionButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let prominent: Bool
 
     func makeBody(configuration: Configuration) -> some View {

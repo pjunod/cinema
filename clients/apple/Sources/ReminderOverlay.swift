@@ -1,17 +1,11 @@
 import SwiftUI
 
-/// The in-app reminder: lower-left, three buttons, and a bar that fills as the
-/// programme's start approaches.
-///
-/// Buttons only, deliberately. The ten-foot input contract decides what every
-/// remote press means, and a panel that claimed a key for itself would be a
-/// second answer to the same press — the surface would then behave differently
-/// depending on whether a reminder happened to be showing. Back and Menu
-/// dismiss this the way the platform dismisses anything else on the surface,
-/// and nothing here touches the player's routing table.
+/// Reminder arrival is informational during playback. Actions live in the
+/// player's revealed More panel, so arrival and expiry cannot steal focus.
 struct ReminderOverlay: View {
     let reminder: DvrReminder
     let now: Int
+    var interactive = true
     let watch: () -> Void
     let record: () -> Void
     /// Acknowledges it: gone here, and gone from every other device too.
@@ -47,15 +41,19 @@ struct ReminderOverlay: View {
                 .foregroundStyle(Palette.muted)
                 .lineLimit(1)
             LiveTvProgressLine(value: countdown, height: 3)
-            HStack(spacing: 8) {
-                DvrActionButton(label: "Watch", prominent: true, action: watch)
-                // Nothing to offer when a recording already covers the airing:
-                // the button would either make a second row for one broadcast
-                // or quietly do nothing at all.
-                if !reminder.covered {
-                    DvrActionButton(label: "Record", action: record)
+            if interactive {
+                HStack(spacing: 8) {
+                    DvrActionButton(label: "Watch", prominent: true, action: watch)
+                    // Nothing to offer when a recording already covers the airing:
+                    // the button would either make a second row for one broadcast
+                    // or quietly do nothing at all.
+                    if !reminder.covered {
+                        DvrActionButton(label: "Record", action: record)
+                    }
+                    DvrActionButton(label: "Dismiss", action: dismiss)
                 }
-                DvrActionButton(label: "Dismiss", action: dismiss)
+            } else {
+                Text("Open More for reminder actions").font(LiveTvType.secondary)
             }
         }
         .padding(reminderPadding)

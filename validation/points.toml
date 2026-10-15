@@ -1227,7 +1227,7 @@ checks = ["mobile-version", "operations-contract"]
 id = "apple.client"
 title = "Native iOS and tvOS clients"
 contract = "The Apple clients preserve the shared API, navigation, preferences, and playback policies on both platforms."
-paths = ["clients/apple/**"]
+paths = ["clients/apple/**", "scripts/apple-tv-navigation-test", "tests/operations/test_apple_tv_navigation_runner.py"]
 checks = ["apple-simulators", "apple-tv-navigation", "player-input-fence", "playback-surface-fence"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline", "offline.viewing"]
 

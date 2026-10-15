@@ -445,7 +445,7 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
-| [APPLE-TV-NAVIGATION-AUDIT.md](clients/APPLE-TV-NAVIGATION-AUDIT.md) | October 15 whole-app TV navigation source audit, native menu failure reproduction, 29 findings/risks and mandatory navigation acceptance proposal. | open |
+| [APPLE-TV-NAVIGATION-AUDIT.md](clients/APPLE-TV-NAVIGATION-AUDIT.md) | October 15 whole-app TV navigation source audit, native menu failure reproduction, 30 findings/risks, implementation ledger and mandatory navigation acceptance contract. | open |
 | [Apple TV navigation renderings](clients/apple-tv-navigation/index.html) | Twelve proposed screen/acceptance plates and actual synthetic native failure captures; designs, not implemented fixes. | open |
 | [Android playback repair status](clients/ANDROID-PLAYBACK-REPAIR-STATUS.md) | Merged playback repairs, validation and remaining physical-device acceptance. | built |
 | [Ready-video recovery build note](apple-builds/888-ready-video-recovery.md) | Apple build claim and viewer-visible black-picture recovery changes for PR #888. | built |

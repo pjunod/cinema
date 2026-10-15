@@ -287,8 +287,10 @@ final class LiveTvTests: XCTestCase {
             encoding: .utf8)
         XCTAssertTrue(source.contains("Button(\"Fullscreen\") { fullscreen = true }"))
         XCTAssertTrue(source.contains(".fullScreenCover(isPresented: $fullscreen)"))
-        XCTAssertTrue(source.contains("VideoPlayer(player: controller.player).ignoresSafeArea()"),
-                      "fullscreen must reuse the active channel player instead of opening another session")
+        XCTAssertTrue(source.contains("PlayerSurface(player: controller.player, pictureInPicture: channelPictureInPicture"),
+                      "fullscreen must reuse the active channel player without a second AVKit control owner")
+        XCTAssertTrue(source.contains(".liveTvRemoteAdapter(.root, state: channelInputState, apply: applyChannelInput)"))
+        XCTAssertTrue(source.contains("if channelChromeVisible {"), "all channel controls must belong to revealable chrome")
         XCTAssertTrue(source.contains("if controller.watching != nil && !fullscreen {"),
                       "only one surface should render the shared player while fullscreen is open")
         XCTAssertTrue(source.contains("Button(\"Return to channels\") { fullscreen = false }"))
@@ -786,7 +788,7 @@ final class LiveTvTests: XCTestCase {
     func testEveryDeveloperCardThatStaysSaysWhatItWaitsOn() throws {
         let developer = try Self.appleSource("LiveTvDeveloperView.swift")
         XCTAssertEqual(LiveTvSettingsPlacement.developer,
-                       ["Cinema remotes · advisory enablement", "Screen invitations · advisory readiness"])
+                       ["Remote diagnostics · advisory readiness", "Cinema remotes · advisory enablement", "Screen invitations · advisory readiness"])
         for title in LiveTvSettingsPlacement.developer {
             XCTAssertTrue(developer.contains("Section(\"\(title)\")"), title)
         }
@@ -1430,8 +1432,9 @@ final class LiveTvTests: XCTestCase {
             .components(separatedBy: "private var fullscreenSurface: some View {")[1]
             .components(separatedBy: "private func applyLiveOutcome")[0]
         XCTAssertTrue(fullscreen.contains(
-            ".focusable(!overlayVisible && !temporaryGuide)"
+            "if !overlayVisible && !temporaryGuide {"
         ))
+        XCTAssertTrue(fullscreen.contains("LiveTvRevealSurface(state:"))
         XCTAssertFalse(fullscreen.contains(".focusable(true)"))
     }
 
@@ -1512,7 +1515,7 @@ final class LiveTvTests: XCTestCase {
         // 2. One key per focusable: the page toolbar and the cover's pills no
         //    longer share `.guide` / `.channels` / `.more`.
         for pill in [".pillPlay", ".pillGuide", ".pillChannels", ".pillInfo", ".pillMore", ".pillActivity"] {
-            XCTAssertEqual(source.components(separatedBy: ".focused($focusedControl, equals: \(pill))").count - 1,
+            XCTAssertEqual(source.components(separatedBy: ".focused(focus, equals: \(pill))").count - 1,
                            1, pill)
         }
         XCTAssertEqual(source.components(separatedBy: ".focused($focusedControl, equals: .guide)").count - 1, 1)
@@ -1650,9 +1653,8 @@ final class LiveTvTests: XCTestCase {
 
     func testFiveFullscreenActionsAndNoFavorite() throws {
         let source = try liveTvViewSource()
-        let buttons = source
-            .components(separatedBy: "private var liveSurfaceButtons: some View {")[1]
-            .components(separatedBy: "#endif")[0]
+        let start = try XCTUnwrap(source.range(of: "private func liveSurfaceButtons(focus:"))
+        let buttons = String(source[start.upperBound...]).components(separatedBy: "#endif")[0]
         XCTAssertEqual(buttons.components(separatedBy: "Label(").count - 1, 5)
         for action in [
             "\"Play live\" : \"Pause\"",
@@ -2648,13 +2650,13 @@ final class LiveTvTests: XCTestCase {
         let source = try String(
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
-        XCTAssertTrue(source.contains(".focused($focusedControl, equals: FocusTarget.reveal)"))
+        XCTAssertTrue(source.contains("LiveTvRevealSurface(state: { liveInputState }"))
         // Was `focusedControl = visible ? .guide : .reveal`, which the
         // rebuilt surface split into the two branches of
         // `onChange(of: overlayVisible)` and retargeted to `.play`. This
         // assertion had been failing on main ever since: the fast lane
         // compiles the Apple target and does not run it.
-        XCTAssertTrue(source.contains(".focusable(!overlayVisible && !temporaryGuide)"))
+        XCTAssertTrue(source.contains("if !overlayVisible && !temporaryGuide {"))
         XCTAssertTrue(source.contains("focusedControl = .reveal"))
         // Tuning stays inside the selected browse layout. The viewer chooses
         // fullscreen explicitly with Return to live or by selecting the
@@ -2704,9 +2706,10 @@ final class LiveTvTests: XCTestCase {
             return String(source[lower..<upper])
         }
         let more = try section("private var morePanel", "private var liveToolbar")
-        XCTAssertEqual(more.components(separatedBy: "Button(").count - 1, 8)
-        XCTAssertEqual(more.components(separatedBy: ".buttonStyle(TVReadableButtonStyle").count - 1, 8,
-                       "every More action owns a readable foreground/background pair")
+        XCTAssertTrue(more.contains("DiagnosticReportButton(category: \"playback\", owner: \"live-player-more\")"))
+        XCTAssertTrue(more.contains("Button(\"Reminder actions\")"))
+        XCTAssertTrue(more.contains(".buttonStyle(TVReadableButtonStyle(prominent: false))"),
+                      "More and nested reminder actions inherit the readable TV style")
         let layout = try section("private var layoutPanel", "private var morePanel")
         XCTAssertEqual(layout.components(separatedBy: ".buttonStyle(TVReadableButtonStyle").count - 1, 2,
                        "the layout choice and Close action must not inherit the red tint")

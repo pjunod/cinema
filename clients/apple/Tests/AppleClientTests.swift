@@ -4827,7 +4827,8 @@ final class AppleClientTests: XCTestCase {
         )
 
         XCTAssertTrue(playerSource.contains(".playerRemoteAdapter(\n            .root"))
-        XCTAssertTrue(playerSource.contains(".playerRemoteAdapter(\n                            .surface"))
+        XCTAssertTrue(playerSource.contains("PlayerRevealSurface(state: inputState, apply: applyPlayerInputOutcome)"))
+        XCTAssertTrue(adapterSource.contains("NativePlaybackRevealTarget"))
         XCTAssertTrue(playerSource.contains(".playerRemoteAdapter(\n            .timeline"))
         let handlerSuffixes = ["MoveCommand", "ExitCommand", "PlayPauseCommand"]
         for token in handlerSuffixes.map({ ".on" + $0 }) {

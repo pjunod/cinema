@@ -158,6 +158,16 @@ import GameController
 /// Observe hardware value changes without replacing focus-engine direction
 /// handling. This catches a Siri Remote press at a stationary focus edge.
 /// Forward the existing handler and restore it when observation is stopped.
+struct RemotePhysicalInputTransitions {
+    private var active: Set<String> = []
+    mutating func reset(to current: Set<String> = []) { active = current }
+    mutating func observe(_ current: Set<String>) -> Bool {
+        let activated = !current.subtracting(active).isEmpty
+        active = current
+        return activated
+    }
+}
+
 @MainActor
 final class RemotePhysicalInputObserver: ObservableObject {
     private struct Subscription {
@@ -180,12 +190,37 @@ final class RemotePhysicalInputObserver: ObservableObject {
     private func observe(_ controller: GCController) {
         guard !subscriptions.contains(where: { $0.controller === controller }) else { return }
         let previous = controller.physicalInputProfile.valueDidChangeHandler
+        var transitions = RemotePhysicalInputTransitions()
+        transitions.reset(to: Self.activeInputs(controller.physicalInputProfile))
         subscriptions.append(.init(controller: controller, handler: previous, queue: controller.handlerQueue))
         controller.handlerQueue = .main
         controller.physicalInputProfile.valueDidChangeHandler = { [weak self] profile, element in
-            MainActor.assumeIsolated { self?.receive() }
+            MainActor.assumeIsolated {
+                if transitions.observe(Self.activeInputs(profile)) { self?.receive() }
+            }
             previous?(profile, element)
         }
+    }
+    private static func activeInputs(_ profile: GCPhysicalInputProfile) -> Set<String> {
+        var active: Set<String> = []
+        var directionalButtons: Set<ObjectIdentifier> = []
+        var directionalAxes: Set<ObjectIdentifier> = []
+        for (name, pad) in profile.dpads {
+            [pad.up, pad.down, pad.left, pad.right].forEach { directionalButtons.insert(ObjectIdentifier($0)) }
+            [pad.xAxis, pad.yAxis].forEach { directionalAxes.insert(ObjectIdentifier($0)) }
+            if pad.xAxis.value > 0.5 { active.insert(name + ":right") }
+            if pad.xAxis.value < -0.5 { active.insert(name + ":left") }
+            if pad.yAxis.value > 0.5 { active.insert(name + ":up") }
+            if pad.yAxis.value < -0.5 { active.insert(name + ":down") }
+        }
+        for (name, button) in profile.buttons where !directionalButtons.contains(ObjectIdentifier(button)) {
+            if button.isPressed { active.insert("button:" + name) }
+        }
+        for (name, axis) in profile.axes where !directionalAxes.contains(ObjectIdentifier(axis)) {
+            if axis.value > 0.5 { active.insert("axis:" + name + ":positive") }
+            if axis.value < -0.5 { active.insert("axis:" + name + ":negative") }
+        }
+        return active
     }
     func stop() {
         if let connection { NotificationCenter.default.removeObserver(connection) }
@@ -196,6 +231,173 @@ final class RemotePhysicalInputObserver: ObservableObject {
         }
         subscriptions.removeAll()
         receive = {}
+    }
+}
+#endif
+
+#if os(tvOS)
+/// Only the settings content pane owns this Back. The category rail remains
+/// outside the adapter, retaining native root behavior and spatial movement.
+private struct TVSettingsContentExitAdapter: ViewModifier {
+    let returnToCategory: () -> Void
+    func body(content: Content) -> some View {
+        content.onExitCommand(perform: returnToCategory)
+    }
+}
+extension View {
+    func tvSettingsContentExit(_ returnToCategory: @escaping () -> Void) -> some View {
+        modifier(TVSettingsContentExitAdapter(returnToCategory: returnToCategory))
+    }
+}
+#endif
+
+extension View {
+    @ViewBuilder
+    func remotePhysicalDirections() -> some View {
+        #if os(tvOS)
+        modifier(RemotePhysicalDirectionIntentAdapter())
+        #else
+        self
+        #endif
+    }
+}
+#if os(tvOS)
+/// Observe arrow presses, including simulator keyboard-style input, while
+/// returning ignored so SwiftUI's spatial focus engine retains movement.
+private struct RemotePhysicalDirectionIntentAdapter: ViewModifier {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    func body(content: Content) -> some View {
+        content.onKeyPress(keys: [.upArrow, .downArrow, .leftArrow, .rightArrow], phases: [.down, .repeat]) { _ in
+            navigation.physicalInput()
+            return .ignored
+        }
+    }
+}
+#endif
+
+#if os(tvOS)
+private struct TVDiagnosticReportExitAdapter: ViewModifier {
+    let close: () -> Void
+    func body(content: Content) -> some View { content.onExitCommand(perform: close) }
+}
+extension View {
+    func tvDiagnosticReportExit(_ close: @escaping () -> Void) -> some View {
+        modifier(TVDiagnosticReportExitAdapter(close: close))
+    }
+}
+#endif
+
+#if os(tvOS)
+/// A hidden surface supplies bounded native focus neighbours. Moving to any
+/// neighbour reveals controls; visible transport movement remains native.
+struct LiveTvRevealSurface: View {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    @EnvironmentObject private var playback: RemotePlaybackAdapter
+    let state: () -> LiveTvInputState
+    let apply: (LiveTvInputOutcome, LiveTvContractInput) -> Bool
+    var identifier = "live-player-reveal"
+    var body: some View {
+        NativePlaybackRevealTarget(identifier: identifier, enabled: { state() == .fullscreenHidden },
+                                   reveal: { dispatch(.select) }, direction: { direction in
+            guard let input = LiveTvRemoteAdapter.input(for: direction) else { return }
+            dispatch(input)
+        })
+    }
+    private func dispatch(_ input: LiveTvContractInput) {
+        guard state() == .fullscreenHidden else { return }
+        playback.physicalInput(); navigation.physicalInput()
+        _ = apply(LiveTvInputRouting.route(surface: .tenFoot, state: state(), input: input), input)
+    }
+}
+
+struct PlayerRevealSurface: View {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    @EnvironmentObject private var playback: RemotePlaybackAdapter
+    let state: () -> PlayerInputState
+    let apply: (PlayerInputOutcome, PlayerContractInput) -> Bool
+    var identifier = "player-reveal"
+    var body: some View {
+        NativePlaybackRevealTarget(identifier: identifier, enabled: { state() == .hidden },
+                                   reveal: { dispatch(.select) }, direction: { direction in
+            guard let input = PlayerRemoteAdapter.input(for: direction) else { return }
+            dispatch(input)
+        })
+    }
+    private func dispatch(_ input: PlayerContractInput) {
+        guard state() == .hidden else { return }
+        playback.physicalInput(); navigation.physicalInput()
+        _ = apply(PlayerInputRouting.route(surface: .tenFoot, state: state(), input: input), input)
+    }
+}
+
+private struct NativePlaybackRevealTarget: View {
+    let identifier: String
+    let enabled: () -> Bool
+    let reveal: () -> Void
+    let direction: (MoveCommandDirection) -> Void
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Button { if enabled() { reveal() } } label: {
+            Color.clear.contentShape(Rectangle()).frame(width: 120, height: 120)
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .focused($focused)
+        .accessibilityLabel("Show playback controls")
+        .accessibilityIdentifier(identifier)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .defaultFocus($focused, true)
+        .onMoveCommand { if enabled() { direction($0) } }
+        .task { focused = true }
+    }
+}
+#endif
+
+#if os(tvOS)
+/// Focus state belongs to the presented controls, not the covered browser.
+struct NativePlaybackFocusRegion<Key: Hashable, Content: View>: View {
+    @FocusState private var focused: Key?
+    let preferred: Key
+    let requested: Key?
+    let changed: () -> Void
+    var focusChanged: (Key?) -> Void = { _ in }
+    @ViewBuilder let content: (FocusState<Key?>.Binding) -> Content
+    var body: some View {
+        content($focused)
+            .defaultFocus($focused, preferred, priority: .userInitiated)
+            .onAppear { focused = preferred }
+            .onChange(of: requested) { _, value in focused = value }
+            .onChange(of: focused) { _, value in focusChanged(value); changed() }
+    }
+}
+#endif
+
+extension View {
+    @ViewBuilder
+    func playbackControlFocus(_ binding: FocusState<String?>.Binding?, equals key: String) -> some View {
+        if let binding { focused(binding, equals: key) } else { self }
+    }
+}
+
+#if os(tvOS)
+/// The tool rail returns Right to the saved content identity. Other directions
+/// retain native movement between its controls.
+private struct RemoteContentReturnAdapter: ViewModifier {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    @Environment(\.remoteNavigationScope) private var scope
+    let target: String?
+    func body(content: Content) -> some View {
+        content.onMoveCommand { direction in
+            guard direction == .right, let target else { return }
+            navigation.physicalInput()
+            navigation.focusControl(scope: scope, key: target)
+        }
+    }
+}
+extension View {
+    func remoteContentReturn(to target: String?) -> some View {
+        modifier(RemoteContentReturnAdapter(target: target))
     }
 }
 #endif

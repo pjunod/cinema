@@ -245,6 +245,22 @@ schemes:
       targets:
         - plurx-tvOSTests
 
+  plurx-tvOS-navigation:
+    build:
+      targets:
+        plurx-tvOS: all
+        plurx-tvOSUITests: [test]
+    test:
+      targets:
+        - name: plurx-tvOSUITests
+          selectedTests:
+            - TVNavigationTests
+            - TVSecondaryNavigationTests
+            - TVPlaybackNavigationTests
+            - TVLiveNavigationTests
+            - TVDvrNavigationTests
+            - TVRemoteManagementNavigationTests
+
   plurx-tvOS-physical:
     build:
       targets:
@@ -252,7 +268,14 @@ schemes:
         plurx-tvOSUITests: [test]
     test:
       targets:
-        - plurx-tvOSUITests
+        - name: plurx-tvOSUITests
+          skippedTests:
+            - TVNavigationTests
+            - TVSecondaryNavigationTests
+            - TVPlaybackNavigationTests
+            - TVLiveNavigationTests
+            - TVDvrNavigationTests
+            - TVRemoteManagementNavigationTests
 
   plurx-iOS-library-ui:
     build:

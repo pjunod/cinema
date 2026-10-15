@@ -71,6 +71,8 @@ private struct AuthScaffold<Content: View>: View {
                     .foregroundColor(Palette.accent)
                     .multilineTextAlignment(.center)
             }
+            DiagnosticReportButton(category: "connection")
+                .shelfActionButtonStyle()
         }
         .frame(maxWidth: 460)
         .padding(30)

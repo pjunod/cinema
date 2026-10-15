@@ -5,8 +5,14 @@ struct SharedLibrariesEntry: View {
     var body: some View {
         NavigationLink(value: Route.sharedLibraries) {
             Label("Shared libraries · Browse by Source", systemImage: "network")
+                #if os(tvOS)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                #endif
         }
         .accessibilityIdentifier("shared-libraries-entry")
+        #if os(tvOS)
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
+        #endif
         .remoteControl("libraries:shared", label: "Browse Shared libraries") { navigation.navigate(to: .sharedLibraries) }
     }
 }
@@ -42,6 +48,9 @@ struct SharedLibrariesView: View {
             }.padding()
         }
         .remoteScrollRealization()
+        #if os(tvOS)
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
+        #endif
         .onPreferenceChange(SharedRemoteOrderKey.self) { keys in
             navigation.setOrder(scope: "library:shared", keys: keys + ["shared:refresh"], columns: 1)
         }
@@ -178,6 +187,9 @@ struct SharedLibraryItemsView: View {
             }.padding()
         }
         .remoteScrollRealization()
+        #if os(tvOS)
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
+        #endif
         .onAppear {
             updateRemoteOrder()
             navigation.setSearch(scope: remoteScope, nonce: searchNonce) { query = $0 }
@@ -276,6 +288,9 @@ struct SharedLibraryDetailView: View {
             }.padding()
         }
         .remoteScrollRealization()
+        #if os(tvOS)
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
+        #endif
         .onAppear { updateRemoteDetailOrder() }
         .onChange(of: detail?.item.hasChildren) { _, _ in updateRemoteDetailOrder() }
         .onChange(of: detail?.files.map(\.id)) { _, _ in navigation.contextChanged(); updateRemoteDetailOrder() }
