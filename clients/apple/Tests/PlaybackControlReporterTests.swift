@@ -1868,7 +1868,7 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
                 linkCeiling: completedLink, currentCost: Double(current.peakBps!),
                 minimumAcquisitionCost: autoPressureNeedsMinimumAcquisitionCost(
                     severe: isSevere, runwaySeconds: runway, playbackRate: 1))?.height, 720,
-                "ample runway or non-severe evidence retains ordinary fitting-rung selection")
+                "outside the constrained rescue budget, ordinary fitting-rung selection remains")
         }
     }
 

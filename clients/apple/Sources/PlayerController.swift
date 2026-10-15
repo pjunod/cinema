@@ -499,9 +499,10 @@ func autoTrialMayCommit(requestedId: String?, offeredId: String?, requestedTarge
         automatic && presenting && !seeking
 }
 
-/// A severe cliff gets one protected acquisition attempt when actual loaded
-/// runway cannot afford a failed preparation followed by another protected try.
+/// Prefer one minimum-cost rescue below two full overlaps plus the reserve.
 /// A metadata-ready attempt may spend its entire overlap before failing.
+/// This selection budget does not bound control or queue latency; native
+/// admission still measures actual loaded coverage and the original deadlines.
 func autoPressureNeedsMinimumAcquisitionCost(severe: Bool, runwaySeconds: Double?,
                                             playbackRate: Double) -> Bool {
     guard severe, let runwaySeconds, runwaySeconds.isFinite, runwaySeconds >= 0,

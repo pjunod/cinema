@@ -6706,3 +6706,21 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func discardPreparedSuccessor() {"
 test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
 test_anchor = "testCadencePreparationFinishesBeforeOneTargetIsFrozenAndDisposalCancelsIt"
+
+
+[[fixes]]
+id = "apple.severe-rescue-full-failed-preparation-budget"
+commits = ["7ed2a07dea9bc1fbc39d9eceee288cd0dd6607b2"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoPressureNeedsMinimumAcquisitionCost("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testSeverePressureRescueBudgetPreservesActualTVLowLinkOpportunity"
+
+[[fixes]]
+id = "apple.severe-rescue-original-overlap-rate-boundaries"
+commits = []
+supplements = "apple.severe-rescue-full-failed-preparation-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoPressureNeedsMinimumAcquisitionCost("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testSeverePressureAcquisitionBudgetUsesOriginalBoundsAndActualRate"
