@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-15T18:04:56.923700+00:00",
+  "scope": "F4 compressed Matroska source-parser repair; physical startup matrix recorded separately",
+  "failure": {
+    "code": "vod_source_rescan_required",
+    "phase": "before VOD producer admission",
+    "unchanged_source": "equivalent 3840x1600 AV1 HDR10 film, 19 streams",
+    "difference": "native PGS subtitle streams 15\u201318 have 1920x1080 geometry; old sealed parser omitted width and height",
+    "old_stderr": "Unsupported encoding type repeated",
+    "root_cause": "sealed WASI FFprobe disables autodetection and did not build zlib; native FFprobe can decompress the Matroska tracks"
+  },
+  "repair": {
+    "zlib_commit": "f9dd6009be3ed32415edf1e89d1bc38380ecb95d",
+    "source_sha256": "e622c9f153848cdcaf3ffd8dae056a9ee4b42ae5ce4f0a86b52f08979c336f35",
+    "configure": "--enable-zlib with private static WASI dependency; compiled CONFIG_ZLIB=1 mandatory",
+    "provenance": "pinned source archive, license, headers, build log and manifest retained recursively",
+    "private_build_paths_embedded": false,
+    "held_source_guard_relaxed": false,
+    "abi_or_capability_change": false
+  },
+  "final_module": {
+    "sha256": "f45be8688acd51d552ece66769643aaa4a3e2eca6a8da360eea32d828e27b522",
+    "bytes": 15491199,
+    "all_native_stream_dictionaries_equal": true,
+    "stream_count": 19,
+    "status": 0,
+    "stderr": ""
+  },
+  "qualification": {
+    "package_tests": 13,
+    "adversarial_review": "Astra approved relative-path correction and three functional regressions",
+    "physical_startup": "pending at this receipt; no complete matrix claim"
+  }
+}

@@ -705,6 +705,31 @@ then repeat the original cold route and forced-SDR control. Publish latency
 per stage, failure rate, route and source identity. Keep unsupported-source
 refusal separate from supported playback reliability.
 
+### Compressed Matroska startup repair — 2026-10-15
+
+The equivalent AV1 HDR10 control completed three original-quality cold/warm
+pairs within the predeclared 40-second startup budget. Its first forced-1080p
+SDR cold start instead refused before producer admission with
+`vod_source_rescan_required`. The retained native and sealed probe documents
+isolated the difference to four PGS subtitle streams: native FFprobe reported
+1920×1080 geometry, while the sealed parser omitted both dimensions and logged
+`Unsupported encoding type`. The movie bytes had not changed.
+
+The sealed parser disabled dependency autodetection without supplying zlib.
+The repair builds the same pinned zlib commit as the native package for WASI,
+requires compiled zlib support, and retains its authenticated source and license.
+It preserves the source-comparison guard, parser ABI and capabilities. Relative
+include/library paths avoid embedding temporary build directories in the module.
+
+The [parser receipt](evidence/f4-compressed-matroska-parser-20261015.json)
+records the final module digest and actual held-file proof: all nineteen complete
+stream dictionaries equal native FFprobe, including the four PGS geometries,
+with empty stderr. Thirteen package regressions pass, including missing compiled
+support, substituted-source refusal before compilation, and recursive source/license
+retention. Astra approved the correction. The forced-SDR startup matrix and
+physical Air captures remain separate acceptance work; this receipt does not
+claim they have completed.
+
 ## 7. F5 — playback information does not fully describe delivery
 
 ### Observation and evidence
