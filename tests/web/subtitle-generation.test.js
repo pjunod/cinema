@@ -110,3 +110,20 @@ test("older Activity history entries cannot resurrect another account's inspecto
 test("unavailable catalog observations never hide saved enable or Save",async()=>{
   const h=harness(),panel=h.settings();h.ctx.respond=path=>path.endsWith("/managed")?config:Promise.reject(Error("No worker observations"));await h.ctx.openSubtitleTranscription(element());assert.match(panel.innerHTML,/id="st-enabled" type="checkbox" checked/);assert.match(panel.innerHTML,/>Save<\/button>/);assert.match(h.nodes["st-operation-status"].textContent,/settings remain editable/);h.ctx.respond=()=>({...config,revision:"2"});await h.ctx.saveSubtitleTranscription(element());assert.equal(h.calls.at(-1).init.body.enabled,true);
 });
+test("model failure reasons distinguish network storage integrity and engine repair actions",()=>{
+  const h=harness();
+  for(const [code,pattern]of [["insufficient_disk",/could not safely reserve model storage.*Free space or check its storage support.*retry Install/],["model_download_failed",/network access.*retry Install/],["model_verification_failed",/integrity or transcription test.*Retry Install/],["engine_unavailable",/supported server package.*run Test/],["waiting_for_worker",/worker to take this job/],["worker_observation_unavailable",/Current worker status is unavailable.*Refresh worker status/],["worker_not_current",/no longer a current cluster member.*choose a current worker/]])assert.match(h.ctx.subtitleReason(code),pattern);
+  assert.doesNotMatch(h.ctx.subtitleReason("insufficient_disk"),/disk is full/);
+  const html=h.ctx.subtitleModelOperationsHtml({catalog:{workers:[{node_id:"ready",label:"Ready worker"},{node_id:"space",label:"Storage worker"}]},operationRows:[{node_id:"ready",outcome:"accepted",job_id:"install-one",job:{state:"running",phase:"verifying"}},{node_id:"space",outcome:"insufficient_disk"}]});
+  assert.match(html,/Ready worker: verifying/);assert.match(html,/Storage worker: storage unavailable.*could not safely reserve model storage/);assert.match(html,/activity\/jobs\/install-one/);
+  const unknown=h.ctx.subtitleReason("PRIVATE /srv/process/stdout");assert.doesNotMatch(unknown,/PRIVATE|\/srv\/process/);
+  const refused=h.ctx.subtitleModelOperationsHtml({catalog:{workers:[]},operationRows:[{node_id:"worker",outcome:"PRIVATE /srv/process/stdout"}]});assert.match(refused,/not accepted/);assert.doesNotMatch(refused,/PRIVATE|\/srv\/process/);
+});
+test("watch generation mount survives mirrored ledger refresh and retires on file or account changes",()=>{
+  const h=harness();Object.assign(h.ctx.file,{available:true,video_codec:"h264"});h.ctx.watchCurrentFile=()=>h.ctx.file;
+  vm.runInContext(declarations("detail/watch-browser.js",name=>["watchCanGenerateSubtitles","watchGenerationAction","watchRenderSubtitleGeneration"].includes(name)),h.ctx);
+  const mount=h.node("watch-subtitle-generation");h.ctx.watchRenderSubtitleGeneration();assert.match(mount.innerHTML,/subtitle-generate-9007199254740993/);
+  mount.innerHTML="pending form with viewer edits and focus";h.ctx.watchRenderSubtitleGeneration();assert.equal(mount.innerHTML,"pending form with viewer edits and focus");
+  h.ctx.file={...h.ctx.file,id:"9007199254740994",fileContext:h.ctx.localPlaybackFileContext("9007199254740994")};h.ctx.watchRenderSubtitleGeneration();assert.match(mount.innerHTML,/subtitle-generate-9007199254740994/);assert.doesNotMatch(mount.innerHTML,/9007199254740993/);
+  h.ctx.ME={is_admin:false};h.ctx.watchRenderSubtitleGeneration();assert.equal(mount.hidden,true);assert.equal(mount.innerHTML,"");assert.equal(h.ctx.watchGenerationAction(h.ctx.file),"");
+});

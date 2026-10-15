@@ -937,6 +937,7 @@ async function completeSubtitleGeneration(state,request,job){
   const mount=document.getElementById(`pp-sub-field-${id}`),sel=prePlaySelection(state.context)||{subtitle:null};
   if(mount){const opt=(value,label,on)=>`<option value="${esc(String(value))}"${on?" selected":""}>${esc(label)}</option>`;mount.innerHTML=`<div class="ppfield"><label for="pp-s-${id}">Subtitles</label><select id="pp-s-${id}" onchange="setPrePlay('${id}','subtitle',this.value)">${opt("","Default",sel.subtitle==null)}${opt(-1,"Off",sel.subtitle===-1)}${options.subtitle_streams.map(row=>opt(row.index,subFactLabel(row),sel.subtitle===row.index)).join("")}</select></div>`;}
   if(typeof PLAYER!=="undefined"&&samePlaybackFile(PLAYER,state.context)&&PLAYER.started)PLAYER.subs=options.subtitle_streams;
+  if(typeof watchRenderLedger==="function"&&typeof WATCH!=="undefined"&&WATCH?.page===state.page)watchRenderLedger();
   state.readyIndex=caption.index;
   document.getElementById(`sg-status-${id}`).innerHTML=`Captions ready — use generated subtitles. <button class="sm" onclick="useGeneratedSubtitles('${id}')">Use generated subtitles</button> ${subtitleJobLink(state.jobId)}`;
 }
