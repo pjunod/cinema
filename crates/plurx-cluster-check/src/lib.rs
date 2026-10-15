@@ -65,7 +65,7 @@ use plurx_core::store::{
     LibraryStore, MediaStore, OfflinePackageStore, PlaybackTelemetryStore, ReconcileOutcome,
     RootFingerprintStatus, SettingsStore, SubtitleSourcePublication, TraktStore,
     TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore, AUTH_PROTOCOL_MAX,
-    AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION,
+    AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_BASELINE_VERSION, AUTH_SCHEMA_VERSION,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -13245,14 +13245,16 @@ pub async fn preflight_voter(preflight: Preflight) -> Result<()> {
     }
 }
 
-/// Start a candidate voter one schema version behind and return the refusal it
-/// printed. Any other exit status is itself a failure.
+/// Start a candidate below the supported bootstrap schema and return its
+/// refusal. The optional current schema can be newer than the cluster's
+/// bootstrap baseline, so current-minus-one is not necessarily incompatible.
+/// Any other exit status is itself a failure.
 pub async fn run_incompatible_preflight(executable: &Path, specs: &[NodeSpec]) -> Result<String> {
     run_preflight(
         executable,
         specs,
         ClusterCompatibility {
-            schema_version: AUTH_SCHEMA_VERSION - 1,
+            schema_version: AUTH_SCHEMA_BASELINE_VERSION - 1,
             ..ClusterCompatibility::CURRENT
         },
         Some(42),

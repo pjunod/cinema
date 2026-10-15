@@ -58,6 +58,8 @@ def main(argv: list[str]) -> int:
                 {"id": "protected", "guide_number": "107.1", "guide_name": "Fixture Protected", "drm": True, "favorite": False, "support": "drm_unsupported"},
             ]
             sessions: dict[str, dict] = {}
+            starts: dict[str, str] = {}
+            resumes: list[tuple[str, str]] = []
             events: list[str] = []
             errors: list[str] = []
             forbidden: list[str] = []
@@ -78,7 +80,7 @@ def main(argv: list[str]) -> int:
                 path = urlsplit(request.url).path.removeprefix("/api/v1/live-tv/")
                 method = request.method
                 if path == "channels":
-                    route.fulfill(json={"channels": channels, "freshness": "fresh", "age_seconds": 0})
+                    route.fulfill(json={"channels": channels, "freshness": "fresh", "age_seconds": 0, "protocols": [3]})
                     return
                 if path == "guide":
                     # The guide is a second, independent read. The page must be
@@ -103,9 +105,17 @@ def main(argv: list[str]) -> int:
                 if start and method == "POST":
                     if request.headers.get("authorization") != "Bearer " + host.token:
                         violations.append("start did not carry the account bearer: " + request.url)
+                    request_id = (request.post_data_json or {}).get("request_id")
+                    if not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-f]{32}", request_id):
+                        violations.append("protocol 3 start lacked a valid request identity")
+                        route.fulfill(status=400, json={"code": "invalid_request", "owner_decided": False})
+                        return
+                    if request_id in starts:
+                        route.fulfill(json=sessions[starts[request_id]]["info"])
+                        return
                     if mode["next"] == "capacity":
                         mode["next"] = "normal"
-                        route.fulfill(status=503, json={"code": "tuner_capacity", "message": "Fixture is busy"})
+                        route.fulfill(status=503, json={"code": "tuner_capacity", "message": "Fixture is busy", "owner_decided": True})
                         return
                     if active():
                         violations.append("a new tuner was allocated before the old capability was released")
@@ -115,11 +125,38 @@ def main(argv: list[str]) -> int:
                     events.append("start:" + capability)
                     result = {"session_id": capability, "playlist_url": "https://untrusted.invalid/ignored",
                               "channel": channel, "live": True, "output": {"video": "h264", "audio": "aac"}}
+                    starts[request_id] = capability
+                    sessions[capability]["info"] = result
+                    sessions[capability]["request_id"] = request_id
                     if mode["next"] == "late":
                         mode["next"] = "normal"
                         pending.append((route, result))
                     else:
                         route.fulfill(json=result)
+                    return
+                recovery = re.fullmatch(r"starts/([0-9a-f]{32})(/resume)?", path)
+                if recovery:
+                    request_id, resume = recovery.groups()
+                    if request.headers.get("authorization") != "Bearer " + host.token:
+                        violations.append("recovery did not carry the account bearer: " + request.url)
+                    capability = starts.get(request_id)
+                    if capability is None:
+                        violations.append("recovery used an unknown request identity")
+                        route.fulfill(status=404, json={"code": "start_unknown", "owner_decided": True})
+                        return
+                    session = sessions[capability]
+                    if resume and method == "POST":
+                        resumes.append((request_id, capability))
+                        route.fulfill(json={"outcome": "ended"} if session["closed"] else
+                                      {"outcome": "live", "session": session["info"]})
+                    elif not resume and method == "DELETE":
+                        if not session["closed"]:
+                            session["closed"] = True
+                            events.append("release:" + capability)
+                        route.fulfill(json={"outcome": "retired"})
+                    else:
+                        violations.append("unexpected recovery method: " + method + " " + path)
+                        route.fulfill(status=405)
                     return
                 resource = re.fullmatch(r"sessions/(fixture-\d+)(?:/(.*))?", path)
                 assert resource, "unexpected Live TV fixture route: " + path
@@ -345,50 +382,47 @@ def main(argv: list[str]) -> int:
             page.evaluate("delete document.visibilityState")
 
             watch()
-            # The orphan has to be made through a release the browser actually
-            # sends. This step used to set the flag and navigate away, waiting
-            # for an unload DELETE to be lost -- and none ever arrived, so
-            # nothing was dropped, every session closed cleanly, and the
-            # "orphaned start blocks replacement" claim below was proven by a
-            # run that had no orphan in it. Pause is a release this fixture has
-            # already serviced nine times.
+            # Lose the actual release, retaining an owner-bound request hint.
+            # Reload must ask the owner and rejoin that SAME session, with no
+            # extra tuner allocation and no invented local quarantine.
             orphan = active()[0]
+            orphan_id = sessions[orphan]["request_id"]
             attempted = len(deletes)
             mode["drop_delete"] = True
             page.get_by_label("Pause", exact=True).click()
-            until(
-                lambda: len(deletes) > attempted,
-                "the client never tried to release the orphan",
-                timeout=45,
-            )
-            assert deletes[attempted] == orphan, deletes
-            assert active() == [orphan], "a lost DELETE must not close the session"
-            # Now the reload, with a capability the server still holds and the
-            # client believes it has given back.
+            until(lambda: deletes.count(orphan) == 2,
+                  "the client did not complete its bounded lost-release attempts", timeout=45)
+            assert deletes[attempted] == orphan and active() == [orphan], deletes
+            hint_key = "plurx_live_tv_hint_v1:" + orphan_id
+            assert page.evaluate("key => /^\\d+$/.test(localStorage.getItem(key) || '')", hint_key)
+            freshness_ms = page.evaluate("PlaybackPolicy.liveContractTiming('retire_orphan_after_keepalives') * 5000")
+            assert 0 < freshness_ms <= 30000
             page.goto("about:blank")
+            # Pagehide refreshes the hint. Respect the real cross-tab liveness
+            # interval before opening the replacement document; no fake clock.
+            page.wait_for_timeout(freshness_ms + 500)
+            lost_attempts = deletes.count(orphan)
+            assert 2 <= lost_attempts <= 4, deletes
+            mode["drop_delete"] = False
             page.goto(host.base_url + "/#/live-tv")
-            assert page.evaluate("Object.keys(localStorage).some(key => key.startsWith('plurx_live_tv_pending_v1:'))")
-            rows.nth(0).click()
-            page.locator("#live-tv-message").filter(has_text="90 seconds").wait_for()
-            # Nothing new was allocated: the replacement document adopted the
-            # outstanding capability rather than opening an eleventh tuner.
+            until(lambda: (orphan_id, orphan) in resumes,
+                  "reload never asked the owner about the retained start", timeout=20)
+            frames_advance()
             assert active() == [orphan] and len(sessions) == 10, (active(), len(sessions))
+            assert page.evaluate("key => localStorage.getItem(key) !== null", hint_key)
+            stop()
+            until(lambda: not active(), "the rejoined session could not be released")
+            assert deletes.count(orphan) == lost_attempts + 1, deletes
+            assert page.evaluate("key => localStorage.getItem(key) === null", hint_key)
             assert not forbidden, "Live TV wrote VOD/account state: " + repr(forbidden)
             assert not errors, "browser page errors: " + repr(errors)
-            assert events == [entry for i in range(1, 10) for entry in (f"start:fixture-{i}", f"release:fixture-{i}")] + ["start:fixture-10"], events
-            # The last capability intentionally has no confirmed DELETE.
-            # Its backend orphan expiry belongs to backend/hardware acceptance,
-            # not an invented reaper inside this browser fixture.
+            assert events == [entry for i in range(1, 11) for entry in
+                              (f"start:fixture-{i}", f"release:fixture-{i}")], events
             assert all(deletes.count(f"fixture-{i}") == 1 for i in range(1, 10)), deletes
-            # Reachable at last: the orphan's DELETE really is sent and
-            # really is lost, so this counts attempts rather than describing a
-            # request that was never made. The upper bound keeps the client's
-            # retry from becoming a loop.
-            assert 1 <= deletes.count(orphan) <= 3, deletes
             assert not violations, violations
             print("PASS decoded H.264/AAC frames advance; pause/resume, fullscreen stop, switch, navigation, typed refusal and late-start cleanup")
-            print("PASS active owner loss, producer failure, capability expiry, paused timeout, visibility event and lost-unload reload quarantine")
-            print("PASS no account token on capability requests; no VOD or account write from any Live TV path; ten starts, nine confirmed releases, one deliberately orphaned start blocks replacement")
+            print("PASS active owner loss, producer failure, capability expiry, paused timeout, visibility event and owner-confirmed reload recovery")
+            print("PASS no account token on capability requests; no VOD or account write from any Live TV path; ten starts and ten confirmed releases; a lost-release start rejoins without an eleventh allocation")
             context.close()
             browser.close()
         return 0

@@ -322,8 +322,8 @@ async fn a_one_voter_cluster_proves_the_whole_request_protocol() {
         .await
         .expect("no voter exited during the run");
 
-    // A candidate one schema version behind is refused, and refusing it must not
-    // touch raft membership.
+    // A candidate below the supported bootstrap baseline is refused, and
+    // refusing it must not touch raft membership.
     let voters_before = metrics_voters(&mut cluster).await;
     let refused = run_incompatible_preflight(&harness_binary(), &specs)
         .await
