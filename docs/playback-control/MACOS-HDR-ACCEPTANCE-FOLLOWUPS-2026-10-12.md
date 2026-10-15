@@ -1,6 +1,6 @@
 # Mac HDR acceptance — playback follow-ups
 
-**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; ordinary Air hls.js F1 acceptance and restoration complete; F2 repairs qualified and merged; bounded installed Air HDR-to-SDR transition and restoration complete; F3–F7 remain open · **Recorded:** 2026-10-12.
+**Status:** built — ordinary F1 and bounded F2 are on main; bounded F3 current-owner controls, F4 parser/startup, F5 reporting, F6 media fence and F7 reference-white/package/Air evidence are complete on the effort; final current-tree promotion pending · **Recorded:** 2026-10-12; updated 2026-10-15.
 
 The [full acceptance report](../streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 closes the ordinary HDR10 Metal/CPU comparison. This document specifies the
@@ -662,9 +662,11 @@ capacity refusal, stopped-producer permit transfer and active-reader
 protection. Their exact commands and individual results are retained in the
 [controlled receipt](evidence/f6-authority-media-20261015.json). The idle
 producer fixture uses the real driver and admission ledger with a finite
-sleep child; it does not claim encoded media or physical reservation
-accounting. That physical acceptance remains open. The original three-minute
-retention observation alone does not prove an ownership leak.
+sleep child. The later [real lifecycle receipt](evidence/f3-real-lifecycle-20261015.json)
+adds actual owned media, admission accounting, scheduled pins, idle expiry,
+restart and ordinary rolling browser teardown. The original three-minute
+retention observation alone does not prove an ownership leak; historical
+attribution remains inconclusive.
 
 ## 6. F4 — laptop cold/remux Heretic startup remains unreliable
 
@@ -716,6 +718,31 @@ Add the smallest regression for the isolated bottleneck or incorrect deadline,
 then repeat the original cold route and forced-SDR control. Publish latency
 per stage, failure rate, route and source identity. Keep unsupported-source
 refusal separate from supported playback reliability.
+
+### Compressed Matroska startup repair — 2026-10-15
+
+The equivalent AV1 HDR10 control completed three original-quality cold/warm
+pairs within the predeclared 40-second startup budget. Its first forced-1080p
+SDR cold start instead refused before producer admission with
+`vod_source_rescan_required`. The retained native and sealed probe documents
+isolated the difference to four PGS subtitle streams: native FFprobe reported
+1920×1080 geometry, while the sealed parser omitted both dimensions and logged
+`Unsupported encoding type`. The movie bytes had not changed.
+
+The sealed parser disabled dependency autodetection without supplying zlib.
+The repair builds the same pinned zlib commit as the native package for WASI,
+requires compiled zlib support, and retains its authenticated source and license.
+It preserves the source-comparison guard, parser ABI and capabilities. Relative
+include/library paths avoid embedding temporary build directories in the module.
+
+The [parser receipt](evidence/f4-compressed-matroska-parser-20261015.json)
+records the final module digest and actual held-file proof: all nineteen complete
+stream dictionaries equal native FFprobe, including the four PGS geometries,
+with empty stderr. Thirteen package regressions pass, including missing compiled
+support, substituted-source refusal before compilation, and recursive source/license
+retention. Astra approved the correction. The later [physical playback receipt](evidence/hdr-physical-playback-20261015.json)
+records the completed forced-SDR startup matrix and bounded Air captures.
+This parser receipt by itself proves source-fact parity, not playback.
 
 ## 7. F5 — playback information does not fully describe delivery
 
@@ -1006,3 +1033,95 @@ no playback rerun, code change, hardware action or new qualification was
 performed to publish it. Update [the backlog](../features/PROJECT-BACKLOG.md),
 the owning canonical ledger and this document together as F1–F7 progress.
 The accepted HDR10 slice remains closed while those broader packages are open.
+
+## October 15 physical playback and restoration
+
+The [physical receipt](evidence/hdr-physical-playback-20261015.json) binds
+the complete native package, corrected sealed parser, actual reporting UI
+and cold/warm route controls to their immutable private attachments. The
+original failures remain in those archives. These are isolated backend
+acceptance namespaces; no branch mobile application was installed.
+
+Three genuine AV1 HDR10 original-quality cold/warm pairs presented within
+the declared 40-second budget. Three corrected manual-1080 SDR pairs also
+presented: cold 3,336/4,264/4,246 ms, warm 761/1,380/817 ms. Every sampled
+SDR run reported zero buffering interruptions. Frame drops, background
+indexing and the older original-quality runtime are disclosed in the receipt.
+The initial compressed-PGS source-rescan refusal is retained alongside the
+parser correction; the held-source guard was never relaxed.
+
+On the Air, the complete corrected native package admitted Metal at 2.285×
+the CPU boot fixture. The System page shows Metal and explains that Vulkan
+is unavailable. Actual full-film 1920×1080 SDR Metal playback reached 5:28
+with 7,854 frames, five drops and zero interruptions; TTFF was 2,473 ms.
+The CPU control reached 6:41 with 9,596 frames and 30 drops, and retained
+one early 1,019 ms supply stall; TTFF was 12,497 ms. Exact child graphs
+prove Metal reference-white 100 and CPU reference-white 100. The initial
+Auto/remux failures are retained and are not attributed to either forced
+SDR graph. Screen Sharing carries SDR, so this proves neither an optical
+HDR grade nor independent physical audio.
+
+Fresh and cached CPU/Metal reporting controls preserve attached-output
+facts across live settings changes and candidate refusal. Their separate
+archive records that the 60-second media control repeats a 12-second film
+excerpt. It is a reporting check, not another independent film test.
+
+The final Air API read verifies zero sessions/deliveries, zero hardware and
+software occupancy, Mac processing on, and both movie positions zero and
+unwatched. The owned Air server is stopped, shared clipboard is off and
+the temporary Metal SDK is removed. The working NAS mount is retained.
+The later F3 receipt adds bounded current-owner accounting. Final current-tree
+qualification/promotion remains tracked work; this receipt does not turn a
+pending gate into a pass.
+
+## October 15 lifecycle finding and finite closeout scope
+
+The [real lifecycle receipt](evidence/f3-real-lifecycle-20261015.json) closes
+F3's observed obstruction as **current-owner controls pass; historical
+attribution inconclusive**. It does not invent a new leak repair. The private
+archive retains all original driver failures and 113 manifest members; its
+downloaded bytes match the recorded digest. Astra independently checked them.
+
+A genuine AV1 HDR10 source creates a two-video SDR family with shared AAC.
+A second viewer reuses the same family without increasing the observed
+hardware/software charge. A different family receives retryable HTTP 503
+`transcode_capacity_pending`. Releasing one viewer preserves the other's
+actual media. Ready cancellation and supersession clear the old ready facts.
+Two scheduled video intervals reserve 940,101 bytes; cancellation keeps the
+conservative reservation until exact disposal facts release it to zero.
+The serialized terminal ledger retains 82,852 bytes of historical shared-audio
+interval rows; those rows are not asserted to disappear.
+
+The abandoned reader attaches at 19:35:04.384 UTC and idle-reaps at
+19:40:09.965, about 306 seconds later: the 300-second sliding TTL plus its
+maintenance tick. By the campaign's 300-second observation it is ended while
+the other reader's 20-second hold heartbeats continue successfully. Final
+client release returns sessions, deliveries and hardware/software occupancy
+to zero, and another family admits without Activity Stop. An exact owned
+server restart reconciles to zero occupancy and admits a fresh family.
+Ordinary Chrome rolling AV1 playback advances beyond two minutes; paused
+seek-to-zero, exact tab close and final API reads verify ordinary browser
+teardown and zero/unwatched restoration. The owned backend is then stopped.
+
+This is a finite current-owner result. A decoder/preparation failure after
+allocation, abrupt browser-process quit and controlled-family prepared-change
+browser teardown are not separately isolated here. The original three-minute
+retention was inside the documented idle interval and does not establish a
+leak. These limits remain in the broader A04 matrix; they do not erase the
+measured current-owner result.
+
+| Follow-up | Bounded result retained for promotion | Separate limits |
+|---|---|---|
+| F1 | Existing main repairs and ordinary Air paused seek/reopen acceptance complete. | Other devices/native HLS remain in their platform matrix. |
+| F2 | Existing main repairs and decoded Air SDR transition acceptance complete. | Independent physical audio and broader transition matrix remain separate. |
+| F3 | Current owner controls pass; natural expiry, cancellation, supersession, reservations, restart and ordinary rolling browser teardown recorded. | Historical attribution inconclusive; post-allocation failure and abrupt quit not isolated. |
+| F4 | Sealed compressed-Matroska parser repaired; three genuine original-quality and three corrected SDR cold/warm pairs present within the declared budget. | Original-quality pairs predate parser repair; drops/background indexing disclosed. |
+| F5 | Attached-output facts remain stable across CPU/Metal settings changes, cached reuse and refused candidates. | Reporting media repeats a 12-second source excerpt. |
+| F6 | Real producer preserves distinct encoded media through a 2.47-second authority loss; sustained loss reaps after the shipping grace. | Original lag attribution is not retrospectively proved. |
+| F7 | Neutral guard, corrected Hable reference white, held-film/HLG/default controls, full native package and five-minute Air Metal/CPU comparison recorded. | CPU has one early supply stall; initial Auto/remux failures, optical calibration and independent audio are not hidden. |
+
+Task qualification records are exact-head receipts. The final frozen effort
+still requires its full main promotion gate and qualification receipt. Windows
+compilation is absent by the maintainer's October 11 pipeline amendment; no
+Windows success is claimed. Production deployment and the broader codec,
+caption, optical and device matrices are not inferred from these records.
