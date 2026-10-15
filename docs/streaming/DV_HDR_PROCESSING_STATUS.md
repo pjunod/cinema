@@ -1349,3 +1349,30 @@ The original failures remain recorded. Compiler timeouts, daemon readiness,
 web focus baselines, Android transport focus and the package source download
 still require separate diagnosis or qualification. No repair deployment or
 physical HDR acceptance is claimed.
+
+
+### R38 — Serialize daemon activity fixtures and refresh the UI baseline
+
+Promotion 5127 passed the seven activation cases and two activity parsers,
+but its six concurrent real-daemon activity cases exhausted their unchanged
+readiness budgets. The failed-only Linux continuation passed one case in
+74.99 seconds and the remaining five in 303.73 seconds with serial libtest
+scheduling. It repeated none of the applicable passing cases. That probe
+used a different FFmpeg build from CI; it supports startup contention without
+proving the complete CI environment or a GPU cause.
+
+Only the activity integration invocation now uses `--test-threads=1`.
+Activation retains its existing scheduling and process mutex. Every activity
+case retains its four-worker Tokio runtime, concurrent requests, original
+readiness deadline and assertions. Full promotion still executes this lane.
+
+The normal self-hosted UI baseline update captured all 78 routes, layouts and
+viewports: 10,597 structural facts with no console or page errors. Reviewed
+changes add the existing index-coverage action, sign-in/player reporting
+controls and Developer reporting card, with their resulting focus positions.
+Request counts and existing focus labels are unchanged. The capture used the
+previous committed effort's server binary; its embedded web source is identical
+to the current effort. The ordinary qualification comparison remains required.
+
+Original failures remain preserved. Main promotion, deployment and physical
+HDR acceptance remain open.

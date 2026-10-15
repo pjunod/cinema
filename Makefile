@@ -1284,7 +1284,7 @@ cluster-daemon-check: ## Run real-daemon activation and activity contracts
 	$(CARGO) test --locked -p plurxd --features cluster-integration-tests \
 	  --test cluster_activation -- --nocapture
 	$(CARGO) test --locked -p plurxd --features cluster-integration-tests \
-	  --test cluster_activity -- --nocapture
+	  --test cluster_activity -- --nocapture --test-threads=1
 
 .PHONY: live-tv-hardware-check
 live-tv-hardware-check: ## Accept Live TV against a real HDHomeRun (set DEVICE=<tuner ipv4>, optional TUNERS=n)
