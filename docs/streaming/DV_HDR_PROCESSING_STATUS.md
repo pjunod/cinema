@@ -1485,3 +1485,39 @@ with their actual Mac origin and unknown execution commit explicitly preserved.
 Current-source applicability review must distinguish those measurements from
 new P5/QSV outcomes. No full promotion or repair deployment is claimed; physical
 web, Android and Apple TV ON/OFF acceptance remains pending.
+
+
+### R43 — Preserve the intact P5 capture through its finite test retirement
+
+Current main replaces the old retaining-copy refusal regression with the
+strict rolling-options publication/unsafe-fragment regression. The original
+three-outcome capture also contains two still-applicable fragindex passes.
+It remains whole: no cropped log, renamed outcome or invented current test ID.
+A second finite source/raw-digest/retired-ID/successor policy accepts exactly
+that original PASS and requires a later applicable successor PASS. Both known
+retirements may coexist; duplicates are refused per exact policy. The original
+retirement, raw-outcome equality and failure/successor ordering stay intact.
+The representative source of the incoming old capture remains distinguished
+from its unknown actual execution commit.
+
+Two additional finite Python capture identities preserve the original named QSV
+shipping checks and documentation-index repair. Their exact raw digest,
+representative source, original tool, count and unknown execution/interpreter
+measurements use the existing named-capture decoder; no parser, writer,
+request, byte, node or runtime rule changes.
+
+One new coexistence/refusal control is owed on the integrated main-bound effort.
+Its eleven negative variants include wrong source/log/extra identity, omitted
+sibling outcome, failed or ignored retirement, failed/ignored/earlier successor,
+duplicate original and source-invalidated successor. Existing retirement
+controls and applicable core/daemon passes remain retained. Current source
+qualification, deployment and physical HDR acceptance remain open.
+
+
+The first R43 task gate (5154) stops in history before any unit or compiler
+execution. Incoming PR #1104's immutable API merge keeps its raw corrective
+title without the PR number, although all three canonical regression fields
+are present. One existing verified-landing record now binds that exact commit,
+tree, ordered parents, title and PR. It waives no trailer or qualification
+requirement. The original failure remains preserved; the updated exact task
+head still needs its normal compile-only gate.

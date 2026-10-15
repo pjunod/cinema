@@ -34,6 +34,18 @@ RETIRED_DAEMON = {
     'successor': 'fragindex::ride_along_tests::standalone_index_yields_to_foreground_and_removes_partial_stage',
 }
 
+# The source is the reviewed representative of the intact incoming PR1091
+# capture; its actual execution commit remains unknown in the attestation.
+# Keep the two still-applicable fragindex outcomes beside the retired copyseg
+# outcome instead of cropping or relabeling that original three-case log.
+RETIRED_DVH1_DAEMON = {
+    'source': '4ec633fb7d024e0470d15b3f24614496bd2faecd',
+    'log': '3819204d8c29836a5917535e27f8b59e39ca8cf109ce53052db1c57c2d5b9ceb',
+    'id': 'copyseg::tests::captured_dvh1_completeness_publishes_and_refuses_retaining_copy',
+    'successor': 'copyseg::tests::captured_dvh1_rolling_options_publish_and_reject_unproven_samples',
+}
+
+
 
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()
@@ -434,19 +446,27 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                 extras = set(outcomes) - set(ids)
                 retired = None
                 if extras:
-                    r.require(not retired_records, 'Duplicate retired original execution')
                     r.require(document['version'] == 2 and lane == 'rust'
-                              and suite['name'] == 'daemon' and record['format'] == 'rust'
-                              and prior == RETIRED_DAEMON['source']
-                              and digest(raw_log.encode()) == RETIRED_DAEMON['log']
-                              and extras == {RETIRED_DAEMON['id']}
-                              and outcomes[RETIRED_DAEMON['id']] == 'pass'
-                              and RETIRED_DAEMON['successor'] in ids,
+                              and suite['name'] == 'daemon' and record['format'] == 'rust',
                               'Unknown or failed retired original outcome')
-                    retired = RETIRED_DAEMON['id']
+                    # Resolve these finite policies here so existing controls
+                    # still exercise the policy they patch at validation time.
+                    matches = [policy for policy in (RETIRED_DAEMON, RETIRED_DVH1_DAEMON)
+                               if prior == policy['source']
+                               and digest(raw_log.encode()) == policy['log']
+                               and extras == {policy['id']}
+                               and outcomes[policy['id']] == 'pass'
+                               and policy['successor'] in ids]
+                    r.require(len(matches) == 1, 'Unknown or failed retired original outcome')
+                    policy = matches[0]
+                    r.require(not any(row['source_commit'] == policy['source']
+                                      and row['log_sha256'] == policy['log']
+                                      and row['test_id'] == policy['id'] for row in retired_records),
+                              'Duplicate retired original execution')
+                    retired = policy['id']
                     retired_records.append({'sequence': sequence, 'source_commit': prior,
-                        'log_sha256': RETIRED_DAEMON['log'], 'test_id': retired,
-                        'outcome': 'pass', 'successor': RETIRED_DAEMON['successor']})
+                        'log_sha256': policy['log'], 'test_id': retired,
+                        'outcome': 'pass', 'successor': policy['successor']})
                 if aggregate and sequence == aggregate['baseline_sequence']:
                     r.require(record['format'] in {'gradle-summary', 'instrumentation-summary'},
                               'Unsupported aggregate cohort source')
