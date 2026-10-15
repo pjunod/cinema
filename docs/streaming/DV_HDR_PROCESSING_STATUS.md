@@ -1349,3 +1349,15 @@ The original failures remain recorded. Compiler timeouts, daemon readiness,
 web focus baselines, Android transport focus and the package source download
 still require separate diagnosis or qualification. No repair deployment or
 physical HDR acceptance is claimed.
+
+### R37 — Preserve Android transport option adjacency
+
+Promotion 5127 ran 78 Android instrumentation cases; the shared transport-order
+case failed because the diagnostics action intercepted Settings → Info focus.
+The report action now follows optional PiP, preserving Tracks → Settings → Info
+→ PiP and keeping diagnostic reporting available with its original generation
+binding. The existing failed case remains the regression; no duplicate body is
+added. Android build 173 and current generated claims identify the correction.
+Only the current JVM build-input digest changes; historical captures retain
+their original inputs. Local application and instrumentation-source compilation
+pass. Physical HDR acceptance and integrated failed-only execution remain open.

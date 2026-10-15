@@ -39,7 +39,7 @@ ORIGINAL40_JVM_BUILD_INPUTS = {
     'clients/android/settings.gradle.kts': '5891ed8c25e4412da6dd0fff31d21626fa2bb3dde4cc6326e62d39eb9db79055',
 }
 CURRENT_JVM_BUILD_INPUTS = {**ORIGINAL40_JVM_BUILD_INPUTS,
-    'clients/android/app/build.gradle.kts': 'ff03d396029fe3edb1ca657e59729c4374aa5812a74bbad4eef6bf481c5a4a6d',
+    'clients/android/app/build.gradle.kts': '7fa382078cde36ee16165749cf757be44c10271332a90694855aae4d750f0fe0',
 }
 # One immutable capture whose native command passed but whose enclosing wrapper
 # observed transient dirtiness. Independent tracked-input custody does not rewrite
