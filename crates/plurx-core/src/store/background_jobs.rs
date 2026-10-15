@@ -225,13 +225,19 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND active_job IS NULL
       AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'media_probe' AND state IN ('queued','running','cancelling')
         AND json_extract(payload_json,'$.coordinator') = json_extract(body,'$.payload.coordinator')) >= 128 THEN 'queue_full'
-    WHEN json_extract(body,'$.payload.kind') = 'subtitle_transcribe' AND NOT EXISTS (
+    WHEN json_extract(body,'$.payload.kind') IN ('subtitle_transcribe','subtitle_transcribe_managed') AND NOT EXISTS (
       SELECT 1 FROM files WHERE id = json_extract(body,'$.payload.file_id')
         AND size = json_extract(body,'$.payload.source_size') AND mtime = json_extract(body,'$.payload.source_mtime')
         AND probe_json IS NOT NULL) THEN 'source_changed'
-    WHEN json_extract(body,'$.payload.kind') = 'subtitle_transcribe' AND active_job IS NULL
-      AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'subtitle_transcribe'
+    WHEN json_extract(body,'$.payload.kind') IN ('subtitle_transcribe','subtitle_transcribe_managed') AND active_job IS NULL
+      AND (SELECT COUNT(*) FROM background_jobs WHERE kind IN ('subtitle_transcribe','subtitle_transcribe_managed')
         AND state IN ('queued','running','cancelling')) >= 32 THEN 'queue_full'
+    WHEN json_extract(body,'$.payload.kind') = 'subtitle_model_operation' AND active_job IS NULL
+      AND ((SELECT COUNT(*) FROM background_jobs WHERE kind='subtitle_model_operation'
+          AND state IN ('queued','running','cancelling')) >= 64
+        OR (SELECT COUNT(*) FROM background_jobs WHERE kind='subtitle_model_operation'
+          AND target_node_id=json_extract(body,'$.payload.target_node_id')
+          AND state IN ('queued','running','cancelling')) >= 8) THEN 'queue_full'
     WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND NOT EXISTS (
       SELECT 1 FROM items WHERE id = json_extract(body,'$.payload.item_id')) THEN 'source_changed'
     WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND EXISTS (
@@ -440,6 +446,10 @@ WHERE id = json_extract($1, '$.job_id')
  AND file.size = json_extract(background_jobs.payload_json,'$.source_size') AND file.mtime = json_extract(background_jobs.payload_json,'$.source_mtime')
  AND (json_extract(background_jobs.payload_json,'$.coordinator.resource') = 'repair:probe'
    OR json_extract(background_jobs.payload_json,'$.coordinator.resource') = 'scan:library:' || item.library_id))))
+  AND (kind != 'subtitle_model_operation' OR NOT EXISTS (
+    SELECT 1 FROM background_jobs other WHERE other.kind='subtitle_model_operation'
+      AND other.id != background_jobs.id AND other.target_node_id=background_jobs.target_node_id
+      AND other.state IN ('running','cancelling') AND other.lease_expires_ms > json_extract($1,'$.now_ms')))
   AND (target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
   AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
   AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
@@ -606,6 +616,8 @@ pub enum JobKind {
     ArtifactHydrate,
     SubtitleExtract,
     SubtitleTranscribe,
+    SubtitleTranscribeManaged,
+    SubtitleModelOperation,
     LibraryScan,
     MetadataRefresh,
     ArtifactVerify,
@@ -625,6 +637,8 @@ impl JobKind {
             | Self::FragmentIndexBuild
             | Self::ArtifactHydrate
             | Self::SubtitleTranscribe
+            | Self::SubtitleTranscribeManaged
+            | Self::SubtitleModelOperation
             | Self::SubtitleExtract
             | Self::ArtifactVerify
             | Self::ArtworkDerivative
@@ -825,6 +839,24 @@ pub enum JobPayload {
         model_sha256: String,
         pipeline_digest: String,
     },
+    SubtitleTranscribeManaged {
+        file_id: i64,
+        audio_index: i64,
+        source_size: i64,
+        source_mtime: i64,
+        language: String,
+        model_sha256: String,
+        pipeline_digest: String,
+        profile: super::background_jobs_transcription::ManagedProfile,
+    },
+    SubtitleModelOperation {
+        action: super::background_jobs_transcription::ModelAction,
+        model_id: String,
+        catalog_revision: String,
+        model_sha256: String,
+        adapter_contract: String,
+        target_node_id: String,
+    },
     LibraryScan {
         library_id: i64,
         generation: String,
@@ -866,6 +898,8 @@ impl JobPayload {
             Self::ArtifactHydrate { .. } => JobKind::ArtifactHydrate,
             Self::SubtitleExtract { .. } => JobKind::SubtitleExtract,
             Self::SubtitleTranscribe { .. } => JobKind::SubtitleTranscribe,
+            Self::SubtitleTranscribeManaged { .. } => JobKind::SubtitleTranscribeManaged,
+            Self::SubtitleModelOperation { .. } => JobKind::SubtitleModelOperation,
             Self::LibraryScan { .. } => JobKind::LibraryScan,
             Self::MetadataRefresh { .. } => JobKind::MetadataRefresh,
             Self::ArtifactVerify { .. } => JobKind::ArtifactVerify,
@@ -880,7 +914,8 @@ impl JobPayload {
             Self::EncodedOutputPrepare { intent, .. } => Some(&intent.target_node_id),
             Self::CopyOutputPrepare { intent, .. } => Some(&intent.target_node_id),
             Self::ArtifactHydrate { target_node_id, .. }
-            | Self::ArtifactVerify { target_node_id, .. } => Some(target_node_id),
+            | Self::ArtifactVerify { target_node_id, .. }
+            | Self::SubtitleModelOperation { target_node_id, .. } => Some(target_node_id),
             _ => None,
         }
     }
@@ -1015,6 +1050,38 @@ impl JobPayload {
                     && super::background_jobs_transcription::valid_language(language)
                     && digest(model_sha256)
                     && digest(pipeline_digest)
+            }
+            Self::SubtitleTranscribeManaged {
+                file_id,
+                audio_index,
+                source_size,
+                language,
+                model_sha256,
+                pipeline_digest,
+                profile,
+                ..
+            } => {
+                *file_id > 0
+                    && *source_size > 0
+                    && *audio_index >= 0
+                    && super::background_jobs_transcription::whisper_language(language)
+                    && digest(model_sha256)
+                    && digest(pipeline_digest)
+                    && profile.validate()
+            }
+            Self::SubtitleModelOperation {
+                model_id,
+                catalog_revision,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                ..
+            } => {
+                identifier(model_id)
+                    && identifier(catalog_revision)
+                    && digest(model_sha256)
+                    && identifier(adapter_contract)
+                    && identifier(target_node_id)
             }
             Self::MediaProbe {
                 file_id,
@@ -1599,6 +1666,22 @@ pub trait BackgroundJobStore: Send + Sync {
         content_digest: &str,
         model_digest: &str,
     ) -> Result<super::background_jobs_embeddings::EmbeddingLookup, StoreError>;
+    async fn write_subtitle_configuration(
+        &self,
+        request: super::background_jobs_transcription::SubtitleConfigurationWrite,
+    ) -> Result<bool, StoreError>;
+    async fn observe_subtitle_job(
+        &self,
+        request: super::background_jobs_transcription::ObserveSubtitleJob,
+    ) -> Result<bool, StoreError>;
+    async fn publish_subtitle_model(
+        &self,
+        request: super::background_jobs_transcription::PublishSubtitleModel,
+    ) -> Result<bool, StoreError>;
+    async fn subtitle_model_receipts(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<super::background_jobs_transcription::SubtitleModelReceipt>, StoreError>;
     async fn publish_transcription_job(
         &self,
         request: super::background_jobs_transcription::PublishTranscription,
@@ -2013,6 +2096,30 @@ LIMIT 1
         model_digest: &str,
     ) -> Result<super::background_jobs_embeddings::EmbeddingLookup, StoreError> {
         super::background_jobs_embeddings::lookup(self, item_id, content_digest, model_digest).await
+    }
+    async fn write_subtitle_configuration(
+        &self,
+        request: super::background_jobs_transcription::SubtitleConfigurationWrite,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_transcription::write_configuration(self, request).await
+    }
+    async fn observe_subtitle_job(
+        &self,
+        request: super::background_jobs_transcription::ObserveSubtitleJob,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_transcription::observe(self, request).await
+    }
+    async fn publish_subtitle_model(
+        &self,
+        request: super::background_jobs_transcription::PublishSubtitleModel,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_transcription::publish_model(self, request).await
+    }
+    async fn subtitle_model_receipts(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<super::background_jobs_transcription::SubtitleModelReceipt>, StoreError> {
+        super::background_jobs_transcription::model_receipts(self, node_id).await
     }
     async fn publish_transcription_job(
         &self,
