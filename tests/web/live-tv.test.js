@@ -1738,7 +1738,8 @@ async function main() {
       } };
     const state = { serial: 0 };
     const control = new Function("document", "location", "LIVE_TV", "LIVE_TV_LEASE", "detachLiveTvMedia",
-      `${shipped("exitLiveTvPresentation")}${shipped("stopLiveTv")}${shipped("fullscreenLiveTv")}
+      `function liveTvMessage(){}
+       ${shipped("exitLiveTvPresentation")}${shipped("stopLiveTv")}${shipped("fullscreenLiveTv")}
        return {stopLiveTv,fullscreenLiveTv};`)(document, { hash: "#/live-tv" }, state, { stop: async () => events.push("release") }, () => events.push("detach"));
     const closing = control.stopLiveTv();
     await Promise.resolve();
@@ -1766,7 +1767,8 @@ async function main() {
       }),
     };
     const control = new Function("document", "LIVE_TV", "LIVE_TV_LEASE", "detachLiveTvMedia",
-      `${shipped("exitLiveTvPresentation")}${shipped("stopLiveTv")} return stopLiveTv;`)(
+      `function liveTvMessage(){}
+       ${shipped("exitLiveTvPresentation")}${shipped("stopLiveTv")} return stopLiveTv;`)(
       document, { serial: 0 }, { stop: async () => { throw new Error("release failed"); } }, () => {});
     const closing = control();
     await Promise.resolve();
@@ -2293,6 +2295,9 @@ async function main() {
     assert.match(envelope, /max_channels:codec==="aac"\?aacChannels:8/);
     assert.doesNotMatch(envelope, /max_channels:codec==="aac"\?2:8/);
   });
+  // The complete web gate and the preflight journal both execute this family.
+  // Await its child suite once; its source is part of this family's input witness.
+  await require("./live-tv-stop-feedback.test.js")();
 }
 
 main().catch((error) => {
