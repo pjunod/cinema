@@ -74,11 +74,13 @@ const NODE_REACHABLE_WINDOW_MS: i64 = 30_000;
 /// node out of its own store. A brief hiccup must not block activation; two
 /// minutes of silence is not a hiccup.
 const MEDIA_RELAY_ACQUISITION_CAPABILITY: &str = "media_relay_acquisition_v1";
+// Hiqlite binds positionally, while SQLite assigns named `$N` slots by first
+// appearance. Keep predicates in binding order: members, owner, cutoff, now.
 const MEDIA_RELAY_ACQUISITION_PROOF_SQL: &str = "SELECT count(*) AS count FROM cluster_nodes node \
      JOIN cluster_node_capabilities cap ON cap.node_id=node.node_id \
      AND cap.last_seen_at=node.last_seen_at \
-     WHERE node.node_id=$2 AND node.removed_at IS NULL \
-     AND node.raft_id IN (SELECT value FROM json_each($1)) \
+     WHERE node.raft_id IN (SELECT value FROM json_each($1)) \
+     AND node.node_id=$2 AND node.removed_at IS NULL \
      AND node.last_seen_at>0 AND node.last_seen_at BETWEEN $3 AND $4 \
      AND cap.capability='media_relay_acquisition_v1'";
 const MEDIA_RELAY_ACQUISITION_HEARTBEAT_SQL: &str =
