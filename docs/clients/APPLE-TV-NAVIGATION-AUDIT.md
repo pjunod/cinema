@@ -1,7 +1,8 @@
 # Apple TV navigation — defects, proposed screens and a lasting release contract
 
-**Status:** open proposal; one simulator reproduction, source audit complete
-for the inventory below; repairs and whole-app device acceptance not started.
+**Status:** implementation authorized and in progress on `effort/apple-tv-navigation`;
+source audit complete for the inventory below. Native whole-app tests reproduce
+the original blocker; repair validation and physical acceptance remain open.
 **Written:** 2026-10-15 · **Baseline:** `9eb7f6738647a7e963b17cfb3a2f77a594863c41`
 
 This is the Apple TV follow-up to the [mobile usability audit](MOBILE-UI-USABILITY-AUDIT.md)
@@ -700,17 +701,20 @@ and physical acceptance remain required before completion.
 Use one `effort/apple-tv-navigation` integration branch because the work
 packages share files. Task branches start at its current tip; follow the existing
 effort gate and focused regression requirements. Final promotion follows
-[the development pipeline](../DEVELOPMENT_PIPELINE.md). Branch names here are
-proposed; this audit has not created or merged implementation PRs.
+[the development pipeline](../DEVELOPMENT_PIPELINE.md). The implementation base
+is `a0b8cb72c`; the earlier baseline above remains the historical audit source.
+The coordinating agent owns integration, adversarial review and final acceptance;
+three GPT-6.1 Sol work sessions implement bounded packages. Task PRs are open;
+none of the packages is a qualified release merely because it compiles.
 
 | Package | Scope and principal files | Dependency | Acceptance / state |
 |---|---|---|---|
-| T0 · Harness and contract | `project.yml`, TV UI fixtures/tests, affected-Apple workflows | None | Reproduce F01/F02, add failing ownership and hide-report cases; **not built** |
-| T1 · Modal ownership | `RemoteNavigationViews`, coordinator, adapters; every caller | T0 | F01–F03/F25 pass on library, details, all players; **not built** |
-| T2 · Playback presentation | `LiveTvView`, `LibraryChannels`, `PlayerView`, diagnostics | T1 | F11–F17/F24; no permanent report overlay; all players honor Back/reveal; **not built** |
-| T3 · Browsing and details | `LibraryView`, `HomeView`, `SearchView`, `DetailView`, `Components` | T1 | F04–F10; long-list restoration and episode details route; **not built** |
-| T4 · Secondary screens and visual consistency | DVR, Settings, diagnostics, remotes, theme, info | T1; serialize shared-file work with T2/T3 | F18–F23/F26–F28; complete readable/safe paths; **not built** |
-| T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | F29; exact-main release receipt and physical matrix; **not started** |
+| T0 · Harness and contract | `project.yml`, TV UI fixtures/tests, affected-Apple workflows | None | **Built, expanding:** shipping app through fixture server and normal login; native remote reproduces background focus behind View. Strict runner retains failures, rejects empty/skipped execution and binds source. Required gate wiring in progress. |
+| T1 · Modal ownership | `RemoteNavigationViews`, coordinator, adapters; every caller | T0 | **Repairing:** [PR #1109](http://forge.lan:3000/noirr/plurx/pulls/1109). Native cover traps background and readable rows render; runtime still starts on Rows when Grid is selected. This failed assertion blocks acceptance despite passing reducer tests. |
+| T2 · Playback presentation | `LiveTvView`, `LibraryChannels`, `PlayerView`, diagnostics | T1 | **Implemented; native acceptance pending:** [PR #1110](http://forge.lan:3000/noirr/plurx/pulls/1110). Reports inside More, shared reveal/Back, current-versus-future programme behavior, explicit layouts. Both Release simulator builds and 16 focused tests pass. |
+| T3 · Browsing and details | `LibraryView`, `HomeView`, `SearchView`, `DetailView`, `Components` | T1 | **Implemented; native acceptance pending:** bounded tools sidebar, identity restoration, explicit Jump loading, episode details and complete synopsis, fixed Search query and recovery. Native directional handling retained; logical/unit tests alone do not prove the bounded remote path. |
+| T4 · Secondary screens and visual consistency | DVR, Settings, diagnostics, remotes, theme, info | T1; serialize shared-file work with T2/T3 | **In progress:** Settings categories, simplified reports, safe recording/remotes confirmations, readable rows, Reduce Motion and stable Info mode focus. |
+| T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | **Open:** F29; exact integrated source, every inventory route, visual comparison and physical matrix. No device acceptance or deployment claimed. |
 
 **First repair should combine T0's reproducer with T1's menu fix and the small
 T2 reporting-placement change.** That addresses the user's immediate blockers

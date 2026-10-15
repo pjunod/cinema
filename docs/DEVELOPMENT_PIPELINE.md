@@ -35,6 +35,16 @@
 > receipts require no Windows result. The explicit public-release archive build
 > remains in [github-release.yml](../.github/workflows/github-release.yml).
 
+> **TV navigation amendment, 2026-10-15:** The approved
+> [Apple TV navigation effort](clients/APPLE-TV-NAVIGATION-AUDIT.md) adds
+> `make apple-tv-navigation-test` to the affected Apple main gate and the full
+> Apple qualification job. It drives the shipping app with native remote
+> inputs and retains source-bound results and screenshots, including failures.
+> Effort gates remain compile-only; run the focused native regression locally
+> before pushing each task. The required journey manifest grows with repaired
+> surfaces. A passing subset does not close the whole-app or physical-device
+> acceptance matrix, and no periodic schedule is introduced.
+
 > **Coverage amendment, 2026-10-11:** [coverage.yml](../.github/workflows/coverage.yml)
 > refreshes the dated unit coverage badge only by manual dispatch on `main`.
 > Its `ci-coverage` runner is a reserved VM outside the general merge pool;

@@ -1344,7 +1344,7 @@ jobs:
     concurrency:
       group: plurx-apple-silicon-heavy
       cancel-in-progress: false
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       # The Apple runner is a launch daemon with a deliberately narrow PATH.
@@ -1417,6 +1417,18 @@ jobs:
           done
       - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV
         run: make apple-test
+      - name: Require native TV navigation journeys
+        env:
+          PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
+        run: make apple-tv-navigation-test
+      - name: Preserve TV navigation evidence including failures
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 90
       - name: Delete the run's simulators
         if: always()
         run: |

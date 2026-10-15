@@ -311,11 +311,14 @@ jobs:
         run: make web-unit-check
 
   apple_compile:
-    name: fast Apple compile
+    name: Apple compile and native TV navigation
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true'
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
-    timeout-minutes: 10
+    timeout-minutes: 40
+    concurrency:
+      group: plurx-apple-silicon-heavy
+      cancel-in-progress: false
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -340,6 +343,18 @@ jobs:
             apple-dd-
       - name: Compile iOS and tvOS without running simulator tests
         run: make apple-build
+      - name: Require native TV navigation journeys
+        env:
+          PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
+        run: make apple-tv-navigation-test
+      - name: Preserve TV navigation evidence including failures
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 90
 
   android_compile:
     name: fast Android compile
