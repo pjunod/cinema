@@ -3932,7 +3932,7 @@ assert.equal(context.ACT_TIMER, null);
                 }:
                     expected = ci_topology
                 elif path == ".github/workflows/ci.yml" and name == "cluster_wal":
-                    expected = high_cpu
+                    expected = local("Linux", "X64", "lab", "baremetal", "ci-topology")
                 elif (
                     path in {
                         ".github/workflows/ci.yml",
@@ -3940,7 +3940,7 @@ assert.equal(context.ACT_TIMER, null);
                     }
                     and name == "rust_compile"
                 ):
-                    expected = high_cpu
+                    expected = local("Linux", "X64", "lab", "baremetal", "ci-topology")
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
                     "android_device",
