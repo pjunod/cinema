@@ -204,8 +204,10 @@ final class TVNavigationTests: XCTestCase {
             if targetIsTab && !focusedTab.exists { remote.press(.up); continue }
             let destination = target.frame
             let source = current.frame
-            if destination.maxY <= source.minY { remote.press(.up) }
-            else if destination.minY >= source.maxY { remote.press(.down) }
+            if destination.minY >= source.maxY { remote.press(.down) }
+            else if destination.maxX <= source.minX { remote.press(.left) }
+            else if destination.minX >= source.maxX { remote.press(.right) }
+            else if destination.maxY <= source.minY { remote.press(.up) }
             else { remote.press(destination.midX > source.midX ? .right : .left) }
         }
     }

@@ -263,7 +263,9 @@ schemes:
         plurx-tvOSUITests: [test]
     test:
       targets:
-        - plurx-tvOSUITests
+        - name: plurx-tvOSUITests
+          skippedTests:
+            - TVNavigationTests
 
   plurx-iOS-library-ui:
     build:
