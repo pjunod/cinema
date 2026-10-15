@@ -526,6 +526,116 @@ def shipping_system_objects(package):
     return objects
 
 
+SOURCE_STORAGE_GUARD = r'''
+import json, os, signal, stat, subprocess, sys, time
+request = json.loads(sys.argv[1])
+if os.getpgrp() != os.getpid():
+    raise RuntimeError("source storage guard requires its own process group")
+def allocated(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return 0
+    if not stat.S_ISDIR(info.st_mode):
+        return info.st_size
+    total = 0
+    for directory, dirs, files in os.walk(path, followlinks=False):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(directory, name)).st_size
+            except FileNotFoundError:
+                pass
+    return total
+
+def enforce():
+    for limit in request["limits"]:
+        size = allocated(limit["path"])
+        if size > limit["bytes"]:
+            print("source storage limit exceeded: kind=" + limit["kind"]
+                  + "; path=" + limit["path"] + "; actual=" + str(size)
+                  + "; limit=" + str(limit["bytes"]), file=sys.stderr, flush=True)
+            os.killpg(os.getpgrp(), signal.SIGKILL)
+enforce()
+child = subprocess.Popen(request["argv"], stdin=subprocess.DEVNULL)
+try:
+    while child.poll() is None:
+        enforce()
+        time.sleep(0.05)
+    enforce()
+finally:
+    if child.poll() is None:
+        print("source storage guard aborted with an active child", file=sys.stderr, flush=True)
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+raise SystemExit(child.returncode)
+'''
+
+
+def bounded_source_command(helper, argv, cwd, environment, log, deadline, limits):
+    """Keep Git and descendants inside the existing finite runner and storage bounds."""
+    import sys
+    request = {"argv": argv, "limits": limits}
+    return helper.bounded_generator([sys.executable, "-c", SOURCE_STORAGE_GUARD, json.dumps(request)],
+                                    cwd, environment, log, deadline)
+
+
+def fetch_source_archive(path, url, expected, deadline, provider="https-archive", commit=None, remaining_bytes=2 * 1024**3):
+    """Fetch an explicitly declared archive transport without changing its pin."""
+    import tempfile
+    import urllib.request
+    if provider not in ("https-archive", "git-archive"):
+        raise ValueError("unknown immutable archive provider: " + str(provider))
+    if not url.startswith("https://"):
+        raise ValueError("immutable archive provider requires HTTPS")
+    if provider == "git-archive" and (not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit)):
+        raise ValueError("Git archive provider requires a pinned 40-hex commit")
+    if time.monotonic() >= deadline:
+        raise ValueError("immutable source download deadline exceeded")
+    budget = min(256 * 1024**2, remaining_bytes)
+    if budget <= 0:
+        raise ValueError("immutable input download exceeds bounded source budget")
+    if provider == "git-archive":
+        evidence = path.parent.parent / "source-fetch-evidence" / path.name
+        evidence.mkdir(parents=True)
+        helper = load("prepare-linux-dolby-sdk")
+        environment = {"PATH": "/usr/bin:/bin", "HOME": str(evidence), "LC_ALL": "C",
+                       "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+                       "GIT_TERMINAL_PROMPT": "0"}
+        with tempfile.TemporaryDirectory(prefix="public-git-source-", dir=path.parent.parent) as temporary:
+            repository = Path(temporary) / "repository.git"
+            commands = [
+                ["/usr/bin/git", "init", "--bare", "--template=", str(repository)],
+                ["/usr/bin/git", "-C", str(repository), "-c", "credential.helper=", "fetch",
+                 "--depth=1", "--no-tags", "--no-recurse-submodules", url, commit],
+                ["/usr/bin/git", "-C", str(repository), "archive", "--format=tar.gz",
+                 "--output", str(path), commit],
+            ]
+            # Temporary compressed Git objects have a separate 256 MiB budget;
+            # exported source bytes also consume the aggregate input allowance.
+            limits = [{"kind": "git-object-database", "path": str(repository), "bytes": 256 * 1024**2},
+                      {"kind": "source-archive", "path": str(path), "bytes": budget}]
+            records = []
+            for index, argv in enumerate(commands):
+                records.append(bounded_source_command(helper, argv, path.parent.parent, environment,
+                               evidence / (str(index) + ".log"), deadline, limits))
+            (evidence / "receipt.json").write_text(json.dumps({"provider": provider, "url": url,
+                "commit": commit, "storage_limits": limits, "commands": records}, indent=2) + "\n")
+    else:
+        with urllib.request.urlopen(url, timeout=min(60, max(1, deadline-time.monotonic()))) as response, path.open("xb") as output:
+            size = 0
+            while chunk := response.read(1024 * 1024):
+                size += len(chunk)
+                if size > budget or time.monotonic() >= deadline:
+                    raise ValueError("immutable input download exceeds bounded source budget")
+                output.write(chunk)
+    if path.stat().st_size > budget or time.monotonic() >= deadline:
+        raise ValueError("immutable input download exceeds bounded source budget")
+    actual = sha(path)
+    if actual != expected:
+        raise ValueError("immutable source download checksum mismatch: " + str(path)
+                         + "; url=" + url + "; expected=" + expected + "; actual=" + actual)
+    return path.stat().st_size
+
+
 def package_pipeline(root, jobs, seconds):
     """Real Bookworm export owner; nothing is emitted from declarations."""
     import subprocess
@@ -539,16 +649,22 @@ def package_pipeline(root, jobs, seconds):
     inputs.mkdir()
     lock_path = Path(__file__).with_name("linux-video-ffmpeg-sdk-sources.json")
     lock = json.loads(lock_path.read_text())
-    downloads, embedded_patches = {}, {}
-    def add(name, url, digest):
+    downloads, embedded_patches, providers = {}, {}, {}
+    def add(name, url, digest, provider="https-archive", commit=None):
         if Path(name).name != name or not url.startswith("https://"):
             raise ValueError("public source role must use a plain name and HTTPS")
+        if provider not in ("https-archive", "git-archive"):
+            raise ValueError("unknown immutable archive provider: " + str(provider))
+        if provider == "git-archive" and (not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit)):
+            raise ValueError("Git archive provider requires a pinned 40-hex commit")
         claim = (url, digest)
-        if name in downloads and downloads[name] != claim:
+        if name in downloads and (downloads[name] != claim or providers[name] != (provider, commit)):
             raise ValueError("colliding immutable input role")
         downloads[name] = claim
+        providers[name] = (provider, commit)
     for role in [*lock["sources"].values(), *lock.get("build_tools", {}).values()]:
-        add(role["archive"], role["url"], role["archive_sha256"])
+        add(role["archive"], role["url"], role["archive_sha256"], role.get("archive_provider", "https-archive"),
+            role.get("commit") if role.get("archive_provider") == "git-archive" else None)
         if role.get("submodule_tree_evidence"):
             evidence = role["submodule_tree_evidence"]
             add(evidence["archive"], evidence["url"], evidence["sha256"])
@@ -570,19 +686,10 @@ def package_pipeline(root, jobs, seconds):
     deadline = time.monotonic() + seconds
     total = 0
     for name, (url, expected) in sorted(downloads.items()):
-        if time.monotonic() >= deadline:
-            raise ValueError("immutable source download deadline exceeded")
-        path = inputs / name
-        with urllib.request.urlopen(url, timeout=min(60, max(1, deadline-time.monotonic()))) as response, path.open("xb") as output:
-            size = 0
-            while chunk := response.read(1024 * 1024):
-                size += len(chunk)
-                total += len(chunk)
-                if size > 256 * 1024**2 or total > 2 * 1024**3 or time.monotonic() >= deadline:
-                    raise ValueError("immutable input download exceeds bounded source budget")
-                output.write(chunk)
-        if sha(path) != expected:
-            raise ValueError("immutable source download checksum mismatch")
+        total += fetch_source_archive(inputs / name, url, expected, deadline, *providers[name],
+                                      remaining_bytes=2 * 1024**3 - total)
+        if total > 2 * 1024**3:
+            raise ValueError("immutable input download exceeds bounded source budget")
     helper = load("prepare-linux-dolby-sdk")
     source_members, _ = helper.tar_members((inputs / "jellyfin-source.tar.gz").read_bytes())
     for name, patch in embedded_patches.items():
@@ -591,6 +698,7 @@ def package_pipeline(root, jobs, seconds):
             raise ValueError("embedded pinned recipe patch differs from authenticated source")
         (inputs / name).write_bytes(contents)
     (inputs / "download-manifest.json").write_text(json.dumps(downloads, sort_keys=True, indent=2) + "\n")
+    (inputs / "download-providers.json").write_text(json.dumps(providers, sort_keys=True, indent=2) + "\n")
     # This is the authenticated official binary from runtime-assets, before
     # replacement. Observe its full configuration instead of manufacturing it.
     buildconf = root / "official-buildconf.txt"
