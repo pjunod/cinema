@@ -155,7 +155,7 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurx-core/src/fmp4/dvh1_tests.rs::fmp4::tests::"
             "captured_dvh1_completeness_preserves_dolby_vision_and_publishes",
             "crates/plurxd/src/copyseg.rs::copyseg::tests::"
-            "captured_dvh1_completeness_publishes_and_refuses_retaining_copy",
+            "captured_dvh1_rolling_options_publish_and_reject_unproven_samples",
             "crates/plurxd/src/fragindex.rs::fragindex::tests::"
             "captured_dvh1_completeness_builds_a_constant_index",
         ):

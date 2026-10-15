@@ -2320,3 +2320,127 @@ generalized in place. Their receipts record the exact argv.
 This is one Intel Alder Lake-P node and one AMD node. It makes no NVIDIA,
 other-generation, deployment, performance, concurrency or client-presentation
 claim.
+
+
+## 46. QSV shipping dependency retirement — 2026-10-15
+
+Implementation commit `30a631dae315e39f0dea1706054f8d55c23adaaa`, based on
+`9eb7f6738647a7e963b17cfb3a2f77a594863c41`, removes the competing Debian
+Media SDK from both amd64 Dolby shipping targets. Debian FFmpeg brings
+`libmfx1` through its libav dependencies; oneVPL then discovers that foreign
+implementation alongside the audited Jellyfin implementation. This caused
+strict QSV discovery to refuse the graph. The runtime identity check remains
+unchanged.
+
+The installer validates its audited system-provider inventory before writing
+the destination. Each shipping stage snapshots the actual provider bytes,
+removes `libmfx1` through apt, verifies every provider is unchanged, points
+bare FFmpeg/FFprobe callers at the audited Jellyfin executables, and refreshes
+the installed-package inventory. It does not run autoremove. Default and arm64
+targets are unchanged.
+
+The bounded package experiment passes: all 43 actual system providers survive
+byte-for-byte, all 121 distributed library objects match their audited hashes,
+and every distributed ELF import resolves. AC-4, `dovi_rpu`, `tonemapx`
+`apply_dovi`, bare executable aliases and mkvmerge loading pass. The parser,
+producer and capsule identities are unchanged. The known ABI-compatible Expat
+builder/runtime difference from §42 is preserved: the invariant is the actual
+shipping provider's before/after identity, not replacement with a diagnostic
+builder's different package revision.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Corrected runtime image | `97c80187ff3ec76281d46792a14ab5e51d05804773fa8be7e0ac39f96389bcd3` |
+| Corrected Python observer | `329df5f8ca3152f1667a4801113de633b1568a591d0e7daf9b8daf53801e9cd5` |
+| Literal shipping-stage build | `2c2f19e78ec4ecd99bbf2cacf4427e0b99a600d4192793fcc81d1a46c76a99d7` |
+
+The final build executes the current installer and both literal Docker shipping
+stages. Immutable retained bases replace unchanged upstream stages; this is
+not a cold build of the entire current Dockerfile or a rebuilt current daemon.
+Current DV helpers statically link libav and reject dynamic libav imports.
+The experiment uses two CPUs, 2 GiB without swap, no network and a 300-second
+deadline. Production is unchanged.
+
+[Dependency retirement receipt and build evidence](evidence/macos-video-20261008/qsv-shipping-dependency-evidence.tar.gz)
+contains seven members, 21,371 compressed bytes, SHA-256
+`5c37f88a5473efe380d075a201405caf38025bd34ef4d7e2c243c0c44ed7cd7e`.
+The receipt binds all three changed implementation/test files, the literal
+shipping stages, unchanged upstream stages and six evidence members by hash.
+Every evidence member was reopened and its checksum verified.
+
+**Remaining acceptance:** transfer of these exact new images to the Intel
+qualification host requires explicit approval after automatic approval review
+refused that transfer. No new Intel GPU window has run. Existing AMD/Intel
+VA-API and Mac receipts remain valid within their recorded scope. Final
+adversarial review and regression execution are pending; the normal commit
+hook passed catalog lint, Rust formatting, pinned Rust 1.97.1 workspace
+all-target Clippy and JavaScript syntax without executing unit tests.
+
+
+## 47. Corrected shipping image qualifies Intel QSV — 2026-10-15
+
+After explicit approval, the exact corrected runtime and observer from §46
+were transferred to the Intel Alder Lake-P node. Both imported IDs, all 43
+system-provider hashes, capsule and executable identities pass verification;
+the competing system Media SDK is absent. The retained finite-window harness
+changes only its observer image ID. All original admission, resource, deadline,
+negative-control, cadence and pixel assertions remain unchanged.
+
+The raw QSV window passes **32/32 controls** in 30.14 seconds. Observed
+closures load only the packaged Media SDK/oneVPL objects. The ordinary API
+window then passes in 140.81 seconds with the encoder explicitly set to QSV:
+
+- The daemon admits all six exact-package graphs, including Software/QSV and
+  VA-API/QSV, and session creation selects Intel QuickSync.
+- The actual serving producer has `-copyts`, `-strict_dovi 1`, VA-API hardware
+  P5 decode, `tonemapx` with `apply_dovi=1:require_dovi=1`, and `h264_qsv`.
+  Tone mapping remains the existing CPU stage between hardware decode/encode;
+  this does not claim an entirely GPU-resident processing graph.
+- All nine delivery checks pass on 24 independently decoded 256×144 AVC
+  frames: BT.709, limited range, progressive, 8-bit, 12 fps. The first media
+  object arrives in 0.735 seconds; this single observation is not a benchmark.
+- Shutdown exits zero, owned children are reaped and containers removed;
+  both production epochs remain unchanged.
+
+The raw window uses two CPUs and 2 GiB without swap; the API window uses two
+CPUs and 4 GiB without swap. Both retain fresh GPU admission, no network,
+dropped capabilities and their original finite bounds: 590 seconds inside the
+raw container with a 650-second outer window, and a 600-second API window.
+
+**Source boundary.** This isolates a shipping-package correction using the
+already-qualified daemon from `36b9a6903a3aec632f69a4b81a0f46ca0f065c8d`,
+SHA-256 `29ef709fba513fab75fafe702117fa33c0b931876e45bad22e62808912931a8c`.
+Its strict-QSV policy is unchanged in the closeout base. This is not a rebuilt
+current-main daemon or a production deployment. It adds no NVIDIA,
+other-generation, concurrency or client-presentation claim. Earlier refused
+and fallback windows from §45 remain preserved.
+
+[Intel QSV shipping qualification](evidence/macos-video-20261008/intel-qsv-shipping-qualification-evidence.tar.gz)
+is 20,369 compressed bytes, SHA-256
+`8d34ae7202d1ffc988859d3c69bb239b811ba14bc6dd378b29978d5827b8dfd5`.
+Its single 151,657-byte neutral JSON member was reopened and compared exactly.
+It retains identities, full raw controls, API observations and actual producer
+argv, window guards, production epochs, cleanup, and the private raw-evidence
+hash inventory. The full 164-member private evidence archive is durably
+retained and independently verified, SHA-256
+`941a92fa9101acf3c060e2b3a3bae594cd39f357075610cc50381072163e9a8b`.
+
+
+The final adversarial review approves candidate `e08a0680` with no blocking
+findings. It verifies the source/evidence hashes, literal shipping-stage
+correspondence, raw/API results and historical-daemon boundary. Its sole P3
+finding corrected the deadline wording above to the recorded raw 590/650 and
+API 600-second limits. After that correction, both named packaging regressions
+pass once (`LinuxDolbyPackageCase.test_shipping_retirement_preserves_audited_system_elf_closure`
+and `test_only_dolby_shipping_targets_retire_the_competing_debian_media_sdk`).
+Final fast-lane and landing receipts belong to [PR #1102](http://forge.lan:3000/noirr/plurx/pulls/1102).
+
+
+**Cleanup.** Full prior AMD/Intel and corrected-image evidence is durably
+retained with per-member checksums. All four task-owned remote qualification/
+build roots and all task-owned images were removed after fresh consumer checks;
+no force or global prune was used. Production container IDs, image IDs, start
+times and restart counts remained unchanged. The redundant builder clone,
+temporary Metal toolchain and two already-landed Mac branches were removed.
+The active manager clone and isolated compiler cache are removed after landing,
+with the final cleanup receipt retained alongside the pull-request receipt.

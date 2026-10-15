@@ -1,7 +1,8 @@
 # Live TV shared transport — one tuner per channel however many are watching, and captions only once they are proven
 
 **Status:** open — M1–M4 code on `main` since 2026-10-04 (#793); the capacity
-offer and caption matrix open ·
+offer and caption matrix open; buffered-ready fan-out fairness correction
+reviewed and corrected on 2026-10-15 UTC, promotion pending (§3.2) ·
 **Executes:** L4 / F-ltv-4 (design) and the
 closed-captions half of Q9 / L7 / F-ltv-8 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
@@ -472,6 +473,24 @@ tuner GET is the tuner. `TUNER_READ_TIMEOUT` stays on the fan-out's tuner
 stdin) and the DVR writer (per sink); the fan-out has no write timeout
 because it has no writes (§2.4 D6).
 
+**Buffered input must still schedule its consumers.** On 2026-10-14 UTC,
+`a_ready_tuner_burst_does_not_evict_a_reading_viewer` rejected the old fan-out:
+1,536 immediately ready 188-byte chunks (288,768 bytes, below the 4 MiB byte
+bound) evicted a runnable reader before it got CPU. The older sibling test's
+input yielded on every chunk, hiding this case. The sole independent review
+found that consuming one cooperative budget unit per chunk still fails for
+65 ready 64 KiB chunks: the 4 MiB byte bound fills before the task budget
+expires. That second regression failed on the reviewed implementation on
+2026-10-15 UTC. The fan-out now explicitly yields once per iteration, giving
+runnable consumers a scheduling opportunity independently of chunk size.
+This does not guarantee which task or I/O driver runs next. It is not a wait on a
+consumer, fixed sleep, capacity increase or removal of the 512-slot bound.
+Both burst regressions receive every byte on the runnable reader while still
+evicting its non-reading sibling. Existing byte-backlog, slow-disk isolation
+and whole-opening-prefix regressions also pass on the corrected source.
+This proves the scheduling defect and its correction, not that it caused a
+particular fleet failure or that the physical caption matrix is complete.
+
 Metric: `plurx_live_tv_consumer_evictions_total{kind,reason}` with `kind ∈
 {viewer, recording}`, `reason ∈ {backlog, fenced}` — four series.
 
@@ -890,6 +909,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-14–15 UTC | Codex; exact runtime model ID not exposed | `01a0c165-d718-73a1-93e9-e81380017705` | M1 buffered-input fairness | #1093, promotion pending | Pinned Rust 1.97.1 loop established before edits; main `9eb7f6738` composed. Original real fan-out test fails on runnable-reader eviction. Sole independent review finds a byte-bound variant; 65 ready 64 KiB chunks fail the budget-only repair. Explicit per-iteration yield passes both burst regressions while retaining non-reader eviction. Isolation and opening-prefix regressions cover affected behavior. Bounds, reasons, metrics and encoder/default policy unchanged. Scheduling opportunities are not a guarantee of a particular next task. The historical Chrome failure is not independently bound to this mechanism; runtime and physical acceptance remain open. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | Design re-verification (§2.4) | [PR #482](http://forge.lan:3000/noirr/plurx/pulls/482) | Done, commit `3cb3951a8`. Every §2/§3 premise re-read at `886fc8bd` with `file:line`; eight M1 design corrections (D1–D8) and six caption findings (C1–C6). The false premises that would have broken M1: the DVR transport has never probed its prefix, so `DvrTransport.source` is always `None` (D1); DVR capacity and insertion are two lock holds, which with viewers lets a second start on one channel overwrite a live transport in the map (D2); both transport closers key on sinks and would close viewer-only transports (D3). **D7 is flagged, not decided:** the plan's own "a join never crosses a generation" guardrail, combined with DVR transports that outlive a settings save, would refuse every viewer on a recorded channel for the rest of the recording after any Live TV settings save. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 captions fixture and per-graph audit | [PR #482](http://forge.lan:3000/noirr/plurx/pulls/482) | Landed on the branch: `ee4a1752c`, with the measured process-shape reviews in `9f167d9a9` and the clippy and known-red count follow-up in `64016b108`. Generated fixture (1080i MPEG-2, B-frames, CC1 pop-on + 708 service 1, ground truth in code), an independent `cc_data` decoder, and the production planner + live argv run end to end. In `make unit`: `the_caption_fixture_carries_608_and_708`, `the_caption_decoder_tells_dropped_and_partial_from_preserved`, `the_software_live_graph_carries_608_and_708_through_both_deinterlace_modes`, `a_copied_h264_route_carries_608_and_708`, `caption_args_per_encoder_match_the_audit_table`. Per-node audit on `lab3` with `plurx/plurxd:latest`: jellyfin-ffmpeg 8.1.2 preserves CC1 and service 1 for software, QSV, VA-API (12 runs) and copy (2 runs), exit 0; the distro FFmpeg 5.1.9 fallback in the same image garbles CC1 under `send_field`, drops everything on VA-API, and could not start QSV, exit 101 — recorded in the status table and as §2.4 C6. No production code changed: `live_caption_args` is untouched because no audited default-engine graph needed a flag. Mutation check: giving `Encoder::Software` `-a53cc 0` in `live_caption_args` fails `caption_args_per_encoder_match_the_audit_table` and `the_software_live_graph_carries_608_and_708_through_both_deinterlace_modes` (and the existing `live_caption_forwarding_is_disabled_only_for_videotoolbox_encoding`), exit 101; restored before commit. **Not audited here:** NVENC (no node has it) and VideoToolbox's `-a53cc 1` re-proof (needs a Mac) — `needs:` below. |
 | 2026-09-24 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1 | — | **Not started — blocked on Paul's decision on §2.4 D7.** D1–D6 and D8 are the corrected design M1 is to be built against; the dependency on the DVR plan's owned writers is met on `main`. *Superseded the same day by the two rows below: D7 was decided and M1 built.* |

@@ -256,3 +256,73 @@ fn captured_dvh1_completeness_preserves_dolby_vision_and_publishes() {
         std::fs::write(path, output).expect("valid DV test fixture operation");
     }
 }
+
+#[test]
+fn rolling_dvh1_guard_checks_every_sample_and_strict_nal_framing() {
+    let (mut init, opening) = dvh1_incomplete_fixture();
+    promote_hevc_parameter_sets(&mut init, &opening).expect("repair fixture");
+    let video = init.video().expect("video").id;
+    let (_, fragments, _) = read_all(&pipe("open-gop"));
+    let base = fragments[0].clone();
+    let mut ambiguous = init.clone();
+    let mut extra = ambiguous.video().expect("video").clone(); extra.id += 100;
+    ambiguous.tracks.push(extra);
+    assert!(validate_rolling_dvh1_fragment(&ambiguous, &base).is_err());
+    let mut outside_mdat = base.clone();
+    outside_mdat.tracks.iter_mut().find(|t| t.track_id == video).expect("video").runs[0].data_offset = 0;
+    assert!(validate_rolling_dvh1_fragment(&init, &outside_mdat).is_err());
+    assert!(base.track(video).expect("video").sample_count() > 1);
+    for invalid in [false, true] {
+        for nal in [vec![0x44, 1, 0xc1], vec![0x44], vec![0xc4, 1, 0xc0], vec![0x44, 0, 0xc0]] {
+            let mut fragment = base.clone();
+            let mut count = 0;
+            rewrite_video_samples(&mut fragment, &init.tracks, video, |_| {
+                count += 1;
+                Ok(if invalid && count == 2 { length_prefixed_hevc_nals(&[&nal]) }
+                   else { length_prefixed_hevc_nals(&[&[0x44, 1, 0xc0, 0], &[0x26, 1, 0x80]]) })
+            }).expect("rewrite fixture");
+            assert_eq!(validate_rolling_dvh1_fragment(&init, &fragment).is_err(), invalid);
+        }
+    }
+    for bad in [vec![], vec![0], vec![0, 0, 0, 0], vec![0, 0, 0, 3, 0x26, 1]] {
+        let mut fragment = base.clone();
+        let mut count = 0;
+        rewrite_video_samples(&mut fragment, &init.tracks, video, |_| {
+            count += 1;
+            Ok(if count == 2 { bad.clone() } else { length_prefixed_hevc_nals(&[&[0x26, 1, 0x80]]) })
+        }).expect("rewrite fixture");
+        assert!(validate_rolling_dvh1_fragment(&init, &fragment).is_err());
+    }
+    let mut absent = base;
+    rewrite_video_samples(&mut absent, &init.tracks, video, |_| Ok(length_prefixed_hevc_nals(&[&[0x26, 1, 0x80]]))).expect("absent repeats");
+    validate_rolling_dvh1_fragment(&init, &absent).expect("absent is safe");
+    let moof = peek_box(&absent.bytes, 0).expect("moof").expect("moof");
+    for (at, traf) in find_children(&absent.bytes, moof.header_len..moof.size, b"traf").expect("trafs") {
+        let (tfhd_at, tfhd) = find_child(&absent.bytes, at.start+traf.header_len..at.start+traf.size, b"tfhd").expect("tfhd").expect("tfhd");
+        let payload = tfhd_at.start+tfhd.header_len;
+        if be_u32(&absent.bytes,payload+4)==video {
+            // A description override is four bytes longer: reuse the default
+            // duration slot in this synthetic tfhd to supply an invalid index.
+            let flags=be_u32(&absent.bytes,payload);
+            assert_eq!(flags & 1,0);
+            assert!(tfhd.size >= tfhd.header_len+12);
+            absent.bytes[payload..payload+4].copy_from_slice(&(flags|2).to_be_bytes());
+            absent.bytes[payload+8..payload+12].copy_from_slice(&99u32.to_be_bytes());
+            break;
+        }
+    }
+    assert!(validate_rolling_dvh1_fragment(&init, &absent).is_err());
+}
+
+#[test]
+fn rolling_dvh1_reader_rejects_replacement_init_after_arming() {
+    let (init, fragments, _) = read_all(&pipe("open-gop"));
+    let mut reader = FragmentReader::new();
+    reader.push(&init.bytes);
+    assert!(matches!(reader.next_unit().expect("first init"),Some(Unit::Init(_))));
+    reader.reject_reinitialization();
+    reader.push(&fragments[0].bytes);
+    assert!(matches!(reader.next_unit().expect("first fragment"),Some(Unit::Fragment(_))));
+    reader.push(&init.bytes);
+    assert!(reader.next_unit().is_err());
+}
