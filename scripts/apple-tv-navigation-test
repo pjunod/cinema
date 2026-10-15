@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Run native tvOS navigation tests on an isolated simulator; retain a receipt.
+
+No receipt is a qualification unless the complete required suite passes.
+The result bundle preserves failed assertions and native screenshots.
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import plistlib
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+REQUIRED = [
+    "TVNavigationTests/testViewModalOwnsFocusAndBackRestoresOpener416",
+    "TVNavigationTests/testViewModalOwnsFocusAndBackRestoresOpener5000",
+    "TVNavigationTests/testGridToolsAndJump416",
+    "TVNavigationTests/testGridToolsAndJump5000",
+    "TVNavigationTests/testRowsToolsAndJump416",
+    "TVNavigationTests/testRowsToolsAndJump5000",
+    "TVNavigationTests/testSortFilterAndGroupingOwnFocusAndRestoreOpeners",
+    "TVNavigationTests/testEveryEnabledRootTabReceivesNativeFocus",
+]
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, cwd=ROOT, text=True, check=True, **kwargs)
+
+
+def verify_summary(summary, expected):
+    if (summary.get("passedTests") != expected or summary.get("failedTests") != 0
+            or summary.get("skippedTests") != 0):
+        raise RuntimeError(f"Incomplete native journey execution: {summary}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--only-testing", action="append", default=[],
+                        help="Focused development run; never a complete qualification")
+    parser.add_argument("--derived-data", type=Path, help="Reusable isolated build cache")
+    parser.add_argument("--runtime", default="com.apple.CoreSimulator.SimRuntime.tvOS-26-5")
+    options = parser.parse_args()
+    output = options.output.resolve()
+    if output == ROOT or ROOT in output.parents:
+        parser.error("--output must be outside the source checkout")
+    output.mkdir(parents=True, exist_ok=False)
+    derived = (options.derived_data or (output / "DerivedData")).resolve()
+    sha = run("git", "rev-parse", "HEAD", capture_output=True).stdout.strip()
+    dirty = bool(run("git", "status", "--porcelain", capture_output=True).stdout.strip())
+    # Bind even development runs to exact source content, including untracked
+    # test files. Promotion requires a clean, committed candidate separately.
+    source = hashlib.sha256()
+    files = run("git", "ls-files", "--cached", "--others", "--exclude-standard",
+                "-z", capture_output=True).stdout.split("\0")
+    for name in sorted(filter(None, files)):
+        path = ROOT / name
+        if path.is_file():
+            source.update(name.encode())
+            source.update(b"\0")
+            source.update(path.read_bytes())
+    receipt = {"schema": 1, "source_sha": sha, "source_tree_sha256": source.hexdigest(),
+               "source_dirty": dirty, "derived_data": str(derived), "required_tests": REQUIRED,
+               "selected_tests": options.only_testing or REQUIRED,
+               "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+               "status": "failed", "qualification": False, "coverage_scope": "T0 browse/root journeys; full audit matrix pending",
+               "result_bundle": str(output / "navigation.xcresult")}
+    device = None
+    try:
+        receipt["xcode"] = run("xcodebuild", "-version", capture_output=True).stdout.strip()
+        device = run("xcrun", "simctl", "create", "Plurx navigation isolated",
+                     "com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-4K",
+                     options.runtime, capture_output=True).stdout.strip()
+        receipt["simulator_udid"] = device
+        receipt["runtime"] = options.runtime
+        run("xcodegen", "generate", "--spec", "clients/apple/project.yml")
+        command = ["xcodebuild", "test", "-project", "clients/apple/plurx.xcodeproj",
+                   "-scheme", "plurx-tvOS-navigation", "-destination", f"id={device}",
+                   "-derivedDataPath", str(derived),
+                   "-resultBundlePath", receipt["result_bundle"],
+                   "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
+                   "-default-test-execution-time-allowance", "180",
+                   "-maximum-test-execution-time-allowance", "240", "CODE_SIGNING_ALLOWED=NO"]
+        command += [f"-only-testing:plurx-tvOSUITests/{test}"
+                    for test in (options.only_testing or REQUIRED)]
+        receipt["command"] = command
+        with (output / "xcodebuild.log").open("w") as log:
+            run(*command, stdout=log, stderr=subprocess.STDOUT)
+        # xcodebuild can succeed while a test selection is empty. Require the
+        # result summary's exact executed count and no skips, not only exit 0.
+        summary = json.loads(run("xcrun", "xcresulttool", "get", "test-results", "summary",
+                                 "--path", receipt["result_bundle"], capture_output=True).stdout)
+        receipt["test_summary"] = summary
+        expected = len(options.only_testing or REQUIRED)
+        verify_summary(summary, expected)
+        receipt["status"] = "passed"
+        receipt["qualification"] = False  # Full audit matrix is not implemented yet.
+    except (subprocess.CalledProcessError, RuntimeError) as error:
+        receipt["error"] = str(error)
+    finally:
+        if device:
+            subprocess.run(["xcrun", "simctl", "shutdown", device], capture_output=True)
+            subprocess.run(["xcrun", "simctl", "delete", device], capture_output=True)
+        app = derived / "Build/Products/Debug-appletvsimulator/plurx.app"
+        if (app / "Info.plist").exists():
+            with (app / "Info.plist").open("rb") as info_file:
+                info = plistlib.load(info_file)
+            binary = app / info["CFBundleExecutable"]
+            if binary.exists():
+                receipt["app_build"] = {
+                    "bundle_identifier": info["CFBundleIdentifier"],
+                    "version": info.get("CFBundleShortVersionString"),
+                    "build": info.get("CFBundleVersion"),
+                    "executable_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                }
+        receipt["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    print(output / "receipt.json")
+    return 0 if receipt["status"] == "passed" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
