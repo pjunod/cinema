@@ -32,6 +32,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         let activate: () -> Void
     }
     @Published private(set) var requestedFocus: String?
+    @Published private(set) var focusRequestRevision: UInt64 = 1
     @Published private(set) var contextRevision: UInt64 = 1
     @Published private(set) var focusRevision: UInt64 = 1
     @Published var selectedTab: HomeTab = .home
@@ -43,7 +44,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
     private var orderedKeys: [String: [String]] = [:]
     private var columns: [String: Int] = [:]
     private var textContexts: [String: (UUID, (String) -> Void)] = [:]
-    private var modal: (scope: String, returnFocus: String?, dismiss: () -> Void)?
+    private var modal: (id: UUID, scope: String, parent: String, returnFocus: String?, dismiss: () -> Void)?
     private var blockers: Set<UUID> = []
     private var exhausted = false
     private var restoredFocus: [String: String] = [:]
@@ -52,6 +53,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
     private let maximumEntries = 512
     private let maximumOrderedKeys = 16_384
     private var pendingFocus = false
+    private var modalReturn: (id: UUID, dismissedScope: String, scope: String, key: String?, revision: UInt64)?
     private var focusedRegistration: UUID?
     private struct Destination {
         let token: UUID
@@ -90,6 +92,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         }
     }
     var hasOwnedModal: Bool { modal != nil }
+    var ownedModalIdentity: UUID? { modal?.id }
     @Published private(set) var requestedPlaybackItem: Int?
     func requestPlayback(itemID: Int) {
         guard itemID > 0, !snapshot().blocked else { return }
@@ -149,14 +152,14 @@ final class RemoteNavigationCoordinator: ObservableObject {
         guard !presentations.contains(where: { $0.0 == token }), presentations.count < 8 else { return }
         presentations.append((token, scope))
         advanceContext()
-        requestFocus(nil)
+        if modal?.scope != scope { requestFocus(nil) }
     }
     func detachPresentation(_ token: UUID) {
         presentationControllers.removeValue(forKey: token)
         if presentations.contains(where: { $0.0 == token }) {
             presentations.removeAll { $0.0 == token }
             advanceContext()
-            requestFocus(restoredFocus[scope])
+            if modalReturn == nil && modal == nil { requestFocus(restoredFocus[activeScope]) }
         }
     }
     func ownsPresentation(_ controller: ObjectIdentifier) -> Bool {
@@ -183,6 +186,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         // A repeated item ID still denotes a different native route lifetime.
         // Returning destinations reattach with their surviving view token.
         destinations.removeAll()
+        modalReturn = nil
         modal?.dismiss()
         modal = nil
         if let focusedKey {
@@ -203,6 +207,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         focusedKey = nil
         focusedRegistration = nil
         pendingFocus = false
+        modalReturn = nil
     }
     /// A credential/server transition must not retain another account's closures.
     func resetIdentity() {
@@ -238,6 +243,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         action()
     }
     func physicalInput() {
+        modalReturn = nil
         onPhysicalInput()
         pendingFocus = false
         requestedFocus = focusedKey
@@ -283,6 +289,9 @@ final class RemoteNavigationCoordinator: ObservableObject {
     /// Only the actual native FocusState acknowledgment commits semantic focus.
     func physicalFocus(scope: String, key: String?) {
         guard scope == activeScope else { return }
+        // Native default focus may settle while a cover animates away. Only a
+        // genuine input (physicalInput) cancels that cover's pending return.
+        if modalReturn != nil && pendingFocus && key != requestedFocus { return }
         if pendingFocus && key == requestedFocus {
             pendingFocus = false
             focusedKey = key
@@ -297,17 +306,19 @@ final class RemoteNavigationCoordinator: ObservableObject {
         requestedFocus = key
         advanceFocus()
     }
-    private func requestFocus(_ key: String?) {
-        if key == focusedKey && !pendingFocus { return }
+    private func requestFocus(_ key: String?, force: Bool = false) {
+        if !force && key == focusedKey && !pendingFocus { return }
         requestedFocus = key
         focusedKey = nil
         focusedRegistration = nil
         pendingFocus = key != nil
         advanceFocus()
+        focusRequestRevision = focusRevision
     }
     func openModal(scope: String, opener: String, dismiss: @escaping () -> Void) {
         guard modal == nil else { return }
-        modal = (scope, opener, dismiss)
+        modalReturn = nil
+        modal = (UUID(), scope, activeScope, opener, dismiss)
         advanceContext()
         requestFocus(nil)
     }
@@ -316,7 +327,39 @@ final class RemoteNavigationCoordinator: ObservableObject {
         modal = nil
         current.dismiss()
         advanceContext()
-        requestFocus(current.returnFocus)
+        let available = orderedKeys[current.parent] ?? []
+        let target = current.returnFocus.flatMap { available.isEmpty || available.contains($0) ? $0 : nil } ?? available.first
+        requestFocus(target)
+        modalReturn = (current.id, current.scope, current.parent, target, focusRevision)
+    }
+    /// The native presenter calls this after its covered controls become eligible
+    /// again. Reissue the request even when the key did not change. A newer
+    /// physical command, route or presentation cancels the old restoration.
+    func modalPresentationDismissed(scope dismissedScope: String, identity: UUID? = nil) {
+        if modal?.scope == dismissedScope && (identity == nil || modal?.id == identity) { closeModal() }
+        guard let restoration = modalReturn, restoration.dismissedScope == dismissedScope,
+              identity == nil || restoration.id == identity else { return }
+        modalReturn = nil
+        guard modal == nil, restoration.scope == activeScope,
+              restoration.revision == focusRevision else { return }
+        requestedFocus = restoration.key
+        focusedKey = nil
+        focusedRegistration = nil
+        pendingFocus = restoration.key != nil
+        advanceFocus()
+        focusRequestRevision = focusRevision
+    }
+    func enterChoicePanel(scope: String, keys: [String], selected: String?) {
+        guard modal?.scope == scope else { return }
+        setOrder(scope: scope, keys: keys, columns: 1)
+        requestFocus(selected.flatMap { keys.contains($0) ? $0 : nil } ?? keys.first)
+    }
+    /// Requests realization and focus; only native acknowledgment authorizes Select.
+    @discardableResult
+    func focusControl(scope: String, key: String) -> Bool {
+        guard scope == activeScope, orderedKeys[scope]?.contains(key) == true else { return false }
+        requestFocus(key, force: true)
+        return true
     }
     func navigate(to route: Route) {
         paths[selectedTab, default: []].append(route)
