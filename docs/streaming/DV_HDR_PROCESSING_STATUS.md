@@ -1458,3 +1458,16 @@ and runtime deadlines are unchanged. The existing aggregate-CI contract checks
 both metadata-job budgets; only its changed body is owed on the integrated
 effort. Current exact-tree qualification, normal fleet deployment and physical
 HDR acceptance remain open.
+
+
+### Current-main integration — Live TV ready-burst fairness
+
+Main advanced to `ac01c7ab8` during the journaled R41 evidence enrollment. The
+exact-base guard stopped before further enrollment or promotion dispatch. The
+pending upload outcome and original logs remain preserved. The effort integrates
+main's ready-burst scheduling fix and two joined-reader regressions; the producer
+ownership census combines both reviewed additions at 959 sites. No HDR behavior
+changes in this integration. Current-source compilation, native membership and
+applicability review must precede promotion. Applicable existing unit passes are
+retained; only genuinely missing or invalidated outcomes may execute. Deployment
+and all physical HDR acceptance remain open.
