@@ -119,7 +119,9 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    timeout-minutes: 10
+    # The job includes every-target compilation and vendored Clippy with a
+    # runner-local cache; allow a cold runner to finish all existing checks.
+    timeout-minutes: 30
     steps:
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

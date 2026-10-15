@@ -2109,6 +2109,11 @@ assert.equal(context.ACT_TIMER, null);
         # its receipt publications finish; the effort gate keeps ten.
         self.assertIn("timeout-minutes: 15", fast_jobs["preflight"])
         self.assertIn("timeout-minutes: 10", effort_jobs["preflight"])
+        self.assertIn("timeout-minutes: 30", effort_jobs["rust_compile"])
+        self.assertIn(
+            "if: always() && steps.cargo-cache.outputs.local == 'true'",
+            effort_rust_steps["Enforce persistent Cargo bounds"],
+        )
         fast_rust_steps = workflow_step_blocks(fast_jobs["rust_compile"])
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")
