@@ -7,6 +7,67 @@ import XCTest
 
 final class RemoteNavigationTests: XCTestCase {
     @MainActor
+    func testChoiceEntrySelectsCurrentValueAndNativeDismissalRestoresOpener() {
+        let navigation = RemoteNavigationCoordinator()
+        navigation.presentationBlocked = { false }
+        navigation.setOrder(scope: "home", keys: ["sort", "view"], columns: 1)
+        navigation.physicalFocus(scope: "home", key: "sort")
+        navigation.openModal(scope: "sort-menu", opener: "sort") {}
+        let token = UUID()
+        navigation.attachPresentation(token, scope: "sort-menu", controllers: [])
+        navigation.enterChoicePanel(scope: "sort-menu", keys: ["title", "year"], selected: "year")
+        XCTAssertEqual(navigation.requestedFocus, "year")
+        XCTAssertNil(navigation.focusedKey)
+        navigation.closeModal()
+        navigation.detachPresentation(token)
+        navigation.modalPresentationDismissed(scope: "sort-menu")
+        XCTAssertEqual(navigation.activeScope, "home")
+        XCTAssertEqual(navigation.requestedFocus, "sort")
+        XCTAssertNil(navigation.focusedKey)
+        XCTAssertEqual(navigation.dispatch(.select, context: navigation.context), .unsupported)
+    }
+    @MainActor
+    func testDismissalCannotOverrideNewPhysicalIntentAndMissingOpenerFallsBack() {
+        let navigation = RemoteNavigationCoordinator()
+        navigation.presentationBlocked = { false }
+        navigation.setOrder(scope: "home", keys: ["survivor"], columns: 1)
+        navigation.openModal(scope: "menu", opener: "removed") {}
+        navigation.closeModal()
+        XCTAssertEqual(navigation.requestedFocus, "survivor")
+        navigation.physicalInput()
+        let revision = navigation.focusRevision
+        navigation.modalPresentationDismissed(scope: "menu")
+        XCTAssertEqual(navigation.focusRevision, revision)
+        XCTAssertNil(navigation.requestedFocus)
+    }
+    @MainActor
+    func testOldNativeDismissalCannotCloseReplacementWithSameScope() {
+        let navigation = RemoteNavigationCoordinator()
+        navigation.presentationBlocked = { false }
+        var dismissed = 0
+        navigation.openModal(scope: "menu", opener: "sort") { dismissed += 1 }
+        let identity = navigation.ownedModalIdentity
+        navigation.closeModal()
+        navigation.openModal(scope: "menu", opener: "view") { dismissed += 1 }
+        navigation.modalPresentationDismissed(scope: "menu", identity: identity)
+        XCTAssertTrue(navigation.hasOwnedModal)
+        XCTAssertEqual(dismissed, 1)
+    }
+    @MainActor
+    func testFocusControlRequiresScopeAndOrderAndNativeAcknowledgment() {
+        let navigation = RemoteNavigationCoordinator()
+        navigation.presentationBlocked = { false }
+        navigation.setOrder(scope: "home", keys: ["lazy"], columns: 1)
+        XCTAssertFalse(navigation.focusControl(scope: "other", key: "lazy"))
+        XCTAssertFalse(navigation.focusControl(scope: "home", key: "missing"))
+        XCTAssertTrue(navigation.focusControl(scope: "home", key: "lazy"))
+        let revision = navigation.focusRevision
+        XCTAssertTrue(navigation.focusControl(scope: "home", key: "lazy"))
+        XCTAssertGreaterThan(navigation.focusRevision, revision)
+        XCTAssertNil(navigation.focusedKey)
+        XCTAssertEqual(navigation.dispatch(.select, context: navigation.context), .unsupported)
+    }
+    @MainActor
     func testRestrictedModalFencesAllActionsAndSensitiveState() {
         let navigation = RemoteNavigationCoordinator()
         navigation.presentationBlocked = { false }
