@@ -1,0 +1,2975 @@
+{
+  "version": 1,
+  "status": "diagnostic observations; not qualification pass",
+  "runs": [
+    {
+      "cases": [
+        {
+          "caption": {
+            "cue_count": 1,
+            "cues": [
+              [
+                0.0,
+                11.0
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "clean",
+          "decode": {
+            "child_cpu_seconds": 0.044863,
+            "child_maxrss_bytes": 15581184,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 352044,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.11191987500205869
+          },
+          "evidence": "short archival speech",
+          "inference": {
+            "child_cpu_seconds": 3.4466959999999998,
+            "child_maxrss_bytes": 297418752,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704321,
+            "stderr_bytes": 335,
+            "wall_seconds": 1.821907541998371
+          },
+          "inference_rtf": 0.1656279583634883,
+          "input": {
+            "bytes": 352044,
+            "clipped_samples": 0,
+            "noise_snr_db": null,
+            "seconds": 11.0,
+            "sha256": "d7d4e74b8a333ed02186008bc109a1b1a19d16da668bd56e785d80d69a16a72f"
+          },
+          "pipeline_rtf": 0.1758024924545845,
+          "status": "measured",
+          "word_errors": {
+            "deletions": 0,
+            "hypothesis_words": 22,
+            "insertions": 0,
+            "reference_words": 22,
+            "substitutions": 0,
+            "wer": 0.0
+          }
+        },
+        {
+          "caption": {
+            "cue_count": 1,
+            "cues": [
+              [
+                0.0,
+                11.0
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "noise",
+          "decode": {
+            "child_cpu_seconds": 0.037436000000000025,
+            "child_maxrss_bytes": 297418752,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 352044,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.056897499998740386
+          },
+          "evidence": "controlled additive noise, not movie mixing",
+          "inference": {
+            "child_cpu_seconds": 3.4471820000000006,
+            "child_maxrss_bytes": 297418752,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704321,
+            "stderr_bytes": 335,
+            "wall_seconds": 1.816083499998058
+          },
+          "inference_rtf": 0.16509849999982346,
+          "input": {
+            "bytes": 352044,
+            "clipped_samples": 0,
+            "noise_snr_db": 10,
+            "seconds": 11.0,
+            "sha256": "57d31cc6a61e1538211fddfc186fffe85175787c450b7237b54c4369eed169a5"
+          },
+          "pipeline_rtf": 0.17027099999970893,
+          "status": "measured",
+          "word_errors": {
+            "deletions": 0,
+            "hypothesis_words": 22,
+            "insertions": 0,
+            "reference_words": 22,
+            "substitutions": 0,
+            "wer": 0.0
+          }
+        },
+        {
+          "caption": {
+            "cue_count": 1,
+            "cues": [
+              [
+                0.0,
+                2.0
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " You",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "silence",
+          "decode": {
+            "child_cpu_seconds": 0.037358999999999476,
+            "child_maxrss_bytes": 297418752,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 352044,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.05778333300258964
+          },
+          "evidence": "digital silence, not room tone",
+          "inference": {
+            "child_cpu_seconds": 2.916875,
+            "child_maxrss_bytes": 297418752,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704540,
+            "stderr_bytes": 335,
+            "wall_seconds": 1.5568427500002144
+          },
+          "inference_rtf": 0.1415311590909286,
+          "input": {
+            "bytes": 352044,
+            "clipped_samples": 0,
+            "noise_snr_db": null,
+            "seconds": 11.0,
+            "sha256": "1a092b23d9dfe64d53943d18262c0a49eaf32c5ab5f2b016cd8edd16ec9440dd"
+          },
+          "pipeline_rtf": 0.1467841893638913,
+          "status": "measured",
+          "silence_output_tokens": 1
+        }
+      ],
+      "child_environment": {
+        "LC_ALL": "C"
+      },
+      "corpus_sha256": "ecc763584a472a8c116fa71a7fb16c1d694ba6e6195b35245b7b3f2a2c29743c",
+      "decoder_sha256": "c8173e9755795978bce8e104f8d7044fabe7d6d84044aba37d3648c6f4e4e1a8",
+      "driver_sha256": "7dbc55f594cf6f9eda5ef8c71902fef6cbbc41abf0d7f51697c1c5f5a2228b5c",
+      "effective_uid": 501,
+      "engine": {
+        "adapter_contract": "whisper.cpp-1.9.2-cpu-v1",
+        "binary_bytes": 2438384,
+        "binary_sha256": "43b757eda907535bc13789db47f7316a5571ce32c5c7b714a2746bb9fe84679b",
+        "build_options": {
+          "BUILD_SHARED_LIBS": "OFF",
+          "CMAKE_BUILD_TYPE": "Release",
+          "GGML_ACCELERATE": "OFF",
+          "GGML_AVX": "OFF",
+          "GGML_AVX2": "OFF",
+          "GGML_BACKEND_DL": "OFF",
+          "GGML_BLAS": "OFF",
+          "GGML_BMI2": "OFF",
+          "GGML_CCACHE": "OFF",
+          "GGML_CPU_ARM_ARCH": "armv8-a",
+          "GGML_CUDA": "OFF",
+          "GGML_F16C": "OFF",
+          "GGML_FMA": "OFF",
+          "GGML_METAL": "OFF",
+          "GGML_NATIVE": "OFF",
+          "GGML_OPENMP": "OFF",
+          "GGML_RPC": "OFF",
+          "GGML_SSE42": "OFF",
+          "GGML_VULKAN": "OFF",
+          "WHISPER_BUILD_EXAMPLES": "ON",
+          "WHISPER_BUILD_SERVER": "OFF",
+          "WHISPER_BUILD_TESTS": "OFF",
+          "WHISPER_COMMON_FFMPEG": "OFF",
+          "WHISPER_COREML": "OFF",
+          "WHISPER_CURL": "OFF",
+          "WHISPER_OPENVINO": "OFF"
+        },
+        "cmake": "cmake version 4.4.3",
+        "companions": {
+          "self-test.wav": {
+            "bytes": 352078,
+            "sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e"
+          },
+          "whisper-models.LICENSE.txt": {
+            "bytes": 1063,
+            "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d"
+          },
+          "whisper.cpp.LICENSE.txt": {
+            "bytes": 1078,
+            "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+          }
+        },
+        "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+        "platform": "macos-arm64",
+        "release_observation": "whisper.cpp version: 1.9.2",
+        "runtime_dependencies": [
+          "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)",
+          "/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2200.27.0)"
+        ],
+        "source_archive_sha256": "f3585ebf64df3e41b26c45d93bdb38b423ca1de0bf40cc4b6d320254867a75df",
+        "source_commit": "306c88f4d1286aec1bf96e544632897886af5501",
+        "version": 1
+      },
+      "model_id": "base.en",
+      "model_sha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
+      "platform": "darwin",
+      "profile": {
+        "language": "en",
+        "no_gpu": true,
+        "processors": 1,
+        "threads": 2
+      },
+      "qualification": "offline component diagnostic; no durable service, human quality or playback proof",
+      "source_commit": "15fa176bc36cd07a00d4c462f799ab16c13f80e8",
+      "version": 1,
+      "evidence_id": "recognition-base-en-v1",
+      "foreground_playback_active": false,
+      "warm_file_cache": true
+    },
+    {
+      "cases": [
+        {
+          "caption": {
+            "cue_count": 1,
+            "cues": [
+              [
+                0.0,
+                10.5
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " And so my fellow Americans ask not what your country can do for you, ask what you can do for your country.",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "clean",
+          "decode": {
+            "child_cpu_seconds": 0.043664999999999995,
+            "child_maxrss_bytes": 15663104,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 352044,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.10960025000167661
+          },
+          "evidence": "short archival speech",
+          "inference": {
+            "child_cpu_seconds": 3.443379,
+            "child_maxrss_bytes": 297533440,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704318,
+            "stderr_bytes": 329,
+            "wall_seconds": 1.7900108330031799
+          },
+          "inference_rtf": 0.16272825754574363,
+          "input": {
+            "bytes": 352044,
+            "clipped_samples": 0,
+            "noise_snr_db": null,
+            "seconds": 11.0,
+            "sha256": "d7d4e74b8a333ed02186008bc109a1b1a19d16da668bd56e785d80d69a16a72f"
+          },
+          "language": "en",
+          "pipeline_rtf": 0.17269191663680514,
+          "source_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+          "status": "measured",
+          "word_errors": {
+            "deletions": 0,
+            "hypothesis_words": 22,
+            "insertions": 0,
+            "reference_words": 22,
+            "substitutions": 0,
+            "wer": 0.0
+          }
+        },
+        {
+          "caption": {
+            "cue_count": 1,
+            "cues": [
+              [
+                0.0,
+                10.56
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " And so my fellow America asked not what your country can do for you as what you can do for your country.",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "noise",
+          "decode": {
+            "child_cpu_seconds": 0.035889999999999755,
+            "child_maxrss_bytes": 297533440,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 352044,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.05753804199775914
+          },
+          "evidence": "controlled additive noise, not movie mixing",
+          "inference": {
+            "child_cpu_seconds": 3.4298430000000004,
+            "child_maxrss_bytes": 297680896,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704318,
+            "stderr_bytes": 329,
+            "wall_seconds": 1.7717721250010072
+          },
+          "inference_rtf": 0.16107019318190974,
+          "input": {
+            "bytes": 352044,
+            "clipped_samples": 0,
+            "noise_snr_db": 10,
+            "seconds": 11.0,
+            "sha256": "57d31cc6a61e1538211fddfc186fffe85175787c450b7237b54c4369eed169a5"
+          },
+          "language": "en",
+          "pipeline_rtf": 0.1663009242726151,
+          "source_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+          "status": "measured",
+          "word_errors": {
+            "deletions": 0,
+            "hypothesis_words": 22,
+            "insertions": 0,
+            "reference_words": 22,
+            "substitutions": 3,
+            "wer": 0.13636363636363635
+          }
+        },
+        {
+          "caption": {
+            "cue_count": 1,
+            "cues": [
+              [
+                0.0,
+                10.0
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " [BLANK_AUDIO]",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "silence",
+          "decode": {
+            "child_cpu_seconds": 0.036271000000000164,
+            "child_maxrss_bytes": 297680896,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 352044,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.057831791000353405
+          },
+          "evidence": "digital silence, not room tone",
+          "inference": {
+            "child_cpu_seconds": 3.0650049999999993,
+            "child_maxrss_bytes": 297680896,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704318,
+            "stderr_bytes": 329,
+            "wall_seconds": 1.6287232079994283
+          },
+          "inference_rtf": 0.1480657461817662,
+          "input": {
+            "bytes": 352044,
+            "clipped_samples": 0,
+            "noise_snr_db": null,
+            "seconds": 11.0,
+            "sha256": "1a092b23d9dfe64d53943d18262c0a49eaf32c5ab5f2b016cd8edd16ec9440dd"
+          },
+          "language": "en",
+          "pipeline_rtf": 0.15332318172725287,
+          "source_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+          "status": "measured",
+          "silence_output_tokens": 2
+        },
+        {
+          "caption": {
+            "cue_count": 12,
+            "cues": [
+              [
+                0.0,
+                4.0
+              ],
+              [
+                4.0,
+                7.0
+              ],
+              [
+                7.0,
+                12.0
+              ],
+              [
+                12.0,
+                20.0
+              ],
+              [
+                20.0,
+                27.0
+              ],
+              [
+                27.0,
+                37.0
+              ],
+              [
+                37.0,
+                48.0
+              ],
+              [
+                48.0,
+                55.0
+              ],
+              [
+                55.0,
+                63.0
+              ],
+              [
+                63.0,
+                66.0
+              ],
+              [
+                66.0,
+                75.0
+              ],
+              [
+                75.0,
+                90.0
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " Abschnitt 1 von die Verwandlung.  Dies ist eine LibriVox-Aufnahme.  Alle LibriVox-Aufnahmen sind lizensfrei und in öffentlichen Besitz.  Weitere Informationen und Hinweise zur Beteiligung an diesem Projekt gibt es bei LibriVox.org.  Die Verwandlung von Franz Kafka. Abschnitt 1.  Als Krieger Samsa eines Morgens aus unruhigen Träumen erwachte, fand er sich in seinem Bett zu einem ungeheuren Ungeziver verwandelt.  Er lag auf seinem panzerartig harten Rücken und sah, wenn er den Kopf ein wenig hoch, seinen gewölbten Braunen von wogenförmigen Versteifungen geteilten Bauch.  Auf dessen Höhe sich die Bettdecke zum gänzlichen Niedergleiten bereit kaum noch erhalten konnte.  Seine Fielen im Vergleich zu seinem sonstigen Umfang gläglich dünnen Beine flimmerten ihm hilflos vor den Augen.  Was ist mit mir geschehen, dachte er.  Es war kein Traum, sein Zimmer ein richtiges, nur etwas zu kleines Menschenzimmer lag ruhig zwischen den vier wohlbekannten Wänden.  Über dem Tisch, auf dem eine auseinander gepackte Muster-Kollektion von Tuchwaren ausgebreitet war, Samsa war reisende, hing das Bild, das er vor kurzem aus einer illustrierten Zeitschrift ausgeschnitten und in einem hübschen, vergolteten Rahmen.",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "german",
+          "decode": {
+            "child_cpu_seconds": 0.17237100000000005,
+            "child_maxrss_bytes": 297680896,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 1048576,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.10828904200025136
+          },
+          "evidence": "real German single-narrator audiobook; not dialogue or human-scored quality",
+          "inference": {
+            "child_cpu_seconds": 22.38451,
+            "child_maxrss_bytes": 401997824,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 2881701,
+            "stderr_bytes": 329,
+            "wall_seconds": 11.650425416999497
+          },
+          "inference_rtf": 0.1294491712999944,
+          "input": {
+            "bytes": 39452911,
+            "seconds": 90,
+            "sha256": "96b670c97fc93e794387066699bb7a60e0c7fc514c237060a72a689b77e41beb"
+          },
+          "language": "de",
+          "pipeline_rtf": 0.13065238287777498,
+          "reference_limit": "First 90 seconds include spoken LibriVox intro. Independent book text exists but an exact spoken excerpt has not been human-aligned. Do not score WER against recognizer output.",
+          "source_sha256": "96b670c97fc93e794387066699bb7a60e0c7fc514c237060a72a689b77e41beb",
+          "status": "measured"
+        },
+        {
+          "caption": {
+            "cue_count": 131,
+            "cues": [
+              [
+                0.0,
+                23.0
+              ],
+              [
+                23.0,
+                24.56
+              ],
+              [
+                24.56,
+                27.4
+              ],
+              [
+                27.4,
+                30.4
+              ],
+              [
+                30.4,
+                34.4
+              ],
+              [
+                34.4,
+                37.4
+              ],
+              [
+                37.4,
+                39.4
+              ],
+              [
+                39.4,
+                42.4
+              ],
+              [
+                42.4,
+                44.4
+              ],
+              [
+                44.4,
+                45.4
+              ],
+              [
+                49.4,
+                54.4
+              ],
+              [
+                58.4,
+                62.4
+              ],
+              [
+                88.4,
+                91.4
+              ],
+              [
+                117.4,
+                120.4
+              ],
+              [
+                131.4,
+                134.4
+              ],
+              [
+                136.4,
+                139.4
+              ],
+              [
+                147.4,
+                150.4
+              ],
+              [
+                150.4,
+                153.4
+              ],
+              [
+                158.4,
+                160.4
+              ],
+              [
+                177.4,
+                180.4
+              ],
+              [
+                191.4,
+                192.4
+              ],
+              [
+                192.4,
+                193.4
+              ],
+              [
+                193.4,
+                195.4
+              ],
+              [
+                196.4,
+                198.4
+              ],
+              [
+                198.4,
+                201.4
+              ],
+              [
+                201.4,
+                203.4
+              ],
+              [
+                203.4,
+                204.4
+              ],
+              [
+                204.4,
+                206.4
+              ],
+              [
+                206.4,
+                208.4
+              ],
+              [
+                209.4,
+                212.4
+              ],
+              [
+                212.4,
+                215.4
+              ],
+              [
+                215.4,
+                217.4
+              ],
+              [
+                222.4,
+                224.4
+              ],
+              [
+                224.4,
+                226.4
+              ],
+              [
+                230.4,
+                233.4
+              ],
+              [
+                233.4,
+                236.4
+              ],
+              [
+                236.4,
+                238.4
+              ],
+              [
+                238.4,
+                240.4
+              ],
+              [
+                240.4,
+                242.4
+              ],
+              [
+                242.4,
+                244.4
+              ],
+              [
+                244.4,
+                246.4
+              ],
+              [
+                246.4,
+                248.4
+              ],
+              [
+                254.4,
+                257.4
+              ],
+              [
+                263.4,
+                266.4
+              ],
+              [
+                284.4,
+                287.4
+              ],
+              [
+                292.4,
+                295.4
+              ],
+              [
+                295.4,
+                298.4
+              ],
+              [
+                298.4,
+                301.4
+              ],
+              [
+                301.4,
+                303.4
+              ],
+              [
+                303.4,
+                304.4
+              ],
+              [
+                306.4,
+                309.4
+              ],
+              [
+                315.4,
+                317.4
+              ],
+              [
+                317.4,
+                320.4
+              ],
+              [
+                320.4,
+                323.4
+              ],
+              [
+                324.4,
+                328.4
+              ],
+              [
+                338.4,
+                341.4
+              ],
+              [
+                341.4,
+                342.4
+              ],
+              [
+                342.4,
+                344.4
+              ],
+              [
+                344.4,
+                346.4
+              ],
+              [
+                346.4,
+                349.4
+              ],
+              [
+                350.4,
+                353.4
+              ],
+              [
+                356.4,
+                359.4
+              ],
+              [
+                359.4,
+                361.4
+              ],
+              [
+                361.4,
+                364.4
+              ],
+              [
+                364.4,
+                366.4
+              ],
+              [
+                366.4,
+                369.4
+              ],
+              [
+                369.4,
+                371.4
+              ],
+              [
+                371.4,
+                373.4
+              ],
+              [
+                373.4,
+                375.4
+              ],
+              [
+                375.4,
+                377.4
+              ],
+              [
+                377.4,
+                380.4
+              ],
+              [
+                380.4,
+                383.4
+              ],
+              [
+                383.4,
+                386.4
+              ],
+              [
+                386.4,
+                387.4
+              ],
+              [
+                387.4,
+                389.4
+              ],
+              [
+                389.4,
+                390.4
+              ],
+              [
+                390.4,
+                393.4
+              ],
+              [
+                393.4,
+                396.4
+              ],
+              [
+                396.4,
+                398.4
+              ],
+              [
+                398.4,
+                401.4
+              ],
+              [
+                401.4,
+                404.4
+              ],
+              [
+                404.4,
+                407.4
+              ],
+              [
+                407.4,
+                409.4
+              ],
+              [
+                409.4,
+                412.4
+              ],
+              [
+                412.4,
+                415.4
+              ],
+              [
+                415.4,
+                418.4
+              ],
+              [
+                418.4,
+                421.4
+              ],
+              [
+                421.4,
+                423.4
+              ],
+              [
+                423.4,
+                425.4
+              ],
+              [
+                425.4,
+                427.4
+              ],
+              [
+                427.4,
+                429.4
+              ],
+              [
+                429.4,
+                431.4
+              ],
+              [
+                431.4,
+                433.4
+              ],
+              [
+                433.4,
+                435.4
+              ],
+              [
+                435.4,
+                436.4
+              ],
+              [
+                436.4,
+                437.4
+              ],
+              [
+                464.4,
+                466.4
+              ],
+              [
+                493.4,
+                495.4
+              ],
+              [
+                495.4,
+                497.4
+              ],
+              [
+                497.4,
+                499.4
+              ],
+              [
+                500.4,
+                502.4
+              ],
+              [
+                502.4,
+                503.4
+              ],
+              [
+                503.4,
+                505.4
+              ],
+              [
+                506.4,
+                508.4
+              ],
+              [
+                510.4,
+                512.4
+              ],
+              [
+                518.4,
+                520.4
+              ],
+              [
+                523.4,
+                525.4
+              ],
+              [
+                526.4,
+                527.4
+              ],
+              [
+                534.4,
+                536.4
+              ],
+              [
+                537.4,
+                539.4
+              ],
+              [
+                540.4,
+                542.4
+              ],
+              [
+                544.4,
+                546.4
+              ],
+              [
+                553.4,
+                555.4
+              ],
+              [
+                558.4,
+                560.4
+              ],
+              [
+                561.4,
+                563.4
+              ],
+              [
+                565.4,
+                567.4
+              ],
+              [
+                567.4,
+                569.4
+              ],
+              [
+                570.4,
+                571.4
+              ],
+              [
+                572.4,
+                574.4
+              ],
+              [
+                583.4,
+                585.4
+              ],
+              [
+                586.4,
+                588.4
+              ],
+              [
+                597.4,
+                599.4
+              ],
+              [
+                602.4,
+                604.4
+              ],
+              [
+                613.4,
+                615.4
+              ],
+              [
+                643.4,
+                645.4
+              ],
+              [
+                673.4,
+                675.4
+              ],
+              [
+                683.4,
+                685.4
+              ],
+              [
+                687.4,
+                689.4
+              ],
+              [
+                690.4,
+                692.4
+              ],
+              [
+                703.4,
+                705.4
+              ],
+              [
+                733.4,
+                743.4
+              ]
+            ],
+            "errors": [
+              "invalid_timing"
+            ],
+            "structural_valid": false,
+            "text": " We have main engine start, 4, 3, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2,  You're a jerk, Tom.  Look, Celia, we have to follow our passions.  You have your robotics, and I just want to be awesome in space.  Why don't you just admit that you're freaked out by my robot hand?  I'm not freaked out, but it's...  All right, fine, I'm freaked out.  I'm having nightmares that I'm being chased by these giant robotic glasses.  What are you doing, Tom?  We're done!  Robot's memory, synced and locked.  This is pretty freaking.  [Birds chirping]  Shouldn't you be down there?  I heard you guys talking last night.  It's not my fault, you know?  [Birds chirping]  [Birds chirping]  [Birds chirping]  [Birds chirping]  Are you ready?  Of course you're ready.  You're a rock star.  How's it looking, Barley?  We should have about 10 minutes.  Well, that's perfect.  We're only one!  All systems go!  Yeah, you go! Go!  Move your asses! Go, Bobo!  I love it! Go, Bobo!  Go!  That's nice.  Nothing to worry about, Tom.  Tom, there she is.  Now, you'll love her.  She's your passion.  Be... be tender to her.  Be honest.  Be tender.  Reminder...  what love is.  [Birds chirping]  [Birds chirping]  [Birds chirping]  And... action!  Memory overriding progress.  You're a jerk, Tom!  Oh, I'm sorry!  Sorry.  [Birds chirping]  Look, Celia.  We have to follow our passions.  You have your robotics.  And I just want to be awesome in space.  Get her to come in. Two minutes left.  Two minutes!  Sneer up, Tom!  Sneer up!  Why don't you just admit that you're freaked out by my robot hand?  [Birds chirping]  Listen, Celia. I was young.  And a dick.  But there's no reason to destroy the world.  Why does he do this?  We already tried that one.  [Birds chirping]  Come on!  [Birds chirping]  [Birds chirping]  [Birds chirping]  [Birds chirping]  You broke my heart.  I know.  You forgot me, honors.  I know.  I should just stretch you.  [Birds chirping]  I know.  [Birds chirping]  [Birds chirping]  [Birds chirping]  I'm sorry.  Go. Who'd that lip?  [Birds chirping]  [Birds chirping]  Got my ball?  This time.  [Birds chirping]  [Birds chirping]  Why else say it?  Run, run, run, run!  [Birds chirping]  *Screams*  *Screams*  You Bane!  *Screams*  *Screams*  *Screams*  *Screams*  *Screams*  *Screams*  Emory overrated, 90%.  Captain, we have to abort!  *Screams*  The world's changed Celia.  *Screams*  *Screams*  Maybe we can too.  Memory overrated complete!  *Screams*  *Screams*  *Screams*  You know,  there's a lesson to be learned from this.  It could have gone worse.  *Screams*  *Screams*  *Screams*  *Screams*  *Screams*  *Screams*  *Screams*  *Screams*  *Screams*  *Screams*  *Screams*  *Screams*  *Screams*  *Screams*  [BLANK_AUDIO]",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "film",
+          "decode": {
+            "child_cpu_seconds": 1.565529000000005,
+            "child_maxrss_bytes": 401997824,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 22282240,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.703207166003267
+          },
+          "evidence": "real short-film dialogue/music/effects; not feature-length or human-scored quality",
+          "inference": {
+            "child_cpu_seconds": 142.614007,
+            "child_maxrss_bytes": 511262720,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 23498272,
+            "stderr_bytes": 329,
+            "wall_seconds": 76.41318879200116
+          },
+          "inference_rtf": 0.10409196421468861,
+          "input": {
+            "bytes": 372178639,
+            "seconds": 734.166667,
+            "sha256": "efa9062d9cdb7a338e40ad530dfdf234806743f29ae6a1a136b97ece4e588e8f"
+          },
+          "language": "en",
+          "pipeline_rtf": 0.10503935880543652,
+          "reference_limit": "Publisher subtitles are not a verbatim ASR reference; mismatch is diagnostic, not audited WER.",
+          "source_sha256": "efa9062d9cdb7a338e40ad530dfdf234806743f29ae6a1a136b97ece4e588e8f",
+          "status": "measured",
+          "word_errors": {
+            "deletions": 8,
+            "hypothesis_words": 469,
+            "insertions": 114,
+            "reference_words": 363,
+            "substitutions": 60,
+            "wer": 0.5013774104683195
+          },
+          "pcm": {
+            "samples": 11745489,
+            "seconds": 734.0930625,
+            "sha256": "c9548d11fd6da03ce464b50b415280f3b058657491982452abd7fcd588beddee"
+          },
+          "attribution": "Tears of Steel, (CC) Blender Foundation | mango.blender.org; CC BY3.0",
+          "raw_vtt_sha256": "97e9bd9222522300ede5f533027a30e326510dcaafde41b9c2fb6d58d550e47d",
+          "normalized_component_diagnostic": {
+            "clipped": 1,
+            "discarded": 0,
+            "pcm_end_ms": 734093,
+            "sha256": "3ec75709a0a2a9d1aa1221aa3466b4460b72065252f69a44b96906f016029994",
+            "policy": "pcm-eof-intersection-v1; independently reproduced from retainedraw; not daemon execution"
+          }
+        }
+      ],
+      "child_environment": {
+        "LC_ALL": "C"
+      },
+      "corpus_sha256": "2ca2e7456c61fc8057dc4be1ef7593ba65291fd6b28c421d6ac67f4b4574ab82",
+      "decoder_sha256": "c8173e9755795978bce8e104f8d7044fabe7d6d84044aba37d3648c6f4e4e1a8",
+      "driver_sha256": "107219ad867a78babe4115d1d8d85b5f04590258f9efcbfb000406811bc17d8c",
+      "effective_uid": 501,
+      "engine": {
+        "adapter_contract": "whisper.cpp-1.9.2-cpu-v1",
+        "binary_bytes": 2438384,
+        "binary_sha256": "43b757eda907535bc13789db47f7316a5571ce32c5c7b714a2746bb9fe84679b",
+        "build_options": {
+          "BUILD_SHARED_LIBS": "OFF",
+          "CMAKE_BUILD_TYPE": "Release",
+          "GGML_ACCELERATE": "OFF",
+          "GGML_AVX": "OFF",
+          "GGML_AVX2": "OFF",
+          "GGML_BACKEND_DL": "OFF",
+          "GGML_BLAS": "OFF",
+          "GGML_BMI2": "OFF",
+          "GGML_CCACHE": "OFF",
+          "GGML_CPU_ARM_ARCH": "armv8-a",
+          "GGML_CUDA": "OFF",
+          "GGML_F16C": "OFF",
+          "GGML_FMA": "OFF",
+          "GGML_METAL": "OFF",
+          "GGML_NATIVE": "OFF",
+          "GGML_OPENMP": "OFF",
+          "GGML_RPC": "OFF",
+          "GGML_SSE42": "OFF",
+          "GGML_VULKAN": "OFF",
+          "WHISPER_BUILD_EXAMPLES": "ON",
+          "WHISPER_BUILD_SERVER": "OFF",
+          "WHISPER_BUILD_TESTS": "OFF",
+          "WHISPER_COMMON_FFMPEG": "OFF",
+          "WHISPER_COREML": "OFF",
+          "WHISPER_CURL": "OFF",
+          "WHISPER_OPENVINO": "OFF"
+        },
+        "cmake": "cmake version 4.4.3",
+        "companions": {
+          "self-test.wav": {
+            "bytes": 352078,
+            "sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e"
+          },
+          "whisper-models.LICENSE.txt": {
+            "bytes": 1063,
+            "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d"
+          },
+          "whisper.cpp.LICENSE.txt": {
+            "bytes": 1078,
+            "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+          }
+        },
+        "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+        "platform": "macos-arm64",
+        "release_observation": "whisper.cpp version: 1.9.2",
+        "runtime_dependencies": [
+          "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)",
+          "/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2200.27.0)"
+        ],
+        "source_archive_sha256": "f3585ebf64df3e41b26c45d93bdb38b423ca1de0bf40cc4b6d320254867a75df",
+        "source_commit": "306c88f4d1286aec1bf96e544632897886af5501",
+        "version": 1
+      },
+      "measurement_poll_seconds": 0.05,
+      "model_id": "base",
+      "model_sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+      "platform": "darwin",
+      "preflight_seconds": 0.3430711250002787,
+      "profile": {
+        "no_gpu": true,
+        "processors": 1,
+        "threads": 2
+      },
+      "qualification": "offline component diagnostic; no durable service, human quality or playback proof",
+      "source_commit": "15fa176bc36cd07a00d4c462f799ab16c13f80e8",
+      "source_tree_dirty": true,
+      "version": 1,
+      "evidence_id": "recognition-base-v1",
+      "foreground_playback_active": false,
+      "warm_file_cache": true
+    },
+    {
+      "cases": [
+        {
+          "caption": {
+            "cue_count": 126,
+            "cues": [
+              [
+                0.0,
+                22.96
+              ],
+              [
+                22.96,
+                24.56
+              ],
+              [
+                24.56,
+                27.4
+              ],
+              [
+                27.4,
+                30.74
+              ],
+              [
+                30.74,
+                34.52
+              ],
+              [
+                34.52,
+                37.62
+              ],
+              [
+                37.62,
+                38.62
+              ],
+              [
+                38.62,
+                39.62
+              ],
+              [
+                39.62,
+                42.4
+              ],
+              [
+                42.4,
+                44.0
+              ],
+              [
+                44.0,
+                45.44
+              ],
+              [
+                45.44,
+                57.6
+              ],
+              [
+                57.6,
+                71.18
+              ],
+              [
+                71.18,
+                94.48
+              ],
+              [
+                94.48,
+                119.96
+              ],
+              [
+                119.96,
+                134.52
+              ],
+              [
+                134.52,
+                145.6
+              ],
+              [
+                145.6,
+                161.96
+              ],
+              [
+                161.96,
+                178.68
+              ],
+              [
+                178.68,
+                195.4
+              ],
+              [
+                195.4,
+                198.9
+              ],
+              [
+                198.9,
+                201.9
+              ],
+              [
+                201.9,
+                202.9
+              ],
+              [
+                202.9,
+                204.4
+              ],
+              [
+                204.4,
+                205.4
+              ],
+              [
+                205.4,
+                206.4
+              ],
+              [
+                206.4,
+                207.4
+              ],
+              [
+                207.4,
+                208.4
+              ],
+              [
+                208.4,
+                209.4
+              ],
+              [
+                209.4,
+                210.4
+              ],
+              [
+                210.4,
+                211.4
+              ],
+              [
+                211.4,
+                212.4
+              ],
+              [
+                212.4,
+                213.4
+              ],
+              [
+                213.4,
+                214.4
+              ],
+              [
+                214.4,
+                215.4
+              ],
+              [
+                215.4,
+                216.4
+              ],
+              [
+                216.4,
+                217.4
+              ],
+              [
+                217.4,
+                218.4
+              ],
+              [
+                218.4,
+                221.4
+              ],
+              [
+                221.4,
+                237.4
+              ],
+              [
+                237.4,
+                242.4
+              ],
+              [
+                242.4,
+                244.4
+              ],
+              [
+                244.4,
+                245.4
+              ],
+              [
+                245.4,
+                253.92
+              ],
+              [
+                253.92,
+                275.92
+              ],
+              [
+                275.92,
+                289.92
+              ],
+              [
+                289.92,
+                291.92
+              ],
+              [
+                291.92,
+                292.92
+              ],
+              [
+                292.92,
+                296.92
+              ],
+              [
+                296.92,
+                298.92
+              ],
+              [
+                298.92,
+                301.92
+              ],
+              [
+                301.92,
+                302.92
+              ],
+              [
+                302.92,
+                303.92
+              ],
+              [
+                303.92,
+                319.92
+              ],
+              [
+                319.92,
+                322.92
+              ],
+              [
+                322.92,
+                327.92
+              ],
+              [
+                327.92,
+                332.92
+              ],
+              [
+                332.92,
+                340.92
+              ],
+              [
+                340.92,
+                341.92
+              ],
+              [
+                341.92,
+                342.92
+              ],
+              [
+                342.92,
+                344.92
+              ],
+              [
+                344.92,
+                349.92
+              ],
+              [
+                349.92,
+                356.92
+              ],
+              [
+                356.92,
+                358.92
+              ],
+              [
+                358.92,
+                360.92
+              ],
+              [
+                360.92,
+                364.92
+              ],
+              [
+                364.92,
+                366.92
+              ],
+              [
+                366.92,
+                370.92
+              ],
+              [
+                370.92,
+                372.92
+              ],
+              [
+                372.92,
+                373.92
+              ],
+              [
+                373.92,
+                375.92
+              ],
+              [
+                375.92,
+                378.92
+              ],
+              [
+                378.92,
+                380.92
+              ],
+              [
+                380.92,
+                382.92
+              ],
+              [
+                382.92,
+                385.92
+              ],
+              [
+                385.92,
+                386.92
+              ],
+              [
+                386.92,
+                388.92
+              ],
+              [
+                388.92,
+                389.92
+              ],
+              [
+                389.92,
+                392.92
+              ],
+              [
+                392.92,
+                393.92
+              ],
+              [
+                393.92,
+                395.92
+              ],
+              [
+                395.92,
+                399.92
+              ],
+              [
+                399.92,
+                404.92
+              ],
+              [
+                404.92,
+                415.92
+              ],
+              [
+                415.92,
+                418.92
+              ],
+              [
+                418.92,
+                421.92
+              ],
+              [
+                421.92,
+                426.92
+              ],
+              [
+                426.92,
+                429.92
+              ],
+              [
+                429.92,
+                436.92
+              ],
+              [
+                460.92,
+                463.92
+              ],
+              [
+                490.92,
+                498.92
+              ],
+              [
+                498.92,
+                506.92
+              ],
+              [
+                506.92,
+                511.92
+              ],
+              [
+                511.92,
+                521.92
+              ],
+              [
+                534.92,
+                537.92
+              ],
+              [
+                537.92,
+                542.92
+              ],
+              [
+                558.92,
+                564.92
+              ],
+              [
+                564.92,
+                568.92
+              ],
+              [
+                594.92,
+                599.92
+              ],
+              [
+                599.92,
+                604.92
+              ],
+              [
+                604.92,
+                609.92
+              ],
+              [
+                609.92,
+                614.92
+              ],
+              [
+                614.92,
+                619.92
+              ],
+              [
+                619.92,
+                624.92
+              ],
+              [
+                624.92,
+                629.92
+              ],
+              [
+                629.92,
+                634.92
+              ],
+              [
+                634.92,
+                639.92
+              ],
+              [
+                639.92,
+                644.92
+              ],
+              [
+                644.92,
+                649.92
+              ],
+              [
+                649.92,
+                654.92
+              ],
+              [
+                654.92,
+                659.92
+              ],
+              [
+                659.92,
+                664.92
+              ],
+              [
+                664.92,
+                669.92
+              ],
+              [
+                669.92,
+                674.92
+              ],
+              [
+                674.92,
+                679.92
+              ],
+              [
+                679.92,
+                684.92
+              ],
+              [
+                684.92,
+                689.92
+              ],
+              [
+                689.92,
+                694.92
+              ],
+              [
+                694.92,
+                699.92
+              ],
+              [
+                699.92,
+                704.92
+              ],
+              [
+                704.92,
+                709.92
+              ],
+              [
+                709.92,
+                714.92
+              ],
+              [
+                714.92,
+                719.92
+              ],
+              [
+                719.92,
+                724.92
+              ],
+              [
+                724.92,
+                730.92
+              ],
+              [
+                730.92,
+                738.98
+              ]
+            ],
+            "errors": [
+              "invalid_timing"
+            ],
+            "structural_valid": false,
+            "text": " We have main engine start, four, three, two, one, get on!  You're a jerk, Tom!  Look, Celia, we have to follow our passions.  You have your robotics, and I just want to be awesome in space.  Why don't you just admit that you're freaked out by my robot hand?  I'm not freaked out, but it's...  All right, fine.  I'm freaked out.  I'm having nightmares that I'm being chased by these giant robotic claws.  Oh, what in our tongue?  We're done.  The robot's memory synced and locked.  This is pretty freaky.  I'm gonna go back and get a little bit of a little bit of a bit of a pain.  Shouldn't you be down there?  I heard you guys talking last night.  It's not my fault, you know?  I'm gonna go back and get a little bit of a pain.  Are you ready?  Of course you're ready, you're a rock star.  Has it lookin' Bali?  We should have about ten minutes.  Well that's perfect.  We're only one!  All systems go!  Yeah, you go!  Go!  Go!  Go, guys!  Go, go, go!  I love it!  Go, go!  Go!  That's nice.  Nothing to worry about.  Don't...  There she is.  Now...  You love her.  She's your passion.  Be tender to her.  Be honest.  Be tender.  Reminder what love is.  Be tender.  Be tender.  And...  Action!  Memory overriding progress.  You're a jerk dog.  Oh, I'm sorry.  Sorry.  Sorry.  Look, Celia, we have to follow our passions.  You have your robotics.  And I just want to be awesome in space.  Get her coming.  Two minutes left.  Two minutes.  Celia, come on!  Even Celia!  Why don't you just admit that you're freaked out by my robot hand?  Listen, Celia.  I was young.  And a dick.  But there's no reason to destroy the world.  Why did she do this?  We already tried that one.  Come on!  Back!  Whoa!  Whoa!  No!  No!  You broke my heart.  I know.  You forgot me on Earth.  I know.  I should just press you!  I'm...  I'm...  I'm sorry.  Who'd Adlib?  I'm sorry.  Who'd Adlib?  Got my ball?  Just time.  Why don't you say...  Round of time, round of time!  Round of time, round of time!  Everybody over at it!  Ninety percent!  Captain, we have to abort!  The world's changed, Celia.  Maybe we can too.  Everybody over at complete!  You know, there's a lesson to blurt from this.  Could have gone worse.  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  ♪  [BLANK_AUDIO]",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "film",
+          "decode": {
+            "child_cpu_seconds": 1.7547650000000001,
+            "child_maxrss_bytes": 22740992,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 23491056,
+            "stderr_bytes": 0,
+            "wall_seconds": 3.5047629159998905
+          },
+          "evidence": "real short-film dialogue/music/effects; not feature-length or human-scored quality",
+          "inference": {
+            "child_cpu_seconds": 170.53296299999997,
+            "child_maxrss_bytes": 511492096,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 23504174,
+            "stderr_bytes": 345,
+            "wall_seconds": 115.40734499999962
+          },
+          "inference_rtf": 0.15721078279499423,
+          "input": {
+            "bytes": 372178639,
+            "seconds": 734.166667,
+            "sha256": "efa9062d9cdb7a338e40ad530dfdf234806743f29ae6a1a136b97ece4e588e8f"
+          },
+          "language": "en",
+          "pipeline_rtf": 0.16196881888128478,
+          "reference_limit": "Publisher subtitles are not a verbatim ASR reference; mismatch is diagnostic, not audited WER.",
+          "source_sha256": "efa9062d9cdb7a338e40ad530dfdf234806743f29ae6a1a136b97ece4e588e8f",
+          "status": "measured",
+          "word_errors": {
+            "deletions": 8,
+            "hypothesis_words": 434,
+            "insertions": 79,
+            "reference_words": 363,
+            "substitutions": 64,
+            "wer": 0.41597796143250687
+          },
+          "pcm": {
+            "samples": 11745489,
+            "seconds": 734.0930625,
+            "sha256": "c9548d11fd6da03ce464b50b415280f3b058657491982452abd7fcd588beddee"
+          },
+          "attribution": "Tears of Steel, (CC) Blender Foundation | mango.blender.org; CC BY3.0",
+          "raw_vtt_sha256": "360d3acf517da6b5520143eca8c786b40e74db379c14e5d5cf866fc5cfd54366",
+          "normalized_component_diagnostic": {
+            "clipped": 1,
+            "discarded": 0,
+            "pcm_end_ms": 734093,
+            "sha256": "8b7bc3176370c51c377dda6e2cecfe3dcee0080cfe853421030c175bb13687be",
+            "policy": "pcm-eof-intersection-v1; independently reproduced from retainedraw; not daemon execution"
+          }
+        }
+      ],
+      "child_environment": {
+        "LC_ALL": "C"
+      },
+      "corpus_sha256": "2ca2e7456c61fc8057dc4be1ef7593ba65291fd6b28c421d6ac67f4b4574ab82",
+      "decoder_sha256": "c8173e9755795978bce8e104f8d7044fabe7d6d84044aba37d3648c6f4e4e1a8",
+      "driver_sha256": "7002f0d9d4e7e7913c84b96dbbbb8b338bbe60c9753b9260c62077bab4ab3a6b",
+      "effective_uid": 501,
+      "engine": {
+        "adapter_contract": "whisper.cpp-1.9.2-cpu-v1",
+        "binary_bytes": 2438384,
+        "binary_sha256": "43b757eda907535bc13789db47f7316a5571ce32c5c7b714a2746bb9fe84679b",
+        "build_options": {
+          "BUILD_SHARED_LIBS": "OFF",
+          "CMAKE_BUILD_TYPE": "Release",
+          "GGML_ACCELERATE": "OFF",
+          "GGML_AVX": "OFF",
+          "GGML_AVX2": "OFF",
+          "GGML_BACKEND_DL": "OFF",
+          "GGML_BLAS": "OFF",
+          "GGML_BMI2": "OFF",
+          "GGML_CCACHE": "OFF",
+          "GGML_CPU_ARM_ARCH": "armv8-a",
+          "GGML_CUDA": "OFF",
+          "GGML_F16C": "OFF",
+          "GGML_FMA": "OFF",
+          "GGML_METAL": "OFF",
+          "GGML_NATIVE": "OFF",
+          "GGML_OPENMP": "OFF",
+          "GGML_RPC": "OFF",
+          "GGML_SSE42": "OFF",
+          "GGML_VULKAN": "OFF",
+          "WHISPER_BUILD_EXAMPLES": "ON",
+          "WHISPER_BUILD_SERVER": "OFF",
+          "WHISPER_BUILD_TESTS": "OFF",
+          "WHISPER_COMMON_FFMPEG": "OFF",
+          "WHISPER_COREML": "OFF",
+          "WHISPER_CURL": "OFF",
+          "WHISPER_OPENVINO": "OFF"
+        },
+        "cmake": "cmake version 4.4.3",
+        "companions": {
+          "self-test.wav": {
+            "bytes": 352078,
+            "sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e"
+          },
+          "whisper-models.LICENSE.txt": {
+            "bytes": 1063,
+            "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d"
+          },
+          "whisper.cpp.LICENSE.txt": {
+            "bytes": 1078,
+            "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+          }
+        },
+        "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+        "platform": "macos-arm64",
+        "release_observation": "whisper.cpp version: 1.9.2",
+        "runtime_dependencies": [
+          "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)",
+          "/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2200.27.0)"
+        ],
+        "source_archive_sha256": "f3585ebf64df3e41b26c45d93bdb38b423ca1de0bf40cc4b6d320254867a75df",
+        "source_commit": "306c88f4d1286aec1bf96e544632897886af5501",
+        "version": 1
+      },
+      "measurement_poll_seconds": 0.05,
+      "model_id": "base.en",
+      "model_sha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
+      "platform": "darwin",
+      "preflight_seconds": 0.9241283329974976,
+      "profile": {
+        "no_gpu": true,
+        "processors": 1,
+        "threads": 2
+      },
+      "qualification": "offline component diagnostic; no durable service, human quality or playback proof",
+      "source_commit": "15fa176bc36cd07a00d4c462f799ab16c13f80e8",
+      "source_tree_dirty": true,
+      "version": 1,
+      "evidence_id": "recognition-base-en-film-v2",
+      "foreground_playback_active": false,
+      "warm_file_cache": true
+    },
+    {
+      "cases": [
+        {
+          "caption": {
+            "cue_count": 1,
+            "cues": [
+              [
+                0.0,
+                10.5
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " And so my fellow Americans ask not what your country can do for you, ask what you can do for your country.",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "clean",
+          "decode": {
+            "child_cpu_seconds": 0.04228900000000001,
+            "child_maxrss_bytes": 15695872,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704122,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.0589099159988109
+          },
+          "decode_argv": [
+            "<decoder>",
+            "-nostdin",
+            "-v",
+            "error",
+            "-xerror",
+            "-err_detect",
+            "explode",
+            "-y",
+            "-copyts",
+            "-start_at_zero",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-threads",
+            "2",
+            "-i",
+            "<source-fd>",
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-af",
+            "aresample=16000:async=1:first_pts=0:min_comp=0:min_hard_comp=0:max_soft_comp=0",
+            "-threads",
+            "2",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            "-fs",
+            "460804097",
+            "<scratch>/audio.wav"
+          ],
+          "evidence": "short archival speech",
+          "inference": {
+            "child_cpu_seconds": 3.5904689999999997,
+            "child_maxrss_bytes": 297828352,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704748,
+            "stderr_bytes": 337,
+            "wall_seconds": 2.0500284580011794
+          },
+          "inference_argv": [
+            "<qualified-engine>",
+            "--threads",
+            "2",
+            "--processors",
+            "1",
+            "--no-gpu",
+            "--language",
+            "en",
+            "--output-vtt",
+            "--no-prints",
+            "--model",
+            "<model-fd>",
+            "--file",
+            "<scratch>/audio.wav",
+            "--output-file",
+            "<scratch>/caption"
+          ],
+          "inference_rtf": 0.18636622345465267,
+          "input": {
+            "bytes": 352044,
+            "clipped_samples": 0,
+            "noise_snr_db": null,
+            "seconds": 11.0,
+            "sha256": "d7d4e74b8a333ed02186008bc109a1b1a19d16da668bd56e785d80d69a16a72f"
+          },
+          "language": "en",
+          "normalized": {
+            "caption": {
+              "cue_count": 1,
+              "cues": [
+                [
+                  0.0,
+                  10.5
+                ]
+              ],
+              "errors": [],
+              "structural_valid": true,
+              "text": " And so my fellow Americans ask not what your country can do for you, ask what you can do for your country.",
+              "timing_accuracy": "unmeasured; no human-aligned reference"
+            },
+            "clipped": 0,
+            "discarded": 0,
+            "pcm_end_ms": 11000,
+            "policy": "pcm-eof-intersection-v1; component reproduction, not daemon execution",
+            "sha256": "cb8fdb0f8c486f76bd0f25c5feb2c8fb311ee7900519c67b85d133dca4b07f58"
+          },
+          "pcm": {
+            "bytes": 352078,
+            "samples": 176000,
+            "seconds": 11.0,
+            "sha256": "b1b461fa65350cbf2f880e367265519b6b4f9ca6597c3b1904a71704a464d7cb"
+          },
+          "pipeline_rtf": 0.1917216703636355,
+          "raw_vtt_sha256": "cb8fdb0f8c486f76bd0f25c5feb2c8fb311ee7900519c67b85d133dca4b07f58",
+          "source_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+          "status": "measured",
+          "word_errors": {
+            "deletions": 0,
+            "hypothesis_words": 22,
+            "insertions": 0,
+            "reference_words": 22,
+            "substitutions": 0,
+            "wer": 0.0
+          }
+        },
+        {
+          "caption": {
+            "cue_count": 1,
+            "cues": [
+              [
+                0.0,
+                10.56
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " And so my fellow America asked not what your country can do for you as what you can do for your country.",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "noise",
+          "decode": {
+            "child_cpu_seconds": 0.038828000000000085,
+            "child_maxrss_bytes": 297828352,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704122,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.04020274999857065
+          },
+          "decode_argv": [
+            "<decoder>",
+            "-nostdin",
+            "-v",
+            "error",
+            "-xerror",
+            "-err_detect",
+            "explode",
+            "-y",
+            "-copyts",
+            "-start_at_zero",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-threads",
+            "2",
+            "-i",
+            "<source-fd>",
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-af",
+            "aresample=16000:async=1:first_pts=0:min_comp=0:min_hard_comp=0:max_soft_comp=0",
+            "-threads",
+            "2",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            "-fs",
+            "460804097",
+            "<scratch>/audio.wav"
+          ],
+          "evidence": "controlled additive noise, not movie mixing",
+          "inference": {
+            "child_cpu_seconds": 3.529162,
+            "child_maxrss_bytes": 297828352,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704744,
+            "stderr_bytes": 337,
+            "wall_seconds": 1.9209028749974095
+          },
+          "inference_argv": [
+            "<qualified-engine>",
+            "--threads",
+            "2",
+            "--processors",
+            "1",
+            "--no-gpu",
+            "--language",
+            "en",
+            "--output-vtt",
+            "--no-prints",
+            "--model",
+            "<model-fd>",
+            "--file",
+            "<scratch>/audio.wav",
+            "--output-file",
+            "<scratch>/caption"
+          ],
+          "inference_rtf": 0.17462753409067358,
+          "input": {
+            "bytes": 352044,
+            "clipped_samples": 0,
+            "noise_snr_db": 10,
+            "seconds": 11.0,
+            "sha256": "57d31cc6a61e1538211fddfc186fffe85175787c450b7237b54c4369eed169a5"
+          },
+          "language": "en",
+          "normalized": {
+            "caption": {
+              "cue_count": 1,
+              "cues": [
+                [
+                  0.0,
+                  10.56
+                ]
+              ],
+              "errors": [],
+              "structural_valid": true,
+              "text": " And so my fellow America asked not what your country can do for you as what you can do for your country.",
+              "timing_accuracy": "unmeasured; no human-aligned reference"
+            },
+            "clipped": 0,
+            "discarded": 0,
+            "pcm_end_ms": 11000,
+            "policy": "pcm-eof-intersection-v1; component reproduction, not daemon execution",
+            "sha256": "9f5ee0227f01360006038286c23263d9ce8e8a5e2e7262ceb9e2d9adc9deb1c4"
+          },
+          "pcm": {
+            "bytes": 352078,
+            "samples": 176000,
+            "seconds": 11.0,
+            "sha256": "2d63c8c89343ee1f981afa6c3f4ddfdb34efa3bc96432f104efe9913afa3d11c"
+          },
+          "pipeline_rtf": 0.1782823295450891,
+          "raw_vtt_sha256": "9f5ee0227f01360006038286c23263d9ce8e8a5e2e7262ceb9e2d9adc9deb1c4",
+          "source_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+          "status": "measured",
+          "word_errors": {
+            "deletions": 0,
+            "hypothesis_words": 22,
+            "insertions": 0,
+            "reference_words": 22,
+            "substitutions": 3,
+            "wer": 0.13636363636363635
+          }
+        },
+        {
+          "caption": {
+            "cue_count": 1,
+            "cues": [
+              [
+                0.0,
+                10.0
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " [BLANK_AUDIO]",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "silence",
+          "decode": {
+            "child_cpu_seconds": 0.04018299999999986,
+            "child_maxrss_bytes": 297828352,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704122,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.044423583000025246
+          },
+          "decode_argv": [
+            "<decoder>",
+            "-nostdin",
+            "-v",
+            "error",
+            "-xerror",
+            "-err_detect",
+            "explode",
+            "-y",
+            "-copyts",
+            "-start_at_zero",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-threads",
+            "2",
+            "-i",
+            "<source-fd>",
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-af",
+            "aresample=16000:async=1:first_pts=0:min_comp=0:min_hard_comp=0:max_soft_comp=0",
+            "-threads",
+            "2",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            "-fs",
+            "460804097",
+            "<scratch>/audio.wav"
+          ],
+          "evidence": "digital silence, not room tone",
+          "inference": {
+            "child_cpu_seconds": 3.101825,
+            "child_maxrss_bytes": 297828352,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704562,
+            "stderr_bytes": 337,
+            "wall_seconds": 1.633527875001164
+          },
+          "inference_argv": [
+            "<qualified-engine>",
+            "--threads",
+            "2",
+            "--processors",
+            "1",
+            "--no-gpu",
+            "--language",
+            "en",
+            "--output-vtt",
+            "--no-prints",
+            "--model",
+            "<model-fd>",
+            "--file",
+            "<scratch>/audio.wav",
+            "--output-file",
+            "<scratch>/caption"
+          ],
+          "inference_rtf": 0.1485025340910149,
+          "input": {
+            "bytes": 352044,
+            "clipped_samples": 0,
+            "noise_snr_db": null,
+            "seconds": 11.0,
+            "sha256": "1a092b23d9dfe64d53943d18262c0a49eaf32c5ab5f2b016cd8edd16ec9440dd"
+          },
+          "language": "en",
+          "normalized": {
+            "caption": {
+              "cue_count": 1,
+              "cues": [
+                [
+                  0.0,
+                  10.0
+                ]
+              ],
+              "errors": [],
+              "structural_valid": true,
+              "text": " [BLANK_AUDIO]",
+              "timing_accuracy": "unmeasured; no human-aligned reference"
+            },
+            "clipped": 0,
+            "discarded": 0,
+            "pcm_end_ms": 11000,
+            "policy": "pcm-eof-intersection-v1; component reproduction, not daemon execution",
+            "sha256": "4a4d8c361f1a520e18910bf3731b4d7667a6d5077f9e4e28be305b33d1461930"
+          },
+          "pcm": {
+            "bytes": 352078,
+            "samples": 176000,
+            "seconds": 11.0,
+            "sha256": "882f98f71b72b1cc490861f610aac013ac3a08b502a66b0a45e9cb067f47585f"
+          },
+          "pipeline_rtf": 0.15254104163647175,
+          "raw_vtt_sha256": "4a4d8c361f1a520e18910bf3731b4d7667a6d5077f9e4e28be305b33d1461930",
+          "silence_output_tokens": 2,
+          "source_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+          "status": "measured"
+        },
+        {
+          "caption": {
+            "cue_count": 12,
+            "cues": [
+              [
+                0.0,
+                4.0
+              ],
+              [
+                4.0,
+                7.0
+              ],
+              [
+                7.0,
+                12.0
+              ],
+              [
+                12.0,
+                20.0
+              ],
+              [
+                20.0,
+                27.0
+              ],
+              [
+                27.0,
+                37.0
+              ],
+              [
+                37.0,
+                48.0
+              ],
+              [
+                48.0,
+                55.0
+              ],
+              [
+                55.0,
+                63.0
+              ],
+              [
+                63.0,
+                66.0
+              ],
+              [
+                66.0,
+                75.0
+              ],
+              [
+                75.0,
+                90.0
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " Abschnitt 1 von die Verwandlung.  Dies ist eine LibriVox-Aufnahme.  Alle LibriVox-Aufnahmen sind lizensfrei und in öffentlichen Besitz.  Weitere Informationen und Hinweise zur Beteiligung an diesem Projekt gibt es bei LibriVox.org.  Die Verwandlung von Franz Kafka. Abschnitt 1.  Als Krieger Samsa eines Morgens aus unruhigen Träumen erwachte, fand er sich in seinem Bett zu einem ungeheuren Ungeziver verwandelt.  Er lag auf seinem panzerartig harten Rücken und sah, wenn er den Kopf ein wenig hoch, seinen gewölbten Braunen von wogenförmigen Versteifungen geteilten Bauch.  Auf dessen Höhe sich die Bettdecke zum gänzlichen Niedergleiten bereit kaum noch erhalten konnte.  Seine Fielen im Vergleich zu seinem sonstigen Umfang gläglich dünnen Beine flimmerten ihm hilflos vor den Augen.  Was ist mit mir geschehen, dachte er.  Es war kein Traum, sein Zimmer ein richtiges, nur etwas zu kleines Menschenzimmer lag ruhig zwischen den vier wohlbekannten Wänden.  Über dem Tisch, auf dem eine auseinander gepackte Muster-Kollektion von Tuchwaren ausgebreitet war, Samsa war reisende, hing das Bild, das er vor kurzem aus einer illustrierten Zeitschrift ausgeschnitten und in einem hübschen, vergolteten Rahmen.",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "german",
+          "decode": {
+            "child_cpu_seconds": 0.17265900000000123,
+            "child_maxrss_bytes": 297828352,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 2880170,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.08811216699905344
+          },
+          "decode_argv": [
+            "<decoder>",
+            "-nostdin",
+            "-v",
+            "error",
+            "-xerror",
+            "-err_detect",
+            "explode",
+            "-y",
+            "-copyts",
+            "-start_at_zero",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-threads",
+            "2",
+            "-i",
+            "<source-fd>",
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-af",
+            "aresample=16000:async=1:first_pts=0:min_comp=0:min_hard_comp=0:max_soft_comp=0",
+            "-threads",
+            "2",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            "-fs",
+            "460804097",
+            "-t",
+            "90",
+            "<scratch>/audio.wav"
+          ],
+          "evidence": "real German single-narrator audiobook; not dialogue or human-scored quality",
+          "inference": {
+            "child_cpu_seconds": 22.495148,
+            "child_maxrss_bytes": 400457728,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 2883726,
+            "stderr_bytes": 337,
+            "wall_seconds": 11.76522179099993
+          },
+          "inference_argv": [
+            "<qualified-engine>",
+            "--threads",
+            "2",
+            "--processors",
+            "1",
+            "--no-gpu",
+            "--language",
+            "de",
+            "--output-vtt",
+            "--no-prints",
+            "--model",
+            "<model-fd>",
+            "--file",
+            "<scratch>/audio.wav",
+            "--output-file",
+            "<scratch>/caption"
+          ],
+          "inference_rtf": 0.1307246865666659,
+          "input": {
+            "bytes": 39452911,
+            "seconds": 90,
+            "sha256": "96b670c97fc93e794387066699bb7a60e0c7fc514c237060a72a689b77e41beb"
+          },
+          "language": "de",
+          "normalized": {
+            "caption": {
+              "cue_count": 12,
+              "cues": [
+                [
+                  0.0,
+                  4.0
+                ],
+                [
+                  4.0,
+                  7.0
+                ],
+                [
+                  7.0,
+                  12.0
+                ],
+                [
+                  12.0,
+                  20.0
+                ],
+                [
+                  20.0,
+                  27.0
+                ],
+                [
+                  27.0,
+                  37.0
+                ],
+                [
+                  37.0,
+                  48.0
+                ],
+                [
+                  48.0,
+                  55.0
+                ],
+                [
+                  55.0,
+                  63.0
+                ],
+                [
+                  63.0,
+                  66.0
+                ],
+                [
+                  66.0,
+                  75.0
+                ],
+                [
+                  75.0,
+                  90.0
+                ]
+              ],
+              "errors": [],
+              "structural_valid": true,
+              "text": " Abschnitt 1 von die Verwandlung.  Dies ist eine LibriVox-Aufnahme.  Alle LibriVox-Aufnahmen sind lizensfrei und in öffentlichen Besitz.  Weitere Informationen und Hinweise zur Beteiligung an diesem Projekt gibt es bei LibriVox.org.  Die Verwandlung von Franz Kafka. Abschnitt 1.  Als Krieger Samsa eines Morgens aus unruhigen Träumen erwachte, fand er sich in seinem Bett zu einem ungeheuren Ungeziver verwandelt.  Er lag auf seinem panzerartig harten Rücken und sah, wenn er den Kopf ein wenig hoch, seinen gewölbten Braunen von wogenförmigen Versteifungen geteilten Bauch.  Auf dessen Höhe sich die Bettdecke zum gänzlichen Niedergleiten bereit kaum noch erhalten konnte.  Seine Fielen im Vergleich zu seinem sonstigen Umfang gläglich dünnen Beine flimmerten ihm hilflos vor den Augen.  Was ist mit mir geschehen, dachte er.  Es war kein Traum, sein Zimmer ein richtiges, nur etwas zu kleines Menschenzimmer lag ruhig zwischen den vier wohlbekannten Wänden.  Über dem Tisch, auf dem eine auseinander gepackte Muster-Kollektion von Tuchwaren ausgebreitet war, Samsa war reisende, hing das Bild, das er vor kurzem aus einer illustrierten Zeitschrift ausgeschnitten und in einem hübschen, vergolteten Rahmen.",
+              "timing_accuracy": "unmeasured; no human-aligned reference"
+            },
+            "clipped": 0,
+            "discarded": 0,
+            "pcm_end_ms": 90000,
+            "policy": "pcm-eof-intersection-v1; component reproduction, not daemon execution",
+            "sha256": "ab0a8d93d8cd63436059e0a28b39e01531253e245b97db7f717e336b0daf5daa"
+          },
+          "pcm": {
+            "bytes": 2880170,
+            "samples": 1440000,
+            "seconds": 90.0,
+            "sha256": "1c4ed4e4101461e2647b55f2a0659b5fd63f1c3b0067ba7c87666695ee928e1d"
+          },
+          "pipeline_rtf": 0.13170371064443315,
+          "raw_vtt_sha256": "ab0a8d93d8cd63436059e0a28b39e01531253e245b97db7f717e336b0daf5daa",
+          "reference_limit": "First 90 seconds include spoken LibriVox intro. Independent book text exists but an exact spoken excerpt has not been human-aligned. Do not score WER against recognizer output.",
+          "source_sha256": "96b670c97fc93e794387066699bb7a60e0c7fc514c237060a72a689b77e41beb",
+          "status": "measured"
+        }
+      ],
+      "child_environment": {
+        "LC_ALL": "C"
+      },
+      "corpus_sha256": "8dc2e1e4fd934685fe28528293d82413f868b2600f8054ea040345d7c0e095dc",
+      "decoder_sha256": "c8173e9755795978bce8e104f8d7044fabe7d6d84044aba37d3648c6f4e4e1a8",
+      "driver_sha256": "be660d0b838c2f6efacc3af365139d2211b92658aefe76e7e0b87fd09b34b065",
+      "effective_uid": 501,
+      "engine": {
+        "adapter_contract": "whisper.cpp-1.9.2-cpu-v1",
+        "binary_bytes": 2438384,
+        "binary_sha256": "43b757eda907535bc13789db47f7316a5571ce32c5c7b714a2746bb9fe84679b",
+        "build_options": {
+          "BUILD_SHARED_LIBS": "OFF",
+          "CMAKE_BUILD_TYPE": "Release",
+          "GGML_ACCELERATE": "OFF",
+          "GGML_AVX": "OFF",
+          "GGML_AVX2": "OFF",
+          "GGML_BACKEND_DL": "OFF",
+          "GGML_BLAS": "OFF",
+          "GGML_BMI2": "OFF",
+          "GGML_CCACHE": "OFF",
+          "GGML_CPU_ARM_ARCH": "armv8-a",
+          "GGML_CUDA": "OFF",
+          "GGML_F16C": "OFF",
+          "GGML_FMA": "OFF",
+          "GGML_METAL": "OFF",
+          "GGML_NATIVE": "OFF",
+          "GGML_OPENMP": "OFF",
+          "GGML_RPC": "OFF",
+          "GGML_SSE42": "OFF",
+          "GGML_VULKAN": "OFF",
+          "WHISPER_BUILD_EXAMPLES": "ON",
+          "WHISPER_BUILD_SERVER": "OFF",
+          "WHISPER_BUILD_TESTS": "OFF",
+          "WHISPER_COMMON_FFMPEG": "OFF",
+          "WHISPER_COREML": "OFF",
+          "WHISPER_CURL": "OFF",
+          "WHISPER_OPENVINO": "OFF"
+        },
+        "cmake": "cmake version 4.4.3",
+        "companions": {
+          "self-test.wav": {
+            "bytes": 352078,
+            "sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e"
+          },
+          "whisper-models.LICENSE.txt": {
+            "bytes": 1063,
+            "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d"
+          },
+          "whisper.cpp.LICENSE.txt": {
+            "bytes": 1078,
+            "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+          }
+        },
+        "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+        "platform": "macos-arm64",
+        "release_observation": "whisper.cpp version: 1.9.2",
+        "runtime_dependencies": [
+          "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)",
+          "/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2200.27.0)"
+        ],
+        "source_archive_sha256": "f3585ebf64df3e41b26c45d93bdb38b423ca1de0bf40cc4b6d320254867a75df",
+        "source_commit": "306c88f4d1286aec1bf96e544632897886af5501",
+        "version": 1
+      },
+      "measurement_poll_seconds": 0.05,
+      "model_id": "base",
+      "model_sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+      "platform": "darwin",
+      "preflight_seconds": 0.18228724999789847,
+      "profile": {
+        "no_gpu": true,
+        "processors": 1,
+        "threads": 2
+      },
+      "qualification": "offline component diagnostic; no durable service, human quality or playback proof",
+      "source_commit": "15fa176bc36cd07a00d4c462f799ab16c13f80e8",
+      "source_tree_dirty": true,
+      "version": 1,
+      "evidence_id": "recognition-final-short",
+      "foreground_playback_active": false,
+      "warm_file_cache": true
+    },
+    {
+      "cases": [
+        {
+          "caption": {
+            "cue_count": 1,
+            "cues": [
+              [
+                0.0,
+                11.0
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "clean",
+          "decode": {
+            "child_cpu_seconds": 0.04649399999999998,
+            "child_maxrss_bytes": 15728640,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704122,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.08432945900131017
+          },
+          "decode_argv": [
+            "<decoder>",
+            "-nostdin",
+            "-v",
+            "error",
+            "-xerror",
+            "-err_detect",
+            "explode",
+            "-y",
+            "-copyts",
+            "-start_at_zero",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-threads",
+            "2",
+            "-i",
+            "<source-fd>",
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-af",
+            "aresample=16000:async=1:first_pts=0:min_comp=0:min_hard_comp=0:max_soft_comp=0",
+            "-threads",
+            "2",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            "-fs",
+            "460804097",
+            "<scratch>/audio.wav"
+          ],
+          "evidence": "short archival speech",
+          "inference": {
+            "child_cpu_seconds": 3.5084589999999998,
+            "child_maxrss_bytes": 298467328,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 704750,
+            "stderr_bytes": 337,
+            "wall_seconds": 1.8960096660011914
+          },
+          "inference_argv": [
+            "<qualified-engine>",
+            "--threads",
+            "2",
+            "--processors",
+            "1",
+            "--no-gpu",
+            "--language",
+            "en",
+            "--output-vtt",
+            "--no-prints",
+            "--model",
+            "<model-fd>",
+            "--file",
+            "<scratch>/audio.wav",
+            "--output-file",
+            "<scratch>/caption"
+          ],
+          "inference_rtf": 0.17236451509101738,
+          "input": {
+            "bytes": 352044,
+            "clipped_samples": 0,
+            "noise_snr_db": null,
+            "seconds": 11.0,
+            "sha256": "d7d4e74b8a333ed02186008bc109a1b1a19d16da668bd56e785d80d69a16a72f"
+          },
+          "language": "en",
+          "normalized": {
+            "caption": {
+              "cue_count": 1,
+              "cues": [
+                [
+                  0.0,
+                  11.0
+                ]
+              ],
+              "errors": [],
+              "structural_valid": true,
+              "text": " And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+              "timing_accuracy": "unmeasured; no human-aligned reference"
+            },
+            "clipped": 0,
+            "discarded": 0,
+            "pcm_end_ms": 11000,
+            "policy": "pcm-eof-intersection-v1; component reproduction, not daemon execution",
+            "sha256": "132fd8fec9bfb49b8e1d41e8f63a1a1a5ccf9af1f14f55067f7e73dc242844cf"
+          },
+          "pcm": {
+            "bytes": 352078,
+            "samples": 176000,
+            "seconds": 11.0,
+            "sha256": "b1b461fa65350cbf2f880e367265519b6b4f9ca6597c3b1904a71704a464d7cb"
+          },
+          "pipeline_rtf": 0.18003082954568195,
+          "raw_vtt_sha256": "132fd8fec9bfb49b8e1d41e8f63a1a1a5ccf9af1f14f55067f7e73dc242844cf",
+          "source_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+          "status": "measured",
+          "word_errors": {
+            "deletions": 0,
+            "hypothesis_words": 22,
+            "insertions": 0,
+            "reference_words": 22,
+            "substitutions": 0,
+            "wer": 0.0
+          }
+        }
+      ],
+      "child_environment": {
+        "LC_ALL": "C"
+      },
+      "corpus_sha256": "8dc2e1e4fd934685fe28528293d82413f868b2600f8054ea040345d7c0e095dc",
+      "decoder_sha256": "c8173e9755795978bce8e104f8d7044fabe7d6d84044aba37d3648c6f4e4e1a8",
+      "driver_sha256": "be660d0b838c2f6efacc3af365139d2211b92658aefe76e7e0b87fd09b34b065",
+      "effective_uid": 501,
+      "engine": {
+        "adapter_contract": "whisper.cpp-1.9.2-cpu-v1",
+        "binary_bytes": 2438384,
+        "binary_sha256": "43b757eda907535bc13789db47f7316a5571ce32c5c7b714a2746bb9fe84679b",
+        "build_options": {
+          "BUILD_SHARED_LIBS": "OFF",
+          "CMAKE_BUILD_TYPE": "Release",
+          "GGML_ACCELERATE": "OFF",
+          "GGML_AVX": "OFF",
+          "GGML_AVX2": "OFF",
+          "GGML_BACKEND_DL": "OFF",
+          "GGML_BLAS": "OFF",
+          "GGML_BMI2": "OFF",
+          "GGML_CCACHE": "OFF",
+          "GGML_CPU_ARM_ARCH": "armv8-a",
+          "GGML_CUDA": "OFF",
+          "GGML_F16C": "OFF",
+          "GGML_FMA": "OFF",
+          "GGML_METAL": "OFF",
+          "GGML_NATIVE": "OFF",
+          "GGML_OPENMP": "OFF",
+          "GGML_RPC": "OFF",
+          "GGML_SSE42": "OFF",
+          "GGML_VULKAN": "OFF",
+          "WHISPER_BUILD_EXAMPLES": "ON",
+          "WHISPER_BUILD_SERVER": "OFF",
+          "WHISPER_BUILD_TESTS": "OFF",
+          "WHISPER_COMMON_FFMPEG": "OFF",
+          "WHISPER_COREML": "OFF",
+          "WHISPER_CURL": "OFF",
+          "WHISPER_OPENVINO": "OFF"
+        },
+        "cmake": "cmake version 4.4.3",
+        "companions": {
+          "self-test.wav": {
+            "bytes": 352078,
+            "sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e"
+          },
+          "whisper-models.LICENSE.txt": {
+            "bytes": 1063,
+            "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d"
+          },
+          "whisper.cpp.LICENSE.txt": {
+            "bytes": 1078,
+            "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+          }
+        },
+        "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+        "platform": "macos-arm64",
+        "release_observation": "whisper.cpp version: 1.9.2",
+        "runtime_dependencies": [
+          "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)",
+          "/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2200.27.0)"
+        ],
+        "source_archive_sha256": "f3585ebf64df3e41b26c45d93bdb38b423ca1de0bf40cc4b6d320254867a75df",
+        "source_commit": "306c88f4d1286aec1bf96e544632897886af5501",
+        "version": 1
+      },
+      "measurement_poll_seconds": 0.05,
+      "model_id": "base.en",
+      "model_sha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
+      "platform": "darwin",
+      "preflight_seconds": 0.17130125000039698,
+      "profile": {
+        "no_gpu": true,
+        "processors": 1,
+        "threads": 2
+      },
+      "qualification": "offline component diagnostic; no durable service, human quality or playback proof",
+      "source_commit": "15fa176bc36cd07a00d4c462f799ab16c13f80e8",
+      "source_tree_dirty": true,
+      "version": 1,
+      "evidence_id": "recognition-final-clean",
+      "foreground_playback_active": false,
+      "warm_file_cache": true
+    },
+    {
+      "cases": [
+        {
+          "caption": {
+            "cue_count": 1,
+            "cues": [
+              [
+                0.0,
+                12.0
+              ]
+            ],
+            "errors": [],
+            "structural_valid": true,
+            "text": " Ihr erstes war der Slalom, bei dem Sie in Ihrem ersten Lauf ein Diednatt-Fimisch erhielt, 36 der 116 Teilnehmer. Er zieht dann in diesem Rennen das gleiche Ergebnis.",
+            "timing_accuracy": "unmeasured; no human-aligned reference"
+          },
+          "case": "german-aligned",
+          "decode": {
+            "child_cpu_seconds": 0.056309,
+            "child_maxrss_bytes": 15679488,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 414798,
+            "stderr_bytes": 0,
+            "wall_seconds": 0.43176241599940113
+          },
+          "decode_argv": [
+            "<decoder>",
+            "-nostdin",
+            "-v",
+            "error",
+            "-xerror",
+            "-err_detect",
+            "explode",
+            "-y",
+            "-copyts",
+            "-start_at_zero",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-threads",
+            "2",
+            "-i",
+            "<source-fd>",
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-af",
+            "aresample=16000:async=1:first_pts=0:min_comp=0:min_hard_comp=0:max_soft_comp=0",
+            "-threads",
+            "2",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            "-fs",
+            "460804097",
+            "<scratch>/audio.wav"
+          ],
+          "evidence": "one independently transcribed German read-speech utterance; not dialogue or local human quality/timing review",
+          "inference": {
+            "child_cpu_seconds": 4.0743529999999994,
+            "child_maxrss_bytes": 299139072,
+            "exit_code": 0,
+            "maxrss_scope": "cumulative child high-water mark of this driver, not per-stage RAM",
+            "scratch_peak_sampled_bytes": 415546,
+            "stderr_bytes": 341,
+            "wall_seconds": 2.126268291998713
+          },
+          "inference_argv": [
+            "<qualified-engine>",
+            "--threads",
+            "2",
+            "--processors",
+            "1",
+            "--no-gpu",
+            "--language",
+            "de",
+            "--output-vtt",
+            "--no-prints",
+            "--model",
+            "<model-fd>",
+            "--file",
+            "<scratch>/audio.wav",
+            "--output-file",
+            "<scratch>/caption"
+          ],
+          "inference_rtf": 0.16406391141965376,
+          "input": {
+            "bytes": 829498,
+            "seconds": 12.96,
+            "sha256": "1942763aa0b6903ba0305fe95d665497efdd75aacbb605f79d6484ac6470b33d"
+          },
+          "language": "de",
+          "normalized": {
+            "caption": {
+              "cue_count": 1,
+              "cues": [
+                [
+                  0.0,
+                  12.0
+                ]
+              ],
+              "errors": [],
+              "structural_valid": true,
+              "text": " Ihr erstes war der Slalom, bei dem Sie in Ihrem ersten Lauf ein Diednatt-Fimisch erhielt, 36 der 116 Teilnehmer. Er zieht dann in diesem Rennen das gleiche Ergebnis.",
+              "timing_accuracy": "unmeasured; no human-aligned reference"
+            },
+            "clipped": 0,
+            "discarded": 0,
+            "pcm_end_ms": 12960,
+            "policy": "pcm-eof-intersection-v1; component reproduction, not daemon execution",
+            "sha256": "e42ae81ad4c60e070ddad72944bc287e9d2e82bc35dbe6dbb0ae639839c6bc21"
+          },
+          "pcm": {
+            "bytes": 414798,
+            "samples": 207360,
+            "seconds": 12.96,
+            "sha256": "075c06341ee211646094d36a8c1dc1d89670bf59e0468a9815713f47fb16a37c"
+          },
+          "pipeline_rtf": 0.19737891265417545,
+          "raw_vtt_sha256": "e42ae81ad4c60e070ddad72944bc287e9d2e82bc35dbe6dbb0ae639839c6bc21",
+          "reference_limit": "Publisher-provided independently sourced read-speech transcription, not local human listening/timing review.",
+          "source_sha256": "1942763aa0b6903ba0305fe95d665497efdd75aacbb605f79d6484ac6470b33d",
+          "status": "measured",
+          "word_errors": {
+            "deletions": 1,
+            "hypothesis_words": 29,
+            "insertions": 2,
+            "reference_words": 28,
+            "substitutions": 3,
+            "wer": 0.21428571428571427
+          }
+        }
+      ],
+      "child_environment": {
+        "LC_ALL": "C"
+      },
+      "corpus_sha256": "a3603243eb4e5e633fbfa7e7dc1136d8574b86655a56cb5dd85f7b58451c214c",
+      "decoder_sha256": "c8173e9755795978bce8e104f8d7044fabe7d6d84044aba37d3648c6f4e4e1a8",
+      "driver_sha256": "5bd08a75f9d6501fc59486fe04969fdd6591bccae3a8583f1b79278f3bf3e50b",
+      "effective_uid": 501,
+      "engine": {
+        "adapter_contract": "whisper.cpp-1.9.2-cpu-v1",
+        "binary_bytes": 2438384,
+        "binary_sha256": "43b757eda907535bc13789db47f7316a5571ce32c5c7b714a2746bb9fe84679b",
+        "build_options": {
+          "BUILD_SHARED_LIBS": "OFF",
+          "CMAKE_BUILD_TYPE": "Release",
+          "GGML_ACCELERATE": "OFF",
+          "GGML_AVX": "OFF",
+          "GGML_AVX2": "OFF",
+          "GGML_BACKEND_DL": "OFF",
+          "GGML_BLAS": "OFF",
+          "GGML_BMI2": "OFF",
+          "GGML_CCACHE": "OFF",
+          "GGML_CPU_ARM_ARCH": "armv8-a",
+          "GGML_CUDA": "OFF",
+          "GGML_F16C": "OFF",
+          "GGML_FMA": "OFF",
+          "GGML_METAL": "OFF",
+          "GGML_NATIVE": "OFF",
+          "GGML_OPENMP": "OFF",
+          "GGML_RPC": "OFF",
+          "GGML_SSE42": "OFF",
+          "GGML_VULKAN": "OFF",
+          "WHISPER_BUILD_EXAMPLES": "ON",
+          "WHISPER_BUILD_SERVER": "OFF",
+          "WHISPER_BUILD_TESTS": "OFF",
+          "WHISPER_COMMON_FFMPEG": "OFF",
+          "WHISPER_COREML": "OFF",
+          "WHISPER_CURL": "OFF",
+          "WHISPER_OPENVINO": "OFF"
+        },
+        "cmake": "cmake version 4.4.3",
+        "companions": {
+          "self-test.wav": {
+            "bytes": 352078,
+            "sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e"
+          },
+          "whisper-models.LICENSE.txt": {
+            "bytes": 1063,
+            "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d"
+          },
+          "whisper.cpp.LICENSE.txt": {
+            "bytes": 1078,
+            "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+          }
+        },
+        "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+        "platform": "macos-arm64",
+        "release_observation": "whisper.cpp version: 1.9.2",
+        "runtime_dependencies": [
+          "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)",
+          "/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2200.27.0)"
+        ],
+        "source_archive_sha256": "f3585ebf64df3e41b26c45d93bdb38b423ca1de0bf40cc4b6d320254867a75df",
+        "source_commit": "306c88f4d1286aec1bf96e544632897886af5501",
+        "version": 1
+      },
+      "measurement_poll_seconds": 0.05,
+      "model_id": "base",
+      "model_sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+      "platform": "darwin",
+      "preflight_seconds": 0.3472514159984712,
+      "profile": {
+        "no_gpu": true,
+        "processors": 1,
+        "threads": 2
+      },
+      "qualification": "offline component diagnostic; no durable service, human quality or playback proof",
+      "source_commit": "15fa176bc36cd07a00d4c462f799ab16c13f80e8",
+      "source_tree_dirty": true,
+      "version": 1,
+      "evidence_id": "recognition-fleurs-german",
+      "foreground_playback_active": false,
+      "warm_file_cache": true
+    }
+  ],
+  "hardware": {
+    "cpu": "Apple M3 Max",
+    "physical_cores": 16,
+    "memory_bytes": 68719476736
+  },
+  "host_background_load": "Uncontrolled development activity; Rust builds may have overlapped measurements. No deliberate foreground playback."
+}

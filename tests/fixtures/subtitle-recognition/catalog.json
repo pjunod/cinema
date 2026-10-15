@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "reference_policy": "Source text, not recognizer output. No human-audited word or cue timestamps are available.",
+  "sources": {
+    "jfk": {
+      "path": "crates/plurxd/src/subtitle_models/self-test.wav",
+      "bytes": 352078,
+      "sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+      "source": "https://github.com/ggml-org/whisper.cpp/blob/306c88f4d1286aec1bf96e544632897886af5501/samples/jfk.wav",
+      "license": "Upstream MIT; United States government presidential speech. See crates/plurxd/src/subtitle_models/self-test.provenance.json.",
+      "language": "en",
+      "reference": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country",
+      "seconds": 11,
+      "license_notice_sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+    },
+    "kafka-de": {
+      "filename": "verwandlung_01_kafka.mp3",
+      "bytes": 39452911,
+      "sha256": "96b670c97fc93e794387066699bb7a60e0c7fc514c237060a72a689b77e41beb",
+      "source": "https://archive.org/download/verwandlung_mw_0811_librivox/verwandlung_01_kafka.mp3",
+      "license": "LibriVox public-domain dedication; book public domain in USA. Check applicable jurisdiction before obtaining; media is not redistributed here.",
+      "license_source": "https://librivox.org/pages/about-librivox/",
+      "catalog_source": "https://librivox.org/die-verwandlung-von-franz-kafka/",
+      "reader": "Markus Wachenheim",
+      "language": "de",
+      "seconds": 90,
+      "reference": null,
+      "reference_status": "First 90 seconds include spoken LibriVox intro. Independent book text exists but an exact spoken excerpt has not been human-aligned. Do not score WER against recognizer output.",
+      "reference_excerpt_file": "kafka-first-paragraph.txt",
+      "reference_excerpt_sha256": "c430b3cffabc88ec422331b8084b7a70eb2186653b859a1389e108afbccdc9b4",
+      "reference_source": "https://www.gutenberg.org/cache/epub/22367/pg22367.txt",
+      "reference_source_sha256": "359d3f5983c812393f4bd7ee49a350ffffc7d476015e58d6b84b6c848dd2b0e9",
+      "reference_excerpt_policy": "Public-domain original book excerpt, independently sourced; not aligned to the90s excerpt, so no WER is reported.",
+      "license_source_sha256": "90eaec2a06b276310e39609cfb97360dbe91aef49b31d0a5d82b02767049fa93"
+    },
+    "tears-of-steel": {
+      "filename": "tears_of_steel_720p.mov",
+      "bytes": 372178639,
+      "sha256": "efa9062d9cdb7a338e40ad530dfdf234806743f29ae6a1a136b97ece4e588e8f",
+      "source": "https://download.blender.org/demo/movies/ToS/tears_of_steel_720p.mov",
+      "license": "CC BY 3.0; (CC) Blender Foundation | mango.blender.org. Full movie retains credits. Separate soundtrack album has separate BY-ND terms and is not used.",
+      "license_source": "https://mango.blender.org/sharing/",
+      "language": "en",
+      "seconds": 734.166667,
+      "reference_file": "TOS-en.srt",
+      "reference_sha256": "ce9578f6fe098a5821045a38884b229160f9e7ba27890448a92f5be330c6e6fe",
+      "reference_source": "https://download.blender.org/demo/movies/ToS/subtitles/TOS-en.srt",
+      "reference_status": "Publisher subtitle text, not a verbatim human-audited ASR transcript. Includes on-screen text; scores are diagnostic only.",
+      "license_source_sha256": "c3defc0521e16af0a3afb6a96d084517620adf6434038e6a3a2ba1cf50f86947",
+      "license_url": "https://creativecommons.org/licenses/by/3.0/",
+      "license_text": "licenses/CC-BY-3.0.txt",
+      "license_text_sha256": "e6bc9e9c474700b708f568bac9e5a8a9bcb2b1dad53442f5ba449fcb848b8e76"
+    },
+    "fleurs-de": {
+      "path": "tests/fixtures/subtitle-recognition/fleurs-de.wav",
+      "bytes": 829498,
+      "sha256": "1942763aa0b6903ba0305fe95d665497efdd75aacbb605f79d6484ac6470b33d",
+      "source": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/de_de/audio/dev.tar.gz",
+      "source_archive_bytes": 227694463,
+      "source_archive_sha256": "72cac13bbddbddf674d8102a9e7b90a3b1db5d777ed92e88eccc5ae69cb8fc9d",
+      "archive_member": "dev/10031412691154736538.wav",
+      "license": "CC BY 4.0",
+      "attribution": "FLEURS: Conneau, Ma, Khanuja, Zhang, Axelrod, Dalmia, Riesa, Rivera and Bapna (2022), Google.",
+      "license_source": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/README.md",
+      "license_source_sha256": "688f79f2a5c731af3796e9f683eb02f9b3f09d040decd8c5625d0f37098e71c6",
+      "reference": "ihr erstes war der slalom bei dem sie in ihrem ersten lauf ein did not finish erhielt 36 der 116 teilnehmer erzielten in diesem rennen das gleiche ergebnis",
+      "reference_source": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/de_de/dev.tsv",
+      "reference_tsv_sha256": "055b6ddecc9ad493d9ead86babe3ebe225148dd3c174fa6f95cb83a4f9586e18",
+      "reference_status": "Publisher-provided independently sourced read-speech transcription, not local human listening/timing review.",
+      "language": "de",
+      "seconds": 12.96,
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "license_text": "licenses/CC-BY-4.0.txt",
+      "license_text_sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+      "changes": "Extracted individual WAV; audio bytes and selected publisher reference text are unmodified. Provenance metadata added."
+    }
+  },
+  "cases": {
+    "clean": {
+      "source": "jfk",
+      "recipe": "copy",
+      "evidence": "short archival speech"
+    },
+    "noise": {
+      "source": "jfk",
+      "recipe": "lcg32-uniform-snr10-db-v1",
+      "evidence": "controlled additive noise, not movie mixing"
+    },
+    "silence": {
+      "source": "jfk",
+      "recipe": "zero-pcm",
+      "evidence": "digital silence, not room tone"
+    },
+    "stress": {
+      "source": "jfk",
+      "recipe": "repeat-pcm",
+      "evidence": "synthetic repeated speech, not film quality",
+      "prepared_input": {
+        "seconds": 7200,
+        "bytes": 230400044,
+        "sha256": "6ac4c32a2f586fd626408b6c44097e6613f15004ec98299b9a01a21615763a24",
+        "status": "input generated and hashed only; inference and resource qualification not executed"
+      }
+    },
+    "german": {
+      "source": "kafka-de",
+      "recipe": "first-90-seconds",
+      "evidence": "real German single-narrator audiobook; not dialogue or human-scored quality"
+    },
+    "film": {
+      "source": "tears-of-steel",
+      "recipe": "full-short-film",
+      "evidence": "real short-film dialogue/music/effects; not feature-length or human-scored quality"
+    },
+    "german-aligned": {
+      "source": "fleurs-de",
+      "recipe": "whole-published-utterance",
+      "evidence": "one independently transcribed German read-speech utterance; not dialogue or local human quality/timing review"
+    }
+  }
+}
