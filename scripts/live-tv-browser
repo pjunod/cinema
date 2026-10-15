@@ -413,7 +413,7 @@ def main(argv: list[str]) -> int:
             stop()
             until(lambda: not active(), "the rejoined session could not be released")
             assert deletes.count(orphan) == lost_attempts + 1, deletes
-            assert page.evaluate("key => localStorage.getItem(key) === null", hint_key)
+            page.wait_for_function("key => localStorage.getItem(key) === null", arg=hint_key)
             assert not forbidden, "Live TV wrote VOD/account state: " + repr(forbidden)
             assert not errors, "browser page errors: " + repr(errors)
             assert events == [entry for i in range(1, 11) for entry in
