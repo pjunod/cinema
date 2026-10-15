@@ -15,6 +15,19 @@ PR title alone) counts as having claimed or finished work. It lives in the
 repository so every vendor reads and writes it the same way: through git and
 the Forgejo API, with no vendor-specific tooling.
 
+**Bounded L-03 web follow-up, 2026-10-15:** root
+`codex://threads/01a0c165-d718-73a1-93e9-e81380017705` owns only the Stop
+feedback repair on `codex/live-tv-stop-feedback-20261015`: web
+`pages/live-tv-controls.js`, its focused/existing web test fixtures, the
+new test family's CI input registration and these ledger/index/backlog
+updates. Original authorship and other playback work remain untouched.
+The observed stale Playing live paragraph reproduces in a source-executing
+test; the pending/success/newer-channel feedback correction has local
+evidence in the [shared-transport ledger](../features/LIVE-TV-SHARED-TRANSPORT.md#execution-log).
+Independent review and promotion remain pending. No tuner/lease/default,
+runtime deployment or full-row acceptance change; four bounded closures
+and45acceptance-open remain unchanged.
+
 **Promoted to main, 2026-10-04:** the effort branch
 `effort/architecture-review-2026-09-20` landed on `main` as `4cfd1bdd1`
 (#793) on 2026-10-04, without the pre-merge relevance check that was planned

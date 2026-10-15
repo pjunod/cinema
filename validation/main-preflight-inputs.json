@@ -3175,6 +3175,15 @@
       "reason": "Only actual api.js read into VM."
     },
     {
+      "id_prefix": "node:tests/web/live-tv-stop-feedback.test.js",
+      "inputs": [
+        "tests/web/live-tv-stop-feedback.test.js",
+        "tests/web/shell-source.js",
+        "crates/plurxd/src/web/**"
+      ],
+      "reason": "Executes shipped Stop and page feedback against deferred release/presentation replies; served scripts are read through shell-source."
+    },
+    {
       "id_prefix": "node:tests/web/live-tv.test.js",
       "inputs": [
         "tests/web/live-tv.test.js",
