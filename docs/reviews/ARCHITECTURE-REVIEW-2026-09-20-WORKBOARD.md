@@ -22,9 +22,11 @@ feedback repair on `codex/live-tv-stop-feedback-20261015`: web
 new test family's CI input registration and these ledger/index/backlog
 updates. Original authorship and other playback work remain untouched.
 The observed stale Playing live paragraph reproduces in a source-executing
-test; the pending/success/newer-channel feedback correction has local
+test; the pending/confirmed-release/newer-channel feedback correction has local
 evidence in the [shared-transport ledger](../features/LIVE-TV-SHARED-TRANSPORT.md#execution-log).
-Independent review and promotion remain pending. No tuner/lease/default,
+The sole review's unconfirmed-Start P2 reproduces through the shipped Lease
+and is repaired; five focused cases pass. Promotion remains pending in #1107.
+No tuner/lease/default,
 runtime deployment or full-row acceptance change; four bounded closures
 and45acceptance-open remain unchanged.
 
