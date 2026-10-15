@@ -1,6 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** Mac follow-ups and AMD/Intel VA-API fixes landed; QSV shipping-image correction qualified and reviewed; final gate and landing pending · **Updated:** 2026-10-15 · **Owner:** managing agent with Sol 6.1 builder · **Integration:** `codex/video-processing-closeout`.
+**Status:** Mac follow-ups and AMD/Intel VA-API fixes landed; supported implementation and hardware qualification complete; final QSV contribution in PR #1102 · **Updated:** 2026-10-15 · **Owner:** managing agent with Sol 6.1 builder · **Integration:** [PR #1102](http://forge.lan:3000/noirr/plurx/pulls/1102).
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is
@@ -37,13 +37,15 @@ Prior AMD and Intel receipts, scripts and synthetic controls are preserved in
 verified durable archives (41 and 348 members respectively). The redundant
 builder checkout was removed after its three source files matched the
 implementation commit. The temporary Metal toolchain was removed and Xcode
-reports it uninstalled. Intel qualification images and inputs remain reserved
-for the pending checks; final remote scratch and compiler-cache cleanup follows
-acceptance and durable publication.
+reports it uninstalled. All task-owned qualification roots and images on both nodes are now removed
+after durable evidence verification and fresh consumer checks. Production
+container identities, starts and restart counts are unchanged. The two obsolete
+Mac integration branches are removed after ancestry and open-PR checks. Only
+the active manager clone and isolated compiler cache remain until final merge.
 
 The final adversarial review approves the candidate; its one minor deadline
 wording finding is corrected. Both focused packaging regressions pass. The
-remaining order is the fast lane, merge and final cleanup. The operator authorized this session to finish validation and merge; the
+fast-lane, merge and final local-cleanup receipts are tracked in [PR #1102](http://forge.lan:3000/noirr/plurx/pulls/1102). The operator authorized this session to finish validation and merge; the
 previously nominated batch-merge session remains stopped.
 
 
@@ -182,10 +184,10 @@ cleared before recovery, so everything was rebuilt from the pushed branch
   Intel, and requalifies on AMD. The adversarial review's findings are
   addressed (`36b9a690`), and the final tree requalifies on Intel.
 
-The Intel fixes subsequently landed in PR #1016. Remaining closeout work:
-
-1. Complete the fast lane for the reviewed, hardware-qualified shipping correction.
-2. Merge the closeout and finish task-owned qualification-resource cleanup.
+The Intel fixes landed in PR #1016. The final shipping correction is
+implemented, hardware-qualified and independently approved in [PR #1102](http://forge.lan:3000/noirr/plurx/pulls/1102).
+That pull request records the final fast lane, landing and local cleanup; no
+additional implementation remains in this contribution.
 
 The corrected image no longer carries Debian's `libmfx1` and admits strict
 QSV graphs; the original image's refusal remains correctly enforced. Each node's own probe decides
@@ -205,7 +207,7 @@ merged tree passes pinned all-target compilation and the normal tracked hook.
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
 | F1 GPU subtitle compositing | Native builder | All eight raw graph comparisons, merged `c10f16f0` text API and one complete performance campaign pass; wall time is 13.02–31.14% lower and child CPU/frame 49.90–81.73% lower | Landed in #993; exact evidence retained |
-| F2 non-Mac P5 hardware decoding | Claude (was Route builder) | AMD and Intel raw graphs pass 32/32 (Intel with VA-API and QSV encode). On the shipping image, the daemon's own probe admits the package on both, and normal-API delivery runs the strict graph with VA-API decode and encode. Fixed on the way: the probe raster, the progress-meter splice, refusal attribution, the 64×64 DV encoder-pairing proof, a foreign Media SDK failing the whole Intel probe, and 64×64 QSV Main10 proofs | Corrected shipping image now passes raw and ordinary-API strict QSV; final closeout fast lane/landing pending |
+| F2 non-Mac P5 hardware decoding | Claude (was Route builder) | AMD and Intel raw graphs pass 32/32 (Intel with VA-API and QSV encode). On the shipping image, the daemon's own probe admits the package on both, and normal-API delivery runs the strict graph with VA-API decode and encode. Fixed on the way: the probe raster, the progress-meter splice, refusal attribution, the 64×64 DV encoder-pairing proof, a foreign Media SDK failing the whole Intel probe, and 64×64 QSV Main10 proofs | Corrected shipping image now passes raw and ordinary-API strict QSV; final gate/landing receipt in [PR #1102](http://forge.lan:3000/noirr/plurx/pulls/1102) |
 | F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on `2139fa9c`; the merged `c10f16f0` MPEG-2 case also passes unchanged caption/picture assertions and clean shutdown | Landed in #993; broader DVR and client presentation remain separate |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner

@@ -2433,4 +2433,14 @@ finding corrected the deadline wording above to the recorded raw 590/650 and
 API 600-second limits. After that correction, both named packaging regressions
 pass once (`LinuxDolbyPackageCase.test_shipping_retirement_preserves_audited_system_elf_closure`
 and `test_only_dolby_shipping_targets_retire_the_competing_debian_media_sdk`).
-Final fast-lane and landing receipts belong to the closeout pull request.
+Final fast-lane and landing receipts belong to [PR #1102](http://forge.lan:3000/noirr/plurx/pulls/1102).
+
+
+**Cleanup.** Full prior AMD/Intel and corrected-image evidence is durably
+retained with per-member checksums. All four task-owned remote qualification/
+build roots and all task-owned images were removed after fresh consumer checks;
+no force or global prune was used. Production container IDs, image IDs, start
+times and restart counts remained unchanged. The redundant builder clone,
+temporary Metal toolchain and two already-landed Mac branches were removed.
+The active manager clone and isolated compiler cache are removed after landing,
+with the final cleanup receipt retained alongside the pull-request receipt.
