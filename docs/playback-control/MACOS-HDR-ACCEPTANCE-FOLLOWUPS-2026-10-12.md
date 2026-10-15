@@ -98,6 +98,31 @@ Reconcile against the [lifecycle status](PLAYBACK-LIFECYCLE-STATUS.md),
 Prepared transitions, cancellation, generation fences and recovery ownership
 already exist. A reproduction should identify the failing rule in that code.
 
+### 2.1 Remaining execution claimed — 2026-10-15
+
+Remaining F3–F7 work is claimed on `effort/hdr-playback-followups`, starting
+from main `9eb7f6738647a7e963b17cfb3a2f77a594863c41`. Task branches target
+that integration branch and require the Effort development gate; final
+promotion requires a current-tree qualification receipt. Original evidence
+and completed F1/F2 receipts remain authoritative for their bounded scopes.
+
+| Task | Implementation and evidence ownership | Closure boundary |
+|---|---|---|
+| F7 neutral peak guard | `crates/plurxd/src/pipeprobe.rs`, this ledger, bounded evidence | Reject old explicit Metal peak units on real neutral PQ frames while retaining the 4K motion/speed probe. |
+| F5 attached output facts | Frozen VOD status and web Playback info, associated regressions | Report attached output provenance without deriving an old rendition from current settings. |
+| F3 lifecycle/accounting | Existing preparation/admission/maintenance paths and regression evidence; repair only a demonstrated gap | Distinguish the documented 300-second idle policy from a resource leak; protect unrelated viewers. |
+| F4 cold Heretic | Isolated Mac playback namespace and source/stage evidence; repair the demonstrated failing stage | Repeated declared cold/warm starts, truthful delivery and bounded startup. |
+| F6 authority recovery | Isolated serving-fence controls and retained stage evidence | Never inject faults into the shared fleet; preserve stale-owner refusal and distinguish process survival from actual continuity. |
+| F7 visual fidelity | Pinned software reference, named source windows and display observations | Keep algorithmic differences separate from physical display measurements and artistic-grade equivalence. |
+
+The operator has a Studio Display and Studio Display XDR but no measurement
+instrument. Their factory calibration and Apple video reference presets can
+support a documented visual comparison; no instrument purchase is required
+for the software repairs. That comparison will be labelled as factory-reference
+visual evidence, with no independent measurement of display calibration.
+The original calibrated-fidelity criterion remains a distinct, unmeasured
+boundary rather than being silently marked passed.
+
 ## 3. F1 — paused seek outside the local buffer stalls
 
 ### Observation and evidence
@@ -826,30 +851,29 @@ production curve to match one film frame or report SDR VMAF as HDR VMAF.
 A parity-probe improvement and a calibrated grade qualification are separate
 closure receipts.
 
-## 9.1 Remaining execution claimed — 2026-10-15
+### Narrow neutral guard — built locally, qualification pending
 
-Remaining F3–F7 work is claimed on `effort/hdr-playback-followups`, starting
-from main `9eb7f6738647a7e963b17cfb3a2f77a594863c41`. Task branches target
-that integration branch and require the Effort development gate; final
-promotion requires a current-tree qualification receipt. Original evidence
-and completed F1/F2 receipts remain authoritative for their bounded scopes.
+The F7 task adds a separate 512×128, eight-frame neutral PQ correctness
+check for Metal, with MaxCLL 1179 and lossless 10-bit HEVC input. It keeps
+the existing 4K colored-motion speed measurement and the unchanged 24-level
+channel tolerance. The corrected production curve and its peak units are
+unchanged. A failure to generate, encode, tag or measure the neutral control
+refuses Metal parity with its specific reason.
 
-| Task | Implementation and evidence ownership | Closure boundary |
-|---|---|---|
-| F7 neutral peak guard | `crates/plurxd/src/pipeprobe.rs`, this ledger, bounded evidence | Reject old explicit Metal peak units on real neutral PQ frames while retaining the 4K motion/speed probe. |
-| F5 attached output facts | Frozen VOD status and web Playback info, associated regressions | Report attached output provenance without deriving an old rendition from current settings. |
-| F3 lifecycle/accounting | Existing preparation/admission/maintenance paths and regression evidence; repair only a demonstrated gap | Distinguish the documented 300-second idle policy from a resource leak; protect unrelated viewers. |
-| F4 cold Heretic | Isolated Mac playback namespace and source/stage evidence; repair the demonstrated failing stage | Repeated declared cold/warm starts, truthful delivery and bounded startup. |
-| F6 authority recovery | Isolated serving-fence controls and retained stage evidence | Never inject faults into the shared fleet; preserve stale-owner refusal and distinguish process survival from actual continuity. |
-| F7 visual fidelity | Pinned software reference, named source windows and display observations | Keep algorithmic differences separate from physical display measurements and artistic-grade equivalence. |
+The actual Mac control reproduces the former blind spot: old units pass the
+motion image check at 8.2315 levels but fail the new neutral gate at 26.35.
+Corrected units pass both; the eight-frame encoded neutral diagnostic differs
+from CPU by 10.24 levels. The focused regression fails before the repair;
+48 ordinary probe tests and the explicit real-Metal negative/control test
+pass locally. The first hardware test incorrectly required Matroska container
+transfer/primaries, which were omitted; decoded frames prove PQ, BT.2020,
+10-bit geometry and MaxCLL. That failed assertion and the corrected run are
+preserved together. These controls do not close broader film/display fidelity.
 
-The operator has a Studio Display and Studio Display XDR but no measurement
-instrument. Their factory calibration and Apple video reference presets can
-support a documented visual comparison; no instrument purchase is required
-for the software repairs. That comparison will be labelled as factory-reference
-visual evidence, with no independent measurement of display calibration.
-The original calibrated-fidelity criterion remains a distinct, unmeasured
-boundary rather than being silently marked passed.
+The [bounded receipt](evidence/f7-neutral-peak-20261015.json) pins the source,
+tools, commands, old/corrected measurements and retained archive hash.
+Independent review, the task gate and final main qualification are pending;
+no merged repair or new physical display acceptance is claimed here.
 
 ## 10. Shared execution and closure contract
 
