@@ -2404,7 +2404,8 @@ window then passes in 140.81 seconds with the encoder explicitly set to QSV:
 
 The raw window uses two CPUs and 2 GiB without swap; the API window uses two
 CPUs and 4 GiB without swap. Both retain fresh GPU admission, no network,
-dropped capabilities and the original finite 600-second window bound.
+dropped capabilities and their original finite bounds: 590 seconds inside the
+raw container with a 650-second outer window, and a 600-second API window.
 
 **Source boundary.** This isolates a shipping-package correction using the
 already-qualified daemon from `36b9a6903a3aec632f69a4b81a0f46ca0f065c8d`,
@@ -2423,3 +2424,13 @@ argv, window guards, production epochs, cleanup, and the private raw-evidence
 hash inventory. The full 164-member private evidence archive is durably
 retained and independently verified, SHA-256
 `941a92fa9101acf3c060e2b3a3bae594cd39f357075610cc50381072163e9a8b`.
+
+
+The final adversarial review approves candidate `e08a0680` with no blocking
+findings. It verifies the source/evidence hashes, literal shipping-stage
+correspondence, raw/API results and historical-daemon boundary. Its sole P3
+finding corrected the deadline wording above to the recorded raw 590/650 and
+API 600-second limits. After that correction, both named packaging regressions
+pass once (`LinuxDolbyPackageCase.test_shipping_retirement_preserves_audited_system_elf_closure`
+and `test_only_dolby_shipping_targets_retire_the_competing_debian_media_sdk`).
+Final fast-lane and landing receipts belong to the closeout pull request.

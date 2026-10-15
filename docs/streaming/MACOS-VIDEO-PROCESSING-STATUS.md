@@ -1,6 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** Mac follow-ups and AMD/Intel VA-API fixes landed; QSV shipping-image correction qualified; final review and landing pending · **Updated:** 2026-10-15 · **Owner:** managing agent with Sol 6.1 builder · **Integration:** `codex/video-processing-closeout`.
+**Status:** Mac follow-ups and AMD/Intel VA-API fixes landed; QSV shipping-image correction qualified and reviewed; final gate and landing pending · **Updated:** 2026-10-15 · **Owner:** managing agent with Sol 6.1 builder · **Integration:** `codex/video-processing-closeout`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is
@@ -41,9 +41,9 @@ reports it uninstalled. Intel qualification images and inputs remain reserved
 for the pending checks; final remote scratch and compiler-cache cleanup follows
 acceptance and durable publication.
 
-The remaining order is: one adversarial review of the frozen candidate;
-address findings; final focused regressions and fast lane; merge and final
-cleanup. No unit tests have run for this closeout. The operator authorized this session to finish validation and merge; the
+The final adversarial review approves the candidate; its one minor deadline
+wording finding is corrected. Both focused packaging regressions pass. The
+remaining order is the fast lane, merge and final cleanup. The operator authorized this session to finish validation and merge; the
 previously nominated batch-merge session remains stopped.
 
 
@@ -184,7 +184,7 @@ cleared before recovery, so everything was rebuilt from the pushed branch
 
 The Intel fixes subsequently landed in PR #1016. Remaining closeout work:
 
-1. Review the qualified shipping-image correction and complete affected validation.
+1. Complete the fast lane for the reviewed, hardware-qualified shipping correction.
 2. Merge the closeout and finish task-owned qualification-resource cleanup.
 
 The corrected image no longer carries Debian's `libmfx1` and admits strict
@@ -205,7 +205,7 @@ merged tree passes pinned all-target compilation and the normal tracked hook.
 | Follow-up | Sol 6.1 owner | State | Remaining evidence |
 |---|---|---|---|
 | F1 GPU subtitle compositing | Native builder | All eight raw graph comparisons, merged `c10f16f0` text API and one complete performance campaign pass; wall time is 13.02–31.14% lower and child CPU/frame 49.90–81.73% lower | Landed in #993; exact evidence retained |
-| F2 non-Mac P5 hardware decoding | Claude (was Route builder) | AMD and Intel raw graphs pass 32/32 (Intel with VA-API and QSV encode). On the shipping image, the daemon's own probe admits the package on both, and normal-API delivery runs the strict graph with VA-API decode and encode. Fixed on the way: the probe raster, the progress-meter splice, refusal attribution, the 64×64 DV encoder-pairing proof, a foreign Media SDK failing the whole Intel probe, and 64×64 QSV Main10 proofs | Corrected shipping image now passes raw and ordinary-API strict QSV; final closeout review/validation/landing pending |
+| F2 non-Mac P5 hardware decoding | Claude (was Route builder) | AMD and Intel raw graphs pass 32/32 (Intel with VA-API and QSV encode). On the shipping image, the daemon's own probe admits the package on both, and normal-API delivery runs the strict graph with VA-API decode and encode. Fixed on the way: the probe raster, the progress-meter splice, refusal attribution, the 64×64 DV encoder-pairing proof, a foreign Media SDK failing the whole Intel probe, and 64×64 QSV Main10 proofs | Corrected shipping image now passes raw and ordinary-API strict QSV; final closeout fast lane/landing pending |
 | F3 caption-bearing VOD VideoToolbox | Dolby/native builders | All three file-VOD cases pass on `2139fa9c`; the merged `c10f16f0` MPEG-2 case also passes unchanged caption/picture assertions and clean shutdown | Landed in #993; broader DVR and client presentation remain separate |
 
 Builders use separate owned clones. Native owns `0004`, compositor/planner
