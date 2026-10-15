@@ -96,9 +96,8 @@ outstanding and cannot be replaced by this isolated prototype review.
 ## 5. Fable source review — corrections awaiting qualification
 
 **Updated:** 2026-10-15. Fable reviewed `ca00c3ed8` against
-`6e01ef879`, including the Apple 245 source package. The current committed
-candidate is `e2315d3a4` (Apple 247); the corrections below are still
-uncommitted. Source review does not qualify a different hardware build.
+`6e01ef879`, including the Apple 245 source package. The corrections are recorded in `f94f73211` (Apple 248), following
+the `e2315d3a4` Apple 247 checkpoint. Source review does not qualify a different hardware build.
 
 | Finding | Current disposition | Remaining evidence |
 |---|---|---|

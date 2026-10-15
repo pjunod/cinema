@@ -6736,8 +6736,7 @@ test_anchor = "testPausePublicationRetainsPendingSeekUntilPlayDispatchesOnce"
 
 [[fixes]]
 id = "server.cached-wait-contended-session-retains-witness"
-commits = []
-supplements = "apple.pause-publication-retains-pending-destination"
+commits = ["f94f73211506883b24d1d4d7eeb07f8aa0841db5"]
 source = "crates/plurxd/src/http/hls/preparation.rs"
 source_anchor = "fn cached_accepted_wait_is_current("
 test = "crates/plurxd/src/http/hls/preparation.rs"
@@ -6746,7 +6745,7 @@ test_anchor = "cached_accepted_wait_survives_contended_session_lock_during_foreg
 [[fixes]]
 id = "server.cached-wait-contended-reader-retains-witness"
 commits = []
-supplements = "apple.pause-publication-retains-pending-destination"
+supplements = "server.cached-wait-contended-session-retains-witness"
 source = "crates/plurxd/src/http/hls/preparation.rs"
 source_anchor = "fn cached_accepted_wait_is_current("
 test = "crates/plurxd/src/http/hls/preparation.rs"
@@ -6755,7 +6754,7 @@ test_anchor = "cached_accepted_wait_survives_contended_reader_lock_during_foregr
 [[fixes]]
 id = "server.cached-wait-contention-does-not-renew"
 commits = []
-supplements = "apple.pause-publication-retains-pending-destination"
+supplements = "server.cached-wait-contended-session-retains-witness"
 source = "crates/plurxd/src/http/hls/preparation.rs"
 source_anchor = "pub(super) fn cancel_preparations_for_incumbent_wait("
 test = "crates/plurxd/src/http/hls/preparation.rs"
@@ -6764,7 +6763,7 @@ test_anchor = "cached_accepted_wait_contention_keeps_control_witness_without_ren
 [[fixes]]
 id = "apple.incumbent-lease-rejects-positive-buffer-gap"
 commits = []
-supplements = "apple.pause-publication-retains-pending-destination"
+supplements = "server.cached-wait-contended-session-retains-witness"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "private func acquirePreparedIncumbentBufferPreference("
 test = "clients/apple/Tests/PlayerResumeTests.swift"
@@ -6773,7 +6772,7 @@ test_anchor = "testIncumbentFetchPreferenceLeaseRejectsPositiveGapInsideProtecte
 [[fixes]]
 id = "apple.cadence-sixty-four-request-bound"
 commits = []
-supplements = "apple.pause-publication-retains-pending-destination"
+supplements = "server.cached-wait-contended-session-retains-witness"
 source = "clients/apple/Sources/HLSFragmentCadence.swift"
 source_anchor = "enum HLSFragmentCadence"
 test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
