@@ -407,8 +407,8 @@ def main(argv: list[str]) -> int:
             # sends. This step used to set the flag and navigate away, waiting
             # for an unload DELETE to be lost -- and none ever arrived, so
             # nothing was dropped, every session closed cleanly, and the
-            # recovery claim below was proven by a run that had no orphan in it. Pause is a release this fixture has
-            # already serviced nine times.
+            # recovery claim below was proven by a run that had no orphan in
+            # it. Pause is a release this fixture has serviced nine times.
             orphan = active()[0]
             attempted = len(deletes)
             mode["drop_delete"] = True
@@ -427,11 +427,19 @@ def main(argv: list[str]) -> int:
             assert re.fullmatch(r"[0-9a-f]{32}", orphan_request) and float(hints[0][1]) > 0
             assert orphan not in json.dumps(hints), "a hint must not persist a capability"
             posts_before_reload = len(start_requests)
-            # The pause already exceeded the 15-second liveness window. The
-            # replacement document asks the owner to rejoin this exact start;
-            # it neither waits on a quarantine nor presses a channel to tune.
+            # pagehide touches a retained hint, so the replacement document
+            # first waits for its real liveness window on another route. SPA
+            # navigation then opens Live TV without another pagehide touch.
+            page.evaluate("window.__fixturePreviousLiveTvDocument = true")
             page.goto("about:blank")
-            page.goto(host.base_url + "/#/live-tv")
+            page.goto(host.base_url + "/#/settings")
+            assert page.evaluate("!window.__fixturePreviousLiveTvDocument && LIVE_TV_LEASE.current === null && !LIVE_TV.resumed"), "recovery needs a genuinely replaced document"
+            orphan_window_ms = page.evaluate("PlaybackPolicy.liveContractTiming('retire_orphan_after_keepalives') * 5000")
+            page.wait_for_function("""({id, windowMs}) => {
+                const touched = Number(localStorage.getItem('plurx_live_tv_hint_v1:' + id));
+                return Number.isFinite(touched) && touched > 0 && Date.now() - touched >= windowMs;
+            }""", arg={"id": orphan_request, "windowMs": orphan_window_ms}, timeout=orphan_window_ms + 5000)
+            page.evaluate("location.hash = '#/live-tv'")
             until(lambda: orphan_request in resumes, "reload did not ask the owner to resume its hint")
             page.wait_for_function("id => LIVE_TV_LEASE.current?.session_id === id", arg=orphan)
             frames_advance()
