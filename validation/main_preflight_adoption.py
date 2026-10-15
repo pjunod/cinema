@@ -113,7 +113,6 @@ NODE = (
     "tests/web/player-dom.test.js",
     "tests/web/read-after.test.js",
     "tests/web/live-tv.test.js",
-    "tests/web/live-tv-stop-feedback.test.js",
 )
 _TREE_CACHE = {}
 _DIGEST_CACHE = {}

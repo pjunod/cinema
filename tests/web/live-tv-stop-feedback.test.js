@@ -144,4 +144,5 @@ async function test(name, run) {
   process.stdout.write(`PASS ${name}\n`);
 }
 
-main().catch(error => { console.error(error); process.exitCode = 1; });
+module.exports = main;
+if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });

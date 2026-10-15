@@ -2295,6 +2295,9 @@ async function main() {
     assert.match(envelope, /max_channels:codec==="aac"\?aacChannels:8/);
     assert.doesNotMatch(envelope, /max_channels:codec==="aac"\?2:8/);
   });
+  // The complete web gate and the preflight journal both execute this family.
+  // Await its child suite once; its source is part of this family's input witness.
+  await require("./live-tv-stop-feedback.test.js")();
 }
 
 main().catch((error) => {

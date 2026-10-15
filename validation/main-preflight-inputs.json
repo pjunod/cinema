@@ -3175,18 +3175,10 @@
       "reason": "Only actual api.js read into VM."
     },
     {
-      "id_prefix": "node:tests/web/live-tv-stop-feedback.test.js",
-      "inputs": [
-        "tests/web/live-tv-stop-feedback.test.js",
-        "tests/web/shell-source.js",
-        "crates/plurxd/src/web/**"
-      ],
-      "reason": "Executes shipped Stop and page feedback against deferred release/presentation replies; served scripts are read through shell-source."
-    },
-    {
       "id_prefix": "node:tests/web/live-tv.test.js",
       "inputs": [
         "tests/web/live-tv.test.js",
+        "tests/web/live-tv-stop-feedback.test.js",
         "tests/web/shell-source.js",
         "crates/plurxd/src/web/**",
         "tests/playback/live-tv-start-cases.json",
@@ -3195,7 +3187,7 @@
         "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvGuideUi.kt",
         "clients/apple/Sources/LiveTvView.swift"
       ],
-      "reason": "Whole served shell/CSS plus policy/Live TV, guide/start JSON and cross-native guide cell assertions."
+      "reason": "Whole served shell/CSS plus policy/Live TV, guide/start JSON, cross-native guide cell assertions and the required Stop-feedback child suite."
     },
     {
       "id_prefix": "operations:test_known_red.KnownRedContractTest.test_opt_in_fixture_is_explicit_and_separate_from_known_red",
