@@ -75,6 +75,67 @@ an operator choice.
 Installation, firewall, upgrade, and removal commands are in the
 [Windows deploy runbook](../deploy/README.md#run-as-a-service--windows).
 
+### HTTPS configuration and identity — implementation in progress
+
+The [HTTPS build ledger](server/HTTPS-BUILD.md) records the staged work.
+H1 adds configuration and tested identity primitives; the production listener
+and Developer editor remain separate H2/H3 milestones. These instructions
+name the final on-disk format so recovery does not depend on guessing it.
+
+`[server.https]` accepts `enabled`, `port` (default `32443`), absolute
+`cert_file`/`key_file` paths and `sans`. Both paths empty select a generated
+identity; both supplied select a leaf-first PEM chain and one unencrypted
+private key. Settings are node-local and never enter the replicated Store.
+Existing HTTP and discovery continue using their current port.
+
+Precedence is defaults → TOML → `<data_dir>/https-settings.json` → explicitly
+present HTTPS environment variables. `PLURX_DATA_DIR` selects the directory
+before the local file is read. The HTTPS variables are `PLURX_HTTPS_ENABLED`,
+`PLURX_HTTPS_PORT`, `PLURX_HTTPS_CERT_FILE`, `PLURX_HTTPS_KEY_FILE` and
+`PLURX_HTTPS_SANS` (comma-separated). Empty path variables deliberately select
+generated mode when both are empty. An override masks its stored choice;
+saving another field must not copy the override into that stored choice.
+
+The local file is at most 16 KiB and has this exact versioned envelope:
+
+```json
+{"version":1,"revision":1,"settings":{"enabled":false,"port":32443,"cert_file":"","key_file":"","sans":["localhost","127.0.0.1","::1"]}}
+```
+
+Stop the service before manual editing and increment `revision` on every
+edit. Malformed envelopes and unsupported versions are errors. Do not reset
+the revision: it fences stale administrator requests across restarts.
+A save that publishes its new revision but cannot confirm directory sync is
+committed with `durability_confirmed: false`. Reload and investigate storage;
+do not retry as if nothing changed. A crash may lose that unconfirmed rename.
+Only failures before publication leave desired state and revision unchanged.
+
+The generated identity is `<data_dir>/https/identity.pem`, a combined private
+bundle. Back it up as a secret. Its Unix directory and file permissions are
+`0700` and `0600`. Managed descendants refuse symlinks; the configured data
+root itself retains its existing symlink semantics. Unix supplied certificate
+manager symlinks are supported, but the opened targets must be regular files
+of at most 1 MiB each. Windows supplied material must be regular local disk
+PEM files: device, pipe and UNC namespaces and certificate-manager symlinks
+are rejected before traversal. Windows uses the repository's private-path ACL helper
+at creation; Windows compilation and physical ACL acceptance are not claimed
+by this milestone.
+
+Generated certificates retain the exact leaf and key through restart and
+off/on. They last 365 days and never renew silently. If expiry or SAN changes
+require replacement, stop the service, edit stored SANs and any controlling
+environment value, increment the local revision, securely back up and remove
+`https/identity.pem`, then restart. Removing only the identity recreates the
+old SAN coverage. Verify the replacement public fingerprint and explicitly
+re-trust its certificate. Never install or distribute the combined private
+bundle as a public trust certificate; the later admin download exports only
+the loaded public chain. Supplied renewals are loaded on restart.
+
+To recover from enabled TLS with broken material, stop the service, set
+`PLURX_HTTPS_ENABLED=false`, and restart using existing HTTP. Repair intent
+or file references before removing the override. Disabling never opens
+obsolete certificate paths or deletes an identity.
+
 ### Duplicate-show identity repair
 
 The repair API is preview-first, administrator-only, always compiled, and has

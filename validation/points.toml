@@ -428,6 +428,7 @@ paths = [
   # each plan and its cold and warm timings on both backends' schemas.
   "crates/plurx-core/examples/query_plans/{main,calls,bench}.rs",
   "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,testfixtures}.rs",
+  "crates/plurx-core/src/config/**",
   "crates/plurx-core/src/content_analysis.rs",
   "crates/plurx-core/src/store/mod.rs",
   "crates/plurx-core/src/store/scan_identity_repair.rs",
@@ -745,7 +746,7 @@ contract = "The single server binary exposes stable native endpoints, coordinate
 paths = [
   "crates/plurxd/Cargo.toml",
   "crates/plurxd/src/availability.rs",
-  "crates/plurxd/src/{cachekeep,logbuf,main,panics,redact,schedule,state,storeprobe,telemetry}.rs",
+  "crates/plurxd/src/{cachekeep,https,logbuf,main,panics,redact,schedule,state,storeprobe,telemetry}.rs",
   "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/reader_formats.rs",

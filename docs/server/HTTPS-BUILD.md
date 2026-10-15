@@ -1,6 +1,6 @@
 # HTTPS build — milestones, ownership and qualification
 
-**Status:** ready to build; adversarial review resolved · **Written:** 2026-10-15
+**Status:** H1 locally verified; effort gate/integration pending · **Written:** 2026-10-15
 **Owner:** GPT-6.1 Sol builder; parent coordinates and reviews
 
 This canonical ledger executes [the contract](HTTPS-IMPLEMENTATION.md).
@@ -83,10 +83,43 @@ then graduate it to System. Built source awaiting physical proof is
 
 | Date | Step | Result |
 |---|---|---|
-| 2026-10-15 | D0 baseline | Isolated source `9eb7f6738`; pinned Rust 1.97.1 verified; Sol running baseline check before edits. |
-
+| 2026-10-15 | D0 baseline | Isolated source `9eb7f6738`; pinned Rust 1.97.1 verified; Sol baseline check established before edits. |
 | 2026-10-15 | D0 compiler | Sol baseline pinned `cargo check -p plurxd --locked` and formatting passed; warm target retained. |
 | 2026-10-15 | D0 review | [Independent adversarial review](HTTPS-REVIEW.md): five P2 clarifications incorporated; architecture approved. Sol 6.1 released to build H1–H4. |
+| 2026-10-15 | H1 source review | Parent reviewed configuration, filesystem/identity ownership and persistence outcomes. Fixed masked-value precedence, intentional data-root symlinks, read-only directory validation and post-publication sync semantics; no remaining source blocker. |
+| 2026-10-15 | H1 compiler/lint | Pinned Rust 1.97.1 all-target daemon check and Clippy with `-D warnings` passed; final test-only `unwrap` calls replaced with explicit fixture assertions. Catalog maps both new source paths. |
+| 2026-10-15 | H1 focused evidence | Current-source core `--features hiqlite-store --lib config::`: 22 passed; daemon `--bin plurxd https::tests::`: 8 passed, including normal generated/private-CA trust, unknown trust/hostname rejection and FIFO bounds. Formatting, docs index (4 tests), catalog and infrastructure-name checks passed. |
 
-Implementation milestones remain pending. No source has been implemented or
-deployed by this project yet.
+Post-review persistence clarification: rename publishes the revision. A later
+directory-sync error is a committed save with `durability_confirmed: false`;
+H3 must adopt desired/revision and show the warning without blind retries.
+The injected post-publication sync regression covers this distinction.
+
+Windows scope clarification: supplied material uses regular local disk PEM
+files through no-reparse opens; device/pipe/UNC namespaces and cert-manager
+symlinks are rejected. Unix cert-manager symlinks remain supported. No
+Windows compile or physical safety acceptance is claimed.
+
+H1 is implemented on `codex/https-h1-config-identity`. The full configuration
+suite passes (22 tests), and final identity/trust fixtures pass (8 tests).
+Pinned all-target compilation
+and denied-warning daemon Clippy pass. Parent reviewed the full source and
+found no remaining blocker after the documented clarifications. The
+new daemon identity module is temporarily `cfg(test)` in H1: its all-target
+checks and real TLS regressions compile it, while H2 must remove that
+staging attribute when the production listener owns it. H2/H3 integration,
+all task gates, promotion and physical acceptance remain pending. Nothing
+has been deployed or enabled on a live node.
+
+H1 focused commands, run with Rust 1.97.1:
+
+```bash
+cargo +1.97.1 test --locked -p plurx-core --features hiqlite-store --lib config::
+cargo +1.97.1 test --locked -p plurxd --bin plurxd https::tests::
+cargo +1.97.1 check --locked -p plurxd --all-targets
+cargo +1.97.1 clippy --locked -p plurxd --all-targets -- -D warnings
+cargo +1.97.1 fmt --all -- --check
+python3 -m unittest tests.operations.test_docs_index
+make validation-lint
+scripts/scrub-infra-names --check
+```

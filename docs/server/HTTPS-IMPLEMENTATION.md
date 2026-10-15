@@ -93,8 +93,12 @@ replaces the desired object, rejects unknown fields, and has a 16 KiB limit.
 Stale revision/node mismatch returns 409 without mutation. Persist revisions
 across restart; never reset the counter. The UI reports conflicts and asks
 for a fresh load, never automatically retries on another node. Serialize writes;
-atomically replace a restrictive, bounded node-local file. Failed persistence
-leaves in-memory state unchanged. PUT changing an env-owned field returns an
+atomically replace a restrictive, bounded node-local file. Failure before atomic publication leaves in-memory state unchanged. Rename
+is the publication point: if the subsequent directory sync fails, the save
+is committed with durability uncertainty, not rolled back. Adopt the new
+in-memory desired/revision and return success with
+`durability_confirmed: false` and a visible warning; never invite a blind
+retry. A normal successful sync returns `durability_confirmed: true`. PUT changing an env-owned field returns an
 explicit conflict; edits to other fields remain valid. Persist only editable
 choices,
 preserving the previous pre-env values of overridden fields: echoed env
@@ -157,9 +161,12 @@ GET never provisions/rotates identity. Never destroy an identity on disable.
 Supplied mode reads a leaf-first chain and one unencrypted supported key,
 each bounded to 1 MiB. Verify PEM format, key match, current validity and
 server-auth suitability; accept private CA/self-signed certificates without
-requiring public-CA trust. Reject unrelated/malformed PEM material. Follow
+requiring public-CA trust. Reject unrelated/malformed PEM material. On Unix, follow
 legitimate supplied-file symlinks used by certificate managers but validate
-the opened regular file/size. Opening and reading must be bounded: use
+the opened regular file/size. Windows accepts regular local disk PEM paths
+through the existing no-reparse helper; device, pipe and UNC namespaces and
+certificate-manager symlinks are unsupported and rejected before traversal.
+Windows compilation/physical safety remains unqualified in this increment. Opening and reading must be bounded: use
 nonblocking/safe regular-file opening so a FIFO/device cannot hang before
 metadata validation. Test a named pipe and a symlink to one. Never overwrite
 supplied files. Client trust

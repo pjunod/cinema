@@ -40,6 +40,9 @@ mod fragindex;
 mod fragment_index_cluster;
 mod hevc_census;
 mod http;
+// H1 identity regressions compile before H2 adds the production listener.
+#[cfg(test)]
+mod https;
 mod job_lease;
 mod library_search;
 mod live_tv;
