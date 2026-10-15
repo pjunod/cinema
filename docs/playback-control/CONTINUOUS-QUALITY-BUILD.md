@@ -11921,3 +11921,19 @@ exists. Each required test must pass once on the integrated candidate, with only
 failures rerun. Compilation and final unit evidence are pending at this source
 checkpoint. New physical mobile builds/installations remain main-only; no new
 hardware campaign is requested or claimed for251.
+
+
+The first final named-test pass finds two failures. The relay registration
+regression exposes a production SQL binding bug: SQLite assigns named `$N`
+slots by first appearance, while Hiqlite binds sequentially. Moving the `$1`
+membership predicate before `$2` owner restores the original intended proof
+without weakening membership, heartbeat, owner or expiry requirements. The
+existing atomic-registration/rollback/expiry regression covers this correction.
+The Pause regression's fixture uses unsupported legacy `direct` instead of
+actual wire `direct_play`, entering transcode before the transport sequence.
+Correcting that fixture and asserting no initial create isolates the intended
+Pause/Play behavior; production Pause code is unchanged. The 60 successful
+Apple methods remain retained; only failed cases are due for rerun, and the
+38 server anchors have not executed yet. No full suite, review or hardware
+campaign is restarted. Final source, per-test and fast-lane receipts belong
+to the promotion record rather than a new hardware claim.

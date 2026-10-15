@@ -518,7 +518,7 @@ final class PlayerResumeTests: XCTestCase {
         let gate = ResumeIntentGate()
         let player = ResumePlayer()
         let decision = try JSONDecoder().decode(Decision.self, from: Data("""
-        {"fileId":1,"method":"direct","playUrl":"/not-fetched",
+        {"fileId":1,"method":"direct_play","playUrl":"/not-fetched",
          "source":{"height":1080,"durationMs":600000},"audio":[],"subtitles":[],"ladder":[]}
         """.utf8))
         let caps = DeviceCaps(client: ClientInfo(kind: "ios", build: "test", ua: "test"),
@@ -553,6 +553,8 @@ final class PlayerResumeTests: XCTestCase {
         controller.start(model: model, itemId: 1, fileId: 1, startMs: 0,
             durationMs: 600_000, title: "Pause retains destination")
         await controller.loadingTask?.value
+        XCTAssertEqual(creates, 0,
+            "The direct_play fixture must attach without entering the HLS create path")
         let attachment = controller.openGenerationForTesting
         let quality = controller.selectedHeight
         controller.seek(toMs: 90_000)

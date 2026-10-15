@@ -6847,3 +6847,12 @@ source = "clients/apple/Sources/DiagnosticReportView.swift"
 source_anchor = 'Section("Recent safe events")'
 test = "clients/apple/UITests/DiagnosticReportingTests.swift"
 test_anchor = "testTVZIPDownloadsSelectedIncidentAndCloseRevokesNewLink"
+
+
+[[fixes]]
+id = "cluster.relay-proof-positional-parameter-order"
+commits = ["decf8155c16d4d99d2d767de1e6a9acb4df4f7a3"]
+source = "crates/plurx-core/src/cluster/membership.rs"
+source_anchor = "const MEDIA_RELAY_ACQUISITION_PROOF_SQL:"
+test = "crates/plurx-core/src/cluster/membership.rs"
+test_anchor = "relay_acquisition_registration_is_atomic_and_rollback_claims_expire"

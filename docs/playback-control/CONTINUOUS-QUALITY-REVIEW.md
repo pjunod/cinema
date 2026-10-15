@@ -223,3 +223,12 @@ only failures rerun. No batched merge session exists. This supersedes the earlie
 merge hold and deferred-unit checkpoint; it does not restart full review or the
 hardware campaign. TV250 does not qualify changed251 hardware; new physical
 mobile builds and installs await main. Canonical ledger: §10.329.
+
+
+Final named-unit execution exposes the production relay proof's `$2`-before-`$1`
+positional binding error, corrected without changing authority predicates. The
+Pause failure is an invalid `direct` fixture; actual `direct_play` is used and
+initial setup must not create HLS. Production Pause code is unchanged. Successful
+Apple methods are retained; only failed methods rerun, with 38 server cases
+still unexecuted at this source checkpoint. This is failed-test remediation,
+not another full review or hardware cycle.
