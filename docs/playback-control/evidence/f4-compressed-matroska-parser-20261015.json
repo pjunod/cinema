@@ -30,6 +30,6 @@
   "qualification": {
     "package_tests": 13,
     "adversarial_review": "Astra approved relative-path correction and three functional regressions",
-    "physical_startup": "pending at this receipt; no complete matrix claim"
+    "physical_startup": "three cold/warm corrected SDR pairs completed; see hdr-physical-playback-20261015.json, preserving drops and original refusal"
   }
 }

@@ -998,3 +998,42 @@ no playback rerun, code change, hardware action or new qualification was
 performed to publish it. Update [the backlog](../features/PROJECT-BACKLOG.md),
 the owning canonical ledger and this document together as F1–F7 progress.
 The accepted HDR10 slice remains closed while those broader packages are open.
+
+## October 15 physical playback and restoration
+
+The [physical receipt](evidence/hdr-physical-playback-20261015.json) binds
+the complete native package, corrected sealed parser, actual reporting UI
+and cold/warm route controls to their immutable private attachments. The
+original failures remain in those archives. These are isolated backend
+acceptance namespaces; no branch mobile application was installed.
+
+Three genuine AV1 HDR10 original-quality cold/warm pairs presented within
+the declared 40-second budget. Three corrected manual-1080 SDR pairs also
+presented: cold 3,336/4,264/4,246 ms, warm 761/1,380/817 ms. Every sampled
+SDR run reported zero buffering interruptions. Frame drops, background
+indexing and the older original-quality runtime are disclosed in the receipt.
+The initial compressed-PGS source-rescan refusal is retained alongside the
+parser correction; the held-source guard was never relaxed.
+
+On the Air, the complete corrected native package admitted Metal at 2.285×
+the CPU boot fixture. The System page shows Metal and explains that Vulkan
+is unavailable. Actual full-film 1920×1080 SDR Metal playback reached 5:28
+with 7,854 frames, five drops and zero interruptions; TTFF was 2,473 ms.
+The CPU control reached 6:41 with 9,596 frames and 30 drops, and retained
+one early 1,019 ms supply stall; TTFF was 12,497 ms. Exact child graphs
+prove Metal reference-white 100 and CPU reference-white 100. The initial
+Auto/remux failures are retained and are not attributed to either forced
+SDR graph. Screen Sharing carries SDR, so this proves neither an optical
+HDR grade nor independent physical audio.
+
+Fresh and cached CPU/Metal reporting controls preserve attached-output
+facts across live settings changes and candidate refusal. Their separate
+archive records that the 60-second media control repeats a 12-second film
+excerpt. It is a reporting check, not another independent film test.
+
+The final Air API read verifies zero sessions/deliveries, zero hardware and
+software occupancy, Mac processing on, and both movie positions zero and
+unwatched. The owned Air server is stopped, shared clipboard is off and
+the temporary Metal SDK is removed. The working NAS mount is retained.
+F3 physical accounting and final current-tree qualification/promotion remain
+tracked work; this receipt does not turn a pending gate into a pass.
