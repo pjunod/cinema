@@ -6781,7 +6781,7 @@ test_anchor = "testFragmentIndexWalkFailsClosedPastSixtyFourRequestsOnManyFragme
 
 [[fixes]]
 id = "apple.incumbent-lease-membership-rounding-strict-gap"
-commits = ["6e527f6fcb92b7da55339f3e4d33b40cfa9ade10"]
+commits = ["6e527f6fcb92b7da55339f3e4d33b40cfa9ade10", "69b4762afdb0c45d7d710c6c4145f50af23d56bd"]
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "guard let runway = bufferedRunwaySeconds(gapTolerance: 0)"
 test = "clients/apple/Tests/PlayerResumeTests.swift"
