@@ -1,8 +1,8 @@
 # Apple TV navigation — defects, proposed screens and a lasting release contract
 
-**Status:** implementation authorized and in progress on `effort/apple-tv-navigation`;
-source audit complete for the inventory below. Native whole-app tests reproduce
-the original blocker; repair validation and physical acceptance remain open.
+**Status:** repairs built and native validation passed on `effort/apple-tv-navigation`.
+All 26 required journeys and the effort gate pass; main promotion and the
+explicit remaining physical/dynamic-state acceptance are open.
 **Written:** 2026-10-15 · **Baseline:** `9eb7f6738647a7e963b17cfb3a2f77a594863c41`
 
 This is the Apple TV follow-up to the [mobile usability audit](MOBILE-UI-USABILITY-AUDIT.md)
@@ -754,7 +754,7 @@ none of the packages is a qualified release merely because it compiles.
 | T2 · Playback presentation | `LiveTvView`, `LibraryChannels`, `PlayerView`, diagnostics | T1 | **Partly proven:** [PR #1110](http://forge.lan:3000/noirr/plurx/pulls/1110). Native future-programme details/Close and current-programme single-session behavior pass; explicit layout change/reopen/Back passes. Library-channel hidden Play/Pause, first-direction reveal, More → Report → Back and session retention now pass. Reports moved inside More. Ordinary movie and Live TV native journeys also pass: hidden picture → reveal → More → Report → Back retains the playback session and returns to the original item/channel. Shared playback now passes initial Pause focus, hidden-picture reveal, selected Quality entry, exact menu/report return and a single retained session. The Shared title also exposes the same focusable About reading panel as local titles, with a native final-paragraph and exact-return assertion. |
 | T3 · Browsing and details | `LibraryView`, `HomeView`, `SearchView`, `DetailView`, `Components` | T1 | **Partly proven:** bounded tools sidebar, identity restoration, explicit Jump loading, episode details and complete synopsis, fixed Search query and recovery. Native full synopsis/Back and unchanged-query Search Retry/result return pass. Full Grid/Rows journeys now pass at 416 and 5,000 titles, including Jump A/M/Z/M, bounded tools access and exact content return. Empty and single-title libraries pass. Eleven focused browsing unit regressions and iOS simulator compilation pass; the synopsis has a visible focus cue. A foreground Home refresh failure now retains cached titles, exposes a reachable Retry and restores the retained title when Retry disappears; the native lifecycle journey passes. |
 | T4 · Secondary screens and visual consistency | DVR, Settings, diagnostics, remotes, theme, info | T1; serialize shared-file work with T2/T3 | **Partly proven:** native Settings quality selection/Back, Help → phone QR report → Advanced → Done/Back, recording details, safe rule cancellation and named manual channel selection pass. DVR title rows span the content region so Down from a middle category cannot hit a gap. Remote pairing revocation and registration reset now pass safe Cancel entry and exact opener return in an ad hoc signed simulator build. The fixture uses the normal saved-server identity and Keychain registration. DVR title scaling and report instruction wrapping are corrected and visually checked after passing native reruns. Saved-connection recovery now exposes Retry and contextual Help while network discovery continues, rather than hiding all actions behind a spinner. A repeated native run first caught the delayed recovery; the corrected run requires Retry within five seconds and preserves the saved sign-in. Final integrated and physical acceptance remain open. |
-| T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | **Open:** F29; final source-bound suite and remaining inventory/physical matrix. The complete 25-journey baseline passes. A saved-account physical TV library journey passes on 491 titles; gestures, accessibility and couch-distance QR acceptance remain open. No deployment claimed. |
+| T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | **Awaiting promotion and remaining physical acceptance:** F29; all 26 source-bound native journeys pass, as do 1,037 unit tests, iOS compilation and the effort gate. The final saved-account physical TV library journey passes on 491 titles. Gestures, accessibility, couch-distance QR and the listed dynamic-state stress cases remain unaccepted. No deployment claimed. |
 
 **Integrated development evidence, October 15:** the full 1,037-test tvOS unit
 suite and iOS simulator compilation pass again after Shared About and connection
@@ -783,23 +783,28 @@ clipped Rows/Live focus outlines, low-contrast TV headings/query text and
 Up from a row skipping its group action. The new View all/group-return
 journey first reproduced the skip, then passed with a native viewport-clearance
 assertion. Rows at 416/5,000 titles, Live and Search focused reruns and iOS
-simulator compilation pass with these final corrections. A complete 26-journey
-receipt on the consolidated candidate remains required.
+simulator compilation pass with these final corrections. The complete 26-journey run on `d754da0d3` passed: 26 passed, zero failed,
+zero skipped, with a clean source/app-bound receipt. All 1,037 tvOS unit tests,
+iOS simulator compilation and 27 static contracts passed on that candidate.
+Effort development gate 5212 passed. [PR #1127](http://forge.lan:3000/noirr/plurx/pulls/1127)
+landed as `3a202fa1a`; its Git tree exactly equals the tested candidate and its
+message carries all 15 regression references.
 
-**Physical TV evidence:** a signed build from `d2c79ac4a` passed the saved-account
+**Physical TV evidence:** a signed build from final implementation candidate `d754da0d3` passed the saved-account
 library journey on AppleTV14,1, tvOS 27.0 (24J361), app build 238. The real Movies
 collection contained 491 titles. View, Sort and Filter focused the selected
 choice immediately; Back restored each opener and the collection. Captured
 4K focus outlines and labels were inspected. This was XCUIRemote button
 automation; gestures/holds, VoiceOver, Reduce Motion and couch-distance QR
 scanning remain unaccepted. UIKit hierarchy and SwiftUI view-update warnings
-were retained in the receipt. Repeat the scoped device journey on the final
-candidate; do not confuse that scope with whole-device qualification.
+were retained in the receipt. The final candidate repeat passed in 49.215 seconds with no failures or skips;
+do not confuse that scope with whole-device qualification.
 
 The development gate's stale source/commit anchors from task consolidation
 were corrected to current code and actual corrective commits. The local
 history audit accepted the corrected mapping without an errata waiver;
-a fresh gate on the final candidate remains required.
+the fresh effort gate passed on the final candidate. Main promotion still
+requires the separate full qualification receipt.
 
 **Non-goals:** no server transport rewrite, removal of diagnostic capture,
 feature enablement policy change, new hidden remote gestures, or redesign of
