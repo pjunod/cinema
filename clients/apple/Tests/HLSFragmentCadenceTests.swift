@@ -305,6 +305,45 @@ final class HLSFragmentCadenceTests: XCTestCase {
         XCTAssertLessThanOrEqual(CadenceStub.served(host, "/hls/s1/seg0.m4s"), first.count + second.count + 8_192)
     }
 
+    func testFragmentIndexWalkFailsClosedPastSixtyFourRequestsOnManyFragments() async throws {
+        func media(fragmentCount: Int) -> Data {
+            var result = Data()
+            for index in 0..<fragmentCount {
+                let track = box("tfhd", words([0x20000, 7]))
+                    + box("tfdt", words([0, UInt32(index * 2000)]))
+                    + box("trun", words([0x100, 2, 1000, 1000]))
+                result.append(box("moof", box("traf", track)))
+                result.append(box("mdat", Data(count: 8_192)))
+            }
+            return result
+        }
+        func inspect(fragmentCount: Int) async throws -> (PreparedDecodedCadence?, [String]) {
+            let host = CadenceStub.host()
+            CadenceStub.install(host, [
+                "/hls/s1/index.m3u8": .text(Self.playlist(map: true)),
+                "/hls/s1/init.mp4": .bytes(initialization()),
+                "/hls/s1/seg0.m4s": .bytes(media(fragmentCount: fragmentCount)),
+            ])
+            let cadence = await HLSFragmentCadence.inspect(
+                url: try XCTUnwrap(URL(string: "http://\(host)/hls/s1/index.m3u8")),
+                itemSeconds: 1, boundMs: 4_000, configuration: CadenceStub.configuration())
+            return (cadence, CadenceStub.requestedRanges(host, "/hls/s1/seg0.m4s"))
+        }
+
+        // The same well-formed representation resolves when the index walk fits.
+        let small = try await inspect(fragmentCount: 2)
+        XCTAssertEqual(try XCTUnwrap(small.0).frameDurationSeconds, 1 / 24.0, accuracy: 1e-9)
+        XCTAssertLessThan(small.1.count, 64)
+        // Small metadata separated by media payload requires further real Range
+        // fetches; the terminal budget refuses rather than publishing a prefix.
+        XCTAssertNotNil(HLSFragmentCadence.minimumDuration(
+            initData: initialization(), fragment: media(fragmentCount: 80)),
+            "The complete many-fragment sample is valid; only the bounded network walk refuses it")
+        let many = try await inspect(fragmentCount: 80)
+        XCTAssertNil(many.0)
+        XCTAssertEqual(many.1.count, 64)
+    }
+
     /// A server that ignores Range answers with the whole object. Its body is
     /// walked as it arrives, keeping only `moof` bytes, up to the byte cap
     /// the earlier whole-segment read allowed; past the cap it is refused.

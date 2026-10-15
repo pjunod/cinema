@@ -1185,7 +1185,7 @@ impl TranscodeManager {
         route: &plurx_core::domain::MediaSessionRoute,
         successor: &str,
         request: &crate::playback_control::ControlRequestV1,
-    ) -> Option<crate::playback_control::AcceptedControlFence> {
+    ) -> Option<Option<crate::playback_control::AcceptedControlFence>> {
         self.vod
             .cached_prepared_wait_fence(route, successor, request)
     }
@@ -1196,7 +1196,7 @@ impl TranscodeManager {
         successor: &str,
         fence: &crate::playback_control::AcceptedControlFence,
         intent: Option<&plurx_core::playback::MediaIntentEnvelope>,
-    ) -> bool {
+    ) -> Option<bool> {
         self.vod
             .cached_prepared_wait_is_current(predecessor, successor, fence, intent)
     }

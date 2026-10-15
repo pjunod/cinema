@@ -6694,7 +6694,7 @@ id = "server.cached-wait-watcher-current-accepted-authority"
 commits = []
 supplements = "apple.hidden-clock-startup-strict-contiguous-runway"
 source = "crates/plurxd/src/http/hls/preparation.rs"
-source_anchor = "fn cached_accepted_wait_is_current(active: &ActivePreparedSuccessor) -> bool"
+source_anchor = "fn cached_accepted_wait_is_current(active: &ActivePreparedSuccessor) -> Option<bool>"
 test = "crates/plurxd/src/http/hls/preparation.rs"
 test_anchor = "cached_accepted_wait_survives_actual_foreground_watcher_capacity_pressure"
 
@@ -6733,3 +6733,48 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "private func setPlaybackRequested(_ requested: Bool, viewerOrigin: Bool) {"
 test = "clients/apple/Tests/PlayerResumeTests.swift"
 test_anchor = "testPausePublicationRetainsPendingSeekUntilPlayDispatchesOnce"
+
+[[fixes]]
+id = "server.cached-wait-contended-session-retains-witness"
+commits = []
+supplements = "apple.pause-publication-retains-pending-destination"
+source = "crates/plurxd/src/http/hls/preparation.rs"
+source_anchor = "fn cached_accepted_wait_is_current("
+test = "crates/plurxd/src/http/hls/preparation.rs"
+test_anchor = "cached_accepted_wait_survives_contended_session_lock_during_foreground_pressure"
+
+[[fixes]]
+id = "server.cached-wait-contended-reader-retains-witness"
+commits = []
+supplements = "apple.pause-publication-retains-pending-destination"
+source = "crates/plurxd/src/http/hls/preparation.rs"
+source_anchor = "fn cached_accepted_wait_is_current("
+test = "crates/plurxd/src/http/hls/preparation.rs"
+test_anchor = "cached_accepted_wait_survives_contended_reader_lock_during_foreground_pressure"
+
+[[fixes]]
+id = "server.cached-wait-contention-does-not-renew"
+commits = []
+supplements = "apple.pause-publication-retains-pending-destination"
+source = "crates/plurxd/src/http/hls/preparation.rs"
+source_anchor = "pub(super) fn cancel_preparations_for_incumbent_wait("
+test = "crates/plurxd/src/http/hls/preparation.rs"
+test_anchor = "cached_accepted_wait_contention_keeps_control_witness_without_renewal"
+
+[[fixes]]
+id = "apple.incumbent-lease-rejects-positive-buffer-gap"
+commits = []
+supplements = "apple.pause-publication-retains-pending-destination"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func acquirePreparedIncumbentBufferPreference("
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "testIncumbentFetchPreferenceLeaseRejectsPositiveGapInsideProtectedWindow"
+
+[[fixes]]
+id = "apple.cadence-sixty-four-request-bound"
+commits = []
+supplements = "apple.pause-publication-retains-pending-destination"
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "enum HLSFragmentCadence"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "testFragmentIndexWalkFailsClosedPastSixtyFourRequestsOnManyFragments"

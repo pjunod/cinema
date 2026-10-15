@@ -400,7 +400,11 @@ fn arm_preparation_foreground_watch(active: ActivePreparedSuccessor) {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match registered.get(&active.preparation.incarnation_id) {
-                        Some(current) if cached_accepted_wait_is_current(current) => None,
+                        Some(current)
+                            if cached_accepted_wait_is_current(current) != Some(false) =>
+                        {
+                            None
+                        }
                         Some(_) => registered.remove(&active.preparation.incarnation_id),
                         None => return,
                     }
@@ -635,20 +639,20 @@ fn cached_recovery_matches_accepted_wait(
     route: &MediaSessionRoute,
     request: &crate::playback_control::ControlRequestV1,
     deadline_unix_ms: i64,
-) -> bool {
+) -> Option<bool> {
     let now = unix_ms();
     let Some(owner) = active.cached_recovery_owner.as_ref() else {
-        return false;
+        return Some(false);
     };
     let Some(identity) = active.quality_intent.as_ref() else {
-        return false;
+        return Some(false);
     };
     let Some(current) = QualityIntentIdentity::from_control(request) else {
-        return false;
+        return Some(false);
     };
     let Ok(recipe) = serde_json::from_str::<RemoteStartRequest>(&active.preparation.recipe_json)
     else {
-        return false;
+        return Some(false);
     };
     let selection_matches = match request.selection.quality {
         crate::playback_control::QualitySelection::Auto { candidate_id: Some(candidate), height } => {
@@ -659,7 +663,7 @@ fn cached_recovery_matches_accepted_wait(
         crate::playback_control::QualitySelection::Auto { candidate_id: None, height: None } => owner.bootstrap,
         _ => false,
     };
-    request.demand == crate::playback_control::PlaybackDemand::Active
+    let matches = request.demand == crate::playback_control::PlaybackDemand::Active
         && matches!(
             request.render_state,
             crate::playback_control::RenderState::Waiting
@@ -676,30 +680,42 @@ fn cached_recovery_matches_accepted_wait(
         && active.preparation.principal == route.principal
         && active.preparation.playback_id == route.playback_id
         && same_accepted_quality_intent(identity, &current)
-        && selection_matches
-        && active
-            .state
-            .transcode
-            .prepared_cached_recovery_is_live(&active.preparation, &owner.owner)
+        && selection_matches;
+    if !matches {
+        return Some(false);
+    }
+    active
+        .state
+        .transcode
+        .prepared_cached_recovery_is_live(&active.preparation, &owner.owner)
 }
 
-fn cached_accepted_wait_is_current(active: &ActivePreparedSuccessor) -> bool {
+fn cached_accepted_wait_is_current(active: &ActivePreparedSuccessor) -> Option<bool> {
     let Some(wait) = active.cached_accepted_wait.as_ref() else {
-        return false;
+        return Some(false);
     };
-    wait.fence.still_live()
-        && cached_recovery_matches_accepted_wait(
-            active,
-            &wait.route,
-            &wait.request,
-            wait.deadline_unix_ms,
-        )
-        && active.state.transcode.cached_prepared_wait_is_current(
-            &wait.route.session_id,
-            &active.preparation.incarnation_id,
-            &wait.fence,
-            wait.request.intent.as_ref(),
-        )
+    if !wait.fence.still_live() {
+        return Some(false);
+    }
+    let reader = cached_recovery_matches_accepted_wait(
+        active,
+        &wait.route,
+        &wait.request,
+        wait.deadline_unix_ms,
+    );
+    // Observe both independent probes: a definite Playing/owner change must
+    // still revoke the witness when the reader table happens to be busy.
+    let accepted = active.state.transcode.cached_prepared_wait_is_current(
+        &wait.route.session_id,
+        &active.preparation.incarnation_id,
+        &wait.fence,
+        wait.request.intent.as_ref(),
+    );
+    match (reader, accepted) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    }
 }
 
 pub(super) fn cancel_preparations_for_incumbent_wait(
@@ -724,7 +740,8 @@ pub(super) fn cancel_preparations_for_incumbent_wait(
                 }
                 let (route, request, deadline) = accepted?;
                 let fresh = (route.owner_node_id == active.state.node_id
-                    && cached_recovery_matches_accepted_wait(active, route, request, deadline))
+                    && cached_recovery_matches_accepted_wait(active, route, request, deadline)
+                        == Some(true))
                 .then(|| {
                     active.state.transcode.cached_prepared_wait_fence(
                         route,
@@ -732,6 +749,7 @@ pub(super) fn cancel_preparations_for_incumbent_wait(
                         request,
                     )
                 })
+                .flatten()
                 .flatten();
                 if let Some(fence) = fresh {
                     // Only exact current acceptance may renew the witness.
@@ -746,9 +764,10 @@ pub(super) fn cancel_preparations_for_incumbent_wait(
                     // owner/intent has published its own accepted wait witness.
                     // Its request is not current authority: retain only the
                     // independently proved bounded witness, without renewal.
-                    // Missing/expired/changed current authority still refuses;
+                    // Contention preserves only this existing bounded witness; it
+                    // cannot mint or renew one. Missing/expired/changed authority refuses;
                     // accepted=None never reaches this branch.
-                    if !cached_accepted_wait_is_current(active) {
+                    if cached_accepted_wait_is_current(active) == Some(false) {
                         return None;
                     }
                 }
@@ -2914,6 +2933,21 @@ mod quality_cancellation_tests {
         }
     }
 
+    #[tokio::test]
+    async fn cached_accepted_wait_survives_contended_session_lock_during_foreground_pressure() {
+        cached_wait_watcher_fixture(Some("contended_sessions")).await;
+    }
+
+    #[tokio::test]
+    async fn cached_accepted_wait_survives_contended_reader_lock_during_foreground_pressure() {
+        cached_wait_watcher_fixture(Some("contended_readers")).await;
+    }
+
+    #[tokio::test]
+    async fn cached_accepted_wait_contention_keeps_control_witness_without_renewal() {
+        cached_wait_watcher_fixture(Some("contended_control_witness")).await;
+    }
+
     async fn cached_wait_watcher_fixture(watcher_revocation: Option<&str>) {
         let (_output_dir, serve, facts, output_request) =
             crate::vodserve::retained::test_post_attachment_output_facts().await;
@@ -3056,6 +3090,68 @@ mod quality_cancellation_tests {
                 "real capacity pressure cannot abort the proved accepted keeper"
             );
             assert!(!pending.cancelled());
+            if let Some(lock) = revocation.strip_prefix("contended_") {
+                let original = active_preparation(&incarnation)
+                    .expect("cached keeper")
+                    .cached_accepted_wait
+                    .expect("existing accepted witness");
+                let locks: &[&str] = if lock == "control_witness" {
+                    &["sessions", "readers"]
+                } else {
+                    &[lock]
+                };
+                for lock in locks {
+                    serve
+                        .while_cached_recovery_lock_held_for_test(id, lock, async {
+                            // Both real session-table and real reader-table locks
+                            // outlive at least two 25 ms watcher ticks under actual
+                            // occupied live capacity, not a mocked liveness answer.
+                            tokio::time::sleep(Duration::from_millis(90)).await;
+                            assert!(active_preparation(&incarnation).is_some());
+                            assert!(!pending.cancelled());
+                            if revocation == "contended_control_witness" {
+                                cancel_preparations_for_incumbent_wait(
+                                    &playback,
+                                    Some((&route, &request, unix_ms() + 20_000)),
+                                );
+                                let kept = active_preparation(&incarnation)
+                                    .expect("busy keeper")
+                                    .cached_accepted_wait
+                                    .expect("retained witness");
+                                assert_eq!(
+                                    kept.deadline_unix_ms, original.deadline_unix_ms,
+                                    "unknown must not renew an existing witness"
+                                );
+                                assert!(kept.fence.still_live());
+                                assert!(!pending.cancelled());
+                            }
+                        })
+                        .await;
+                }
+                // A definite accepted Playing observation must still revoke
+                // while the independent reader probe is unknown.
+                request.sequence += 1;
+                request.render_state = crate::playback_control::RenderState::Rendering;
+                serve
+                    .accept_cached_wait_for_test(&route, &request, &incarnation)
+                    .await;
+                serve
+                    .while_cached_recovery_lock_held_for_test(id, "readers", async {
+                        tokio::time::timeout(Duration::from_millis(150), async {
+                            while active_preparation(&incarnation).is_some() {
+                                tokio::time::sleep(Duration::from_millis(5)).await;
+                            }
+                        })
+                        .await
+                        .expect("next watcher polls cancel definite Playing even with busy reader");
+                        assert!(pending.cancelled());
+                    })
+                    .await;
+                drop(blocked);
+                drop(held);
+                assert!(!state.transcode.foreground_media_waiting());
+                return;
+            }
             // Acceptance is visible before the HTTP path can refresh the
             // witness. An ordinary same-intent Waiting heartbeat must survive
             // this exact window even though its sequence and position advance.

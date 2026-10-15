@@ -1,6 +1,6 @@
 # Preserve launch IDs and prepare tracks before presentation
 
-Build: 247
+Build: 248
 Issue: #994
 
 The DEBUG physical-acceptance launch path preserves full-width explicit decimal
@@ -129,3 +129,14 @@ remain pending. TV transport-event attribution and the phone low-link
 
 [Continuous Quality Build §10.325](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10325--preserve-pause-intent-through-publication)
 records the measured failures and the correction's scope.
+
+
+Apple 248 keeps an existing bounded cached recovery witness during server lock
+contention without creating or renewing authority. Definitive invalidity still
+cancels it. Its physical incumbent preference lease requires gap-free coverage;
+ordinary telemetry stays tolerant. Five new regressions are authored and unrun.
+TV compilation and exact-source qualification remain pending. Mobile builds and
+installs remain subject to the owner's main-only rule; no merge is authorized.
+
+[Continuous Quality Build §10.326](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10326--preserve-bounded-cached-witnesses-during-lock-contention)
+records the Fable corrections and remaining acceptance.

@@ -4042,7 +4042,7 @@ final class PlayerController: ObservableObject {
     /// Runway of the item currently attached, or `nil` when there is no item
     /// or no usable clock. `nil` means "unknown", which the delivery watchdog
     /// must not read as "healthy".
-    func bufferedRunwaySeconds() -> Double? {
+    func bufferedRunwaySeconds(joinTolerance: Double = 0.25) -> Double? {
         guard let item = player.currentItem else { return nil }
         let playhead = item.currentTime().seconds
         guard playhead.isFinite else { return nil }
@@ -4053,7 +4053,9 @@ final class PlayerController: ObservableObject {
             guard start.isFinite, end.isFinite, end >= start else { return nil }
             return start...end
         }
-        return Self.bufferedRunwaySeconds(playheadSeconds: playhead, ranges: ranges)
+        return Self.bufferedRunwaySeconds(
+            playheadSeconds: playhead, ranges: ranges, joinTolerance: joinTolerance
+        )
     }
 
     /// Playable seconds contiguous with the current clock. A later buffered
@@ -12562,8 +12564,9 @@ extension PlayerController: PreparedSuccessorHost {
 
     private func acquirePreparedIncumbentBufferPreference(_ action: PreparedReplacementAction) {
         restorePreparedIncumbentBufferPreference()
+        // A physical protection lease cannot bridge telemetry's tolerated gaps.
         guard started, wantsPlayback, let item = player.currentItem,
-              let runway = bufferedRunwaySeconds(),
+              let runway = bufferedRunwaySeconds(joinTolerance: 0),
               let policy = PreparedIncumbentBufferPreference(
                 original: item.preferredForwardBufferDuration,
                 actualRunwaySeconds: runway, playbackRate: Double(preferredRate)) else { return }

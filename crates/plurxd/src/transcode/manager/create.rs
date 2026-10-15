@@ -3065,7 +3065,7 @@ impl TranscodeManager {
         &self,
         preparation: &plurx_core::domain::MediaSessionPreparation,
         owner: &crate::vodserve::ResponseOwner,
-    ) -> bool {
+    ) -> Option<bool> {
         self.vod.cached_prepared_reader_is_live(
             &preparation.session_id,
             &preparation.incarnation_id,

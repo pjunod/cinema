@@ -11768,3 +11768,37 @@ The earlier full-series phone pass does not qualify Apple 247. The new source,
 exact native acceptance and external review delta remain pending. All failures
 and original false transport receipts are preserved, and independent optical
 and audio continuity remain unmeasured. Nothing is merged.
+
+
+### 10.326 — preserve bounded cached witnesses during lock contention
+
+Fable's external source review identifies a major cached-recovery cancellation
+bug: nonblocking lifecycle, session, control or reader lock contention was read
+as definite invalidity by the foreground watcher. The corrected probes distinguish
+unknown from definite false. Only an already sealed, unexpired accepted witness
+survives unknown; unknown cannot mint or renew one. Independent definitive owner,
+intent, snapshot, cancellation, fence and deadline failures still revoke it.
+No asynchronous wait is introduced under the preparation registry lock.
+
+Apple 248 also requires zero positive-gap tolerance when acquiring the physical
+incumbent buffer-preference lease. Ordinary runway telemetry retains its existing
+0.25-second tolerance. The new real-controller regression covers the gap refusal,
+contiguous admission, restoration and later-owner preference preservation.
+An injected-fetch cadence regression covers the existing 64-request bound using
+valid many-fragment media and a small successful control, without changing policy.
+
+Three real-lock server regressions hold the actual session or reader table across
+multiple watcher ticks under live capacity pressure. They require the successor
+and pending token to survive, forbid renewal under contention, then require a
+new accepted Rendering snapshot to cancel even while the reader table is busy.
+All five regression bodies are authored and unrun. Pinned Rust all-targets
+compilation passed before integration; exact committed-source compilation remains
+required. The full Fable dispositions are in the companion review record.
+
+The owner clarified that main-only app builds/installations apply to mobile apps.
+iPhone and Android qualification therefore await an authorized main landing;
+Apple TV compilation and qualification proceed on this correction. The prior
+phone 247 clock diagnostic was safely stopped before READY/native launch, with
+all 159 owned process identities absent and no playback acceptance credit.
+The low-link clock refusal remains undiagnosed; no weakened deadline, runway,
+reserve, ownership condition or client HTTP retry is introduced. Nothing merges.

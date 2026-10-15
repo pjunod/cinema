@@ -92,3 +92,62 @@ external display capture not measured. CQ0 is a runnable partial milestone;
 its missing physical/API and media evidence is not converted into a pass.
 The upstream ownership/integration delta review required by §1.2 is still
 outstanding and cannot be replaced by this isolated prototype review.
+
+## 5. Fable source review — corrections awaiting qualification
+
+**Updated:** 2026-10-15. Fable reviewed `ca00c3ed8` against
+`6e01ef879`, including the Apple 245 source package. The current committed
+candidate is `e2315d3a4` (Apple 247); the corrections below are still
+uncommitted. Source review does not qualify a different hardware build.
+
+| Finding | Current disposition | Remaining evidence |
+|---|---|---|
+| F1, major: a busy cached-reader or accepted-wait lock cancels a sealed recovery under foreground pressure | Authored tri-state probes. Unknown preserves only an existing unexpired witness. Definitive negative checks cancel; fresh authority requires definite success. | Pinned Rust 1.97.1 all-targets compilation passed. Three actual-lock watcher/control regressions are authored, unrun. |
+| F2, minor: physical incumbent protection bridges telemetry's positive-gap tolerance | Lease acquisition explicitly requests zero gap tolerance; ordinary runway telemetry retains its existing tolerance. | Real-controller gap, contiguous admission and restoration regression authored; Apple compilation and execution pending. |
+| README build mismatch | Already corrected by Apple 247 before this review arrived. | Current README and project both report 247. |
+| N6, request-bound coverage | Added an injected-fetch regression with valid many-fragment media; it requires refusal after exactly 64 requests and includes a valid small control. | Authored, unrun; no request-budget change. |
+| N4, shared-controller parity | Recorded as a separate parity gap outside this correction batch. | No shared-controller acceptance claimed. |
+
+The new regression anchors are:
+
+- `crates/plurxd/src/http/hls/preparation.rs::cached_accepted_wait_survives_contended_session_lock_during_foreground_pressure`
+- `crates/plurxd/src/http/hls/preparation.rs::cached_accepted_wait_survives_contended_reader_lock_during_foreground_pressure`
+- `crates/plurxd/src/http/hls/preparation.rs::cached_accepted_wait_contention_keeps_control_witness_without_renewal`
+- `clients/apple/Tests/PlayerResumeTests.swift::testIncumbentFetchPreferenceLeaseRejectsPositiveGapInsideProtectedWindow`
+- `clients/apple/Tests/HLSFragmentCadenceTests.swift::testFragmentIndexWalkFailsClosedPastSixtyFourRequestsOnManyFragments`
+
+### Source context requested by Fable
+
+`http/hls/control.rs` returns HTTP 429 with `control_rate_limited` when
+`media_sessions.admit_control` rejects the ingress control budget. This
+source path explains a possible response, not the cause of a particular
+metadata-ready receipt: that still requires its exact response and request
+chronology. It does not establish a media HTTP 503 cause or authorize a
+client retry.
+
+`PlayerController` converts native transfer completion dates into a
+`PlaybackControlSession.monotonicMs()` timestamp when observing the metrics.
+`AutoCompletedTransfer.ageMs` subsequently subtracts that timestamp from the
+same uptime clock, rejecting a backwards value with `Int.max`. The initial
+age conversion uses wall-clock dates; it is not an independent monotonic
+native completion timestamp. Provide these source contexts in the next
+review package rather than claiming them present in the original package.
+
+Catalog counts describe distinct recorded `commits` values, not distinct
+regression ID prefixes. At the committed Apple 247 checkpoint there were
+712 rows, 712 unique IDs and 588 distinct recorded `commits` values.
+
+### Hardware and owner-policy hold
+
+Phone 247's clock diagnostic was stopped before READY and before native
+launch after a new owner instruction prohibited app builds and installs
+from unmerged source, including diagnostics. All 159 recorded owned
+process identities were absent at independent closure. Three cost proofs
+completed; no native frames or quality changes were captured. This is a
+policy-stopped attempt, not media acceptance or a reproduced playback
+failure. Earlier failed captures remain preserved.
+
+The owner subsequently clarified that the main-only build/install instruction
+applies to mobile apps only. iPhone and Android builds/installations stay held;
+Apple TV qualification resumes on the corrected source. No merge is authorized.
+Unit bodies remain unexecuted under the explicit deferred-test instruction.

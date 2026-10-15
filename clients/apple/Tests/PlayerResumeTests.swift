@@ -4,11 +4,12 @@ import XCTest
 
 private final class ResumeItem: AVPlayerItem {
     var ready = true
+    var positionSeconds = 29.661
     var ranges: [ClosedRange<Double>] = [29.661...91.999]
 
     override var status: AVPlayerItem.Status { ready ? .readyToPlay : .unknown }
     override func currentTime() -> CMTime {
-        CMTime(seconds: 29.661, preferredTimescale: 1_000)
+        CMTime(seconds: positionSeconds, preferredTimescale: 1_000)
     }
     override var loadedTimeRanges: [NSValue] {
         ranges.map {
@@ -125,6 +126,54 @@ final class PlayerResumeTests: XCTestCase {
             selectedPath: "buffered-immediate",
             lastVideoDisplaySeconds: baseline
         )
+    }
+
+    func testIncumbentFetchPreferenceLeaseRejectsPositiveGapInsideProtectedWindow() throws {
+        let player = ResumePlayer()
+        player.item.positionSeconds = 0
+        player.item.ranges = [0...5, 5.1...40]
+        player.item.preferredForwardBufferDuration = 60
+        let controller = PlayerController(player: player,
+            requestPlaybackDecision: { _, _, _, _ in
+                try await Task.sleep(for: .seconds(3_600))
+                throw CancellationError()
+            })
+        let credentials = Session.shared.credentials
+        Session.shared.setCredentials(origin: "http://127.0.0.1:1", token: nil)
+        defer {
+            controller.stop()
+            Session.shared.setCredentials(origin: credentials.origin, token: credentials.token)
+        }
+        controller.start(model: AppModel(), itemId: 1, fileId: 1, startMs: 0,
+            durationMs: 600_000, title: "Physical lease runway")
+        let sessionId = "7f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01"
+        let action = try XCTUnwrap(PreparedReplacementAction(ControlAction(
+            type: PlaybackControl.prepareActionType,
+            actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+            sessionId: sessionId,
+            playlistUrl: "/api/v1/hls/\(sessionId)/master.m3u8",
+            mediaOriginMs: 0,
+            effectiveSelection: EffectiveSelection(
+                qualityAuto: false, height: 720, audioTrack: nil, subtitleBurn: nil,
+                audioOffsetMs: 0, codec: "source", dynamicRange: nil))))
+
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds()), 40, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(joinTolerance: 0)), 5, accuracy: 0.001)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 60,
+            "A positive gap inside the protected window must prevent physical buffer reduction")
+        controller.discardPreparedSuccessor()
+
+        player.item.ranges = [0...5, 5...40]
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 16)
+        controller.discardPreparedSuccessor()
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 60)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        player.item.preferredForwardBufferDuration = 45
+        controller.discardPreparedSuccessor()
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 45,
+            "Restoration must preserve a later owner's preference")
     }
 
     func testHeartstopperRunwayQualifiesAndBoundaryCasesDoNot() {
