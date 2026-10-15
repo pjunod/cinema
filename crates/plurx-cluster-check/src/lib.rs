@@ -13316,12 +13316,12 @@ async fn run_preflight(
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
-/// Build the hiqlite configuration for one voter and create its data dir.
 fn node_hiqlite_dir(root: &Path, node_id: u64) -> PathBuf {
     root.join(format!("node-{node_id}"))
         .join(HIQLITE_ACTIVE_DIRNAME)
 }
 
+/// Build the hiqlite configuration for one voter and create its data dir.
 pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
     let mut defaults = production_hiqlite_defaults_with_read_pool(launch.read_pool_size);
     if let Some(logs_since_last) = launch.snapshot_logs_since_last {
