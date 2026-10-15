@@ -466,10 +466,10 @@ async function saveSubtitleTranscription(button){
 async function refreshSubtitleModels(){
   const panel=subtitleSetupPanel(),setup=panel?._subtitleSetup,mount=document.getElementById("st-model-evidence");
   if(!setup||!mount||!subtitleUiCurrent(setup.capture))return;
-  const modelId=subtitleSetupInput("st-model-id").value,request={};setup.refresh=request;
+  const modelId=subtitleSetupInput("st-model-id").value,request={},operation=setup.operation;setup.refresh=request;
   const selected=subtitleSetupWorkers(true).map(node=>node.value);
-  try{const catalog=await api("/subtitle-transcription/models");if(!subtitleUiCurrent(setup.capture)||panel._subtitleSetup!==setup||setup.refresh!==request||!mount.isConnected||subtitleSetupInput("st-model-id").value!==modelId)return;setup.catalog=catalog;subtitleSetupInput("st-model-id").innerHTML=subtitleModelOptions(catalog.models,modelId);mount.innerHTML=subtitleModelEvidence(catalog,modelId);for(const node of subtitleSetupWorkers())if(!node.disabled)node.checked=selected.includes(node.value);}
-  catch(error){if(subtitleUiCurrent(setup.capture)&&mount.isConnected&&setup.refresh===request)document.getElementById("st-operation-status").innerHTML=`${setup.operationRows?.length?subtitleModelOperationsHtml(setup):""}<p>${esc(error.message||"Could not refresh worker status.")} <button class="ghost sm" onclick="refreshSubtitleModels()">Retry worker status</button></p>`;}
+  try{const catalog=await api("/subtitle-transcription/models");if(!subtitleUiCurrent(setup.capture)||panel._subtitleSetup!==setup||setup.refresh!==request||setup.operation!==operation||!mount.isConnected||subtitleSetupInput("st-model-id").value!==modelId)return;setup.catalog=catalog;subtitleSetupInput("st-model-id").innerHTML=subtitleModelOptions(catalog.models,modelId);mount.innerHTML=subtitleModelEvidence(catalog,modelId);for(const node of subtitleSetupWorkers())if(!node.disabled)node.checked=selected.includes(node.value);}
+  catch(error){if(subtitleUiCurrent(setup.capture)&&mount.isConnected&&setup.refresh===request&&setup.operation===operation)document.getElementById("st-operation-status").innerHTML=`${setup.operationRows?.length?subtitleModelOperationsHtml(setup):""}<p>${esc(error.message||"Could not refresh worker status.")} <button class="ghost sm" onclick="refreshSubtitleModels()">Retry worker status</button></p>`;}
 }
 async function subtitleModelOperation(action,button){
   const panel=subtitleSetupPanel(),setup=panel?._subtitleSetup,status=document.getElementById("st-operation-status");
@@ -481,7 +481,7 @@ async function subtitleModelOperation(action,button){
   try{const result=await api(`/subtitle-transcription/models/${encodeURIComponent(modelId)}/${action}`,{method:"POST",body:{version:1,node_ids:nodeIds}});
     if(!subtitleUiCurrent(setup.capture)||panel._subtitleSetup!==setup||setup.operation!==request||!status.isConnected)return;
     const operations=result.operations||[];
-    setup.operationRows=operations.map(operation=>({...operation}));
+    setup.operationRows=operations.map(operation=>({...operation,model_id:modelId}));
     status.innerHTML=subtitleModelOperationsHtml(setup);
     pollSubtitleModelOperations(setup,operations.filter(op=>["accepted","existing"].includes(op.outcome)).map(op=>op.job_id));
   }catch(error){if(subtitleUiCurrent(setup.capture)&&status.isConnected&&setup.operation===request)status.textContent=error.message||"Could not request model work.";}
@@ -495,8 +495,16 @@ function subtitleModelOperationsHtml(setup){
 }
 function retrySubtitleModelOperations(){
   const setup=subtitleSetupPanel()?._subtitleSetup;if(!setup||!subtitleUiCurrent(setup.capture))return;
-  const ids=(setup.operationRows||[]).filter(row=>["accepted","existing"].includes(row.outcome)&&!["succeeded","failed","cancelled"].includes(row.job?.state)).map(row=>row.job_id);
+  const ids=(setup.operationRows||[]).filter(row=>["accepted","existing"].includes(row.outcome)&&(!["succeeded","failed","cancelled"].includes(row.job?.state)||row.awaitingObservation)).map(row=>{row.observationDeadline=null;return row.job_id;});
   pollSubtitleModelOperations(setup,ids);
+}
+function subtitleModelObservationPending(setup,row){
+  const job=row.job;
+  if(job?.state!=="succeeded")return false;
+  const worker=(setup.catalog.workers||[]).find(worker=>worker.node_id===row.node_id);
+  const model=worker?.models?.find(model=>model.model_id===row.model_id);
+  return !worker||!Number.isFinite(worker.observed_at_ms)||worker.observed_at_ms>Date.now()+30000||!Number.isFinite(worker.expires_at_ms)||worker.expires_at_ms<=Date.now()||
+    model?.status!=="verified";
 }
 async function pollSubtitleModelOperations(setup,ids){
   if(!ids.length||!subtitleUiCurrent(setup.capture))return;
@@ -507,9 +515,21 @@ async function pollSubtitleModelOperations(setup,ids){
     for(const job of jobs){const row=(setup.operationRows||[]).find(operation=>operation.job_id===job.job_id);if(row)row.job=job;}
     document.getElementById("st-operation-status").innerHTML=subtitleModelOperationsHtml(setup);
     await refreshSubtitleModels();
+    if(!subtitleUiCurrent(setup.capture)||panel._subtitleSetup!==setup||setup.operation!==request)return;
     const pending=jobs.filter(job=>!["succeeded","failed","cancelled"].includes(job.state)).map(job=>job.job_id);
+    let updating=false;
+    for(const job of jobs){
+      const row=(setup.operationRows||[]).find(row=>row.job_id===job.job_id);if(!row)continue;
+      row.awaitingObservation=subtitleModelObservationPending(setup,row);
+      if(row.awaitingObservation){
+        if(row.observationDeadline==null)row.observationDeadline=Date.now()+30000;
+        if(Date.now()<row.observationDeadline)pending.push(job.job_id);
+        updating=true;
+      }
+    }
+    if(updating)document.getElementById("st-operation-status").innerHTML+=`<p>Verification status is updating. <button class="ghost sm" onclick="retrySubtitleModelOperations()">Refresh verification status</button></p>`;
     if(pending.length)setTimeout(()=>{if(setup.operation===request)pollSubtitleModelOperations(setup,pending);},3000);
-  }catch(error){if(subtitleUiCurrent(setup.capture)&&panel._subtitleSetup===setup)document.getElementById("st-operation-status").innerHTML=`${subtitleModelOperationsHtml(setup)}<p>${esc(error.message||"Could not refresh model work.")} <button class="ghost sm" onclick="retrySubtitleModelOperations()">Retry status</button></p>`;}
+  }catch(error){if(subtitleUiCurrent(setup.capture)&&panel._subtitleSetup===setup&&setup.operation===request)document.getElementById("st-operation-status").innerHTML=`${subtitleModelOperationsHtml(setup)}<p>${esc(error.message||"Could not refresh model work.")} <button class="ghost sm" onclick="retrySubtitleModelOperations()">Retry status</button></p>`;}
 }
 
 function hevcCopyCard(settings){

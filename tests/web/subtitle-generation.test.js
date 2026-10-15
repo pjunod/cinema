@@ -138,3 +138,31 @@ test("watch generation mount survives mirrored ledger refresh and retires on fil
   h.ctx.file={...h.ctx.file,id:"9007199254740994",fileContext:h.ctx.localPlaybackFileContext("9007199254740994")};h.ctx.watchRenderSubtitleGeneration();assert.match(mount.innerHTML,/subtitle-generate-9007199254740994/);assert.doesNotMatch(mount.innerHTML,/9007199254740993/);
   h.ctx.ME={is_admin:false};h.ctx.watchRenderSubtitleGeneration();assert.equal(mount.hidden,true);assert.equal(mount.innerHTML,"");assert.equal(h.ctx.watchGenerationAction(h.ctx.file),"");
 });
+
+test("terminal model work waits for fresh verification with bounded fenced retries",async()=>{
+  const h=harness(),panel=h.settings();let clock=1000,fresh=false;
+  h.ctx.Date=class extends Date{static now(){return clock;}};
+  const setup=panel._subtitleSetup;setup.operation={};setup.operationRows=[{node_id:"worker",job_id:"verify-one",outcome:"accepted",model_id:"base"}];
+  h.nodes["st-language"].value="sv";
+  h.ctx.respond=path=>path.includes("/jobs/")?{job_id:"verify-one",state:"succeeded",phase:"succeeded",updated_at_ms:900}:{models:[model],workers:[{node_id:"worker",label:"Worker",eligible:true,engine:{status:"available"},observed_at_ms:800,expires_at_ms:60000,models:[{model_id:"base",status:fresh?"verified":"unverified_cache",verified_at_ms:fresh?850:null}]}]};
+  await h.ctx.pollSubtitleModelOperations(setup,["verify-one"]);
+  assert.match(h.nodes["st-model-evidence"].innerHTML,/Download cached/);assert.match(h.nodes["st-operation-status"].innerHTML,/Verification status is updating/);assert.equal(h.timers.length,1);
+  assert.equal(h.nodes["st-language"].value,"sv");assert.equal(h.nodes["st-enabled"].checked,true);
+  fresh=true;h.timers.shift()();await settle();
+  assert.match(h.nodes["st-model-evidence"].innerHTML,/ · verified · engine/);assert.equal(h.timers.length,0);assert.equal(setup.operationRows[0].awaitingObservation,false);
+  const row=setup.operationRows[0];setup.catalog.workers[0].observed_at_ms=clock+30001;assert.equal(h.ctx.subtitleModelObservationPending(setup,row),true);assert.match(h.ctx.subtitleModelEvidence(setup.catalog,"base"),/readiness is unknown/);
+  row.job={state:"failed"};assert.equal(h.ctx.subtitleModelObservationPending(setup,row),false);row.job={state:"cancelled"};assert.equal(h.ctx.subtitleModelObservationPending(setup,row),false);
+  fresh=false;await h.ctx.pollSubtitleModelOperations(setup,["verify-one"]);assert.equal(h.timers.length,1);
+  clock=32000;h.timers.shift()();await settle();assert.equal(h.timers.length,0);assert.match(h.nodes["st-operation-status"].innerHTML,/Refresh verification status/);
+  clock=33000;h.ctx.retrySubtitleModelOperations();await settle();assert.equal(h.timers.length,1);
+  const calls=h.calls.length;h.ctx.PAGE_RENDER_GENERATION++;h.timers.shift()();await settle();assert.equal(h.calls.length,calls);assert.equal(h.timers.length,0);
+  const newer=harness(),newPanel=newer.settings(),newSetup=newPanel._subtitleSetup;newSetup.operation={};newSetup.operationRows=[{node_id:"worker",job_id:"old",outcome:"accepted",model_id:"base"}];
+  let rejectOld;newer.ctx.respond=()=>new Promise((_resolve,reject)=>rejectOld=reject);
+  const oldPoll=newer.ctx.pollSubtitleModelOperations(newSetup,["old"]);newSetup.operation={};newer.nodes["st-operation-status"].textContent="New operation";
+  rejectOld(Error("old response failed"));await oldPoll;assert.equal(newer.nodes["st-operation-status"].textContent,"New operation");
+  for(const change of [ctx=>{ctx.location.hash="#/settings/playback";},ctx=>{ctx.TOKEN="other-account";}]){
+    const retired=harness(),retiredSetup=retired.settings()._subtitleSetup;retiredSetup.operation={};retiredSetup.operationRows=[{node_id:"worker",job_id:"verify-one",outcome:"accepted",model_id:"base"}];retired.ctx.respond=h.ctx.respond;
+    await retired.ctx.pollSubtitleModelOperations(retiredSetup,["verify-one"]);assert.equal(retired.timers.length,1);const before=retired.calls.length;
+    change(retired.ctx);retired.timers.shift()();await settle();assert.equal(retired.calls.length,before);assert.equal(retired.timers.length,0);
+  }
+});
