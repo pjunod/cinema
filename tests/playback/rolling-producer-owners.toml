@@ -2939,7 +2939,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # collection task drops its peer futures on cancellation or a five-second
 # deadline; the expiry task removes the original job at JOB_TTL or cancellation.
 # Neither starts a producer/process nor makes a playback decision.
-expected_occurrences = 950
+# PR1093: +1 test-only reader drain in assert_ready_tuner_burst_is_fair.
+# The fixture owns the receiver and byte-accounting handle; transport.finish
+# closes the channel, then the test awaits the JoinHandle and checks every
+# byte received. The two burst regressions share this one spawn site. No
+# production task, timer, process or detached owner is introduced.
+expected_occurrences = 951
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes

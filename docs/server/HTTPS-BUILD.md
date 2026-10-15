@@ -1,6 +1,6 @@
 # HTTPS build — milestones, ownership and qualification
 
-**Status:** H1 locally verified; effort gate/integration pending · **Written:** 2026-10-15
+**Status:** H1 re-verified on refreshed base; effort gate/integration pending · **Written:** 2026-10-15
 **Owner:** GPT-6.1 Sol builder; parent coordinates and reviews
 
 This canonical ledger executes [the contract](HTTPS-IMPLEMENTATION.md).
@@ -89,6 +89,7 @@ then graduate it to System. Built source awaiting physical proof is
 | 2026-10-15 | H1 source review | Parent reviewed configuration, filesystem/identity ownership and persistence outcomes. Fixed masked-value precedence, intentional data-root symlinks, read-only directory validation and post-publication sync semantics; no remaining source blocker. |
 | 2026-10-15 | H1 compiler/lint | Pinned Rust 1.97.1 all-target daemon check and Clippy with `-D warnings` passed; final test-only `unwrap` calls replaced with explicit fixture assertions. Catalog maps both new source paths. |
 | 2026-10-15 | H1 focused evidence | Current-source core `--features hiqlite-store --lib config::`: 22 passed; daemon `--bin plurxd https::tests::`: 8 passed, including normal generated/private-CA trust, unknown trust/hostname rejection and FIFO bounds. Formatting, docs index (4 tests), catalog and infrastructure-name checks passed. |
+| 2026-10-15 | H1 base refresh | Manual effort run #5158 refused authenticated history binding because current main was not an ancestor of the effort. Merged main `a0b8cb72c` into effort normally as `4fb1c1943`, then merged that refreshed effort into H1 without conflicts or rebasing. Earlier H1 results are retained history; the exact combined source has now passed 22 configuration tests, 8 identity/trust tests, all-target compilation, formatting, docs index (4 tests), infrastructure checks and catalog lint. Normal pinned workspace hook is required on the merge commit before push. |
 
 Post-review persistence clarification: rename publishes the revision. A later
 directory-sync error is a committed save with `durability_confirmed: false`;
