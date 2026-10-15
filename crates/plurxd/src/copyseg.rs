@@ -745,6 +745,7 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
     // same records in hvcC before it will accept a PQ HLS variant.
     let mut pending_init: Option<(Init, fmp4::CutPolicy)> = None;
     let mut segmenter: Option<Segmenter> = None;
+    let mut guarded_dvh1_init: Option<Init> = None;
     let mut converter: Option<crate::dvpipe::Converter> = None;
     let mut buf = vec![0u8; READ_CHUNK];
     let mut warned_memory = false;
@@ -781,6 +782,9 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                     // task observes the file. Preserve structural Unsupported
                     // exactly and let the actor choose Retry or
                     // RetainPublished from its ordered response state.
+                    if guarded_dvh1_init.is_some() {
+                        return Outcome::InvalidHevcConfiguration(e.to_string());
+                    }
                     return match e {
                         fmp4::Fmp4Error::Unsupported(reason) => Outcome::Unsupported(reason),
                         error @ fmp4::Fmp4Error::MultipleHevcSampleEntries { .. } => {
@@ -797,6 +801,11 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
             };
             match unit {
                 Unit::Init(mut init) => {
+                    if guarded_dvh1_init.is_some() {
+                        return Outcome::InvalidHevcConfiguration(
+                            "rolling dvh1 decoder configuration changed after publication".into(),
+                        );
+                    }
                     let Some(init_video) = init.video() else {
                         return Outcome::Unsupported("the pipe's moov has no video track".into());
                     };
@@ -959,18 +968,14 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                                 counts: SegmentCounts::default(),
                             };
                         };
-                        // Retaining copies knowingly keep in-band definitions.
-                        // They cannot acquire a new out-of-band-only claim.
-                        if retain_hevc_parameter_sets
+                        // A rolling source has no whole-film stability proof.
+                        // Repair this muxer omission only with a strict per-sample
+                        // guard: matching definitions can be stripped; a later
+                        // contradiction terminates before its bytes are buffered.
+                        let guard_dvh1 = retain_hevc_parameter_sets
                             && !fmp4::PromotionInputs::from_fragment(&fragment, &init)
                                 .dvh1_parameter_sets
-                                .is_empty()
-                        {
-                            return Outcome::InvalidHevcConfiguration(
-                                "dvh1 completeness repair cannot retain in-band parameter sets"
-                                    .into(),
-                            );
-                        }
+                                .is_empty();
                         match fmp4::promote_hevc_parameter_sets(&mut init, &fragment) {
                             Ok(true) => tracing::info!(
                                 session = %crate::transcode::session_log_id(session_id),
@@ -1040,6 +1045,15 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                                 "validating the HEVC decoder configuration: {error}"
                             ));
                         }
+                        if guard_dvh1 {
+                            if let Err(error) =
+                                fmp4::validate_rolling_dvh1_fragment(&init, &fragment)
+                            {
+                                return Outcome::InvalidHevcConfiguration(error.to_string());
+                            }
+                            guarded_dvh1_init = Some(init.clone());
+                            reader.reject_reinitialization();
+                        }
                         if let Err(e) = out.write_init(&init).await {
                             return if out.torn_down().await {
                                 Outcome::Cancelled(SegmentCounts::default())
@@ -1050,10 +1064,15 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                                 }
                             };
                         }
-                        segmenter = Some(
-                            Segmenter::new(init, policy)
-                                .retaining_hevc_parameter_sets(retain_hevc_parameter_sets),
-                        );
+                        segmenter =
+                            Some(Segmenter::new(init, policy).retaining_hevc_parameter_sets(
+                                retain_hevc_parameter_sets && !guard_dvh1,
+                            ));
+                    }
+                    if let Some(init) = guarded_dvh1_init.as_ref() {
+                        if let Err(error) = fmp4::validate_rolling_dvh1_fragment(init, &fragment) {
+                            return Outcome::InvalidHevcConfiguration(error.to_string());
+                        }
                     }
                     let Some(seg) = segmenter.as_mut() else {
                         unreachable!("the first fragment constructs the segmenter");
@@ -1882,55 +1901,255 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs a private FFmpeg dvh1 capture; PLURX_DVH1_CAPTURE"]
-    async fn captured_dvh1_completeness_publishes_and_refuses_retaining_copy() {
-        let feed = std::fs::read(
-            std::env::var("PLURX_DVH1_CAPTURE").expect("valid DV capture test operation"),
-        )
-        .expect("valid DV capture test operation");
-        for retain in [false, true] {
-            let dir = crate::test_tempdir().expect("valid DV capture test operation");
+    async fn captured_dvh1_rolling_options_publish_and_reject_unproven_samples() {
+        let feed = std::fs::read(std::env::var("PLURX_DVH1_CAPTURE").expect("capture path"))
+            .expect("capture");
+        let (mut source, _) = plain();
+        source.video_codec = Some("hevc".into());
+        source.hdr = Some("dolby_vision".into());
+        source.dolby_vision.profile = Some(5);
+        let options = crate::transcode::rolling_copy_video_options(
+            &source,
+            Some(r#"{"streams":[{"codec_type":"video","codec_name":"hevc","extradata_size":23}]}"#),
+            true,
+            true,
+            false,
+        );
+        assert!(options.retains_hevc_parameter_sets());
+        assert!(options.promotes_parameter_sets());
+        let mut reader = fmp4::FragmentReader::new();
+        reader.push(&feed);
+        let mut original_init = None;
+        let mut fragments = Vec::new();
+        while let Some(unit) = reader.next_unit().expect("capture parses") {
+            match unit {
+                fmp4::Unit::Init(init) => original_init = Some(init),
+                fmp4::Unit::Fragment(f) => fragments.push(f),
+                _ => {}
+            }
+        }
+        let original_init = original_init.expect("init");
+        let video = original_init.video().expect("video").id;
+        assert!(fragments.len() >= 3, "capture needs three GOPs");
+        fn payloads(fragments: &[fmp4::Fragment], id: u32, hevc: bool) -> Vec<Vec<u8>> {
+            let mut result = Vec::new();
+            for f in fragments {
+                for track in f.tracks.iter().filter(|track| track.track_id == id) {
+                    for run in &track.runs {
+                        let mut at = run.data_offset;
+                        for sample in &run.samples {
+                            let end = at + sample.size as usize;
+                            if hevc {
+                                while at < end {
+                                    let len = u32::from_be_bytes(
+                                        f.bytes[at..at + 4].try_into().expect("length"),
+                                    ) as usize;
+                                    let nal = &f.bytes[at + 4..at + 4 + len];
+                                    if !matches!((nal[0] >> 1) & 63, 32..=34) {
+                                        result.push(nal.to_vec());
+                                    }
+                                    at += 4 + len;
+                                }
+                            } else {
+                                result.push(f.bytes[at..end].to_vec());
+                            }
+                            at = end;
+                        }
+                    }
+                }
+            }
+            result
+        }
+
+        for fault in [
+            "none",
+            "first-nonkey",
+            "later-pps",
+            "later-malformed",
+            "second-init",
+        ] {
+            let mut pieces = fragments.clone();
+            if fault != "none" && fault != "second-init" {
+                let index = if fault == "first-nonkey" {
+                    0
+                } else {
+                    pieces.len() - 1
+                };
+                let mut sample = 0;
+                fmp4::rewrite_video_samples(
+                    &mut pieces[index],
+                    &original_init.tracks,
+                    video,
+                    |bytes| {
+                        sample += 1;
+                        let mut bytes = bytes.to_vec();
+                        if sample == 2 {
+                            if fault == "later-malformed" {
+                                bytes.push(0);
+                            } else {
+                                bytes.extend_from_slice(&[0, 0, 0, 3, 0x44, 1, 0xff]);
+                                bytes.extend_from_slice(&[
+                                    0, 0, 0, 6, 0x4e, 1, 0xde, 0xad, 0xbe, 0xef,
+                                ]);
+                            }
+                        }
+                        Ok(bytes)
+                    },
+                )
+                .expect("fault injection");
+                assert!(sample >= 2);
+            }
+            let mut input = original_init.bytes.clone();
+            for (index, fragment) in pieces.iter().enumerate() {
+                if fault == "second-init" && index == 1 {
+                    input.extend_from_slice(&original_init.bytes);
+                }
+                input.extend_from_slice(&fragment.bytes);
+            }
+            let dir = crate::test_tempdir().expect("scratch");
             let outcome = run(
-                &feed[..],
+                &input[..],
                 dir.path().to_path_buf(),
                 "test",
                 brisk(),
-                &plain().0,
-                plain().1.with_parameter_set_retention(retain),
+                &source,
+                options,
                 None,
             )
             .await;
-            if retain {
-                assert!(
-                    matches!(outcome, Outcome::InvalidHevcConfiguration(_)),
-                    "{outcome:?}"
-                );
-                assert!(!dir.path().join("init.mp4").exists());
-                assert!(!dir.path().join("index.m3u8").exists());
-            } else {
+            let mut published_fragments = Vec::new();
+            if let Ok(bytes) = std::fs::read(dir.path().join("init.mp4")) {
+                let mut served = fmp4::FragmentReader::new();
+                served.push(&bytes);
+                let Some(fmp4::Unit::Init(served_init)) = served.next_unit().expect("served init")
+                else {
+                    panic!("init");
+                };
+                for name in std::fs::read_to_string(dir.path().join("index.m3u8"))
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|line| !line.starts_with('#') && !line.is_empty())
+                {
+                    served.push(&std::fs::read(dir.path().join(name)).expect("published segment"));
+                    while let Some(unit) = served.next_unit().expect("published fragment") {
+                        if let fmp4::Unit::Fragment(fragment) = unit {
+                            fmp4::validate_rolling_dvh1_fragment(&served_init, &fragment)
+                                .expect("no contradictory media was published");
+                            for track in fragment
+                                .tracks
+                                .iter()
+                                .filter(|track| track.track_id == video)
+                            {
+                                for run in &track.runs {
+                                    let mut pos = run.data_offset;
+                                    for sample in &run.samples {
+                                        let end = pos + sample.size as usize;
+                                        while pos < end {
+                                            let len = u32::from_be_bytes(
+                                                fragment.bytes[pos..pos + 4]
+                                                    .try_into()
+                                                    .expect("length"),
+                                            )
+                                                as usize;
+                                            assert!(
+                                                !matches!(
+                                                    (fragment.bytes[pos + 4] >> 1) & 63,
+                                                    32..=34
+                                                ),
+                                                "served dvh1 must be out-of-band"
+                                            );
+                                            pos += 4 + len;
+                                        }
+                                    }
+                                }
+                            }
+                            published_fragments.push(fragment);
+                        }
+                    }
+                }
+            }
+            if fault == "none" {
                 let Outcome::Completed(counts) = outcome else {
-                    panic!("{outcome:?}")
+                    panic!("{outcome:?}");
                 };
                 assert!(counts.segments > 0);
-                let mut reader = fmp4::FragmentReader::new();
-                reader.push(
-                    &std::fs::read(dir.path().join("init.mp4"))
-                        .expect("valid DV capture test operation"),
+                let pictures = payloads(&fragments, video, true);
+                assert!(
+                    pictures.iter().any(|nal| (nal[0] >> 1) & 63 == 62),
+                    "actual P5 RPU"
                 );
-                let Some(fmp4::Unit::Init(init)) =
-                    reader.next_unit().expect("valid DV capture test operation")
-                else {
-                    panic!("init")
+                assert_eq!(
+                    payloads(&published_fragments, video, true),
+                    pictures,
+                    "RPU and picture bytes unchanged"
+                );
+                for track in original_init
+                    .tracks
+                    .iter()
+                    .filter(|track| track.kind == TrackKind::Audio)
+                {
+                    assert_eq!(
+                        payloads(&published_fragments, track.id, false),
+                        payloads(&fragments, track.id, false),
+                        "audio unchanged"
+                    );
+                }
+
+                let mut reader = fmp4::FragmentReader::new();
+                reader.push(&std::fs::read(dir.path().join("init.mp4")).expect("init"));
+                let Some(fmp4::Unit::Init(init)) = reader.next_unit().expect("init parses") else {
+                    panic!("init");
                 };
-                fmp4::validate_hevc_decoder_configuration(&init)
-                    .expect("valid DV capture test operation");
+                fmp4::validate_hevc_decoder_configuration(&init).expect("valid repaired init");
                 assert_eq!(
                     fmp4::dolby_vision_record(&init)
-                        .expect("valid DV capture test operation")
-                        .expect("valid DV capture test operation")
+                        .expect("DV")
+                        .expect("DV")
                         .profile,
                     5
                 );
                 assert!(playlist(dir.path()).contains("#EXT-X-ENDLIST"));
+            } else {
+                assert!(
+                    matches!(outcome, Outcome::InvalidHevcConfiguration(_)),
+                    "{fault}: {outcome:?}"
+                );
+                let playlist =
+                    std::fs::read_to_string(dir.path().join("index.m3u8")).unwrap_or_default();
+                assert!(!playlist.contains("#EXT-X-ENDLIST"));
+                let published = payloads(&published_fragments, video, true);
+                let fault_index = if fault == "first-nonkey" {
+                    0
+                } else if fault == "second-init" {
+                    1
+                } else {
+                    fragments.len() - 1
+                };
+                let safe_prefix = payloads(&fragments[..fault_index], video, true);
+                assert!(
+                    published.len() <= safe_prefix.len(),
+                    "no payload from the faulting fragment"
+                );
+                assert_eq!(
+                    published,
+                    safe_prefix[..published.len()],
+                    "published media is an unchanged safe prefix"
+                );
+                assert!(
+                    !published
+                        .iter()
+                        .any(|nal| nal.as_slice() == [0x4e, 1, 0xde, 0xad, 0xbe, 0xef]),
+                    "fault fragment was never published"
+                );
+                if fault == "first-nonkey" {
+                    assert!(!dir.path().join("init.mp4").exists());
+                }
+                if fault.starts_with("later-") {
+                    assert!(
+                        playlist.contains("#EXTINF"),
+                        "must fail after prior publication"
+                    );
+                }
             }
         }
     }

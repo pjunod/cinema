@@ -602,11 +602,17 @@ pub struct FragmentReader {
     /// holds the whole film in memory.
     tracks: Vec<Track>,
     saw_trailer: bool,
+    reject_reinitialization: bool,
 }
 
 impl FragmentReader {
     pub fn new() -> FragmentReader {
         FragmentReader::default()
+    }
+
+    /// A guarded publication keeps one decoder configuration for its lifetime.
+    pub fn reject_reinitialization(&mut self) {
+        self.reject_reinitialization = true;
     }
 
     /// Feed bytes read from the pipe.
@@ -663,6 +669,9 @@ impl FragmentReader {
             }
 
             match hdr.kind() {
+                b"ftyp" | b"moov" if self.reject_reinitialization => {
+                    return malformed("guarded stream replaced its initialization segment");
+                }
                 b"moof" => {
                     let mdat_pos = self.pos + hdr.size;
                     let Some(mdat) = peek_box(&self.buf, mdat_pos)? else {
@@ -1802,6 +1811,7 @@ fn write_be_u32(bytes: &mut [u8], at: usize, value: u32) -> Result<(), Fmp4Error
 
 #[path = "fmp4/dvh1.rs"]
 mod dvh1;
+pub use dvh1::validate_rolling_dvh1_fragment;
 
 #[path = "fmp4/hdr10_index.rs"]
 mod hdr10_index;
@@ -2558,10 +2568,11 @@ pub fn validate_hevc_sample_description_reference(
         saw_video = true;
         let flags = be_u32(&first.bytes, payload.start) & 0x00ff_ffff;
         let index = if flags & 0x00_0002 != 0 {
-            if payload.len() < 12 {
+            let index_offset = 8 + if flags & 1 != 0 { 8 } else { 0 };
+            if payload.len() < index_offset + 4 {
                 return malformed("tfhd truncated at sample_description_index");
             }
-            be_u32(&first.bytes, payload.start + 8)
+            be_u32(&first.bytes, payload.start + index_offset)
         } else {
             default_index
         };

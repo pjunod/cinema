@@ -395,6 +395,47 @@ printf '%s\n' "$cc" "$cxx" "$pkg_config"
         assert 'argument + "=" + getattr(args, argument.lower())' in builder
 
 
+    def test_shipping_retirement_preserves_audited_system_elf_closure(self):
+        module = recipe()
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory)
+            (package / "provenance").mkdir()
+            capsule = package / "provenance/linux-dolby-package.json"
+            system_path = "/usr/lib/x86_64-linux-gnu/libc.so.6"
+            facts = {"elf_closure": {
+                system_path: {"distributed": False, "sha256": "a" * 64},
+                "/work/package/lib/libmfx.so.1": {"distributed": True, "sha256": "b" * 64}}}
+            capsule.write_text(json.dumps(facts))
+            self.assertEqual(module.shipping_system_objects(package), {system_path: "a" * 64})
+            for path, digest in [("/tmp/foreign.so", "a" * 64),
+                                 (system_path + "\nmalformed", "a" * 64),
+                                 ("/usr/lib/x86_64-linux-gnu/../foreign.so", "a" * 64),
+                                 (system_path, "a" * 64 + "\n/etc/passwd")]:
+                facts["elf_closure"] = {path: {"distributed": False, "sha256": digest}}
+                capsule.write_text(json.dumps(facts))
+                with self.assertRaises(ValueError):
+                    module.shipping_system_objects(package)
+            capsule.write_text(json.dumps({"elf_closure": {}}))
+            with self.assertRaisesRegex(ValueError, "no audited system ELF closure"):
+                module.shipping_system_objects(package)
+
+    def test_only_dolby_shipping_targets_retire_the_competing_debian_media_sdk(self):
+        docker = (Path(__file__).resolve().parents[2] / "Dockerfile").read_text()
+        incumbent = docker.split("FROM runtime-assets AS runtime-assets-dolby-amd64", 1)[0]
+        self.assertNotIn("apt-get purge -y libmfx1", incumbent)
+        for marker in ["FROM runtime-assets AS runtime-assets-dolby-amd64",
+                       "FROM runtime AS runtime-dolby-amd64"]:
+            stage = docker.split(marker, 1)[1].split("\nFROM ", 1)[0]
+            self.assertIn("apt-get purge -y libmfx1", stage)
+            self.assertNotIn("apt-get autoremove", stage)
+            self.assertIn("sha256sum -c /usr/lib/jellyfin-ffmpeg/provenance/shipping-system-elf-sha256.txt", stage)
+            self.assertLess(stage.index("while IFS= read -r path"), stage.index("apt-get purge -y libmfx1"))
+            self.assertLess(stage.index("apt-get purge -y libmfx1"), stage.index("sha256sum -c"))
+            for name in ["ffmpeg", "ffprobe"]:
+                self.assertIn(f"ln -sfn /usr/lib/jellyfin-ffmpeg/{name} /usr/bin/{name}", stage)
+            self.assertIn("media-runtime-packages.txt", stage)
+        self.assertIn("FROM runtime AS default-runtime", docker)
+
     def test_package_export_observes_official_configuration_and_reuses_only_matched_parser(self):
         root = Path(__file__).resolve().parents[2]
         builder = (root / "scripts/build-linux-dolby-ffmpeg").read_text()

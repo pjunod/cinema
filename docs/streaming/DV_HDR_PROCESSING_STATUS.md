@@ -1471,3 +1471,17 @@ changes in this integration. Current-source compilation, native membership and
 applicability review must precede promotion. Applicable existing unit passes are
 retained; only genuinely missing or invalidated outcomes may execute. Deployment
 and all physical HDR acceptance remain open.
+
+
+### Current-main integration — P5 rolling proof and QSV shipping package
+
+Main advanced again to `a0b8cb72c` before the next native-cluster capture or
+promotion dispatch. The effort integrates its strict rolling dvh1 fragment
+validation and QSV shipping dependency fix without a merge conflict. Existing
+Live TV source-bound captures remain original: 24 genuinely invalidated daemon
+cases pass once in 92.46 seconds on `bcd90828e`; the integrated ownership control
+passes once in 16.523 seconds. Five recovered incoming Rust passes are retained
+with their actual Mac origin and unknown execution commit explicitly preserved.
+Current-source applicability review must distinguish those measurements from
+new P5/QSV outcomes. No full promotion or repair deployment is claimed; physical
+web, Android and Apple TV ON/OFF acceptance remains pending.

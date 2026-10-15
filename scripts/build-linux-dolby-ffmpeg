@@ -489,6 +489,7 @@ def validate_shipping_package(package):
 
 def install_shipping_package(package, destination):
     validate_shipping_package(package)
+    system_objects = shipping_system_objects(package)
     destination.mkdir(parents=True, exist_ok=True)
     for name in ["ffmpeg", "ffprobe"]:
         shutil.copy2(package / name, destination / name)
@@ -496,6 +497,33 @@ def install_shipping_package(package, destination):
     shutil.copytree(package / "lib", destination / "lib")
     shutil.copytree(package / "provenance", destination / "provenance", dirs_exist_ok=True)
     shutil.copy2(package / "sealed-ffprobe", Path("/usr/local/lib/plurx/ffprobe"))
+    # The shipping stages retire Debian's competing Media SDK with apt's
+    # dependency solver. Keep every audited system ELF dependency explicit so
+    # those stages prove that retirement preserved the shipping provider bytes.
+    # Builder and shipping bases may contain ABI-compatible security revisions;
+    # the shipping stages record their own before/after hashes for these paths.
+    (destination / "provenance/system-elf-sha256.txt").write_text(
+        "".join(digest + "  " + path + "\n" for path, digest in sorted(system_objects.items())))
+
+
+def shipping_system_objects(package):
+    facts = json.loads((package / "provenance/linux-dolby-package.json").read_text())
+    objects = {}
+    for path, record in facts["elf_closure"].items():
+        if record["distributed"]:
+            continue
+        member = Path(path)
+        if (not member.is_absolute() or ".." in member.parts
+                or not member.is_relative_to("/usr/lib/x86_64-linux-gnu")
+                or not re.fullmatch(r"[/A-Za-z0-9_.+-]+", path)):
+            raise ValueError("shipping system ELF path is outside the audited Bookworm library root")
+        digest = record["sha256"]
+        if not re.fullmatch("[0-9a-f]{64}", digest):
+            raise ValueError("shipping system ELF digest is invalid")
+        objects[path] = digest
+    if not objects:
+        raise ValueError("shipping package has no audited system ELF closure")
+    return objects
 
 
 def git_source_scratch_bytes(scratch, *, live):
