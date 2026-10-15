@@ -295,9 +295,9 @@ jobs:
     # The full unit and SQLite suite continues below; contributors may merge
     # after this compile gate and policy pass, then watch that suite on main.
     if: needs.scope.outputs.rust == 'true'
-    # The full workspace check exceeded this budget on the 8-GiB guest.
-    # Use the existing bare-metal compiler capacity without raising its limit.
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, baremetal]
+    # General executors also reclaim above 4 GiB during the large Rust check.
+    # Share the existing larger-memory topology queue; keep its host bounds.
+    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     timeout-minutes: 20
     env:
       CARGO_BUILD_JOBS: "1"

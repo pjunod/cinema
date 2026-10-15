@@ -1687,7 +1687,7 @@ assert.equal(context.ACT_TIMER, null);
         ):
             compiler_header = compiler_job.split("    steps:", 1)[0]
             self.assertIn(
-                "runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, baremetal]",
+                "runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]",
                 compiler_header,
             )
             self.assertRegex(
