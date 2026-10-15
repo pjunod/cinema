@@ -337,7 +337,7 @@ async function saveCinemaRemoteInvitations(button){
 }
 
 function diagnosticDeveloperCard(){return setCard(`${cardHead("Diagnostic ZIP reports","Bounded local evidence for bug and issue attachments.",'<span class="pill">Qualification pending</span>')}<p>Help → Report a problem saves a ZIP with a readable summary and structured evidence. Attach it to an issue using your usual reporting channel. Web download and phone sharing are available. Native TVs offer a temporary local QR download on trusted Wi-Fi; physical-device sampling remains.</p>${devGraduation("archive export, privacy and recovery have applicable client and device receipts, including native TV file transfer.","this advisory card is removed; reporting remains in Help and the player.")}<button type="button" onclick="showDiagnostics()">Open reporting</button>`);}
-function developerPanel(settings,readiness){
+function developerPanel(settings,readiness,httpsCard=""){
   // Only features that are not yet fully active or fully tested wait here,
   // each saying what it waits on (devGraduation). Everything that graduated
   // lives in its own section; the links below are the way back to them.
@@ -348,7 +348,7 @@ function developerPanel(settings,readiness){
     ${clustered?`<a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health, placement, clocks and backups</span></a>`:""}
   </nav>`;
   return `${setHead("Developer","Features still waiting on qualification. Each card says what it waits on; none of them is gated by it.")}
-      ${destinations}${diagnosticDeveloperCard()}
+      ${destinations}${httpsCard}${diagnosticDeveloperCard()}
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection"><h2>Shared libraries and remotes</h2><p>Private sharing between separate Cinemas, and companion remotes.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
@@ -591,12 +591,12 @@ function httpsSettingsCard(value,error){
     <p>Addressed node: <code>${esc(value.node_id)}</code> · revision <code>${esc(value.revision)}</code></p>
     <p>${value.restart_required?"Saved changes require this node to restart.":"The desired configuration matches this process."} Save never restarts the server.</p>
     <details><summary>Saved, desired and active configuration</summary><table><thead><tr><th>State</th><th>Enabled / port</th><th>Identity files or generated names</th></tr></thead><tbody>${[["Saved before environment",value.saved],["Desired next boot",desired],["Active process",active]].map(([label,config])=>`<tr><td>${label}</td><td>${config.enabled?"On":"Off"} / ${esc(config.port)}</td><td>${config.cert_file?`${esc(config.cert_file)}<br>${esc(config.key_file)}`:`Self-signed: ${esc(config.sans.join(", "))}`}</td></tr>`).join("")}</tbody></table></details>
-    <label><input id="https-enabled" type="checkbox"${desired.enabled?" checked":""}${locked("enabled")}> Enable HTTPS after restart</label>
+    <label class="chk"><input id="https-enabled" type="checkbox"${desired.enabled?" checked":""}${locked("enabled")}> Enable HTTPS after restart</label>
     <div class="setrow"><label for="https-port">HTTPS port</label><input id="https-port" type="number" min="1" max="65535" value="${esc(desired.port)}"${locked("port")}></div>
     <p>Leave both paths empty for a persistent self-signed identity. Supplied paths refer to files on the server or inside its container, never this browser’s computer.</p>
     <div class="setrow"><label for="https-cert">Certificate chain PEM path</label><input id="https-cert" value="${esc(desired.cert_file)}"${locked("cert_file")}></div>
     <div class="setrow"><label for="https-key">Private key PEM path</label><input id="https-key" value="${esc(desired.key_file)}"${locked("key_file")}></div>
-    <div class="setrow"><label for="https-sans">Self-signed DNS names and IP addresses (one per line)</label><textarea id="https-sans"${locked("sans")}>${esc(desired.sans.join("\n"))}</textarea></div>
+    <div class="setrow"><label for="https-sans">Self-signed DNS names and IP addresses (one per line)</label><textarea id="https-sans" rows="4"${locked("sans")}>${esc(desired.sans.join("\n"))}</textarea></div>
     <p>Generated identities retain their key and certificate across restarts and disable/enable. Changing their names or replacing an expired identity requires explicit file replacement while stopped. Add every hostname or address clients will use before first enable.</p>
     ${fields.size?`<p>Environment-controlled fields: ${esc([...fields].join(", "))}. Their saved underlying values are preserved.</p>`:""}
     ${cert?`<p>Active identity: ${esc(cert.mode)} · expires ${esc(new Date(cert.expires_at_seconds*1000).toISOString())}<br>SHA-256 <code>${esc(cert.sha256)}</code><br>Names: ${esc(cert.sans.join(", "))}</p><button class="ghost sm" onclick="downloadHttpsCertificate(this)">Download active public certificate chain</button>`:"<p>No HTTPS identity is active in this process.</p>"}

@@ -214,7 +214,7 @@ test("every section is a route, grouped in the rail's order", () => {
     cluster: "clusterPanel(d)",
     sharing: "sharingManagementPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",
-    developer: "developerPanel(d.settings,d.developerReadiness)",
+    developer: "developerPanel(d.settings,d.developerReadiness,httpsSettingsMount(d.https))",
   };
   const panel = shippedSource("settingsPanel");
   for (const [id] of r.SET_TABS) {
@@ -707,9 +707,13 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     dvr_reminder_lead_s: 300,
     dvr_webhook_url: "",
   };
+  const httpsCard = '<div id="settings-https">Node-local HTTPS</div>';
   const html = renderComposedPanel(
-    "developerPanel", () => panels.developerPanel(settings, readiness),
+    "developerPanel", () => panels.developerPanel(settings, readiness, httpsCard),
   );
+  assert.ok(html.indexOf("HEAD:Developer") < html.indexOf(httpsCard), "the page heading precedes HTTPS");
+  assert.ok(html.indexOf("</nav>") < html.indexOf(httpsCard), "everyday destinations precede HTTPS");
+  assert.ok(html.indexOf(httpsCard) < html.indexOf("CARDHEAD:Diagnostic ZIP reports"), "HTTPS stays inside the Developer card list");
   for (const id of ["hevc-unverified", "pabr"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   // Graduated 2026-10-10 (Paul: "clean up developer settings"). Each switch
