@@ -2699,6 +2699,7 @@ struct LiveTvView: View {
     }
 
     private var morePanel: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 18) {
             Text("Live TV").font(LiveTvType.title)
             Button(favoritesOnly ? "Show all channels" : "Favorites only") { favoritesOnly.toggle() }
@@ -2766,6 +2767,10 @@ struct LiveTvView: View {
                 .focusEffectDisabled()
                 #endif
         }
+        }
+        #if os(tvOS)
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
+        #endif
         .padding(48)
         .frame(minWidth: 420, minHeight: 360, alignment: .topLeading)
         .background(Palette.bg)

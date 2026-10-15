@@ -942,6 +942,7 @@ struct LibraryChannelsView: View {
                 .diagnosticReportHost(owner: "channel-player")
 
         }
+        .onAppear { channelNavigation.setOrder(scope: "library-channels", keys: ["channel:layout"], columns: 1) }
         .remoteScope("library-channels")
         .background(RemoteOwnedPresentationProbe(navigation: channelNavigation, token: channelOwner, scope: "library-channels"))
         .remoteChoicePresentation(isPresented: $showingLayout, scope: "library-channels:layout") {
@@ -968,6 +969,9 @@ struct LibraryChannelsView: View {
                 }
                 Button("Close") { programmeDetails = nil }
             }.padding(48)
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                #endif
         }
         .task {
             await controller.load(model: model)
@@ -1096,12 +1100,14 @@ struct LibraryChannelsView: View {
         .onChange(of: channelControl) { _, _ in chromeGeneration += 1 }
         #endif
         .onAppear { channelChromeVisible = true; chromeGeneration += 1 }
+        #if os(tvOS)
         .task(id: chromeGeneration) {
             guard channelChromeVisible, !channelMore, !controller.paused, !controller.systemPaused else { return }
             do { try await Task.sleep(nanoseconds: LiveTvInputRouting.overlayAutoHideNanoseconds) } catch { return }
             guard !Task.isCancelled, !channelMore else { return }
             channelChromeVisible = false
         }
+        #endif
         .sheet(isPresented: $channelMore, onDismiss: {
             chromeGeneration += 1
             #if os(tvOS)
@@ -1113,10 +1119,17 @@ struct LibraryChannelsView: View {
                 DiagnosticReportButton(category: "playback", owner: "channel-player-more")
                 Button("Stop channel") { channelMore = false; fullscreen = false; Task { await controller.stop() } }
                 Button("Close") { channelMore = false }
-            }.padding(48).diagnosticReportHost(owner: "channel-player-more")
+            }.padding(48)
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                #endif
+                .diagnosticReportHost(owner: "channel-player-more")
         }
         .onChange(of: controller.paused) { _, _ in chromeGeneration += 1 }
         .onChange(of: controller.systemPaused) { _, _ in chromeGeneration += 1 }
+        .onChange(of: controller.playbackError) { _, error in
+            if error != nil { channelChromeVisible = true }
+        }
     }
 
     private func channelInputState() -> LiveTvInputState {

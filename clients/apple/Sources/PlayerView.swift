@@ -3728,6 +3728,7 @@ struct SharedPlayerSessionView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var sharedChromeVisible = true
     @State private var sharedMenuPresented = false
+    @State private var sharedMorePresented = false
     @State private var lastSharedAction = "play"
     @State private var sharedChromeGeneration = 0
     @StateObject private var sharedPictureInPicture = PictureInPictureController()
@@ -3799,7 +3800,9 @@ struct SharedPlayerSessionView: View {
             } else {
                 navigation.performPhysicalAction { Task { await controller.control(controller.playing ? .pause : .play) } }
             }
-        case .closeMenu: navigation.closeModal()
+        case .closeMenu:
+            sharedMorePresented = false
+            if navigation.hasOwnedModal { navigation.closeModal() }
         case .exit:
             navigation.performPhysicalAction { controller.beginStop(); dismiss() }
         default: return false
@@ -3840,7 +3843,7 @@ struct SharedPlayerSessionView: View {
                     if let failure = controller.failure { Text(failure).foregroundStyle(.secondary) }
                     if findingNext { ProgressView("Finding the next episode") }
                     if controller.playback != nil, let current = controller.plan {
-                        SharedPlayerControls(controller: controller, plan: current, onMenuChange: { sharedMenuPresented = $0; sharedChromeGeneration += 1 }, onInteraction: { sharedChromeGeneration += 1 }, restoreFocus: lastSharedAction, onFocus: { lastSharedAction = $0 })
+                        SharedPlayerControls(controller: controller, plan: current, showingSharedMore: $sharedMorePresented, onMenuChange: { sharedMenuPresented = $0; sharedChromeGeneration += 1 }, onInteraction: { sharedChromeGeneration += 1 }, restoreFocus: lastSharedAction, onFocus: { lastSharedAction = $0 })
                     }
                     Button("Close") { navigation.performPhysicalAction { controller.beginStop(); dismiss() } }
                         #if os(tvOS)
@@ -3855,6 +3858,9 @@ struct SharedPlayerSessionView: View {
         .onChange(of: sharedChromeVisible) { _, visible in sharedControl = visible ? nil : "reveal" }
         .onChange(of: sharedControl) { _, _ in sharedChromeGeneration += 1 }
         .onChange(of: controller.playing) { _, _ in sharedChromeGeneration += 1 }
+        .onChange(of: controller.failure) { _, failure in
+            if failure != nil { sharedChromeVisible = true; sharedControl = "close" }
+        }
         .task(id: sharedChromeGeneration) {
             guard sharedChromeVisible, !sharedMenuPresented, controller.playing else { return }
             do { try await Task.sleep(nanoseconds: PlayerView.controlAutoHideDelayNanoseconds) } catch { return }
@@ -3892,6 +3898,7 @@ struct SharedPlayerSessionView: View {
 struct SharedPlayerControls: View {
     @ObservedObject var controller: SharedPlayerController
     let plan: SharedPlaybackPlan
+    @Binding var showingSharedMore: Bool
     var onMenuChange: (Bool) -> Void = { _ in }
     var onInteraction: () -> Void = {}
     var restoreFocus = "play"
@@ -3899,7 +3906,6 @@ struct SharedPlayerControls: View {
     @FocusState private var focusedAction: String?
     @EnvironmentObject private var navigation: RemoteNavigationCoordinator
     @Environment(\.remoteNavigationScope) private var remoteScope
-    @State private var showingSharedMore = false
     @State private var choiceTitle: String?
     @State private var ownedChoices: [RemoteChoice] = []
     var body: some View {
@@ -3995,11 +4001,10 @@ struct SharedPlayerControls: View {
         // v1 intentionally exposes shared transport only. The physical owned
         // choice surface fences network credits rather than inventing track IDs.
         .remoteRestricted(choiceTitle != nil)
-        .onAppear {
-            var keys = ["shared:quality"]
-            if (plan.decision.presentation.audio?.count ?? 0) > 1 { keys.append("shared:audio") }
-            if (plan.decision.presentation.subtitles ?? []).contains(where: \.isNativeHLS) { keys.append("shared:subtitles") }
-            navigation.setOrder(scope: remoteScope, keys: keys, columns: 1)
+        .onAppear { updateChoiceOrder() }
+        .onChange(of: choiceOrder) { _, _ in
+            updateChoiceOrder()
+            if let action = focusedAction, !availableFocusActions.contains(action) { focusedAction = "play" }
         }
         .onChange(of: choiceTitle) { _, value in onMenuChange(value != nil || showingSharedMore) }
         .onChange(of: showingSharedMore) { _, value in onMenuChange(value || choiceTitle != nil) }
@@ -4007,22 +4012,45 @@ struct SharedPlayerControls: View {
             if let key { onFocus(key) }
             onInteraction()
         }
-        .task { await Task.yield(); focusedAction = restoreFocus }
+        .task {
+            await Task.yield()
+            focusedAction = availableFocusActions.contains(restoreFocus) ? restoreFocus : "play"
+        }
         #endif
     }
+    private var choiceOrder: [String] {
+        var keys = ["shared:quality"]
+        if (plan.decision.presentation.audio?.count ?? 0) > 1 { keys.append("shared:audio") }
+        if (plan.decision.presentation.subtitles ?? []).contains(where: \.isNativeHLS) { keys.append("shared:subtitles") }
+        return keys
+    }
+    private var availableFocusActions: [String] {
+        ["back", "play", "forward", "more"] + choiceOrder.map { String($0.dropFirst("shared:".count)) }
+    }
+    private func updateChoiceOrder() { navigation.setOrder(scope: remoteScope, keys: choiceOrder, columns: 1) }
+
     private func openAudioChoices() {
         let tracks = plan.decision.presentation.audio ?? []
         openChoices("Audio", choices: tracks.map { track in
-                        RemoteChoice(id: String(track.index), label: Self.label(track.title, track.language, fallback: "Track \(track.index)"), selected: (plan.rawAudioIndex ?? plan.decision.presentation.delivery?.audio) == track.index) { Task { await controller.change(SharedDirectedChange(audioIndex: .some(track.index))) } }
-                    })
-
+            RemoteChoice(id: String(track.index),
+                         label: Self.label(track.title, track.language, fallback: "Track \(track.index)"),
+                         selected: (plan.rawAudioIndex ?? plan.decision.presentation.delivery?.audio) == track.index) {
+                Task { await controller.change(SharedDirectedChange(audioIndex: .some(track.index))) }
+            }
+        })
     }
     private func openSubtitleChoices() {
         let natives = (plan.decision.presentation.subtitles ?? []).filter(\.isNativeHLS)
-        openChoices("Subtitles", choices: [RemoteChoice(id: "off", label: "Off", selected: plan.rawSubtitleIndex == nil) { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(nil))) } }] + natives.map { track in
-                        RemoteChoice(id: String(track.index), label: Self.label(track.title, track.language, fallback: "Subtitle \(track.index)"), selected: plan.rawSubtitleIndex == track.index) { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(track.index))) } }
-                    })
-
+        let off = RemoteChoice(id: "off", label: "Off", selected: plan.rawSubtitleIndex == nil) {
+            Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(nil))) }
+        }
+        openChoices("Subtitles", choices: [off] + natives.map { track in
+            RemoteChoice(id: String(track.index),
+                         label: Self.label(track.title, track.language, fallback: "Subtitle \(track.index)"),
+                         selected: plan.rawSubtitleIndex == track.index) {
+                Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(track.index))) }
+            }
+        })
     }
     private func openQualityChoices() {
         openChoices("Quality", choices: PlaybackQuality.allCases.map { quality in
