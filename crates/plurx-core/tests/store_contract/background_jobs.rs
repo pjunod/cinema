@@ -4655,12 +4655,19 @@ async fn probe_batches_respect_scan_parent_and_shared_domain_reservations() {
 #[tokio::test]
 async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop_fenced() {
     for_each_backend(|store, backend| async move {
-        for (index, scenario) in ["published", "cancelled", "source_replaced"]
-            .into_iter()
-            .enumerate()
+        for (index, (scenario, managed)) in [
+            ("published", false),
+            ("cancelled", false),
+            ("source_replaced", false),
+            ("published", true),
+            ("cancelled", true),
+            ("source_replaced", true),
+        ]
+        .into_iter()
+        .enumerate()
         {
             let now = 1_000 + index as i64 * 40_000;
-            let (_, id) = seed_file(&store, &format!("transcription-{scenario}")).await;
+            let (_, id) = seed_file(&store, &format!("transcription-{scenario}-{managed}")).await;
             let file = store.get_file(id).await.expect("file").expect("file");
             store
                 .upsert_file(
@@ -4701,10 +4708,30 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
                 model_sha256: "a".repeat(64),
                 pipeline_digest: "b".repeat(64),
             };
+            let source = if managed {
+                JobPayload::SubtitleTranscribeManaged {
+                    file_id: id,
+                    audio_index: 0,
+                    source_size: file.size,
+                    source_mtime: file.mtime,
+                    language: "en".into(),
+                    model_sha256: "a".repeat(64),
+                    pipeline_digest: "b".repeat(64),
+                    profile: plurx_core::store::background_jobs_transcription::ManagedProfile {
+                        model_id: "base.en".into(),
+                        catalog_revision: "catalog-v1".into(),
+                        adapter_contract: "whisper.cpp-1.9.2-cpu-v1".into(),
+                    },
+                }
+            } else {
+                source
+            };
             let key = plurx_core::store::background_jobs_transcription::artifact_key(&source)
                 .expect("key");
             let mut french = source.clone();
-            let JobPayload::SubtitleTranscribe { language, .. } = &mut french else {
+            let (JobPayload::SubtitleTranscribe { language, .. }
+            | JobPayload::SubtitleTranscribeManaged { language, .. }) = &mut french
+            else {
                 unreachable!()
             };
             *language = "fr".into();
@@ -4748,7 +4775,7 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
                     node_id: "node-a".into(),
                     boot_id: uuid::Uuid::new_v4().to_string(),
                     claim_id: uuid::Uuid::new_v4().to_string(),
-                    kind: JobKind::SubtitleTranscribe,
+                    kind: source.kind(),
                     payload_version: 1,
                     now_ms: now,
                     dispatched_at_ms: now,
@@ -4783,6 +4810,48 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
                     caption,
                     now_ms: now + 1,
                 };
+            if managed && scenario == "published" {
+                for change_audio in [false, true] {
+                    let mut changed = publication.clone();
+                    let JobPayload::SubtitleTranscribeManaged {
+                        audio_index,
+                        profile,
+                        ..
+                    } = &mut changed.source
+                    else {
+                        unreachable!()
+                    };
+                    if change_audio {
+                        *audio_index = 1;
+                    } else {
+                        profile.adapter_contract = "changed-qualified-profile".into();
+                    }
+                    let altered_key =
+                        plurx_core::store::background_jobs_transcription::artifact_key(
+                            &changed.source,
+                        )
+                        .expect("subtitle store contract");
+                    let provenance = changed
+                        .caption
+                        .transcription
+                        .as_mut()
+                        .expect("subtitle store contract");
+                    provenance.artifact_key = altered_key;
+                    if change_audio {
+                        provenance.audio_index = 1;
+                    }
+                    assert!(
+                        matches!(
+                            store
+                                .publish_transcription_job(changed)
+                                .await
+                                .expect("subtitle store contract"),
+                            JobPublishOutcome::LostOwnership
+                        ),
+                        "{backend}: changed accepted profile/audio cannot publish"
+                    );
+                }
+            }
             if scenario == "cancelled" {
                 store
                     .cancel_job(CancelJob {
@@ -4890,4 +4959,302 @@ async fn background_jobs_transcription_publication_is_atomic_namespaced_and_stop
         }
     })
     .await;
+}
+
+#[tokio::test]
+async fn managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_media_readers() {
+    use plurx_core::store::background_jobs_transcription::{
+        ModelAction, ObserveSubtitleJob, PublishSubtitleModel, SubtitleModelReceipt, SubtitlePhase,
+    };
+    for_each_backend(|store, backend| async move {
+        let now = 1000;
+        let mut jobs = Vec::new();
+        for (i, node) in ["node-a", "node-a", "node-b"].into_iter().enumerate() {
+            let id = uuid::Uuid::new_v4().to_string();
+            let source = JobPayload::SubtitleModelOperation {
+                action: if i == 1 {
+                    ModelAction::Verify
+                } else {
+                    ModelAction::Install
+                },
+                model_id: format!("model-{i}"),
+                catalog_revision: "catalog-v1".into(),
+                model_sha256: "a".repeat(64),
+                adapter_contract: "whisper.cpp-1.9.2-cpu-v1".into(),
+                target_node_id: node.into(),
+            };
+            assert!(
+                matches!(
+                    store
+                        .enqueue_job(EnqueueJob {
+                            id: id.clone(),
+                            payload: source.clone(),
+                            dedupe_key: id.clone(),
+                            priority: 0,
+                            not_before_ms: now,
+                            now_ms: now,
+                            request: JobRequest {
+                                scope: "subtitle-model".into(),
+                                request_id: id.clone(),
+                                request_digest: "c".repeat(64),
+                                consumer_kind: "subtitle_model".into(),
+                                consumer_ref: id.clone(),
+                                target_node_id: Some(node.into()),
+                                deadline_ms: None,
+                                retain_identity: false
+                            }
+                        })
+                        .await
+                        .expect("subtitle store contract"),
+                    EnqueueOutcome::Accepted { .. }
+                ),
+                "{backend}"
+            );
+            let request = ClaimJob {
+                job_id: id.clone(),
+                expected_revision: 0,
+                node_id: node.into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::SubtitleModelOperation,
+                payload_version: 1,
+                now_ms: now,
+                dispatched_at_ms: now,
+            };
+            let claim = store
+                .claim_artifact_job(request)
+                .await
+                .expect("subtitle store contract");
+            if i == 1 {
+                assert!(
+                    !matches!(claim, ClaimOutcome::Claimed { .. }),
+                    "{backend}: one install per node"
+                );
+                continue;
+            }
+            let ClaimOutcome::Claimed { job } = claim else {
+                panic!("{backend}: independent install claim");
+            };
+            jobs.push((source, job.token.expect("subtitle store contract")));
+        }
+        assert!(
+            store
+                .source_io_holders(now)
+                .await
+                .expect("subtitle store contract")
+                .is_empty(),
+            "{backend}: downloads reserve no media-reader slots"
+        );
+        for i in 0..9 {
+            let id = uuid::Uuid::new_v4().to_string();
+            let outcome = store
+                .enqueue_job(EnqueueJob {
+                    id: id.clone(),
+                    payload: JobPayload::SubtitleModelOperation {
+                        action: ModelAction::Verify,
+                        model_id: id.clone(),
+                        catalog_revision: "catalog-v1".into(),
+                        model_sha256: "a".repeat(64),
+                        adapter_contract: "whisper.cpp-1.9.2-cpu-v1".into(),
+                        target_node_id: "node-c".into(),
+                    },
+                    dedupe_key: id.clone(),
+                    priority: 0,
+                    not_before_ms: now,
+                    now_ms: now,
+                    request: JobRequest {
+                        scope: "subtitle-model".into(),
+                        request_id: id.clone(),
+                        request_digest: "c".repeat(64),
+                        consumer_kind: "subtitle_model".into(),
+                        consumer_ref: id.clone(),
+                        target_node_id: Some("node-c".into()),
+                        deadline_ms: None,
+                        retain_identity: false,
+                    },
+                })
+                .await
+                .expect("subtitle store contract");
+            assert_eq!(
+                matches!(outcome, EnqueueOutcome::QueueFull),
+                i == 8,
+                "{backend}: queued requests count toward node bound"
+            );
+        }
+        let (source, token) = jobs.remove(0);
+        assert!(store
+            .observe_subtitle_job(ObserveSubtitleJob {
+                token: token.clone(),
+                phase: SubtitlePhase::Downloading,
+                now_ms: now + 1
+            })
+            .await
+            .expect("subtitle store contract"));
+        let receipt = SubtitleModelReceipt {
+            node_id: token.node_id.clone(),
+            boot_id: token.boot_id.clone(),
+            model_id: "model-0".into(),
+            model_sha256: "a".repeat(64),
+            adapter_contract: "whisper.cpp-1.9.2-cpu-v1".into(),
+            engine_sha256: "b".repeat(64),
+            model_file_identity: "dev:ino:size:mtime".into(),
+            engine_file_identity: "dev:ino:size:mtime".into(),
+            job_id: token.job_id.clone(),
+            fence: token.fence,
+            verified_at_ms: now + 2,
+        };
+        store
+            .cancel_job(CancelJob {
+                job_id: token.job_id.clone(),
+                now_ms: now + 1,
+            })
+            .await
+            .expect("subtitle store contract");
+        assert!(!store
+            .observe_subtitle_job(ObserveSubtitleJob {
+                token: token.clone(),
+                phase: SubtitlePhase::Verifying,
+                now_ms: now + 2
+            })
+            .await
+            .expect("subtitle store contract"));
+        assert!(
+            !store
+                .publish_subtitle_model(PublishSubtitleModel {
+                    token,
+                    source,
+                    receipt,
+                    now_ms: now + 2
+                })
+                .await
+                .expect("subtitle store contract"),
+            "{backend}: Stop cannot publish ready"
+        );
+        assert!(store
+            .subtitle_model_receipts("node-a")
+            .await
+            .expect("subtitle store contract")
+            .is_empty());
+        let (source, token) = jobs.remove(0);
+        let receipt = SubtitleModelReceipt {
+            node_id: token.node_id.clone(),
+            boot_id: token.boot_id.clone(),
+            model_id: "model-2".into(),
+            model_sha256: "a".repeat(64),
+            adapter_contract: "whisper.cpp-1.9.2-cpu-v1".into(),
+            engine_sha256: "b".repeat(64),
+            model_file_identity: "identity-one".into(),
+            engine_file_identity: "identity-two".into(),
+            job_id: token.job_id.clone(),
+            fence: token.fence,
+            verified_at_ms: now + 2,
+        };
+        let publication = PublishSubtitleModel {
+            token: token.clone(),
+            source,
+            receipt,
+            now_ms: now + 2,
+        };
+        let mut publication = publication;
+        let renewed = store
+            .renew_jobs(RenewJobs {
+                tokens: vec![token.clone()],
+                now_ms: now + 1,
+            })
+            .await
+            .expect("subtitle store contract");
+        let RenewOutcome::Renewed {
+            token: current_token,
+        } = &renewed[0]
+        else {
+            panic!("{backend}: renewal");
+        };
+        assert!(
+            !store
+                .publish_subtitle_model(publication.clone())
+                .await
+                .expect("subtitle store contract"),
+            "{backend}: prior renewal token cannot publish ready"
+        );
+        publication.token = current_token.clone();
+        let mut wrong = publication.clone();
+        wrong.receipt.boot_id = uuid::Uuid::new_v4().to_string();
+        assert!(store.publish_subtitle_model(wrong).await.is_err());
+        assert!(store
+            .publish_subtitle_model(publication.clone())
+            .await
+            .expect("subtitle store contract"));
+        assert!(
+            store
+                .publish_subtitle_model(publication)
+                .await
+                .expect("subtitle store contract"),
+            "{backend}: uncertain success replay is idempotent"
+        );
+        assert_eq!(
+            store
+                .subtitle_model_receipts("node-b")
+                .await
+                .expect("subtitle store contract")
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .background_job(&token.job_id)
+                .await
+                .expect("subtitle store contract")
+                .expect("subtitle store contract")
+                .state,
+            JobState::Succeeded
+        );
+        assert!(
+            !store
+                .observe_subtitle_job(ObserveSubtitleJob {
+                    token,
+                    phase: SubtitlePhase::Verifying,
+                    now_ms: now + 3
+                })
+                .await
+                .expect("subtitle store contract"),
+            "{backend}: terminal observation fenced"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn managed_subtitle_configuration_cas_fences_legacy_writers_atomically() {
+    use plurx_core::store::background_jobs_transcription::SubtitleConfigurationWrite;
+    for_each_backend(|store,backend|async move {
+        let managed_key="subtitles.transcription.managed.v1";
+        let legacy_key="subtitles.transcription.config";
+        let revision=uuid::Uuid::new_v4().to_string();
+        let legacy=serde_json::json!({"enabled":false,"interval_mins":0,"command":"whisper-cli","model_path":"","language":"en"});
+        let initial=SubtitleConfigurationWrite {expected_revision:Some("0".into()),expected_legacy:None,revision:revision.clone(),managed:serde_json::json!({"version":1,"revision":revision,"mode":"managed","enabled":true}),legacy:legacy.clone(),now_ms:1_000};
+        assert!(store.write_subtitle_configuration(initial.clone()).await.expect("subtitle store contract"),"{backend}: readiness never gates saved enabled");
+        assert!(store.write_subtitle_configuration(initial).await.expect("subtitle store contract"),"{backend}: uncertain retry recognizes exact pair");
+        let old_managed=store.get_setting(managed_key).await.expect("subtitle store contract").expect("subtitle store contract");
+        let observed_legacy=store.get_setting(legacy_key).await.expect("subtitle store contract");
+        let mut draft=SubtitleConfigurationWrite {expected_revision:Some(revision),expected_legacy:observed_legacy,revision:uuid::Uuid::new_v4().to_string(),managed:serde_json::json!({}),legacy,now_ms:1_001};
+        draft.managed=serde_json::json!({"version":1,"revision":draft.revision,"mode":"managed","enabled":false});
+        // An unchanged managed UUID cannot conceal an old binary's write.
+        let old_writer="{\"enabled\":true,\"interval_mins\":5,\"command\":\"whisper-cli\",\"model_path\":\"/models/old\",\"language\":\"fr\"}";
+        store.put_settings(&[(legacy_key,old_writer),("subtitles.transcription.next_run","777")]).await.expect("subtitle store contract");
+        assert!(!store.write_subtitle_configuration(draft.clone()).await.expect("subtitle store contract"),"{backend}: legacy drift atomically refuses both keys");
+        assert_eq!(store.get_setting(managed_key).await.expect("subtitle store contract").as_deref(),Some(old_managed.as_str()));
+        assert_eq!(store.get_setting(legacy_key).await.expect("subtitle store contract").as_deref(),Some(old_writer));
+        assert_eq!(store.get_setting("subtitles.transcription.next_run").await.expect("subtitle store contract").as_deref(),Some("777"),"{backend}: refused CAS preserves discovery cursor");
+        draft.expected_legacy=Some(old_writer.into());
+        draft.expected_revision=Some("0".into());
+        assert!(!store.write_subtitle_configuration(draft.clone()).await.expect("subtitle store contract"),"{backend}: stale managed UUID refuses both keys");
+        draft.expected_revision=None;
+        assert!(store.write_subtitle_configuration(draft.clone()).await.is_err(),"{backend}: LWW is Advanced only");
+        let long_path=format!("/{}","\\".repeat(4095));
+        draft.legacy=serde_json::json!({"enabled":false,"interval_mins":0,"command":long_path,"model_path":long_path,"language":"en"});
+        draft.managed["advanced"]=draft.legacy.clone();
+        draft.managed["legacy_snapshot"]=draft.legacy.clone();
+        draft.managed["mode"]=serde_json::json!("advanced");
+        assert!(store.write_subtitle_configuration(draft).await.expect("subtitle store contract"),"{backend}: explicit legacy endpoint is Advanced LWW");
+    }).await;
 }

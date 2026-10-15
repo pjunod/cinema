@@ -382,7 +382,7 @@ A small fixture proves a pipeline; it cannot close the movie-quality rows.
 ```json
 {
   "version": 1,
-  "expected_revision": "0",
+  "expected_revision": "0.<legacy-sha256>",
   "mode": "managed",
   "enabled": false,
   "interval_mins": 0,
@@ -391,8 +391,12 @@ A small fixture proves a pipeline; it cannot close the movie-quality rows.
 }
 ```
 
-GET supplies `revision`; PUT requires `expected_revision` and rejects stale
-writes with conflict. Advanced mode additionally supplies
+GET supplies opaque `revision` as `<saved UUID-or-0>.<canonical full legacy
+JSON SHA256>` (absence has a distinct canonical identity). PUT requires that
+`expected_revision` and rejects stale writes with conflict. Its core transaction
+compares both the managed UUID and the exact legacy raw value or absence
+observed by that load, so an old server's write cannot slip between token
+validation and the atomic update. Invalid legacy JSON fails explicitly. Advanced mode additionally supplies
 `advanced: {command, model_path}`. Managed activation atomically writes its
 separate configuration and disables legacy discovery while preserving
 Advanced command/path. An explicit return to Advanced copies the chosen
