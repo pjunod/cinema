@@ -54,6 +54,25 @@ final class RemoteNavigationTests: XCTestCase {
         XCTAssertEqual(dismissed, 1)
     }
     @MainActor
+    func testChoiceReturnOverrideRequiresParentOrderAndNativeAcknowledgment() {
+        let navigation = RemoteNavigationCoordinator()
+        navigation.presentationBlocked = { false }
+        navigation.setOrder(scope: "home", keys: ["jump", "item:416"], columns: 1)
+        navigation.openModal(scope: "jump-menu", opener: "jump") {}
+        navigation.closeModal(returnFocus: "unknown")
+        navigation.modalPresentationDismissed(scope: "jump-menu")
+        XCTAssertEqual(navigation.requestedFocus, "jump")
+        navigation.openModal(scope: "jump-menu", opener: "jump") {}
+        navigation.closeModal(returnFocus: "item:416")
+        navigation.modalPresentationDismissed(scope: "jump-menu")
+        XCTAssertEqual(navigation.requestedFocus, "item:416")
+        XCTAssertNil(navigation.focusedKey)
+        XCTAssertEqual(navigation.dispatch(.select, context: navigation.context), .unsupported)
+        navigation.register(scope: "home", key: "item:416", entry: .init(id: UUID(), label: "Movie", frame: .init(x: 0, y: 0, width: 100, height: 60)) {})
+        navigation.physicalFocus(scope: "home", key: "item:416")
+        XCTAssertEqual(navigation.focusedKey, "item:416")
+    }
+    @MainActor
     func testFocusControlRequiresScopeAndOrderAndNativeAcknowledgment() {
         let navigation = RemoteNavigationCoordinator()
         navigation.presentationBlocked = { false }
