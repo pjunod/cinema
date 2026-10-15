@@ -1,0 +1,114 @@
+--- a/clients/apple/Sources/PlurxApp.swift
++++ b/clients/apple/Sources/PlurxApp.swift
+@@ -50,7 +50,6 @@
+ }
+ #endif
+ 
+-@main
+ struct PlurxApp: App {
+     #if os(iOS)
+     @UIApplicationDelegateAdaptor(OfflineAppDelegate.self) private var appDelegate
+--- a/clients/apple/Sources/AppModel.swift
++++ b/clients/apple/Sources/AppModel.swift
+@@ -706,12 +706,16 @@
+     }
+ 
+     func libraryPage(_ libraryId: Int, sort: LibrarySort, offset: Int) async throws -> Page {
+-        do {
+-            return try await requireAPI().libraryItems(libraryId, sort: sort, offset: offset, limit: 200)
+-        } catch {
+-            noteAuthFailure(error)
+-            throw error
+-        }
++        var rows: [[String: Any]] = []
++        for i in 0..<416 {
++            let title = String(UnicodeScalar(65+i/16)!) + " Movie " + String(i)
++            let row: [String: Any] = ["id": i+1, "library_id": 1, "kind": "movie", "title": title, "sort_title": String(format: "%04d", i), "year": 2000+i/16]
++            rows.append(row)
++        }
++        let data = try JSONSerialization.data(withJSONObject: rows)
++        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
++        let all = try decoder.decode([Item].self, from: data)
++        return Page(items: Array(all.dropFirst(offset).prefix(200)), total: 416, offset: offset, limit: 200)
+     }
+ 
+     /// Page a collection, handing the caller everything received so far — in
+--- a/clients/apple/Sources/AuditApp.swift
++++ b/clients/apple/Sources/AuditApp.swift
+@@ -0,0 +1,13 @@
++import SwiftUI
++@main struct AuditApp: App {
++ @StateObject var model = AppModel(startServices: false)
++ @StateObject var navigation = RemoteNavigationCoordinator()
++ @StateObject var playback = RemotePlaybackAdapter()
++ let collection = LibraryCollection(id: "category:movie", title: "Movies", kind: "movie", libraries: [Library(id: 1, name: "Movies", kind: "movie")])
++ var body: some Scene { WindowGroup {
++  NavigationStack { LibraryView(collection: collection).remoteScope("library:category:movie") }
++   .environmentObject(model).environmentObject(navigation).environmentObject(playback)
++   .preferredColorScheme(.dark).tint(Palette.accent)
++   .onAppear { navigation.selectedTab = .libraries; navigation.paths[.libraries] = [.collection(collection)]; navigation.synchronizeRoute() }
++ } }
++}
+--- a/clients/apple/AuditTests/ModalAuditTests.swift
++++ b/clients/apple/AuditTests/ModalAuditTests.swift
+@@ -0,0 +1,20 @@
++import XCTest
++@MainActor final class ModalAuditTests: XCTestCase {
++ func testLibraryModalFocus() {
++  let app = XCUIApplication(); app.launchArguments += ["-plurx.libraryPresentation", "grid"]; app.launch()
++  XCTAssertTrue(app.buttons["View"].waitForExistence(timeout: 30))
++  let remote = XCUIRemote.shared
++  for _ in 0..<8 { if app.buttons["View"].hasFocus { break }; remote.press(.up) }
++  for _ in 0..<4 { if app.buttons["View"].hasFocus { break }; remote.press(.left) }
++  print("AUDIT BEFORE " + app.debugDescription)
++  XCTAssertTrue(app.buttons["View"].hasFocus)
++  remote.press(.select)
++  XCTAssertTrue(app.buttons["Rows"].waitForExistence(timeout: 5))
++  let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "library-view-modal"; shot.lifetime = .keepAlways; add(shot)
++  print("AUDIT OPEN " + app.debugDescription)
++  for _ in 0..<3 { remote.press(.down) }
++  print("AUDIT AFTER THREE DOWN " + app.debugDescription)
++  let second = XCTAttachment(screenshot: app.screenshot()); second.name = "library-modal-after-three-down"; second.lifetime = .keepAlways; add(second)
++  XCTAssertTrue(app.buttons["Rows"].hasFocus || app.buttons["Grid"].hasFocus || app.buttons["Close"].hasFocus, "Modal must own focus without traversing library")
++ }
++}
+--- a/clients/apple/audit.yml
++++ b/clients/apple/audit.yml
+@@ -0,0 +1,37 @@
++name: NavigationAudit
++options:
++  deploymentTarget:
++    tvOS: "17.0"
++settings:
++  base:
++    SWIFT_VERSION: "5.9"
++    SWIFT_STRICT_CONCURRENCY: targeted
++    CODE_SIGNING_ALLOWED: NO
++targets:
++  NavigationAudit:
++    type: application
++    platform: tvOS
++    sources: [Sources]
++    settings:
++      base:
++        PRODUCT_BUNDLE_IDENTIFIER: tv.plurx.navigationaudit
++        GENERATE_INFOPLIST_FILE: YES
++  NavigationAuditTests:
++    type: bundle.ui-testing
++    platform: tvOS
++    sources: [AuditTests]
++    dependencies:
++      - target: NavigationAudit
++    settings:
++      base:
++        PRODUCT_BUNDLE_IDENTIFIER: tv.plurx.navigationaudit.tests
++        GENERATE_INFOPLIST_FILE: YES
++        TEST_TARGET_NAME: NavigationAudit
++schemes:
++  NavigationAudit:
++    build:
++      targets:
++        NavigationAudit: all
++        NavigationAuditTests: [test]
++    test:
++      targets: [NavigationAuditTests]
