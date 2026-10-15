@@ -6856,3 +6856,29 @@ source = "crates/plurx-core/src/cluster/membership.rs"
 source_anchor = "const MEDIA_RELAY_ACQUISITION_PROOF_SQL:"
 test = "crates/plurx-core/src/cluster/membership.rs"
 test_anchor = "relay_acquisition_registration_is_atomic_and_rollback_claims_expire"
+
+[[fixes]]
+id = "apple.missing-cost-refresh-independent-fence"
+commits = ["03efc497c1ab6d1bd4308c1ad13fef9eb2d12482"]
+source = "clients/apple/Sources/PlayerAttempt.swift"
+source_anchor = "case autoMissingCostCatalogRefresh"
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid"
+
+[[fixes]]
+id = "apple.missing-cost-refresh-refuses-viewer-pause"
+commits = []
+supplements = "apple.missing-cost-refresh-independent-fence"
+source = "clients/apple/Sources/PlayerAttempt.swift"
+source_anchor = "case autoMissingCostCatalogRefresh"
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "testEveryMigratedFenceRefusesAContinuationAcrossAViewerPause"
+
+[[fixes]]
+id = "apple.missing-cost-refresh-refuses-previous-title"
+commits = []
+supplements = "apple.missing-cost-refresh-independent-fence"
+source = "clients/apple/Sources/PlayerAttempt.swift"
+source_anchor = "case autoMissingCostCatalogRefresh"
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle"
