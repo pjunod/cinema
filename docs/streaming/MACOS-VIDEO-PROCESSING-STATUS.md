@@ -1,6 +1,6 @@
 # macOS video processing — execution status and decisions
 
-**Status:** Mac follow-ups in `main` (PR #993); AMD and Intel strict-P5 qualified; Intel fixes open on `effort/linux-p5-intel-qualification` · **Updated:** 2026-10-12 · **Owner:** Claude · **Integration:** `effort/linux-p5-intel-qualification`.
+**Status:** Mac follow-ups and AMD/Intel VA-API fixes landed; QSV shipping-image closeout active · **Updated:** 2026-10-15 · **Owner:** managing agent with Sol 6.1 builder · **Integration:** `codex/video-processing-closeout`.
 
 Companion to the [design](MACOS-VIDEO-PROCESSING-DESIGN.md) and
 [implementation plan](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md). This page is
@@ -10,6 +10,30 @@ A plan or compiled change is not hardware qualification. The
 measurements, negative results, provenance and reproducible raw receipts.
 
 ## 1. Current position
+
+
+**October 15 closeout.** The Mac subtitle/caption and AMD follow-ups landed
+through PR #993 (`72bdacc6`); the Intel fixes landed through PR #1016
+(`c4c6bd2f`). The later Mac scan/peak correction and retained acceptance report
+landed through PRs #1038 and #1043. The earlier pending-merge wording below
+was stale; these completed contributions do not need another merge.
+
+The remaining implementation in this effort is the amd64 shipping-image
+Media SDK conflict: Debian's `libmfx1` accompanies the audited package and
+prevents strict QSV discovery from binding to one runtime. The closeout patch
+retires that duplicate through apt in both amd64 Dolby shipping targets.
+It preserves the actual shipping bytes of every audited system provider,
+keeps bare FFmpeg callers on the audited Jellyfin executables, and refreshes
+the installed-package inventory. The incumbent and arm64 targets are unchanged.
+The isolated candidate preserves all 43 system providers and all 121
+distributed library objects; AC-4, Dolby filter and loader checks pass.
+Intel QSV graph and ordinary-API qualification remain pending the explicitly
+approved transfer of the new candidate images. Existing AMD/VA-API and Mac
+receipts remain retained.
+Task-owned qualification resources are being inventoried for cleanup after
+reusable evidence and inputs are secured. No cleanup or QSV pass is claimed
+before its receipt exists.
+
 
 **October 13 Air follow-up.** Renewed NAS access permits the real HDR10-to-SDR
 rerun. The paused loading repairs reach unbuffered target frames; the newly
@@ -146,10 +170,12 @@ cleared before recovery, so everything was rebuilt from the pushed branch
   Intel, and requalifies on AMD. The adversarial review's findings are
   addressed (`36b9a690`), and the final tree requalifies on Intel.
 
-Remaining work, in order:
+The Intel fixes subsequently landed in PR #1016. Remaining closeout work:
 
-1. Run the fast lane once on the Intel PR, then merge.
-2. Clean up both nodes' qualification roots and images.
+1. Remove the duplicate Media SDK from the amd64 shipping targets and qualify
+   strict QSV using the corrected package composition.
+2. Review the final closeout change and complete its affected validation.
+3. Preserve retained evidence and clean up task-owned qualification resources.
 
 QSV strict graphs stay refused on this image until it stops carrying
 Debian's `libmfx1`; see the backlog. Each node's own probe decides
