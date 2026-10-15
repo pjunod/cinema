@@ -1,6 +1,6 @@
 # Mac HDR acceptance — playback follow-ups
 
-**Status:** built — ordinary F1 and bounded F2 are on main; bounded F3 current-owner controls, F4 parser/startup, F5 reporting, F6 media fence and F7 reference-white/package/Air evidence are complete on the effort; final current-tree promotion pending · **Recorded:** 2026-10-12; updated 2026-10-15.
+**Status:** open — ordinary F1 and bounded F2 are on main; bounded F3 current-owner controls, F4 parser/startup, F5 reporting, F6 media fence and F7 reference-white/package/Air evidence are complete on the effort; final current-tree promotion pending · **Recorded:** 2026-10-12; updated 2026-10-15.
 
 The [full acceptance report](../streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 closes the ordinary HDR10 Metal/CPU comparison. This document specifies the
