@@ -40,6 +40,10 @@ not an instruction to build in that order.
 
 ## 2. Concrete work to build or investigate
 
+| Project | State | Canonical ledger |
+|---|---|---|
+| Optional public HTTPS | Claimed; design adversarially reviewed, Sol 6.1 builds on effort/https-support and parent manages/reviews. | [HTTPS build](../server/HTTPS-BUILD.md) |
+
 ### 2.1 Video, playback and client projects
 
 | ID / project | State and remaining scope | Next step and canonical plan |
