@@ -1992,7 +1992,6 @@ internal fun Controls(
                     Icon(Icons.Filled.Tune, contentDescription = "Playback settings", tint = Color.White)
                 }
             }
-            tv.plurx.app.diagnostics.DiagnosticReportButton(category="playback",positiveTitle=title,generation=diagnosticGeneration)
             TvIconButton(
                 onClick = onInfo,
                 modifier = transportModifier(PlayerControlId.Info),
@@ -2007,6 +2006,8 @@ internal fun Controls(
                     Icon(Icons.Filled.PictureInPictureAlt, contentDescription = "Picture in picture", tint = Color.White)
                 }
             }
+            // Preserve the shared Tracks → Settings → Info → PiP transport order.
+            tv.plurx.app.diagnostics.DiagnosticReportButton(category="playback",positiveTitle=title,generation=diagnosticGeneration)
         }
     }
 
