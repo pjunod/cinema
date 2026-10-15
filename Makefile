@@ -1488,6 +1488,19 @@ library-rows-browser-check: ## Test grouped library rows with the provisioned Pl
 		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
 		--test tests/web/library-rows.browser.cjs
 
+.PHONY: subtitle-generation-browser-check
+subtitle-generation-browser-check: ## Run subtitle setup/completion in provisioned Chromium; missing runtimes fail
+	@set -eu; \
+		pw_module="$${PLAYWRIGHT_MODULE:-}"; pw_node="$${PLAYWRIGHT_NODE:-}"; \
+		if [ -z "$$pw_module" ]; then \
+			pw_module="$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')" || { echo 'subtitle browser check requires provisioned Python Playwright or PLAYWRIGHT_MODULE' >&2; exit 2; }; \
+		fi; \
+		if [ -z "$$pw_node" ]; then \
+			pw_node="$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')" || { echo 'subtitle browser check requires provisioned Playwright Node or PLAYWRIGHT_NODE' >&2; exit 2; }; \
+		fi; \
+		[ -x "$$pw_node" ] || { echo 'subtitle browser check: PLAYWRIGHT_NODE must name an executable runtime' >&2; exit 2; }; \
+		PLAYWRIGHT_MODULE="$$pw_module" "$$pw_node" --test tests/web/subtitle-generation.browser.cjs
+
 # Regenerating the golden is a deliberate act that shows up in a git diff, never
 # a side effect of a normal run — a golden that rewrites itself asserts nothing.
 # Run this when you MEANT to change the UI, then read the diff before committing.
