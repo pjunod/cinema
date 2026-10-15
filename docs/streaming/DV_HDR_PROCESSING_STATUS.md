@@ -1326,3 +1326,26 @@ and updates only the current JVM build-input digest. Original JVM captures
 and historical build pins retain their actual sources and bytes. Fresh Android
 compilation and discovery remain required; deployment and physical acceptance
 remain open.
+
+### R36 — Use protocol identities and await asynchronous snapshot publication
+
+Promotion 5127 passed evidence scope, mobile counters, policy preflight and
+Android compilation/lint. Its real topology campaign then refused synthetic
+`node-N` membership identities at the existing canonical UUID check. The
+harness now maps each numeric Raft ID to one deterministic canonical UUID in
+bootstrap, join, ownership, authentication and removal. Numeric process paths
+and hostnames remain separate. Production reference validation is unchanged.
+
+The voter campaign failed during warm-up and the learner campaign failed in
+cycle 15 immediately after their bounded 768-write bursts, without awaiting
+asynchronous snapshot publication. Later completion was not observed. The
+harness now polls after the burst
+under the same original cycle deadline, without additional writes. Newer-index,
+purge, retained-log and actual transport proofs remain required. Three focused
+controls cover UUID admission, delayed publication and unchanged-index expiry;
+their first execution belongs to the integrated effort.
+
+The original failures remain recorded. Compiler timeouts, daemon readiness,
+web focus baselines, Android transport focus and the package source download
+still require separate diagnosis or qualification. No repair deployment or
+physical HDR acceptance is claimed.
