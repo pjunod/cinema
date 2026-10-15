@@ -6490,3 +6490,11 @@ source = "clients/android/app/build.gradle.kts"
 source_anchor = "versionCode ="
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "def test_android_counter_the_target_already_ships_fails_against_the_target"
+
+[[fixes]]
+id = "android.transport-options-keep-shared-focus-order"
+commits = ["ceea81356157da9036d5fd297eef2973240dc20d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "fun TransportOptions()"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
+test_anchor = "fun transportOptionsFollowTheSharedContractOrder()"
