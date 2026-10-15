@@ -826,6 +826,31 @@ production curve to match one film frame or report SDR VMAF as HDR VMAF.
 A parity-probe improvement and a calibrated grade qualification are separate
 closure receipts.
 
+## 9.1 Remaining execution claimed — 2026-10-15
+
+Remaining F3–F7 work is claimed on `effort/hdr-playback-followups`, starting
+from main `9eb7f6738647a7e963b17cfb3a2f77a594863c41`. Task branches target
+that integration branch and require the Effort development gate; final
+promotion requires a current-tree qualification receipt. Original evidence
+and completed F1/F2 receipts remain authoritative for their bounded scopes.
+
+| Task | Implementation and evidence ownership | Closure boundary |
+|---|---|---|
+| F7 neutral peak guard | `crates/plurxd/src/pipeprobe.rs`, this ledger, bounded evidence | Reject old explicit Metal peak units on real neutral PQ frames while retaining the 4K motion/speed probe. |
+| F5 attached output facts | Frozen VOD status and web Playback info, associated regressions | Report attached output provenance without deriving an old rendition from current settings. |
+| F3 lifecycle/accounting | Existing preparation/admission/maintenance paths and regression evidence; repair only a demonstrated gap | Distinguish the documented 300-second idle policy from a resource leak; protect unrelated viewers. |
+| F4 cold Heretic | Isolated Mac playback namespace and source/stage evidence; repair the demonstrated failing stage | Repeated declared cold/warm starts, truthful delivery and bounded startup. |
+| F6 authority recovery | Isolated serving-fence controls and retained stage evidence | Never inject faults into the shared fleet; preserve stale-owner refusal and distinguish process survival from actual continuity. |
+| F7 visual fidelity | Pinned software reference, named source windows and display observations | Keep algorithmic differences separate from physical display measurements and artistic-grade equivalence. |
+
+The operator has a Studio Display and Studio Display XDR but no measurement
+instrument. Their factory calibration and Apple video reference presets can
+support a documented visual comparison; no instrument purchase is required
+for the software repairs. That comparison will be labelled as factory-reference
+visual evidence, with no independent measurement of display calibration.
+The original calibrated-fidelity criterion remains a distinct, unmeasured
+boundary rather than being silently marked passed.
+
 ## 10. Shared execution and closure contract
 
 ### 10.1 Minimum receipt for each reproduction
