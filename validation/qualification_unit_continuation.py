@@ -913,9 +913,15 @@ def bound_execution(record, item, raw, source_commands=historical_canonical):
     if witness['mode']=='local-original-capture':
         return original_capture(record,item,raw)
     if witness['mode'] == 'local-binary':
+        fields = {'mode','first_line','build_invocation','archive_sha256','binary_sha256_before','binary_sha256_after','features','fingerprint','binary_path','fingerprint_path'}
+        default_harness = '--test-threads=1' not in rust_identity(item['invocation'])['harness']
         receipts.require(origin['kind'] == 'attested-local' and kind in RUST_KINDS
-                         and set(witness) == {'mode','first_line','build_invocation','archive_sha256','binary_sha256_before','binary_sha256_after','features','fingerprint','binary_path','fingerprint_path'},
+                         and set(witness) == fields | ({'harness_environment'} if default_harness else set()),
                          'Unknown local binary witness')
+        if default_harness:
+            receipts.require(witness['harness_environment'] == {'RUST_TEST_THREADS': None}
+                             and record['environment']['runtime']['test_threads'] == 'libtest-default',
+                             'Default native scheduling lacks actual environment custody')
         receipts.require(lines[first-1].startswith('COMMAND '), 'Local command anchor unavailable')
         argv = receipts.bounded_json(lines[first-1].removeprefix('COMMAND ').encode())
         receipts.require(isinstance(argv,list) and argv and all(isinstance(arg,str) for arg in argv)
@@ -951,12 +957,24 @@ def bound_execution(record, item, raw, source_commands=historical_canonical):
                          and fingerprint_path.parent.parent.name=='.fingerprint',
                          'Native binary/fingerprint target linkage differs')
         args = argv[1:]
-        receipts.require('--list' not in args and '--exact' in args and '--test-threads=1' in args
-                         and len([arg for arg in args if not arg.startswith('--')]) == 1,
-                         'Unknown local missing-only harness')
+        if default_harness:
+            flags = [arg for arg in args if arg.startswith('-')]
+            receipts.require('--exact' in flags and len(flags) == len(set(flags))
+                             and set(flags) <= {'--exact', '--nocapture', '--ignored'}
+                             and ('--ignored' in flags) == ('--ignored' in target['harness'])
+                             and len([arg for arg in args if not arg.startswith('-')]) == 1,
+                             'Unknown default missing-only harness')
+        else:
+            receipts.require('--list' not in args and '--exact' in args and '--test-threads=1' in args
+                             and len([arg for arg in args if not arg.startswith('--')]) == 1,
+                             'Unknown local missing-only harness')
         selected = next(arg for arg in args if not arg.startswith('--'))
         actual = retention.log_outcomes(body, record['coverage']['format'])
         receipts.require(set(actual) == {selected}, 'Actual local selector/outcomes differ')
+        if default_harness:
+            receipts.require(len(re.findall(r'^test result:', body, re.M)) == 1,
+                             'One native process requires one complete terminal')
+            require_native_terminals(body, actual, record['exit_code'], origin['command'])
     elif witness['mode']=='local-cargo-json':
         receipts.require(origin['kind']=='attested-local' and kind in RUST_KINDS
                          and set(witness)=={'mode','first_line','historical_name','archive_sha256',

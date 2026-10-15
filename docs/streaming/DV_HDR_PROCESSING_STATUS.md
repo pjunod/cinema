@@ -1376,3 +1376,27 @@ to the current effort. The ordinary qualification comparison remains required.
 
 Original failures remain preserved. Main promotion, deployment and physical
 HDR acceptance remain open.
+
+
+### R39 — Capture missing native cases with their actual default scheduling
+
+The first current Linux cluster-check compilation and native listing after
+R36 passed with no unit bodies: 145 full cases, including 72 transport cases.
+The normal exact-count guard and its existing operations control now require
+72 rather than the previous 70. The UUID control's focused macOS pass is
+separate; only the two new transport controls enter this Linux cohort.
+
+The existing local-binary evidence adapter previously accepted only serial
+single-case execution. Its additional default-scheduled form requires one
+exact selector, matching canonical scheduling, the recorded absence of
+`RUST_TEST_THREADS`, an unambiguous allowed argv and one complete native result
+terminal. Source archive, compiler fingerprint, target, features, binary
+custody and complete outcomes remain required. Existing serial records and
+their schema are unchanged. The existing runtime mismatch control gains
+positive and refusal cases; its first changed-body execution and the changed
+operations count control belong to the integrated main-bound effort.
+
+This permits the two genuinely missing Linux outcomes to be captured without
+replaying 70 applicable passes. It invents no Linux result from a macOS pass
+and does not turn serial scheduling into default scheduling. Current proof,
+full promotion, deployment and physical HDR acceptance remain open.

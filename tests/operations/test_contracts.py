@@ -3331,7 +3331,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(contract_commands), 7)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=70", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=72", contract_commands[1])
         self.assertIn("PLURX_EXPECT_TEST_NAMES=", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
