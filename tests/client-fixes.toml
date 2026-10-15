@@ -6514,3 +6514,11 @@ source = "clients/apple/Sources/SharedLibrariesView.swift"
 source_anchor = "TVReadableInformation("
 test = "clients/apple/UITests/TVSharedPlaybackNavigationTests.swift"
 test_anchor = "func testSharedPlaybackRevealQualityReportAndBackRetainSession()"
+
+[[fixes]]
+id = "apple.tv-row-header-native-focus-and-clearance"
+commits = ["3cd66d8992727ba97bb1217b25b87eda48d2a48f"]
+source = "clients/apple/Sources/LibraryView.swift"
+source_anchor = ".tvNavigationFocusSection()"
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "func testRowsViewAllOpensGroupAndBackRestoresHeader()"
