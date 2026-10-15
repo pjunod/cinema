@@ -373,6 +373,109 @@ class CompleteCommandUnitCase(unittest.TestCase):
         for altered in [missing,overridden,serial]:
             with self.assertRaises(receipts.ReceiptError):inspect(changed=altered)
 
+        # A finite original Cargo capture retains its actual serial runtime.
+        # Its bytes have no manufactured COMMAND/NATIVE_EXIT frame.
+        name=q.SERIAL_ROTATION_CAPTURE['test'];binary='/owned/plurx_cluster_check-deadbeefdeadbeef'
+        command='$(CARGO) test --locked -p plurx-cluster-check transport_recovery --lib'
+        argv=['cargo','test','--locked','--offline','-p','plurx-cluster-check','--lib',name,'--','--exact','--test-threads=1']
+        raw='Running unittests src/lib.rs ('+binary+')\nrunning 1 test\ntest '+name+' ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n'
+        environment=copy.deepcopy(fixture()['commands'][0]['environment']);environment['features']=[]
+        environment['runtime'].update(test_threads='libtest-default',rust_min_stack=None)
+        measured=copy.deepcopy(environment);measured['runtime']['test_threads']=1
+        artifact={'reason':'compiler-artifact','executable':binary,'features':[],
+                  'target':{'name':'plurx_cluster_check','kind':['lib']},'profile':environment['runtime']['profile']}
+        compiler=json.dumps(artifact)+'\n';compiler_sha=hashlib.sha256(compiler.encode()).hexdigest()
+        raw_sha=hashlib.sha256(raw.encode()).hexdigest()
+        binding={'source_commit':CANDIDATE,'branch':'effort/dv-hdr-repair','source_archive_sha256':'d'*64,
+                 'state':'PASS','source_clean_before':True,'source_clean_after':True,'unit_bodies_executed':4,
+                 'rustc':q.RUSTC_VERSION,'platform':'linux-x86_64','commands':[{} for _ in range(6)],
+                 'binaries':{'lib':{'path':binary,'sha256':'c'*64,'features':[],'profile':artifact['profile']}}}
+        binding['commands'][1]={'index':2,'kind':'compile-only','native_exit':0,'log_sha256':compiler_sha,
+                               'argv':['cargo','test','--locked','--offline','-p','plurx-cluster-check','--lib','--no-run','--message-format=json']}
+        binding['commands'][5]={'index':6,'kind':'unit','argv':argv,'native_exit':0,'log_sha256':raw_sha,
+                               'log_bytes':len(raw.encode()),'test_id':name,'binary_sha256_before':'c'*64,
+                               'binary_sha256_after':'c'*64,'actual_features':[]}
+        binding_text=json.dumps(binding);binding_sha=hashlib.sha256(binding_text.encode()).hexdigest()
+        fp={'rustc':q.RUSTC_FINGERPRINT,'profile':q.TEST_PROFILE_FINGERPRINTS[0],
+            'compile_kind':0,'rustflags':[],'features':'[]'}
+        observation={'exit':0,'stderr':'','original_result_sha256':binding_sha,'stdout':json.dumps({
+            'unit_bodies_executed':0,'binary_path':binary,'binary_sha256':'c'*64,'fingerprint':fp,
+            'fingerprint_path':'/owned/.fingerprint/plurx-cluster-check-deadbeefdeadbeef/test-lib-plurx_cluster_check.json'})}
+        observation_text=json.dumps(observation)
+        pins={'source':CANDIDATE,'test':name,'log':raw_sha,'binding':binding_sha,'compiler':compiler_sha,
+              'observation':hashlib.sha256(observation_text.encode()).hexdigest()}
+        row={'sequence':1,'source_commit':CANDIDATE,'environment':measured,
+             'origin':{'kind':'attested-local','identity':'original measured Cargo capture','command':shlex.join(argv),
+                       'execution':{'mode':'original-serial-rotation','first_line':1,'binding':log(binding_text),
+                                    'compiler':log(compiler),'observation':log(observation_text)}},
+             'changes':{},'log':{'sha256_ref':raw_sha},'exit_code':0,
+             'coverage':{'mode':'rust','first_line':1,'last_line':len(raw.splitlines()),'format':'rust','outcomes':{name:'pass'}}}
+        item={'name':'transport:1','invocation':command,'environment':environment,'records':[row],'obligations':[],
+              'inventory':{'source_commit':CANDIDATE,'ids':[name],'list_log':log(name+': test\n'),
+                           'binary_sha256':'c'*64,'features':[]}}
+        proof={'version':1,'source_commit':CANDIDATE,'commands':[item],'logs':{raw_sha:log(raw)}}
+        with patch.object(q,'SERIAL_ROTATION_CAPTURE',pins),patch.object(q,'historical_canonical',return_value={'transport:1':command}):
+            # bound_execution's default is intentionally resolved separately.
+            original=q.original_serial_rotation
+            with patch.object(q,'original_serial_rotation',side_effect=lambda r,i,t,s: original(r,i,t,lambda _: {'transport:1':command})):
+                before=copy.deepcopy(proof)
+                self.assertIn('transport',self.validate(proof,commands={'transport:1':command}))
+                self.assertEqual(proof,before)
+                mutations=[
+                    lambda p:p['commands'][0]['records'][0]['environment']['runtime'].update(test_threads='libtest-default'),
+                    lambda p:p['commands'][0]['records'][0]['environment']['runtime'].update(test_threads=2),
+                    lambda p:p['commands'][0]['records'][0]['environment']['runtime'].update(rust_min_stack=8388608),
+                    lambda p:p['commands'][0]['records'][0]['environment'].update(features=['hidden']),
+                    lambda p:p['commands'][0]['records'][0].update(source_commit='a'*40),
+                    lambda p:p['commands'][0]['records'][0].update(exit_code=101),
+                    lambda p:p['commands'][0]['records'][0]['origin'].update(command=shlex.join([a for a in argv if a!='--offline'])),
+                    lambda p:p['commands'][0]['records'][0]['origin']['execution'].update(first_line=2),
+                    lambda p:p['commands'][0]['records'][0]['origin']['execution'].update(binding=log(binding_text+' ')),
+                    lambda p:p['commands'][0]['records'][0]['origin']['execution'].update(compiler=log(compiler+' ')),
+                    lambda p:p['commands'][0]['records'][0]['origin']['execution'].update(observation=log(observation_text+' ')),
+                    lambda p:p['commands'][0]['records'][0]['coverage'].update(outcomes={name:'ignored'}),
+                    lambda p:p['commands'][0]['records'][0]['coverage'].update(first_line=2),
+                    lambda p:p['commands'][0]['records'][0]['coverage'].update(last_line=3),
+                    lambda p:p['commands'][0]['records'][0]['coverage'].update(format='rust-serial'),
+                ]
+                for mutate in mutations:
+                    altered=copy.deepcopy(proof);mutate(altered)
+                    with self.subTest(mutation=mutate),self.assertRaises(receipts.ReceiptError):self.validate(altered,commands={'transport:1':command})
+                for changed_raw in [raw+'test hidden ... ok\n',raw.replace(' ... ok',' ... FAILED'),raw.removesuffix('test result: ok. 1 passed; 0 failed; 0 ignored;\n')]:
+                    altered=copy.deepcopy(proof);encoded=log(changed_raw);altered['logs'][encoded['sha256']]=encoded
+                    altered['commands'][0]['records'][0]['log']={'sha256_ref':encoded['sha256']}
+                    with self.assertRaises(receipts.ReceiptError):self.validate(altered,commands={'transport:1':command})
+
+        # Missing-only default-scheduled execution still proves the full
+        # implicit target footprint, including a same-stem zero-case binary.
+        command='$(CARGO) test --locked -p plurx-cluster-check topology:: -- --nocapture'
+        name='topology::a';argv=[binary,name,'--exact','--nocapture']
+        raw='COMMAND '+json.dumps(argv)+'\nrunning 1 test\ntest '+name+' ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\nNATIVE_EXIT 0\n'
+        row=copy.deepcopy(fixture()['commands'][0]['records'][0]);row['environment']=copy.deepcopy(environment)
+        row['origin']['command']=shlex.join(argv);witness=row['origin']['execution']
+        witness.update(build_invocation='cargo test --locked -p plurx-cluster-check --no-run',features=[],
+                       binary_path=binary,fingerprint_path='/owned/.fingerprint/plurx-cluster-check-deadbeefdeadbeef/test-lib-plurx_cluster_check.json',
+                       fingerprint=fp,harness_environment={'RUST_TEST_THREADS':None})
+        row['coverage']={'mode':'rust','first_line':2,'last_line':4,'format':'rust','outcomes':{name:'pass'}}
+        encoded=log(raw);row['log']={'sha256_ref':encoded['sha256']}
+        target={'name':'plurx_cluster_check','kind':['lib'],'binary_sha256':'c'*64,'features':[],'list_log':log(name+': test\n')}
+        auxiliary={**target,'kind':['bin'],'list_log':log('0 tests, 0 benchmarks\n')}
+        item={'name':'topology:5','invocation':command,'environment':copy.deepcopy(environment),'records':[row],
+              'obligations':[],'inventory':{'source_commit':CANDIDATE,'ids':[name],'targets':[target,auxiliary]}}
+        proof={'version':1,'source_commit':CANDIDATE,'commands':[item],'logs':{encoded['sha256']:encoded}}
+        self.assertIn('topology',self.validate(proof,commands={'topology:5':command}))
+        mutations=[
+            lambda p:p['commands'][0]['records'][0]['origin']['execution'].update(fingerprint_path='/owned/.fingerprint/plurx-cluster-check-deadbeefdeadbeef/test-bin-plurx_cluster_check.json'),
+            lambda p:p['commands'][0]['records'][0]['origin']['execution'].update(build_invocation='cargo test --locked -p plurx-cluster-check --lib --no-run'),
+            lambda p:p['commands'][0]['inventory']['targets'][0].update(list_log=log('topology::other: test\n')),
+            lambda p:p['commands'][0]['inventory']['targets'][1].update(list_log=log('topology::hidden: test\n')),
+            lambda p:p['commands'][0]['inventory']['targets'].append(copy.deepcopy(target)),
+            lambda p:p['commands'][0]['inventory']['targets'][0].update(features=['hidden']),
+        ]
+        for mutate in mutations:
+            altered=copy.deepcopy(proof);mutate(altered)
+            with self.subTest(mutation=mutate),self.assertRaises(receipts.ReceiptError):self.validate(altered,commands={'topology:5':command})
+
     def test_tampered_shared_log_and_unknown_outcome_refuse(self):
         proof=fixture();next(iter(proof['logs'].values()))['sha256']='0'*64
         with self.assertRaises(receipts.ReceiptError):self.validate(proof)
