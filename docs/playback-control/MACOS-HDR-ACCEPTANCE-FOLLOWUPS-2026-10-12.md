@@ -872,8 +872,41 @@ preserved together. These controls do not close broader film/display fidelity.
 
 The [bounded receipt](evidence/f7-neutral-peak-20261015.json) pins the source,
 tools, commands, old/corrected measurements and retained archive hash.
-Independent review, the task gate and final main qualification are pending;
-no merged repair or new physical display acceptance is claimed here.
+Astra approved the narrow guard and its seven-job effort gate passed; PR1101
+landed in the effort as `3c757c5e8`. Final main qualification and broader
+physical display acceptance remain open.
+
+### Hable reference white — bounded repair, shipping acceptance pending
+
+The remaining darkness has a separate identified cause: the accepted CPU chain
+linearizes PQ relative to 100 nits, while pinned Jellyfin Metal uses 203 nits.
+Matching the explicit peak unit does not make nonlinear Hable identical.
+A separate native patch adds a bounded `reference_white` option, default 203,
+and normalizes both signal and peak inside Hable. Plurx requests 100 for its
+PQ Metal graph. CPU, CUDA/OpenCL and Metal HLG BT.2390/ITP remain unchanged;
+Metal peak serialization remains nits/10. Old packages without the required
+option report the graph unavailable through the existing parity/resolver path.
+
+Before running the corrected variant, a separate neutral limit of two levels
+was declared. The broad motion limit remains 24 and its encode clock remains
+the throughput measurement. Actual eight-frame VT-encoded neutral controls
+measure a maximum mean-channel delta of 10.2490 for old 203-nit Metal and
+0.3227 for corrected 100-nit Metal; all outputs have verified BT.709 tags.
+The raw neutral luma MAE falls from 10.2295 to 0.3561. Nine held real-film
+frames all improve, with pooled luma MAE falling from 5.07994 to 0.19135.
+Default 203-nit output is byte-identical, invalid bounds refuse, and authored
+HLG BT.2390 controls are byte-identical with and without the new option.
+
+Astra independently approved the bounded native prototype and verified its
+source and retained bytes. That review is not production-integration approval.
+The [reference-white receipt](evidence/f7-reference-white-20261015.json) links
+all controls and the independently downloaded private archive. The limited
+proof executable was never installed. Full shipping-package/source/parser
+qualification, integrated regression/review gates and physical Air acceptance
+remain required. Available Apple factory reference presets need no new
+calibrator purchase; independent instrumented calibration and an artistic SDR
+grade remain unclaimed. Individual pixel differences persist despite low
+aggregate error, so these controls do not close general film/display fidelity.
 
 ## 10. Shared execution and closure contract
 

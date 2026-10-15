@@ -72,6 +72,18 @@ class MacosVideoPackageCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Git checkout"):
             TOOL.attach_source_parser(self.package, self.stage, self.evidence)
 
+    def test_prepared_hable_white_is_source_bound_and_checks_bounds_and_default(self):
+        with patch.object(TOOL, "run") as query:
+            self.assertFalse(TOOL.verify_prepared_hable_white(Path("ffmpeg"), self.evidence, {}))
+            query.assert_not_called()
+        patches = {"0005-match-metal-hable-reference-white.patch": "source-bound"}
+        valid = "Filter tonemap_videotoolbox\n   reference_white <double> ..FV....... Reference white in nits for Hable (from 1 to 10000) (default 203)\n"
+        with patch.object(TOOL, "run", return_value=valid):
+            self.assertTrue(TOOL.verify_prepared_hable_white(Path("ffmpeg"), self.evidence, patches))
+        for text in ["Filter tonemap_videotoolbox\n", valid.replace("default 203", "default 100"), valid.replace("from 1 to 10000", "from 0 to 10000"), valid.replace("Filter tonemap_videotoolbox", "Filter unrelated")]:
+            with self.subTest(text=text), patch.object(TOOL, "run", return_value=text), self.assertRaisesRegex(ValueError, "Hable reference_white"):
+                TOOL.verify_prepared_hable_white(Path("ffmpeg"), self.evidence, patches)
+
     def test_prepared_subtitle_contract_is_source_bound_and_official_baseline_stays_supported(self):
         with patch.object(TOOL, "run") as query:
             self.assertFalse(TOOL.verify_prepared_subtitle_options(Path("ffmpeg"), self.evidence, {}))

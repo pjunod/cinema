@@ -232,6 +232,19 @@ def verify_strict_options(executable, evidence):
     (evidence / "decoder-hevc.txt").write_text(decoder_help)
 
 
+
+def verify_prepared_hable_white(executable, evidence, patches):
+    """Bind the source patch to an actual declared Hable-white option."""
+    if "0005-match-metal-hable-reference-white.patch" not in patches:
+        return False
+    text = run([str(executable), "-hide_banner", "-h", "filter=tonemap_videotoolbox"])
+    if not re.search(r"^Filter tonemap_videotoolbox$", text, re.MULTILINE) or not re.search(
+            r"^\s+reference_white\s+<double>.*\(from 1 to 10000\).*\(default 203\)", text, re.MULTILINE):
+        raise ValueError("prepared Metal contract lacks bounded Hable reference_white")
+    (evidence / "filter-tonemap_videotoolbox.txt").write_text(text)
+    return True
+
+
 def verify_prepared_subtitle_options(executable, evidence, patches):
     """New prepared contract only; official portable baseline remains supported."""
     if "0004-prepare-and-composite-videotoolbox-subtitles.patch" not in patches:
@@ -555,6 +568,8 @@ def main():
             receipt.pop("binary_archive_sha256")
             receipt["checksum_authority"] = "pinned source and local compiled binary digests"
             verify_strict_options(stage / "ffmpeg", evidence)
+            if verify_prepared_hable_white(stage / "ffmpeg", evidence, receipt["compiled_source"]["local_patches"]):
+                receipt["capabilities"]["metal_hable_reference_white"] = "declared"
             if verify_prepared_subtitle_options(stage / "ffmpeg", evidence, receipt["compiled_source"]["local_patches"]):
                 receipt["capabilities"]["filters"]["subtitles_vt_images"] = "declared"
                 receipt["font_tools"] = attach_font_tools(args.prepared_build, stage)
