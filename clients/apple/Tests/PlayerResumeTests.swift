@@ -4,11 +4,12 @@ import XCTest
 
 private final class ResumeItem: AVPlayerItem {
     var ready = true
+    var positionSeconds = 29.661
     var ranges: [ClosedRange<Double>] = [29.661...91.999]
 
     override var status: AVPlayerItem.Status { ready ? .readyToPlay : .unknown }
     override func currentTime() -> CMTime {
-        CMTime(seconds: 29.661, preferredTimescale: 1_000)
+        CMTime(seconds: positionSeconds, preferredTimescale: 1_000)
     }
     override var loadedTimeRanges: [NSValue] {
         ranges.map {
@@ -125,6 +126,141 @@ final class PlayerResumeTests: XCTestCase {
             selectedPath: "buffered-immediate",
             lastVideoDisplaySeconds: baseline
         )
+    }
+
+    func testIncumbentFetchPreferenceLeaseRejectsPositiveGapInsideProtectedWindow() throws {
+        let player = ResumePlayer()
+        player.item.positionSeconds = 0
+        player.item.ranges = [0...5, 5.1...40]
+        player.item.preferredForwardBufferDuration = 60
+        let controller = PlayerController(player: player,
+            requestPlaybackDecision: { _, _, _, _ in
+                try await Task.sleep(for: .seconds(3_600))
+                throw CancellationError()
+            })
+        let credentials = Session.shared.credentials
+        Session.shared.setCredentials(origin: "http://127.0.0.1:1", token: nil)
+        defer {
+            controller.stop()
+            Session.shared.setCredentials(origin: credentials.origin, token: credentials.token)
+        }
+        controller.start(model: AppModel(), itemId: 1, fileId: 1, startMs: 0,
+            durationMs: 600_000, title: "Physical lease runway")
+        let sessionId = "7f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01"
+        let action = try XCTUnwrap(PreparedReplacementAction(ControlAction(
+            type: PlaybackControl.prepareActionType,
+            actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+            sessionId: sessionId,
+            playlistUrl: "/api/v1/hls/\(sessionId)/master.m3u8",
+            mediaOriginMs: 0,
+            effectiveSelection: EffectiveSelection(
+                qualityAuto: false, height: 720, audioTrack: nil, subtitleBurn: nil,
+                audioOffsetMs: 0, codec: "source", dynamicRange: nil))))
+
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds()), 40, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(joinTolerance: 0, gapTolerance: 0)), 5, accuracy: 0.001)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 60,
+            "A positive gap inside the protected window must prevent physical buffer reduction")
+        controller.discardPreparedSuccessor()
+
+        // Timebase rounding may put the playhead just before the first range.
+        // Keep membership tolerance without allowing a positive internal gap.
+        player.item.ranges = [0.005...5, 5.1...40]
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds()), 40, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(gapTolerance: 0)), 5, accuracy: 0.001)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 60)
+        controller.discardPreparedSuccessor()
+
+        player.item.ranges = [0.005...5, 5...40]
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(joinTolerance: 0, gapTolerance: 0)), 0)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(gapTolerance: 0)), 40, accuracy: 0.001)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 16)
+        controller.discardPreparedSuccessor()
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 60)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        player.item.preferredForwardBufferDuration = 45
+        controller.discardPreparedSuccessor()
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 45,
+            "Restoration must preserve a later owner's preference")
+
+        // A tolerated prior range must not shadow the interval containing the
+        // current clock. The historical gap is behind the protected window.
+        player.item.positionSeconds = 10
+        player.item.ranges = [0...9.9, 10...40]
+        player.item.preferredForwardBufferDuration = 60
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds()), 30, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(gapTolerance: 0)), 30, accuracy: 0.001)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 10_000))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 16)
+        controller.discardPreparedSuccessor()
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 60)
+
+        // A positive gap ahead of that same clock remains disqualifying.
+        player.item.ranges = [0...9.9, 10...15, 15.1...40]
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds()), 30, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(gapTolerance: 0)), 5, accuracy: 0.001)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 10_000))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 60)
+        controller.discardPreparedSuccessor()
+
+        // Neither interval contains the clock. The future rounding-qualified
+        // range must win over a stale sliver without joining positive gaps.
+        player.item.ranges = [9.8...9.95, 10.02...40]
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds()), 30, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(controller.bufferedRunwaySeconds(gapTolerance: 0)), 30, accuracy: 0.001)
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 10_000))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 16)
+        controller.discardPreparedSuccessor()
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 60)
+    }
+
+    func testAutomaticIncumbentFetchPreferenceLeaseRestoresAutomaticAndPreservesLaterOwner() throws {
+        let player = ResumePlayer()
+        player.item.positionSeconds = 0
+        player.item.ranges = [0...40]
+        player.item.preferredForwardBufferDuration = 0
+        let controller = PlayerController(player: player,
+            requestPlaybackDecision: { _, _, _, _ in
+                try await Task.sleep(for: .seconds(3_600))
+                throw CancellationError()
+            })
+        let credentials = Session.shared.credentials
+        Session.shared.setCredentials(origin: "http://127.0.0.1:1", token: nil)
+        defer {
+            controller.stop()
+            Session.shared.setCredentials(origin: credentials.origin, token: credentials.token)
+        }
+        controller.start(model: AppModel(), itemId: 1, fileId: 1, startMs: 0,
+            durationMs: 600_000, title: "Automatic physical lease")
+        let sessionId = "7f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01"
+        let action = try XCTUnwrap(PreparedReplacementAction(ControlAction(
+            type: PlaybackControl.prepareActionType,
+            actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+            sessionId: sessionId,
+            playlistUrl: "/api/v1/hls/\(sessionId)/master.m3u8",
+            mediaOriginMs: 0,
+            effectiveSelection: EffectiveSelection(
+                qualityAuto: false, height: 720, audioTrack: nil, subtitleBurn: nil,
+                audioOffsetMs: 0, codec: "source", dynamicRange: nil))))
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 16)
+        controller.discardPreparedSuccessor()
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 0)
+
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        player.item.preferredForwardBufferDuration = 45
+        controller.discardPreparedSuccessor()
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 45)
+
+        player.item.preferredForwardBufferDuration = 0
+        player.item.ranges = [0...5, 5.1...40]
+        XCTAssertTrue(controller.startPreparedSuccessor(action, filmPositionMs: 0))
+        XCTAssertEqual(player.item.preferredForwardBufferDuration, 0,
+            "automatic buffering still requires contiguous protected runway")
+        controller.discardPreparedSuccessor()
     }
 
     func testHeartstopperRunwayQualifiesAndBoundaryCasesDoNot() {
@@ -376,6 +512,81 @@ final class PlayerResumeTests: XCTestCase {
         controller.setPlaybackRequested(false)
         controller.setPlaybackRequested(true)
         XCTAssertEqual(player.commands, ["pause", "play"])
+    }
+
+    func testPausePublicationRetainsPendingSeekUntilPlayDispatchesOnce() async throws {
+        let gate = ResumeIntentGate()
+        let player = ResumePlayer()
+        let decision = try JSONDecoder().decode(Decision.self, from: Data("""
+        {"fileId":1,"method":"direct_play","playUrl":"/not-fetched",
+         "source":{"height":1080,"durationMs":600000},"audio":[],"subtitles":[],"ladder":[]}
+        """.utf8))
+        let caps = DeviceCaps(client: ClientInfo(kind: "ios", build: "test", ua: "test"),
+            video: [], audio: [], containers: [], transports: [], dvTransport: "none",
+            display: DisplayCaps(hdr: false, dolbyVision: false))
+        var selection = PlayerController.MediaSelectionPreparation()
+        selection.audio = { _, _ in nil }
+        selection.native = { _, _, _ in .init(hasSubtitleOptions: true, apply: { true }) }
+        var nativeSeeks: [Int] = []
+        var creates = 0
+        let controller = PlayerController(player: player,
+            requestPlaybackDecision: { _, _, _, _ in (decision, caps) },
+            mediaSelectionPreparation: selection,
+            itemPreparation: .init(ready: { _, _ in }, seek: { _, _ in }),
+            nativeSeek: { _, target in nativeSeeks.append(target); return true },
+            requestHlsSession: { _, _, _ in
+                creates += 1
+                throw APIError.transport("unexpected create in retained direct seek")
+            },
+            reportPlaybackIntent: { _ in await gate.report() })
+        let model = AppModel()
+        let previousQuality = model.playbackQuality
+        let previousCredentials = Session.shared.credentials
+        model.playbackQuality = .auto
+        Session.shared.setCredentials(origin: "http://127.0.0.1:1", token: nil)
+        defer {
+            controller.stop()
+            gate.releaseAll()
+            model.playbackQuality = previousQuality
+            Session.shared.setCredentials(origin: previousCredentials.origin, token: previousCredentials.token)
+        }
+        controller.start(model: model, itemId: 1, fileId: 1, startMs: 0,
+            durationMs: 600_000, title: "Pause retains destination")
+        await controller.loadingTask?.value
+        XCTAssertEqual(creates, 0,
+            "The direct_play fixture must attach without entering the HLS create path")
+        let attachment = controller.openGenerationForTesting
+        let quality = controller.selectedHeight
+        controller.seek(toMs: 90_000)
+        let pending = controller.pendingPlaybackIntentForTesting
+        // Pause supersedes the coalesced seek before it can publish or run.
+        controller.setPlaybackRequested(false)
+        try await waitUntil("Pause publication") { gate.calls == 1 }
+        let pausePublication = try XCTUnwrap(controller.pendingTransportTasksForTesting.publication)
+        gate.releaseNext(7)
+        await pausePublication.value
+        await controller.pendingTransportTasksForTesting.seek?.value
+        XCTAssertTrue(nativeSeeks.isEmpty, "Pause must not dispatch the retained destination")
+        XCTAssertEqual(creates, 0)
+        XCTAssertEqual(controller.openGenerationForTesting, attachment)
+        XCTAssertEqual(controller.pendingPlaybackIntentForTesting.targetMs, pending.targetMs)
+        XCTAssertEqual(controller.pendingPlaybackIntentForTesting.generation, pending.generation)
+        XCTAssertEqual(controller.selectedHeight, quality)
+        XCTAssertFalse(controller.wantsPlayback)
+        XCTAssertEqual(player.commands.last, "pause")
+        let commandsBeforePlay = player.commands.count
+        controller.setPlaybackRequested(true)
+        try await waitUntil("Play publication") { gate.calls == 2 }
+        XCTAssertTrue(nativeSeeks.isEmpty)
+        XCTAssertEqual(player.commands.count, commandsBeforePlay,
+            "Play must not start the predecessor before its pending seek")
+        let playPublication = try XCTUnwrap(controller.pendingTransportTasksForTesting.publication)
+        gate.releaseNext(8)
+        await playPublication.value
+        await controller.pendingTransportTasksForTesting.seek?.value
+        XCTAssertEqual(nativeSeeks, [90_000])
+        XCTAssertEqual(creates, 0)
+        XCTAssertTrue(controller.wantsPlayback)
     }
 
     func testPendingSeekNeverStartsThePredecessor() {

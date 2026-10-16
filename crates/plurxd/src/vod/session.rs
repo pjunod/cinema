@@ -298,6 +298,7 @@ impl Rendition {
     pub(super) fn request_handoff(
         &self,
         incarnation: &str,
+        deadline_ms: i64,
         successor: &Arc<Rendition>,
         wanted: crate::admission::TranscodeResourceEstimate,
     ) -> bool {
@@ -306,8 +307,15 @@ impl Rendition {
         let fresh = !slot
             .as_ref()
             .is_some_and(|request| request.until > now && request.incarnation == incarnation);
+        let admitted = slot
+            .as_ref()
+            .filter(|request| request.incarnation == incarnation)
+            .map(|request| Arc::clone(&request.admitted))
+            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
         *slot = Some(HandoffRequest {
             until: now + HANDOFF_REQUEST_TTL,
+            deadline_ms,
+            admitted,
             incarnation: incarnation.to_owned(),
             successor: Arc::downgrade(successor),
             wanted,
@@ -316,12 +324,26 @@ impl Rendition {
     }
 
     pub(super) fn live_handoff(&self) -> Option<HandoffRequest> {
-        self.handoff
-            .lock()
-            .expect("handoff lock")
-            .as_ref()
-            .filter(|request| request.until > Instant::now())
-            .cloned()
+        let mut request = self.handoff.lock().expect("handoff lock").as_ref()?.clone();
+        let successor = request.successor.upgrade()?;
+        if successor.closed.load(Relaxed) || successor.failure().is_some() {
+            return None;
+        }
+        let now = Instant::now();
+        let remaining = request
+            .deadline_ms
+            .saturating_sub(crate::media_sessions::unix_ms());
+        if remaining <= 0 {
+            return None;
+        }
+        if request.admitted.load(std::sync::atomic::Ordering::Acquire) {
+            // Admission completes the capacity transfer, not the staged
+            // ownership. Recheck its bounded lifetime without a busy timer.
+            request.until = now + Duration::from_millis(remaining.min(1_000) as u64);
+        } else if request.until <= now {
+            return None;
+        }
+        Some(request)
     }
 
     #[cfg(test)]
@@ -380,10 +402,17 @@ impl Rendition {
 
     #[cfg(test)]
     pub(super) async fn attach_reader(&self, session_id: &str, frontier: u32) {
+        let mut reader = Reader::new(frontier);
+        if let Some(encoding) = self.recipe.encoding.as_ref() {
+            if encoding.is_speculative() || encoding.nonpreemptive_trial {
+                reader.admission_priority = crate::admission::Priority::Speculative;
+            }
+            reader.nonpreemptive_trial = encoding.nonpreemptive_trial;
+        }
         self.readers
             .lock()
             .await
-            .insert(session_id.to_string(), Reader::new(frontier));
+            .insert(session_id.to_string(), reader);
         *self.dormant_since.lock().expect("dormant lock") = None;
     }
 
@@ -755,6 +784,9 @@ pub(super) struct Session {
     pub(super) root_admission: Option<crate::vodencode::EncodePermit>,
     pub(super) processed_reuse_scope: Option<[u8; 32]>,
     pub(super) processed_probes: Vec<Weak<ProcessedRootProbe>>,
+    /// Immutable acquisition hint from this attachment's authorized create.
+    /// It never changes the rendition timeline or follows control progress.
+    pub(super) preferred_start_ms: Option<i64>,
     pub(super) rendition: Option<Arc<Rendition>>,
     pub(super) passive_grant: Option<Arc<passive_grant::Grant>>,
     pub(super) retained_output: Option<Arc<retained::RetainedVodArtifact>>,
@@ -824,6 +856,76 @@ pub(super) struct Session {
 }
 
 impl Session {
+    /// Find preparation demand owned by this exact parent/child attachment,
+    /// including families whose public root is authority-only.
+    pub(super) async fn has_prepared_reader_on(
+        &self,
+        session_id: &str,
+        rendition: &Arc<Rendition>,
+    ) -> bool {
+        let readers = rendition.readers.lock().await;
+        let eligible = |id: &str| {
+            readers.get(id).is_some_and(|reader| {
+                !reader.authority_only && reader.may_request_predecessor_handoff()
+            })
+        };
+        (self
+            .rendition
+            .as_ref()
+            .is_some_and(|root| Arc::ptr_eq(root, rendition))
+            && eligible(session_id))
+            || self
+                .children
+                .iter()
+                .any(|child| Arc::ptr_eq(&child.rendition, rendition) && eligible(&child.reader_id))
+    }
+
+    /// Change only this attachment's consumer purpose. Cached rendition
+    /// identity and other viewers' admission authority remain independent.
+    pub(super) async fn set_reader_admission_priority(
+        &self,
+        session_id: &str,
+        priority: crate::admission::Priority,
+    ) {
+        if let Some(root) = self.rendition.as_ref() {
+            if let Some(reader) = root.readers.lock().await.get_mut(session_id) {
+                reader.admission_priority = priority;
+            }
+        }
+        for child in &self.children {
+            if let Some(reader) = child
+                .rendition
+                .readers
+                .lock()
+                .await
+                .get_mut(&child.reader_id)
+            {
+                reader.admission_priority = priority;
+            }
+        }
+    }
+
+    /// Called only after first-prime validation of this session's durable
+    /// preparation ledger. Do not change any other consumer of a cached Arc.
+    pub(super) async fn set_prepared_bootstrap_reader_purpose(&self, session_id: &str) {
+        if let Some(root) = self.rendition.as_ref() {
+            if let Some(reader) = root.readers.lock().await.get_mut(session_id) {
+                reader.nonpreemptive_trial = false;
+            }
+        }
+        for child in &self.children {
+            if let Some(reader) = child
+                .rendition
+                .readers
+                .lock()
+                .await
+                .get_mut(&child.reader_id)
+            {
+                reader.nonpreemptive_trial = false;
+            }
+        }
+    }
+
     /// An immutable retained response keeps the viewer's control identity,
     /// but has no missing bytes for this rendition's producer to generate.
     pub(super) fn attachment_reader(&self, frontier: u32) -> Reader {
@@ -904,6 +1006,8 @@ impl Session {
 
     pub(super) fn response_owner(&self) -> ResponseOwner {
         ResponseOwner {
+            preferred_start_ms: self.preferred_start_ms,
+            scalar_playlist: self.children.is_empty(),
             lifecycle: Arc::clone(&self.lifecycle),
             incarnation: Arc::clone(&self.incarnation),
             retained_output: self
@@ -1166,14 +1270,38 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                 // is reporting has already been written either way.
                 return false;
             };
-            let mut control = session.control.lock().expect("control lock");
-            if !committed {
-                control
-                    .begin_abort_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
+            let settled = {
+                let mut control = session.control.lock().expect("control lock");
+                if !committed {
+                    control.begin_abort_preparation_for_owner(
+                        staged_incarnation_id,
+                        expected_owner_epoch,
+                    );
+                }
+                control.settle_preparation_for_owner(staged_incarnation_id, expected_owner_epoch)
+            };
+            if settled && committed {
+                // The Store CAS has transferred the pointer, but predecessor
+                // projection deliberately lets already admitted responses
+                // drain. Retire only this exact attachment's proactive demand
+                // before releasing the handoff wakes its old producer.
+                if let Some(rendition) = session.rendition.as_ref() {
+                    if let Some(reader) = rendition.readers.lock().await.get_mut(&self.session_id) {
+                        reader.draining_after_prepared_commit = true;
+                    }
+                }
+                for child in &session.children {
+                    if let Some(reader) = child
+                        .rendition
+                        .readers
+                        .lock()
+                        .await
+                        .get_mut(&child.reader_id)
+                    {
+                        reader.draining_after_prepared_commit = true;
+                    }
+                }
             }
-            let settled =
-                control.settle_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
-            drop(control);
             session.release_stale_handoff();
             settled
         })

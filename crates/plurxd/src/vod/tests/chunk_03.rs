@@ -168,6 +168,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
                 root_admission: None,
                 processed_reuse_scope: None,
                 processed_probes: Vec::new(),
+                preferred_start_ms: None,
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
@@ -222,6 +223,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
                 root_admission: None,
                 processed_reuse_scope: None,
                 processed_probes: Vec::new(),
+                preferred_start_ms: None,
                 passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key: replacement_key,
@@ -2630,14 +2632,29 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
 
     #[cfg(unix)]
     async fn prepared_handoff_fixture(base: &Path, predecessor_hardware: bool) -> HandoffFixture {
+        prepared_handoff_fixture_with_trial(base, predecessor_hardware, false).await
+    }
+
+    #[cfg(unix)]
+    async fn prepared_handoff_fixture_with_trial(base: &Path, predecessor_hardware: bool, trial: bool) -> HandoffFixture {
         let serve = bare_serve(base);
         let (file, source_encoding) = encoded_fixture(base).await;
-        let successor_encoding = source_encoding
+        let mut successor_encoding = source_encoding
             .clone_with_admissions_for_test(source_encoding.admissions.clone())
             .await;
         let mut predecessor_encoding = source_encoding
             .clone_with_admissions_for_test(source_encoding.admissions.clone())
             .await;
+        if trial {
+            for encoding in [&mut successor_encoding, &mut predecessor_encoding] {
+                let encoding = Arc::get_mut(encoding).expect("unshared purpose fixture");
+                encoding.resources = crate::admission::TranscodeResourceEstimate {
+                    hardware_slot: false, cpu_threads: 3, decoder_threads: None,
+                };
+                encoding.options.software_threads = Some(3);
+            }
+            Arc::get_mut(&mut successor_encoding).expect("unshared automatic recipe").nonpreemptive_trial = true;
+        }
         if predecessor_hardware {
             Arc::get_mut(&mut predecessor_encoding)
                 .expect("unshared predecessor encoding")
@@ -2795,6 +2812,270 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
             },
         )
         .await;
+    }
+
+    /// A cached Auto recipe's voluntary purpose cannot starve an actual
+    /// bounded bootstrap or grant another viewer a predecessor's permit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cached_auto_bootstrap_handoff_keeps_voluntary_and_unrelated_readers_scoped() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture_with_trial(base.path(), false, true).await;
+        fixture.successor_encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "5").await.expect("three plus three cannot fit five");
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+        assert!(fixture.successor_encoding.nonpreemptive_trial);
+        driver_pass(&fixture.serve.shared, &fixture.successor).await;
+        assert!(!fixture.successor_encoding.handoff_wait.load(Relaxed), "automatic recipe alone is a nonpreemptive trial");
+        insert_control_session(&fixture.serve, "voluntary", Arc::clone(&fixture.successor), Instant::now()).await;
+        fixture.serve.mark_prepared_incarnation("voluntary", "unrelated-incarnation").await;
+        fixture.serve.mark_prepared_incarnation_with_bootstrap("new-session", STAGED_SUCCESSOR, true).await;
+        {
+            let readers = fixture.successor.readers.lock().await;
+            assert!(readers["new-session"].may_request_predecessor_handoff());
+            assert!(!readers["voluntary"].may_request_predecessor_handoff(), "same cached Arc retains the other trial's purpose");
+            assert!(fixture.successor_encoding.nonpreemptive_trial, "no cached purpose mutation");
+        }
+        fixture.predecessor.attach_reader("other-viewer", 0).await;
+        driver_pass(&fixture.serve.shared, &fixture.successor).await;
+        assert!(!fixture.successor_encoding.handoff_wait.load(Relaxed), "another predecessor reader forbids exclusive handoff");
+        fixture.predecessor.detach_media_reader(&fixture.serve.shared.pool, "other-viewer").await;
+        assert!(successor_then_predecessor(&fixture).await, "actual bootstrap retires only its own exclusive running predecessor");
+        assert_eq!(fixture.successor_encoding.resources.cpu_threads, 3);
+        let _ = perform_driver_step(&fixture.serve.shared, &fixture.successor, Step::Terminate { why: Termination::Idle }).await;
+    }
+
+    /// Reusing a formerly Live cached recipe does not grant a prepared
+    /// consumer foreground admission. Real Live readers retain that authority.
+    #[tokio::test]
+    async fn cached_live_recipe_uses_scoped_prepared_reader_admission() {
+        use crate::admission::{Priority, TranscodeResourceEstimate};
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let (_, source) = encoded_fixture(base.path()).await;
+        let mut encoding = source
+            .clone_with_admissions_for_test(source.admissions.clone())
+            .await;
+        {
+            let encoding = Arc::get_mut(&mut encoding).expect("unshared recipe");
+            encoding.resources = TranscodeResourceEstimate {
+                hardware_slot: false,
+                cpu_threads: 4,
+                decoder_threads: None,
+            };
+            encoding.options.software_threads = Some(4);
+        }
+        encoding
+            .store
+            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "5")
+            .await
+            .expect("bounded pool");
+        let incumbent = encoding
+            .admissions
+            .try_admit_bundle(
+                2,
+                5,
+                &TranscodeResourceEstimate {
+                    hardware_slot: false,
+                    cpu_threads: 3,
+                    decoder_threads: None,
+                },
+                Priority::Live,
+            )
+            .expect("committed 720 occupies three threads");
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition)
+            .expect("unshared cache")
+            .recipe
+            .encoding = Some(Arc::clone(&encoding));
+        assert!(
+            !encoding.is_speculative(),
+            "the cached original 1080 recipe remains Live"
+        );
+        insert_control_session(&serve, "target", Arc::clone(&rendition), Instant::now()).await;
+        serve
+            .mark_prepared_incarnation("target", STAGED_SUCCESSOR)
+            .await;
+        rendition.readers.lock().await.insert(
+            "other-preparation".into(),
+            Reader::with_priority(6, Priority::Speculative),
+        );
+        async fn admit(
+            serve: &VodServe,
+            rendition: &Rendition,
+            encoding: &crate::vodencode::Encoding,
+        ) -> Option<crate::vodencode::EncodePermit> {
+            encoding
+                .try_permit_guarded(async {
+                    let readers = rendition.readers.lock().await;
+                    reader_admission_priority(&serve.shared.pool, rendition, &readers)
+                        .map(|priority| (priority, readers))
+                })
+                .await
+        }
+        assert!(admit(&serve, &rendition, &encoding).await.is_none());
+        assert_eq!(
+            encoding.last_refusal().expect("capacity refusal").priority,
+            Priority::Speculative
+        );
+        assert!(
+            !encoding.has_live_wait(),
+            "cached identity cannot publish a Live wait for preparation"
+        );
+        {
+            let mut readers = rendition.readers.lock().await;
+            let target = readers.get_mut("target").expect("prepared reader");
+            assert!(target.may_request_predecessor_handoff());
+            target.nonpreemptive_trial = true;
+            assert!(!target.may_request_predecessor_handoff(), "cached manual purpose cannot turn an Auto trial into a preemptive preparation");
+            target.nonpreemptive_trial = false;
+        }
+        rendition.attach_reader("unrelated-live", 9).await;
+        assert!(admit(&serve, &rendition, &encoding).await.is_none());
+        assert!(
+            encoding.has_live_wait(),
+            "another actual Live viewer keeps foreground authority"
+        );
+        rendition
+            .detach_media_reader(&serve.shared.pool, "unrelated-live")
+            .await;
+        assert!(admit(&serve, &rendition, &encoding).await.is_none());
+        assert!(
+            !encoding.has_live_wait(),
+            "detachment removes only the departed authority"
+        );
+        assert!(serve.promote_prepared_session("target").await);
+        {
+            let readers = rendition.readers.lock().await;
+            assert_eq!(readers["target"].admission_priority, Priority::Live);
+            assert_eq!(
+                readers["other-preparation"].admission_priority,
+                Priority::Speculative,
+                "one commit does not promote another preparation sharing the Arc"
+            );
+        }
+        assert!(admit(&serve, &rendition, &encoding).await.is_none());
+        assert!(encoding.has_live_wait());
+        rendition
+            .detach_media_reader(&serve.shared.pool, "target")
+            .await;
+        assert!(admit(&serve, &rendition, &encoding).await.is_none());
+        assert!(!encoding.has_live_wait());
+        rendition
+            .detach_media_reader(&serve.shared.pool, "other-preparation")
+            .await;
+        assert!(admit(&serve, &rendition, &encoding).await.is_none());
+        assert!(
+            encoding.last_refusal().is_none(),
+            "aborted/detached consumers leave no admission demand"
+        );
+        {
+            let mut readers = rendition.readers.lock().await;
+            let mut authority = Reader::with_priority(6, Priority::Speculative);
+            authority.authority_only = true;
+            readers.insert("target".into(), authority);
+            readers.insert("owned-child".into(), Reader::with_priority(6, Priority::Speculative));
+            readers.insert("unowned-child".into(), Reader::with_priority(6, Priority::Speculative));
+        }
+        {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let parent = sessions.get_mut("target").expect("prepared family");
+            parent.children.push(ParentMediaReader {
+                controlled: true, candidate_id: None, reader_id: "owned-child".into(),
+                rendition: Arc::clone(&rendition), _reservation: None,
+            });
+            assert!(parent.has_prepared_reader_on("target", &rendition).await,
+                "an authority-only parent retains its exact media child handoff");
+            rendition.readers.lock().await.get_mut("owned-child").expect("child").authority_only = true;
+            assert!(!parent.has_prepared_reader_on("target", &rendition).await,
+                "an unrelated preparation cannot stand in for this family's own child");
+            rendition.readers.lock().await.get_mut("owned-child").expect("child").authority_only = false;
+        }
+        assert!(serve.promote_prepared_session("target").await);
+        {
+            let readers = rendition.readers.lock().await;
+            assert_eq!(readers["owned-child"].admission_priority, Priority::Live);
+            assert_eq!(readers["unowned-child"].admission_priority, Priority::Speculative);
+        }
+        drop(incumbent);
+    }
+
+    /// A committed predecessor keeps its protected bytes and already admitted
+    /// GETs during projection, without proactively loading an obsolete anchor.
+    #[tokio::test]
+    async fn committed_predecessor_drains_exact_readers_without_cold_ahead_fill() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, "old", Arc::clone(&rendition), Instant::now()).await;
+        rendition.attach_reader("old-child", 7).await;
+        rendition.attach_reader("other", 3).await;
+        serve.shared.sessions.lock().await.get_mut("old").expect("old").children.push(ParentMediaReader {
+            controlled: false, candidate_id: None, reader_id: "old-child".into(),
+            rendition: Arc::clone(&rendition), _reservation: None,
+        });
+        let gate = serve.preparation_gate("old").await.expect("exact gate");
+        assert!(gate.stage_preparation("successor".into(), uuid::Uuid::new_v4().to_string(), i64::MAX, None).await);
+        assert!(!gate.settle_preparation_for_owner("successor", true, 2).await);
+        assert!(!rendition.readers.lock().await["old"].draining_after_prepared_commit);
+        assert!(!gate.settle_preparation_for_owner("another-successor", true, 1).await);
+        assert!(gate.settle_preparation_for_owner("successor", true, 1).await);
+        assert_eq!(rendition.reader_windows().await.len(), 3, "draining bytes retain eviction protection");
+        {
+            let readers = rendition.readers.lock().await;
+            assert!(readers["old"].draining_after_prepared_commit);
+            assert!(readers["old-child"].draining_after_prepared_commit);
+            assert!(!readers["other"].draining_after_prepared_commit);
+            let manifest = rendition.manifest.lock().await;
+            assert_eq!(playback_demands(&serve.shared.pool, &rendition, &readers, &manifest), vec![Demand::idle_at(3)]);
+        }
+        rendition.readers.lock().await.remove("other");
+        let wait = serve.shared.pool.register(WaitKey { rendition: rendition.key.clone(), index: 45 }, "old")
+            .expect("admitted predecessor request");
+        {
+            let readers = rendition.readers.lock().await;
+            let manifest = rendition.manifest.lock().await;
+            let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+            assert_eq!(demands.len(), 1);
+            assert_eq!(demands[0].blocked_on, Some(45), "a draining response remains owed");
+        }
+        drop(wait);
+        {
+            let readers = rendition.readers.lock().await;
+            let manifest = rendition.manifest.lock().await;
+            assert!(playback_demands(&serve.shared.pool, &rendition, &readers, &manifest).is_empty());
+        }
+        insert_control_session(&serve, "aborted", Arc::clone(&rendition), Instant::now()).await;
+        let aborted = serve.preparation_gate("aborted").await.expect("abort gate");
+        assert!(aborted.stage_preparation("aborted-successor".into(), uuid::Uuid::new_v4().to_string(), i64::MAX, None).await);
+        assert!(aborted.settle_preparation_for_owner("aborted-successor", false, 1).await);
+        assert!(!rendition.readers.lock().await["aborted"].draining_after_prepared_commit);
+    }
+
+    /// The Store policy read can suspend a pass whose old proactive demand
+    /// disappears at commit. It must never register new Live pressure afterward.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn committed_predecessor_fences_an_inflight_encoder_admission() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+        retire_predecessor(&fixture).await;
+        let encoding = fixture.predecessor.recipe.encoding.as_ref().expect("predecessor encoding");
+        let admission = encoding.pause_next_admission();
+        let pass = tokio::spawn({
+            let shared = Arc::clone(&fixture.serve.shared);
+            let predecessor = Arc::clone(&fixture.predecessor);
+            async move { driver_pass(&shared, &predecessor).await }
+        });
+        let held = tokio::time::timeout(Duration::from_secs(2), admission.reached()).await.expect("pending admission");
+        let gate = fixture.serve.preparation_gate("old-session").await.expect("exact predecessor");
+        assert!(gate.settle_preparation_for_owner(STAGED_SUCCESSOR, true, 1).await);
+        held.release();
+        tokio::time::timeout(Duration::from_secs(2), pass).await.expect("bounded retired pass").expect("pass task");
+        assert!(!encoding.has_live_wait(), "retired proactive demand cannot register Live pressure");
+        assert!(matches!(fixture.predecessor.slot.belief().await, Producer::Absent { .. }), "no obsolete worker starts");
     }
 
     /// Production (lab6, f600d282): every quality change on a full encoder pool
@@ -3073,6 +3354,31 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         .await
         .expect("the lapse wakes the parked predecessor");
         assert!(!fixture.predecessor.handoff_requested());
+    }
+
+    /// A successfully claimed transfer belongs to the staged preparation,
+    /// not to the short retry timer. Its abort still releases the incumbent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_admitted_prepared_handoff_survives_retry_expiry_until_abort() {
+        let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+        let base = crate::test_tempdir().expect("base");
+        let fixture = prepared_handoff_fixture(base.path(), false).await;
+        stage_successor(&fixture, STAGED_SUCCESSOR).await;
+        assert!(successor_then_predecessor(&fixture).await);
+        let permit = fixture.successor_encoding.try_permit().await
+            .expect("the successor claims the exact yielded reservation");
+        tokio::time::sleep(HANDOFF_REQUEST_TTL + Duration::from_millis(50)).await;
+        assert!(fixture.predecessor.handoff_requested(), "admission does not abandon staged ownership");
+        let predecessor_encoding = fixture.predecessor.recipe.encoding.as_ref().expect("encoding");
+        let admission = predecessor_encoding.pause_next_admission();
+        driver_pass(&fixture.serve.shared, &fixture.predecessor).await;
+        assert!(!admission.was_reached(), "the incumbent cannot take back the admitted transfer");
+        admission.release();
+        let gate = fixture.serve.preparation_gate("old-session").await.expect("gate");
+        assert!(gate.begin_abort_preparation_for_owner(STAGED_SUCCESSOR, 1).await);
+        assert!(!fixture.predecessor.handoff_requested(), "abort releases the exact transfer");
+        drop(permit);
     }
 
     /// A successor that closes or fails stops polling for a handoff and gives
@@ -3443,6 +3749,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
                 root_admission: None,
                 processed_reuse_scope: None,
                 processed_probes: Vec::new(),
+                preferred_start_ms: None,
                 passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key,
@@ -5167,3 +5474,193 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         assert!(ready.len > 0, "the next demand gets a fresh generation");
         serve.end("sess-n2b", Terminal::Deleted).await;
     }
+
+#[test]
+fn prepared_vod_start_hint_preserves_full_timeline_and_preceding_acquisition() {
+    let original = b"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2.000,\nseg00000.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:2.000,\nseg00146.m4s\n#EXT-X-ENDLIST\n";
+    let hinted = vod_serve_delivery::playlist_with_preferred_start(original, Some(293_106));
+    let text = std::str::from_utf8(&hinted).expect("validated playlist or attachment");
+    let hint = "#EXT-X-START:TIME-OFFSET=293.106,PRECISE=NO\n";
+    assert_eq!(text.matches("#EXT-X-START:").count(), 1);
+    assert!(text.starts_with(&format!("#EXTM3U\n{hint}")));
+    assert_eq!(text.replace(hint, "").as_bytes(), original);
+    assert_eq!(
+        vod_serve_delivery::playlist_with_preferred_start(original, None),
+        original
+    );
+    assert_eq!(
+        vod_serve_delivery::playlist_with_preferred_start(original, Some(0)),
+        original
+    );
+    let with_old_hint = text.replace(hint, "#EXT-X-START:TIME-OFFSET=0\n");
+    assert_eq!(
+        vod_serve_delivery::playlist_with_preferred_start(with_old_hint.as_bytes(), Some(293_106)),
+        hinted
+    );
+}
+
+#[test]
+fn prepared_vod_start_hint_rejects_nonfinite_negative_and_outside_duration() {
+    for start in [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -1.0,
+        0.0,
+        0.0001,
+        670.0,
+        671.0,
+        f64::MAX,
+    ] {
+        assert_eq!(
+            vod_serve_delivery::preferred_playlist_start_ms(start, 670_000),
+            None
+        );
+    }
+    assert_eq!(
+        vod_serve_delivery::preferred_playlist_start_ms(293.106, 670_000),
+        Some(293_106)
+    );
+    assert_eq!(
+        vod_serve_delivery::preferred_playlist_start_ms(293.1069, 670_000),
+        Some(293_106)
+    );
+    assert_eq!(
+        vod_serve_delivery::preferred_playlist_start_ms(1.0, 0),
+        None
+    );
+    assert_eq!(
+        vod_serve_delivery::preferred_playlist_start_ms(1.0, -1),
+        None
+    );
+}
+
+#[tokio::test]
+async fn prepared_vod_start_hint_is_attachment_scoped_and_owner_fenced() {
+    let base = crate::test_tempdir().expect("base");
+    let (serve, file) = serve_on(base.path()).await;
+    let attribution = VodAttribution {
+        user_name: "test",
+        item_title: "Fixture",
+        supersession_user: "[\"user_id\",1]",
+    };
+    let start = serve
+        .try_create(
+            &request("hinted-play", 4.125),
+            &file,
+            &settings(),
+            attribution,
+            "hinted-session".into(),
+        )
+        .await
+        .expect("create");
+    assert_eq!(start.session_id, "hinted-session");
+    create(&serve, &file, "zero-session", "zero-play", &settings()).await;
+    let first = serve.playlist("hinted-session").await.expect("validated playlist or attachment");
+    assert_eq!(first.owner.preferred_start_ms, Some(4_125));
+    let hinted = first.result.expect("validated playlist or attachment");
+    assert!(
+        std::str::from_utf8(&hinted)
+            .expect("validated playlist or attachment")
+            .contains("#EXT-X-START:TIME-OFFSET=4.125,PRECISE=NO\n")
+    );
+    let zero = serve.playlist("zero-session").await.expect("validated playlist or attachment");
+    assert!(zero.owner.preferred_start_ms.is_none());
+    let untouched = zero.result.expect("validated playlist or attachment");
+    assert!(
+        !std::str::from_utf8(&untouched)
+            .expect("validated playlist or attachment")
+            .contains("#EXT-X-START:")
+    );
+    let rendition = serve
+        .shared
+        .sessions
+        .lock()
+        .await
+        .get("hinted-session")
+        .expect("validated playlist or attachment")
+        .rendition
+        .clone()
+        .expect("validated playlist or attachment");
+    assert_eq!(rendition.playlist, untouched);
+    fetch(&serve, "hinted-session", "seg00000.m4s").await;
+    assert_eq!(
+        serve
+            .playlist("hinted-session")
+            .await
+            .expect("validated playlist or attachment")
+            .result
+            .expect("validated playlist or attachment"),
+        hinted
+    );
+    assert!(
+        serve
+            .response_owner_is_live("hinted-session", &first.owner)
+            .await
+    );
+    serve.end("hinted-session", Terminal::Deleted).await;
+    assert!(
+        !serve
+            .response_owner_is_live("hinted-session", &first.owner)
+            .await
+    );
+    assert!(matches!(
+        serve.playlist("hinted-session").await.expect("validated playlist or attachment").result,
+        Err(VodError::Gone(Terminal::Deleted))
+    ));
+    assert_eq!(
+        serve
+            .playlist("zero-session")
+            .await
+            .expect("validated playlist or attachment")
+            .result
+            .expect("validated playlist or attachment"),
+        untouched
+    );
+}
+
+
+#[test]
+fn prepared_acquisition_override_uses_fresh_position_without_mutating_timeline() {
+    let original = b"#EXTM3U\n#EXT-X-VERSION:7\n#EXTINF:2.000,\nseg00147.m4s\n#EXTINF:2.000,\nseg00148.m4s\n#EXT-X-ENDLIST\n";
+    let stale = vod_serve_delivery::playlist_with_preferred_start(original, Some(295_016));
+    let fresh = vod_serve_delivery::playlist_with_acquisition_start(
+        original, Some(295_016), Some(296_065), 900_000,
+    );
+    let text = std::str::from_utf8(&fresh).expect("playlist");
+    let tag = "#EXT-X-START:TIME-OFFSET=296.065,PRECISE=NO\n";
+    assert_eq!(text.matches("#EXT-X-START:").count(), 1);
+    assert_eq!(text.replace(tag, "").as_bytes(), original);
+    assert!(std::str::from_utf8(&stale).expect("playlist").contains("TIME-OFFSET=295.016"));
+    for invalid in [None, Some(-1), Some(900_000), Some(i64::MAX)] {
+        assert_eq!(vod_serve_delivery::playlist_with_acquisition_start(original, Some(295_016), invalid, 900_000), stale);
+    }
+    assert_eq!(vod_serve_delivery::playlist_with_acquisition_start(original, Some(295_016), Some(296_065), 0), stale);
+    let zero = vod_serve_delivery::playlist_with_acquisition_start(&stale, Some(295_016), Some(0), 900_000);
+    let zero_text = std::str::from_utf8(&zero).expect("playlist");
+    assert!(zero_text.contains("TIME-OFFSET=0.000,PRECISE=NO"));
+    assert!(!zero_text.contains("TIME-OFFSET=295.016"));
+}
+
+#[tokio::test]
+async fn prepared_acquisition_override_remains_response_scoped_and_owner_fenced() {
+    let base = crate::test_tempdir().expect("base");
+    let (serve, file) = serve_on(base.path()).await;
+    create(&serve, &file, "acquire-one", "acquire-one-play", &settings()).await;
+    create(&serve, &file, "acquire-two", "acquire-two-play", &settings()).await;
+    let baseline = serve.playlist("acquire-one").await.expect("publication");
+    let unchanged = baseline.result.expect("baseline");
+    let first = serve.playlist_with_acquisition_start("acquire-one", Some(1_125)).await.expect("publication");
+    assert!(first.owner.preferred_start_ms.is_none());
+    assert!(first.owner.scalar_playlist);
+    assert!(std::str::from_utf8(first.result.as_ref().expect("hint")).expect("playlist").contains("TIME-OFFSET=1.125"));
+    let second = serve.playlist_with_acquisition_start("acquire-two", Some(2_250)).await.expect("publication");
+    assert!(std::str::from_utf8(second.result.as_ref().expect("hint")).expect("playlist").contains("TIME-OFFSET=2.250"));
+    assert_eq!(serve.playlist("acquire-one").await.expect("publication").result.expect("baseline"), unchanged);
+    let shared = serve.shared.sessions.lock().await.get("acquire-one").expect("session").rendition.clone().expect("rendition");
+    assert_eq!(shared.playlist, unchanged);
+    assert!(serve.response_owner_is_live("acquire-one", &first.owner).await);
+    serve.end("acquire-one", Terminal::Deleted).await;
+    assert!(!serve.response_owner_is_live("acquire-one", &first.owner).await);
+    assert!(matches!(serve.playlist_with_acquisition_start("acquire-one", Some(1_125)).await.expect("terminal").result, Err(VodError::Gone(Terminal::Deleted))));
+}

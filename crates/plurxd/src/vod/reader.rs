@@ -25,9 +25,17 @@ pub(super) struct Recipe {
 /// One attached reader, in plan indexes.
 #[derive(Debug, Clone)]
 pub(super) struct Reader {
+    /// Admission purpose belongs to this consumer, not the cached recipe.
+    pub(super) admission_priority: crate::admission::Priority,
+    /// Voluntary Auto trials must not borrow the incumbent's permit.
+    pub(super) nonpreemptive_trial: bool,
     /// A parent authority, cold controlled child or verified retained-output
     /// attachment keeps control identity without producing or an eviction window.
     pub(super) authority_only: bool,
+    /// A durable prepared commit has moved playback to another incarnation.
+    /// Keep cached bytes and admitted GETs protected while this reader drains,
+    /// but do not encode ahead for its obsolete playback anchor.
+    pub(super) draining_after_prepared_commit: bool,
     /// Current playback anchor, owned by accepted control once available.
     /// Before control arrives, successful media commits are the fallback.
     pub(super) frontier: u32,
@@ -51,8 +59,18 @@ pub(super) struct Reader {
 
 impl Reader {
     pub(super) fn new(frontier: u32) -> Self {
+        Self::with_priority(frontier, crate::admission::Priority::Live)
+    }
+
+    pub(super) fn with_priority(
+        frontier: u32,
+        admission_priority: crate::admission::Priority,
+    ) -> Self {
         Self {
+            admission_priority,
+            nonpreemptive_trial: false,
             authority_only: false,
+            draining_after_prepared_commit: false,
             frontier,
             preparation_frontier: None,
             processing_probe: None,
@@ -60,6 +78,12 @@ impl Reader {
             last_served: None,
             marker_prewarm: Arc::new(StdMutex::new(MarkerPrewarmLedger::default())),
         }
+    }
+
+    pub(super) fn may_request_predecessor_handoff(&self) -> bool {
+        !self.draining_after_prepared_commit
+            && self.admission_priority == crate::admission::Priority::Speculative
+            && !self.nonpreemptive_trial
     }
 
     pub(super) fn accept_control(&mut self, sequence: u64, index: u32) {

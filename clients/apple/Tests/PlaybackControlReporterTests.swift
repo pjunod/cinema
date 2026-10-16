@@ -1849,6 +1849,130 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
                                            linkCeiling: 2_000_000, currentCost: 6_000_000))
     }
 
+    func testSeverePressureAcquisitionBudgetUsesOriginalBoundsAndActualRate() {
+        XCTAssertTrue(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: 16.8696, playbackRate: 1))
+        XCTAssertTrue(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: 27.999, playbackRate: 1))
+        XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: 28, playbackRate: 1))
+        XCTAssertTrue(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: 55.999, playbackRate: 2))
+        XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: 56, playbackRate: 2))
+        XCTAssertTrue(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: 27.999, playbackRate: 0.5))
+        XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: false,
+            runwaySeconds: 0, playbackRate: 1))
+    }
+
+    func testSeverePressureRescueBudgetPreservesActualTVLowLinkOpportunity() {
+        let current = candidate(1_080, peak: 8_814_676)
+        let ladder = [candidate(720, peak: 4_566_988), candidate(480, peak: 2_423_504),
+                      candidate(360, peak: 1_523_496)]
+        let completedLink = 5_669_000.0
+        let severe = completedLink < Double(current.peakBps!) * 0.7
+        XCTAssertTrue(severe)
+        for runway in [23.027, 22.692] {
+            let minimizeCost = autoPressureNeedsMinimumAcquisitionCost(
+                severe: severe, runwaySeconds: runway, playbackRate: 1)
+            XCTAssertTrue(minimizeCost,
+                "a failed attempt can consume twelve seconds before the next preparation")
+            XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+                linkCeiling: completedLink, currentCost: Double(current.peakBps!),
+                minimumAcquisitionCost: minimizeCost)?.height, 360)
+        }
+        for (isSevere, runway) in [(true, 28.0), (true, 30.0), (false, 23.027)] {
+            XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+                linkCeiling: completedLink, currentCost: Double(current.peakBps!),
+                minimumAcquisitionCost: autoPressureNeedsMinimumAcquisitionCost(
+                    severe: isSevere, runwaySeconds: runway, playbackRate: 1))?.height, 720,
+                "outside the constrained rescue budget, ordinary fitting-rung selection remains")
+        }
+    }
+
+    func testPressureAcquisitionBudgetPreservesUnknownAndInvalidFacts() {
+        XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+            runwaySeconds: nil, playbackRate: 1))
+        for invalid in [Double.nan, .infinity, -.infinity, -1] {
+            XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+                runwaySeconds: invalid, playbackRate: 1))
+        }
+        for invalid in [Double.nan, .infinity, -.infinity, -1, 0, Double.greatestFiniteMagnitude] {
+            XCTAssertFalse(autoPressureNeedsMinimumAcquisitionCost(severe: true,
+                runwaySeconds: 16, playbackRate: invalid))
+        }
+    }
+
+    func testLimitedSeverePressureRanksMeasuredCostRatherThanHeight() {
+        let current = candidate(1_080, peak: 8_812_956)
+        let ladder = [candidate(720, peak: 1_100_000), candidate(480, peak: 2_415_736),
+                      candidate(360, peak: 1_300_000)]
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+            linkCeiling: 3_000_000, currentCost: 8_812_956,
+            minimumAcquisitionCost: true)?.height, 720,
+            "height does not establish the smallest measured acquisition cost")
+        let observed = [candidate(720, peak: 6_000_000), candidate(480, peak: 2_415_736),
+                        candidate(360, peak: 1_300_000)]
+        XCTAssertEqual(autoRecoveryCandidate(observed, current: current, rejected: [],
+            linkCeiling: 3_000_000, currentCost: 8_812_956,
+            minimumAcquisitionCost: autoPressureNeedsMinimumAcquisitionCost(
+                severe: true, runwaySeconds: 16.8696, playbackRate: 1))?.height, 360)
+        for severe in [false, true] {
+            XCTAssertEqual(autoRecoveryCandidate(observed, current: current, rejected: [],
+                linkCeiling: 3_000_000, currentCost: 8_812_956,
+                minimumAcquisitionCost: autoPressureNeedsMinimumAcquisitionCost(
+                    severe: severe, runwaySeconds: 30, playbackRate: 1))?.height, 480)
+        }
+        XCTAssertEqual(autoRecoveryCandidate([candidate(480, peak: 1_000_000),
+            candidate(720, peak: 1_000_000)], current: current, rejected: [],
+            linkCeiling: 3_000_000, currentCost: 8_812_956,
+            minimumAcquisitionCost: true)?.height, 720,
+            "equal measured cost preserves the larger compatible geometry")
+    }
+
+    func testSeverePressureCostRankingRetainsCandidateFencesAndImprovement() {
+        let current = candidate(1_080, peak: 8_812_956)
+        let unknown = candidate(360, peak: nil)
+        let zero = candidate(360, peak: 0)
+        let wrongGrade = candidate(360, peak: 1, grade: "hdr10")
+        let compatible = candidate(480, peak: 2_415_736)
+        func changed(_ candidate: QualityCandidate, id: String? = nil,
+                     compatible: Bool = true) -> QualityCandidate {
+            QualityCandidate(id: id ?? candidate.id, recipeDigest: candidate.recipeDigest,
+                route: candidate.route, width: candidate.width, height: candidate.height,
+                targetHeight: candidate.targetHeight, averageBps: candidate.averageBps,
+                peakBps: candidate.peakBps, grade: candidate.grade, decoderCompatible: compatible,
+                completeCache: candidate.completeCache, sustainable: candidate.sustainable)
+        }
+        let invalidIdentity = changed(candidate(360, peak: 1), id: "invalid")
+        let invalidDecoder = changed(candidate(360, peak: 1), compatible: false)
+        XCTAssertEqual(autoRecoveryCandidate([unknown, zero, wrongGrade, invalidIdentity,
+            invalidDecoder, compatible, current], current: current, rejected: [],
+            linkCeiling: 3_000_000, currentCost: 8_812_956,
+            minimumAcquisitionCost: true)?.height, 480)
+        XCTAssertNil(autoRecoveryCandidate([compatible], current: current,
+            rejected: [compatible.id], linkCeiling: 3_000_000, currentCost: 8_812_956,
+            minimumAcquisitionCost: true))
+        XCTAssertNil(autoRecoveryCandidate([candidate(480, peak: 9_000_000)],
+            current: current, rejected: [], linkCeiling: 3_000_000,
+            currentCost: 8_812_956, minimumAcquisitionCost: true))
+        XCTAssertEqual(autoRecoveryCandidate([compatible], current: current,
+            rejected: [], linkCeiling: 3_000_000, currentCost: nil,
+            minimumAcquisitionCost: true)?.height, 480,
+            "unknown incumbent cost retains the existing selection")
+    }
+
+    func testPressureRescueDoesNotOverrideDecoderOrUnmeasuredProducerRecovery() {
+        let current = candidate(1_080, peak: 8_812_956)
+        let ladder = [candidate(720, peak: 2_000_000), candidate(360, peak: 1_000_000)]
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+            linkCeiling: 3_000_000, decoderRecovery: true, currentCost: 8_812_956,
+            minimumAcquisitionCost: true)?.height, 720)
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+            currentCost: 8_812_956, minimumAcquisitionCost: true)?.height, 720)
+    }
+
     func testColdOriginalRecoversToUnprovedCompatibleEncodeUnderLinkPressure() {
         let original = candidate(2_160, route: "remux", peak: nil)
         let lower = candidate(1_080)
@@ -2063,5 +2187,101 @@ final class DisplayAwareAutoIntentTests: XCTestCase {
         XCTAssertEqual(object["recipe_revision"] as? Int, 2)
         XCTAssertEqual(object["destination_revision"] as? Int, 3)
         XCTAssertEqual(object["transport_revision"] as? Int, 4)
+    }
+}
+
+final class AutoTransferPressureEvidenceTests: XCTestCase {
+    private let item = NSObject()
+    private var owner: AutoTransferPressureOwner {
+        .init(item: ObjectIdentifier(item), attempt: "attempt", viewerEpoch: 1,
+              session: "session", candidate: "candidate", origin: "https://node")
+    }
+    private func sample(_ receipt: Int, completed: Int = 1_000, duration: Double = 1,
+                        bytes: Int64 = 100_000, status: Int = 200,
+                        session: String = "session", candidate: String = "candidate",
+                        cache: Bool = false, paced: Bool? = false) -> PlayerController.AutoCompletedTransfer {
+        .init(bodyBytes: bytes, bodyDurationSeconds: duration, completedAtMs: completed,
+              origin: "https://node", networkLoad: true, fromLocalCache: cache, producerPaced: paced,
+              statusCode: status, segmentId: "https://node/hls/\(session)/seg\(receipt).m4s",
+              mediaDurationSeconds: 2, receipt: String(format: "00000000-0000-0000-0000-%012d", receipt),
+              etag: "object-\(receipt)", installedSessionId: session, installedCandidateId: candidate)
+    }
+    private func observe(_ sample: PlayerController.AutoCompletedTransfer,
+                         evidence: inout AutoTransferPressureEvidence, now: Int = 1_000,
+                         cost: Double? = 800_000, known: Bool = true,
+                         canonicalOrigin: String? = "https://node") -> AutoTransferPressureObservation? {
+        evidence.observe(sample, owner: owner, canonicalOrigin: canonicalOrigin,
+                         downsideCost: cost, knownPeak: known, nowMs: now)
+    }
+
+    func testDistinctMildReceiptsAtSameClockBecomeUrgentBeforePeriodicTick() {
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        XCTAssertFalse(observe(sample(1), evidence: &evidence)!.urgent)
+        XCTAssertTrue(observe(sample(2), evidence: &evidence)!.urgent)
+        XCTAssertEqual(evidence.mildSamples(nowMs: 1_000), 2)
+        XCTAssertTrue(observe(sample(3, bytes: 50_000), evidence: &evidence)!.severe)
+    }
+
+    func testDuplicateAndOlderReceiptsCannotResetOrRenewPressure() {
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        _ = observe(sample(1), evidence: &evidence)
+        _ = observe(sample(2, completed: 1_001), evidence: &evidence, now: 1_001)
+        XCTAssertNil(observe(sample(2, completed: 1_002, bytes: 1_000_000), evidence: &evidence, now: 1_002))
+        XCTAssertNil(observe(sample(3, completed: 1_000, bytes: 1_000_000), evidence: &evidence, now: 1_002))
+        XCTAssertEqual(evidence.mildSamples(nowMs: 1_002), 2)
+        XCTAssertEqual(evidence.mildSamples(nowMs: 11_002), 0)
+        XCTAssertNil(observe(sample(2, completed: 1_001), evidence: &evidence, now: 11_002))
+    }
+
+    func testInvalidForeignAndUnmeasuredBodiesNeverSupplyPressureAuthority() {
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        for bad in [sample(1, duration: .nan), sample(2, duration: 121), sample(3, bytes: 0),
+                    sample(4, status: 206), sample(5, session: "foreign"), sample(6, candidate: "foreign"),
+                    sample(7, cache: true), sample(8, paced: nil)] {
+            XCTAssertNil(observe(bad, evidence: &evidence))
+        }
+        XCTAssertNil(observe(sample(9), evidence: &evidence, canonicalOrigin: "https://foreign"))
+        XCTAssertEqual(evidence.mildSamples(nowMs: 1_000), 0)
+        // Catalog absence retains a usable owned body, but supplies no urgency.
+        XCTAssertFalse(observe(sample(10), evidence: &evidence, cost: nil)!.urgent)
+        XCTAssertFalse(observe(sample(11), evidence: &evidence, cost: .infinity)!.urgent)
+        XCTAssertEqual(evidence.mildSamples(nowMs: 1_000), 0)
+    }
+
+    func testPressureEvidenceOwnerAndViewerResetRetireAllReceiptCredit() {
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        _ = observe(sample(1), evidence: &evidence)
+        _ = observe(sample(2), evidence: &evidence)
+        let changed = AutoTransferPressureOwner(item: owner.item, attempt: owner.attempt,
+            viewerEpoch: 2, session: owner.session, candidate: owner.candidate, origin: owner.origin)
+        evidence.bind(changed)
+        XCTAssertFalse(evidence.owns(owner)); XCTAssertEqual(evidence.mildSamples(nowMs: 1_000), 0)
+        XCTAssertNil(observe(sample(3), evidence: &evidence))
+        evidence.clear(notBeforeMs: 1_001); XCTAssertFalse(evidence.owns(changed))
+        evidence.bind(owner)
+        XCTAssertNil(observe(sample(1), evidence: &evidence, now: 1_002))
+        XCTAssertFalse(observe(sample(4, completed: 1_002), evidence: &evidence, now: 1_002)!.urgent)
+    }
+
+    func testReceiptWindowIsBoundedAndExpiredMildCreditDoesNotRenew() {
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        for receipt in 1...32 { XCTAssertNotNil(observe(sample(receipt), evidence: &evidence)) }
+        XCTAssertNil(observe(sample(33), evidence: &evidence))
+        XCTAssertEqual(evidence.mildSamples(nowMs: 11_001), 0)
+        XCTAssertFalse(observe(sample(34, completed: 11_001), evidence: &evidence, now: 11_001)!.urgent)
+        XCTAssertTrue(observe(sample(35, completed: 11_001), evidence: &evidence, now: 11_001)!.urgent)
+    }
+
+    func testPressureThresholdsKeepSevereAndTwoMildAuthority() {
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        // Equality at the severe boundary is mild, not severe.
+        let boundary = observe(sample(1, bytes: 70_000), evidence: &evidence)!
+        XCTAssertFalse(boundary.severe); XCTAssertFalse(boundary.urgent)
+        XCTAssertTrue(observe(sample(2, bytes: 69_999), evidence: &evidence)!.severe)
+        let healthy = observe(sample(3, bytes: 130_000), evidence: &evidence)!
+        XCTAssertFalse(healthy.urgent); XCTAssertEqual(evidence.mildSamples(nowMs: 1_000), 0)
+        // Unknown peak preserves the existing 1.0 mild multiplier.
+        XCTAssertFalse(observe(sample(4), evidence: &evidence, known: false)!.urgent)
+        XCTAssertEqual(evidence.mildSamples(nowMs: 1_000), 0)
     }
 }

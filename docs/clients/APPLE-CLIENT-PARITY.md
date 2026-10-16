@@ -11,7 +11,7 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-10-13): source is v0.3.0, Apple build 239. Timer-only
+> Status (2026-10-13): source is v0.3.0, Apple build 252. Timer-only
 > presentation stalls stay explicitly unknown and use one bounded same-recipe
 > repair without a legacy quality-reduction ticket. The repair preserves the
 > selected quality, HDR, tracks, offset, film position and pause intent; actual
@@ -33,6 +33,18 @@ Vision investigation are recorded in
 > TestFlight and the deployment ledger still ends at server `787eaa6`, so
 > publishing plus the broader real-hardware/offline matrix remain release
 > gates.
+
+**Continuous-quality acceptance (2026-10-13).** The corrective batch remains
+under qualification. Preserve the earlier phone and TV partial campaigns and
+failed deadlines; they do not prove the newly integrated tree. The public
+initial-parking and loaded-window rendezvous correction compiles without unit
+execution. Private QA capture retains real frame and wire ownership evidence;
+its diagnostics are not production release claims. Full native Auto and
+3 Mb/s down/recovery, independent optical/audio continuity, final adversarial
+review and the external Fable checkpoint remain open. The canonical findings
+and failure history are in
+[CONTINUOUS-QUALITY-BUILD.md](../playback-control/CONTINUOUS-QUALITY-BUILD.md#10311-restored-verifier-and-native-first-switch-diagnosis--october-12)
+and [the acceptance status](../playback-control/CONTINUOUS-QUALITY-STATUS.html).
 
 **Display matching and audio-session implementation (2026-09-20).** Apple
 build 175 restores the `AVPlayerLayer` behavior that `AVPlayerViewController`

@@ -1534,11 +1534,78 @@ pub(crate) async fn resolve_plan(
     resolve_plan_with_continuous(inputs, review, body, None).await
 }
 
+/// Preserve ordinary initial Auto's local incomplete-sweep fallback. A bounded
+/// bootstrap only narrows eligible outputs; it never authorizes a foreign or
+/// explicitly named partial route.
+pub(super) fn preparation_catalog_workers(
+    workers: &[crate::media_pool::WorkerQualityCandidate],
+    local_node: &str,
+    initial_auto: bool,
+    bootstrap_ceiling: Option<i64>,
+) -> Vec<crate::media_pool::WorkerQualityCandidate> {
+    let fits = |entry: &&crate::media_pool::WorkerQualityCandidate| {
+        bootstrap_ceiling.is_none_or(|ceiling| {
+            entry.candidate.identity_matches()
+                && entry.candidate.decoder_compatible
+                && entry.candidate.width > 0
+                && entry.candidate.height > 0
+                && i64::from(entry.candidate.height) <= ceiling
+                && i64::from(entry.candidate.target_height) <= ceiling
+        })
+    };
+    let fitting_workers = workers.iter().filter(fits).cloned().collect::<Vec<_>>();
+    eligible_quality_workers(&fitting_workers, initial_auto, local_node)
+}
+
+#[derive(Default)]
+struct PlanScope<'a> {
+    continuous: Option<&'a ContinuousFamilyStart>,
+    auto_bootstrap_ceiling: Option<i64>,
+}
+
+/// Internal preparation policy, never a create-body override. Ordinary creates
+/// retain their own selection and named-route admission rules.
+pub(super) async fn resolve_plan_for_preparation(
+    inputs: PlanInputs<'_>,
+    review: Option<PlanReview>,
+    body: CreateSession,
+    auto_bootstrap_ceiling: Option<i64>,
+) -> Result<ResolvedPlan, ApiError> {
+    resolve_plan_with_scope(
+        inputs,
+        review,
+        body,
+        PlanScope {
+            continuous: None,
+            auto_bootstrap_ceiling,
+        },
+    )
+    .await
+}
+
 async fn resolve_plan_with_continuous(
     inputs: PlanInputs<'_>,
     review: Option<PlanReview>,
     body: CreateSession,
     continuous: Option<&ContinuousFamilyStart>,
+) -> Result<ResolvedPlan, ApiError> {
+    resolve_plan_with_scope(
+        inputs,
+        review,
+        body,
+        PlanScope {
+            continuous,
+            auto_bootstrap_ceiling: None,
+        },
+    )
+    .await
+}
+
+async fn resolve_plan_with_scope(
+    inputs: PlanInputs<'_>,
+    review: Option<PlanReview>,
+    body: CreateSession,
+    scope: PlanScope<'_>,
 ) -> Result<ResolvedPlan, ApiError> {
     let PlanInputs {
         snapshot,
@@ -1561,7 +1628,7 @@ async fn resolve_plan_with_continuous(
         &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
         review,
         body,
-        continuous,
+        scope,
         network_identity,
         incumbent_receipt,
     )
@@ -1585,7 +1652,13 @@ pub(crate) async fn resolve_plan_for_principal(
     body: CreateSession,
 ) -> Result<ResolvedPlan, ApiError> {
     resolve_plan_for_principal_with_local_evidence(
-        inputs, principal, review, body, None, None, None,
+        inputs,
+        principal,
+        review,
+        body,
+        PlanScope::default(),
+        None,
+        None,
     )
     .await
 }
@@ -1595,10 +1668,23 @@ async fn resolve_plan_for_principal_with_local_evidence(
     principal: &plurx_core::playback_principal::PlaybackPrincipal,
     review: Option<PlanReview>,
     mut body: CreateSession,
-    continuous: Option<&ContinuousFamilyStart>,
+    scope: PlanScope<'_>,
     network_identity: Option<&crate::telemetry::NetworkIdentity>,
     incumbent_receipt: Option<&str>,
 ) -> Result<ResolvedPlan, ApiError> {
+    let PlanScope {
+        continuous,
+        auto_bootstrap_ceiling,
+    } = scope;
+    if auto_bootstrap_ceiling.is_some_and(|ceiling| ceiling <= 0)
+        || (auto_bootstrap_ceiling.is_some()
+            && (body.quality_auto != Some(true)
+                || body.height.is_some()
+                || body.intent.is_some()
+                || continuous.is_some()))
+    {
+        return Err(ApiError::BadRequest("invalid Auto bootstrap policy".into()));
+    }
     if !principal.valid_admission_shape()
         || matches!(
             principal,
@@ -1718,7 +1804,8 @@ async fn resolve_plan_for_principal_with_local_evidence(
             return Err(ApiError::BadRequest("candidate_route_disabled".to_owned()));
         }
         if enabled
-            && (requested.is_some()
+            && (auto_bootstrap_ceiling.is_some()
+                || requested.is_some()
                 || body.height == Some(1440)
                 || (body.quality_auto == Some(true) && body.copy != Some(true)))
         {
@@ -1780,8 +1867,12 @@ async fn resolve_plan_for_principal_with_local_evidence(
             let worker_catalog = &catalogue_result.candidates;
             let initial_auto =
                 requested.is_none() && body.quality_auto == Some(true) && body.height != Some(1440);
-            let eligible_workers =
-                eligible_quality_workers(worker_catalog, initial_auto, &state.node_id);
+            let eligible_workers = preparation_catalog_workers(
+                worker_catalog,
+                &state.node_id,
+                initial_auto,
+                auto_bootstrap_ceiling,
+            );
             let mut catalog: Vec<_> = eligible_workers
                 .iter()
                 .map(|entry| entry.candidate.clone())
@@ -1850,6 +1941,15 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     .await;
                 }
             }
+            if let Some(ceiling) = auto_bootstrap_ceiling {
+                tracing::debug!(target: "plurxd::auto_prepare", phase = "catalog",
+                    catalog_count = worker_catalog.len(), safe_count = catalog.len(),
+                    partial_count = worker_catalog.iter().filter(|entry| entry.partial).count(),
+                    local_count = worker_catalog.iter().filter(|entry| entry.node_id == state.node_id).count(),
+                    playable_count = worker_catalog.iter().filter(|entry| entry.candidate.playable()).count(),
+                    proposed_height = height.min(ceiling),
+                    "Auto bootstrap eligible catalog");
+            }
             let picked = if requested.is_none() && body.height != Some(1440) {
                 (if let Some(snapshot) = snapshot {
                     crate::transcode::TranscodeManager::quality_facts_from_snapshot(snapshot)
@@ -1868,7 +1968,24 @@ async fn resolve_plan_for_principal_with_local_evidence(
                         None,
                     )
                 })
-                .or_else(|| auto_encode_fallback(&catalog, before_link_verdict.as_deref(), height))
+                .or_else(|| {
+                    if let Some(ceiling) = auto_bootstrap_ceiling {
+                        // Cold first attachment has no production measurement.
+                        // Ordinary Auto can stage an encoded route; actual
+                        // admission still belongs to the preparation lifecycle.
+                        catalog
+                            .iter()
+                            .filter(|candidate| {
+                                candidate.decoder_compatible
+                                    && candidate.route
+                                        == plurx_core::playback::candidate::CandidateRoute::Encode
+                                    && i64::from(candidate.target_height) <= height.min(ceiling)
+                            })
+                            .max_by_key(|candidate| candidate.target_height)
+                    } else {
+                        auto_encode_fallback(&catalog, before_link_verdict.as_deref(), height)
+                    }
+                })
             } else {
                 catalog.iter().find(|candidate| {
                     requested.map_or(candidate.target_height == 1440, |id| candidate.id == id)

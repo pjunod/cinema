@@ -73,6 +73,21 @@ const NODE_REACHABLE_WINDOW_MS: i64 = 30_000;
 /// while this decides whether to commit a one-way narrowing that can lock a
 /// node out of its own store. A brief hiccup must not block activation; two
 /// minutes of silence is not a hiccup.
+const MEDIA_RELAY_ACQUISITION_CAPABILITY: &str = "media_relay_acquisition_v1";
+// Hiqlite binds positionally, while SQLite assigns named `$N` slots by first
+// appearance. Keep predicates in binding order: members, owner, cutoff, now.
+const MEDIA_RELAY_ACQUISITION_PROOF_SQL: &str = "SELECT count(*) AS count FROM cluster_nodes node \
+     JOIN cluster_node_capabilities cap ON cap.node_id=node.node_id \
+     AND cap.last_seen_at=node.last_seen_at \
+     WHERE node.raft_id IN (SELECT value FROM json_each($1)) \
+     AND node.node_id=$2 AND node.removed_at IS NULL \
+     AND node.last_seen_at>0 AND node.last_seen_at BETWEEN $3 AND $4 \
+     AND cap.capability='media_relay_acquisition_v1'";
+const MEDIA_RELAY_ACQUISITION_HEARTBEAT_SQL: &str =
+    "INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) \
+     VALUES($1,$2,$3) ON CONFLICT(node_id,capability) \
+     DO UPDATE SET last_seen_at=excluded.last_seen_at";
+
 const PROTOCOL_CHANGE_ABSENCE_WINDOW_MS: i64 = 120_000;
 const ARTWORK_AUTH_WINDOW_MS: i64 = 60_000;
 /// The vendored Raft configuration sends heartbeats every 500 ms and cannot
@@ -4726,6 +4741,7 @@ struct ReplicatedMembership {
     purpose_master: Mutex<Option<Arc<crate::secrets::CredentialKey>>>,
     source_boot_attempt: Mutex<Option<String>>,
     source_dispatch_ready: AtomicBool,
+    media_relay_acquisition_registered: AtomicBool,
     source_schema_coordination: tokio::sync::Mutex<()>,
     activation_marker_lock: Arc<tokio::sync::Mutex<()>>,
     source_schema_receipt_persisted: AtomicBool,
@@ -5482,6 +5498,7 @@ impl MembershipManager {
                 purpose_master: Mutex::new(None),
                 source_boot_attempt: Mutex::new(None),
                 source_dispatch_ready: AtomicBool::new(false),
+                media_relay_acquisition_registered: AtomicBool::new(false),
                 source_schema_coordination: tokio::sync::Mutex::new(()),
                 activation_marker_lock: Arc::new(tokio::sync::Mutex::new(())),
                 source_schema_receipt_persisted: AtomicBool::new(false),
@@ -6856,6 +6873,22 @@ impl MembershipManager {
                 params!(
                     inner.identity.node_id.as_str(),
                     CACHE_ADMIN_REVOCATION_CAPABILITY,
+                    now
+                ),
+            ));
+        }
+        // Only the serving daemon registers this implemented protocol. Publish
+        // it in the same transaction as this node's heartbeat, never as an
+        // independent mutable capability claim.
+        if inner
+            .media_relay_acquisition_registered
+            .load(Ordering::Acquire)
+        {
+            statements.push((
+                MEDIA_RELAY_ACQUISITION_HEARTBEAT_SQL.to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    MEDIA_RELAY_ACQUISITION_CAPABILITY,
                     now
                 ),
             ));
@@ -11372,7 +11405,61 @@ impl MembershipManager {
             .await
     }
 
-    /// Quorum-confirm a closed set of requirements for a shared admission.
+    /// Register the daemon's implemented relay protocol, without a user switch.
+    /// Generic membership users do not advertise an HTTP handler they lack.
+    pub fn register_media_relay_acquisition(&self) {
+        if let Some(inner) = &self.inner {
+            inner
+                .media_relay_acquisition_registered
+                .store(true, Ordering::Release);
+        }
+    }
+
+    /// Local applied membership proof for this exact owner. A later legacy
+    /// heartbeat invalidates a retained capability by timestamp inequality.
+    pub async fn media_relay_acquisition_supported(
+        &self,
+        node_id: &str,
+    ) -> Result<bool, MembershipError> {
+        let Some(inner) = &self.inner else {
+            return Ok(false);
+        };
+        // The constructor requires a local client and installs this in-process
+        // metrics receiver. Neither membership observation nor query_map can
+        // turn this proof lookup into an HTTP capability probe.
+        let membership = inner.local_metrics.membership_snapshot();
+        if !membership.running
+            || !membership.committed
+            || membership.node_id != inner.identity.raft_id
+        {
+            return Ok(false);
+        }
+        let members = membership.members.iter().copied().collect::<BTreeSet<_>>();
+        if members.is_empty() {
+            return Ok(false);
+        }
+        let members_json = bounded_committed_raft_ids_json(&members)?;
+        let now = unix_ms()?;
+        let rows = inner
+            .client
+            .query_map::<CountRow, _>(
+                MEDIA_RELAY_ACQUISITION_PROOF_SQL,
+                params!(
+                    members_json,
+                    node_id,
+                    now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS),
+                    now
+                ),
+            )
+            .await?;
+        let after = inner.local_metrics.membership_snapshot();
+        Ok(after.running
+            && after.committed
+            && after.membership_log == membership.membership_log
+            && after.members == membership.members
+            && rows.first().is_some_and(|row| row.count == 1))
+    }
+
     /// Publish only the boot of this process's real accepted-driver registry.
     /// The heartbeat binds it to the exact installed adjunct and its timestamp.
     pub fn set_ingress_custody_boot(&self, boot: Option<uuid::Uuid>) {
@@ -24565,5 +24652,81 @@ mod tests {
             ([true; 2], [true; 2], [true; 2], [true; 2], [true; 2], [true; 2], [true; 2]),
             "every verdict has to be reached both ways, or the agreement is vacuous"
         );
+    }
+}
+
+#[cfg(test)]
+mod media_relay_acquisition_tests {
+    #[test]
+    fn relay_acquisition_registration_is_atomic_and_rollback_claims_expire() {
+        let mut db = rusqlite::Connection::open_in_memory().expect("membership DB");
+        db.execute_batch("CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,raft_id INTEGER,last_seen_at INTEGER,removed_at INTEGER); CREATE TABLE cluster_node_capabilities(node_id TEXT,capability TEXT,last_seen_at INTEGER,PRIMARY KEY(node_id,capability)); INSERT INTO cluster_nodes VALUES('owner',7,100,NULL);").expect("membership rows");
+        let proof =
+            |db: &rusqlite::Connection, members: &str, owner: &str, cutoff: i64, now: i64| {
+                db.query_row(
+                    super::MEDIA_RELAY_ACQUISITION_PROOF_SQL,
+                    rusqlite::params![members, owner, cutoff, now],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("production proof")
+            };
+        assert_eq!(
+            proof(&db, "[7]", "owner", 1, 100),
+            0,
+            "generic membership has no daemon registration"
+        );
+        {
+            let tx = db.transaction().expect("heartbeat transaction");
+            tx.execute("UPDATE cluster_nodes SET last_seen_at=101", [])
+                .expect("heartbeat");
+            tx.execute(
+                super::MEDIA_RELAY_ACQUISITION_HEARTBEAT_SQL,
+                rusqlite::params!["owner", super::MEDIA_RELAY_ACQUISITION_CAPABILITY, 101],
+            )
+            .expect("registered daemon capability");
+            assert_eq!(proof(&tx, "[7]", "owner", 1, 101), 1);
+            tx.rollback()
+                .expect("failed heartbeat rolls back capability too");
+        }
+        assert_eq!(proof(&db, "[7]", "owner", 1, 101), 0);
+        {
+            let tx = db.transaction().expect("heartbeat transaction");
+            tx.execute("UPDATE cluster_nodes SET last_seen_at=102", [])
+                .expect("heartbeat");
+            tx.execute(
+                super::MEDIA_RELAY_ACQUISITION_HEARTBEAT_SQL,
+                rusqlite::params!["owner", super::MEDIA_RELAY_ACQUISITION_CAPABILITY, 102],
+            )
+            .expect("capability");
+            tx.commit().expect("atomic registered heartbeat");
+        }
+        assert_eq!(proof(&db, "[7]", "owner", 1, 102), 1);
+        assert_eq!(
+            proof(&db, "[]", "owner", 1, 102),
+            0,
+            "uncommitted identity cannot advertise"
+        );
+        assert_eq!(proof(&db, "[7]", "other-owner", 1, 102), 0);
+        assert_eq!(
+            proof(&db, "[7]", "owner", 103, 200),
+            0,
+            "stale proof cannot advertise"
+        );
+        db.execute("UPDATE cluster_nodes SET last_seen_at=103", [])
+            .expect("legacy rollback heartbeat");
+        assert_eq!(
+            proof(&db, "[7]", "owner", 1, 103),
+            0,
+            "old binary cannot refresh retained new-protocol claim"
+        );
+        db.execute(
+            super::MEDIA_RELAY_ACQUISITION_HEARTBEAT_SQL,
+            rusqlite::params!["owner", super::MEDIA_RELAY_ACQUISITION_CAPABILITY, 103],
+        )
+        .expect("updated daemon heartbeat");
+        assert_eq!(proof(&db, "[7]", "owner", 1, 103), 1);
+        db.execute("UPDATE cluster_nodes SET removed_at=104", [])
+            .expect("removed owner");
+        assert_eq!(proof(&db, "[7]", "owner", 1, 104), 0);
     }
 }

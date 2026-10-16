@@ -1841,6 +1841,8 @@ pub(crate) enum RelayResource {
     Playlist {
         native: Option<u8>,
         subtitle: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        acquisition_start_ms: Option<i64>,
     },
     Master {
         subtitle: Option<i64>,
@@ -1946,10 +1948,28 @@ impl RelayHeaders {
 }
 
 impl RelayResource {
+    /// Unknown peers receive the original strict envelope. This changes only
+    /// acquisition metadata, never media authority, resources, or deadlines.
+    pub(crate) fn for_acquisition_peer(&self, supported: bool) -> Self {
+        let mut resource = self.clone();
+        if let Self::Playlist {
+            acquisition_start_ms,
+            ..
+        } = &mut resource
+        {
+            if !supported {
+                *acquisition_start_ms = None;
+            }
+        }
+        resource
+    }
+
     pub(crate) fn is_valid(&self) -> bool {
         match self {
             Self::Status | Self::VideoPlaylist | Self::ContinuousFamily | Self::Delete => true,
-            Self::Playlist { native, subtitle } => {
+            Self::Playlist {
+                native, subtitle, ..
+            } => {
                 native.is_none_or(|value| value <= 1)
                     && subtitle.is_none_or(|value| (0..=1_024).contains(&value))
             }
@@ -2343,8 +2363,10 @@ impl MediaSessionCoordinator {
     /// Resolve a prepared media object while its control publication remains
     /// fenced. Before commit the live preparation ledger is the authority;
     /// after commit the prepared-response marker plus the playback pointer is.
-    /// Control and status deliberately continue to use
-    /// `route_resolution_before` until predecessor projection finishes.
+    /// Status uses the same exact preparation authority as media so a client
+    /// can inspect the successor it is already decoding. Mutating control,
+    /// Delete and passive presence retain `route_resolution_before` until
+    /// predecessor projection finishes.
     pub(crate) async fn media_route_resolution_before(
         &self,
         session_id: &str,

@@ -230,6 +230,7 @@ async fn serve(
     }
     let query = super::super::hls::PlaylistQuery {
         native: None,
+        acquisition_start_ms: None,
         subtitle: selection["vod"]["body"]["subtitle"].as_i64(),
         diagnostic: None,
     };

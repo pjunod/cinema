@@ -213,7 +213,17 @@ async fn report_permit_wait(
     encoding: &crate::vodencode::Encoding,
 ) {
     encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), false);
-    let handoff = if encoding.is_speculative() && !encoding.nonpreemptive_trial {
+    let handoff_allowed = rendition
+        .readers
+        .lock()
+        .await
+        .values()
+        .any(Reader::may_request_predecessor_handoff);
+    let handoff = if encoding
+        .last_refusal()
+        .is_some_and(|refusal| refusal.priority == crate::admission::Priority::Speculative)
+        && handoff_allowed
+    {
         request_predecessor_handoff(shared, rendition, encoding).await
     } else {
         Err("not_prepared")
@@ -285,15 +295,31 @@ async fn request_predecessor_handoff(
     if refusal.pool.live_waiting > 0 {
         return Err("live_waiter");
     }
-    let (incarnation, bound, predecessor) = {
+    let (incarnation, deadline_ms, bound, predecessor) = {
         let sessions = shared.sessions.lock().await;
-        let Some((incarnation, playback_id)) = sessions.values().find_map(|session| {
-            let incarnation = session.prepared_incarnation.as_ref()?;
-            session
-                .live_rendition()
-                .filter(|rendition| Arc::ptr_eq(rendition, successor))?;
-            Some((incarnation.clone(), session.playback_id.clone()))
-        }) else {
+        let mut prepared_owner = None;
+        for (id, session) in sessions.iter() {
+            let Some(incarnation) = session.prepared_incarnation.as_ref() else {
+                continue;
+            };
+            // Historical committed incarnations and voluntary Auto trials can
+            // share this Arc; neither can own this prepared permit transfer.
+            if !session.renewable() || !session.has_prepared_reader_on(id, successor).await {
+                continue;
+            }
+            if sessions.values().any(|predecessor| {
+                predecessor
+                    .control
+                    .lock()
+                    .expect("control lock")
+                    .live_preparation_incarnation()
+                    == Some(incarnation.as_str())
+            }) {
+                prepared_owner = Some((incarnation.clone(), session.playback_id.clone()));
+                break;
+            }
+        }
+        let Some((incarnation, playback_id)) = prepared_owner else {
             return Err("not_prepared");
         };
         // The sessions being replaced by exactly this incarnation. The store
@@ -316,11 +342,23 @@ async fn request_predecessor_handoff(
                     .map(|rendition| (id.clone(), Arc::clone(rendition)))
             })
             .collect();
+        let deadline_ms = bound
+            .keys()
+            .filter_map(|id| sessions.get(id))
+            .filter_map(|session| {
+                session
+                    .control
+                    .lock()
+                    .expect("control lock")
+                    .live_preparation_deadline_ms(&incarnation)
+            })
+            .min()
+            .ok_or("no_local_predecessor")?;
         let predecessor = bound
             .values()
             .find(|rendition| !Arc::ptr_eq(rendition, successor))
             .cloned();
-        (incarnation, bound, predecessor)
+        (incarnation, deadline_ms, bound, predecessor)
     };
     let Some(predecessor) = predecessor else {
         return Err("no_local_predecessor");
@@ -353,7 +391,8 @@ async fn request_predecessor_handoff(
     if !encoding.fits_after_release(&released.resources) {
         return Err("would_not_fit");
     }
-    let fresh = predecessor.request_handoff(&incarnation, successor, encoding.resources());
+    let fresh =
+        predecessor.request_handoff(&incarnation, deadline_ms, successor, encoding.resources());
     predecessor.kick();
     Ok((predecessor.key.clone(), fresh))
 }
@@ -431,7 +470,7 @@ fn reserve_for_successor(request: &HandoffRequest) -> Option<Arc<Rendition>> {
         let token = encoding
             .admissions
             .reserve_for_handoff(&request.wanted, HANDOFF_RESERVATION_TTL);
-        encoding.accept_handoff_claim(token);
+        encoding.accept_handoff_claim(token, Arc::clone(&request.admitted));
     }
     Some(successor)
 }
@@ -536,7 +575,11 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             let demands = playback_demands(&shared.pool, rendition, &readers, &manifest);
             let ledgers = readers
                 .values()
-                .filter(|reader| !reader.authority_only && reader.processing_probe.is_none())
+                .filter(|reader| {
+                    !reader.authority_only
+                        && reader.processing_probe.is_none()
+                        && !reader.draining_after_prepared_commit
+                })
                 .map(|reader| Arc::clone(&reader.marker_prewarm))
                 .collect::<Vec<_>>();
             (demands, ledgers)
@@ -672,16 +715,34 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     }
                     continue;
                 }
+                let mut current_demand = false;
                 prepared_permit = match rendition.retained_admission.current() {
                     Some(reservation) => {
                         // A parent's admitted delivery obligation survives an
                         // idle worker or a later cold seek. Borrow its exact
                         // credit instead of competing for a second allocation.
                         encoding.cancel_wait();
+                        current_demand = true;
                         Some(reservation)
                     }
-                    None => encoding.try_permit().await,
+                    None => {
+                        encoding
+                            .try_permit_guarded(async {
+                                let readers = rendition.readers.lock().await;
+                                let priority =
+                                    reader_admission_priority(&shared.pool, rendition, &readers);
+                                current_demand = priority.is_some();
+                                priority.map(|priority| (priority, readers))
+                            })
+                            .await
+                    }
                 };
+                if !current_demand {
+                    // Settlement can remove ahead-fill demand while the policy
+                    // read is pending. It must not publish a stale Live waiter.
+                    rendition.permit_wait_logged.store(false, Relaxed);
+                    return;
+                }
                 notify_new_vod_live_wait(shared, encoding, was_waiting, prepared_permit.is_some());
                 if prepared_permit.is_none() {
                     report_permit_wait(shared, rendition, encoding).await;
@@ -930,6 +991,36 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
 
 /// Preserve all admitted obligations, using accepted control solely to rank
 /// current playback ahead of requests outside its buffer window.
+/// The strongest actual consumer purpose, independent of the cached recipe.
+/// Draining readers retain only their admitted GET obligations.
+pub(super) fn reader_admission_priority(
+    pool: &WaitPool,
+    rendition: &Rendition,
+    readers: &HashMap<String, Reader>,
+) -> Option<crate::admission::Priority> {
+    use crate::admission::Priority;
+    let mut priority = None;
+    let mut include = |purpose| {
+        if purpose == Priority::Live || priority.is_none() {
+            priority = Some(purpose);
+        }
+    };
+    for reader in readers
+        .values()
+        .filter(|reader| !reader.authority_only && !reader.draining_after_prepared_commit)
+    {
+        include(reader.admission_priority);
+    }
+    for request in pool.demands(&rendition.key) {
+        match readers.get(&request.session) {
+            Some(reader) if !reader.authority_only => include(reader.admission_priority),
+            None => include(Priority::Live),
+            _ => {}
+        }
+    }
+    priority
+}
+
 pub(super) fn playback_demands(
     pool: &WaitPool,
     rendition: &Rendition,
@@ -1001,7 +1092,11 @@ pub(super) fn playback_demands(
     demands.extend(
         readers
             .values()
-            .filter(|reader| !reader.authority_only && reader.processing_probe.is_none())
+            .filter(|reader| {
+                !reader.authority_only
+                    && reader.processing_probe.is_none()
+                    && !reader.draining_after_prepared_commit
+            })
             .map(|reader| match reader.preparation_frontier {
                 Some(frontier) => {
                     // Admission records an actual bounded Prepare request,

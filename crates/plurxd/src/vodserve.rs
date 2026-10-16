@@ -10,8 +10,9 @@
 //!   the playlist bytes rendered *once* from the stored plan, the rendition's
 //!   [`InitIdentity`], and a [`ProducerSlot`] driven by a per-rendition task.
 //! - **Sessions are handles** (plan §2.5): auth, TTL, demand attribution, and
-//!   a tombstone when they end for good. They own no media, no timeline, no
-//!   playlist identity; reaping one deletes nothing.
+//!   a tombstone when they end for good. A fixed preferred-start hint guides
+//!   initial acquisition without changing the shared media or timeline;
+//!   reaping one deletes nothing.
 //! - **The segment GET has exactly three outcomes** (plan §2.3): materialized
 //!   bytes now; a bounded block on the [`WaitPool`]; or a typed refusal. An
 //!   unknown name is the caller's 404 and nothing else's.
@@ -82,8 +83,9 @@ const STOPPED_ENCODER_POLL: Duration = Duration::from_secs(1);
 /// How long one refused prepared successor's request keeps its own viewer's
 /// predecessor from producing. The successor refreshes it on every refused
 /// retry (its driver polls every 250 ms while it waits), so it expires on its
-/// own shortly after the successor either starts or goes away, and the
-/// predecessor is never parked by a successor that no longer exists.
+/// own shortly after an unclaimed successor goes away. Once admitted, the
+/// exact transfer remains bound to its staged preparation and its deadline;
+/// commit or abort releases the predecessor through the control slot.
 const HANDOFF_REQUEST_TTL: Duration = Duration::from_secs(2);
 
 /// How long capacity a predecessor yielded stays reserved for its successor.
@@ -97,6 +99,8 @@ const HANDOFF_RESERVATION_TTL: Duration = Duration::from_secs(2);
 #[derive(Clone)]
 struct HandoffRequest {
     until: Instant,
+    deadline_ms: i64,
+    admitted: Arc<std::sync::atomic::AtomicBool>,
     incarnation: String,
     successor: Weak<Rendition>,
     wanted: crate::admission::TranscodeResourceEstimate,
@@ -402,6 +406,10 @@ pub struct VodHlsFacts {
 /// session that reused the durable session id.
 #[derive(Clone)]
 pub(crate) struct ResponseOwner {
+    preferred_start_ms: Option<i64>,
+    /// Frozen parent shape; a response-only scalar hint cannot stand in for
+    /// a continuous family's independently owned child playlist.
+    scalar_playlist: bool,
     retained_output: Option<Arc<retained::RetainedVodArtifact>>,
     lifecycle: Arc<Mutex<()>>,
     incarnation: Arc<()>,

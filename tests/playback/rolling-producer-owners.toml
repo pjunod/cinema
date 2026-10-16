@@ -27,6 +27,32 @@
 # Static recount yields 949 namespaced tasks and 1740 timer constructors;
 # no scope, pattern or equality requirement changes. No units executed here.
 
+# PR #1048 continuous-quality census since d6326a764 (exact source deltas):
+# Bounded VOD lookup 9 -> 11: response.rs adds the acquisition-start facade's
+# definition and delegating call; both spend the original request deadline.
+# DurableRouteResolution 101 -> 102: one OwnerTransition assertion in the
+# prepared-successor status regression, not another authority.
+# Authoritative control-route reclassification 11 -> 9: three status.rs reads
+# use the existing media-only classifier; one new chunk_03 control-fence
+# assertion retains the original classifier (-3 +1). Control stays fenced.
+# VodResponsePublication 30 -> 32: one response.rs and one manager/create.rs
+# acquisition-start wrapper signature preserve the same response owner.
+# VodPublication 53 -> 54: delivery.rs's acquisition-start playlist signature
+# names the existing typed owner-bound result; it creates no producer.
+# Namespaced task spawn 951 -> 952: the inflight predecessor-admission fixture
+# in vod/tests/chunk_03.rs spawns one driver pass and awaits its exact handle.
+# Namespaced timers 1744 -> 1761: two production timeout_at calls spend the
+# existing prime deadline (preparation.rs) and ingress deadline (relay.rs).
+# The other fifteen are awaited fixture observations: ten sleeps/timeouts in
+# preparation.rs's real-lock cancellation regressions; one five-second
+# retained-assembly observation in retained.rs; one accepted-wait setup sleep
+# in delivery.rs; and two admission/driver timeouts plus one handoff-expiry
+# sleep in vod/tests/chunk_03.rs. No new independent timer owner is introduced.
+# Process-shaped methods 753 -> 756: three response.status() assertions in
+# HTTP regression fixtures (chunk_03 +1, chunk_05 +2), not child launches.
+# Patterns, module scopes, exact equality, and zero forbidden-shape counts
+# remain unchanged; this records reviewed ownership rather than allowances.
+
 # Subtitle batch census, base0c4ae0aa5 -> reviewed worker/owner delivery:
 # +2 publication_ready_at_ms fields belong only to cached_owner_delivery's
 # admitted activation fixtures; no new production publication fence is added.
@@ -947,7 +973,7 @@ id = "m4-bounded-vod-lookup"
 pattern = "vod_(?:playlist|segment)_before"
 # 7 -> 9: one owner-bound facade and one HTTP caller inspect the exact init
 # object; neither call creates a worker or extends the response deadline.
-expected_occurrences = 9
+expected_occurrences = 11
 
 [[module_symbols]]
 id = "m4-typed-segment-resolution"
@@ -1109,19 +1135,19 @@ pattern = "DurableRouteResolution"
 # 82 -> 101 with M6 server prime: the media-only prepared classifier, its
 # authoritative/local callers, and exact regressions all name the durable
 # verdict they consume. Control classification remains the original authority.
-expected_occurrences = 101
+expected_occurrences = 102
 
 [[module_symbols]]
 id = "m4-authoritative-route-reclassification"
 pattern = "authoritative_route_resolution_before"
-expected_occurrences = 11
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-owner-bound-vod-facade"
 pattern = "VodResponsePublication"
 # 15 -> 22: the init-inspection facade returns the existing owner-bearing
 # wrapper and its exhaustive HTTP classification tests construct each outcome.
-expected_occurrences = 30
+expected_occurrences = 32
 
 [[module_symbols]]
 id = "m4-owner-bound-vod-outcome"
@@ -1144,7 +1170,7 @@ pattern = "VodPublication"
 # F1/N2 landing repair: +1 test-only VodPublication match in
 # an_unplaced_start_entry_does_not_refuse_a_seek_elsewhere. It inspects the
 # existing owner-bearing refusal; no producer or response owner is created.
-expected_occurrences = 53
+expected_occurrences = 54
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -2975,8 +3001,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # closes the channel, then the test awaits the JoinHandle and checks every
 # byte received. The two burst regressions share this one spawn site. No
 # production task, timer, process or detached owner is introduced.
-# Main integration: the effort's 958 sites plus this one joined test owner.
-expected_occurrences = 959
+# Integrated ownership: HDR959 plus main's one awaited driver fixture.
+expected_occurrences = 960
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4606,8 +4632,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # leaves. Timeout fails that assertion; it is not a completion receipt.
 # The single adversarial review covered these paths and found no ownership
 # defect. This inventory records the two constructors already in that review.
-# HDR effort source union: 1753 -> 1755 with the two reviewed #1077 sites.
-expected_occurrences = 1755
+# Integrated ownership: HDR1755 plus main's17 bounded production/fixture observations.
+expected_occurrences = 1772
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5673,7 +5699,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # F1/N2 landing repair: +2 matches. constant_size_film.status() synchronously
 # waits/reaps its finite fixture child. record_unplaced's decision.status()
 # names the existing MediaLandingFailed verdict and starts no process.
-expected_occurrences = 753
+expected_occurrences = 756
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
