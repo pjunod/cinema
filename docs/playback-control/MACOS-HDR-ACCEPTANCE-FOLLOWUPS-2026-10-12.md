@@ -1378,3 +1378,18 @@ Missing source boundaries now identify themselves in XCTest diagnostics.
 Production playback source, build counters and historical physical receipts
 are unchanged. The failing run stays failed; the reviewed test correction
 requires its focused native run, task gate and a new exact-tree promotion.
+
+### Complete Store qualification retains a fragment-prune fixture failure
+
+The complete local Store suite retains a failure in
+`sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded`; its
+isolated execution reproduces the v111 managed-subtitle table collision.
+The test stamps its populated fixture as v87 while leaving that later
+extension installed. Production correctly refuses to create it twice.
+
+After checking query plans and bounded work on the complete fresh chain,
+invoke the existing exact-shape, current-version, no-Source, empty-managed-work
+rewind before constructing the historical workload. The production upgrade
+and both fresh/upgraded query-plan, retained-source and VM-step assertions
+remain unchanged. Preserve the original complete run and isolated failure;
+corrected focused evidence and a new exact-tree qualification remain required.

@@ -13738,6 +13738,10 @@ fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
             plurx_core::store::FRAGMENT_PRUNE_CANDIDATES,
             plurx_core::store::FRAGMENT_PRUNE_TERMINAL_JOBS,
         );
+        // Keep the fresh-chain budget check above on the complete current
+        // schema, then remove only the exact empty managed extension before
+        // constructing a genuine v87 predecessor for the production upgrade.
+        queue_fixture::rewind_empty_managed_subtitle_schema(&conn);
         conn.execute_batch(include_str!("fixtures/fragment-prune-worst.sql"))
             .expect("populated upgrade workload");
         drop_composed_v92_v93_columns(&conn);
