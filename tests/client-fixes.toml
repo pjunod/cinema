@@ -3146,7 +3146,7 @@ test_anchor = "func testNativeSeekDeadlineRecoversASeekThatNeverCompletes()"
 id = "apple.live-tv-appletv-navigation"
 commits = ["17ab5f50e"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = "private func moveDetailFocus(_ input: LiveTvContractInput, region: DetailRegion) -> Bool {"
+source_anchor = "private func moveDetailFocus(_ input: LiveTvContractInput, from current: FocusTarget,"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "func testAppleTvLiveNavigationIsReversibleAndReachesEverything() throws"
 
@@ -6968,3 +6968,35 @@ source = "clients/apple/Sources/PlayerAttempt.swift"
 source_anchor = "case autoMissingCostCatalogRefresh"
 test = "clients/apple/Tests/AttemptScopesTests.swift"
 test_anchor = "testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle"
+
+[[fixes]]
+id = "apple.tv-full-guide-lazy-viewport"
+commits = ["18577692c30128a49541d290d43463c2a7eeb11c"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "LazyVStack(alignment: .leading, spacing: 0) {"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testGuide77ChannelsKeepsNativeFocusVisibleAndResponsive()"
+
+[[fixes]]
+id = "apple.tv-guide-explicit-toolbar-origin"
+commits = ["03252a5d77791697f7bb5b94650fbfe08eeae8a5"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "if input == .down { lastToolbarFocus = source }"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testGuideToolsAndTimeReturnKeepNativeFocus()"
+
+[[fixes]]
+id = "apple.tv-guide-mounted-player-focus"
+commits = ["1a1ba1d51aed7db5fbc7dfd8dc87037bdf4dd86e"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private var coverControlInput: LiveTvRemoteAdapter {"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testLiveFullscreenRevealMoreReportAndBackRetainSession()"
+
+[[fixes]]
+id = "apple.tv-guide-readable-station-column"
+commits = ["67c0a4d9cb6eb1ab3ef59801ce7dcac0720c60e3"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "#if !os(tvOS)\n                                    LiveTvFormatBadges(channel: row.channel).fixedSize()"
+test = "clients/apple/UITests/TVPhysicalNavigationAcceptanceTests.swift"
+test_anchor = "func testPhysicalFullGuideRemainsVisibleAndResponsive()"
