@@ -210,7 +210,10 @@ name = "gha-media1-general-01"
 host = "media1"
 os = "Linux"
 arch = "X64"
-labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
+# Dedicated full unit capacity: one 12 GiB resident / 14 GiB combined job.
+# Keep the sole selector available after qualification; general jobs use the
+# other registrations. This grants no heavy replicated-cluster eligibility.
+labels = ["lab", "unit-memory-12g", "baremetal", "ubuntu-26.04"]
 
 [[runners]]
 name = "gha-media1-general-02"

@@ -1,6 +1,6 @@
 # Runner disk — what fills a CI runner, and what is bounded
 
-**Status:** live · **Reconciled:** 2026-10-11
+**Status:** live · **Reconciled:** 2026-10-16
 
 Companion to [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md)
 (how the lanes are meant to get faster) — this is *where the bytes go, who
@@ -40,6 +40,43 @@ retired `lab3` guests receive no swap allocation. Both `lab4` root disks are
 The final repair check found a later compiler exhausting the initial 10 GiB
 combined limit; the additional swap raises that limit to 14 GiB without
 increasing host resident allocations.
+
+### Dedicated full-unit resident capacity
+
+The full Rust unit job uses the dedicated `unit-memory-12g` label and the
+same pinned CI image, `make ci-rust-gate`, test profile and 90-minute job
+limit. Its Docker options are
+`--cpus 3 --memory 12g --memory-swap 14g --pids-limit 4096`: 12 GiB resident and 14 GiB combined memory, one Cargo
+job and two Rust test threads. This increases resident capacity without
+increasing the existing general job's combined bound or changing tests.
+
+Full qualification run 5274 measured the daemon test compiler at about
+6.5 GiB resident plus 3.5 GiB swapped under the general 7 GiB resident
+cap, with sustained memory pressure and swap traffic. Two source-only
+6 GiB experiments failed before producing a test binary. Their Docker VM
+had only 1 GiB actual swap; neither established a successful profile
+change. The dedicated allowance is a capacity remedy, whose sufficiency
+still requires a complete fresh unit run.
+
+Keep this label on a single existing repository runner with capacity one,
+without `general` or `high-cpu` labels. Its existing service has a 12 GiB
+high watermark and 16 GiB maximum; the explicit Docker bound is required
+because Docker children need not belong to that service's cgroup. The
+runner configuration also retains the same child-container options and
+compiler/test concurrency, so a missing workflow option cannot silently
+create an unbounded job. Keep this dedicated service available after
+qualification: the merged workflow must remain schedulable. Do not
+activate another registration, change unrelated services or use an offline
+registration as evidence of permission to restart it.
+
+Before activation, verify the existing registration identity and idle state,
+back up only its configuration with mode 0600, apply the dedicated labels
+and child bounds, then start that same service. Verify the effective server
+labels and actual Docker limits before accepting a qualification result.
+Revert the dedicated configuration only together with a reviewed replacement
+for the workflow selector; stopping its sole service would strand the lane.
+The source contract is
+[`test_full_unit_suite_has_dedicated_bounded_resident_capacity`](../../tests/operations/test_contracts.py).
 
 The separate host image builder on `lab4` must also be bounded: its Docker
 container has a persistent 4 GiB resident and 10 GiB combined memory limit.

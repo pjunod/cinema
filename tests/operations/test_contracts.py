@@ -2961,12 +2961,46 @@ assert.equal(context.ACT_TIMER, null);
             makefile,
         )
 
+    def test_full_unit_suite_has_dedicated_bounded_resident_capacity(self):
+        job = workflow_job_blocks(".github/workflows/ci.yml")["check"]
+        header = job.split("    steps:\n", 1)[0]
+        self.assertIn(
+            "    runs-on: [self-hosted, Linux, X64, lab, unit-memory-12g]\n",
+            header,
+        )
+        self.assertIn(
+            "      options: --cpus 3 --memory 12g --memory-swap 14g --pids-limit 4096\n",
+            header,
+        )
+        self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"\n      RUST_TEST_THREADS: "2"\n', header)
+        self.assertRegex(header, r"(?m)^    timeout-minutes: 90$")
+        self.assertIn(
+            FLEET_REGISTRY_EXPR + "/noirr/plurx-ci@sha256:"
+            "3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855",
+            header,
+        )
+        self.assertEqual(
+            workflow_step_scalar(workflow_step_blocks(job)[
+                "Run format, Clippy, unit, and SQLite contracts"], "run"),
+            "make ci-rust-gate",
+        )
+        self.assertNotIn("codegen-units", job)
+        self.assertNotIn("CARGO_PROFILE_", job)
+        self.assertNotIn("continue-on-error", job)
+        carriers = [
+            (name, labels) for name, labels in rostered_runners()
+            if "unit-memory-12g" in labels
+        ]
+        self.assertEqual([name for name, _ in carriers], ["gha-media1-general-01"])
+        self.assertFalse({"general", "high-cpu", "ci-store", "ci-topology"} & carriers[0][1])
+
     def test_full_runtime_job_allowances_preserve_the_existing_suites(self):
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
         for name, minutes in (("check", 90), ("cluster_store_legacy", 120), ("cluster_wal", 60)):
             with self.subTest(job=name):
                 self.assertRegex(jobs[name], rf"(?m)^    timeout-minutes: {minutes}$")
-                self.assertNotIn("CARGO_BUILD_JOBS", jobs[name])
+                if name != "check":
+                    self.assertNotIn("CARGO_BUILD_JOBS", jobs[name])
         unit = workflow_step_blocks(jobs["check"])
         self.assertEqual(workflow_step_scalar(
             unit["Run format, Clippy, unit, and SQLite contracts"], "run"), "make ci-rust-gate")
@@ -4028,10 +4062,9 @@ assert.equal(context.ACT_TIMER, null);
                     and name == "apple_compile"
                 ):
                     expected = apple
-                elif path == ".github/workflows/ci.yml" and name in {
-                    "check",
-                    "cluster_daemon",
-                }:
+                elif path == ".github/workflows/ci.yml" and name == "check":
+                    expected = local("Linux", "X64", "lab", "unit-memory-12g")
+                elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
                     # The pinned private CI image supplies shipped FFmpeg 8;
                     # host trust labels remain unchanged, without a FFmpeg-6
                     # installation requirement on these image-owned jobs.

@@ -307,14 +307,20 @@ jobs:
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
     if: needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_rust != 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    # The full daemon test compiler exceeded the general 7 GiB resident cap.
+    # This dedicated capacity retains the same suite/profile and combined bound.
+    runs-on: [self-hosted, Linux, X64, lab, unit-memory-12g]
     # Private, smoke-tested CI target; never expose the management credential.
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      options: --cpus 3 --memory 12g --memory-swap 14g --pids-limit 4096
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "1"
+      RUST_TEST_THREADS: "2"
     steps:
       - name: Capture mounted runner workspace owner
         run: |

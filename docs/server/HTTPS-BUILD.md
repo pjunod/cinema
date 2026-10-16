@@ -331,7 +331,7 @@ installer, Docker hardware/startup, CI budget/timeout/preflight/runner and cache
 sweep passed all 125 tests. This includes the earlier host-temp-path installer
 case; the earlier default-temp failure remains recorded in §8. Catalog lint
 (3,534 governed files), infrastructure-name and whitespace checks passed.
-The complete PR body carries 155 unique resolvable regression anchors, including
+The complete PR body carries 156 unique resolvable regression anchors, including
 all prior checkpoint anchors and the selected existing regressions.
 
 The normal commit hook remains mandatory before push. The fresh task-head
@@ -353,3 +353,29 @@ the full structural sweep and Live TV companion sequentially and record their
 source bindings and outcomes in promotion PR receipts. Full exact-tree
 qualification remains mandatory. Synthetic fixtures do not establish physical
 HTTPS trust/playback acceptance.
+
+## Full-unit resident-capacity prerequisite (2026-10-16)
+
+The reviewed Store follow-up is committed as `0ecc8fc025`; its normal hook
+passed. Full run 5274's daemon test compilation measured about 6.5 GiB
+resident plus 3.5 GiB swapped under a 7 GiB resident bound, with sustained
+memory pressure. Diagnostic package-local codegen-unit experiments at one
+and 256 units both failed under 6 GiB before producing a binary; no profile
+change is retained. The Docker experiment VM had only 1 GiB actual swap. The original full
+unit job subsequently exhausted its existing 90-minute deadline during
+compilation, without a Rust diagnostic; no further timeout increase is made.
+
+The approved capacity remedy keeps the pinned image, full command, profile,
+90-minute deadline, one Cargo job and two test threads. Only the full unit
+job selects dedicated `unit-memory-12g` capacity, with explicit Docker bounds
+of 12 GiB RAM, 14 GiB combined memory, three CPUs and 4096 PIDs. The existing
+capacity-one registration is isolated from general jobs; no new registration
+or unrelated service/resource change is included. Its prior clean stop has
+no retained cause, and approval to activate comes from the authorized CI
+repair, not from that inactive status. Operator contract:
+[RUNNER-DISK.md](../ci/RUNNER-DISK.md#dedicated-full-unit-resident-capacity).
+
+The strict workflow regression first fails against the generic selector and
+missing child bound, then passes with the dedicated declaration. Activation
+and a source-only exact committed candidate run remain required evidence;
+no successful 12 GiB completion is claimed at this preparation checkpoint.
