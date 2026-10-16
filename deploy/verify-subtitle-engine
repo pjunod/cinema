@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Verify a macOS engine bundle before an installer replaces any running tools.
+# Uses only macOS system tools; no Python, Homebrew or developer tools required.
+set -euo pipefail
+package=${1:?usage: verify-subtitle-engine PACKAGE_DIRECTORY}
+case ${2:-} in ''|--static-only) ;; *) exit 2 ;; esac
+manifest=$package/subtitle-engine.json
+die() { printf 'subtitle engine: %s\n' "$*" >&2; exit 1; }
+field() { /usr/bin/plutil -extract "$1" raw -o - "$manifest"; }
+[ -d "$package" ] && [ ! -L "$package" ] || die 'package is not a real directory'
+for member in "$package"/* "$package"/.[!.]* "$package"/..?*; do
+  [ -e "$member" ] || [ -L "$member" ] || continue
+  case ${member##*/} in whisper-cli|subtitle-engine.json|self-test.wav|whisper.cpp.LICENSE.txt|whisper-models.LICENSE.txt) ;;
+    *) die 'package contains unexpected files' ;; esac
+done
+[ -f "$manifest" ] && [ ! -L "$manifest" ] || die 'missing regular package manifest'
+[ "$(field version)" = 1 ] || die 'unsupported manifest version'
+[ "$(field adapter_contract)" = whisper.cpp-1.9.2-cpu-v1 ] || die 'unqualified adapter'
+[ "$(field source_commit)" = 306c88f4d1286aec1bf96e544632897886af5501 ] || die 'unqualified source'
+[ "$(field source_archive_sha256)" = f3585ebf64df3e41b26c45d93bdb38b423ca1de0bf40cc4b6d320254867a75df ] || die 'unqualified source archive'
+# plutil serializes dictionaries in key order. This digest covers the complete
+# pinned option dictionary, including unknown/extra options, without Python.
+[ "$(/usr/bin/plutil -extract build_options xml1 -o - "$manifest" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')" = 918636af5ba727d99000d9d1998acb8ffb1a157cc902bcfce8ba26fcb86671d1 ] || die 'unqualified build options'
+case $(field platform) in macos-arm64|macos-x86_64|macos-universal) ;; *) die 'package is not macOS' ;; esac
+[ -f "$package/whisper-cli" ] && [ ! -L "$package/whisper-cli" ] && [ -x "$package/whisper-cli" ] || die 'missing executable'
+[ "$(/usr/bin/stat -f %z "$package/whisper-cli")" = "$(field binary_bytes)" ] || die 'executable length mismatch'
+[ "$(/usr/bin/shasum -a 256 "$package/whisper-cli" | /usr/bin/awk '{print $1}')" = "$(field binary_sha256)" ] || die 'executable digest mismatch'
+for name in self-test.wav whisper.cpp.LICENSE.txt whisper-models.LICENSE.txt; do
+  [ -f "$package/$name" ] && [ ! -L "$package/$name" ] || die "missing regular $name"
+  # Dots are key-path separators in plutil. Extract the companion dictionary
+  # first, then use -extract with escaped separators for its filename key.
+  key=${name//./\\.}
+  [ "$(/usr/bin/stat -f %z "$package/$name")" = "$(field "companions.$key.bytes")" ] || die "$name length mismatch"
+  [ "$(/usr/bin/shasum -a 256 "$package/$name" | /usr/bin/awk '{print $1}')" = "$(field "companions.$key.sha256")" ] || die "$name digest mismatch"
+done
+/usr/bin/codesign --verify --strict "$package/whisper-cli"
+[ "${2:-}" != --static-only ] || exit 0
+[ "$(/usr/bin/env -i LC_ALL=C "$package/whisper-cli" --version)" = 'whisper.cpp version: 1.9.2' ] || die 'engine cannot run with cleared environment'

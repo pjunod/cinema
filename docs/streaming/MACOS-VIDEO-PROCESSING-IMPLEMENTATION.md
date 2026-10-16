@@ -883,10 +883,13 @@ python3 scripts/build-macos-video-ffmpeg \
   --source-parser-package "$mac_build_root/parser" \
   --output "$mac_build_root/native-package"
 cargo build --locked --release -p plurxd
+python3 scripts/build-subtitle-engine \
+  --output "$mac_build_root/subtitle-engine" --jobs 2
 python3 scripts/package-macos \
-  --daemon target/release/plurxd \
-  --debug-symbols target/release/plurxd.dSYM \
+  --daemon "$PWD/target/release/plurxd" \
+  --debug-symbols "$PWD/target/release/plurxd.dSYM" \
   --ffmpeg-package "$mac_build_root/native-package" \
+  --subtitle-engine-package "$mac_build_root/subtitle-engine" \
   --output "$mac_build_root/daemon-package"
 ```
 
@@ -897,7 +900,10 @@ recorded as no symbol bundle. The default signature is ad hoc. An explicit
 mode establishes notarization or distribution-install acceptance.
 
 The copied layout has `bin/plurxd`, `bin/ffmpeg`, `bin/ffprobe` and
-`bin/plurx-source-parser.wasm`, with native/parser and daemon provenance.
+`bin/plurx-source-parser.wasm` and the verified `bin/subtitle-engine/` bundle,
+with native/parser, recognizer and daemon provenance. The recognizer bundle
+contains its executable digest, pinned build options, speech diagnostic and
+MIT notices; model downloads remain explicit server operations.
 Normal explicit executable overrides still win over sibling discovery.
 Retain the entire versioned package when using it: native binary hashes,
 parser identity, patches and source receipts are one implementation. Upgrade

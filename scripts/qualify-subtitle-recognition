@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""Bounded offline recognition measurements; never a daemon/client qualification.
+
+Downloads nothing. Uses a verified package and catalog model, LC_ALL-only
+children, production CPU/decode argv, held input/model descriptors. Writes a
+new receipt directory. Silence is measured even when it has no valid captions.
+"""
+import argparse
+from array import array
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path
+import re
+import resource
+import selectors
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+import wave
+
+ROOT = Path(__file__).resolve().parents[1]
+CATALOG = ROOT / "tests/fixtures/subtitle-recognition/catalog.json"
+MAX_OUTPUT = 256 * 1024
+MAX_PCM = 460804097
+
+
+def load_recipe():
+    loader = importlib.machinery.SourceFileLoader("recognition_engine_recipe", str(ROOT / "scripts/build-subtitle-engine"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def digest(path):
+    result = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(128 * 1024), b""):
+            result.update(chunk)
+    return result.hexdigest()
+
+
+def words(text):
+    return re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", text).casefold(), re.UNICODE)
+
+
+def error_rate(reference, hypothesis):
+    """Levenshtein WER with explicit insertions/deletions/substitutions."""
+    ref, hyp = words(reference), words(hypothesis)
+    previous = [(i, 0, i, 0) for i in range(len(hyp) + 1)]
+    for row, expected in enumerate(ref, 1):
+        current = [(row, row, 0, 0)]
+        for column, actual in enumerate(hyp, 1):
+            if expected == actual:
+                current.append(previous[column - 1])
+                continue
+            deletion = previous[column]
+            insertion = current[column - 1]
+            substitution = previous[column - 1]
+            current.append(min((deletion[0] + 1, deletion[1] + 1, deletion[2], deletion[3]),
+                               (insertion[0] + 1, insertion[1], insertion[2] + 1, insertion[3]),
+                               (substitution[0] + 1, substitution[1], substitution[2], substitution[3] + 1)))
+        previous = current
+    distance, deletions, insertions, substitutions = previous[-1]
+    return dict(reference_words=len(ref), hypothesis_words=len(hyp), deletions=deletions,
+                insertions=insertions, substitutions=substitutions,
+                wer=distance / len(ref) if ref else None)
+
+
+STAMP = re.compile(r"^(\d{2}):(\d{2}):(\d{2})\.(\d{3}) --> (\d{2}):(\d{2}):(\d{2})\.(\d{3})$")
+
+
+def captions(path, duration):
+    if not path.exists():
+        return {"structural_valid": False, "error": "missing_vtt", "text": "", "cues": []}
+    if path.stat().st_size > MAX_OUTPUT:
+        raise ValueError("output_too_large")
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("WEBVTT\n"):
+        raise ValueError("output_invalid")
+    cues, spoken, errors = [], [], []
+    for block in re.split(r"\n\s*\n", text.strip())[1:]:
+        lines = block.splitlines()
+        if not lines:
+            continue
+        if not STAMP.fullmatch(lines[0]) and len(lines) > 1 and lines[0].isdigit():
+            lines = lines[1:]
+        match = STAMP.fullmatch(lines[0])
+        if not match or len(lines) < 2:
+            errors.append("invalid_cue")
+            continue
+        values = [int(value) for value in match.groups()]
+        times = [values[i] * 3600 + values[i + 1] * 60 + values[i + 2] + values[i + 3] / 1000 for i in (0, 4)]
+        if any(values[i] > 59 for i in (1, 2, 5, 6)) or not 0 <= times[0] < times[1] <= duration:
+            errors.append("invalid_timing")
+        if cues and times[0] < cues[-1][0]:
+            errors.append("nonmonotonic_start")
+        cues.append(times)
+        spoken.append(" ".join(lines[1:]))
+    return dict(structural_valid=bool(cues) and not errors, errors=errors,
+                text=" ".join(spoken), cues=cues, cue_count=len(cues),
+                timing_accuracy="unmeasured; no human-aligned reference")
+
+
+def fixture(source, destination, case, stress_seconds):
+    with wave.open(str(source), "rb") as reader:
+        if (reader.getnchannels(), reader.getsampwidth(), reader.getframerate()) != (1, 2, 16000):
+            raise ValueError("fixture_format_changed")
+        samples = array("h", reader.readframes(reader.getnframes()))
+    if sys.byteorder != "little":
+        samples.byteswap()
+    clipped = 0
+    if case == "noise":
+        rms = math.sqrt(sum(value * value for value in samples) / len(samples))
+        scale, seed = rms / math.sqrt(10) * math.sqrt(3), 0x504C5552
+        for index, value in enumerate(samples):
+            seed = (1664525 * seed + 1013904223) & 0xFFFFFFFF
+            mixed = round(value + (seed / 4294967296 * 2 - 1) * scale)
+            clipped += not -32768 <= mixed <= 32767
+            samples[index] = max(-32768, min(32767, mixed))
+    elif case == "silence":
+        samples = array("h", [0]) * len(samples)
+    frames = stress_seconds * 16000 if case == "stress" else len(samples)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    data = samples.tobytes()
+    with wave.open(str(destination), "wb") as writer:
+        writer.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        remaining = frames * 2
+        while remaining:
+            chunk = data[:remaining]
+            writer.writeframesraw(chunk)
+            remaining -= len(chunk)
+    return dict(seconds=frames / 16000, sha256=digest(destination), bytes=destination.stat().st_size,
+                clipped_samples=clipped, noise_snr_db=10 if case == "noise" else None)
+
+
+def subtitle_reference(path, expected_digest):
+    if path.is_symlink() or digest(path) != expected_digest:
+        raise ValueError("reference_identity_changed")
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    return " ".join(line for line in lines if line.strip() and not line.isdigit() and " --> " not in line)
+
+
+def intersect_vtt(text, samples):
+    """Report the approved managed EOF policy without semantic cleanup."""
+    if not text.startswith("WEBVTT\n\n") or len(text.encode()) > MAX_OUTPUT:
+        raise ValueError("output_invalid")
+    limit = samples * 1000 // 16000
+    result, clipped, discarded, previous = ["WEBVTT\n\n"], 0, 0, None
+    for block in text[8:].strip("\n").split("\n\n"):
+        lines = block.splitlines()
+        index = 0 if lines and " --> " in lines[0] else 1
+        if index >= len(lines) or len(lines) <= index + 1:
+            raise ValueError("output_invalid")
+        match = STAMP.fullmatch(lines[index])
+        if not match:
+            raise ValueError("output_invalid")
+        values = [int(value) for value in match.groups()]
+        times = [values[i] * 3600000 + values[i + 1] * 60000 + values[i + 2] * 1000 + values[i + 3] for i in (0, 4)]
+        if any(values[i] > 59 for i in (1, 2, 5, 6)) or times[1] <= times[0] or previous is not None and times[0] < previous:
+            raise ValueError("output_invalid")
+        previous = times[0]
+        if times[0] >= limit:
+            discarded += 1
+            continue
+        if times[1] > limit:
+            stamp = f"{limit // 3600000:02}:{limit // 60000 % 60:02}:{limit // 1000 % 60:02}.{limit % 1000:03}"
+            lines[index] = lines[index].split(" --> ")[0] + " --> " + stamp
+            clipped += 1
+        result.append("\n".join(lines) + "\n\n")
+    if len(result) == 1:
+        raise ValueError("output_invalid")
+    return "".join(result), {"clipped": clipped, "discarded": discarded, "pcm_end_ms": limit}
+
+
+def run_child(argv, scratch, label, deadline, pass_fds=()):
+    """Bound disk logs/output; timeout/error always kills and reaps the group."""
+    start = time.monotonic()
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    peak = 0
+    stdout, stderr = scratch / (label + ".stdout"), scratch / (label + ".stderr")
+    with stdout.open("xb") as out, stderr.open("xb") as err, selectors.DefaultSelector() as selector:
+        child = subprocess.Popen(argv, env={"LC_ALL": "C"}, pass_fds=pass_fds,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        for pipe, target in ((child.stdout, out), (child.stderr, err)):
+            selector.register(pipe, selectors.EVENT_READ, [target, 0])
+        try:
+            while selector.get_map() or child.poll() is None:
+                for key, _ in selector.select(timeout=0.05):
+                    chunk = os.read(key.fd, 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    key.data[1] += len(chunk)
+                    if key.data[1] > MAX_OUTPUT:
+                        raise ValueError(label + "_output_bound_exceeded")
+                    key.data[0].write(chunk)
+                    key.data[0].flush()
+                sizes = {item.name: item.stat().st_size for item in scratch.iterdir() if item.is_file()}
+                peak = max(peak, sum(sizes.values()))
+                if time.monotonic() - start > deadline:
+                    raise ValueError(label + "_timeout")
+                if any(size > (MAX_PCM if name.endswith(".wav") else MAX_OUTPUT) for name, size in sizes.items()):
+                    raise ValueError(label + "_output_bound_exceeded")
+        finally:
+            # Include descendants when the leader already exited; never leave
+            # an orphan writer behind after a malformed recognizer invocation.
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait()
+            for pipe in (child.stdout, child.stderr):
+                pipe.close()
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return dict(exit_code=child.returncode, wall_seconds=time.monotonic() - start,
+                child_cpu_seconds=(after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime),
+                child_maxrss_bytes=after.ru_maxrss * (1 if sys.platform == "darwin" else 1024),
+                maxrss_scope="cumulative child high-water mark of this driver, not per-stage RAM",
+                scratch_peak_sampled_bytes=peak, stderr_bytes=stderr.stat().st_size)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--engine-package", type=Path, required=True)
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--decoder", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cases", nargs="+", choices=["clean", "noise", "silence", "stress", "german", "german-aligned", "film"], default=["clean", "noise", "silence"])
+    parser.add_argument("--corpus-root", type=Path, help="preobtained external media directory; filenames and hashes are fixed by catalog")
+    parser.add_argument("--stress-seconds", type=int, default=1200)
+    parser.add_argument("--inference-timeout", type=int, default=600)
+    args = parser.parse_args()
+    started = time.monotonic()
+    if not 11 <= args.stress_seconds <= 14400 or not 1 <= args.inference_timeout <= 14400:
+        parser.error("stress duration 11..14400 and inference timeout 1..14400 seconds required")
+    for path in (args.engine_package, args.model, args.decoder, args.output):
+        if not path.is_absolute() or path.is_symlink():
+            parser.error("paths must be absolute and not symlinks")
+    recipe = load_recipe()
+    engine = recipe.verify(args.engine_package)
+    model_digest = digest(args.model)
+    models = json.loads((ROOT / "crates/plurxd/src/subtitle_models/catalog.json").read_text())["models"]
+    model = next((item for item in models if item["sha256"] == model_digest and item["download_bytes"] == args.model.stat().st_size), None)
+    if model is None:
+        parser.error("model does not match the pinned catalog")
+    if any(case in args.cases for case in ("german", "german-aligned")) and "de" not in model["languages"]:
+        parser.error("German case requires a catalog model supporting de (base)")
+    catalog = json.loads(CATALOG.read_text())
+    source = catalog["sources"]["jfk"]
+    source_path = ROOT / source["path"]
+    if digest(source_path) != source["sha256"] or source_path.stat().st_size != source["bytes"]:
+        parser.error("source fixture identity changed")
+    external = {}
+    for case in args.cases:
+        selected = catalog["sources"][catalog["cases"][case]["source"]]
+        if case == "german-aligned":
+            path = ROOT / selected["path"]
+            if path.is_symlink() or path.stat().st_size != selected["bytes"] or digest(path) != selected["sha256"]:
+                parser.error("committed source identity changed")
+            external[case] = path
+        if "filename" in selected:
+            if args.corpus_root is None or not args.corpus_root.is_absolute() or args.corpus_root.is_symlink():
+                parser.error("external cases require an absolute real --corpus-root")
+            path = args.corpus_root / selected["filename"]
+            if path.is_symlink() or path.stat().st_size != selected["bytes"] or digest(path) != selected["sha256"]:
+                parser.error("external source identity changed")
+            external[case] = path
+    args.output.mkdir(mode=0o700)
+    receipt = dict(version=1, qualification="offline component diagnostic; no durable service, human quality or playback proof",
+                   source_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                   driver_sha256=digest(Path(__file__)), corpus_sha256=digest(CATALOG), engine=engine,
+                   model_id=model["id"], model_sha256=model_digest, decoder_sha256=digest(args.decoder),
+                   platform=sys.platform, effective_uid=os.geteuid(), child_environment={"LC_ALL": "C"},
+                   profile={"threads": 2, "processors": 1, "no_gpu": True},
+                   source_tree_dirty=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
+                   preflight_seconds=time.monotonic() - started, measurement_poll_seconds=0.05, cases=[])
+    for case in dict.fromkeys(args.cases):
+        item = dict(case=case, evidence=catalog["cases"][case]["evidence"], status="failed")
+        receipt["cases"].append(item)
+        try:
+            selected = catalog["sources"][catalog["cases"][case]["source"]]
+            item["language"] = selected["language"]
+            item["source_sha256"] = selected["sha256"]
+            with tempfile.TemporaryDirectory(prefix="recognition-", dir=args.output) as temporary:
+                scratch = Path(temporary)
+                raw, pcm, base = scratch / "input.wav", scratch / "audio.wav", scratch / "caption"
+                if case in external:
+                    raw = external[case]
+                    item["input"] = {"seconds": selected["seconds"], "sha256": selected["sha256"], "bytes": selected["bytes"]}
+                else:
+                    item["input"] = fixture(source_path, raw, case, args.stress_seconds)
+                with raw.open("rb") as held:
+                    fd = held.fileno()
+                    decode = [str(args.decoder), "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode", "-y",
+                              "-copyts", "-start_at_zero", "-protocol_whitelist", "file,pipe", "-threads", "2", "-i", f"/dev/fd/{fd}",
+                              "-map", "0:a:0", "-vn", "-sn", "-dn", "-af", "aresample=16000:async=1:first_pts=0:min_comp=0:min_hard_comp=0:max_soft_comp=0",
+                              "-threads", "2", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-fs", str(MAX_PCM), str(pcm)]
+                    if case == "german":
+                        decode[-1:-1] = ["-t", "90"]
+                    item["decode_argv"] = ["<decoder>" if arg == str(args.decoder) else "<source-fd>" if arg == f"/dev/fd/{fd}" else "<scratch>/audio.wav" if arg == str(pcm) else arg for arg in decode]
+                    item["decode"] = run_child(decode, scratch, "decode", 1800, (fd,))
+                if item["decode"]["exit_code"] or item["decode"]["stderr_bytes"]:
+                    raise ValueError("decode_failed")
+                with wave.open(str(pcm), "rb") as waveform:
+                    if (waveform.getnchannels(), waveform.getsampwidth(), waveform.getframerate()) != (1, 2, 16000):
+                        raise ValueError("decode_format_changed")
+                    frames = waveform.getnframes()
+                item["pcm"] = {"samples": frames, "seconds": frames / 16000, "sha256": digest(pcm), "bytes": pcm.stat().st_size}
+                with args.model.open("rb") as held:
+                    fd = held.fileno()
+                    argv = [str(args.engine_package / "whisper-cli"), "--threads", "2", "--processors", "1", "--no-gpu",
+                            "--language", selected["language"], "--output-vtt", "--no-prints", "--model", f"/dev/fd/{fd}", "--file", str(pcm), "--output-file", str(base)]
+                    item["inference_argv"] = ["<qualified-engine>" if arg == argv[0] else "<model-fd>" if arg == f"/dev/fd/{fd}" else "<scratch>/audio.wav" if arg == str(pcm) else "<scratch>/caption" if arg == str(base) else arg for arg in argv]
+                    item["inference"] = run_child(argv, scratch, "inference", args.inference_timeout, (fd,))
+                if item["inference"]["exit_code"]:
+                    raise ValueError("inference_failed")
+                result = captions(base.with_suffix(".vtt"), item["pcm"]["seconds"])
+                item["caption"] = result
+                item["inference_rtf"] = item["inference"]["wall_seconds"] / item["pcm"]["seconds"]
+                item["pipeline_rtf"] = (item["decode"]["wall_seconds"] + item["inference"]["wall_seconds"]) / item["pcm"]["seconds"]
+                if case in ("clean", "noise"):
+                    item["word_errors"] = error_rate(source["reference"], result["text"])
+                if case == "german-aligned":
+                    item["word_errors"] = error_rate(selected["reference"], result["text"])
+                    item["reference_limit"] = selected["reference_status"]
+                if case == "film":
+                    reference = subtitle_reference(CATALOG.parent / selected["reference_file"], selected["reference_sha256"])
+                    item["word_errors"] = error_rate(reference, result["text"])
+                    item["reference_limit"] = selected["reference_status"]
+                if case == "german":
+                    item["reference_limit"] = selected["reference_status"]
+                if case == "silence":
+                    item["silence_output_tokens"] = len(words(result["text"]))
+                if base.with_suffix(".vtt").exists():
+                    raw = base.with_suffix(".vtt").read_bytes()
+                    (args.output / (case + ".vtt")).write_bytes(raw)
+                    item["raw_vtt_sha256"] = hashlib.sha256(raw).hexdigest()
+                    try:
+                        normalized, facts = intersect_vtt(raw.decode(), frames)
+                        normalized_path = args.output / (case + ".normalized.vtt")
+                        normalized_path.write_text(normalized)
+                        item["normalized"] = dict(facts, sha256=digest(normalized_path), caption=captions(normalized_path, frames / 16000),
+                                                  policy="pcm-eof-intersection-v1; component reproduction, not daemon execution")
+                    except ValueError as error:
+                        item["normalized"] = {"error": str(error)}
+                item["status"] = "measured"
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            item["error"] = str(error)
+        (args.output / "receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    print(json.dumps({"receipt": str(args.output / "receipt.json"), "cases": [{"case": item["case"], "status": item["status"]} for item in receipt["cases"]]}))
+    return int(any(item["status"] != "measured" for item in receipt["cases"]))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
