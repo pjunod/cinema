@@ -1139,3 +1139,39 @@ to Picture in picture; no focus assertion is removed. All eight focus tests
 then pass on the owned API36 emulator. Failed baseline/build/test output is
 retained, and no branch app is installed on a physical device. Independent
 review, task qualification and fresh full promotion remain required.
+## October 15 inherited Apple qualification prerequisite
+
+Full promotion run 5228 passes policy/preflight and the fast Rust compiler,
+but its Apple suite exposes four inherited failing cases in files unchanged
+by the HDR effort. An isolated iOS simulator reproduces all four (five
+assertion failures): the Developer inventory omits the existing Remote
+diagnostics advisory; two subtitle controls dequeue a processing-status
+notification instead of their subtitle callback; and the terminal-publication
+control blocks the first shared callback before its pending warm-up can reach
+the requested second exchange. The failed CI and local logs remain retained.
+The failed local wrapper is stopped only after all assertions finish, while
+Xcode is collecting simulator diagnostics; it is not recorded as a passing run.
+
+The bounded test repair includes diagnostics in the placement inventory and
+accepts its existing explicit "leaves Developer" graduation wording. Subtitle
+controls hold all callbacks until a later request proves the ready response
+was fully consumed, then execute them across the original owner/intent fence.
+The terminal control starts with a terminal response, blocks exactly one
+callback and joins reporter finalization before asserting no late verdict.
+Production callback scheduling and playback fences are unchanged. Both entire
+affected classes pass locally: 137 tests, zero failures, on Xcode 27.0 and an
+owned iOS 26.5 simulator. No branch app is installed on a physical device.
+Independent review, the task gate and fresh full promotion remain required.
+
+Apple task gate 5234 reaches its ten-minute preflight deadline during the
+full operations sweep, after all 359 validation tests pass. Its partial
+operations output is not a completed suite or retained success. Preserve
+the failed log and raise only the effort preflight to the existing fast
+lane's finite 15-minute receipt-publication budget. Every history, policy,
+validation and operations check remains required; the full main preflight
+keeps its existing budget. The exact-head task gate must run again.
+
+Task gate 5235 refuses the missing client-fix history anchor before compilation;
+its failed receipt is preserved. The exact reviewed runtime commit and its
+existing instrumented regression are now named in the client-fix catalog.
+This catalog repair adds no runtime change or new device claim.

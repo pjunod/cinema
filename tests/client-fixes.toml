@@ -6453,3 +6453,11 @@ source = "crates/plurxd/src/web/player/stats.js"
 source_anchor = "const stream=statsStreamFormat(p);"
 test = "tests/playback/web-policy.test.js"
 test_anchor = "attached cached output reports its frozen frame and Metal renderer"
+
+[[fixes]]
+id = "android.diagnostics-preserves-shared-transport-order"
+commits = ["5a918f7192a95cbbd958ad764717a901ebf2435b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "reporting follows them without intercepting D-pad steps."
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
+test_anchor = "fun transportOptionsFollowTheSharedContractOrder()"
