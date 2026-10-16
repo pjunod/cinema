@@ -285,7 +285,8 @@ class OriginalScopeEvidenceCase(unittest.TestCase):
             self.assertEqual(proof,original)
             witness=decoded['lanes']['rust'][0]['records'][0]['changes']['input.rs']
             self.assertEqual(witness,{'before':retention.digest(b'old'),'after':retention.digest(b'new'),'affected_ids':[]})
-            with patch.object(commands,'validate',return_value={}):
+            with patch.object(commands,'validate',return_value={}), \
+                    patch.object(retention,'COHORTS',{'rust':{'core'}}):
                 adopted,_=retention.validate(decoded,'b'*40,
                     differences=lambda a,b:{'input.rs'}if a!=b else set(),
                     source=lambda commit,path:b'new'if commit=='b'*40 else b'old')
