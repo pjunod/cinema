@@ -4428,6 +4428,7 @@ struct LiveTvView: View {
                 .buttonStyle(LiveSurfacePillStyle())
                 .focusEffectDisabled()
                 .focused(focus, equals: .pillActivity)
+                .modifier(coverControlInput(from: .pillActivity, focus: focus))
             }
             liveSurfaceButtons(focus: focus)
         }
@@ -4436,9 +4437,28 @@ struct LiveTvView: View {
         .foregroundStyle(.white)
     }
 
-    private var coverControlInput: LiveTvRemoteAdapter {
-        LiveTvRemoteAdapter(scope: .root, state: { liveInputState }) { outcome, _ in
-            applyLiveOutcome(outcome)
+    private func coverControlInput(from source: FocusTarget,
+                                   focus: FocusState<FocusTarget?>.Binding) -> LiveTvRemoteAdapter {
+        LiveTvRemoteAdapter(scope: .controls, state: { liveInputState }) { outcome, input in
+            guard outcome == .focusControl else { return applyLiveOutcome(outcome) }
+            // Route from the button receiving the press. Native focus may
+            // already name its neighbour when the move callback is delivered.
+            let row: [FocusTarget] = [.pillPlay, .pillGuide, .pillChannels, .pillInfo, .pillMore]
+            var target = source
+            switch input {
+            case .left:
+                if let index = row.firstIndex(of: source), index > 0 { target = row[index - 1] }
+            case .right:
+                if let index = row.firstIndex(of: source), index + 1 < row.count { target = row[index + 1] }
+            case .up:
+                if dvr.indicatorLabel != nil { target = .pillActivity }
+            case .down:
+                if source == .pillActivity { target = .pillPlay }
+            default: return false
+            }
+            overlayGeneration &+= 1
+            focus.wrappedValue = target
+            return true
         }
     }
 
@@ -4452,14 +4472,14 @@ struct LiveTvView: View {
             }
             .focused(focus, equals: .pillPlay)
             .accessibilityIdentifier("live-player-play")
-            .modifier(coverControlInput)
+            .modifier(coverControlInput(from: .pillPlay, focus: focus))
             .remoteControl("live:play", label: live.paused ? "Play live" : "Pause", managesFocus: false) { live.togglePause() }
             Button { openTemporaryGuide() } label: {
                 Label("Guide", systemImage: "rectangle.grid.3x2")
             }
             .focused(focus, equals: .pillGuide)
             .accessibilityIdentifier("live-player-guide")
-            .modifier(coverControlInput)
+            .modifier(coverControlInput(from: .pillGuide, focus: focus))
             .remoteControl("live:guide", label: "Guide", managesFocus: false) { openTemporaryGuide() }
             // Focus on the list is requested when the cover has gone
             // (`restoreBrowseFocusAfterCover`), not here while it is still up.
@@ -4468,20 +4488,20 @@ struct LiveTvView: View {
             }
             .focused(focus, equals: .pillChannels)
             .accessibilityIdentifier("live-player-channels")
-            .modifier(coverControlInput)
+            .modifier(coverControlInput(from: .pillChannels, focus: focus))
             .remoteControl("live:channels", label: "Channels", managesFocus: false) { browse = .list; fullscreen = false }
             Button { coverSheetOpener = .pillInfo; showStreamInfo() } label: {
                 Label("Info", systemImage: "info.circle")
             }
             .focused(focus, equals: .pillInfo)
             .accessibilityIdentifier("live-player-info")
-            .modifier(coverControlInput)
+            .modifier(coverControlInput(from: .pillInfo, focus: focus))
             Button { coverSheetOpener = .pillMore; showingMore = true } label: {
                 Label("More", systemImage: "ellipsis")
             }
             .focused(focus, equals: .pillMore)
             .accessibilityIdentifier("live-player-more")
-            .modifier(coverControlInput)
+            .modifier(coverControlInput(from: .pillMore, focus: focus))
             Spacer()
             Text("MENU hides · PLAY/PAUSE \(live.paused ? "resumes" : "pauses")")
                 .font(LiveTvType.surfaceHint)
@@ -4532,8 +4552,7 @@ struct LiveTvView: View {
                     )
                     .frame(height: 520)
                     NativePlaybackFocusRegion(preferred: coverControl ?? .pillPlay, requested: coverControl,
-                                              changed: { overlayGeneration &+= 1 },
-                                              focusChanged: { coverControl = $0 }) { focus in
+                                              changed: { overlayGeneration &+= 1 }) { focus in
                         liveBottomBand(channel: channel, airing: airing, focus: focus)
                     }
                 }

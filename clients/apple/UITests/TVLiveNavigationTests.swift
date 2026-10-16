@@ -144,6 +144,11 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         assertFocus(pause, in: app, context: "Recording activity returns to playback controls")
         let more = app.buttons["live-player-more"]
         XCTAssertEqual(pause.label, "Pause", "The reveal press must not pause playback")
+        let leftEdgeDeadline = Date().addingTimeInterval(5)
+        repeat {
+            remote.press(.left)
+            assertFocus(pause, in: app, context: "Left edge retains Pause during active input")
+        } while Date() < leftEdgeDeadline
         // Exercise the actual four-step transport row. Generic geometric
         // discovery can spend the entire idle-hide interval taking snapshots
         // without delivering any remote input.
@@ -166,7 +171,7 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
                 assertFocus(app.buttons[identifier], in: app, context: "Fullscreen guide Close restores Guide pill")
                 // Restoration must release ownership to the next remote move,
                 // including repeated moves across the former idle deadline.
-                for pass in 1...4 {
+                for pass in 1...20 {
                     remote.press(.right)
                     assertFocus(app.buttons["live-player-channels"], in: app,
                                 context: "Guide return Right reaches Channels pass \(pass)")
@@ -176,6 +181,11 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
                 }
             }
         }
+        let rightEdgeDeadline = Date().addingTimeInterval(5)
+        repeat {
+            remote.press(.right)
+            assertFocus(more, in: app, context: "Right edge retains More during active input")
+        } while Date() < rightEdgeDeadline
         remote.press(.select)
         let report = app.buttons["diagnostics-open"]
         reachForSetup(report, in: app, limit: 10)

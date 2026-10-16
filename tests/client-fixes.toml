@@ -6989,7 +6989,7 @@ test_anchor = "func testGuideToolsAndTimeReturnKeepNativeFocus()"
 id = "apple.tv-guide-mounted-player-focus"
 commits = ["1a1ba1d51aed7db5fbc7dfd8dc87037bdf4dd86e"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = "private var coverControlInput: LiveTvRemoteAdapter {"
+source_anchor = "private func coverControlInput(from source: FocusTarget,"
 test = "clients/apple/UITests/TVLiveNavigationTests.swift"
 test_anchor = "func testLiveFullscreenRevealMoreReportAndBackRetainSession()"
 

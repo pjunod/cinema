@@ -66,6 +66,8 @@ struct LiveTvRemoteAdapter: ViewModifier {
     enum Scope {
         case root
         case revealSurface
+        /// A mounted transport row with explicit directional neighbours.
+        case controls
         /// A region whose directions are moved by its own navigator: the
         /// guide grid, and the page's detail region (picture + programme
         /// actions). `onMoveCommand` takes every direction pressed inside it,
@@ -85,6 +87,14 @@ struct LiveTvRemoteAdapter: ViewModifier {
             content
                 .onExitCommand { dispatch(.back) }
                 .onPlayPauseCommand { dispatch(.playPause) }
+        case .controls:
+            content
+                .onExitCommand { dispatch(.back) }
+                .onPlayPauseCommand { dispatch(.playPause) }
+                .onMoveCommand { direction in
+                    guard let input = Self.input(for: direction) else { return }
+                    dispatch(input)
+                }
         case .revealSurface:
             content
                 .onTapGesture { dispatch(.select) }
@@ -367,7 +377,6 @@ struct NativePlaybackFocusRegion<Key: Hashable, Content: View>: View {
     let preferred: Key
     let requested: Key?
     let changed: () -> Void
-    var focusChanged: (Key?) -> Void = { _ in }
     @ViewBuilder let content: (FocusState<Key?>.Binding) -> Content
     var body: some View {
         content($focused)
@@ -376,14 +385,11 @@ struct NativePlaybackFocusRegion<Key: Hashable, Content: View>: View {
             // can make one press skip the adjacent control.
             .onAppear { focused = preferred }
             .onChange(of: requested) { _, value in
-                // The parent also observes actual focus. Do not turn that
-                // observation into a second native request that can arrive
-                // after the viewer has already moved to the next control.
+                // Requests are presentation intents, never native-focus
+                // observations echoed back by the parent.
                 if focused != value { focused = value }
             }
-            .onChange(of: focused) { _, value in
-                focusChanged(value); changed()
-            }
+            .onChange(of: focused) { _, _ in changed() }
     }
 }
 #endif

@@ -1,6 +1,7 @@
 # Apple TV navigation — defects, proposed screens and a lasting release contract
 
-**Status:** repairs built; guide and playback corrections installed as build 254.
+**Status:** guide repairs installed as build 255; the remaining playback focus
+repair is still under validation after a failed complete-candidate repeat.
 All 28 native journeys passed before the final review corrections; those
 corrections pass expanded Live/channel journeys and all 1,101 tvOS units.
 The combined integration gate, final promotion and explicitly remaining
@@ -691,7 +692,21 @@ sequence and the complete playback journey (99.22 seconds). Temporary tracing
 has been removed. Two uninstrumented Live repeats pass (98.35 and 97.39
 seconds), and the first library-channel repeat passes (73.49 seconds). The
 second channel repeat exposes the separate browser gap below before playback
-opens. Complete-candidate qualification remains open.
+opens. The subsequent clean full run at `b40d88e4c` still fails the first Left
+after guide closure. Removing the default preference and ignoring equal writes
+are therefore insufficient. The next candidate removes the observation-to-parent
+callback entirely: only explicit presentation intents may update the requested
+focus key. The strengthened native journey now requires twenty Right/Left pairs.
+Removing that callback alone also fails at the fourth Left in the longer
+repeat. The current candidate therefore assigns explicit neighbours to every
+mounted Live transport control through the existing remote adapter, routing
+from the receiving control rather than a potentially advanced focus binding.
+Each direction invalidates stale remote intent and resets idle, including row
+edges; Activity has explicit Up/Down routes. Two forty-move native repeats
+pass, including subsequent reporting and session retention. The final journey
+also exercises repeated input at both row edges for longer than the idle
+deadline. Complete-candidate validation remains required.
+The failed full receipt, focused trials and cancelled gate 5310 are retained. Complete-candidate qualification remains open.
 
 ### F35 · P1 · N — Favorite has no Down destination in a short channel row
 
@@ -705,7 +720,10 @@ Watch live now fills the card width on TV, using the shared readable button
 style. Its focus area gives Down a destination below Favorite even when the
 programme strip is short. Touch layout is unchanged. The native playback
 setup now explicitly focuses Favorite, presses Down once and requires Watch
-live to own actual focus before tuning. Repeated native validation is pending.
+live to own actual focus before tuning. Two complete native channel playback
+repeats pass (78.11 and 73.56 seconds), and the full-width Watch focus rendering
+was inspected. iOS compilation and the 1,101-unit suite pass on the combined
+candidate. Complete app qualification is still blocked by F34.
 
 ## 6. Proposed renderings — consistent interaction before decoration
 
