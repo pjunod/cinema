@@ -575,6 +575,13 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    // Managed configuration CAS and node-bounded model publication/observation
+    // run on both backends in the managed_subtitle_configuration_* and
+    // managed_subtitle_model_operations_* contracts in background_jobs.rs.
+    "write_subtitle_configuration",
+    "observe_subtitle_job",
+    "publish_subtitle_model",
+    "subtitle_model_receipts",
     // Covered on both backends by
     // `background_jobs_transcription_publication_is_atomic_namespaced_and_stop_fenced`
     // (store_contract/background_jobs.rs).
@@ -13069,7 +13076,7 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
         ._root
         .path()
         .join("fresh-bootstrap-subtitle-source-telemetry.db");
-    let checks: [(&str, i64); 6] = [
+    let checks: [(&str, i64); 8] = [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
             AUTH_SCHEMA_BASELINE_VERSION,
@@ -13104,9 +13111,21 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
              AND name IN ('analysis_attempts_v47_backup', 'analysis_requests_v46')",
             0,
         ),
+        (
+            "SELECT COUNT(*) AS value FROM subtitle_managed_schema \
+             WHERE singleton = 1 AND version = 1",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'view' \
+             AND name = 'background_job_required_resources' \
+             AND sql LIKE '%subtitle_model_operation%' AND sql LIKE '%subtitle_model:%'",
+            1,
+        ),
     ];
     // Twice: the second bootstrap is the retry a cancelled client future
     // makes, and it must neither fail nor replay the table rebuild.
+    let mut installed_view = None;
     for round in ["first", "retried"] {
         let store = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
             .await
@@ -13119,6 +13138,23 @@ async fn fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps() {
                 .expect("inspect bootstrapped schema");
             assert_eq!(rows.len(), 1, "{round}: {sql}");
             assert_eq!(rows[0].value, expected, "{round}: {sql}");
+        }
+        let views: Vec<SchemaText> = client
+            .query_consistent_map(
+                "SELECT sql AS value FROM sqlite_master \
+                 WHERE type = 'view' AND name = 'background_job_required_resources'",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("inspect managed resource view after bootstrap");
+        assert_eq!(views.len(), 1, "{round}: one resource view");
+        if let Some(expected) = &installed_view {
+            assert_eq!(
+                &views[0].value, expected,
+                "retry must preserve the installed view"
+            );
+        } else {
+            installed_view = Some(views[0].value.clone());
         }
     }
 }
@@ -20102,7 +20138,10 @@ fn contract_inventory_matches_every_store_method() {
     // read that confirms a complete seal under `seal_prepared_output`'s own
     // predicate, covered by the same both-backend seal scenario.
     // No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 486, "review the Store method count");
+    // +4: managed subtitle configuration CAS, fenced phase observation,
+    // model receipt publication and receipt reads, covered on both backends
+    // by the managed configuration/model-operation contracts named above.
+    assert_eq!(declared.len(), 490, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
