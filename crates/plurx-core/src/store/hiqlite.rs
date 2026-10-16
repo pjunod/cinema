@@ -3932,6 +3932,7 @@ impl HiqliteAuthStore {
     async fn subtitle_managed_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
+            // authority: current schema shape decides whether replicated DDL may run.
             .query_consistent_map::<RemoteShapeRow, _>(
                 super::subtitle_managed_schema::SHAPE_SQL,
                 params!(),
@@ -3943,7 +3944,14 @@ impl HiqliteAuthStore {
             .collect::<Vec<_>>();
         let version = super::subtitle_managed_schema::version(&shape)?;
         if version == Some(1) {
-            let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM subtitle_managed_schema WHERE singleton=1 AND version=1",params!()).await?;
+            let rows = self
+                .client()
+                // authority: the installed marker must agree with the current replicated shape.
+                .query_consistent_map::<CountRow, _>(
+                    "SELECT count(*) AS count FROM subtitle_managed_schema WHERE singleton=1 AND version=1",
+                    params!(),
+                )
+                .await?;
             if !matches!(rows.as_slice(),[row] if row.count==1) {
                 return Err(StoreError::Migration(
                     "managed subtitle schema marker missing".into(),
@@ -4079,32 +4087,11 @@ impl HiqliteAuthStore {
         &self,
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<(), StoreError> {
-        let previous = self.committed_schema_version_unchecked().await?;
-        let (next, guard) = match previous {
-            SHARING_SCHEMA_VERSION => (
-                SHARING_INGRESS_SCHEMA_VERSION,
-                "NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sharing_ingress_custody')"
-                    .to_owned(),
-            ),
-            _ => {
-                return Err(StoreError::Migration(
-                    "custody migration predecessor changed".into(),
-                ));
-            }
-        };
-        let rows = self
-            .client()
-            // authority: exact predecessor shape fences the custody migration transaction.
-            .query_consistent_map::<CountRow, _>(
-                format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
-                params!(),
-            )
-            .await?;
-        if !matches!(rows.as_slice(), [row] if row.count == 1) {
-            return Err(StoreError::Migration(
-                "custody migration requires its exact predecessor and original Source owners must retire all retained obligations".into(),
-            ));
+        if self.custody_migration_settled().await? {
+            return Ok(());
         }
+        let previous = SHARING_SCHEMA_VERSION;
+        let guard = "NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sharing_ingress_custody')";
         let now = self.now()?;
         // Guard failure must abort, rather than silently mark a partial shape.
         let assertion = format!(
@@ -4115,19 +4102,33 @@ impl HiqliteAuthStore {
         let attempt = self.schema_migration_transaction(vec![
             (assertion, params!(previous)),
             (super::sharing_ingress_custody::declaration().to_owned(), params!()),
-            ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton=1 AND schema_version=$3".into(), params!(next, now, previous)),
+            ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton=1 AND schema_version=$3".into(), params!(SHARING_INGRESS_SCHEMA_VERSION, now, previous)),
             (format!("INSERT INTO cluster_meta(singleton) SELECT NULL WHERE NOT ({shape})"),params!()),
         ]).await;
         self.settle_migration_attempt(previous, attempt).await?;
-        let observed = self.committed_schema_version_unchecked().await?;
-        if observed != next {
+        if !self.custody_migration_settled().await? {
             return Err(StoreError::Migration(
                 "custody migration did not commit its exact target".into(),
             ));
         }
-        self.verify_compatibility(ClusterCompatibility::CURRENT)
-            .await
+        Ok(())
     }
+
+    async fn custody_migration_settled(&self) -> Result<bool, StoreError> {
+        let sql = format!("SELECT schema_version,protocol_min,protocol_max,NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sharing_ingress_custody') AS absent,CASE WHEN ({}) THEN 1 ELSE 0 END AS exact FROM cluster_meta WHERE singleton=1", super::sharing_ingress_custody::schema_guard());
+        let rows = self
+            .client()
+            // authority: marker, protocol and exact custody shape must share one settlement snapshot.
+            .query_consistent_map::<CustodyMigrationSnapshot, _>(sql, params!())
+            .await?;
+        let [snapshot] = rows.as_slice() else {
+            return Err(StoreError::Migration(
+                "missing unique custody migration snapshot".into(),
+            ));
+        };
+        custody_snapshot_settled(snapshot)
+    }
+
     async fn committed_schema_version_unchecked(&self) -> Result<i64, StoreError> {
         // authority: committed cluster marker selects the permitted migration lineage.
         let rows=self.client().query_consistent_map::<CompatibilityRow,_>(
@@ -6762,6 +6763,32 @@ struct CompatibilityRow {
     schema_version: i64,
     protocol_min: i64,
     protocol_max: i64,
+}
+
+struct CustodyMigrationSnapshot {
+    compatibility: CompatibilityRow,
+    absent: i64,
+    exact: i64,
+}
+impl From<&mut Row<'_>> for CustodyMigrationSnapshot {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            compatibility: CompatibilityRow::from(&mut *row),
+            absent: row.get("absent"),
+            exact: row.get("exact"),
+        }
+    }
+}
+fn custody_snapshot_settled(snapshot: &CustodyMigrationSnapshot) -> Result<bool, StoreError> {
+    verify_compatibility_rows(
+        vec![snapshot.compatibility.clone()],
+        ClusterCompatibility::CURRENT,
+    )?;
+    match (snapshot.compatibility.schema_version, snapshot.absent, snapshot.exact) {
+        (SHARING_SCHEMA_VERSION, 1, 0) => Ok(false),
+        (AUTH_SCHEMA_BASELINE_VERSION | AUTH_SCHEMA_VERSION, 0, 1) => Ok(true),
+        _ => Err(StoreError::Migration("custody migration requires its exact predecessor or a supported exact completed layout".into())),
+    }
 }
 
 struct LineageReadRow {
@@ -9671,6 +9698,47 @@ mod tests {
             )
             .expect("an activated cluster may still be migrated by this binary"),
             SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE)
+        );
+    }
+}
+
+#[cfg(test)]
+mod custody_settlement_tests {
+    use super::*;
+    #[test]
+    fn custody_settlement_accepts_only_exact_supported_winners_and_preserves_refusals() {
+        let snapshot = |schema_version, absent, exact| CustodyMigrationSnapshot {
+            compatibility: CompatibilityRow {
+                schema_version,
+                protocol_min: AUTH_PROTOCOL_MIN,
+                protocol_max: AUTH_PROTOCOL_MIN,
+            },
+            absent,
+            exact,
+        };
+        assert!(!custody_snapshot_settled(&snapshot(80, 1, 0)).expect("actual absent predecessor"));
+        for version in [81, 82] {
+            assert!(
+                custody_snapshot_settled(&snapshot(version, 0, 1)).expect("exact supported winner")
+            );
+            for (absent, exact) in [(1, 0), (0, 0), (1, 1)] {
+                assert!(
+                    custody_snapshot_settled(&snapshot(version, absent, exact)).is_err(),
+                    "missing or inconsistent winner shape must refuse"
+                );
+            }
+        }
+        for version in [69, 70, 71, 73, 79, 80, 83] {
+            assert!(
+                custody_snapshot_settled(&snapshot(version, 0, 1)).is_err(),
+                "private/unsupported markers or premature custody cannot be adopted"
+            );
+        }
+        let mut incompatible = snapshot(81, 0, 1);
+        incompatible.compatibility.protocol_max = AUTH_PROTOCOL_MAX + 1;
+        assert!(
+            custody_snapshot_settled(&incompatible).is_err(),
+            "exact shape cannot override incompatible protocols"
         );
     }
 }

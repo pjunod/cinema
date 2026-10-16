@@ -1126,6 +1126,19 @@ compilation is absent by the maintainer's October 11 pipeline amendment; no
 Windows success is claimed. Production deployment and the broader codec,
 caption, optical and device matrices are not inferred from these records.
 
+## October 15 inherited Android navigation prerequisite
+
+Promotion run 5228's Android instrumented suite completes 78 tests with one
+failure: the shared transport-order control expects Right from Playback
+settings to reach Playback info, but the new Report a problem button
+intercepts it. An isolated owned Android TV emulator reproduces the same
+failure in the eight-test focus class. Moving reporting after the contiguous
+standard options restores Settings → Info → Picture in picture. The same
+control now also proves Right reaches reporting afterward and Left returns
+to Picture in picture; no focus assertion is removed. All eight focus tests
+then pass on the owned API36 emulator. Failed baseline/build/test output is
+retained, and no branch app is installed on a physical device. Independent
+review, task qualification and fresh full promotion remain required.
 ## October 15 inherited Apple qualification prerequisite
 
 Full promotion run 5228 passes policy/preflight and the fast Rust compiler,
@@ -1157,3 +1170,162 @@ the failed log and raise only the effort preflight to the existing fast
 lane's finite 15-minute receipt-publication budget. Every history, policy,
 validation and operations check remains required; the full main preflight
 keeps its existing budget. The exact-head task gate must run again.
+## October 15 inherited qualification prerequisites
+
+Full promotion run 5228 preserves failures in the existing validation fixtures
+and inventories as well as the Apple and Android controls recorded separately.
+The prerequisite port takes the reviewed census, canonical cluster identity,
+production storage layout, one-voter readiness, asynchronous snapshot and
+real HLS browser fixtures from `d326ed2d648096b932b1e1bffc048b20e8d514f0`.
+It retains the production consistent-read ceiling of 237, exact transaction
+inventories, failure controls and original Makefile commands. The topology
+performs two local queries per bounded operation, so its 256 operations require
+exactly 512 local queries and zero Authority queries.
+
+The reviewed Linux UI structure comes from
+`d0433b54b98312996045913acbe0b7e12d546ff7`, SHA-256
+`5fcd0589e40ee70ca25240345256b63e239442f5d9a653d79464c2df17de3419`.
+The fixture waits for the current boot's caption probe and a stable empty child
+inventory before captures, reserves four distinct listeners and supplies real
+HLS structure. The earlier macOS capture's readiness and first-activity
+differences remain preserved; importing the Linux golden does not claim a new
+matching capture.
+
+Pinned Rust 1.97.1 workspace/all-target checking and all 84 operation contracts
+pass on the port. Focused consistent-read census, placeholder census, named
+transaction inventory, topology schema and actual one-voter bootstrap/reopen
+checks pass. All 70 macOS transport controls pass with no failures or ignored
+cases, including both new delayed-snapshot controls. The attempted Linux count
+wrapper correctly refuses 70 against 72; that failure is retained. Two cleanup
+controls are Linux-only, so the shipping Linux requirement remains exactly 72.
+Run 5228 also completes all 13 WAL snapshot-metric tests successfully before
+its stale count of ten refuses them; the guard now requires all 13. Daemon
+activity cases execute serially against the actual production storage layout.
+
+Astra approves the frozen 17-file source delta, SHA-256
+`70fad91d01c1f78b7823e4fd57c04723fa2716b2b10d25a89662cd9a007bb22b`.
+Its review leaves integration and exact-candidate task/full gates required.
+All three failed legacy Store controls reproduce the same mixed-sharing-lineage
+refusal locally. Their historical downgrade fixtures still contain later empty
+sharing tables. The port adds the existing guarded fixture rewind: it requires
+the actual baseline marker, no Source activation and zero rows in every
+inventoried sharing table before removing those disposable tables. Each of the
+three real controls then passes, including the populated three-voter fragment
+prune and playback-mutation case. Production lineage refusal is unchanged.
+The first local baseline compiler log was reused accidentally during rerun; its
+exact panic/result is retained as a labelled terminal excerpt. Both other full
+local baseline logs, all baseline result metadata and the original CI log are
+preserved. The full Rust/Store job deadlines still require a new complete run.
+
+The repaired browser fixture subsequently captures all 78 views with no page
+or console errors; all 10,597 structural facts match the reviewed golden on
+macOS as well. This uses the unchanged web/backend source surface from the
+previous local build and the corrected fixture, rather than claiming a new
+exact-candidate package build. Astra's Store caller review requests the four
+companion baseline assertions for offline-audio and read-index replay. Those
+exact assertions are ported without relaxing any guard, and both complete
+replay callers pass locally. The initial 17-file approval and this addressed
+caller finding remain separately identified.
+
+The legacy Store job in run 5228 completes only 188 of 367 serial controls
+before its 40-minute deadline, including three now-reproduced fixture failures.
+Its measured throughput projects roughly 75 minutes including compilation.
+The complete job therefore receives a finite 95-minute budget; no case,
+assertion, failure status or required receipt is removed. The full Rust job has a separate incomplete-suite deadline, recorded below.
+
+The complete local core run also exposes a macOS-only stale cached-subtitle
+expectation: the QSV graph correctly includes the explicit Fontconfig provider,
+while the test expects the platform-neutral string. Its repaired control checks
+the exact `-vf` value with the required platform provider, retains the single
+hardware download/upload and no-zscale assertions, and changes no production
+graph. The original full-suite failure and isolated panic are preserved.
+Run 5228's full Rust job likewise exhausts 30 minutes after compilation and
+1,917 unit-result rows, before the unit/SQLite receipt; its finite budget is
+60 minutes, retaining the entire suite and all required receipts.
+
+The complete core suite on the prerequisite Rust snapshot finishes in
+1,266.50 seconds: 1,880 pass, one cached-subtitle expectation fails and five
+opt-in cases are ignored. All eight earlier core failures pass in that run.
+The platform-corrected subtitle control then passes separately on the
+current-main integration (one pass, zero failures). These are separate results,
+not a claim of a fully green rerun. The new complete promotion remains required.
+
+Rechecking the current-main integration finds two additional authoritative
+managed-subtitle schema reads in `hiqlite.rs`: current shape decides whether
+replicated DDL may run, and the installed marker must agree with that shape.
+Both carry explicit authority reasons and the exact slice count becomes 48.
+The overall unannotated ceiling stays 237 and both injected-read refusal
+controls remain required. The initial integrated four-case census failure
+(two pass, two fail) is preserved alongside the corrected rerun.
+
+Task gate 5235 refuses the missing client-fix history anchor before compilation;
+its failed receipt is preserved. The exact reviewed runtime commit and its
+existing instrumented regression are now named in the client-fix catalog.
+This catalog repair adds no runtime change or new device claim.
+
+### Combined remaining qualification candidate
+
+Task 5283 refuses a malformed client catalog after the Android/main merge
+resolution loses one table separator. Reconstruct the catalog from qualified
+effort `876162e2f` plus the exact independently reviewed Android row: every
+existing entry is byte-for-value unchanged, all IDs remain unique, and the
+repository loader and source/test anchors validate locally. The reviewed
+Android source commits and original eight-test emulator proof join the
+prerequisite candidate in #1137; #1129 is superseded only after that source
+lands through the combined required gate. No failed gate is relabelled green.
+
+Complete the existing reviewed historical and actual-Source fixture imports
+from `d326ed2d648096b932b1e1bffc048b20e8d514f0`; upstream commits
+`5f4c82f38` and `9887e4d19` record their Astra review. Preserve current main's
+managed-subtitle tests and the corrected HDR reference-white assertion.
+The current-main rerun passes four of five historical controls; read-index
+replay correctly refuses the partial managed-subtitle extension left after
+its historical queue rewind. Its fixture now requires baseline/no Source,
+the current marker and complete six-object inventory, zero model receipts
+and no managed accepted work before atomically restoring the published
+predecessor resource view. Production schema guards and migrations stay
+unchanged; the recorded failed run remains evidence for the corrected rerun.
+
+
+The independent combined review requests two caller/oracle corrections: invoke
+that managed rewind for both read-index opens, and capture the full trigger
+name/SQL inventory before removing the three managed triggers. Both corrections
+retain the exact restored-definition comparison; the revised source is approved.
+The corrected complete read-index case passes locally in 10.13 seconds.
+
+The complete v32 case then reaches its retained runtime reservation assertion and
+exposes a separate production compatibility omission: the closed predecessor
+inventory lacks the exact published v18/v31 session declarations after their
+real additive migrations. Import the two pinned SQL variants and their existing
+regression from `a06e00e10`, without admitting arbitrary layouts. The test keeps
+historical row values and additive defaults, and refuses a substituted owner
+constraint or extra index. Independent review verifies published provenance and
+approves this narrow compatibility delta. Its focused execution and the fresh
+exact-candidate gates remain separate requirements; the failed reservation log
+is preserved.
+
+
+The wider affected-case run preserves six additional failures: repeated
+bootstrap replaces an installed managed resource view, two SQLite downgrade
+fixtures retain the newer managed extension, and concurrent lineage migration
+can reject a genuine custody-migration winner. All ten actual selected Source
+runtime cases pass in that run. No complete-suite success is claimed.
+
+Main #1140 lands while task gate 5293 starts, invalidating that gate's
+main-to-effort ancestry. Its simpler non-destructive bootstrap creates the
+probe-era view before the older resource installer and omits the migration-only
+DROP. Adopt that exact main implementation: IF NOT EXISTS preserves an existing
+managed view across retries and concurrent bootstraps, while final strict shape
+verification remains required. The full retry scenario retains its model
+receipt, accepted job, resource obligation and exact-view assertions. The earlier
+reviewed guarded candidate and its two superseded helper tests remain preserved
+in private evidence archive 106; they do not describe the final implementation.
+The extra bootstrap shape read is removed, restoring that census slice to two;
+the overall unannotated ceiling stays 237.
+SQLite queue rewinds require current version 111, no Source installation,
+exact managed objects/marker and no accepted managed work or receipts before
+atomically restoring the published predecessor. Custody settlement reads its
+marker, protocol and exact schema together: only absent predecessor 80 may
+migrate, and only exact supported 81/82 may settle a concurrent winner. The
+same-write predecessor and post-DDL shape assertions remain required. These
+repairs require new independent review and focused qualification.
