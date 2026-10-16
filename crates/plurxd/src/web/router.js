@@ -75,6 +75,7 @@ async function render(){
   // route change must not become a request.
   if(!DVR_REMINDER_TIMER) DVR_REMINDER_TIMER=setInterval(pollDvrReminders,30000);
   let h=location.hash||"#/";
+  h=normalizeActivityJobRoute(h);
   if(!h.startsWith("#/recordings")&&h!=="#/activity"){clearTimeout(DVR_PAGE.historyTimer);DVR_PAGE.historyTimer=null;}
   if(h!=="#/live-tv") liveTvLeaveRoute();
   if(!h.startsWith("#/read/")&&READER) destroyReader(true);

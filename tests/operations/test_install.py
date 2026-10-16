@@ -70,7 +70,7 @@ class Host:
         self.sysbin.mkdir()
         for tool in (
             "awk", "bash", "cat", "chmod", "cp", "dirname", "env", "find", "grep", "head", "mkdir", "mktemp", "mv",
-            "printf", "rm", "sed", "sh", "sleep", "tail", "tr", "uname",
+            "printf", "rm", "rmdir", "sed", "sh", "sleep", "tail", "tr", "uname",
         ):
             found = shutil.which(tool)
             if found:
@@ -83,6 +83,17 @@ class Host:
         self.destdir.mkdir()
         self.fake_binary = tmp / "plurxd-prebuilt"
         write_executable(self.fake_binary, "#!/bin/sh\necho plurxd 0.0.0-test\n")
+        self.subtitle_engine = tmp / "subtitle-engine"
+        self.subtitle_engine.mkdir()
+        for name in ["whisper-cli", "subtitle-engine.json", "self-test.wav", "whisper.cpp.LICENSE.txt", "whisper-models.LICENSE.txt"]:
+            (self.subtitle_engine / name).write_text("qualified fixture\n")
+        # Installer ordering/atomic copy tests stub verification; the dedicated
+        # subtitle engine suite exercises the real digest/length verifier.
+        write_executable(self.bin / "bash", '#!/bin/bash\n'
+            'case "$1" in */verify-subtitle-engine)\n'
+            f'printf "verify-subtitle-engine %s\\n" "$2" >> "{self.log}"\n'
+            'test -f "$2/whisper-cli" && grep -q qualified "$2/whisper-cli" ;;\n'
+            '*) exec /bin/bash "$@" ;; esac\n')
         # Every stub appends `name args...` to the log; specific stubs add
         # behaviour on top.
         self.stub("sudo", 'exec "$@"\n')
@@ -149,7 +160,8 @@ class Host:
         return [line for line in self.log.read_text(encoding="utf-8").splitlines() if line]
 
     def run(
-        self, *args: str, env: dict[str, str] | None = None, installer: Path = INSTALL, unprivileged: bool = False
+        self, *args: str, env: dict[str, str] | None = None, installer: Path = INSTALL, unprivileged: bool = False,
+        subtitle_fixture: bool = True
     ) -> subprocess.CompletedProcess[str]:
         """Run the installer. `unprivileged` makes file permissions real: a
         suite running as root (CI containers do) runs the installer as the
@@ -170,6 +182,8 @@ class Host:
             "LC_ALL": "C",
         }
         merged.update(env or {})
+        if subtitle_fixture and not any(mode in args for mode in ["linux", "docker", "binary", "windows", "--uninstall"]):
+            args = (*args, "--subtitle-engine-package", str(self.subtitle_engine))
         return subprocess.run(
             [str(installer), *args],
             cwd=self.tmp,
@@ -183,7 +197,7 @@ class Host:
 
 class InstallerCase(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="plurx-install-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="plurx-install-")).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.host = Host(self.tmp)
 
@@ -350,6 +364,56 @@ class InstallerCase(unittest.TestCase):
 
     # ---- macos ----------------------------------------------------------------
 
+    def test_macos_subtitle_bundle_stages_before_stop_and_rolls_back_failed_promotion(self):
+        self.host.stub("launchctl", "")
+        prefix = self.tmp / "prefix"
+        previous = prefix / "bin/subtitle-engine"
+        previous.mkdir(parents=True)
+        (previous / "whisper-cli").write_text("qualified prior engine")
+        (previous / "subtitle-engine.json").write_text("prior manifest")
+        model = self.host.home / "Library/Application Support/plurx/subtitle-models/kept.bin"
+        model.parent.mkdir(parents=True)
+        model.write_bytes(b"prior working model")
+        self.host.stub("mv", 'case "$1" in */.subtitle-engine-stage.*) exit 28 ;; *) exec /bin/mv "$@" ;; esac\n')
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((previous / "whisper-cli").read_text(), "qualified prior engine")
+        self.assertEqual((previous / "subtitle-engine.json").read_text(), "prior manifest")
+        self.assertEqual(model.read_bytes(), b"prior working model")
+        self.assertOrdered(self.host.calls(), "verify-subtitle-engine", "launchctl bootout", "mv ", "launchctl bootout")
+        self.assertEqual(list((prefix / "bin").glob(".subtitle-engine-*")), [])
+
+    def test_macos_failed_fresh_subtitle_promotion_leaves_no_installed_bundle(self):
+        self.host.stub("launchctl", "")
+        self.host.stub("mv", 'case "$1" in */.subtitle-engine-stage.*) exit 28 ;; *) exec /bin/mv "$@" ;; esac\n')
+        prefix = self.tmp / "prefix"
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((prefix / "bin/subtitle-engine").exists())
+        self.assertFalse((prefix / "bin/plurxd").exists())
+        self.assertEqual(list((prefix / "bin").glob(".subtitle-engine-*")), [])
+
+    def test_macos_corrupt_subtitle_package_does_not_stop_existing_service(self):
+        self.host.stub("launchctl", "")
+        (self.host.subtitle_engine / "whisper-cli").write_text("corrupt package")
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(self.tmp / "prefix"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("existing installation kept", result.stderr)
+        self.assertFalse(any(call.startswith("launchctl ") for call in self.host.calls()))
+
+    def test_macos_failed_subtitle_staging_keeps_old_bundle_and_running_agent(self):
+        self.host.stub("launchctl", "")
+        self.host.stub("cp", f'case "$*" in *"{self.host.subtitle_engine}/."*) exit 28 ;; *) exec /bin/cp "$@" ;; esac\n')
+        prefix = self.tmp / "prefix"
+        old = prefix / "bin/subtitle-engine"
+        old.mkdir(parents=True)
+        (old / "whisper-cli").write_bytes(b"prior engine")
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((old / "whisper-cli").read_bytes(), b"prior engine")
+        self.assertFalse(any(call.startswith("launchctl ") for call in self.host.calls()))
+        self.assertEqual(list((prefix / "bin").glob(".subtitle-engine-*")), [])
+
     def test_macos_install_renders_the_agent_for_this_user_and_bootstraps_it(self):
         self.host.stub("launchctl", 'case "$1" in bootout) exit 3 ;; print) echo "state = running" ;; esac\n')
         prefix = self.tmp / "homebrew"
@@ -406,6 +470,7 @@ class InstallerCase(unittest.TestCase):
         archive = self.tmp / "plurxd-0.0.0-macos-universal"
         archive.mkdir()
         shutil.copy2(INSTALL, archive / "install")
+        shutil.copy2(ROOT / "deploy/verify-subtitle-engine", archive / "verify-subtitle-engine")
         shutil.copy2(ROOT / "deploy/com.plurx.plurxd.plist", archive / "com.plurx.plurxd.plist")
         shutil.copy2(self.host.fake_binary, archive / "plurxd")
         prefix = self.tmp / "homebrew"

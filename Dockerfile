@@ -102,6 +102,24 @@ RUN python3 /usr/lib/plurx/dv-processing/sources/bundle-manifest.py \
       test "$status" -eq 1 && grep -q 'usage:' /tmp/helper.err || exit 1; \
     done && rm /tmp/helper.out /tmp/helper.err
 
+# Source-built portable recognizer. Static whisper/ggml and no OpenMP, BLAS or
+# GPU backend keep the service child independent of user PATH/loader settings.
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS subtitle-engine-build
+ARG DEBIAN_SNAPSHOT=20260928T000000Z
+RUN sed -i \
+      -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/'"${DEBIAN_SNAPSHOT}"'/|' \
+      -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/'"${DEBIAN_SNAPSHOT}"'/|' \
+      /etc/apt/sources.list.d/debian.sources \
+    && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake python3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/build-subtitle-engine scripts/subtitle-engine-manifest.json /src/scripts/
+COPY licenses/whisper.cpp.LICENSE.txt licenses/whisper-models.LICENSE.txt /src/licenses/
+COPY crates/plurxd/src/subtitle_models/self-test.wav /src/crates/plurxd/src/subtitle_models/
+RUN python3 /src/scripts/build-subtitle-engine --output /opt/subtitle-engine --jobs 2 \
+    && python3 /src/scripts/build-subtitle-engine --verify /opt/subtitle-engine
+
 # Pinned by digest for the same reason, and with more at stake: this layer
 # is the shipped image's entire userland, and `bookworm-slim` moves under
 # the same tag on every Debian point release.
@@ -265,6 +283,14 @@ RUN if [ "$TARGETARCH" = amd64 ]; then \
       sh /tmp/register-vulkan-driver.sh /usr/lib/jellyfin-ffmpeg /usr/share/vulkan/icd.d; \
     fi && rm /tmp/register-vulkan-driver.sh
 COPY --from=dv-processing-helpers /opt/dv-bundle /usr/lib/plurx/dv-processing
+COPY --from=subtitle-engine-build /opt/subtitle-engine/ /usr/local/bin/subtitle-engine/
+# The recognizer must load as the same non-root service account, with no
+# user-supplied PATH or dynamic-library environment. Model install performs
+# the real fixture transcription before claiming worker readiness.
+USER plurx
+RUN env -i LC_ALL=C /usr/local/bin/subtitle-engine/whisper-cli --version \
+    | grep -Fx 'whisper.cpp version: 1.9.2'
+USER root
 
 # M5's CI image uses the shipped runtime's media assets, not a second ffmpeg
 # install on a persistent runner. These two tool images are pinned by index

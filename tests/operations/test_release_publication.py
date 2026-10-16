@@ -225,6 +225,11 @@ class ReleasePublicationContractCase(unittest.TestCase):
         self.assertNotIn("FROM runtime-assets AS ci", generated)
         self.assertNotIn("cargo build", generated)
         self.assertNotIn("COPY --from=build", generated)
+        self.assertIn("AS subtitle-engine-build", generated)
+        self.assertIn("COPY --from=subtitle-engine-build /opt/subtitle-engine/ /usr/local/bin/subtitle-engine/", generated)
+        # This audio asset cannot broaden the exception to any daemon source.
+        with self.assertRaisesRegex(ValueError, "daemon's sources"):
+            render((ROOT / "Dockerfile").read_text().replace("crates/plurxd/src/subtitle_models/self-test.wav", "crates/plurxd/src/subtitle_transcription.rs"))
 
     def test_digest_bound_release_omits_mutable_runtime_install(self):
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
