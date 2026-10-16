@@ -4375,6 +4375,7 @@ async fn background_subtitles_replicated_ready_orphans_are_refused_and_retired()
         .split("-- next statement\n")
         .find(|sql| sql.contains("CREATE TRIGGER IF NOT EXISTS background_subtitle_settled"))
         .expect("predecessor projection trigger");
+    super::drop_later_sharing_schema_from_historical_fixture(&client).await;
     super::downgrade_dv_request_provenance(&client).await;
     for result in client
         .txn(vec![
@@ -4526,6 +4527,7 @@ async fn background_jobs_replicated_settled_history_yields_after_the_v63_upgrade
             .expect("predecessor trigger")
             .to_owned()
     };
+    super::drop_later_sharing_schema_from_historical_fixture(&client).await;
     super::downgrade_dv_request_provenance(&client).await;
     for result in client
         .txn(vec![

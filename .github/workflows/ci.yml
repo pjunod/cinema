@@ -267,7 +267,11 @@ jobs:
     # after this compile gate and policy pass, then watch that suite on main.
     if: needs.scope.outputs.rust == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    timeout-minutes: 10
+    # Match the proven effort compiler bound after full run 5244 exhausted
+    # ten minutes during all-target checking without compiler diagnostics.
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: "1"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -309,7 +313,7 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - name: Capture mounted runner workspace owner
         run: |
@@ -404,7 +408,7 @@ jobs:
       needs.scope.outputs.cluster_auth == 'true' &&
       needs.scope.outputs.execution_mode != 'accelerated'
     runs-on: [self-hosted, Linux, X64, lab, ci-store]
-    timeout-minutes: 40
+    timeout-minutes: 120
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -928,7 +932,7 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

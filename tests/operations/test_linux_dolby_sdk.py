@@ -371,6 +371,14 @@ class LinuxDolbySdkCase(unittest.TestCase):
             assert not row["url"].endswith(".git")
             if row.get("historical_archive_equivalence"):
                 assert row["source_tree_sha256"] == row["historical_archive_equivalence"]["normalized_tree_sha256"]
+        fc = lock["sources"]["fc"]
+        assert fc["url"] == "https://codeload.github.com/fontconfig/fontconfig/legacy.tar.gz/" + fc["commit"]
+        assert fc["archive_sha256"] == "e677cb8c8062e1b51878b491edaba35aa00566634099eb66fc18e2ecafd8d650"
+        assert fc["historical_archive_equivalence"]["archive_sha256"] == "00a589ef0a455d9cf3db55a13e1aa15090a96e65b18a3fe89c182b7be277576d"
+        assert fc["historical_archive_equivalence"]["files"] == 618
+        assert fc["source_tree_sha256"] == "6edd985143c1d5a8b8800bc0096522e925a11eb819e92f74f64348194a33bf5b"
+        assert fc["generator"]["source_root"] == "fontconfig-fontconfig-6d0a989"
+        assert fc["license_members"] == [fc["generator"]["source_root"] + "/COPYING"]
         assert {module["path"] for module in lock["sources"]["freetype"]["submodules"]} == {"subprojects/dlg"}
         placebo = lock["sources"]["libplacebo"]
         assert {module["path"] for module in placebo["submodules"]} == {"3rdparty/glad", "3rdparty/jinja", "3rdparty/markupsafe", "3rdparty/fast_float", "3rdparty/Vulkan-Headers"}

@@ -545,7 +545,7 @@ def free_ports(preferred, count):
 
     Holding every socket until the set is complete prevents a concurrent
     Forgejo job (or the kernel's ephemeral allocator) from handing the same
-    port back for the daemon's HTTP, Raft, and cluster API listeners.
+    port back for the daemon's HTTP, Raft, cluster API, and Jellyfin listeners.
     """
     reservations = []
     try:
@@ -657,9 +657,10 @@ class SelfHost:
         self.media_dir = Path(args.out).resolve() / "media"
         self.config = self.root / "plurx.toml"
         self.log = self.root / "plurxd.log"
-        # The same three ports stay in the config across all three deliberate
-        # boots. A shared runner may already own the daemon defaults 32401/2.
-        self.port, self.raft_port, self.api_port = free_ports(args.port, 3)
+        # The same four ports stay in the config across all three deliberate
+        # boots. Shared runners may own the cluster defaults or Jellyfin 8096;
+        # readiness must describe this fixture's own real listeners.
+        self.port, self.raft_port, self.api_port, self.jellyfin_port = free_ports(args.port, 4)
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.proc = None
         self.token = None
@@ -726,7 +727,8 @@ class SelfHost:
         self.data_dir.mkdir(parents=True)
         self.config.write_text(
             "# Written by scripts/ui-baseline --self-host. Throwaway.\n"
-            f'[server]\nname = "plurx"\nbind = "127.0.0.1:{self.port}"\n\n'
+            f'[server]\nname = "plurx"\nbind = "127.0.0.1:{self.port}"\n'
+            f'jellyfin_port = {self.jellyfin_port}\n\n'
             f'[cluster]\nraft_bind = "127.0.0.1:{self.raft_port}"\n'
             f'api_bind = "127.0.0.1:{self.api_port}"\n\n'
             f'[storage]\ndata_dir = "{self.data_dir}"\n'

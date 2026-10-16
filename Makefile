@@ -1161,7 +1161,7 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-contracts
 cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=67 scripts/require-test-count $(CARGO) test --locked \
+	PLURX_EXPECT_TEST_COUNT=70 scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery --lib
 	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
 	  transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly \

@@ -616,12 +616,13 @@ assert.equal(context.ACT_TIMER, null);
         contract = runpy.run_path(
             str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_port_contract"
         )
-        ports = contract["free_ports"](0, 3)
+        ports = contract["free_ports"](0, 4)
 
-        self.assertEqual(len(ports), 3)
-        self.assertEqual(len(set(ports)), 3)
+        self.assertEqual(len(ports), 4)
+        self.assertEqual(len(set(ports)), 4)
         self.assertTrue(all(port > 0 for port in ports))
-        self.assertIn("self.port, self.raft_port, self.api_port = free_ports", script)
+        self.assertIn("self.port, self.raft_port, self.api_port, self.jellyfin_port = free_ports", script)
+        self.assertIn('jellyfin_port = {self.jellyfin_port}', script)
         self.assertIn('raft_bind = "127.0.0.1:{self.raft_port}"', script)
         self.assertIn('api_bind = "127.0.0.1:{self.api_port}"', script)
 
@@ -2264,18 +2265,23 @@ assert.equal(context.ACT_TIMER, null);
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
         # Whole-job budget includes checkout/toolchain/cache setup plus the
         # unchanged all-target compile and vendored denied-warning Clippy.
-        self.assertRegex(effort_jobs["rust_compile"], r"(?m)^    timeout-minutes: 20$")
-        effort_rust_env = re.search(
-            r"(?ms)^    env:\n(.*?)(?=^    \S)", effort_jobs["rust_compile"]
-        )
-        self.assertIsNotNone(
-            effort_rust_env, "effort compilation must bound Cargo concurrency at job scope"
-        )
-        self.assertEqual(
-            [line.strip() for line in effort_rust_env.group(1).splitlines()
-             if line.strip() and not line.strip().startswith("#")],
-            ['CARGO_BUILD_JOBS: "1"'],
-        )
+        full_jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        for lane, rust_job in (("effort", effort_jobs["rust_compile"]),
+                               ("full compiler", full_jobs["rust_compile"])):
+            with self.subTest(lane=lane):
+                self.assertRegex(rust_job, r"(?m)^    timeout-minutes: 20$")
+                rust_env = re.search(r"(?ms)^    env:\n(.*?)(?=^    \S)", rust_job)
+                self.assertIsNotNone(rust_env, "bound Cargo concurrency at job scope")
+                self.assertEqual(
+                    [line.strip() for line in rust_env.group(1).splitlines()
+                     if line.strip() and not line.strip().startswith("#")],
+                    ['CARGO_BUILD_JOBS: "1"'],
+                )
+        full_compile_steps = workflow_step_blocks(full_jobs["rust_compile"])
+        self.assertEqual(workflow_step_scalar(
+            full_compile_steps["Compile every Rust target without executing tests"], "run"
+        ), "make effort-rust-check")
+        self.assertRegex(full_jobs["check"], r"(?m)^    timeout-minutes: 90$")
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
         # PR #962 raised the main fast lane's preflight to fifteen minutes so
         # its receipt publications finish; the effort gate keeps ten.
@@ -2942,6 +2948,29 @@ assert.equal(context.ACT_TIMER, null);
             makefile,
         )
 
+    def test_full_runtime_job_allowances_preserve_the_existing_suites(self):
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        for name, minutes in (("check", 90), ("cluster_store_legacy", 120), ("cluster_wal", 60)):
+            with self.subTest(job=name):
+                self.assertRegex(jobs[name], rf"(?m)^    timeout-minutes: {minutes}$")
+                self.assertNotIn("CARGO_BUILD_JOBS", jobs[name])
+        unit = workflow_step_blocks(jobs["check"])
+        self.assertEqual(workflow_step_scalar(
+            unit["Run format, Clippy, unit, and SQLite contracts"], "run"), "make ci-rust-gate")
+        store = workflow_step_blocks(jobs["cluster_store_legacy"])
+        self.assertEqual(
+            "\n".join(workflow_step_literal(store["Run replicated Store contracts"], "run")).rstrip(),
+            "set -euo pipefail\nmkdir -p target/validation\n"
+            "make cluster-store-check 2>&1 | tee target/validation/cluster-store.log",
+        )
+        wal = workflow_step_blocks(jobs["cluster_wal"])
+        self.assertEqual(workflow_step_scalar(
+            wal["Run exact Hiqlite and WAL recovery regressions"], "run"), "make cluster-wal-check")
+        self.assertIn("execution_mode != 'accelerated'", jobs["cluster_store_legacy"])
+        makefile = read("Makefile")
+        self.assertIn("--test store_contract -- --test-threads=1", makefile)
+        self.assertIn("--features cluster-read-cost-validation,hiqlite-contract-tests", makefile)
+
     def test_store_shards_are_dynamic_disjoint_and_roll_out_behind_one_verdict(self):
         workflow = read(".github/workflows/ci.yml")
         shards = read(".github/workflows/store-shards.yml")
@@ -3399,7 +3428,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(contract_commands), 14)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=67", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=70", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
         exact_regressions = (

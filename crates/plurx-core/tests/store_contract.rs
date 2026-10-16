@@ -12518,15 +12518,57 @@ async fn downgrade_dv_request_provenance(client: &Client) {
         .expect("commit provenance rewind");
 }
 
+// Only for disposable historical fixtures bootstrapped from today's empty
+// sharing schema: these predecessors predate sharing entirely. Retaining those
+// later objects while rewinding the marker fabricates the ambiguous private
+// lineage that production correctly refuses. Never use this as migration repair
+// for an existing database: its sharing records must not be discarded.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn drop_later_sharing_schema_from_historical_fixture(client: &Client) {
+    let mut rows = client
+        .query_consistent(
+            "SELECT type,name FROM sqlite_master WHERE type IN ('trigger','view','table') \
+             AND (name GLOB 'sharing_*' OR (type='trigger' AND instr(sql,'sharing_')>0)) \
+             ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read later sharing schema in disposable historical fixture");
+    assert!(
+        !rows.is_empty(),
+        "current fixture must contain later sharing schema"
+    );
+    let statements = rows
+        .iter_mut()
+        .map(|row| {
+            let kind = row.get::<String>("type");
+            let name = row.get::<String>("name");
+            (
+                format!("DROP {} \"{}\"", kind, name.replace('"', "\"\"")),
+                hiqlite::params!(),
+            )
+        })
+        .collect::<Vec<_>>();
+    client
+        .txn(statements)
+        .await
+        .expect("rewind disposable sharing schema")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit disposable sharing schema rewind");
+}
+
 // Background job objects (v49+) and sharing (v70) did not exist in v27/v31.
 // Keeping them blocks old column removal/table rebuilds and leaves extension
 // columns/tables that forward migration would add a second time. These fixtures
-// seed no extension rows; remove the later schema and retain the full background
-// trigger inventory as proof that actual migration restores it.
+// seed no extension rows; remove the later schema. The two later Jellyfin
+// watch triggers also reference media_sessions while old fixtures replace it.
+// Retain the background and removed watch-trigger inventory as proof that
+// actual forward migration restores every trigger.
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn drop_post_v39_extension_schema(client: &Client) -> Vec<String> {
     let mut rows = client
-        .query_consistent("SELECT type,name FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
+        .query_consistent("SELECT type,name FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
         .await.expect("read later background schema inventory");
     let mut triggers = Vec::new();
     let statements = rows
@@ -12674,6 +12716,27 @@ async fn downgrade_current_schema_after_request_identity(client: &Client) {
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn downgrade_current_schema_after_producer_recovery(client: &Client) -> Vec<String> {
     let triggers = drop_post_v39_extension_schema(client).await;
+    // Reconstruct a genuine v31 session declaration. Removing only the latest
+    // column from today's inline declaration fabricates a hybrid no historical
+    // migration produced, which the exact ownership-layout guard must refuse.
+    let sessions: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM media_sessions",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("count disposable historical sessions");
+    assert_eq!(
+        sessions[0].value, 0,
+        "only rebuild an empty historical session fixture"
+    );
+    let mut session_objects = client.query_consistent(
+        "SELECT sql FROM sqlite_master WHERE tbl_name='media_sessions' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name", hiqlite::params!(),
+    ).await.expect("retain exact session indexes and triggers");
+    let session_objects = session_objects
+        .iter_mut()
+        .map(|row| row.get::<String>("sql"))
+        .collect::<Vec<_>>();
     let mut statements = post_v39_downgrade_statements();
     statements.extend([
         (
@@ -12704,11 +12767,30 @@ async fn downgrade_current_schema_after_producer_recovery(client: &Client) -> Ve
             "ALTER TABLE offline_packages DROP COLUMN claim_generation",
             hiqlite::params!(),
         ),
+        ("DROP TABLE media_sessions", hiqlite::params!()),
+        (MEDIA_SESSIONS_V10_TO_V15_FIXTURE_SCHEMA, hiqlite::params!()),
         (
-            "ALTER TABLE media_sessions DROP COLUMN recovery_epoch",
+            "ALTER TABLE media_sessions ADD COLUMN terminal_reason TEXT
+        CHECK (terminal_reason IN
+          ('deleted', 'superseded', 'admin_stop', 'revoked', 'replaced'))",
             hiqlite::params!(),
         ),
+        (
+            "ALTER TABLE media_sessions ADD COLUMN publication_ready_at_ms INTEGER NOT NULL DEFAULT 0
+        CHECK (publication_ready_at_ms >= 0)",
+            hiqlite::params!(),
+        ),
+        ("ALTER TABLE media_sessions ADD COLUMN drain_deadline_ms INTEGER", hiqlite::params!()),
     ]);
+    let mut statements = statements
+        .into_iter()
+        .map(|(sql, params)| (sql.to_owned(), params))
+        .collect::<Vec<_>>();
+    statements.extend(
+        session_objects
+            .into_iter()
+            .map(|sql| (sql, hiqlite::params!())),
+    );
     let results = client
         .txn(statements)
         .await
@@ -12917,7 +12999,7 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('reading_state')",
@@ -13885,7 +13967,7 @@ async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('analysis_requests')
@@ -13917,6 +13999,7 @@ async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
     // `settle_migration_attempt` should forgive: no other voter finished the
     // step, so the tree is inconsistent and the daemon must refuse rather
     // than carry on against a schema it cannot account for.
+    drop_later_sharing_schema_from_historical_fixture(&client).await;
     client
         .execute(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
@@ -14024,7 +14107,7 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master
@@ -14048,7 +14131,7 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
     }
 
     let mut trigger_rows = client.query_consistent(
-        "SELECT name FROM sqlite_master WHERE type='trigger' AND (name GLOB 'background_*' OR instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0) ORDER BY name",
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND (name GLOB 'background_*' OR instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0 OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update')) ORDER BY name",
         hiqlite::params!()).await.expect("read restored background trigger inventory");
     let restored_triggers = trigger_rows
         .iter_mut()
@@ -14056,7 +14139,7 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
         .collect::<Vec<_>>();
     assert_eq!(
         restored_triggers, expected_background_triggers,
-        "historical migration must restore every current background trigger"
+        "historical migration must restore every current background and removed watch trigger"
     );
 
     // The migrated store is the working store, not merely a shaped one.
@@ -14099,7 +14182,7 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
         .await
         .expect("inspect the marker after the repeated attempt");
     assert_eq!(
-        rows[0].value, AUTH_SCHEMA_VERSION,
+        rows[0].value, AUTH_SCHEMA_BASELINE_VERSION,
         "the repeated attempt moves the marker rather than refusing"
     );
     assert_eq!(
@@ -14192,7 +14275,7 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('cluster_fragment_index_jobs')
@@ -14224,6 +14307,7 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
     // `settle_migration_attempt` should forgive: no other voter finished the
     // step, so the tree is inconsistent and the daemon must refuse rather
     // than carry on against a schema it cannot account for.
+    drop_later_sharing_schema_from_historical_fixture(&client).await;
     client
         .execute(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
@@ -14439,7 +14523,7 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('dv_conversions')",
@@ -14841,7 +14925,7 @@ async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('items') \
@@ -15041,7 +15125,7 @@ async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('job_leases')",
@@ -15229,7 +15313,7 @@ async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('pretranscode_jobs')",
@@ -15421,7 +15505,7 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
@@ -15670,7 +15754,7 @@ async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('transcode_cache_locations') \
@@ -15893,7 +15977,7 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
@@ -16227,7 +16311,7 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
@@ -16368,7 +16452,7 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT
@@ -22129,6 +22213,7 @@ async fn fragment_prune_worst_case_keeps_three_voter_proofs_and_playback_mutatio
     {
         result.expect("workload statement");
     }
+    drop_later_sharing_schema_from_historical_fixture(&client).await;
     client
         .txn(vec![
             (
@@ -32968,6 +33053,7 @@ async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixt
     // Marker 65 replays every step to the head, and the 67→68 step adds
     // `dv_conversions.requested_manually` unconditionally: rewind that shape
     // too, or the replay fails before it reaches the audio step (69→70).
+    drop_later_sharing_schema_from_historical_fixture(&client).await;
     downgrade_dv_request_provenance(&client).await;
     client
         .txn([
@@ -32989,7 +33075,10 @@ async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixt
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("offline audio contract operation");
-    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_schema_marker(&client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
     let stored = migrated
         .offline_package_for_user(&legacy.id, user_id)
         .await
@@ -33002,6 +33091,7 @@ async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixt
     // The second rewind leaves `audio_recipe` in place: the audio step must
     // tolerate its own column on replay. Provenance is rewound again because
     // its step is not replay-tolerant and is not what this test is about.
+    drop_later_sharing_schema_from_historical_fixture(&client).await;
     downgrade_dv_request_provenance(&client).await;
     client
         .txn([(
@@ -33016,7 +33106,10 @@ async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixt
     HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("additive column replay");
-    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_schema_marker(&client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
 }
 
 #[tokio::test]
@@ -37542,6 +37635,7 @@ async fn replicated_schema_marker(client: &Client) -> i64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     async fn rewind_non_idempotent_columns(client: &Client) {
+        drop_later_sharing_schema_from_historical_fixture(client).await;
         downgrade_dv_request_provenance(client).await;
         // v60 also adds a column. Remove its dependent triggers before replaying
         // that step, including when the v48 index migration itself is a no-op.
@@ -37628,7 +37722,10 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v47 through v48 read-index migration");
-    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_schema_marker(&client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
     assert_eq!(
         replicated_read_index_count(&client).await,
         3,
@@ -37650,7 +37747,10 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     let reopened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("an idempotent step forgives a repeated attempt");
-    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_schema_marker(&client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
     assert_eq!(replicated_read_index_count(&client).await, 3);
     assert_read_index_movie(&reopened, "hiqlite replayed v48", library_id, movie).await;
 }

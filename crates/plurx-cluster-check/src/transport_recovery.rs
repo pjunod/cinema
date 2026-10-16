@@ -26,8 +26,9 @@ use tokio::task::JoinHandle;
 
 use super::topology::{resolve_build_sha, resolve_embedded_build_sha, unix_ms};
 use super::{
-    allocate_nodes, harness_executable, wait_for_protocol_pending, with_port_retry,
-    ClusterProcesses, NodeLaunch, NodeProcess, NodeSpec, Request, Response, API_SECRET,
+    allocate_nodes, fixture_node_id, harness_executable, wait_for_protocol_pending,
+    with_port_retry, ClusterProcesses, NodeLaunch, NodeProcess, NodeSpec, Request, Response,
+    API_SECRET,
 };
 use crate::transport_recovery_diagnostics::{
     classify_failure, CleanupSummary, DiagnosticContracts, DiagnosticOutcome, FailureClass,
@@ -1577,7 +1578,7 @@ async fn admit_learner(
                         request: RedeemJoinRequest {
                             token_digest: join_token_digest(&issued.token),
                             raft_id: TARGET_NODE,
-                            node_id: format!("node-{TARGET_NODE}"),
+                            node_id: fixture_node_id(TARGET_NODE),
                             hostname: format!("cluster-node-{TARGET_NODE}"),
                             raft_address: target.raft.clone(),
                             api_address: target.api.clone(),
@@ -1661,7 +1662,7 @@ async fn admit_learner(
                         request: FinalizeJoinRequest {
                             token_digest: join_token_digest(&issued.token),
                             raft_id: TARGET_NODE,
-                            node_id: format!("node-{TARGET_NODE}"),
+                            node_id: fixture_node_id(TARGET_NODE),
                         },
                     },
                 )

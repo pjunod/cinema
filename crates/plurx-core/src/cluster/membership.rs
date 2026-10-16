@@ -7232,6 +7232,28 @@ impl MembershipManager {
         original: Option<&StartupActivationAdmission>,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
+        self.publish_http_url_claim_admitted(&inner.artwork_http, original)
+            .await
+    }
+
+    /// Exercise real URL ownership with the installed manager, without
+    /// constructing another removal owner. Absent from production builds.
+    #[cfg(feature = "cluster-validation")]
+    #[doc(hidden)]
+    pub async fn validation_publish_http_url(
+        &self,
+        artwork_http: &str,
+    ) -> Result<(), MembershipError> {
+        self.publish_http_url_claim_admitted(artwork_http, None)
+            .await
+    }
+
+    async fn publish_http_url_claim_admitted(
+        &self,
+        artwork_http: &str,
+        original: Option<&StartupActivationAdmission>,
+    ) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
         // The ownership check belongs in the serialized Raft statement rather
         // than a UNIQUE table constraint. Existing M3 clusters already have
         // this table without that constraint, and may temporarily contain the
@@ -7273,7 +7295,7 @@ impl MembershipManager {
                        public_http_url = excluded.public_http_url \
                      RETURNING node_id"
                         .to_owned(),
-                    params!(inner.identity.node_id.as_str(), inner.artwork_http.as_str()),
+                    params!(inner.identity.node_id.as_str(), artwork_http),
                 ),
                 (
                     "INSERT INTO cluster_node_http_claims (node_id, public_http_url) \
@@ -7282,7 +7304,7 @@ impl MembershipManager {
                         .to_owned(),
                     vec![
                         Param::StmtOutputNamed(0, "node_id".into()),
-                        Param::Text(inner.artwork_http.clone()),
+                        Param::Text(artwork_http.to_owned()),
                     ],
                 ),
             ])
@@ -7294,7 +7316,7 @@ impl MembershipManager {
             Err(error) if error.to_string().contains("StmtIndex(") => {
                 return Err(MembershipError::Internal(format!(
                     "artwork URL {} conflicts with an existing node claim",
-                    inner.artwork_http
+                    artwork_http
                 )));
             }
             Err(error) => return Err(error.into()),

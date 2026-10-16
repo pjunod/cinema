@@ -231,7 +231,7 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// forbidden — it has to be looked at, and this number updated, which is what
 /// stops a whole statement from disappearing behind an interpolation.
 ///
-/// The eight today, each spliced into a host this census does judge:
+/// The ten today, each spliced into a host this census or its composition regression judges:
 /// `hiqlite_media.rs`'s two `GENRE` predicates (into the item count and the
 /// item page), `hiqlite_durable.rs`'s two membership tombstone arms (into the
 /// offline-package insert, once per arm), and `hiqlite.rs`'s
@@ -250,7 +250,12 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// `SELECT {…}`, by `replicated_generation_guard_matches_only_canonical_integer_state`;
 /// that is a `#[cfg(test)]` fixture bound by rusqlite's positional `params!`,
 /// stripped before this census runs, and not a replicated statement.
-const EXPECTED_FRAGMENTS: usize = 8;
+// Root removal adds GUARD (expanded into its host from the actual constant)
+// and the dynamically numbered lease fence. The generic scanner does not
+// expand its named paths_are helper binding or the later fence replacement;
+// root_removal_composition_preserves_placeholder_order validates the actual
+// complete statements for both fenced and unfenced construction instead.
+const EXPECTED_FRAGMENTS: usize = 10;
 
 /// One Rust string literal, with its escapes decoded.
 #[derive(Clone)]
@@ -1004,7 +1009,32 @@ fn principal_templates(
 ) -> Vec<String> {
     if !matches!(module, "hiqlite_sessions.rs" | "sessions.rs") {
         let bindings = string_bindings(source, literals, is_code);
-        return resolve_template(&literal.text, constants, &bindings);
+        let mut template = literal.text.clone();
+        if source[..literal.start].trim_end().ends_with("format!(") {
+            let arguments = positional_format_arguments(source, is_code, literal.end);
+            let mut cursor = 0;
+            for expression in arguments {
+                let Some(offset) = template[cursor..].find("{}") else {
+                    break;
+                };
+                let at = cursor + offset;
+                let expression = expression.trim();
+                let helper = expression
+                    .strip_prefix("crate::store::library_paths_are_sql(")
+                    .or_else(|| expression.strip_prefix("super::library_paths_are_sql("));
+                if let Some(arguments) = helper.and_then(|value| value.strip_suffix(')')) {
+                    let (arguments, _) = literals_and_code_mask(arguments);
+                    assert_eq!(arguments.len(), 2, "library path helper takes two literals");
+                    let fragment =
+                        super::library_paths_are_sql(&arguments[0].text, &arguments[1].text);
+                    template.replace_range(at..at + 2, &fragment);
+                    cursor = at + fragment.len();
+                } else {
+                    cursor = at + 2;
+                }
+            }
+        }
+        return resolve_template(&template, constants, &bindings);
     }
     let mut function_start = 0;
     for (at, _) in source[..literal.start].match_indices("fn ") {
@@ -1517,7 +1547,10 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // Those six bind the shared params! immediately after the conditional, but this
 // deliberately conservative scanner stops at the arm's closing brace. Every
 // branch's placeholders remain validated; no source statement is exempted.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 102;
+// 102 -> 103: files_with_unsignalled_transfer prepares its ?1/?2 candidate
+// SELECT before query_map binds after_id and limit.max(0). Its exact-fencing
+// store contract executes that page and the matching conditional update.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 103;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
@@ -1865,6 +1898,56 @@ fn insert() {
             vec!["SELECT 1 FROM t ORDER BY 1 LIMIT $1".to_owned()]
         );
         validate_sql(&resolved[0]).expect("the neutral token keeps the statement well formed");
+    }
+
+    #[test]
+    fn root_removal_composition_preserves_placeholder_order() {
+        let lease = hiqlite::params!("resource", "owner", 1_i64, 2_i64, 3_i64);
+        for fence in [None, Some(&lease)] {
+            let statements =
+                super::super::hiqlite_media::root_removal_statements(7, "[]", "[]", fence)
+                    .expect("actual root-removal composition validates its SQL");
+            assert!(!statements.is_empty());
+            for (sql, _) in statements {
+                validate_sql(&sql)
+                    .expect("every actual statement introduces placeholders in order");
+                assert_eq!(sql.contains("FROM job_leases"), fence.is_some(), "{sql}");
+                assert!(!sql.contains("{LEASE}"), "the actual fence is substituted");
+            }
+        }
+    }
+
+    #[test]
+    fn library_paths_helper_preserves_placeholder_introduction_order() {
+        for (helper, paths, valid) in [
+            ("crate::store", "$4", true),
+            ("crate::store", "$6", false),
+            ("super", "$4", true),
+            ("super", "$6", false),
+        ] {
+            let source = format!(
+                r#"fn fenced() {{ let sql = format!("INSERT INTO library_roots SELECT $1, $2 WHERE $3 AND {{}} AND lease=$5", {helper}::library_paths_are_sql("$1", "{paths}")); }}"#
+            );
+            let (literals, mask) = literals_and_code_mask(&source);
+            let sql = literals
+                .iter()
+                .find(|value| value.text.starts_with("INSERT"))
+                .expect("SQL template");
+            let variants = principal_templates(
+                "hiqlite_publication.rs",
+                &source,
+                sql,
+                &literals,
+                &mask,
+                &[],
+            );
+            assert_eq!(variants.len(), 1);
+            assert!(
+                variants[0].contains(&format!("json_each({paths})")),
+                "actual helper expanded"
+            );
+            assert_eq!(validate_sql(&variants[0]).is_ok(), valid, "{}", variants[0]);
+        }
     }
 
     #[test]

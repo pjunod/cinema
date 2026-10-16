@@ -323,6 +323,8 @@ pub(crate) const BACKGROUND_SQL_CLASSES: [BackgroundSqlClass; 2] = [
 
 /// `main` passes `std::env::args()` straight through, so the argument
 /// contract — including every rejection — is exercised by the crate's tests.
+/// `membership` isolates remote follower removal; `leader-leave` isolates the
+/// existing healthy/degraded self-leave cases. The default still runs all three.
 pub async fn run(args: Vec<String>) -> Result<()> {
     install_crypto_provider();
     hiqlite::validation_register_applied_sql_classes(
@@ -334,6 +336,13 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             controller().await
         }
         Some("membership") => run_membership_lifecycle_case().await,
+        Some("leader-leave") => {
+            if args.get(2).is_some() {
+                bail!("leader-leave accepts no arguments");
+            }
+            run_leader_self_leave_case().await?;
+            run_degraded_four_voter_leader_self_leave_case().await
+        }
         Some("learner") => run_learner_membership_case().await.map(|_| ()),
         Some("proxy-fixture") => failure_drills::run_proxy_fixture_command().await,
         Some("singleton") => run_singleton_takeover_case().await,
@@ -1172,7 +1181,7 @@ async fn run_singleton_takeover_attempt() -> Result<()> {
     let mut provider = ProviderFixture::start().await?;
 
     let initial = start_singleton_probe(&mut cluster, old_owner, &provider.url).await?;
-    if initial.owner_node_id != format!("node-{old_owner}") {
+    if initial.owner_node_id != fixture_node_id(old_owner) {
         bail!("singleton owner identity drifted: {initial:?}");
     }
     provider.expect_call(1).await?;
@@ -1250,7 +1259,7 @@ async fn run_singleton_takeover_attempt() -> Result<()> {
         );
     }
     let (successor_node, successor) = &winners[0];
-    if successor.owner_node_id != format!("node-{successor_node}")
+    if successor.owner_node_id != fixture_node_id(*successor_node)
         || successor.fence != authoritative_old.fence + 1
         || successor.revision != authoritative_old.revision + 1
     {
@@ -3261,7 +3270,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     request: RedeemJoinRequest {
                         token_digest: join_token_digest(&first_issued.token),
                         raft_id: first_issued.raft_id,
-                        node_id: "node-1".to_owned(),
+                        node_id: fixture_node_id(1),
                         hostname: "identity-collision".to_owned(),
                         raft_address: first_spec.raft.clone(),
                         api_address: first_spec.api.clone(),
@@ -3286,7 +3295,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     request: RedeemJoinRequest {
                         token_digest: join_token_digest(&first_issued.token),
                         raft_id: first_issued.raft_id,
-                        node_id: "node-2".to_owned(),
+                        node_id: fixture_node_id(2),
                         hostname: "cluster-node-2".to_owned(),
                         raft_address: first_spec.raft,
                         api_address: first_spec.api,
@@ -3317,7 +3326,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             1,
             Request::SeedLegacyPartialRedemption {
                 token_digest: join_token_digest(&first_issued.token),
-                node_id: "node-2".to_owned(),
+                node_id: fixture_node_id(2),
             },
         )
         .await?
@@ -3350,7 +3359,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                     1,
                     Request::SeedLegacyPartialRedemption {
                         token_digest: token_digest.clone(),
-                        node_id: "node-3".to_owned(),
+                        node_id: fixture_node_id(3),
                     },
                 )
                 .await?
@@ -3359,7 +3368,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         let request = RedeemJoinRequest {
             token_digest: token_digest.clone(),
             raft_id: issued.raft_id,
-            node_id: format!("node-{node_id}"),
+            node_id: fixture_node_id(node_id),
             hostname: format!("cluster-node-{node_id}"),
             raft_address: spec.raft,
             api_address: spec.api,
@@ -3531,7 +3540,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             1,
             Request::SignActivityRequest {
-                target_node_id: "node-2".to_owned(),
+                target_node_id: fixture_node_id(2),
                 timestamp_ms: now,
             },
         )
@@ -3559,7 +3568,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             1,
             Request::SignActivityRequest {
-                target_node_id: "node-2".to_owned(),
+                target_node_id: fixture_node_id(2),
                 timestamp_ms: stale_time,
             },
         )
@@ -3584,7 +3593,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             1,
             Request::SignInternalPeerRequest {
-                target_node_id: "node-2".to_owned(),
+                target_node_id: fixture_node_id(2),
                 timestamp_ms: now,
                 nonce: "123e4567-e89b-42d3-a456-426614174000".to_owned(),
                 method: "POST".to_owned(),
@@ -3616,7 +3625,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             1,
             Request::SignInternalPeerRequest {
-                target_node_id: "node-2".to_owned(),
+                target_node_id: fixture_node_id(2),
                 timestamp_ms: stale_time,
                 nonce: "123e4567-e89b-42d3-a456-426614174001".to_owned(),
                 method: "POST".to_owned(),
@@ -4010,7 +4019,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         read_artwork_repair_observation(&mut cluster, leader, paused_claim_item).await?;
     let paused_fence =
         paused_fence.context("expired post-CAS artwork claim never committed its fence")?;
-    if paused_fence.generation != 1 || paused_fence.owner_node_id != format!("node-{leader}") {
+    if paused_fence.generation != 1 || paused_fence.owner_node_id != fixture_node_id(leader) {
         bail!("expired post-CAS artwork claim committed the wrong fence: {paused_fence:?}");
     }
     let election_target = (1..=3)
@@ -4188,7 +4197,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let after_ambiguous_fence =
         after_ambiguous_fence.context("ambiguous repair claim did not apply its one attempt")?;
     if after_ambiguous_fence.generation != 1
-        || after_ambiguous_fence.owner_node_id != format!("node-{handoff}")
+        || after_ambiguous_fence.owner_node_id != fixture_node_id(handoff)
         || after_ambiguous_fence.leader_term != i64::try_from(handoff_term)?
         || after_ambiguous_index
             .zip(before_ambiguous_index)
@@ -4338,7 +4347,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     let observer = (1..=3)
         .find(|node_id| *node_id != target)
         .context("choose a surviving membership observer")?;
-    let observer_node_id = format!("node-{observer}");
+    let observer_node_id = fixture_node_id(observer);
     let activity_now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
     let departing_activity_proof = match cluster
         .request(
@@ -4394,7 +4403,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         response => bail!("a live voter's artwork proof was refused: {response:?}"),
     }
     let legacy_artwork_proof =
-        shared_secret_artwork_proof(&format!("node-{target}"), "poster.jpg", activity_now)?;
+        shared_secret_artwork_proof(&fixture_node_id(target), "poster.jpg", activity_now)?;
     match cluster
         .request(
             observer,
@@ -4425,7 +4434,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     // departing node owns instead of refusing forever. Seeded on the target's
     // own process so the fixture's source files exist where its packages say
     // they do.
-    let target_node = format!("node-{target}");
+    let target_node = fixture_node_id(target);
     let departing_job_resource = format!("cluster-check:departing-job:{target_node}");
     let departing_job_lease = match cluster
         .request(
@@ -4508,6 +4517,13 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     // commits, so a package created after the plan was drawn is real; a
     // removal that resolved only its opening snapshot would commit and leave
     // this one owned by a node that no longer exists.
+    // A live target must publish its actual post-fence route role/applied
+    // index. Start the real worker after the explicit write-budget controls;
+    // manual pre-fence heartbeats cannot prove the later removal barrier.
+    cluster
+        .request(target, Request::StartHeartbeatLoop)
+        .await?
+        .require_ok()?;
     let late_package = format!("{LATE_PACKAGE}-{target_node}");
     cluster
         .request(
@@ -4537,7 +4553,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             target,
             Request::SignActivityRequest {
-                target_node_id: format!("node-{observer}"),
+                target_node_id: fixture_node_id(observer),
                 timestamp_ms: removed_activity_now,
             },
         )
@@ -4550,8 +4566,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .find(|node_id| *node_id != target && *node_id != observer)
         .context("choose the other surviving voter")?;
     let impersonated_activity_proof = shared_secret_activity_proof(
-        &format!("node-{impersonated_node}"),
-        &format!("node-{observer}"),
+        &fixture_node_id(impersonated_node),
+        &fixture_node_id(observer),
         removed_activity_now,
     )?;
     match cluster
@@ -4839,7 +4855,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
     // The re-homed package is ordinary claimable work on its new owner, and
     // the node that just left can no longer publish it.
     let new_owner_voter = (1..=3)
-        .find(|voter| format!("node-{voter}") == new_owner)
+        .find(|voter| fixture_node_id(*voter) == new_owner)
         .context("requeued package landed on a node outside the cluster")?;
     // The package requested mid-removal can share this queue, so claim until
     // the one under test comes out instead of assuming it is first.
@@ -4910,7 +4926,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             target,
             Request::HeartbeatPreservesTombstone {
-                node_id: format!("node-{target}"),
+                node_id: fixture_node_id(target),
             },
         )
         .await?
@@ -4919,7 +4935,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         .request(
             target,
             Request::TombstoneOfflineFence {
-                node_id: format!("node-{target}"),
+                node_id: fixture_node_id(target),
             },
         )
         .await?
@@ -4952,7 +4968,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             .request(
                 leader,
                 Request::RemoveVoter {
-                    node_id: format!("node-{quorum_target}"),
+                    node_id: fixture_node_id(quorum_target),
                 },
             )
             .await?,
@@ -5246,12 +5262,16 @@ async fn run_leader_self_leave_case() -> Result<()> {
             .request(
                 local_follower,
                 Request::RemoveVoter {
-                    node_id: format!("node-{local_follower}"),
+                    node_id: fixture_node_id(local_follower),
                 },
             )
             .await?,
         "self_removal_requires_leave",
     )?;
+    cluster
+        .request(departed, Request::StartHeartbeatLoop)
+        .await?
+        .require_ok()?;
     cluster
         .request(departed, Request::LeaveVoter)
         .await?
@@ -5260,7 +5280,7 @@ async fn run_leader_self_leave_case() -> Result<()> {
         .request(
             departed,
             Request::HeartbeatPreservesTombstone {
-                node_id: format!("node-{departed}"),
+                node_id: fixture_node_id(departed),
             },
         )
         .await?
@@ -5321,6 +5341,10 @@ async fn run_degraded_four_voter_leader_self_leave_case() -> Result<()> {
     let unavailable = remaining[0];
     cluster.kill(unavailable).await?;
     cluster
+        .request(departed, Request::StartHeartbeatLoop)
+        .await?
+        .require_ok()?;
+    cluster
         .request(departed, Request::LeaveVoter)
         .await?
         .require_ok()?;
@@ -5328,7 +5352,7 @@ async fn run_degraded_four_voter_leader_self_leave_case() -> Result<()> {
         .request(
             departed,
             Request::HeartbeatPreservesTombstone {
-                node_id: format!("node-{departed}"),
+                node_id: fixture_node_id(departed),
             },
         )
         .await?
@@ -5632,7 +5656,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     // Installing this binary activates nothing. Three voters are running it,
     // one of them is not, and the cluster is still on the unactivated range.
     let pending =
-        wait_for_protocol_pending(&mut cluster, leader, &[format!("node-{OLD_BINARY_VOTER}")])
+        wait_for_protocol_pending(&mut cluster, leader, &[fixture_node_id(OLD_BINARY_VOTER)])
             .await?;
     if (pending.active_min, pending.active_max) != (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN)
         || (pending.binary_min, pending.binary_max) != (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MAX)
@@ -5657,7 +5681,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
             .request(leader, Request::ActivateLearnerProtocol)
             .await?,
         "learner_protocol_upgrade_required",
-        &format!("node-{OLD_BINARY_VOTER}"),
+        &fixture_node_id(OLD_BINARY_VOTER),
     )?;
 
     // Upgrade that node the way an operator does: stop the process, start the
@@ -5714,7 +5738,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
                 request: RedeemJoinRequest {
                     token_digest: join_token_digest(&issued.token),
                     raft_id: issued.raft_id,
-                    node_id: format!("node-{LEARNER}"),
+                    node_id: fixture_node_id(LEARNER),
                     hostname: format!("cluster-node-{LEARNER}"),
                     raft_address: learner_spec.raft.clone(),
                     api_address: learner_spec.api.clone(),
@@ -5758,7 +5782,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
                 request: FinalizeJoinRequest {
                     token_digest: join_token_digest(&issued.token),
                     raft_id: issued.raft_id,
-                    node_id: format!("node-{LEARNER}"),
+                    node_id: fixture_node_id(LEARNER),
                 },
             },
         )
@@ -5783,7 +5807,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     let learner_record = status
         .nodes
         .iter()
-        .find(|node| node.node_id == format!("node-{LEARNER}"))
+        .find(|node| node.node_id == fixture_node_id(LEARNER))
         .context("the admitted learner is missing from the roster")?;
     if status.nodes.len() != 4
         || status.availability != ClusterAvailability::HighAvailability
@@ -5830,7 +5854,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         Response::ClusterJobAttempt {
             acquired: true,
             lease: Some(lease),
-        } if lease.owner_node_id == format!("node-{leader}") => {}
+        } if lease.owner_node_id == fixture_node_id(leader) => {}
         response => bail!("a voter could not take the same cluster job: {response:?}"),
     }
     match cluster
@@ -5844,7 +5868,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     {
         Response::ClusterJobAttempt {
             lease: Some(lease), ..
-        } if lease.owner_node_id == format!("node-{leader}") => {}
+        } if lease.owner_node_id == fixture_node_id(leader) => {}
         response => bail!("the cluster job did not stay with its voter owner: {response:?}"),
     }
 
@@ -6022,7 +6046,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             leader,
             Request::SignInternalPeerRequest {
-                target_node_id: format!("node-{LEARNER}"),
+                target_node_id: fixture_node_id(LEARNER),
                 timestamp_ms: peer_proof_now,
                 nonce: "6f1c1a4e-8f2a-4d3b-9c11-0a4d2f7b5e01".to_owned(),
                 method: "GET".to_owned(),
@@ -6058,7 +6082,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             LEARNER,
             Request::SignInternalPeerRequest {
-                target_node_id: "node-2".to_owned(),
+                target_node_id: fixture_node_id(2),
                 timestamp_ms: peer_proof_now,
                 nonce: "6f1c1a4e-8f2a-4d3b-9c11-0a4d2f7b5e02".to_owned(),
                 method: "POST".to_owned(),
@@ -6094,7 +6118,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             LEARNER,
             Request::SignActivityRequest {
-                target_node_id: "node-2".to_owned(),
+                target_node_id: fixture_node_id(2),
                 timestamp_ms: peer_proof_now,
             },
         )
@@ -6209,7 +6233,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
             .request(leader, Request::DeactivateLearnerProtocol)
             .await?,
         "learner_protocol_in_use",
-        &format!("node-{LEARNER}"),
+        &fixture_node_id(LEARNER),
     )?;
 
     const LEARNER_MEDIA_SESSION: &str = "p6-learner-active-media";
@@ -6217,7 +6241,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             leader,
             Request::SeedActiveMediaSession {
-                node_id: format!("node-{LEARNER}"),
+                node_id: fixture_node_id(LEARNER),
                 session_id: LEARNER_MEDIA_SESSION.to_owned(),
             },
         )
@@ -6231,7 +6255,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             leader,
             Request::RemoveNode {
-                node_id: format!("node-{LEARNER}"),
+                node_id: fixture_node_id(LEARNER),
             },
         )
         .await?
@@ -6257,7 +6281,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             LEARNER,
             Request::HeartbeatPreservesTombstone {
-                node_id: format!("node-{LEARNER}"),
+                node_id: fixture_node_id(LEARNER),
             },
         )
         .await?
@@ -6313,7 +6337,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
                 request: RedeemJoinRequest {
                     token_digest: join_token_digest(&promoted_token.token),
                     raft_id: promoted_token.raft_id,
-                    node_id: format!("node-{PROMOTED}"),
+                    node_id: fixture_node_id(PROMOTED),
                     hostname: format!("cluster-node-{PROMOTED}"),
                     raft_address: promoted_spec.raft.clone(),
                     api_address: promoted_spec.api.clone(),
@@ -6354,7 +6378,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
                 request: FinalizeJoinRequest {
                     token_digest: join_token_digest(&promoted_token.token),
                     raft_id: promoted_token.raft_id,
-                    node_id: format!("node-{PROMOTED}"),
+                    node_id: fixture_node_id(PROMOTED),
                 },
             },
         )
@@ -6370,7 +6394,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         .request(
             leader,
             Request::PromoteLearner {
-                node_id: format!("node-{PROMOTED}"),
+                node_id: fixture_node_id(PROMOTED),
             },
         )
         .await?
@@ -6397,7 +6421,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         Response::ClusterJobAttempt {
             acquired: true,
             lease: Some(lease),
-        } if lease.owner_node_id == format!("node-{PROMOTED}") => {}
+        } if lease.owner_node_id == fixture_node_id(PROMOTED) => {}
         response => bail!("a promoted learner did not gain voter job authority: {response:?}"),
     }
     let promoted_status = match cluster.request(leader, Request::MembershipStatus).await? {
@@ -6455,7 +6479,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         Response::ClusterJobAttempt {
             acquired: true,
             lease: Some(lease),
-        } if lease.owner_node_id == format!("node-{PROMOTED}") => {}
+        } if lease.owner_node_id == fixture_node_id(PROMOTED) => {}
         response => bail!("a restarted promoted voter did not retain job authority: {response:?}"),
     }
 
@@ -7630,6 +7654,18 @@ pub struct NodeSpec {
     pub id: u64,
     pub raft: String,
     pub api: String,
+}
+
+/// Stable real-process membership identity; filesystem labels stay `node-N`.
+#[must_use]
+pub fn fixture_node_id(raft_id: u64) -> String {
+    // Keep all 64 identity bits in a canonical, deterministic UUID. These are
+    // disposable fixture identities, not credentials or production node IDs.
+    format!(
+        "00000000-0000-0000-{:04x}-{:012x}",
+        raft_id >> 48,
+        raft_id & 0xffff_ffff_ffff
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -9707,6 +9743,8 @@ struct NodeMutableState {
     catalogue: Option<CatalogueReader>,
     membership: Option<MembershipManager>,
     singleton_probe: Option<SingletonProbe>,
+    /// Exactly one real heartbeat worker; abort and join it before node exit.
+    heartbeat_task: Option<tokio::task::JoinHandle<()>>,
     /// A cluster-wide job lease this process won through the production
     /// acquisition path, kept alive so its renewal loop keeps running.
     cluster_job: Option<ActiveJobLease>,
@@ -9792,24 +9830,38 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
     let mut state = NodeMutableState::default();
     let stdin = tokio::io::stdin();
     let mut input = BufReader::new(stdin).lines();
-    while let Some(line) = input.next_line().await? {
-        let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => handle_request(request, &request_context, &mut state).await,
-            Err(error) => Err(error.into()),
-        };
-        match response {
-            Ok(response) => write_response(&response).await?,
-            Err(error) => {
-                write_response(&Response::Error {
-                    message: format!("{error:#}"),
-                })
-                .await?
+    // Read/write failures must take the same worker cleanup path as EOF.
+    let requests: Result<()> = async {
+        while let Some(line) = input.next_line().await? {
+            let response = match serde_json::from_str::<Request>(&line) {
+                Ok(request) => handle_request(request, &request_context, &mut state).await,
+                Err(error) => Err(error.into()),
+            };
+            match response {
+                Ok(response) => write_response(&response).await?,
+                Err(error) => {
+                    write_response(&Response::Error {
+                        message: format!("{error:#}"),
+                    })
+                    .await?
+                }
             }
+        }
+        Ok(())
+    }
+    .await;
+    let mut heartbeat_result = Ok(());
+    if let Some(task) = state.heartbeat_task.take() {
+        task.abort();
+        match task.await {
+            Err(error) if !error.is_cancelled() => heartbeat_result = Err(error.into()),
+            _ => {}
         }
     }
     let _ = passive_shutdown.send(());
     serving_shutdown.cancel();
-    Ok(())
+    requests?;
+    heartbeat_result
 }
 
 struct NodeRequestContext<'a> {
@@ -9840,6 +9892,7 @@ async fn handle_request(
         catalogue,
         membership,
         singleton_probe,
+        heartbeat_task,
         cluster_job,
     } = state;
     match request {
@@ -9873,7 +9926,7 @@ async fn handle_request(
                         "INSERT INTO cluster_node_http (node_id, public_http_url) \
                          VALUES ($1, $2)",
                         hiqlite::macros::params!(
-                            format!("node-{node_id}"),
+                            fixture_node_id(node_id),
                             "https://shared-join-lb.invalid"
                         ),
                     )
@@ -10023,15 +10076,18 @@ async fn handle_request(
             Ok(Response::Ok)
         }
         Request::StartHeartbeatLoop => {
+            if heartbeat_task.is_some() {
+                bail!("this voter already owns a heartbeat worker");
+            }
             let membership = membership_ref(membership)?.clone();
-            tokio::spawn(membership.heartbeat_loop());
+            *heartbeat_task = Some(tokio::spawn(membership.heartbeat_loop()));
             Ok(Response::Ok)
         }
         Request::AcquireClusterJob { ref resource } => {
             let opened = store.clone().context("node store is not open")?;
             let coordinator = StoreCoordinator::new(
                 opened as Arc<dyn plurx_core::store::Store>,
-                format!("node-{}", launch.node_id),
+                fixture_node_id(launch.node_id),
             )?;
             // The production function, compiled from plurxd's own source, with
             // the production authority: this node's live membership manager.
@@ -10092,7 +10148,7 @@ async fn handle_request(
             let name = store_ref(store)?
                 .get_or_init_setting(plurx_core::store::keys::SERVER_NAME, &seed_name)
                 .await?;
-            let node_id = format!("node-{}", launch.node_id);
+            let node_id = fixture_node_id(launch.node_id);
             let advertisement = plurx_compat_plex::gdm::Advertisement {
                 instance_id: INSTANCE_ID,
                 name: &name,
@@ -10181,60 +10237,43 @@ async fn handle_request(
             .await
             .map(|urls| Response::ArtworkPeerUrls { urls })
             .or_else(|error| Ok(membership_error_response(error))),
-        Request::RejectDuplicateArtworkUrl { public_http_url } => {
-            membership_manager_with_artwork_url(
-                client,
-                replication,
-                store
-                    .as_ref()
-                    .cloned()
-                    .context("auth store has not been opened")?,
-                launch,
-                public_http_url,
-            )
+        Request::RejectDuplicateArtworkUrl { public_http_url } => membership_ref(membership)?
+            .validation_publish_http_url(&public_http_url)
             .await
-            .map(|_| Response::Ok)
-            .or_else(|error| Ok(membership_error_response(error)))
-        }
+            .map(|()| Response::Ok)
+            .or_else(|error| Ok(membership_error_response(error))),
         Request::ReuseRemovedArtworkUrl {
             removed_node_id,
             public_http_url,
         } => {
-            let rejoined_node_id = format!("rejoined-{removed_node_id}");
-            let rejoined_raft_id = launch
-                .nodes
-                .iter()
-                .map(|node| node.id)
-                .max()
-                .unwrap_or_default()
-                .saturating_add(100);
-            match membership_manager_with_identity_artwork_url(
-                client,
-                replication,
-                store
-                    .as_ref()
-                    .cloned()
-                    .context("auth store has not been opened")?,
-                launch,
-                rejoined_node_id.clone(),
-                rejoined_raft_id,
-                public_http_url,
-            )
-            .await
-            {
-                Ok(_) => {
-                    for statement in [
-                        "DELETE FROM cluster_node_hostnames WHERE node_id = $1",
-                        "DELETE FROM cluster_node_http WHERE node_id = $1",
-                        "DELETE FROM cluster_node_activity_keys WHERE node_id = $1",
-                        "DELETE FROM cluster_nodes WHERE node_id = $1",
-                    ] {
-                        client
-                            .execute(
-                                statement,
-                                hiqlite::macros::params!(rejoined_node_id.as_str()),
-                            )
-                            .await?;
+            let removed = client
+                .query_consistent_map::<MembershipTombstoneRow, _>(
+                    "SELECT COALESCE(removed_at, (SELECT started_at \
+                       FROM cluster_node_removals WHERE node_id = $1)) AS removed_at \
+                     FROM cluster_nodes WHERE node_id = $1",
+                    params!(removed_node_id),
+                )
+                .await?;
+            if removed.first().and_then(|row| row.removed_at).is_none() {
+                bail!("artwork origin reuse needs a genuinely removed namespace owner");
+            }
+            // Readdress the existing active observer through the real claim
+            // transaction, then restore it. A synthetic second manager would
+            // violate the installed removal owner's single-binding contract.
+            let observer = fixture_node_id(launch.node_id);
+            let original = read_artwork_http_url(client, &observer)
+                .await?
+                .context("observer has no original artwork origin")?;
+            let manager = membership_ref(membership)?;
+            match manager.validation_publish_http_url(&public_http_url).await {
+                Ok(()) => {
+                    let published = read_artwork_http_url(client, &observer).await?;
+                    manager.validation_publish_http_url(&original).await?;
+                    let restored = read_artwork_http_url(client, &observer).await?;
+                    if published.as_deref() != Some(public_http_url.as_str())
+                        || restored.as_deref() != Some(original.as_str())
+                    {
+                        bail!("removed artwork origin was not actually reassigned and restored");
                     }
                     Ok(Response::Ok)
                 }
@@ -10687,7 +10726,7 @@ async fn handle_request(
             let opened = store.clone().context("node store is not open")?;
             let coordinator = StoreCoordinator::new(
                 opened.clone() as Arc<dyn plurx_core::store::Store>,
-                format!("node-{}", launch.node_id),
+                fixture_node_id(launch.node_id),
             )?;
             match coordinator
                 .acquire(SINGLETON_RESOURCE, SINGLETON_LEASE_TTL)
@@ -11612,6 +11651,19 @@ async fn read_job_lease(client: &Client, resource: &str) -> Result<Option<Lease>
     rows.pop().map(SingletonLeaseRow::into_lease).transpose()
 }
 
+async fn read_artwork_http_url(client: &Client, node_id: &str) -> Result<Option<String>> {
+    let mut rows = client
+        .query_consistent(
+            "SELECT public_http_url FROM cluster_node_http WHERE node_id = $1",
+            params!(node_id),
+        )
+        .await?;
+    if rows.len() > 1 {
+        bail!("artwork origin primary key returned multiple rows");
+    }
+    Ok(rows.pop().map(|mut row| row.get("public_http_url")))
+}
+
 async fn read_local_setting(client: &Client, key: &str) -> Result<Option<String>> {
     let mut rows = client
         .query_map::<SingletonSettingRow, _>(
@@ -11759,7 +11811,7 @@ async fn membership_manager_with_artwork_url(
         replication,
         store,
         launch,
-        format!("node-{}", launch.node_id),
+        fixture_node_id(launch.node_id),
         launch.node_id,
         artwork_http,
     )
@@ -13588,6 +13640,22 @@ mod tests {
         assert!(!singleton_trial_was_unstable(
             b"diagnostic mentioned CLUSTER_SINGLETON_UNSTABLE but was not a verdict\n"
         ));
+    }
+
+    #[test]
+    fn real_node_identities_satisfy_exact_reduction_transport() {
+        let ids = [1, 2, 3, u64::MAX].map(fixture_node_id);
+        assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
+        for (raft_id, target_node_id) in [1, 2, 3, u64::MAX].into_iter().zip(ids) {
+            let reference = hiqlite::ReductionFenceReference {
+                version: 1,
+                target_node_id,
+                target_raft_id: raft_id,
+                attempt_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+                barrier_index: 1,
+            };
+            assert!(reference.has_valid_shape(), "{reference:?}");
+        }
     }
 
     #[test]

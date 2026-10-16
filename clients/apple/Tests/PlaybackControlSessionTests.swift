@@ -13,6 +13,7 @@ private final class ControlExchangeLog: @unchecked Sendable {
     private let lock = NSLock()
     private var requests: [ControlRequest] = []
     private var echoes: [String?] = []
+    private var subtitleResponses: [String: Int] = [:]
 
     func append(_ request: ControlRequest, echo: String?) {
         lock.lock()
@@ -28,11 +29,26 @@ private final class ControlExchangeLog: @unchecked Sendable {
     }
     func firstEcho() -> String? { lock.lock(); defer { lock.unlock() }; return echoes.first ?? nil }
 
+    func recordResponse(_ response: ControlResponse) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let state = response.delivery?.subtitleReadiness, subtitleResponses[state] == nil {
+            subtitleResponses[state] = response.acceptedSequence
+        }
+    }
+
+    func firstResponse(withReadiness state: String) -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return subtitleResponses[state]
+    }
+
     func reset() {
         lock.lock()
         defer { lock.unlock() }
         requests = []
         echoes = []
+        subtitleResponses = [:]
     }
 }
 
@@ -96,6 +112,14 @@ private final class SubtitleCallbackQueue: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return callbacks.isEmpty ? nil : callbacks.removeFirst()
+    }
+
+    func takeAll() -> [@MainActor @Sendable () -> Void] {
+        lock.lock()
+        defer { lock.unlock() }
+        let batch = callbacks
+        callbacks = []
+        return batch
     }
 }
 
@@ -195,6 +219,7 @@ private final class ControlExchangeURLProtocol: URLProtocol {
             delivery: controlAnswer.delivery(),
             action: controlAnswer.get()
         )
+        controlExchanges.recordResponse(response)
         let body = (try? PlaybackControl.encoder.encode(response)) ?? Data()
         // Encoded first, so a held response carries the answer that was
         // current when the request arrived rather than when it was released.
@@ -493,8 +518,8 @@ final class PlaybackControlSessionTests: XCTestCase {
 
     func testEndRevokesATerminalPublicationAlreadyPastTheCaptureGuard() async throws {
         controlExchanges.reset()
-        controlAnswer.set(ControlAction(type: "none"))
-        controlAnswer.setReadiness("pending")
+        controlAnswer.set(ControlAction(type: "terminal", code: "unsupported", message: "late"))
+        controlAnswer.setReadiness("ready")
         let publicationHeld = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
         let session = PlaybackControlSession(scheduleSubtitleReady: { _ in
@@ -512,10 +537,9 @@ final class PlaybackControlSessionTests: XCTestCase {
         }
         session.begin(bootstrap: sessionBootstrap(), transport: transport,
                       observe: { player.observation() })
-        _ = try await waitForExchange { $0.sequence == 2 }
-        controlAnswer.set(ControlAction(type: "terminal", code: "unsupported", message: "late"))
-        controlAnswer.setReadiness("ready")
-        session.reportEvidence()
+        // The first response is terminal: the held processing callback belongs
+        // to that exact response, after its capture guard and before verdict store.
+        _ = try await waitForExchange { $0.sequence == 1 }
         let deadline = Date().addingTimeInterval(5)
         var held = false
         while !held, Date() < deadline {
@@ -523,6 +547,7 @@ final class PlaybackControlSessionTests: XCTestCase {
             if !held { try await Task.sleep(nanoseconds: 10_000_000) }
         }
         XCTAssertTrue(held)
+        XCTAssertEqual(controlExchanges.firstResponse(withReadiness: "ready"), 1)
         session.end()
         release.signal()
         try await Task.sleep(nanoseconds: 100_000_000)
@@ -553,13 +578,18 @@ final class PlaybackControlSessionTests: XCTestCase {
         _ = try await waitForExchange { $0.sequence == 2 }
         controlAnswer.setReadiness(unavailable ? "unavailable" : "ready")
         session.playerChanged()
+        let state = unavailable ? "unavailable" : "ready"
         let deadline = Date().addingTimeInterval(5)
-        var queued: (@MainActor @Sendable () -> Void)?
-        while queued == nil, Date() < deadline {
-            queued = callbacks.take()
-            if queued == nil { try await Task.sleep(nanoseconds: 20_000_000) }
+        while controlExchanges.firstResponse(withReadiness: state) == nil, Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
         }
-        let staleReady = try XCTUnwrap(queued, "the real session must schedule a readiness callback")
+        let readySequence = try XCTUnwrap(controlExchanges.firstResponse(withReadiness: state))
+        // A following request proves onExchange returned for the real readiness
+        // response. Its whole callback batch is queued, including the earlier
+        // processing callback; taking just the first closure would test a no-op.
+        _ = try await waitForExchange { $0.sequence > readySequence }
+        let staleCallbacks = callbacks.takeAll()
+        XCTAssertFalse(staleCallbacks.isEmpty, "the real readiness response must schedule callbacks")
 
         if replaceSession == true {
             var next = sessionBootstrap()
@@ -575,7 +605,7 @@ final class PlaybackControlSessionTests: XCTestCase {
             session.end()
         }
         if newIntent { session.clearVerdict() }
-        staleReady()
+        staleCallbacks.forEach { $0() }
         XCTAssertEqual(deliveries, replaceSession == nil && !newIntent ? 1 : 0,
                        "a queued response loses its authority when its reporting session ends")
         if newIntent {

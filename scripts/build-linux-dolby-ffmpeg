@@ -526,6 +526,13 @@ def shipping_system_objects(package):
     return objects
 
 
+def verify_source_download(path, expected):
+    actual = sha(path)
+    if actual != expected:
+        raise ValueError("immutable source download checksum mismatch: "
+                         f"{path.name[:128]} expected={expected[:64]} actual={actual}")
+
+
 def package_pipeline(root, jobs, seconds):
     """Real Bookworm export owner; nothing is emitted from declarations."""
     import subprocess
@@ -581,8 +588,7 @@ def package_pipeline(root, jobs, seconds):
                 if size > 256 * 1024**2 or total > 2 * 1024**3 or time.monotonic() >= deadline:
                     raise ValueError("immutable input download exceeds bounded source budget")
                 output.write(chunk)
-        if sha(path) != expected:
-            raise ValueError("immutable source download checksum mismatch")
+        verify_source_download(path, expected)
     helper = load("prepare-linux-dolby-sdk")
     source_members, _ = helper.tar_members((inputs / "jellyfin-source.tar.gz").read_bytes())
     for name, patch in embedded_patches.items():

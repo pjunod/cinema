@@ -452,6 +452,15 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
+    // Configuration check, file removal and item pruning share one snapshot
+    // and commit, so changed roots cannot race a removal based on old roots.
+    SqliteTransactionSite {
+        module: "media.rs",
+        method: "remove_files_outside_library_roots",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
     SqliteTransactionSite {
         module: "media.rs",
         method: "prune_empty_items",
@@ -1396,7 +1405,8 @@ mod tests {
         // guarded transaction, each measured in sqlite/sharing.rs.
         // Cinema adds one paired receiver/grant revoke and four guarded
         // invitation admission/cleanup boundaries, registered above.
-        assert_eq!(methods.len(), 113);
+        // Root removal adds one guarded delete/prune boundary.
+        assert_eq!(methods.len(), 114);
     }
 
     #[test]

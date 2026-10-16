@@ -54,11 +54,11 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_jellyfin_play.rs", 4),
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_live_tv_resource.rs", 1),
-    ("hiqlite_media.rs", 71),
+    ("hiqlite_media.rs", 72),
     ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 7),
     ("hiqlite_reading.rs", 2),
-    ("hiqlite_sessions.rs", 36),
+    ("hiqlite_sessions.rs", 37),
     ("hiqlite_sharing.rs", 1),
     ("hiqlite_shared_cache.rs", 4),
     ("hiqlite_timeline_annotations.rs", 2),
@@ -214,6 +214,16 @@ fn with_synthetic_watch_dispatch() -> Vec<(&'static str, String)> {
         .collect()
 }
 
+// Exercise unexplained growth against the measured fixture baseline even
+// when production removals leave headroom under the historical ceiling.
+fn fixture_unannotated_ceiling() -> usize {
+    STORE_SOURCES
+        .iter()
+        .flat_map(|(_, source)| sites(source))
+        .filter(|annotated| !annotated)
+        .count()
+}
+
 fn raised(name: &str) -> Vec<(&'static str, usize)> {
     CONSISTENT_READ_SITES
         .iter()
@@ -227,7 +237,7 @@ fn consistent_read_census_refuses_a_synthetic_extra_read_in_a_fixture_copy() {
     let failure = census(
         &borrowed(&fixture),
         CONSISTENT_READ_SITES,
-        UNANNOTATED_CEILING,
+        fixture_unannotated_ceiling(),
     )
     .expect_err("an unpinned extra consistent read must fail the census");
     assert!(failure.contains("hiqlite_reading.rs: 3 consistent-read sites, table pins 2"));
@@ -237,7 +247,7 @@ fn consistent_read_census_refuses_a_synthetic_extra_read_in_a_fixture_copy() {
     let failure = census(
         &borrowed(&fixture),
         &raised("hiqlite_reading.rs"),
-        UNANNOTATED_CEILING,
+        fixture_unannotated_ceiling(),
     )
     .expect_err("an unexplained new consistent read must fail the census");
     assert!(failure.contains("carry no `// authority: <reason>` comment"));
@@ -263,7 +273,7 @@ fn consistent_read_census_refuses_a_new_authority_read_through_a_dispatch_helper
     let failure = census(
         &borrowed(&fixture),
         CONSISTENT_READ_SITES,
-        UNANNOTATED_CEILING,
+        fixture_unannotated_ceiling(),
     )
     .expect_err("a new Authority watch read must fail the census");
     assert!(
@@ -275,7 +285,9 @@ fn consistent_read_census_refuses_a_new_authority_read_through_a_dispatch_helper
     );
     // The dispatch arm and comments naming the kind are not sites.
     assert_eq!(
-        dispatch_sites("            WatchRead::Authority => self.client().query_consistent_map(sql, params).await,"),
+        dispatch_sites(
+            "            WatchRead::Authority => self.client().query_consistent_map(sql, params).await,"
+        ),
         0
     );
     assert_eq!(dispatch_sites("    // WatchRead::Authority here"), 0);
@@ -291,7 +303,7 @@ fn consistent_read_census_admits_a_raised_entry_with_an_authority_reason() {
     census(
         &borrowed(&fixture),
         &raised("hiqlite_reading.rs"),
-        UNANNOTATED_CEILING,
+        fixture_unannotated_ceiling(),
     )
     .unwrap_or_else(|failures| panic!("an explained, pinned read is admitted:\n{failures}"));
 
@@ -300,7 +312,7 @@ fn consistent_read_census_admits_a_raised_entry_with_an_authority_reason() {
     census(
         &borrowed(&fixture),
         &raised("hiqlite_reading.rs"),
-        UNANNOTATED_CEILING,
+        fixture_unannotated_ceiling(),
     )
     .expect_err("an empty authority reason must not admit the read");
 }
