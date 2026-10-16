@@ -1363,3 +1363,18 @@ Android current-target counter regressions; source anchors name the counter
 fields, preserving the catalog across later monotonic bumps. This is catalog
 bookkeeping, with no runtime source change. Preserve the refused gate and both
 Python receipt artifacts, then rerun history locally before a fresh task gate.
+
+### Complete promotion retains a stale Apple source-contract boundary
+
+Promotion 5313's shared iPhone suite runs 1089 tests and retains one failure in
+`testArmedBoundaryReplanEndsWithStallRecoveryAndSkipsBlockedCandidates`. The
+current Auto evaluator accepts a `pressureOnly` parameter; the contract still
+looks for its former zero-argument signature and fails before checking its
+body. A local native run reproduces that same failure. Locate the function
+without coupling the boundary to its parameters, retain every stall-recovery,
+blocked-candidate, ownership and viewer-action assertion, and explicitly check
+that pressure-only evaluations cannot spend the optional boundary re-plan.
+Missing source boundaries now identify themselves in XCTest diagnostics.
+Production playback source, build counters and historical physical receipts
+are unchanged. The failing run stays failed; the reviewed test correction
+requires its focused native run, task gate and a new exact-tree promotion.
