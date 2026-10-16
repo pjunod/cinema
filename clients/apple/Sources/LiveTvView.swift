@@ -2186,6 +2186,8 @@ struct LiveTvView: View {
     @State private var channelFocusRequest = 0
     @State private var channelFocusRequested = false
     @State private var channelFocusCoordinator = LiveTvFocusRestoreCoordinator()
+    /// Set by a toolbar press, never by transient native focus arrivals.
+    @State private var lastToolbarFocus: FocusTarget?
     /// The pill that opened Info, More or Layout over fullscreen, so closing
     /// the sheet puts focus back on its opener.
     @State private var coverSheetOpener: FocusTarget?
@@ -2929,14 +2931,17 @@ struct LiveTvView: View {
         #if os(tvOS)
         HStack(spacing: 12) {
             HStack(spacing: 0) {
-                segment("On now", active: browse == .list) { requestChannelFocus() }
+                segment("On now", active: browse == .list) { lastToolbarFocus = .channels; requestChannelFocus() }
                     .focused($focusedControl, equals: .channels)
+                .modifier(toolbarInput(from: .channels))
                     .remoteControl("live:channels", label: "Channels", managesFocus: false) { browse = .list }
-                segment("Guide", active: browse == .guide) { requestGuideFocus() }
+                segment("Guide", active: browse == .guide) { lastToolbarFocus = .guide; requestGuideFocus() }
                     .focused($focusedControl, equals: .guide)
+                .modifier(toolbarInput(from: .guide))
                     .remoteControl("live:guide", label: "Guide", managesFocus: false) { browse = .guide }
                 segment(recordingsLabel, active: browse == .recordings) { showRecordings() }
                     .focused($focusedControl, equals: .recordings)
+                .modifier(toolbarInput(from: .recordings))
             }
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.outline, lineWidth: 1))
             Text(toolbarSummary).font(LiveTvType.secondary).foregroundStyle(Palette.muted).lineLimit(1)
@@ -2947,9 +2952,11 @@ struct LiveTvView: View {
             .buttonStyle(TVReadableButtonStyle(prominent: !query.isEmpty, compact: true))
             .focusEffectDisabled()
             .focused($focusedControl, equals: .search)
+                .modifier(toolbarInput(from: .search))
             Button("Guide time") { openLiveRemoteMenu("guide-time", opener: "live:guide-time") }
                 .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
                 .focused($focusedControl, equals: .guideTime)
+                .modifier(toolbarInput(from: .guideTime))
                 .remoteControl("live:guide-time", label: "Guide time", managesFocus: false) { openLiveRemoteMenu("guide-time", opener: "live:guide-time") }
             Button { showingMore = true } label: {
                 Label("More", systemImage: "ellipsis")
@@ -2957,6 +2964,7 @@ struct LiveTvView: View {
             .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
             .focusEffectDisabled()
             .focused($focusedControl, equals: .more)
+                .modifier(toolbarInput(from: .more))
         }
         .frame(height: 48)
         .padding(.horizontal, 12)
@@ -3582,10 +3590,17 @@ struct LiveTvView: View {
         return true
     }
 
-    /// Up out of programme content always returns to the active browse mode.
-    /// Intermediate native focus arrivals cannot change that destination.
+    /// Toolbar input records intent before any later return. Native spatial
+    /// arrivals during an Up press cannot overwrite this bookmark.
+    private func toolbarInput(from source: FocusTarget) -> LiveTvRemoteAdapter {
+        LiveTvRemoteAdapter(scope: .guide, state: { .browser }) { _, input in
+            if input == .down { lastToolbarFocus = source }
+            return false
+        }
+    }
+
     private func returnToToolbar() {
-        focusedControl = browse == .guide ? .guide : .channels
+        focusedControl = lastToolbarFocus ?? (browse == .guide ? .guide : .channels)
     }
 
     /// Up from the first row of the grid on the Guide page. Cells sit under

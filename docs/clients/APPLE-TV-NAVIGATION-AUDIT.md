@@ -575,9 +575,9 @@ still anchored to the time the app opened.
 **Implemented repair:** realize guide rows lazily, use a vertical TV
 viewport with explicit time paging, remove per-scroll origin publication on TV,
 keep one focus binding per cell and toolbar control, and route each direction
-from the control receiving it. Up through programme actions returns to the
-active Guide/On now mode; a transient native arrival cannot change that
-boundary. Choice sheets still restore their exact toolbar opener. The first lazy-row trial eliminated the long entry stall but
+from the control receiving it. Toolbar Down/Select records its explicit origin;
+transient native arrivals cannot overwrite that bookmark. Up through programme
+actions and closing a choice sheet restore their respective exact openers. The first lazy-row trial eliminated the long entry stall but
 exposed native focus moving before the outer custom direction handler; that
 failed trial is retained. Use a white focus outline without zoom, a compact
 detail stage with no idle preview, and clock-following until the viewer

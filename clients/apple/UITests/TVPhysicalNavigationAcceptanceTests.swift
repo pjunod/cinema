@@ -51,6 +51,12 @@ final class TVPhysicalNavigationAcceptanceTests: TVNavigationTestCase {
                                "Physical guide must move promptly to another fully visible row")
             }
             XCTAssertLessThan(Date().timeIntervalSince(began), 3)
+            let identifier = focusedCell().identifier
+            if identifier.hasPrefix("live-guide-programme:"),
+               let start = Int(identifier.split(separator: ":").last ?? "") {
+                XCTAssertLessThanOrEqual(start, Int(Date().timeIntervalSince1970),
+                                         "Vertical browsing from Now must not drift into future programmes")
+            }
         }
         for _ in 1..<count { step(.down) }
         assertFocus(focusedCell(), in: app, context: "Physical guide last channel visible")

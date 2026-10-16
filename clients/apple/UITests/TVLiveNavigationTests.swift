@@ -89,6 +89,13 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         assertFocus(app.buttons["choice:now"], in: app, context: "Guide time Now reachable")
         remote.press(.select)
         assertFocus(time, in: app, context: "Guide time restores exact opener")
+        remote.press(.down)
+        XCTAssertFalse(time.hasFocus, "Down must leave Guide time for content")
+        for _ in 0..<3 {
+            if time.hasFocus { break }
+            remote.press(.up)
+        }
+        assertFocus(time, in: app, context: "Content Up restores its exact Guide time toolbar origin")
         remote.press(.up)
         assertFocus(tab, in: app, context: "Full lineup leaves root tabs responsive")
 
