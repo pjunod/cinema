@@ -9,26 +9,32 @@ on:
   workflow_dispatch:
     inputs:
       retained_units_sha256:
+        type: string
         description: "Authenticated digest-addressed retained unit proof; no suite replay"
         required: false
         default: ""
       retained_units_attachment_id:
+        type: string
         description: "Private promotion PR evidence attachment ID"
         required: false
         default: ""
       retained_units_attachment_uuid:
+        type: string
         description: "Private promotion PR evidence attachment UUID"
         required: false
         default: ""
       promotion_pr:
+        type: string
         description: "Optional open same-repo effort/integration promotion PR to main"
         required: false
         default: ""
       promotion_head_sha:
+        type: string
         description: "Immutable promotion head SHA; dispatch on that head branch"
         required: false
         default: ""
       promotion_base_sha:
+        type: string
         description: "Immutable current main SHA already merged into the promotion head"
         required: false
         default: ""

@@ -2229,6 +2229,33 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("if: always()", cleanup)
         self.assertIn('chown -R "$owner" "$GITHUB_WORKSPACE"', cleanup)
 
+    def test_manual_qualification_dispatch_inputs_have_explicit_string_types(self):
+        dispatch = read(".github/workflows/ci.yml").split(
+            "  workflow_dispatch:\n", 1
+        )[1].split("\nenv:", 1)[0]
+        self.assertTrue(dispatch.startswith("    inputs:\n"))
+        starts = list(re.finditer(r"(?m)^      ([a-z_][a-z0-9_]*):\n", dispatch))
+        descriptions = {
+            "retained_units_sha256": "Authenticated digest-addressed retained unit proof; no suite replay",
+            "retained_units_attachment_id": "Private promotion PR evidence attachment ID",
+            "retained_units_attachment_uuid": "Private promotion PR evidence attachment UUID",
+            "promotion_pr": "Optional open same-repo effort/integration promotion PR to main",
+            "promotion_head_sha": "Immutable promotion head SHA; dispatch on that head branch",
+            "promotion_base_sha": "Immutable current main SHA already merged into the promotion head",
+        }
+        self.assertEqual([entry.group(1) for entry in starts], list(descriptions))
+        for index, entry in enumerate(starts):
+            with self.subTest(input=entry.group(1)):
+                end = starts[index + 1].start() if index + 1 < len(starts) else len(dispatch)
+                fields = re.findall(r"(?m)^        ([a-z_]+): (.+)$", dispatch[entry.end():end])
+                self.assertEqual(len(fields), 4, "dispatch inputs require exactly one explicit renderer type")
+                self.assertEqual(dict(fields), {
+                    "type": "string",
+                    "description": '"' + descriptions[entry.group(1)] + '"',
+                    "required": "false",
+                    "default": '""',
+                })
+
     def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
         fast_lane = read(".github/workflows/main-fast-lane.yml")
