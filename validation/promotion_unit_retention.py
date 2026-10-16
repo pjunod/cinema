@@ -262,7 +262,7 @@ def expanded_document(document, objects=None):
         names = [suite.get('name') for suite in suites]
         r.require(all(isinstance(name, str) and name in COHORTS[lane] for name in names)
                   and len(names) == len(set(names)), 'Unknown or repeated expanded suite')
-        expanded[lane] = suites
+        expanded[lane] = [objects.expand_records(suite, document['source_commit']) for suite in suites]
     return {**document, 'lanes': expanded, 'command_units': units}
 
 

@@ -1554,6 +1554,8 @@ def expanded_commands(proof, candidate, objects=None):
     known = canonical(candidate)
     receipts.require(all(isinstance(name, str) and name in known for name in names)
                      and len(names) == len(set(names)), 'Unknown or repeated expanded command')
+    if proof['version'] == 2:
+        claims = [objects.expand_records(item, candidate) for item in claims]
     return {**proof, 'commands': claims}
 
 

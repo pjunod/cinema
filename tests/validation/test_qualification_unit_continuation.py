@@ -164,6 +164,34 @@ class CompleteCommandUnitCase(unittest.TestCase):
                 with self.assertRaises(receipts.ReceiptError):q.changed_inputs(record,CANDIDATE,{other['sha256']:other})
         with self.assertRaises(receipts.ReceiptError):q.changed_inputs(record,CANDIDATE,{})
 
+        dictionary={'format':'source-applicability-dictionary-v1','paths':['input.rs'],
+            'hashes':[q.retention.digest(b'old'),q.retention.digest(b'new')],
+            'affected_ids':[[]], 'reasons':['reviewed unchanged unit closure']}
+        dictionary_blob=log(json.dumps(dictionary))
+        manifest={'format':'source-applicability-columns-v1','source_commit':'a'*40,
+            'candidate':CANDIDATE,'dictionary':{'sha256_ref':dictionary_blob['sha256']},
+            'rows':'0,0,1,0,0\n'}
+        manifest_blob=log(json.dumps(manifest))
+        proof=fixture();proof['version']=2
+        proof['logs'].update({row['sha256']:row for row in [dictionary_blob,manifest_blob]})
+        proof['commands'][0]['records'][0].update(source_commit='a'*40,
+            changes={'sha256_ref':manifest_blob['sha256']})
+        original=copy.deepcopy(proof)
+        with patch.object(q,'canonical',return_value={'store_contract:1':COMMAND}):
+            expanded=q.expanded_commands(proof,CANDIDATE)
+        self.assertEqual(proof,original)
+        actual=expanded['commands'][0]['records'][0]
+        with patch.object(q.retention,'changed',return_value={'input.rs'}), \
+                patch.object(q.retention,'git_bytes',side_effect=lambda source,path:b'new' if source==CANDIDATE else b'old'):
+            self.assertEqual(q.changed_inputs(actual,CANDIDATE,proof['logs']),set())
+            actual['changes']['input.rs']['after']='f'*64
+            with self.assertRaises(receipts.ReceiptError):q.changed_inputs(actual,CANDIDATE,proof['logs'])
+        manifest['source_commit']='c'*40;wrong=log(json.dumps(manifest))
+        proof['logs'][wrong['sha256']]=wrong
+        proof['commands'][0]['records'][0]['changes']={'sha256_ref':wrong['sha256']}
+        with patch.object(q,'canonical',return_value={'store_contract:1':COMMAND}),self.assertRaises(receipts.ReceiptError):
+            q.expanded_commands(proof,CANDIDATE)
+
     def test_original_capture_keeps_unknown_observations_and_refuses_substitution(self):
         import json
         argv=['/owned/store_contract-0123456789abcdef','a','--exact','--test-threads=1']
