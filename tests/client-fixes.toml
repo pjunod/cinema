@@ -7000,3 +7000,20 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "#if !os(tvOS)\n                                    LiveTvFormatBadges(channel: row.channel).fixedSize()"
 test = "clients/apple/UITests/TVPhysicalNavigationAcceptanceTests.swift"
 test_anchor = "func testPhysicalFullGuideRemainsVisibleAndResponsive()"
+
+[[fixes]]
+id = "apple.tv-autohide-rechecks-current-ownership"
+commits = ["c8ca674b6453e6353011372f9910338a513845c0"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "return !Task.isCancelled && eligible()"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testAutoHideRechecksChannelFailureAfterCountdown()"
+
+[[fixes]]
+id = "apple.tv-recording-activity-restores-player-opener"
+commits = []
+supplements = "apple.tv-autohide-rechecks-current-ownership"
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "&& !showingLayout && !showingDvrActivity && detail == nil"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testLiveFullscreenRevealMoreReportAndBackRetainSession()"

@@ -624,6 +624,32 @@ candidate has identical Apple source; its current-main Rust compilation,
 Clippy and focused gate contracts pass. Mandatory promotion remains open,
 as does the remaining physical accessibility/gesture acceptance matrix.
 
+### F33 · P2 · N/S — playback hide countdown outlives a new presentation or failure
+
+The single adversarial review of candidate `d2abab249` found two remaining
+ownership gaps. Live Recording activity did not suspend the four-second hide
+timer or restore its exact opener. A library-channel error arriving while
+controls were already visible did not invalidate that timer; its completion
+could hide the failure and recovery controls.
+
+The shared countdown now rechecks eligibility after waiting and rejects
+cancelled requests. Live activity participates in the same presentation
+ownership and dismissal restoration as the other cover sheets, with Play as
+the fallback when the activity indicator disappears. Channel error changes
+invalidate the current countdown and keep the failure visible.
+
+**Focused evidence:** a deterministic unit injects a real controller failure
+while the countdown is suspended; another exercises a newer presentation,
+cancellation and unchanged idle state. Both pass. The expanded native Live
+journey leaves Recording activity open beyond five seconds, then requires
+actual focus on its opener. It fails on the unchanged production baseline
+and passes on the correction (109.29 seconds), including the existing guide,
+report and Back paths. The channel playback smoke also passes (90.74 seconds).
+The actual activity-return capture was inspected. All 1,101 tvOS unit tests
+pass with zero failures; the iOS simulator target also builds. The earlier 28-journey
+receipt predates this follow-up; final qualification must run the expanded
+journey against the promotion candidate.
+
 ## 6. Proposed renderings — consistent interaction before decoration
 
 The [gallery](apple-tv-navigation/index.html) includes twelve annotated design
@@ -843,7 +869,7 @@ none of the packages is a qualified release merely because it compiles.
 | T2 · Playback presentation | `LiveTvView`, `LibraryChannels`, `PlayerView`, diagnostics | T1 | **Partly proven:** [PR #1110](http://forge.lan:3000/noirr/plurx/pulls/1110). Native future-programme details/Close and current-programme single-session behavior pass; explicit layout change/reopen/Back passes. Library-channel hidden Play/Pause, first-direction reveal, More → Report → Back and session retention now pass. Reports moved inside More. Ordinary movie and Live TV native journeys also pass: hidden picture → reveal → More → Report → Back retains the playback session and returns to the original item/channel. Shared playback now passes initial Pause focus, hidden-picture reveal, selected Quality entry, exact menu/report return and a single retained session. The Shared title also exposes the same focusable About reading panel as local titles, with a native final-paragraph and exact-return assertion. |
 | T3 · Browsing and details | `LibraryView`, `HomeView`, `SearchView`, `DetailView`, `Components` | T1 | **Partly proven:** bounded tools sidebar, identity restoration, explicit Jump loading, episode details and complete synopsis, fixed Search query and recovery. Native full synopsis/Back and unchanged-query Search Retry/result return pass. Full Grid/Rows journeys now pass at 416 and 5,000 titles, including Jump A/M/Z/M, bounded tools access and exact content return. Empty and single-title libraries pass. Eleven focused browsing unit regressions and iOS simulator compilation pass; the synopsis has a visible focus cue. A foreground Home refresh failure now retains cached titles, exposes a reachable Retry and restores the retained title when Retry disappears; the native lifecycle journey passes. |
 | T4 · Secondary screens and visual consistency | DVR, Settings, diagnostics, remotes, theme, info | T1; serialize shared-file work with T2/T3 | **Partly proven:** native Settings quality selection/Back, Help → phone QR report → Advanced → Done/Back, recording details, safe rule cancellation and named manual channel selection pass. DVR title rows span the content region so Down from a middle category cannot hit a gap. Remote pairing revocation and registration reset now pass safe Cancel entry and exact opener return in an ad hoc signed simulator build. The fixture uses the normal saved-server identity and Keychain registration. DVR title scaling and report instruction wrapping are corrected and visually checked after passing native reruns. Saved-connection recovery now exposes Retry and contextual Help while network discovery continues, rather than hiding all actions behind a spinner. A repeated native run first caught the delayed recovery; the corrected run requires Retry within five seconds and preserves the saved sign-in. Final integrated and physical acceptance remain open. |
-| T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | **Awaiting promotion and remaining physical acceptance:** F29; all 28 source-bound native journeys pass at `0c52e0286` with no failures/skips, as do 1,099 unit tests and iOS compilation. The refreshed combined candidate still requires its effort and promotion gates. Saved-account physical checks pass on the 491-title library and all 77 guide channels; corrected build 252 is installed. Gestures, accessibility, couch-distance QR and the listed dynamic-state stress cases remain unaccepted. The installed TV correction does not constitute main promotion or complete physical qualification. |
+| T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | **Awaiting promotion and remaining physical acceptance:** F29; all 28 source-bound native journeys pass at `0c52e0286` with no failures/skips, as do 1,099 unit tests and iOS compilation. The F33 adversarial-review follow-up passes all 1,101 unit tests, iOS compilation and the expanded Live/channel journeys; its final full native run remains required. The refreshed combined candidate still requires its effort and promotion gates. Saved-account physical checks pass on the 491-title library and all 77 guide channels; corrected build 252 is installed. Gestures, accessibility, couch-distance QR and the listed dynamic-state stress cases remain unaccepted. The installed TV correction does not constitute main promotion or complete physical qualification. |
 
 **Integrated development evidence, October 15:** the full 1,037-test tvOS unit
 suite and iOS simulator compilation pass again after Shared About and connection
