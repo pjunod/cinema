@@ -3366,6 +3366,7 @@ fn spawn_background_loops(
     tokio::spawn(
         std::sync::Arc::clone(&state.transcode).serving_fence_loop(state.serving.subscribe()),
     );
+    state.membership.register_media_relay_acquisition();
     tokio::spawn(state.membership.clone().heartbeat_loop());
     tokio::spawn(std::sync::Arc::clone(&state.media_pool).poll_loop());
     tokio::spawn(

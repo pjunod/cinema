@@ -5,7 +5,7 @@ const {Worker:Thread}=require('node:worker_threads');
 const {webcrypto,createHash}=require('node:crypto');
 const {init,media}=require('./continuous-media.fixture.js');
 const source=fs.readFileSync('crates/plurxd/src/web/player/continuous-media.js','utf8');
-function environment(stalled=false){
+function environment(stalled=false,lan=false){
  const urls=new Map(),workers=[];let nextUrl=0;
  const stall=typeof stalled==='function'?stalled:()=>stalled;
  class PageWorker {
@@ -13,7 +13,7 @@ function environment(stalled=false){
    this.index=workers.length;workers.push(this);this.terminated=false;
    this.ready=urls.get(url).text().then(body=>{
     if(this.terminated)return null;
-    const prelude="const {parentPort}=require('node:worker_threads');globalThis.onmessage=null;globalThis.postMessage=value=>parentPort.postMessage(value);parentPort.on('message',data=>onmessage({data}));";
+    const prelude=(lan?"Object.defineProperty(globalThis,'crypto',{value:undefined,configurable:true});":"")+"const {parentPort}=require('node:worker_threads');globalThis.onmessage=null;globalThis.postMessage=value=>parentPort.postMessage(value);parentPort.on('message',data=>onmessage({data}));";
     this.child=new Thread(prelude+body,{eval:true});
     this.child.on('message',data=>this.onmessage?.({data}));
     this.child.on('error',()=>this.onerror?.());
@@ -92,4 +92,13 @@ test('a stuck worker fails its own jobs and the next job uses a fresh worker',as
  assert.equal(await owner.digest(payload),createHash('sha256').update(payload).digest('hex'));
  assert.equal(env.workers.length,2,'the attachment kept verifying with a new worker');
  owner.close();await env.retired();assert.equal(env.urls.size,0);
+});
+
+
+test('LAN HTTP worker hashes concurrent payloads without native WebCrypto',async t=>{
+  const env=environment(false,true),owner=env.context.continuousMediaVerifier();
+  t.after(async()=>{owner.close();await env.retired();assert.equal(env.urls.size,0);});
+  const payloads=[Buffer.alloc(1048577,0x3a),Buffer.alloc(2097155,0xc7)];
+  const result=await Promise.all(payloads.map(bytes=>owner.digest(new Uint8Array(bytes))));
+  result.forEach((digest,index)=>assert.equal(digest,createHash('sha256').update(payloads[index]).digest('hex')));
 });

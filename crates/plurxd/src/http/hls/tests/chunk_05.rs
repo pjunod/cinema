@@ -3354,3 +3354,51 @@ fn continuous_family_capacity_is_retryable_after_bounded_admission() {
         other => panic!("capacity must reach the client as a bounded retry: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn served_acquisition_hint_changes_only_response_and_keeps_owner_fence() {
+    let dir = crate::test_tempdir().expect("VOD HTTP directory");
+    let fixture = HlsDeliveryFixture::publish(dir.path(), "acquisition-rolling-unused").await;
+    let session = "acquisition-vod-http";
+    let owner = install_vod_http_session(&fixture, dir.path(), session).await;
+    let baseline = fixture.state.transcode.vod_playlist(session).await.expect("publication").result.expect("playlist");
+    let response = playlist(
+        State(fixture.state.clone()), AxPath(session.to_owned()),
+        Query(PlaylistQuery { acquisition_start_ms: Some(296_065), ..Default::default() }),
+        HeaderMap::new(),
+    ).await.expect("served hint");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(response.headers().get(header::ETAG).is_none());
+    let body = axum::body::to_bytes(response.into_body(), 1_048_576).await.expect("playlist body");
+    let text = std::str::from_utf8(&body).expect("playlist text");
+    let hint = "#EXT-X-START:TIME-OFFSET=296.065,PRECISE=NO\n";
+    assert_eq!(text.matches("#EXT-X-START:").count(), 1);
+    assert_eq!(text.replace(hint, "").as_bytes(), baseline);
+    assert_eq!(fixture.state.transcode.vod_playlist(session).await.expect("publication").result.expect("baseline"), baseline);
+    assert!(fixture.state.transcode.stop_session(session, "deleted").await);
+    assert!(complete_buffered_response_before(
+        &fixture.state, session, &owner,
+        crate::transcode::MediaResponsePublication::attempt_media("playlist", Some("index.m3u8")),
+        true, playlist_response(body.to_vec()), Instant::now() + Duration::from_secs(2),
+    ).await.is_err(), "old owner cannot publish fresh-query bytes after stop");
+}
+
+#[tokio::test]
+async fn negotiated_relay_uses_owner_local_acquisition_and_preserves_cached_manifest() {
+    let dir=crate::test_tempdir().expect("VOD HTTP directory");
+    let fixture=HlsDeliveryFixture::publish(dir.path(),"relay-acquisition-unused").await;
+    let session="relay-acquisition-vod";
+    install_vod_http_session(&fixture,dir.path(),session).await;
+    let baseline=fixture.state.transcode.vod_playlist(session).await.expect("publication").result.expect("baseline");
+    let response=relay_local(&fixture.state,RelayRequest {
+        session_id:session.to_owned(),resource:RelayResource::Playlist { native:None,subtitle:None,acquisition_start_ms:Some(296_065) },
+        deadline_unix_ms:resource_deadline_unix_ms(Instant::now()+Duration::from_secs(5)).expect("deadline"),headers:RelayHeaders::default(),
+    }).await;
+    assert_eq!(response.status(),StatusCode::OK);
+    let bytes=axum::body::to_bytes(response.into_body(),1_048_576).await.expect("body");
+    let text=std::str::from_utf8(&bytes).expect("playlist");
+    assert!(text.contains("#EXT-X-START:TIME-OFFSET=296.065,PRECISE=NO\n"));
+    assert_eq!(text.replace("#EXT-X-START:TIME-OFFSET=296.065,PRECISE=NO\n","").as_bytes(),baseline);
+    assert_eq!(fixture.state.transcode.vod_playlist(session).await.expect("publication").result.expect("unchanged"),baseline);
+}

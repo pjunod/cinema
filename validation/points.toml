@@ -946,6 +946,8 @@ paths = [
   "scripts/playback-optical-attribution",
   "scripts/playback-x11-acquisition",
   "scripts/continuous-quality-qualification",
+  "scripts/continuous-sha256.c",
+  "scripts/generate-continuous-sha",
   "scripts/continuous-quality-lifecycle",
   "scripts/continuous-quality-presentation",
   "scripts/continuous-quality-caption-fixture",
