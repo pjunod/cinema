@@ -7041,3 +7041,11 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "LiveTvRemoteAdapter(scope: .controls, state: { liveInputState })"
 test = "clients/apple/UITests/TVLiveNavigationTests.swift"
 test_anchor = "Left edge retains Pause during active input"
+
+[[fixes]]
+id = "apple.tv-synopsis-outline-viewport-clearance"
+commits = ["8e964f6d98018fbabf594efa1b781c4b9baea1c0"]
+source = "clients/apple/Sources/Components.swift"
+source_anchor = '.padding(8)'
+test = "clients/apple/UITests/TVSecondaryNavigationTests.swift"
+test_anchor = "Synopsis focus outline fits inside the reading viewport"
