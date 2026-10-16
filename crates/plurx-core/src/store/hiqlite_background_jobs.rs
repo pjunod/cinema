@@ -76,6 +76,17 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.batch(super::background_jobs_library::SCHEMA)).await? {
         result.map_err(database_error)?;
     }
+    // Bootstrap may be retried after a newer extension has installed its
+    // resource view. Create the probe-era view before the older resource
+    // schema, but never replay its migration-only DROP here. IF NOT EXISTS
+    // preserves an installed managed view even across concurrent bootstraps;
+    // the managed extension still verifies its exact shape at bootstrap end.
+    let probe_schema = super::background_jobs_probe::SCHEMA
+        .replace("DROP VIEW IF EXISTS background_job_required_resources;", "");
+    validate_sql(&probe_schema)?;
+    for result in timeout_store(client.batch(probe_schema)).await? {
+        result.map_err(database_error)?;
+    }
     validate_sql(super::background_jobs_resources::SCHEMA)?;
     for result in timeout_store(client.batch(super::background_jobs_resources::SCHEMA)).await? {
         result.map_err(database_error)?;
@@ -104,10 +115,6 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     }
     validate_sql(super::background_jobs_embeddings::SCHEMA)?;
     for result in timeout_store(client.batch(super::background_jobs_embeddings::SCHEMA)).await? {
-        result.map_err(database_error)?;
-    }
-    validate_sql(super::background_jobs_probe::SCHEMA)?;
-    for result in timeout_store(client.batch(super::background_jobs_probe::SCHEMA)).await? {
         result.map_err(database_error)?;
     }
     validate_sql(super::background_jobs_integrity::SCHEMA)?;
