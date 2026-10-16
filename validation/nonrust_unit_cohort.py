@@ -367,6 +367,352 @@ def modern_jvm_argv(command):
     return selectors
 
 
+# One closed incoming CI pair; these are original Linux source-fixture outcomes.
+# Numeric suite exits and interpreter binary hashes were not recorded. Nothing
+# here changes the ordinary same-effort or measured local-capture contracts.
+LINKED_PYTHON_CI_SCOPE = {'base': 'main',
+ 'branch': 'codex/continuous-quality-hardware-status',
+ 'pr': 1048,
+ 'repository': 1,
+ 'workflow': 'main-fast-lane.yml'}
+LINKED_PYTHON_CI_RUNS = {5249: {'job': 51932,
+        'job_status': 'failure',
+        'journal_artifact_sha256': '1997a87ed005994083ab0dc6f043ab9c5d0ff6558f94fbf00135129f114d8ee2',
+        'journal_pass_count': 1372,
+        'producer_inputs': {'.github/workflows/main-fast-lane.yml': 'd2b4528963ded33c03255685dea791d65634773eb7236aa4f580900fd87ca5e4',
+                            'validation/main_preflight_adoption.py': 'b9851a5404ef4cfe213b8244a67adc2d8b92df730390e19884aa2e7619c053c8',
+                            'validation/main_unit_receipts.py': 'b4112a92f0dd6acb63937c837eeb899db76ab8d8dfad8025f12e7924622ac5f4',
+                            'validation/python_unit_receipts.py': 'f8fec1cbd51b0004e96cb984ffdb0227325930deb0daae9615f8d279d6e86eef'},
+        'raw_sha256': 'b87afee73c137c624dadd48e755cdc3610770048e995f601c02b65df1e82cde0',
+        'source': '213e4cd453bf139ad741fc3dd7e14630f46b77e0',
+        'wire_journals': {'final': 'dede5745304052758fde8bba9161cede8b5e183048994245d6d0bfa28583f0e6',
+                          'start': 'd9dd239a902589bcda5f672c55617bb322d8a73fb9e25fe1f62e436c0647fb9d'}},
+ 5254: {'job': 51968,
+        'job_status': 'success',
+        'journal_artifact_sha256': '0195b19e5753d7db3234f7e264afa3d5d76f5fdb99780374671c38de581f680d',
+        'journal_pass_count': 1388,
+        'producer_inputs': {'.github/workflows/main-fast-lane.yml': 'd2b4528963ded33c03255685dea791d65634773eb7236aa4f580900fd87ca5e4',
+                            'validation/main_preflight_adoption.py': 'b9851a5404ef4cfe213b8244a67adc2d8b92df730390e19884aa2e7619c053c8',
+                            'validation/main_unit_receipts.py': 'b4112a92f0dd6acb63937c837eeb899db76ab8d8dfad8025f12e7924622ac5f4',
+                            'validation/python_unit_receipts.py': 'f8fec1cbd51b0004e96cb984ffdb0227325930deb0daae9615f8d279d6e86eef'},
+        'raw_sha256': '06c6d8d08ba41238c3f572a8a68e71fd83615d416f9e40cece9ff40c7d45639a',
+        'source': '77ed3f5968c5d03c35f839635be432f9cc5febc4',
+        'wire_journals': {'final': '778105690ed623f8acf716c5bcd3e4ff81f6afd39679d84f1b2013f43ab081b4',
+                          'start': 'd5eef4887a7d76ffa84be72a9d2b7cc9159424e981de3d5e8214357f53dec956'}}}
+LINKED_PYTHON_CI_FAILURES = ('validation:test_rolling_producer_ownership_inventory.RollingProducerOwnershipInventoryTest.test_module_wide_legacy_and_deadline_sentinels_have_reviewed_counts',
+ 'validation:test_rolling_producer_ownership_inventory.RollingProducerOwnershipInventoryTest.test_module_wide_task_timer_and_process_shapes_have_reviewed_counts',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_a05_boundary_named_fences_preserve_original_scope_and_no_allowlist_growth',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_a_direct_still_current_call_is_reported',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_a_fence_used_from_another_continuation_is_reported',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_a_fence_without_a_census_row_and_a_row_without_a_fence_are_reported',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_a_new_hand_written_fence_is_reported',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_a_scope_the_attempt_type_does_not_declare_is_reported',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_a_second_copy_of_an_excused_fence_is_reported',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_all_fences_swapped_at_once_are_each_reported',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_an_allow_list_row_that_outlived_its_fence_is_reported',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_prose_about_a_fence_is_not_a_fence',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_reverting_any_migrated_fence_is_reported',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_swapping_any_fences_scope_set_is_reported',
+ 'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_the_repository_agrees_with_its_own_census',
+ 'operations:test_doc_status_audit.DocStatusAuditCase.test_current_index_has_no_mechanical_contradictions')
+LINKED_PYTHON_CI_FAILURE_TOTALS = {'validation': 8, 'operations': 134}
+LINKED_PYTHON_CI_DOCS = ('operations:test_docs_index.DocsIndexTest.test_every_index_link_resolves',
+ 'operations:test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve')
+
+def linked_python_ci_policy(record):
+    execution = record['origin']['execution']
+    digest = execution.get('legacy_capture')
+    matches = [(run, row) for run, row in LINKED_PYTHON_CI_RUNS.items()
+               if row['raw_sha256'] == digest]
+    receipts.require(len(matches) == 1, 'Unknown linked Python CI capture')
+    run, policy = matches[0]
+    kind = execution.get('kind')
+    receipts.require(kind in {'validation', 'operations'}
+                     and record['source_commit'] == policy['source']
+                     and record['log'] == {'sha256_ref': digest}
+                     and record['origin']['kind'] == 'authenticated-ci'
+                     and record['origin']['identity'] == f"run:{run}/job:{policy['job']}"
+                     and record['origin']['command'] is None
+                     and execution == {'mode': 'source-cohort-v1', 'kind': kind,
+                                       'legacy_capture': digest, 'job_status': policy['job_status']}
+                     and record['coverage'] == {'mode': 'python-named'}
+                     and record['exit_code'] is None,
+                     'Linked Python CI origin, source or unknown numeric exit changed')
+    return run, policy
+
+
+def linked_python_ci_pair(proof, discovery):
+    """Read both whole originals; journals never manufacture native outcomes."""
+    from validation import main_unit_receipts as main
+    snapshots, texts = {}, {}
+    for run, policy in LINKED_PYTHON_CI_RUNS.items():
+        raw = blob(proof, {'sha256_ref': policy['raw_sha256']})
+        receipts.require(retention.digest(raw) == policy['raw_sha256'], 'Linked CI raw changed')
+        lines = main.log_lines(raw)
+        markers = re.findall(r'^MAIN-UNIT-JOURNAL (start|final) [1-9][0-9]* ([0-9a-f]{64})$',
+                             '\n'.join(lines), re.M)
+        receipts.require(markers == [(phase, policy['wire_journals'][phase]) for phase in ('start', 'final')],
+                         'Linked CI journal order or wire identity changed')
+        phases = main.read_snapshots(lines)
+        artifact = receipts.bounded_json(blob(proof, {'sha256_ref': policy['journal_artifact_sha256']}))
+        receipts.require(set(phases) == {'start', 'final'} and artifact == phases['final'],
+                         'Original pretty artifact and printed journal differ')
+        for phase, journal in phases.items():
+            receipts.require(set(journal) == {'version', 'scope', 'commit', 'applicability_commit',
+                                             'run', 'complete', 'fixture_errors', 'passes'}
+                             and journal['version'] == 1 and journal['scope'] == LINKED_PYTHON_CI_SCOPE
+                             and journal['commit'] == journal['applicability_commit'] == policy['source']
+                             and journal['run'] == run and journal['complete'] is (phase == 'final')
+                             and journal['fixture_errors'] == [] and isinstance(journal['passes'], dict),
+                             'Linked CI journal source, scope or completion differs')
+        receipts.require(len(artifact['passes']) == policy['journal_pass_count'],
+                         'Linked CI original pass membership count differs')
+        snapshots[run], texts[run] = phases, '\n'.join(lines)
+    first, repaired = sorted(LINKED_PYTHON_CI_RUNS)
+    initial, final = snapshots[first]['final']['passes'], snapshots[repaired]['final']['passes']
+    receipts.require(snapshots[first]['start']['passes'] == {}
+                     and snapshots[repaired]['start']['passes'] == initial
+                     and all(value == {'commit': LINKED_PYTHON_CI_RUNS[first]['source'], 'run': first}
+                             for value in initial.values())
+                     and all(final.get(key) == value for key, value in initial.items())
+                     and set(final) - set(initial) == set(LINKED_PYTHON_CI_FAILURES)
+                     and all(final[key] == {'commit': LINKED_PYTHON_CI_RUNS[repaired]['source'],
+                                            'run': repaired} for key in LINKED_PYTHON_CI_FAILURES)
+                     and set(LINKED_PYTHON_CI_DOCS) <= set(initial),
+                     'Inherited journal membership was relabeled or repair ownership changed')
+    for run, phases in snapshots.items():
+        own = {kind + ':' + name for kind in ('validation', 'operations')
+               for name in discovery(LINKED_PYTHON_CI_RUNS[run]['source'], kind)}
+        receipts.require(set(phases['final']['passes']) <= own,
+                         'Linked journal includes an unknown source-archived identity')
+    # Original full run contains nested test fixtures. Select only these pinned
+    # real native identities, retaining every original failure and the whole log.
+    wanted = set(LINKED_PYTHON_CI_FAILURES) | set(LINKED_PYTHON_CI_DOCS)
+    found = {}
+    pattern = r'^\w+ \(([^)\n]+)\)(?: \.\.\. |\n[^\n]* \.\.\. )(ok|FAIL|ERROR|skipped)(?:\s|$)'
+    for name, status in re.findall(pattern, texts[first], re.M):
+        matches = [key for key in wanted if key.split(':', 1)[1] == name
+                   or 'tests.' + key.replace(':', '.', 1) == name]
+        if not matches:
+            continue
+        receipts.require(len(matches) == 1 and matches[0] not in found,
+                         'Repeated linked original native identity')
+        found[matches[0]] = 'pass' if status == 'ok' else 'fail' if status in {'FAIL', 'ERROR'} else 'ignored'
+    # unittest subtests have native failure-detail frames without a flat
+    # parent FAIL terminal. Keep their enclosing source-method identity; many
+    # subfailure frames still describe one failed method, never many bodies.
+    details = {}
+    for name in re.findall(r'^FAIL: \w+ \(([^)\n]+)\)(?: [^\n]*)?$', texts[first], re.M):
+        matches = [key for key in LINKED_PYTHON_CI_FAILURES
+                   if key.split(':', 1)[1] == name or 'tests.' + key.replace(':', '.', 1) == name]
+        if not matches:
+            continue  # Deliberate failures inside the suite's own fixture tests.
+        receipts.require(len(matches) == 1, 'Ambiguous linked subtest owner')
+        key = matches[0]
+        method = key.rsplit('.', 1)[1]
+        parent = (r'^' + re.escape(method) + r' \((?:'
+                  + re.escape(key.split(':', 1)[1]) + '|'
+                  + re.escape('tests.' + key.replace(':', '.', 1)) + r')\)(?: \.\.\. |$)')
+        receipts.require(len(re.findall(parent, texts[first], re.M)) == 1
+                         and found.get(key, 'fail') == 'fail',
+                         'Linked subtest lacks one native parent or conflicts with its terminal')
+        details[key] = details.get(key, 0) + 1
+        found[key] = 'fail'
+    receipts.require(set(details) == set(LINKED_PYTHON_CI_FAILURES),
+                     'Linked original native failure detail missing')
+    for kind, total in LINKED_PYTHON_CI_FAILURE_TOTALS.items():
+        receipts.require(sum(count for key, count in details.items() if key.startswith(kind + ':')) == total
+                         and re.search(r'^Ran ' + str(len(discovery(LINKED_PYTHON_CI_RUNS[first]['source'], kind)))
+                                       + r' tests in [0-9.]+s\n\s*\nFAILED \(failures='
+                                       + str(total) + r'\)$', texts[first], re.M),
+                         'Original outer suite or native subfailure total changed')
+    expected = {key: 'fail' for key in LINKED_PYTHON_CI_FAILURES}
+    expected.update({key: 'pass' for key in LINKED_PYTHON_CI_DOCS})
+    receipts.require(found == expected, 'Original linked native failures or docs passes differ')
+    # Repair ran two genuine unittest suites, each with its own outer terminal.
+    # Frame boundaries are derived from exact native method starts/summary ends;
+    # no reconstructed output or inherited positive row enters this decoding.
+    results, lines = {}, texts[repaired].splitlines()
+    cursor = 0
+    for kind in ('validation', 'operations'):
+        selected = {key.split(':', 1)[1] for key in LINKED_PYTHON_CI_FAILURES
+                    if key.startswith(kind + ':')}
+        starts = [i for i in range(cursor, len(lines))
+                  if any('(' + name + ')' in lines[i] or '(tests.' + kind + '.' + name + ')' in lines[i]
+                         for name in selected)]
+        receipts.require(starts, 'Missing linked repair native suite')
+        start = min(starts)
+        ends = [i for i in range(start, len(lines)) if lines[i] == 'OK']
+        receipts.require(ends, 'Missing linked repair outer terminal')
+        end = ends[0]
+        body = '\n'.join(lines[start:end + 1])
+        other = {key.split(':', 1)[1] for key in LINKED_PYTHON_CI_FAILURES
+                 if not key.startswith(kind + ':')}
+        actual = python_rows(body, kind, selected, other)
+        receipts.require(actual == {name: 'pass' for name in selected}
+                         and re.search(r'^Ran ' + str(len(selected)) + r' tests in [0-9.]+s\n\s*\nOK$', body, re.M),
+                         'Repair native frame membership or terminal changed')
+        results.update({kind + ':' + name: value for name, value in actual.items()})
+        cursor = end + 1
+    receipts.require(set(results) == set(LINKED_PYTHON_CI_FAILURES),
+                     'Linked repair promoted an inherited pass to native credit')
+    return {first: found, repaired: results}
+
+
+def authenticate_linked_python_ci(api, proof, record, document, repository, live_logs, runs, jobs_by_run):
+    """The exact old PR pair is the only exception to same-effort CI scope."""
+    from validation import main_unit_receipts as main
+    linked_python_ci_policy(record)
+    receipts.require(document['pr'] == 1045 and document['branch'] == 'effort/dv-hdr-repair'
+                     and repository == LINKED_PYTHON_CI_SCOPE['repository'],
+                     'Linked original CI is outside its one main-bound promotion')
+    for rid, policy in LINKED_PYTHON_CI_RUNS.items():
+        if rid not in runs:
+            runs[rid] = api.get(f'/actions/runs/{rid}')
+            jobs_by_run[rid] = api.pages(f'/actions/runs/{rid}/jobs')
+        run = runs[rid]
+        main.authenticate_run(LINKED_PYTHON_CI_SCOPE, run)
+        jobs = [job for job in jobs_by_run[rid] if job['id'] == policy['job']]
+        receipts.require(run['repository']['id'] == repository and run['commit_sha'] == policy['source']
+                         and len(jobs) == 1 and jobs[0]['name'] == main.JOB
+                         and jobs[0]['attempt'] == 1 and jobs[0]['run_id'] == rid
+                         and jobs[0]['repo_id'] == repository and jobs[0]['task_id'] > 0
+                         and jobs[0]['status'] == policy['job_status'],
+                         'Linked original CI run/job/attempt/disposition changed')
+        for path, digest in policy['producer_inputs'].items():
+            raw = retention.git_bytes(policy['source'], path)
+            receipts.require(raw is not None and retention.digest(raw) == digest,
+                             'Linked original CI workflow or receipt producer changed')
+        live = live_logs.get(api, rid, policy['job'])
+        receipts.require(retention.digest(live) == policy['raw_sha256']
+                         and blob(proof, {'sha256_ref': policy['raw_sha256']}) == live,
+                         'Linked original CI whole live log differs')
+
+
+# Original source-bound full suites have one unidentified skip each. Only the
+# reviewed unskippable subset may receive opaque command credit. No named row,
+# measured runtime or original tool-call identity is reconstructed.
+INCOMING_PYTHON_SOURCE = 'd440abf8ebb7c1cfa4cf00163260bc069a36e4ab'
+INCOMING_PYTHON_TREE = '20589a21aff411058fe9261e09c66f132f776c70'
+INCOMING_PYTHON_CUSTODY = {
+    'source_binding': 'dd24316e217c9ef77b652abe36c1ba00885d43c4b04faf7a46786f2a56485b10',
+    'receipt': '10fef05a641350902e08359048b6c3778e660b7ad6d349b45b1addbb6f89c48d',
+    'oracle_manifest': '9b6912a400a01cb964a8ae1741054e9d900602131595eeb8d3296a42d5aab5dc',
+}
+INCOMING_PYTHON_FULL = {
+    '1595c33d10a611b62896756ede62af23848d0bb3b39139b22e4fe8dbf0ba781b': {
+        'kind': 'validation', 'count': 359,
+        'command': ['python3', '-m', 'unittest', 'discover', '-s', 'tests/validation', '-p', 'test_*.py']},
+    '1bb1fc9694c6956f02e9db8ef423293a6b4ebba99eda94af4a58e50ec8750ef6': {
+        'kind': 'operations', 'count': 1049, 'command': ['make', 'operations-check']},
+}
+# Exact source/class/helper closure reviewed for this immutable capture.
+# No validation ID is admitted from its separately preserved skipped suite.
+INCOMING_PYTHON_SUBSETS = {'operations': ('test_api_doc_routes.ApiDocRoutesTest.test_every_registered_route_is_documented',
+                'test_api_doc_routes.ApiDocRoutesTest.test_no_documented_path_is_invented',
+                'test_docs_index.DocsIndexTest.test_every_docs_markdown_file_is_listed',
+                'test_docs_index.DocsIndexTest.test_every_index_link_resolves',
+                'test_docs_index.DocsIndexTest.test_no_reference_points_at_a_missing_docs_path',
+                'test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve',
+                'test_install.InstallerCase.test_dry_run_prints_the_plan_and_touches_nothing',
+                'test_install.InstallerCase.test_installer_stays_bash_3_2_clean_for_macos',
+                'test_install.InstallerCase.test_macos_corrupt_subtitle_package_does_not_stop_existing_service',
+                'test_install.InstallerCase.test_macos_failed_fresh_subtitle_promotion_leaves_no_installed_bundle',
+                'test_install.InstallerCase.test_macos_failed_subtitle_staging_keeps_old_bundle_and_running_agent',
+                'test_install.InstallerCase.test_macos_hands_back_what_an_earlier_root_run_left_before_using_it',
+                'test_install.InstallerCase.test_macos_install_renders_the_agent_for_this_user_and_bootstraps_it',
+                'test_install.InstallerCase.test_macos_installs_a_given_source_parser_and_refuses_one_that_is_not_webassembly',
+                'test_install.InstallerCase.test_macos_installs_the_engine_from_a_local_archive_without_downloading',
+                'test_install.InstallerCase.test_macos_installs_the_source_parser_beside_the_pinned_ffprobe',
+                'test_install.InstallerCase.test_macos_release_archive_installs_its_own_plurxd_and_clears_quarantine',
+                'test_install.InstallerCase.test_macos_subtitle_bundle_stages_before_stop_and_rolls_back_failed_promotion',
+                'test_install.InstallerCase.test_macos_uninstall_boots_the_agent_out_and_keeps_application_support',
+                'test_install.InstallerCase.test_macos_upgrade_keeps_the_operators_plist',
+                'test_install.InstallerCase.test_macos_upgrade_repoints_a_non_jellyfin_engine_and_keeps_a_chosen_jellyfin_one',
+                'test_install.InstallerCase.test_macos_upgrade_repoints_the_engine_through_sudo_when_launchagents_is_not_writable',
+                'test_install.InstallerCase.test_macos_writes_the_agent_through_sudo_when_launchagents_is_not_writable',
+                'test_license_notices.LicenseNoticesCase.test_every_relative_link_resolves',
+                'test_license_notices.LicenseNoticesCase.test_referenced_license_texts_exist',
+                'test_license_notices.LicenseNoticesCase.test_the_notices_survive_the_release_rewrite',
+                'test_macos_daemon_package.MacosDaemonPackageCase.test_failed_signing_does_not_publish_or_mutate_source_artifacts',
+                'test_release_debug.PackedDebugCase.test_export_and_runtime_keep_debug_beside_every_binary',
+                'test_release_publication.ReleasePublicationContractCase.test_audited_amd64_release_render_excludes_export_tools_and_keeps_arm_incumbent',
+                'test_release_publication.ReleasePublicationContractCase.test_digest_bound_release_omits_mutable_runtime_install',
+                'test_release_publication.ReleasePublicationContractCase.test_generated_dockerfile_keeps_only_the_tagged_runtime',
+                'test_release_publication.ReleasePublicationContractCase.test_generator_derives_current_two_binary_runtime',
+                'test_release_publication.ReleasePublicationContractCase.test_named_dolby_package_context_is_accepted_only_in_its_render_mode',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_catalog_pins_immutable_models_and_explicit_supported_languages',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_engine_identity_refuses_symlinks_and_missing_notices',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_engine_identity_rejects_changed_binary_source_options_and_companions',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_linux_architecture_cannot_be_mislabeled_without_cross_compilation',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_macos_installer_real_verifier_rejects_changed_binary_before_execution',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_macos_installer_rejects_unqualified_and_extra_build_options',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_portable_verifier_reaches_but_never_fakes_native_signature_qualification',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_source_archive_is_verified_before_extraction',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_speech_fixture_requires_recognizable_words_and_valid_timing',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_caption_parser_distinguishes_bounds_from_timing_accuracy',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_corpus_pins_source_and_licensed_reference_separately',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_fixture_noise_is_reproducible_and_silence_is_exact_zero',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_oversize_writer_is_stopped_and_reaped',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_real_film_retains_raw_failure_and_reports_exact_pcm_intersection',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_timeout_reaps_child_and_clean_environment_is_explicit',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_word_error_counts_omission_insertion_and_substitution',
+                'test_web_test_inventory.WebTestInventory.test_every_node_test_file_is_executed_by_a_gate',
+                'test_web_test_inventory.WebTestInventory.test_the_recipe_names_no_test_file_that_is_gone',
+                'test_web_test_inventory.WebTestInventory.test_ungated_browser_fixtures_only_shrink'),
+ 'validation': ()}
+
+
+def incoming_python_policy(record):
+    execution = record['origin']['execution']
+    digest = execution.get('legacy_capture')
+    capture = INCOMING_PYTHON_FULL.get(digest)
+    receipts.require(capture is not None, 'Unknown incoming full Python capture')
+    kind = capture['kind']; selected = list(INCOMING_PYTHON_SUBSETS[kind])
+    receipts.require(selected and selected == sorted(set(selected))
+                     and record['source_commit'] == INCOMING_PYTHON_SOURCE
+                     and record['log'] == {'sha256_ref': digest}
+                     and type(record['exit_code']) is int and record['exit_code'] == 0
+                     and record['origin']['kind'] == 'attested-local'
+                     and record['origin']['identity'] == 'custody:sha256:' + INCOMING_PYTHON_CUSTODY['source_binding']
+                     and record['origin']['command'] == capture['command']
+                     and execution == {'mode': 'source-cohort-v1', 'kind': kind,
+                         'legacy_capture': digest, 'actual_execution_source_commit': INCOMING_PYTHON_SOURCE,
+                         'python_patch': None, 'interpreter_sha256': None, 'platform': None,
+                         'original_tool_call_id': None, 'skipped_method_ids': None,
+                         **{key: {'sha256_ref': sha} for key, sha in INCOMING_PYTHON_CUSTODY.items()}}
+                     and record['coverage'] == {'mode': 'python-discovery-subset', 'ids': selected},
+                     'Incoming opaque source, original command, unknowns or subset changed')
+    return capture
+
+
+def incoming_python_outcomes(proof, record, discovery):
+    capture = incoming_python_policy(record); kind = capture['kind']
+    metadata = {key: receipts.bounded_json(blob(proof, {'sha256_ref': sha}))
+                for key, sha in INCOMING_PYTHON_CUSTODY.items()}
+    binding, receipt = metadata['source_binding'], metadata['receipt']
+    receipts.require(binding['source_commit'] == INCOMING_PYTHON_SOURCE
+                     and binding['source_tree'] == INCOMING_PYTHON_TREE
+                     and binding['receipt_sha256'] == INCOMING_PYTHON_CUSTODY['receipt']
+                     and binding['oracle_manifest_sha256'] == INCOMING_PYTHON_CUSTODY['oracle_manifest']
+                     and binding['oracle_file_count'] == len(metadata['oracle_manifest']['files']) == 179,
+                     'Incoming source binding, original receipt or oracle changed')
+    rows = [row for row in receipt['results'] if row['domain'] == kind]
+    receipts.require(len(rows) == 1 and rows[0]['command'] == capture['command']
+                     and rows[0]['exit_code'] == 0
+                     and rows[0]['log_sha256'] == record['log']['sha256_ref'],
+                     'Incoming original executor receipt differs')
+    original_ids = set(discovery(INCOMING_PYTHON_SOURCE, kind))
+    selected = set(INCOMING_PYTHON_SUBSETS[kind])
+    receipts.require(len(original_ids) == capture['count'] and selected <= original_ids,
+                     'Incoming opaque whitelist left original source discovery')
+    text = blob(proof, record['log']).decode()
+    terminals = re.findall(r'^Ran ' + str(capture['count'])
+                           + r' tests in [0-9.]+s\n\s*\nOK \(skipped=1\)$', text, re.M)
+    receipts.require(len(terminals) == 1, 'Incoming outer suite or unknown skip changed')
+    return {name: 'opaque-pass' for name in selected}
+
+
 def require_capture_custody(proof, execution, binding_raw, binding):
     """Preserve an absent historical measurement; reconcile only a pinned one."""
     reference = execution.get('custody_supplement')
@@ -553,6 +899,8 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
     legacy_sequences = {}
     source_failures, source_repairs = {}, {}
     original_jvm_failures = set()
+    linked_ci_sequences = {}
+    incoming_full_sequences = set()
     for record in sorted(item['records'], key=lambda row: row['sequence']):
         receipts.require(set(record) == {'sequence', 'source_commit', 'origin', 'changes', 'log', 'coverage', 'exit_code'},
                          'Unknown source-cohort execution fields')
@@ -576,7 +924,24 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
         exact_selected_repairs = set()
         source_variant_failure = False
         legacy = execution.get('legacy_capture')
-        if legacy is not None and kind == 'android_jvm':
+        if legacy in INCOMING_PYTHON_FULL:
+            receipts.require(legacy not in incoming_full_sequences, 'Incoming full capture enrolled twice')
+            incoming_full_sequences.add(legacy)
+            receipts.require(kind in {'validation', 'operations'}, 'Opaque Python cannot qualify another command')
+            actual = incoming_python_outcomes(proof, record, discovery)
+            receipts.require(set(actual) <= universe, 'Incoming opaque subset left current source')
+            opaque_sources.append({'sequence': sequence, 'source_commit': record['source_commit'],
+                                   'log_sha256': legacy, 'membership_ids': sorted(set(actual) - invalid),
+                                   'runtime_named_outcomes': None})
+        elif legacy in {row['raw_sha256'] for row in LINKED_PYTHON_CI_RUNS.values()}:
+            run, _policy = linked_python_ci_policy(record)
+            receipts.require(run not in linked_ci_sequences, 'Linked CI capture enrolled twice')
+            linked_ci_sequences[run] = sequence
+            pair = linked_python_ci_pair(proof, discovery)
+            actual = {key.split(':', 1)[1]: value for key, value in pair[run].items()
+                      if key.startswith(kind + ':')}
+            receipts.require(actual and set(actual) <= universe, 'Linked native identity left current cohort')
+        elif legacy is not None and kind == 'android_jvm':
             capture = LEGACY_JVM.get(legacy)
             receipts.require(capture is not None, 'Unreviewed original JVM capture')
             actual = legacy_jvm_outcomes(proof, record, capture, raw, universe)
@@ -711,6 +1076,11 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
             owners[test_id] = sequence
             if outcome == 'pass' or (outcome == 'opaque-pass' and test_id in exact_selected_repairs):
                 passes[test_id] = sequence
+    if linked_ci_sequences:
+        first, repair = sorted(LINKED_PYTHON_CI_RUNS)
+        receipts.require(set(linked_ci_sequences) == {first, repair}
+                         and linked_ci_sequences[first] < linked_ci_sequences[repair],
+                         'Linked original failures and repairs must both remain ordered')
     require_source_bound_repairs(source_failures, source_repairs)
     receipts.require(all(test_id in passes for test_id in original_jvm_failures),
                      'Original named JVM failure lacks a current-applicable native pass')

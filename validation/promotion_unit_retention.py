@@ -87,6 +87,14 @@ ANDROID_DEVICE_5172 = {'source': '050b6ececbc9202492eb7e0675dc994f9f65686b',
                                            'unknown'}}}
 
 
+# Exact additive subtitle/browser Makefile integration. All twelve other
+# consumed projections remain identical; appended overrides still fail closed.
+ANDROID_DEVICE_5172_CURRENT_MAKE = frozenset({
+    ANDROID_DEVICE_5172['inputs']['make-complete'],
+    '3f7f061dc4791132197659e5723d6ad3ced1095dea2e97f1e9b714532fc6bd5c',
+})
+
+
 def android_device_tree(commit, path):
     return subprocess.check_output(['git', 'rev-parse', r.sha(commit) + ':' + path],
                                    text=True).strip()
@@ -158,8 +166,12 @@ def android_device_record_contract(lane, suite, record, candidate, source):
               and suite['environment'] == record['environment'] == policy['environment']
               and record['outcomes'] == {policy['id']: 'pass'},
               'Android whole-command source, scope or environment differs')
-    r.require(android_device_inputs(source, policy['source']) == policy['inputs']
-              and android_device_inputs(source, candidate) == policy['inputs'],
+    original = android_device_inputs(source, policy['source'])
+    current = android_device_inputs(source, candidate)
+    allowed_make = ANDROID_DEVICE_5172_CURRENT_MAKE | {policy['inputs']['make-complete']}
+    r.require(original == policy['inputs']
+              and current['make-complete'] in allowed_make
+              and {**current, 'make-complete': policy['inputs']['make-complete']} == policy['inputs'],
               'Android whole-command consumed inputs changed')
 
 

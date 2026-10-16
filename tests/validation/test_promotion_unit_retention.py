@@ -599,6 +599,14 @@ class RetainedUnitCase(unittest.TestCase):
                                                                  'd' * 40, read)
                 else:
                     validate_command(proof, lambda c, p: b'changed' if p == changed_path else read(c, p))
+        additive_make = sources['Makefile'] + b'\nsubtitle-browser-check:\n\tfixture\n'
+        def additive_read(commit, path):
+            return additive_make if commit != policy['source'] and path == 'Makefile' else read(commit, path)
+        with patch.object(retention, 'ANDROID_DEVICE_5172_CURRENT_MAKE',
+                          {retention.digest(additive_make)}):
+            self.assertEqual(validate_command(proof, additive_read)['android_device']['commands_passed'], 1)
+        with self.assertRaises(receipts.ReceiptError):
+            validate_command(proof, additive_read)
         old_version = copy.deepcopy(proof)
         old_version.update(version=1)
         del old_version['command_units']

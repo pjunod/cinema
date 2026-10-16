@@ -386,6 +386,269 @@ class NonRustSourceCohortCase(unittest.TestCase):
         with self.assertRaises(receipts.ReceiptError):
             cohort.original_jvm_failure_witness(proof, capture)
 
+    def linked_ci_fixture(self):
+        # Small source-native fixtures exercise the closed-pair decoder without
+        # copying production logs or executing any imported test body.
+        failures = tuple(kind + ':test_pair.Case.test_' + str(i)
+                         for kind in ('validation', 'operations') for i in range(2))
+        docs = tuple('operations:test_docs.Case.test_' + str(i) for i in range(2))
+        scope = copy.deepcopy(cohort.LINKED_PYTHON_CI_SCOPE)
+        policy = copy.deepcopy(cohort.LINKED_PYTHON_CI_RUNS)
+        proof, raw_logs, snapshots = {'logs': {}}, {}, {}
+        initial = {key: {'commit': policy[5249]['source'], 'run': 5249} for key in docs}
+        repaired = {**initial, **{key: {'commit': policy[5254]['source'], 'run': 5254}
+                                  for key in failures}}
+
+        def wire(journal, phase):
+            raw = json.dumps(journal, sort_keys=True, separators=(',', ':')).encode()
+            encoded = base64.b64encode(raw).decode()
+            chunks = [encoded[i:i + 2048] for i in range(0, len(encoded), 2048)]
+            digest = retention.digest(raw)
+            return ('MAIN-UNIT-JOURNAL ' + phase + ' ' + str(len(chunks)) + ' ' + digest + '\n'
+                    + ''.join('MAIN-UNIT-CHUNK ' + phase + ' ' + str(i) + ' ' + part + '\n'
+                              for i, part in enumerate(chunks)) + 'MAIN-UNIT-END ' + phase + '\n'), digest
+
+        def native(keys, status):
+            return ''.join(key.rsplit('.', 1)[1] + ' (tests.' + key.replace(':', '.', 1)
+                           + ') ... ' + status + '\n' for key in keys)
+
+        for run, row in policy.items():
+            phases = {}
+            for phase in ('start', 'final'):
+                passes = ({} if run == 5249 else initial) if phase == 'start' else (initial if run == 5249 else repaired)
+                phases[phase] = {'version': 1, 'scope': scope, 'commit': row['source'],
+                    'applicability_commit': row['source'], 'run': run,
+                    'complete': phase == 'final', 'fixture_errors': [], 'passes': passes}
+            start, start_sha = wire(phases['start'], 'start')
+            finish, finish_sha = wire(phases['final'], 'final')
+            if run == 5249:
+                body = ''
+                for kind in ('validation', 'operations'):
+                    own = [key for key in failures if key.startswith(kind + ':')]
+                    successful = [key for key in docs if key.startswith(kind + ':')]
+                    for index, key in enumerate(own):
+                        method, identity = key.rsplit('.', 1)[1], 'tests.' + key.replace(':', '.', 1)
+                        # Cover both native subtest shapes: same-line and
+                        # docstring-wrapped, with no invented parent terminal.
+                        body += method + ' (' + identity + ') ... \n'
+                        body += '  ' + method + ' (' + identity + ") (scope='owned')"
+                        body += (' ... FAIL\n' if index == 0 else '\nNative docstring ... FAIL\n')
+                    body += native(successful, 'ok')
+                    body += ''.join('FAIL: ' + key.rsplit('.', 1)[1] + ' (tests.'
+                                    + key.replace(':', '.', 1) + ") (scope='owned')\n"
+                                    for key in own)
+                    body += '\nRan ' + str(len(own + successful)) + ' tests in 0.001s\n\nFAILED (failures=2)\n'
+            else:
+                body = ''.join(native([key for key in failures if key.startswith(kind + ':')], 'ok')
+                               + '\nRan 2 tests in 0.001s\n\nOK\n'
+                               for kind in ('validation', 'operations'))
+            raw = (start + body + finish).encode()
+            raw_logs[run], snapshots[run] = raw, phases
+            row.update(raw_sha256=self.blob(proof, raw)['sha256_ref'],
+                journal_artifact_sha256=self.blob(proof, json.dumps(phases['final'], indent=2).encode())['sha256_ref'],
+                wire_journals={'start': start_sha, 'final': finish_sha},
+                journal_pass_count=len(phases['final']['passes']),
+                producer_inputs={'producer.py': retention.digest(b'producer')})
+        ids = sorted(key.split(':', 1)[1] for key in failures if key.startswith('validation:'))
+        records = []
+        for sequence, (run, row) in enumerate(policy.items(), 1):
+            records.append({'sequence': sequence, 'source_commit': row['source'],
+                'origin': {'kind': 'authenticated-ci', 'identity': f"run:{run}/job:{row['job']}",
+                    'command': None, 'execution': {'mode': 'source-cohort-v1', 'kind': 'validation',
+                        'legacy_capture': row['raw_sha256'], 'job_status': row['job_status']}},
+                'changes': [], 'log': {'sha256_ref': row['raw_sha256']},
+                'coverage': {'mode': 'python-named'}, 'exit_code': None})
+        item = {'name': 'validation', 'invocation': continuation.COMMANDS['validation'],
+            'protocol': 'source-cohort-v1', 'contract': cohort.CONTRACTS['validation'],
+            'inventory': {'ids': ids}, 'records': records, 'obligations': []}
+        discovery = lambda source, kind: sorted(key.split(':', 1)[1]
+            for key in failures + docs if key.startswith(kind + ':'))
+        return item, proof, policy, failures, docs, discovery, raw_logs
+
+    def check_linked_ci_capture_refusals(self):
+        item, proof, policy, failures, docs, discovery, raws = self.linked_ci_fixture()
+        def validate(value):
+            return cohort.validate(value, proof, 'b' * 40, discovery,
+                lambda record, candidate, logs: set(record['changes']),
+                continuation.clean_log, lambda source: 'c' * 64)
+        with mock.patch.object(cohort, 'LINKED_PYTHON_CI_RUNS', policy), \
+                mock.patch.object(cohort, 'LINKED_PYTHON_CI_FAILURES', failures), \
+                mock.patch.object(cohort, 'LINKED_PYTHON_CI_DOCS', docs), \
+                mock.patch.object(cohort, 'LINKED_PYTHON_CI_FAILURE_TOTALS', {'validation': 2, 'operations': 2}):
+            pair = cohort.linked_python_ci_pair(proof, discovery)
+            self.assertEqual(set(pair[5254]), set(failures))
+            self.assertEqual(set(pair[5249]), set(failures + docs))
+            self.assertTrue(all(pair[5249][key] == 'fail' for key in failures))
+            self.assertFalse(set(docs) & set(pair[5254]))
+            first_identity = 'tests.' + failures[0].replace(':', '.', 1)
+            parent = failures[0].rsplit('.', 1)[1] + ' (' + first_identity + ') ... '
+            detail = 'FAIL: ' + failures[0].rsplit('.', 1)[1] + ' (' + first_identity + ')'
+            for changed_raw in (
+                raws[5249].replace(detail.encode(), b'FAIL: other (wrong.Owner.test_other)', 1),
+                raws[5249].replace((parent + '\n').encode(), b'', 1),
+                raws[5249].replace((parent + '\n').encode(), (parent + 'ok\n').encode(), 1),
+                raws[5249].replace(b'FAILED (failures=2)', b'FAILED (failures=3)', 1),
+            ):
+                changed_policy = copy.deepcopy(policy)
+                changed_policy[5249]['raw_sha256'] = self.blob(proof, changed_raw)['sha256_ref']
+                with mock.patch.object(cohort, 'LINKED_PYTHON_CI_RUNS', changed_policy), \
+                        self.assertRaises(receipts.ReceiptError):
+                    cohort.linked_python_ci_pair(proof, discovery)
+            self.assertEqual(validate(item)['actual_named_pass_count'], 2)
+            for mutate in (
+                lambda x: x['records'].pop(0),
+                lambda x: x['records'].pop(),
+                lambda x: x['records'].append(copy.deepcopy(x['records'][0])),
+                lambda x: x['records'][0].update(sequence=3),
+                lambda x: x['records'][1].update(source_commit='e' * 40),
+                lambda x: x['records'][1].update(exit_code=0),
+                lambda x: x['records'][1]['origin'].update(identity='run:5254/job:1'),
+                lambda x: x['records'][1].update(changes=item['inventory']['ids']),
+            ):
+                changed = copy.deepcopy(item); mutate(changed)
+                with self.subTest(mutation=mutate), self.assertRaises(receipts.ReceiptError):
+                    validate(changed)
+            for run in policy:
+                digest = policy[run]['raw_sha256']
+                saved = proof['logs'].pop(digest)
+                with self.assertRaises(receipts.ReceiptError):
+                    cohort.linked_python_ci_pair(proof, discovery)
+                proof['logs'][digest] = {**saved, 'base64': base64.b64encode(raws[run] + b'changed').decode()}
+                with self.assertRaises(receipts.ReceiptError):
+                    cohort.linked_python_ci_pair(proof, discovery)
+                proof['logs'][digest] = saved
+            api = mock.Mock()
+            runs, jobs = {}, {}
+            scope = cohort.LINKED_PYTHON_CI_SCOPE
+            for run, row in policy.items():
+                pull = {'number': scope['pr'], 'base': {'ref': 'main', 'repo': {'id': 1}},
+                        'head': {'ref': scope['branch'], 'sha': row['source'], 'repo': {'id': 1}}}
+                runs[run] = {'workflow_id': scope['workflow'], 'prettyref': '#1048',
+                    'event': 'pull_request', 'commit_sha': row['source'], 'repository': {'id': 1},
+                    'event_payload': {'pull_request': pull, 'number': 1048, 'repository': {'id': 1}}}
+                jobs[run] = [{'id': row['job'], 'name': 'fast policy and contract preflight',
+                    'attempt': 1, 'run_id': run, 'repo_id': 1, 'task_id': 1, 'status': row['job_status']}]
+            live = mock.Mock(); live.get.side_effect = lambda api, run, job: raws[run]
+            document = {'pr': 1045, 'branch': 'effort/dv-hdr-repair'}
+            def authenticate():
+                cohort.authenticate_linked_python_ci(api, proof, item['records'][0], document, 1,
+                                                     live, runs, jobs)
+            api.get.side_effect = lambda path: runs[int(path.rsplit('/', 1)[1])]
+            api.pages.side_effect = lambda path: jobs[int(path.split('/')[-2])]
+            with mock.patch.object(retention, 'git_bytes', return_value=b'producer'):
+                authenticate()
+                authenticated = {'version': 1, 'commands': [item], 'logs': proof['logs']}
+                continuation.authenticate(api, authenticated, document, 1, live_logs=live)
+                foreign = copy.deepcopy(authenticated)
+                foreign['commands'][0]['name'] = 'transport:1'
+                with self.assertRaises(receipts.ReceiptError):
+                    continuation.authenticate(api, foreign, document, 1, live_logs=live)
+                for obj, key, value in [(document, 'pr', 1046), (document, 'branch', 'main'),
+                        (runs[5254], 'commit_sha', 'e' * 40), (jobs[5254][0], 'status', 'failure'),
+                        (jobs[5254][0], 'attempt', 2),
+                        (runs[5254]['event_payload'], 'number', 999)]:
+                    original = obj[key]; obj[key] = value
+                    with self.subTest(field=key), self.assertRaises(receipts.ReceiptError):
+                        authenticate()
+                    obj[key] = original
+                live.get.side_effect = lambda api, run, job: raws[run] + b'changed'
+                with self.assertRaises(receipts.ReceiptError):
+                    authenticate()
+
+    def check_incoming_opaque_subset_refusals(self):
+        proof = {'logs': {}}
+        selected = ['test_old.Case.test_0', 'test_old.Case.test_1']
+        original_ids = selected + ['test_optional.Case.test_unknown_skip']
+        raw = b'Ran 1 test in 0.001s\n\nFAILED (errors=1)\n...\nRan 3 tests in 0.002s\n\nOK (skipped=1)\n'
+        raw_ref = self.blob(proof, raw); digest = raw_ref['sha256_ref']
+        source, tree = 'a' * 40, 'b' * 40
+        command = ['python3', '-m', 'unittest', 'discover', '-s', 'tests/validation', '-p', 'test_*.py']
+        oracle = self.blob(proof, json.dumps({'files': [{}] * 179}).encode())
+        receipt = self.blob(proof, json.dumps({'results': [{'domain': 'validation',
+            'command': command, 'exit_code': 0, 'log_sha256': digest}]}).encode())
+        binding = self.blob(proof, json.dumps({'source_commit': source, 'source_tree': tree,
+            'receipt_sha256': receipt['sha256_ref'], 'oracle_manifest_sha256': oracle['sha256_ref'],
+            'oracle_file_count': 179}).encode())
+        custody = {'source_binding': binding['sha256_ref'], 'receipt': receipt['sha256_ref'],
+                   'oracle_manifest': oracle['sha256_ref']}
+        registry = {digest: {'kind': 'validation', 'count': 3, 'command': command}}
+        record = {'sequence': 1, 'source_commit': source,
+            'origin': {'kind': 'attested-local', 'identity': 'custody:sha256:' + binding['sha256_ref'],
+                'command': command, 'execution': {'mode': 'source-cohort-v1', 'kind': 'validation',
+                    'legacy_capture': digest, 'actual_execution_source_commit': source,
+                    'python_patch': None, 'interpreter_sha256': None, 'platform': None,
+                    'original_tool_call_id': None, 'skipped_method_ids': None,
+                    **{key: {'sha256_ref': sha} for key, sha in custody.items()}}},
+            'changes': [], 'log': raw_ref, 'coverage': {'mode': 'python-discovery-subset', 'ids': selected},
+            'exit_code': 0}
+        item = {'name': 'validation', 'invocation': continuation.COMMANDS['validation'],
+            'protocol': 'source-cohort-v1', 'contract': cohort.CONTRACTS['validation'],
+            'inventory': {'ids': selected}, 'records': [record], 'obligations': []}
+        discovery = lambda commit, kind: ((original_ids if commit == source else selected)
+                                         if kind == 'validation' else [])
+        def validate(value):
+            return cohort.validate(value, proof, 'b' * 40, discovery,
+                lambda row, candidate, logs: set(row['changes']), continuation.clean_log,
+                lambda source: 'c' * 64)
+        with mock.patch.multiple(cohort, INCOMING_PYTHON_SOURCE=source, INCOMING_PYTHON_TREE=tree,
+                INCOMING_PYTHON_CUSTODY=custody, INCOMING_PYTHON_FULL=registry,
+                INCOMING_PYTHON_SUBSETS={'validation': tuple(selected), 'operations': ()}):
+            self.assertEqual(cohort.incoming_python_outcomes(proof, record, discovery),
+                             {name: 'opaque-pass' for name in selected})
+            result = validate(item)
+            self.assertEqual(result['actual_named_pass_count'], 0)
+            self.assertEqual(result['opaque_source_cohorts'][0]['membership_count'], 2)
+            self.assertIsNone(result['opaque_source_cohorts'][0]['runtime_named_outcomes'])
+            authenticated = {'version': 1, 'commands': [item], 'logs': proof['logs']}
+            continuation.authenticate(mock.Mock(), authenticated,
+                {'pr': 1045, 'branch': 'effort/dv-hdr-repair'}, 1)
+            for document in ({'pr': 1046, 'branch': 'effort/dv-hdr-repair'},
+                             {'pr': 1045, 'branch': 'main'}):
+                with self.assertRaises(receipts.ReceiptError):
+                    continuation.authenticate(mock.Mock(), authenticated, document, 1)
+            for mutate in (
+                lambda r: r['coverage']['ids'].append(original_ids[-1]),
+                lambda r: r['coverage'].update(mode='python-named'),
+                lambda r: r['origin']['execution'].update(python_patch='invented'),
+                lambda r: r['origin']['execution'].update(original_tool_call_id='invented'),
+                lambda r: r['origin']['execution'].update(skipped_method_ids=[original_ids[-1]]),
+                lambda r: r['origin'].update(identity='invented-execution'),
+                lambda r: r.update(source_commit='c' * 40),
+                lambda r: r.update(exit_code=False),
+                lambda r: r.update(changes=selected),
+            ):
+                changed = copy.deepcopy(item); mutate(changed['records'][0])
+                with self.subTest(mutation=mutate), self.assertRaises(receipts.ReceiptError):
+                    validate(changed)
+            duplicate = copy.deepcopy(item); duplicate['records'].append(copy.deepcopy(record))
+            duplicate['records'][1]['sequence'] = 2
+            with self.assertRaises(receipts.ReceiptError):
+                validate(duplicate)
+            for ref in [raw_ref, binding, receipt, oracle]:
+                saved = proof['logs'].pop(ref['sha256_ref'])
+                with self.assertRaises(receipts.ReceiptError):
+                    validate(item)
+                proof['logs'][ref['sha256_ref']] = saved
+            original_blob = cohort.blob
+            for bad_raw in (raw.replace(b'skipped=1', b'skipped=0'),
+                            raw.replace(b'Ran 3 tests', b'Ran 4 tests'),
+                            raw.replace(b'OK (skipped=1)', b'FAILED (failures=1)')):
+                with mock.patch.object(cohort, 'blob', side_effect=lambda value, ref:
+                        bad_raw if ref == raw_ref else original_blob(value, ref)):
+                    with self.assertRaises(receipts.ReceiptError):
+                        validate(item)
+            # An opaque command never discharges an earlier named failure.
+            old_item, _, _, _, failed_binding = self.fixture()
+            failed = copy.deepcopy(old_item['records'][1]); failed['sequence'] = 1
+            failure = ('test_0 (' + selected[0] + ') ... FAIL\n\nRan 1 test in 0.001s\n\nFAILED (failures=1)\n').encode()
+            failed.update(exit_code=1, log=self.blob(proof, failure))
+            failed_binding.update(exit_code=1, log_sha256=failed['log']['sha256_ref'])
+            failed['origin']['execution']['binding'] = self.blob(proof, json.dumps(failed_binding).encode())
+            after = copy.deepcopy(record); after['sequence'] = 2
+            changed = {**item, 'records': [failed, after]}
+            with self.assertRaises(receipts.ReceiptError):
+                validate(changed)
+
     def test_finite_legacy_capture_cannot_authorize_different_log_or_source(self):
         item, proof, ids, raw, _ = self.fixture()
         record = item['records'][1]
@@ -393,6 +656,8 @@ class NonRustSourceCohortCase(unittest.TestCase):
                                          'legacy_capture': next(iter(cohort.LEGACY_PYTHON))}
         with self.assertRaises(receipts.ReceiptError):
             self.validate(item, proof, ids, raw)
+        self.check_linked_ci_capture_refusals()
+        self.check_incoming_opaque_subset_refusals()
 
 
 if __name__ == '__main__':

@@ -1633,7 +1633,7 @@ the Android and emulator source trees, shared reader assets, and consumed
 workflow and Make recipes. Changed selectors, runner, inputs, scope, raw output
 or job status refuse retention. Existing per-ID and failed-aggregate formats
 remain unchanged. Astra reviewed the design. The expanded existing aggregate
-Android control is owed once on the integrated effort; no task unit executes.
+Android control passed once on integrated effort `d30d16674`; no task unit executes.
 Current-main qualification, deployment and all physical HDR cases remain open.
 
 ### R49 — Integrate qualified prepared playback without cold HDR admission
@@ -1654,7 +1654,10 @@ can still acquire its first window. Existing mixed-catalog, bootstrap and two
 processing-admission controls cover these compositions. Seven incoming Auto
 preparation events retain their phase diagnostics under the existing parent HLS
 tracing target. The four behavior controls and existing split-child tracing
-audit remain owed once on the integrated effort. No unit body executes on the task branch.
+audit passed once on integrated effort `62f0b6845`. Its fifteen Rust, five Python
+and five iOS targeted bodies all pass; current native discovery records 1,906
+core, 4,267 daemon, 1,090 iOS and 1,074 tvOS identities. Discovery executes no
+unit body. No unit body executes on the task branch.
 
 The normal pinned Rust 1.97.1 integration hook passed formatting, workspace
 all-target Clippy, catalog and served JavaScript syntax. Incoming native/web
@@ -1665,3 +1668,77 @@ two-proof preparation describes the previous main base and cannot qualify this
 new combined source. Current-source qualification, deployment and all eighteen
 physical HDR checks remain open. Apple source build252 exceeds main251;
 Android173 is unchanged. Physical mobile builds and installs remain main-only.
+
+
+### R50 — Keep original incoming Python CI failures beside their repairs
+
+The incoming continuous-quality main change has two intact Python CI captures.
+Run 5249 contains sixteen real failures and two still-needed documentation
+passes. Run 5254 executes two validation and fourteen operations repairs. Its
+other 1,372 journal entries are inherited from 5249 and supply no new native
+execution credit.
+
+A closed decoder for those exact two runs preserves both complete logs, their
+original journal artifacts, source identities, actual job dispositions and
+ordered failures and repairs. Live authentication checks the historical PR
+payload, source-pinned producers, job identity and whole-log bytes. Native
+repair frames supply only their sixteen actual outcomes. Numeric suite exits
+and the interpreter binary digest remain unknown. Current-source applicability
+still decides whether an original pass can be retained. This exception applies
+only to the existing main-bound HDR promotion; it authorizes no other CI run.
+The existing finite-capture control gains paired-source, chronology, inherited
+membership, live-authority and current-invalidation refusals. Its changed body
+is owed once after effort integration; no task unit runs.
+
+The subtitle integration adds only browser commands to the complete Makefile.
+All twelve other Android command-input projections remain identical. Retention
+admits that one reviewed complete Makefile digest beside the original, while
+still requiring the original thirteen inputs exactly. Arbitrary additions,
+shadow assignments and changed Android recipes remain refused. The existing
+aggregate control gains an explicit additive-Make admission/refusal check; its
+changed body is owed once on the integrated effort. No instrumentation body
+is replayed for this source-identical Android command.
+
+The newer subtitle work on main is being reconciled separately. Current-main
+qualification, deployment and all eighteen physical HDR checks remain open.
+
+
+R50 also reconciles the incoming v111 subtitle schema with historical test
+rewinds. The shared test helper refuses populated model receipts, then removes
+the new managed tables and triggers before dropping the common queue. Its
+existing view-removal loop still removes the replaced resource view; historical
+replay restores the historical schema before applying v111. The downgrade
+coverage guard records the new migration and checks that refusal preserves a
+model receipt. Two deliberate current-end assertions advance to 111; their
+historical markers and data-preservation assertions stay intact. Only the
+source-invalidated guard, rewind callers, current-version checks and changed
+queue SQL validator need fresh observations. Five incoming subtitle Store
+functional passes remain preserved, but lack canonical Linux/serial/8 MiB
+provenance, so those five canonical observations are still missing.
+
+
+The incoming subtitle Python suites report 359 and 1,049 cases with one
+unidentified skip each. Their complete originals, source binding, executor
+receipt and public-oracle manifest remain preserved. A finite, source-reviewed
+whitelist admits 52 operations methods whose module, class and helper closure
+cannot skip. They receive opaque subset credit only. No validation method is
+admitted from that capture, no skipped identity or runtime measurement is
+invented, and opaque credit cannot discharge an earlier named failure.
+Current-source classification still removes invalidated cases. The existing
+finite-capture control covers these exclusions, unknowns, exact custody and
+failure-repair separation; its changed body remains owed once on the effort.
+
+
+Task gate 5288 stopped in history preflight before compilation or unit execution:
+the additive main merge duplicated one immutable landing record. The records
+have identical commit, tree, parents, title and pull identity. They are now
+consolidated with both original reasons retained; all three own-tree regression
+trailers remain mandatory. No audit boundary, erratum, waiver or execution
+result changes. The failed gate and complete original log remain preserved;
+the corrected head requires a new task gate.
+
+The ordinary local `make history-check` now parses the corrected ledger. Its
+remaining six diagnostics concern unpromoted effort commits, absent from the
+current main ancestry. That invocation has no authenticated effort-task
+baseline and is retained as a limited diagnostic; no additional main-landing
+errata are added. The real task gate must establish its own live baseline.

@@ -566,6 +566,24 @@ pub(crate) fn remove_jellyfin_compatibility_schema(connection: &rusqlite::Connec
 /// never production migration.
 #[allow(dead_code)]
 pub(crate) fn remove_common_queue_schema(connection: &rusqlite::Connection) {
+    let managed_receipts: i64 = connection
+        .query_row("SELECT count(*) FROM subtitle_model_receipts", [], |row| {
+            row.get(0)
+        })
+        .expect("managed subtitle receipt count before fixture rewind");
+    assert_eq!(
+        managed_receipts, 0,
+        "historical fixture must not discard managed subtitle model receipts"
+    );
+    connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS subtitle_managed_source_changed;
+             DROP TRIGGER IF EXISTS subtitle_managed_source_deleted;
+             DROP TRIGGER IF EXISTS subtitle_managed_config_write;
+             DROP TABLE IF EXISTS subtitle_model_receipts;
+             DROP TABLE IF EXISTS subtitle_managed_schema;",
+        )
+        .expect("remove v111 managed subtitle fixture adjunct");
     connection
         .execute_batch("ALTER TABLE dv_conversions DROP COLUMN requested_manually;")
         .expect("remove later DV request provenance");

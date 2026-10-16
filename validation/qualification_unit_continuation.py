@@ -1361,7 +1361,24 @@ def authenticate(api, proof, document, repository, live_logs=None):
         kind = item['name'].split(':')[0]
         for record in item['records']:
             origin = record['origin']
+            from validation import nonrust_unit_cohort as cohort
+            if origin['execution'].get('legacy_capture') in cohort.INCOMING_PYTHON_FULL:
+                receipts.require(item.get('protocol') == 'source-cohort-v1'
+                                 and kind in {'validation', 'operations'}
+                                 and document['pr'] == 1045 and document['branch'] == 'effort/dv-hdr-repair'
+                                 and repository == 1,
+                                 'Incoming opaque Python is outside its one main-bound promotion')
+                cohort.incoming_python_policy(record)
+                continue
             if origin['kind'] != 'authenticated-ci':
+                continue
+            if origin['execution'].get('legacy_capture') in {
+                    row['raw_sha256'] for row in cohort.LINKED_PYTHON_CI_RUNS.values()}:
+                receipts.require(item.get('protocol') == 'source-cohort-v1'
+                                 and kind in {'validation', 'operations'},
+                                 'Linked Python CI cannot authorize another command')
+                cohort.authenticate_linked_python_ci(api, proof, record, document, repository,
+                                                      live_logs, runs, jobs_by_run)
                 continue
             run_id, job_id = authenticated_ids(origin['identity'])
             if run_id not in runs:
