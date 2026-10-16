@@ -415,6 +415,7 @@ LINKED_PYTHON_CI_FAILURES = ('validation:test_rolling_producer_ownership_invento
  'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_swapping_any_fences_scope_set_is_reported',
  'operations:test_attempt_scope_census.AttemptScopeCensusCase.test_the_repository_agrees_with_its_own_census',
  'operations:test_doc_status_audit.DocStatusAuditCase.test_current_index_has_no_mechanical_contradictions')
+LINKED_PYTHON_CI_FAILURE_TOTALS = {'validation': 8, 'operations': 134}
 LINKED_PYTHON_CI_DOCS = ('operations:test_docs_index.DocsIndexTest.test_every_index_link_resolves',
  'operations:test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve')
 
@@ -497,6 +498,34 @@ def linked_python_ci_pair(proof, discovery):
         receipts.require(len(matches) == 1 and matches[0] not in found,
                          'Repeated linked original native identity')
         found[matches[0]] = 'pass' if status == 'ok' else 'fail' if status in {'FAIL', 'ERROR'} else 'ignored'
+    # unittest subtests have native failure-detail frames without a flat
+    # parent FAIL terminal. Keep their enclosing source-method identity; many
+    # subfailure frames still describe one failed method, never many bodies.
+    details = {}
+    for name in re.findall(r'^FAIL: \w+ \(([^)\n]+)\)(?: [^\n]*)?$', texts[first], re.M):
+        matches = [key for key in LINKED_PYTHON_CI_FAILURES
+                   if key.split(':', 1)[1] == name or 'tests.' + key.replace(':', '.', 1) == name]
+        if not matches:
+            continue  # Deliberate failures inside the suite's own fixture tests.
+        receipts.require(len(matches) == 1, 'Ambiguous linked subtest owner')
+        key = matches[0]
+        method = key.rsplit('.', 1)[1]
+        parent = (r'^' + re.escape(method) + r' \((?:'
+                  + re.escape(key.split(':', 1)[1]) + '|'
+                  + re.escape('tests.' + key.replace(':', '.', 1)) + r')\)(?: \.\.\. |$)')
+        receipts.require(len(re.findall(parent, texts[first], re.M)) == 1
+                         and found.get(key, 'fail') == 'fail',
+                         'Linked subtest lacks one native parent or conflicts with its terminal')
+        details[key] = details.get(key, 0) + 1
+        found[key] = 'fail'
+    receipts.require(set(details) == set(LINKED_PYTHON_CI_FAILURES),
+                     'Linked original native failure detail missing')
+    for kind, total in LINKED_PYTHON_CI_FAILURE_TOTALS.items():
+        receipts.require(sum(count for key, count in details.items() if key.startswith(kind + ':')) == total
+                         and re.search(r'^Ran ' + str(len(discovery(LINKED_PYTHON_CI_RUNS[first]['source'], kind)))
+                                       + r' tests in [0-9.]+s\n\s*\nFAILED \(failures='
+                                       + str(total) + r'\)$', texts[first], re.M),
+                         'Original outer suite or native subfailure total changed')
     expected = {key: 'fail' for key in LINKED_PYTHON_CI_FAILURES}
     expected.update({key: 'pass' for key in LINKED_PYTHON_CI_DOCS})
     receipts.require(found == expected, 'Original linked native failures or docs passes differ')

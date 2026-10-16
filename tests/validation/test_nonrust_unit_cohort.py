@@ -422,7 +422,22 @@ class NonRustSourceCohortCase(unittest.TestCase):
             start, start_sha = wire(phases['start'], 'start')
             finish, finish_sha = wire(phases['final'], 'final')
             if run == 5249:
-                body = native(failures, 'FAIL') + native(docs, 'ok')
+                body = ''
+                for kind in ('validation', 'operations'):
+                    own = [key for key in failures if key.startswith(kind + ':')]
+                    successful = [key for key in docs if key.startswith(kind + ':')]
+                    for index, key in enumerate(own):
+                        method, identity = key.rsplit('.', 1)[1], 'tests.' + key.replace(':', '.', 1)
+                        # Cover both native subtest shapes: same-line and
+                        # docstring-wrapped, with no invented parent terminal.
+                        body += method + ' (' + identity + ') ... \n'
+                        body += '  ' + method + ' (' + identity + ") (scope='owned')"
+                        body += (' ... FAIL\n' if index == 0 else '\nNative docstring ... FAIL\n')
+                    body += native(successful, 'ok')
+                    body += ''.join('FAIL: ' + key.rsplit('.', 1)[1] + ' (tests.'
+                                    + key.replace(':', '.', 1) + ") (scope='owned')\n"
+                                    for key in own)
+                    body += '\nRan ' + str(len(own + successful)) + ' tests in 0.001s\n\nFAILED (failures=2)\n'
             else:
                 body = ''.join(native([key for key in failures if key.startswith(kind + ':')], 'ok')
                                + '\nRan 2 tests in 0.001s\n\nOK\n'
@@ -458,12 +473,27 @@ class NonRustSourceCohortCase(unittest.TestCase):
                 continuation.clean_log, lambda source: 'c' * 64)
         with mock.patch.object(cohort, 'LINKED_PYTHON_CI_RUNS', policy), \
                 mock.patch.object(cohort, 'LINKED_PYTHON_CI_FAILURES', failures), \
-                mock.patch.object(cohort, 'LINKED_PYTHON_CI_DOCS', docs):
+                mock.patch.object(cohort, 'LINKED_PYTHON_CI_DOCS', docs), \
+                mock.patch.object(cohort, 'LINKED_PYTHON_CI_FAILURE_TOTALS', {'validation': 2, 'operations': 2}):
             pair = cohort.linked_python_ci_pair(proof, discovery)
             self.assertEqual(set(pair[5254]), set(failures))
             self.assertEqual(set(pair[5249]), set(failures + docs))
             self.assertTrue(all(pair[5249][key] == 'fail' for key in failures))
             self.assertFalse(set(docs) & set(pair[5254]))
+            first_identity = 'tests.' + failures[0].replace(':', '.', 1)
+            parent = failures[0].rsplit('.', 1)[1] + ' (' + first_identity + ') ... '
+            detail = 'FAIL: ' + failures[0].rsplit('.', 1)[1] + ' (' + first_identity + ')'
+            for changed_raw in (
+                raws[5249].replace(detail.encode(), b'FAIL: other (wrong.Owner.test_other)', 1),
+                raws[5249].replace((parent + '\n').encode(), b'', 1),
+                raws[5249].replace((parent + '\n').encode(), (parent + 'ok\n').encode(), 1),
+                raws[5249].replace(b'FAILED (failures=2)', b'FAILED (failures=3)', 1),
+            ):
+                changed_policy = copy.deepcopy(policy)
+                changed_policy[5249]['raw_sha256'] = self.blob(proof, changed_raw)['sha256_ref']
+                with mock.patch.object(cohort, 'LINKED_PYTHON_CI_RUNS', changed_policy), \
+                        self.assertRaises(receipts.ReceiptError):
+                    cohort.linked_python_ci_pair(proof, discovery)
             self.assertEqual(validate(item)['actual_named_pass_count'], 2)
             for mutate in (
                 lambda x: x['records'].pop(0),
@@ -503,8 +533,16 @@ class NonRustSourceCohortCase(unittest.TestCase):
             def authenticate():
                 cohort.authenticate_linked_python_ci(api, proof, item['records'][0], document, 1,
                                                      live, runs, jobs)
+            api.get.side_effect = lambda path: runs[int(path.rsplit('/', 1)[1])]
+            api.pages.side_effect = lambda path: jobs[int(path.split('/')[-2])]
             with mock.patch.object(retention, 'git_bytes', return_value=b'producer'):
                 authenticate()
+                authenticated = {'version': 1, 'commands': [item], 'logs': proof['logs']}
+                continuation.authenticate(api, authenticated, document, 1, live_logs=live)
+                foreign = copy.deepcopy(authenticated)
+                foreign['commands'][0]['name'] = 'transport:1'
+                with self.assertRaises(receipts.ReceiptError):
+                    continuation.authenticate(api, foreign, document, 1, live_logs=live)
                 for obj, key, value in [(document, 'pr', 1046), (document, 'branch', 'main'),
                         (runs[5254], 'commit_sha', 'e' * 40), (jobs[5254][0], 'status', 'failure'),
                         (jobs[5254][0], 'attempt', 2),
