@@ -1,11 +1,10 @@
 # Apple TV navigation — defects, proposed screens and a lasting release contract
 
-**Status:** guide repairs installed as build 255; the remaining playback focus
-repair is still under validation after a failed complete-candidate repeat.
-All 28 native journeys passed before the final review corrections; those
-corrections pass expanded Live/channel journeys and all 1,101 tvOS units.
-The combined integration gate, final promotion and explicitly remaining
-physical/dynamic-state acceptance are open.
+**Status:** repairs built; corrected guide, playback and channel navigation installed
+as build 256. The final explicit transport owner passes forty-move and sustained
+edge-input checks, including the ordered whole-app run's Live journey. All
+1,101 tvOS units and iOS compilation pass. Final source-bound qualification and
+the explicitly remaining physical/dynamic-state acceptance are open.
 **Written:** 2026-10-15 · **Baseline:** `9eb7f6738647a7e963b17cfb3a2f77a594863c41`
 
 This is the Apple TV follow-up to the [mobile usability audit](MOBILE-UI-USABILITY-AUDIT.md)
@@ -706,7 +705,16 @@ edges; Activity has explicit Up/Down routes. Two forty-move native repeats
 pass, including subsequent reporting and session retention. The final journey
 also exercises repeated input at both row edges for longer than the idle
 deadline. Complete-candidate validation remains required.
-The failed full receipt, focused trials and cancelled gate 5310 are retained. Complete-candidate qualification remains open.
+The failed full receipt, focused trials and cancelled gate 5310 are retained. The explicit-owner
+candidate `101fc89f3` subsequently passes the ordered full run's Live journey
+(146.64 seconds), including forty consecutive moves, five seconds of input at
+each row edge, reporting and retained playback. Its 1,101-unit suite has zero
+failures/skips. A later reverse-root-tab check samples route existence before
+the native transition settles: focus is Libraries while the accessibility tree
+still reports Live TV about a quarter-second after the press. The forward check
+already allows five seconds; the isolated follow-up applies that same bounded
+route check in reverse, preserving actual focus and no-Select assertions. The
+failed run remains retained; this test correction still requires verification. Complete-candidate qualification remains open.
 
 ### F35 · P1 · N — Favorite has no Down destination in a short channel row
 
@@ -723,7 +731,7 @@ setup now explicitly focuses Favorite, presses Down once and requires Watch
 live to own actual focus before tuning. Two complete native channel playback
 repeats pass (78.11 and 73.56 seconds), and the full-width Watch focus rendering
 was inspected. iOS compilation and the 1,101-unit suite pass on the combined
-candidate. Complete app qualification is still blocked by F34.
+candidate. Complete app qualification remains open.
 
 ## 6. Proposed renderings — consistent interaction before decoration
 
