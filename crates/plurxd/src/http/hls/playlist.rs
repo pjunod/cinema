@@ -12,12 +12,15 @@ pub async fn playlist(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let (playlist_deadline, request_deadline) = playlist_request_deadlines(&state);
+    // Relay acquisition metadata only when the selected owner proves the
+    // implemented protocol in its current committed heartbeat.
     if let Some(response) = relay_if_remote(
         &state,
         &session,
         RelayResource::Playlist {
             native: query.native,
             subtitle: query.subtitle,
+            acquisition_start_ms: query.acquisition_start_ms,
         },
         RelayHeaders::from_http(&headers),
         request_deadline,
@@ -40,7 +43,16 @@ pub(super) async fn playlist_local_before(
     // A VOD session's child media playlist is the plan's immutable artifact.
     // The dedicated master path wraps it when native subtitles were requested;
     // the legacy `?native=1` bridge still needs that same wrapper.
-    if let Some(answer) = vod_playlist_before(state, session, initial_vod_deadline).await? {
+    if let Some(answer) = vod_playlist_before_with_acquisition_start(
+        state,
+        session,
+        query
+            .acquisition_start_ms
+            .filter(|_| query.native != Some(1)),
+        initial_vod_deadline,
+    )
+    .await?
+    {
         let (bytes, playlist_owner) = admitted_vod_publication(
             state,
             session,

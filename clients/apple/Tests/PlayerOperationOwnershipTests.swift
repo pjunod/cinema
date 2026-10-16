@@ -4,6 +4,126 @@ import XCTest
 
 @MainActor
 final class PlayerOperationOwnershipTests: XCTestCase {
+    func testAutoCostRefreshRejectsLateRecipeDisplayAndAttachmentResponses() async {
+        let target = PresentationTarget(widthPx: 1_920, heightPx: 1_080, revision: 1)
+        let captured = AutoCostCatalogOwner(lifecycle: 1, viewerAction: 2, recipe: 3,
+            file: 4, source: "local-source", session: "attached-session", candidate: "attached-candidate", target: target)
+        var current = captured
+        let pending = Task { @MainActor in
+            await Task.yield()
+            return captured.owns(current, sameItem: true)
+        }
+        current.recipe += 1
+        let accepted = await pending.value
+        XCTAssertFalse(accepted)
+        current = captured
+        current.target = PresentationTarget(widthPx: 1_920, heightPx: 1_080, revision: 2)
+        XCTAssertFalse(captured.owns(current, sameItem: true))
+        current = captured
+        current.session = "successor-session"
+        XCTAssertFalse(captured.owns(current, sameItem: true))
+        current = captured
+        current.source = "replacement-source"
+        XCTAssertFalse(captured.owns(current, sameItem: true))
+        current = captured
+        current.viewerAction += 1
+        XCTAssertFalse(captured.owns(current, sameItem: true))
+        XCTAssertFalse(captured.owns(captured, sameItem: false))
+        XCTAssertTrue(captured.owns(captured, sameItem: true))
+    }
+
+    func testAutoCostRefreshRequiresUniqueCompleteOutputRatherThanAdvertisedPeak() throws {
+        let candidate = QualityCandidate(id: "0a7ba9bab6fbdd31bab5e5e362a3fac7", recipeDigest: Array(repeating: 0, count: 32),
+            route: "encode", width: 1_920, height: 1_080, targetHeight: 1_080,
+            averageBps: 3_000_000, peakBps: 4_000_000, grade: "sdr", decoderCompatible: true,
+            completeCache: false, sustainable: false)
+        let complete = MeasuredCandidateOutput(candidateId: candidate.id, recipeDigest: candidate.recipeDigest,
+            route: candidate.route, artifactId: "00000000-0000-0000-0000-000000000001",
+            outputIdentity: String(repeating: "0", count: 64), qualification: "complete_full_mux_rfc8216_v1",
+            averageBps: 3_000_000, peakBps: 4_000_000)
+        XCTAssertTrue(autoNeedsEncodedCostRefresh([candidate], outputs: nil, current: candidate.id))
+        XCTAssertFalse(autoNeedsEncodedCostRefresh([candidate], outputs: [complete], current: candidate.id))
+        XCTAssertTrue(autoNeedsEncodedCostRefresh([candidate], outputs: [complete, complete], current: candidate.id))
+        let catalog = try XCTUnwrap(validatedAutoCostCatalog([candidate], outputs: [complete, complete], current: candidate.id))
+        XCTAssertNil(measuredCandidatePeak(candidate, outputs: catalog.outputs))
+        XCTAssertNil(validatedAutoCostCatalog([candidate], outputs: [complete], current: "different-attached-candidate"))
+        XCTAssertNil(validatedAutoCostCatalog([candidate, candidate], outputs: [complete], current: candidate.id))
+    }
+
+    func testAccessLogSamplingRemainsSingleFlightAndRejectsReplacedOwners() async throws {
+        let clock = AccessLogTestClock()
+        let sampler = PlayerAccessLogSampler(now: { clock.read() })
+        let oldItem = AVPlayerItem(url: URL(fileURLWithPath: "/old-access-log"))
+        let newItem = AVPlayerItem(url: URL(fileURLWithPath: "/new-access-log"))
+        let first = PlayerAccessLogOwner(item: ObjectIdentifier(oldItem), session: "first", lifecycle: 1)
+        let second = PlayerAccessLogOwner(item: ObjectIdentifier(newItem), session: "second", lifecycle: 2)
+        let entered = expectation(description: "worker entered")
+        let returned = expectation(description: "worker returned")
+        let release = DispatchSemaphore(value: 0)
+        let facts = accessLogTestValues(rate: 8_000_000)
+        XCTAssertNil(sampler.value(for: first) {
+            entered.fulfill(); release.wait(); returned.fulfill(); return facts
+        })
+        await fulfillment(of: [entered], timeout: 3)
+        // These publications must return while the native operation remains
+        // blocked, and cannot create another worker for a replacement item.
+        for owner in [first, second, PlayerAccessLogOwner(item: second.item, session: "third", lifecycle: 2)] {
+            XCTAssertNil(sampler.value(for: owner) { XCTFail("overlapping native read"); return facts })
+        }
+        sampler.invalidate()
+        release.signal()
+        await fulfillment(of: [returned], timeout: 3)
+        for _ in 0..<20 { await Task.yield() }
+        let fresh = accessLogTestValues(rate: 4_000_000)
+        var accepted: PlayerAccessLogSample?
+        for _ in 0..<600 {
+            accepted = sampler.value(for: second) { fresh }
+            if accepted != nil { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(try XCTUnwrap(accepted).values.observedBitrate, 4_000_000)
+    }
+
+    func testAccessLogSamplingRejectsLateReadsAndExpiresRealFacts() async throws {
+        let clock = AccessLogTestClock()
+        let sampler = PlayerAccessLogSampler(now: { clock.read() })
+        let item = AVPlayerItem(url: URL(fileURLWithPath: "/bounded-access-log"))
+        let owner = PlayerAccessLogOwner(item: ObjectIdentifier(item), session: "same", lifecycle: 1)
+        let entered = expectation(description: "late worker entered")
+        let returned = expectation(description: "late worker returned")
+        let release = DispatchSemaphore(value: 0)
+        let facts = accessLogTestValues(rate: 8_000_000)
+        XCTAssertNil(sampler.value(for: owner) {
+            entered.fulfill(); release.wait(); returned.fulfill(); return facts
+        })
+        await fulfillment(of: [entered], timeout: 3)
+        clock.set(3_000)
+        XCTAssertNil(sampler.value(for: owner) { XCTFail("timeout spawned duplicate read"); return facts })
+        release.signal()
+        await fulfillment(of: [returned], timeout: 3)
+        for _ in 0..<20 { await Task.yield() }
+        let fresh = accessLogTestValues(rate: 4_000_000)
+        var actual: PlayerAccessLogSample?
+        for _ in 0..<600 {
+            actual = sampler.value(for: owner) { fresh }
+            if actual != nil { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(try XCTUnwrap(actual).sampledAtMs, 3_000)
+        XCTAssertEqual(actual?.values.observedBitrate, 4_000_000)
+        clock.set(7_001)
+        XCTAssertNil(sampler.value(for: owner) { nil })
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNil(sampler.value(for: owner) { nil })
+        sampler.invalidate()
+    }
+
+    private func accessLogTestValues(rate: Double) -> PlayerAccessLogValues {
+        PlayerAccessLogValues(observedBitrate: rate, indicatedBitrate: 6_000_000,
+            numberOfStalls: 0, numberOfDroppedVideoFrames: 0, numberOfMediaRequests: 1,
+            segmentsDownloadedDuration: 6, numberOfBytesTransferred: 6_000_000, transferDuration: 1)
+    }
+
     private let caps = DeviceCaps(
         client: ClientInfo(kind: "ios", build: "test", ua: "test"),
         video: [], audio: [], containers: [], transports: [], dvTransport: "none",
@@ -13,6 +133,124 @@ final class PlayerOperationOwnershipTests: XCTestCase {
     private func start(_ controller: PlayerController, model: AppModel, file: Int = 1) {
         controller.start(model: model, itemId: file, fileId: file, startMs: 0,
                          durationMs: 600_000, title: "Title \(file)")
+    }
+
+    func testStagedSelectionsResolveBeforeTheIncumbentIsReplaced() async throws {
+        let suspended = expectation(description: "staged audio resolution")
+        var release: CheckedContinuation<Void, Never>?
+        var audioApplied = 0, subtitleApplied = 0
+        let incumbent = AVPlayerItem(url: URL(fileURLWithPath: "/synthetic-incumbent"))
+        let staged = AVPlayerItem(url: URL(fileURLWithPath: "/synthetic-staged"))
+        var preparation = PlayerController.MediaSelectionPreparation()
+        preparation.audio = { _, item in
+            XCTAssertTrue(item === staged)
+            await withCheckedContinuation { release = $0; suspended.fulfill() }
+            return { audioApplied += 1 }
+        }
+        preparation.native = { _, _, item in
+            XCTAssertTrue(item === staged)
+            return .init(hasSubtitleOptions: true, apply: { subtitleApplied += 1; return true })
+        }
+        let controller = PlayerController(mediaSelectionPreparation: preparation)
+        controller.player.replaceCurrentItem(with: incumbent)
+        let selection = Task { await controller.prepareStagedMediaSelections(to: staged) { true } }
+        await fulfillment(of: [suspended], timeout: 3)
+        XCTAssertTrue(controller.player.currentItem === incumbent)
+        XCTAssertEqual(audioApplied + subtitleApplied, 0)
+        try XCTUnwrap(release).resume()
+        let ready = await selection.value
+        XCTAssertTrue(ready)
+        XCTAssertTrue(controller.player.currentItem === incumbent)
+        XCTAssertEqual(audioApplied, 1)
+        XCTAssertEqual(subtitleApplied, 1)
+        controller.player.replaceCurrentItem(with: nil)
+    }
+
+    func testStagedSelectionResolutionCannotApplyAfterOwnerOrViewerChanges() async throws {
+        for changedViewer in [false, true] {
+            let suspended = expectation(description: "staged selection resolution")
+            var release: CheckedContinuation<Void, Never>?
+            var owned = true
+            var applied = 0
+            var preparation = PlayerController.MediaSelectionPreparation()
+            preparation.audio = { _, _ in
+                await withCheckedContinuation { release = $0; suspended.fulfill() }
+                return { applied += 1 }
+            }
+            preparation.native = { _, _, _ in
+                .init(hasSubtitleOptions: true, apply: { applied += 1; return true })
+            }
+            let controller = PlayerController(mediaSelectionPreparation: preparation)
+            let staged = AVPlayerItem(url: URL(fileURLWithPath: "/synthetic-staged"))
+            let selection = Task { await controller.prepareStagedMediaSelections(to: staged) { owned } }
+            await fulfillment(of: [suspended], timeout: 3)
+            if changedViewer { controller.selectAudio(7) } else { owned = false }
+            try XCTUnwrap(release).resume()
+            let ready = await selection.value
+            XCTAssertFalse(ready)
+            XCTAssertEqual(applied, 0)
+            controller.stop()
+        }
+    }
+
+    func testPreparedPrerollTimeoutCancelsNativeRequestAndIgnoresLateSuccess() async throws {
+        try await checkPreparedPrerollInterruption(cancelTask: false, loseOwner: false)
+    }
+
+    func testPreparedPrerollTaskCancellationDisposesItsNativeRequest() async throws {
+        try await checkPreparedPrerollInterruption(cancelTask: true, loseOwner: false)
+    }
+
+    func testPreparedPrerollSuccessCannotPublishAfterOwnerChanges() async throws {
+        try await checkPreparedPrerollInterruption(cancelTask: false, loseOwner: true)
+    }
+
+    private func checkPreparedPrerollInterruption(cancelTask: Bool, loseOwner: Bool) async throws {
+        let entered = expectation(description: "native preroll suspended")
+        let deadlineEntered = expectation(description: "original overlap deadline suspended")
+        let returned = expectation(description: "bounded preroll returned")
+        var nativeCompletion: CheckedContinuation<Bool, Never>?
+        var deadline: CheckedContinuation<Void, Error>?
+        var owned = true
+        var cancelledRequests = 0
+        let operation = Task {
+            let result = await PlayerSeekCompletion.runOwned(operation: {
+                await withCheckedContinuation {
+                    nativeCompletion = $0
+                    entered.fulfill()
+                }
+            }, cancelOperation: {
+                cancelledRequests += 1
+            }, ownsOperation: { owned }, waitForDeadline: {
+                try await withCheckedThrowingContinuation {
+                    deadline = $0
+                    deadlineEntered.fulfill()
+                }
+            })
+            returned.fulfill()
+            return result
+        }
+        await fulfillment(of: [entered, deadlineEntered], timeout: 3)
+        if cancelTask {
+            operation.cancel()
+        } else if loseOwner {
+            owned = false
+            try XCTUnwrap(nativeCompletion).resume(returning: true)
+            nativeCompletion = nil
+        } else {
+            try XCTUnwrap(deadline).resume()
+            deadline = nil
+        }
+        await fulfillment(of: [returned], timeout: 3)
+        let result = await operation.value
+        XCTAssertEqual(result, cancelTask || loseOwner ? .cancelled : .timedOut)
+        XCTAssertEqual(cancelledRequests, 1, "dispose the exact native preroll even when its adapter ignores cancellation")
+        // A native completion may arrive after the original deadline. It must
+        // not grant exposure or resume the already-returned owner a second time.
+        nativeCompletion?.resume(returning: true)
+        deadline?.resume()
+        await Task.yield()
+        XCTAssertEqual(cancelledRequests, 1)
     }
 
     func testStartStopStartRestoresOnlyTheNewTitlesPlaybackIntent() {
@@ -1428,4 +1666,11 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         XCTAssertNil(controller.player.currentItem)
     }
     #endif
+}
+
+private final class AccessLogTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func read() -> Int { lock.lock(); defer { lock.unlock() }; return value }
+    func set(_ next: Int) { lock.lock(); defer { lock.unlock() }; value = next }
 }

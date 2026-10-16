@@ -6244,6 +6244,47 @@ final class AppleClientTests: XCTestCase {
     }
 
     #if DEBUG
+    func testPhysicalAcceptanceLaunchPreservesLargeExplicitIDs() throws {
+        let suite = "tv.plurx.acceptance-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(Int32.max, forKey: "plurx.acceptance.fileId")
+        defaults.set(Int32.max, forKey: "plurx.acceptance.itemId")
+        let itemId = 2_213_361_592_683_154_835
+        let fileId = Int(Int32.max) + 17
+        let launch = try XCTUnwrap(PlaybackAcceptanceLaunch.current(
+            defaults: defaults,
+            arguments: ["plurx", "-plurx.acceptance.fileId", String(fileId),
+                        "-plurx.acceptance.itemId", String(itemId)]
+        ))
+        XCTAssertEqual(launch.fileId, fileId)
+        XCTAssertEqual(launch.itemId, itemId)
+        XCTAssertEqual(launch.startMs, 0)
+    }
+
+    func testPhysicalAcceptanceLaunchRejectsMalformedExplicitIDs() throws {
+        let suite = "tv.plurx.acceptance-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(42, forKey: "plurx.acceptance.fileId")
+        defaults.set(17, forKey: "plurx.acceptance.itemId")
+        for value in ["invalid", "9223372036854775808"] {
+            XCTAssertNil(PlaybackAcceptanceLaunch.current(
+                defaults: defaults,
+                arguments: ["plurx", "-plurx.acceptance.fileId", value]
+            ))
+            let launch = try XCTUnwrap(PlaybackAcceptanceLaunch.current(
+                defaults: defaults,
+                arguments: ["plurx", "-plurx.acceptance.itemId", value]
+            ))
+            XCTAssertEqual(launch.itemId, 0)
+        }
+        XCTAssertNil(PlaybackAcceptanceLaunch.current(
+            defaults: defaults,
+            arguments: ["plurx", "-plurx.acceptance.fileId"]
+        ))
+    }
+
     func testPhysicalDeviceAcceptanceLaunchReadsOnlyExplicitDebugDefaults() throws {
         let suite = "tv.plurx.acceptance-tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

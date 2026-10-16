@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Rebuild the bounded SHA compressor embedded in continuous-media.js."""
+import argparse
+import base64
+import pathlib
+import re
+import shutil
+import subprocess
+import tempfile
+import tomllib
+
+root = pathlib.Path(__file__).resolve().parent.parent
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--write', action='store_true', help='replace the embedded module')
+parser.add_argument('--clang', default='clang')
+parser.add_argument('--wasm-ld', help='wasm-ld or rust-lld path')
+args = parser.parse_args()
+linker = args.wasm_ld or shutil.which('wasm-ld')
+if not linker:
+    channel = tomllib.loads((root / 'rust-toolchain.toml').read_text())['toolchain']['channel']
+    compiler = ['rustup', 'run', channel, 'rustc']
+    sysroot = subprocess.check_output(compiler + ['--print', 'sysroot'], text=True).strip()
+    version = subprocess.check_output(compiler + ['-vV'], text=True)
+    host = re.search(r'^host: (.+)$', version, re.MULTILINE).group(1)
+    linker = str(pathlib.Path(sysroot) / 'lib' / 'rustlib' / host / 'bin' / 'rust-lld')
+with tempfile.TemporaryDirectory(prefix='plurx-continuous-sha-') as scratch:
+    directory = pathlib.Path(scratch)
+    obj = directory / 'continuous-sha256.o'
+    module = directory / 'continuous-sha256.wasm'
+    subprocess.run([args.clang, '--target=wasm32', '-O3', '-fno-builtin', '-nostdlib',
+                    '-c', str(root / 'scripts' / 'continuous-sha256.c'), '-o', str(obj)], check=True)
+    command = [linker]
+    if pathlib.Path(linker).name == 'rust-lld':
+        command += ['-flavor', 'wasm']
+    subprocess.run(command + ['--no-entry', '--export=compress', '--export=__heap_base',
+                             '--initial-memory=2097152', '--max-memory=2097152',
+                             str(obj), '-o', str(module)], check=True)
+    encoded = base64.b64encode(module.read_bytes()).decode('ascii')
+web = root / 'crates' / 'plurxd' / 'src' / 'web' / 'player' / 'continuous-media.js'
+text = web.read_text()
+pattern = r"Uint8Array.from\(atob\('([A-Za-z0-9+/=]+)'\)"
+match = re.search(pattern, text)
+if not match:
+    raise SystemExit('embedded SHA module marker missing')
+if args.write:
+    web.write_text(text[:match.start(1)] + encoded + text[match.end(1):])
+    print('embedded SHA module rebuilt')
+elif match.group(1) != encoded:
+    raise SystemExit('embedded SHA module differs; regenerate with --write using the recorded compiler')
+else:
+    print('embedded SHA module matches source')

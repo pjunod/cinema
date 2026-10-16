@@ -2837,6 +2837,7 @@ async fn native_master_preparation_can_wait_six_seconds_for_exact_init() {
     let deadline = started + Duration::from_secs(12);
     let query = || PlaylistQuery {
         native: Some(1),
+        acquisition_start_ms: None,
         subtitle: None,
         diagnostic: None,
     };
@@ -5806,4 +5807,144 @@ fn subtitle_playlist_keeps_takeover_and_sliding_discontinuity_epochs() {
         assert_eq!(subtitles.matches("#EXT-X-DISCONTINUITY\n").count(),
                    video.matches("#EXT-X-DISCONTINUITY\n").count());
     }
+}
+
+#[tokio::test]
+async fn legacy_manual_to_auto_preparation_binds_a_real_non_upgrading_candidate() {
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    let state = resolver_state();
+    // Start below the ordinary cold Auto rung so loss of the bootstrap ceiling
+    // would cause a real upgrade, without assuming unmeasured1080p production.
+    let incumbent_height = 360;
+    state.store.put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1").await.expect("Auto policy");
+    let library = state.store.create_library(&NewLibrary { name: "Auto bootstrap".into(), kind: LibraryKind::Movies, paths: vec![], anime: false }).await.expect("library");
+    let item = state.store.insert_item(&NewItem { library_id: library.id, kind: ItemKind::Movie, parent_id: None, title: "Auto bootstrap".into(), year: None, season_number: None, episode_number: None }).await.expect("item");
+    let id = state.store.upsert_file(item, "/media/bootstrap.mkv", 4096, 1, &ProbeResult {
+        container: Some("mkv".into()), video_codec: Some("h264".into()), width: Some(1920), height: Some(1080), bit_depth: Some(8),
+        audio_streams: vec![plurx_core::domain::AudioStream { index: 0, codec: "aac".into(), channels: Some(2), sample_rate: Some(48000), channel_layout: Some("stereo".into()), language: None, title: None, default: true }],
+        raw_json: Some(serde_json::json!({"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","width":1920,"height":1080,"pix_fmt":"yuv420p","sample_aspect_ratio":"1:1","r_frame_rate":"24/1","avg_frame_rate":"24/1"},{"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"channel_layout":"stereo","sample_rate":"48000"}]}).to_string()), ..Default::default()
+    }).await.expect("file");
+    let source = state.store.get_file(id).await.expect("read").expect("source");
+    let route = crate::media_sessions::takeover_eligible_route("bootstrap-old", "00000000-0000-4000-8000-0000000000a1");
+    let mut predecessor = staged_predecessor_recipe(&route);
+    predecessor.request.file_id = id;
+    predecessor.request.automatic = false;
+    predecessor.request.kind = crate::transcode::SessionKind::Transcode { height: incumbent_height };
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"],"display":{"presentation_target":{"width_px":2436,"height_px":1125,"revision":1}}}"#);
+    predecessor.decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).expect("decoder"));
+    let selection = crate::playback_control::ClientSelection { quality: crate::playback_control::QualitySelection::Auto { height: None, candidate_id: None }, audio_track: None, subtitle: crate::playback_control::SubtitleSelection { mode: crate::playback_control::SubtitleMode::Off, track: None }, audio_offset_ms: 0, codec: crate::playback_control::CodecPolicy::Auto, dynamic_range: crate::playback_control::DynamicRangePolicy::Auto };
+    let ordinary = resolve_plan(PlanInputs { snapshot: None, state: &state, user_id: 1, file_id: id, source: Some(&source), network_prior: None, network_identity: None, incumbent_receipt: None }, None,
+        CreateSession { playback_id: "ordinary-auto".into(), quality_auto: Some(true), copy: Some(false), caps: Some(caps.clone()), ..bare_create() }).await.expect("unbounded ordinary Auto");
+    assert!(ordinary.height > incumbent_height, "the ordinary Auto control must be a genuine upgrade over the incumbent");
+    // The control decoder snapshot has no sink facts. Only the accepted
+    // initial playback claim supplies audio authority during a quality replan.
+    let mut initial_caps = caps.clone();
+    initial_caps.audio_sinks = vec![plurx_core::playback::AudioSink { codec: "aac".into(), max_channels: 2, passthrough: false, sample_rates_hz: vec![48000] }];
+    let claim = plurx_core::playback::audio::AudioClaim::from_caps(&initial_caps).expect("valid initial audio sinks").expect("actual initial claim");
+    assert!(caps.audio_sinks.is_empty());
+    predecessor.request.audio_claim = Some(claim.clone());
+    predecessor.request.audio_delivery = Some(plurx_core::playback::audio::resolve_audio(source.audio_streams.first(), &claim.profile(), plurx_core::playback::audio::AudioRoute::EncodedVod, 0));
+    let request = plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, incumbent_height).await.expect("authoritative bootstrap");
+    assert_eq!(request.audio_claim.as_ref(), Some(&claim), "replanning retains the accepted audio authority");
+    assert_eq!(request.audio_delivery.as_ref(), predecessor.request.audio_delivery.as_ref(), "the actual output audio recipe remains unchanged");
+    assert!(request.audio_delivery.as_ref().and_then(|audio| audio.presentation_identity()).is_some(), "the fixture exercises real AAC output, not an absent audio track");
+    assert!(request.automatic);
+    let context = request.candidate_context.as_ref().expect("actual route binding");
+    assert!(request.quality_catalog.as_ref().expect("canonical catalog").candidates.iter().any(|entry| i64::from(entry.candidate.target_height) > incumbent_height), "the bootstrap ceiling never erases later upgrade candidates");
+    let selected = request.quality_catalog.as_ref().expect("canonical catalog").candidates.iter().find(|entry| entry.candidate.id == context.candidate_id).expect("bound catalog identity");
+    assert!(selected.candidate.identity_matches());
+    assert!(i64::from(selected.candidate.height) <= incumbent_height && i64::from(selected.candidate.target_height) <= incumbent_height, "a manual body is not upgrade proof");
+    assert_eq!(context.recipe_digest, selected.candidate.recipe_digest);
+    assert_eq!(plurx_core::playback::audio::AudioClaim::from_caps(context.canonical_caps.as_ref().expect("actual planned caps")).expect("valid context audio"), Some(claim.clone()));
+    let mut no_claim = predecessor.clone();
+    no_claim.request.audio_claim = None;
+    no_claim.request.audio_delivery = None;
+    let unattributed = plan_preparation_candidate(&state, &no_claim, Some(&caps), None, &selection, &source, incumbent_height).await.expect("legacy no-claim route");
+    assert!(unattributed.audio_claim.is_none(), "a video snapshot never fabricates an audio claim");
+    let mut invalid_claim = predecessor.clone();
+    invalid_claim.request.audio_claim.as_mut().expect("claim").sinks[0].max_channels = 0;
+    assert!(plan_preparation_candidate(&state, &invalid_claim, Some(&caps), None, &selection, &source, incumbent_height).await.is_err(), "invalid retained audio authority is refused");
+    assert!(predecessor.candidate_id.is_none(), "the incumbent remains honestly unattributed");
+    predecessor.request.presentation = crate::transcode::Presentation::Live;
+    assert!(plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, incumbent_height).await.is_err(), "a VOD candidate identity cannot authorize rolling bytes");
+}
+
+#[test]
+fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    let row = |node: &str, seed: u8, height, partial| crate::media_pool::WorkerQualityCandidate {
+        node_id: node.into(), binding: None, partial, dispatch_supported: true,
+        candidate: QualityCandidate { id: CandidateId::for_recipe_digest([seed;32]), recipe_digest:[seed;32],
+            route: CandidateRoute::Encode, planned_codec:None, normalized_geometry:true, width:1280,height,target_height:height,
+            average_bps:None,peak_bps:None,grade:plurx_core::transcode::OutputGrade::Sdr,decoder_compatible:true,complete_cache:false,sustainable:true }
+    };
+    let local = row("local",1,720,true);
+    let mut forged = local.clone(); forged.candidate.recipe_digest = [11;32];
+    let mut incompatible = local.clone(); incompatible.candidate.decoder_compatible = false;
+    let mut larger_actual = local.clone(); larger_actual.candidate.height = 1080;
+    let mut larger_rung = local.clone(); larger_rung.candidate.target_height = 1080;
+    let mut cold = local.clone(); cold.candidate.sustainable = false;
+    assert_eq!(preparation_catalog_workers(&[cold.clone()],"local",true,Some(720)).len(),1,"unknown production may stage a bounded first attachment, without claiming sustainable proof");
+    assert!(!cold.candidate.playable(),"bootstrap admission does not manufacture measured production");
+    let mut zero_geometry = local.clone(); zero_geometry.candidate.width = 0;
+    let mut parser_only = local.clone(); parser_only.dispatch_supported = false;
+    assert!(preparation_catalog_workers(&[forged,incompatible,larger_actual,larger_rung,zero_geometry,parser_only],"local",true,Some(720)).is_empty(), "bounded bootstrap rejects invalid identity/decoder/raster/rung/work admission");
+    let foreign = row("foreign",2,720,true);
+    let high_complete = row("foreign",3,1080,false);
+    let workers = [local.clone(),foreign,high_complete];
+    let bootstrap = preparation_catalog_workers(&workers,"local",true,Some(720));
+    assert_eq!(bootstrap.len(),1); assert_eq!(bootstrap[0].candidate.id,local.candidate.id);
+    assert!(preparation_catalog_workers(&workers,"local",false,Some(720)).is_empty(),"named routes never borrow partial admission");
+    assert_eq!(preparation_catalog_workers(&workers,"local",true,None).len(),1,"ordinary complete1080 excludes partial rows");
+    let mut complete = local.clone(); complete.partial=false;
+    assert_eq!(preparation_catalog_workers(&[local,complete],"local",true,Some(720)).len(),1,"a fitting complete route suppresses partial fallback");
+}
+
+#[test]
+fn acquisition_query_preserves_integer_offsets_and_legacy_relay_wire_shape() {
+    let query = Query::<PlaylistQuery>::try_from_uri(
+        &"/index.m3u8?acquisition_start_ms=296065&native=1".parse().expect("uri"),
+    ).expect("integer query").0;
+    assert_eq!(query.acquisition_start_ms, Some(296_065));
+    assert_eq!(query.native, Some(1));
+    let absent = Query::<PlaylistQuery>::try_from_uri(&"/index.m3u8".parse().expect("uri")).expect("legacy query").0;
+    assert!(absent.acquisition_start_ms.is_none());
+    let invalid = Query::<PlaylistQuery>::try_from_uri(
+        &"/index.m3u8?acquisition_start_ms=-1".parse().expect("uri"),
+    ).expect("offset validation belongs to frozen rendition").0;
+    assert_eq!(invalid.acquisition_start_ms, Some(-1));
+    for value in ["NaN", "1.5", "9223372036854775808"] {
+        assert!(Query::<PlaylistQuery>::try_from_uri(
+            &format!("/index.m3u8?acquisition_start_ms={value}").parse().expect("uri"),
+        ).is_err());
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "resource", rename_all = "snake_case", deny_unknown_fields)]
+    enum LegacyResource {
+        Playlist { native: Option<u8>, subtitle: Option<i64> },
+    }
+    let resource = RelayResource::Playlist { native: query.native, subtitle: query.subtitle, acquisition_start_ms: None };
+    let wire = serde_json::to_value(resource).expect("legacy wire");
+    assert!(wire.get("acquisition_start_ms").is_none());
+    let LegacyResource::Playlist { native, subtitle } = serde_json::from_value(wire).expect("old strict peer accepts original envelope");
+    assert_eq!(native, Some(1));
+    assert_eq!(subtitle, None);
+}
+
+#[test]
+fn acquisition_relay_sends_extension_only_to_proven_peer() {
+    #[derive(serde::Deserialize)]
+    #[serde(tag="resource",rename_all="snake_case",deny_unknown_fields)]
+    enum LegacyResource { Playlist { native: Option<u8>, subtitle: Option<i64> } }
+    let resource = RelayResource::Playlist { native: None, subtitle: Some(2), acquisition_start_ms: Some(296_065) };
+    let legacy = serde_json::to_value(resource.for_acquisition_peer(false)).expect("legacy serialization");
+    assert!(legacy.get("acquisition_start_ms").is_none());
+    let LegacyResource::Playlist { native, subtitle } = serde_json::from_value(legacy.clone()).expect("old peer accepts original shape");
+    assert_eq!(native,None); assert_eq!(subtitle,Some(2));
+    let restored: RelayResource = serde_json::from_value(legacy).expect("new peer accepts absent field");
+    assert!(matches!(restored,RelayResource::Playlist{acquisition_start_ms:None,..}));
+    let updated = serde_json::to_value(resource.for_acquisition_peer(true)).expect("negotiated serialization");
+    assert_eq!(updated["acquisition_start_ms"],296_065);
+    assert!(serde_json::from_value::<LegacyResource>(updated.clone()).is_err(),"must never send extension to an old strict peer");
+    assert!(matches!(serde_json::from_value::<RelayResource>(updated).expect("updated owner"),RelayResource::Playlist{acquisition_start_ms:Some(296_065),..}));
 }

@@ -181,6 +181,13 @@ pub(crate) fn try_admit_frozen_bundle(
         .ok_or(false)
 }
 
+/// Receipt shared with the exact predecessor handoff that reserved capacity.
+#[derive(Clone)]
+pub(crate) struct HandoffClaim {
+    token: u64,
+    admitted: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Resolved once before attachment. A restart cannot silently change encoder,
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
 pub(crate) struct Encoding {
@@ -227,7 +234,7 @@ pub(crate) struct Encoding {
     pub last_refusal: Mutex<Option<PermitRefusal>>,
     /// The pool reservation a yielding predecessor made for this successor.
     /// Only this rendition's admission can claim it.
-    pub handoff_claim: Mutex<Option<u64>>,
+    pub handoff_claim: Mutex<Option<HandoffClaim>>,
     /// The admission point a race test can pause at; production installs
     /// [`NoopEncodingHooks`] (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
     pub hooks: Box<dyn EncodingHooks>,
@@ -612,11 +619,18 @@ impl EncodePermit {
         admissions: &Admissions,
         store: &dyn plurx_core::store::Store,
     ) -> SourceCopyPermitRead {
-        let _waiting = admissions.wait_for_slot();
+        let mut waiting = admissions.queue_for_slot();
         let Some((hardware_limit, software_budget)) = source_copy_policy(store).await else {
             return SourceCopyPermitRead::Unavailable;
         };
-        Self::try_source_copy_under(admissions, hardware_limit, software_budget)
+        if software_budget < SOURCE_COPY_CPU_THREADS {
+            return SourceCopyPermitRead::Capacity;
+        }
+        let result = Self::try_source_copy_under(admissions, hardware_limit, software_budget);
+        if matches!(result, SourceCopyPermitRead::Capacity) {
+            waiting.mark_capacity_blocked();
+        }
+        result
     }
 
     /// Wait for a Source copy permit until `deadline`, as a live start.
@@ -634,7 +648,7 @@ impl EncodePermit {
         store: &dyn plurx_core::store::Store,
         deadline: Instant,
     ) -> SourceCopyPermitRead {
-        let _waiting = admissions.wait_for_slot();
+        let mut waiting = admissions.queue_for_slot();
         let Some((hardware_limit, software_budget)) = source_copy_policy(store).await else {
             return SourceCopyPermitRead::Unavailable;
         };
@@ -647,6 +661,7 @@ impl EncodePermit {
             {
                 return admitted;
             }
+            waiting.mark_capacity_blocked();
             let now = Instant::now();
             if now >= deadline {
                 return SourceCopyPermitRead::Capacity;
@@ -827,6 +842,28 @@ impl Encoding {
         .await
     }
 
+    /// Revalidate demand after the asynchronous policy read. The returned
+    /// guard remains held while registering the queue and attempting admission.
+    pub(crate) async fn try_permit_guarded<G>(
+        &self,
+        demand: impl std::future::Future<Output = Option<(Priority, G)>>,
+    ) -> Option<EncodePermit> {
+        self.hooks.before_admission().await;
+        self.try_permit_with_priority(
+            self.store.get_setting_pair(
+                plurx_core::store::keys::MAX_HW_SESSIONS,
+                plurx_core::store::keys::SW_POOL_THREADS,
+            ),
+            None,
+            async {
+                demand
+                    .await
+                    .map(|(priority, guard)| (Some(priority), guard))
+            },
+        )
+        .await
+    }
+
     /// The policy-read future is injected only to test the same production
     /// deadline without making an unresolved backend strand a test runner.
     pub(crate) async fn try_permit_after(
@@ -835,7 +872,8 @@ impl Encoding {
             Output = Result<(Option<String>, Option<String>), plurx_core::error::StoreError>,
         >,
     ) -> Option<EncodePermit> {
-        self.try_permit_with_priority(policy, None).await
+        self.try_permit_with_priority(policy, None, async { Some((None, ())) })
+            .await
     }
 
     /// The finite output-preparation owner uses real background resources;
@@ -847,16 +885,18 @@ impl Encoding {
                 plurx_core::store::keys::SW_POOL_THREADS,
             ),
             Some(Priority::Background),
+            async { Some((None, ())) },
         )
         .await
     }
 
-    async fn try_permit_with_priority(
+    async fn try_permit_with_priority<G>(
         &self,
         policy: impl std::future::Future<
             Output = Result<(Option<String>, Option<String>), plurx_core::error::StoreError>,
         >,
         preparation_priority: Option<Priority>,
+        demand: impl std::future::Future<Output = Option<(Option<Priority>, G)>>,
     ) -> Option<EncodePermit> {
         // Pool policy is current node state, not immutable media identity.
         // A failed policy read closes admission; an existing child's permit
@@ -873,6 +913,14 @@ impl Encoding {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             return None;
         };
+        let Some((demand_priority, _demand_guard)) = demand.await else {
+            self.cancel_wait();
+            self.last_refusal
+                .lock()
+                .expect("VOD encoder refusal")
+                .take();
+            return None;
+        };
         self.policy_retry
             .store(false, std::sync::atomic::Ordering::Relaxed);
         let hardware_limit = hardware
@@ -883,9 +931,15 @@ impl Encoding {
             .unwrap_or_else(crate::admission::software_budget);
         let mut queued = self.queued.lock().expect("VOD encoder admission");
         // Preserve ordinary promotion's post-policy-read observation.
-        let priority = preparation_priority.unwrap_or_else(|| self.priority());
+        let priority = demand_priority
+            .or(preparation_priority)
+            .unwrap_or_else(|| self.priority());
         if priority == Priority::Live {
-            queued.get_or_insert_with(|| self.admissions.wait_for_slot());
+            queued.get_or_insert_with(|| self.admissions.queue_for_slot());
+        } else {
+            // A previous consumer may have left a Live wait on this cached
+            // encoding. Its replacement's preparation must not inherit it.
+            queued.take();
         }
         let refuse = |over_budget: bool| {
             *self.last_refusal.lock().expect("VOD encoder refusal") = Some(PermitRefusal {
@@ -900,7 +954,12 @@ impl Encoding {
         // A shared-audio producer admits its own bounded AAC estimate, never
         // the video recipe it was resolved beside.
         let claim = (priority != Priority::Background)
-            .then(|| *self.handoff_claim.lock().expect("VOD handoff claim"))
+            .then(|| {
+                self.handoff_claim
+                    .lock()
+                    .expect("VOD handoff claim")
+                    .clone()
+            })
             .flatten();
         let bundle = match try_admit_frozen_bundle(
             &self.admissions,
@@ -909,14 +968,32 @@ impl Encoding {
             &self.resources(),
             self.admission_software_threads(),
             priority,
-            claim,
+            claim.as_ref().map(|claim| claim.token),
         ) {
             Ok(bundle) => bundle,
-            Err(over_budget) => return refuse(over_budget),
+            Err(over_budget) => {
+                if !over_budget {
+                    if let Some(waiting) = queued.as_mut() {
+                        waiting.mark_capacity_blocked();
+                    }
+                }
+                return refuse(over_budget);
+            }
         };
         let permit = EncodePermit::from(bundle);
         queued.take();
-        self.handoff_claim.lock().expect("VOD handoff claim").take();
+        if let Some(claim) = claim {
+            claim
+                .admitted
+                .store(true, std::sync::atomic::Ordering::Release);
+            let mut pending = self.handoff_claim.lock().expect("VOD handoff claim");
+            if pending
+                .as_ref()
+                .is_some_and(|current| current.token == claim.token)
+            {
+                pending.take();
+            }
+        }
         self.handoff_wait
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.last_refusal
@@ -951,21 +1028,25 @@ impl Encoding {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.handoff_wait
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        if let Some(token) = self.handoff_claim.lock().expect("VOD handoff claim").take() {
-            self.admissions.release_reservation(token);
+        if let Some(claim) = self.handoff_claim.lock().expect("VOD handoff claim").take() {
+            self.admissions.release_reservation(claim.token);
         }
     }
 
     /// Install the reservation a yielding predecessor made for this rendition,
     /// releasing any earlier one it replaces.
-    pub(crate) fn accept_handoff_claim(&self, token: u64) {
+    pub(crate) fn accept_handoff_claim(
+        &self,
+        token: u64,
+        admitted: Arc<std::sync::atomic::AtomicBool>,
+    ) {
         if let Some(earlier) = self
             .handoff_claim
             .lock()
             .expect("VOD handoff claim")
-            .replace(token)
+            .replace(HandoffClaim { token, admitted })
         {
-            self.admissions.release_reservation(earlier);
+            self.admissions.release_reservation(earlier.token);
         }
     }
 
@@ -1427,6 +1508,10 @@ mod source_copy_admission_tests {
         // Several refused attempts later, it is still the one queued start.
         tokio::time::sleep(crate::transcode::ADMISSION_POLL * 3).await;
         assert_eq!(admissions.snapshot().live_waiting, 1);
+        assert!(
+            admissions.live_capacity_is_waiting(),
+            "a genuinely blocked source copy still preempts preparation"
+        );
         assert!(!waiting.is_finished());
         drop(held);
         let admitted = tokio::time::timeout(Duration::from_secs(5), waiting)
@@ -1435,6 +1520,10 @@ mod source_copy_admission_tests {
             .expect("admission task");
         assert!(matches!(admitted, SourceCopyPermitRead::Admitted(_)));
         assert_eq!(admissions.snapshot().live_waiting, 0);
+        assert!(
+            !admissions.live_capacity_is_waiting(),
+            "grant releases capacity pressure"
+        );
         assert_eq!(admissions.software_in_use(), SOURCE_COPY_CPU_THREADS);
         drop(admitted);
         assert_eq!(admissions.software_in_use(), 0);
