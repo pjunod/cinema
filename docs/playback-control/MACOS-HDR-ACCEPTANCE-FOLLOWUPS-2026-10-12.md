@@ -1356,3 +1356,10 @@ pins to 111, naming the appended managed-subtitle migration, while retaining
 all private-lineage refusal and preserved-library/data checks. The first Apple
 build-reference suite also catches the Android README's old live counter; its
 current claim moves to 172 while historical status entries remain intact.
+
+Task gate 5308 refuses a missing client-fix history anchor for the combined
+release-counter commit. Record that exact commit with the existing Apple and
+Android current-target counter regressions; source anchors name the counter
+fields, preserving the catalog across later monotonic bumps. This is catalog
+bookkeeping, with no runtime source change. Preserve the refused gate and both
+Python receipt artifacts, then rerun history locally before a fresh task gate.
