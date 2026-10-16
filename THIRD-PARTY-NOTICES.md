@@ -859,6 +859,19 @@ the tree, so it is redistributed with every clone the way the Gradle wrapper in
 | Component | Version | Where | License | Copyright |
 |---|---|---|---|---|
 | [acorn](https://github.com/acornjs/acorn) | 8.18.0 | `tests/vendor/acorn.js` | MIT — [full text](licenses/acorn-MIT.txt) | Copyright (c) 2012-2022 by various contributors |
+| [Google FLEURS](https://huggingface.co/datasets/google/fleurs) | `70bb2e84b976b7e960aa89f1c648e09c59f894dd` | `tests/fixtures/subtitle-recognition/fleurs-de.wav` and publisher reference text | CC BY 4.0 — [full text](licenses/CC-BY-4.0.txt) | Conneau, Ma, Khanuja, Zhang, Axelrod, Dalmia, Riesa, Rivera and Bapna (2022), Google |
+| [Tears of Steel](https://mango.blender.org/) | 2012 official short film | `tests/fixtures/subtitle-recognition/TOS-en.srt` and derived `base-film.raw.vtt` | CC BY 3.0 — [full text](licenses/CC-BY-3.0.txt) | (CC) Blender Foundation \| mango.blender.org |
+
+The speech fixture directory carries adjacent `LICENSE.txt` attribution,
+license/source URLs, exact source/reference hashes and change descriptions.
+The single FLEURS WAV and publisher reference text are extracted without
+changes; only provenance metadata was added. The Blender SRT preserves its
+original bytes; the raw VTT is a machine transcription, not a reviewed
+reference. These test assets are not bundled with the daemon; compiled test
+executables can embed the small raw-VTT timing regression input. The Kafka
+book excerpt is public domain in the USA; its joined-line extraction is
+identified separately in that notice. No external movie or audiobook file
+is redistributed with the repository.
 
 `tests/web/asset-order.test.js` needs a real JavaScript parser: it refuses a
 web-asset order in which a file runs something at load that names a binding
@@ -880,6 +893,35 @@ project. Like acorn, it never reaches a browser, the binary, or a native client.
 
 ---
 
+## 8. Offline subtitle recognizer and models
+
+Linux Docker images and native macOS packages carry whisper.cpp 1.9.2 at
+commit `306c88f4d1286aec1bf96e544632897886af5501`, including its vendored
+ggml CPU implementation. The recognizer runs as a separate program. Its
+[MIT license](licenses/whisper.cpp.LICENSE.txt), Copyright (c) 2023–2026 The
+ggml authors, travels inside the `subtitle-engine/` package. The recipe pins
+the source archive SHA-256, portable CPU build options and executable digest
+in the package manifest; `scripts/build-subtitle-engine` verifies them.
+
+OpenAI Whisper model weights converted to GGML are separately downloaded
+only after an explicit installation request. The reviewed catalog pins
+immutable revision `5359861c739e955e79d9a303bcbc70fb988958b1` of
+[ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp/tree/5359861c739e955e79d9a303bcbc70fb988958b1),
+exact byte counts and SHA-256 hashes for base.en, base and diagnostic tiny.en.
+The model card declares MIT; the [OpenAI model license](licenses/whisper-models.LICENSE.txt),
+Copyright (c) 2022 OpenAI, travels with the engine distribution.
+
+The small `self-test.wav` speech fixture comes from the pinned whisper.cpp
+source and is redistributed under its MIT repository license. It is an
+excerpt of President John F. Kennedy's January 20, 1961 inaugural address,
+a United States government presidential speech. The adjacent provenance
+record pins its source URL, SHA-256, byte count and historical source. It
+tests recognizer operation and timed output, not movie recognition quality.
+`tests/operations/test_subtitle_engine_package.py` holds the catalog, fixture
+and package identity contracts together.
+
+---
+
 ## Keeping this file honest
 
 This document is a claim about what is in the dependency graph, so it goes
@@ -890,5 +932,5 @@ allow-list, so a new copyleft dependency cannot land quietly. Run it with
 
 `cargo deny` cannot see the parts that are not crates — the web UI bundle,
 the fonts, the client dependencies, the Dockerfile's ffmpeg, the source checked
-into the tree. Update §1, §2, §5, §6 and §7 by hand when those move, in the
+into the tree. Update §1, §2, §5, §6, §7 and §8 by hand when those move, in the
 same commit that moves them.

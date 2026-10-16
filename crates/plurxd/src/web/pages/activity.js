@@ -3,6 +3,10 @@
 // Where the header pill lands: live streams (with a stop for admins),
 // per-library scan state, and the Trakt story — refreshed every 3s.
 async function viewActivity(generation=++PAGE_RENDER_GENERATION){
+  const stored=history.state?.plurxActivityJob;
+  const pending=ACTIVITY_VIEW.pendingJob||(typeof stored==="string"&&typeof history.state.plurxActivityAccount==="string"&&history.state.plurxActivityAccount===activityAccountKey()?activityJobRoute("#/activity/jobs/"+stored):null);
+  ACTIVITY_VIEW.pendingJob=null;
+  if(pending&&pending.auth===AUTH_GENERATION&&pending.token===TOKEN&&ME?.is_admin)ACTIVITY_VIEW.tab="jobs";
   layoutChrome("activity", `<h2 class="section" style="margin-top:6px">Watching</h2>
     <div class="empty" aria-busy="true">Checking current activity…</div>`);
   setPagePhase("#/activity",generation,"shell");
@@ -11,6 +15,7 @@ async function viewActivity(generation=++PAGE_RENDER_GENERATION){
     setPagePhase("#/activity",generation,"content");
   }
   await renderActivityBody(generation);
+  if(pending&&pending.auth===AUTH_GENERATION&&pending.token===TOKEN&&ME?.is_admin&&generation===PAGE_RENDER_GENERATION&&location.hash==="#/activity"){setActivityTab("jobs");showDurableJob(pending.id);}
   if(DVR_PAGE.selectedId&&!DVR_PAGE.detailBusy){if(!DVR_PAGE.selected)selectDvrDetail(DVR_PAGE.selectedId);else scheduleDvrHistoryRefresh();}
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
   setPageTimer(()=>renderActivityBody(generation), 3000, generation);
@@ -21,6 +26,21 @@ async function viewActivity(generation=++PAGE_RENDER_GENERATION){
 // refresh. A slow queue read never holds up the live Activity overview.
 const ACTIVITY_VIEW={tab:"status",inspector:null,detailTab:"summary"};
 const DURABLE_ACTIVITY={state:"queued",kind:"",node:"",pageSize:20,history:[],repairsOpen:false,detailEpoch:0,cursor:null,next:null,rows:[],counts:[],repairs:[],activeJobs:[],activeTruncated:false,observed:0,error:null,busy:false,request:0,epoch:0,detail:null,detailError:null,retries:new Map()};
+function activityAccountKey(){
+  if(!ME||typeof ME.username!=="string"||!ME.username)return null;
+  return JSON.stringify([String(ME.id),ME.username,ME.created_at]);
+}
+function activityJobRoute(route){
+  const match=/^#\/activity\/jobs\/([a-zA-Z0-9_-]{1,128})$/.exec(route);
+  if(!match)return null;
+  return {id:match[1],auth:AUTH_GENERATION,token:TOKEN,account:activityAccountKey()};
+}
+function normalizeActivityJobRoute(route){
+  const job=activityJobRoute(route);if(!job)return route;
+  ACTIVITY_VIEW.pendingJob=ME?.is_admin?job:null;
+  history.replaceState({...history.state,plurxActivityJob:job.id,plurxActivityAccount:job.account},"","#/activity");
+  return "#/activity";
+}
 function activityIsClustered(d=ACTIVITY_SNAPSHOT||{}){
   // Older servers expose activity_nodes only for clustered reads. Never infer
   // topology from the number of responders: an impaired cluster is still one.
@@ -263,8 +283,9 @@ function paintActivityInspector(){
 }
 
 function resetActivityWork(){
+  if(typeof history!=="undefined"&&history.state?.plurxActivityJob){const state={...history.state};delete state.plurxActivityJob;delete state.plurxActivityAccount;history.replaceState(state,"",location.hash);}
   closeActivityInspector();
-  Object.assign(ACTIVITY_VIEW,{tab:"status",inspector:null,detailTab:"summary",returnFocus:null});
+  Object.assign(ACTIVITY_VIEW,{pendingJob:null,tab:"status",inspector:null,detailTab:"summary",returnFocus:null});
   Object.assign(DURABLE_ACTIVITY,{busy:false,request:(DURABLE_ACTIVITY.request||0)+1,migration:null,activeTruncated:false,rows:[],counts:[],activeJobs:[],detail:null,detailError:null,selectedId:null,history:[],pendingFocus:null,cursor:null,next:null,observed:0,error:null,kind:"",node:"",state:"queued",repairs:[],epoch:DURABLE_ACTIVITY.epoch+1});
   DURABLE_ACTIVITY.retries.clear();
   document.getElementById("activity-work-inspector")?.remove();
