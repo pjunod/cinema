@@ -1,8 +1,10 @@
 # Apple TV navigation — defects, proposed screens and a lasting release contract
 
-**Status:** repairs built and native validation passed on `effort/apple-tv-navigation`.
-All 26 required journeys and the effort gate pass; main promotion and the
-explicit remaining physical/dynamic-state acceptance are open.
+**Status:** repairs built; guide and playback corrections installed as build 253.
+All 28 native journeys passed before the final review corrections; those
+corrections pass expanded Live/channel journeys and all 1,101 tvOS units.
+The combined integration gate, final promotion and explicitly remaining
+physical/dynamic-state acceptance are open.
 **Written:** 2026-10-15 · **Baseline:** `9eb7f6738647a7e963b17cfb3a2f77a594863c41`
 
 This is the Apple TV follow-up to the [mobile usability audit](MOBILE-UI-USABILITY-AUDIT.md)
@@ -619,8 +621,8 @@ native session takes 123.53 seconds. More now explicitly owns its Back; relying
 on native sheet dismissal had left the next playback Back unhandled. The combined 28-journey repeat passes with zero failures and zero skips on
 clean source `0c52e02868687c845da2ff2b0a46095fc42c3e21` (2,249.15 seconds).
 The receipt verifies unchanged source across the run and preserves the native
-result bundle and portable screenshot exports. The refreshed integration
-candidate has identical Apple source; its current-main Rust compilation,
+result bundle and portable screenshot exports. The refreshed `d2abab249` integration
+candidate retained identical Apple source; its current-main Rust compilation,
 Clippy and focused gate contracts pass. Mandatory promotion remains open,
 as does the remaining physical accessibility/gesture acceptance matrix.
 
@@ -648,7 +650,12 @@ report and Back paths. The channel playback smoke also passes (90.74 seconds).
 The actual activity-return capture was inspected. All 1,101 tvOS unit tests
 pass with zero failures; the iOS simulator target also builds. The earlier 28-journey
 receipt predates this follow-up; final qualification must run the expanded
-journey against the promotion candidate.
+journey against the promotion candidate. Build 253 includes these corrections
+and is installed and launched on the paired Apple TV. They are integrated
+with the guide correction in the same task candidate. Gate 5287 passed every
+other job but exhausted its thirty-minute server compile allowance without a
+compiler diagnostic; the effort compiler now has the same sixty-minute
+allowance as the main compiler, with all checks retained.
 
 ## 6. Proposed renderings — consistent interaction before decoration
 
