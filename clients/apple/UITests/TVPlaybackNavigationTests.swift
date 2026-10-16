@@ -202,8 +202,16 @@ final class TVPlaybackNavigationTests: TVNavigationTestCase {
 
     private func tuneAndOpenFullscreen(in app: XCUIApplication, server: TVNavigationServer) {
         let watch = app.buttons["Watch live"]
-        reachForSetup(watch, in: app, limit: 8)
-        assertFocus(watch, in: app, context: "Watch fixture channel setup")
+        let favourite = app.buttons["channel-favourite:fixture-channel"]
+        // Enter the trailing action from the toolbar above it; steering Right
+        // from the final programme cannot cross the empty part of its row.
+        let layout = app.buttons["channel-layout"]
+        reachForSetup(layout, in: app, limit: 8)
+        assertFocus(layout, in: app, context: "Channel toolbar before Favorite")
+        remote.press(.down)
+        assertFocus(favourite, in: app, context: "Channel Favorite entry")
+        remote.press(.down)
+        assertFocus(watch, in: app, context: "Down from Favorite reaches Watch across a short programme row")
         remote.press(.select)
         let fullscreen = app.buttons["Fullscreen"]
         XCTAssertTrue(fullscreen.waitForExistence(timeout: 15), app.debugDescription)

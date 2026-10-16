@@ -1182,6 +1182,7 @@ struct LibraryChannelsView: View {
                             Button { Task { await controller.setFavourite(channel) } } label: {
                                 Image(systemName: channel.favourite ? "star.fill" : "star")
                             }
+                            .accessibilityIdentifier("channel-favourite:" + channel.id)
                         }
                         ScrollView(.horizontal) {
                             HStack(spacing: 6) {
@@ -1218,8 +1219,18 @@ struct LibraryChannelsView: View {
                             }
                         }
                         HStack {
-                            Button(channel.enabled ? "Watch live" : "Disabled") { Task { await controller.tune(channel) } }
-                                .disabled(!channel.enabled || controller.busy)
+                            Button { Task { await controller.tune(channel) } } label: {
+                                Text(channel.enabled ? "Watch live" : "Disabled")
+                                    #if os(tvOS)
+                                    // Down from Favorite must have a destination
+                                    // even when a short guide leaves space below it.
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    #endif
+                            }
+                            .disabled(!channel.enabled || controller.busy)
+                            #if os(tvOS)
+                            .buttonStyle(TVReadableButtonStyle(prominent: false))
+                            #endif
                             #if os(iOS)
                             if channel.canEdit == true {
                                 Button("Edit") { editing = channel }

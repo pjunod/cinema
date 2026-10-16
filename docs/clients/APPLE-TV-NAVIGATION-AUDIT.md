@@ -1,6 +1,6 @@
 # Apple TV navigation — defects, proposed screens and a lasting release contract
 
-**Status:** repairs built; guide and playback corrections installed as build 253.
+**Status:** repairs built; guide and playback corrections installed as build 254.
 All 28 native journeys passed before the final review corrections; those
 corrections pass expanded Live/channel journeys and all 1,101 tvOS units.
 The combined integration gate, final promotion and explicitly remaining
@@ -688,8 +688,24 @@ Presentation restoration remains explicit. The native Live journey alternates
 Right/Left four times after guide closure and requires actual Channels/Guide
 focus on every move before proceeding. The first diagnostic run passes this
 sequence and the complete playback journey (99.22 seconds). Temporary tracing
-has been removed; repeated Live/channel checks and complete-candidate
-qualification remain in progress. This row is not final acceptance.
+has been removed. Two uninstrumented Live repeats pass (98.35 and 97.39
+seconds), and the first library-channel repeat passes (73.49 seconds). The
+second channel repeat exposes the separate browser gap below before playback
+opens. Complete-candidate qualification remains open.
+
+### F35 · P1 · N — Favorite has no Down destination in a short channel row
+
+The repeated channel journey exposes a browser failure before fullscreen
+playback: Favorite sits at the far right of the card, while two short programme
+buttons and Watch live end far to its left. Eight Down presses leave actual
+focus on Favorite. The retained hierarchy and capture show the gap; this is
+not a playback hide-timer failure.
+
+Watch live now fills the card width on TV, using the shared readable button
+style. Its focus area gives Down a destination below Favorite even when the
+programme strip is short. Touch layout is unchanged. The native playback
+setup now explicitly focuses Favorite, presses Down once and requires Watch
+live to own actual focus before tuning. Repeated native validation is pending.
 
 ## 6. Proposed renderings — consistent interaction before decoration
 
