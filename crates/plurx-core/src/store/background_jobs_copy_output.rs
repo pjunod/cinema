@@ -109,6 +109,7 @@ mod tests {
         let store = crate::store::SqliteStore::open(&path).expect("fresh schema");
         drop(store);
         let connection = rusqlite::Connection::open(&path).expect("connection");
+        crate::queue_fixture::rewind_empty_managed_subtitle_schema(&connection);
         let publication: String = connection.query_row("SELECT sql FROM sqlite_master WHERE name='background_job_publish_copy_output_command'", [], |row| row.get(0)).expect("incumbent publication");
         connection
             .execute_batch(super::super::background_jobs::COPY_OUTPUT_SCHEMA)

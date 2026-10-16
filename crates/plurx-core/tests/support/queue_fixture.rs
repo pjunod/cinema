@@ -563,7 +563,7 @@ pub(crate) fn remove_jellyfin_compatibility_schema(connection: &rusqlite::Connec
 
 /// Rewind only an exact empty managed extension in an owned historical fixture.
 #[allow(dead_code)]
-fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connection) {
+pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connection) {
     const SHAPE: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources') ORDER BY name";
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))

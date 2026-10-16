@@ -1067,6 +1067,7 @@ async fn background_subtitles_reconcile_historical_ready_demand_without_overwrit
     {
         let connection =
             rusqlite::Connection::open(&path).expect("subtitle reconciliation fixture");
+        crate::queue_fixture::rewind_empty_managed_subtitle_schema(&connection);
         connection
             .execute_batch(
                 // Everything above v83 that a replay cannot meet twice: v90's
