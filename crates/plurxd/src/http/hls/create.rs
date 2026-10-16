@@ -70,6 +70,23 @@ pub(super) fn auto_encode_fallback<'a>(
     at_or_below(catalog).or_else(|| at_or_below(unnarrowed))
 }
 
+/// Cold ordinary output may acquire its first bounded window. Processed output
+/// still needs the complete executable HDR10 recipe and production proof.
+pub(super) fn auto_bootstrap_encode_fallback(
+    catalog: &[plurx_core::playback::candidate::QualityCandidate],
+    height: i64,
+) -> Option<&plurx_core::playback::candidate::QualityCandidate> {
+    catalog
+        .iter()
+        .filter(|candidate| {
+            candidate.decoder_compatible
+                && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
+                && (!candidate.processed_hdr10 || candidate.playable())
+                && i64::from(candidate.target_height) <= height
+        })
+        .max_by_key(|candidate| candidate.target_height)
+}
+
 /// Replace one local descriptive row with its admitted executable facts.
 /// A shortened-ID collision is never an implicit recipe substitution.
 pub(super) fn upsert_processed_worker_candidate(
@@ -1973,15 +1990,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
                         // Cold first attachment has no production measurement.
                         // Ordinary Auto can stage an encoded route; actual
                         // admission still belongs to the preparation lifecycle.
-                        catalog
-                            .iter()
-                            .filter(|candidate| {
-                                candidate.decoder_compatible
-                                    && candidate.route
-                                        == plurx_core::playback::candidate::CandidateRoute::Encode
-                                    && i64::from(candidate.target_height) <= height.min(ceiling)
-                            })
-                            .max_by_key(|candidate| candidate.target_height)
+                        auto_bootstrap_encode_fallback(&catalog, height.min(ceiling))
                     } else {
                         auto_encode_fallback(&catalog, before_link_verdict.as_deref(), height)
                     }

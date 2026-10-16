@@ -1635,3 +1635,31 @@ or job status refuse retention. Existing per-ID and failed-aggregate formats
 remain unchanged. Astra reviewed the design. The expanded existing aggregate
 Android control is owed once on the integrated effort; no task unit executes.
 Current-main qualification, deployment and all physical HDR cases remain open.
+
+### R49 — Integrate qualified prepared playback without cold HDR admission
+
+Main's continuous-quality batch introduces bounded manual-to-Auto preparation,
+prepared-reader draining and capacity-pressure accounting. Integration keeps its
+bootstrap geometry bound before HDR's existing complete-row eligibility check,
+and excludes both processing probes and drained readers from proactive work.
+Actual queued GET obligations and the dedicated bounded processing sampler
+retain their respective owners. Session state preserves both processing-root
+admission and the immutable preferred acquisition start.
+
+Frozen processing preparation now queues fairly before its first attempt and
+marks capacity pressure only after an actual resource refusal. The incoming
+cold bootstrap fallback also requires processed candidates to satisfy their
+existing executable HDR10/HEVC and production checks. Ordinary cold encoding
+can still acquire its first window. Existing mixed-catalog, bootstrap and two
+processing-admission controls cover these compositions; execution remains owed
+on the integrated effort. No unit body executes on the task branch.
+
+The normal pinned Rust 1.97.1 integration hook passed formatting, workspace
+all-target Clippy, catalog and served JavaScript syntax. Incoming native/web
+qualification captures remain preserved with their actual sources; Android's
+thirteen command-input projections match the original successful command.
+R48's expanded aggregate control already passed once on the effort. Its earlier
+two-proof preparation describes the previous main base and cannot qualify this
+new combined source. Current-source qualification, deployment and all eighteen
+physical HDR checks remain open. Apple source build252 exceeds main251;
+Android173 is unchanged. Physical mobile builds and installs remain main-only.
