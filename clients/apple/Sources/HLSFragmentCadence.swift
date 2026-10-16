@@ -160,6 +160,9 @@ enum HLSFragmentCadence {
     /// One ranged read of a segment's box index. A `moof` and the next box
     /// header almost always fit in the first window; a large `mdat` is
     /// stepped over by the next window's offset rather than downloaded.
+    static let initialIndexWindowBytes = 4_096
+    /// A declared large `moof` continues in bounded windows rather than
+    /// spending the request allowance on many small prefix reads.
     static let indexWindowBytes = 262_144
     /// Retained `moof` bytes across one segment.
     static let maximumIndexBytes = 4_194_304
@@ -183,13 +186,13 @@ enum HLSFragmentCadence {
         private let lock = NSLock()
         private var readers: [Int: AsyncThrowingStream<Event, Error>.Continuation] = [:]
 
-        func events(for request: URLRequest, on session: URLSession) -> AsyncThrowingStream<Event, Error> {
-            AsyncThrowingStream { continuation in
-                let task = session.dataTask(with: request)
-                lock.lock(); readers[task.taskIdentifier] = continuation; lock.unlock()
-                continuation.onTermination = { _ in task.cancel() }
-                task.resume()
-            }
+        func events(for request: URLRequest, on session: URLSession) -> (task: URLSessionDataTask, stream: AsyncThrowingStream<Event, Error>) {
+            let (stream, continuation) = AsyncThrowingStream<Event, Error>.makeStream()
+            let task = session.dataTask(with: request)
+            lock.lock(); readers[task.taskIdentifier] = continuation; lock.unlock()
+            continuation.onTermination = { _ in task.cancel() }
+            task.resume()
+            return (task, stream)
         }
         private func reader(_ task: URLSessionTask, removing: Bool = false) -> AsyncThrowingStream<Event, Error>.Continuation? {
             lock.lock(); defer { lock.unlock() }
@@ -198,7 +201,10 @@ enum HLSFragmentCadence {
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
             reader(dataTask)?.yield(.response(response))
-            completionHandler(.allow)
+            // Refused status bodies cannot contribute media evidence. Cancel
+            // at the response boundary, before allowing any body transfer.
+            let status = (response as? HTTPURLResponse)?.statusCode
+            completionHandler(status == 200 || status == 206 ? .allow : .cancel)
         }
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
             reader(dataTask)?.yield(.bytes(data))
@@ -215,8 +221,8 @@ enum HLSFragmentCadence {
     /// early and cancels its transfer. The byte limit, the deadline and
     /// cancellation are checked per chunk.
     private static func fetch(_ url: URL, range: Range<Int>? = nil, limit: Int, deadline: TimeInterval,
-                              session: URLSession, loads: ChunkedLoads,
-                              chunk: (HTTPURLResponse, Data) throws -> Bool) async throws -> HTTPURLResponse {
+                                     session: URLSession, loads: ChunkedLoads,
+                                     chunk: (HTTPURLResponse, Data) throws -> Bool) async throws -> HTTPURLResponse {
         let remaining = deadline - ProcessInfo.processInfo.systemUptime
         guard remaining > 0, !Task.isCancelled else { throw Invalid.media }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: remaining)
@@ -226,12 +232,14 @@ enum HLSFragmentCadence {
         }
         var response: HTTPURLResponse?
         var received = 0
-        for try await event in loads.events(for: request, on: session) {
+        let transfer = loads.events(for: request, on: session)
+        defer { transfer.task.cancel() }
+        for try await event in transfer.stream {
             guard !Task.isCancelled, ProcessInfo.processInfo.systemUptime < deadline else { throw Invalid.media }
             switch event {
             case .response(let value):
-                guard response == nil, let http = value as? HTTPURLResponse, http.url == url,
-                      http.statusCode == 200 || (range != nil && http.statusCode == 206),
+                guard response == nil, let http = value as? HTTPURLResponse, http.url == url else { throw Invalid.media }
+                guard http.statusCode == 200 || (range != nil && http.statusCode == 206),
                       http.expectedContentLength <= limit else { throw Invalid.media }
                 response = http
             case .bytes(let data):
@@ -274,11 +282,12 @@ enum HLSFragmentCadence {
         for _ in 0..<maximumIndexRequests {
             var window = Data()
             var whole: FragmentIndex?
-            let response = try await fetch(url, range: offset..<(offset + indexWindowBytes), limit: maximumUnrangedFragmentBytes,
+            let requestedBytes = walk?.nextReadBytes ?? initialIndexWindowBytes
+            let response = try await fetch(url, range: offset..<(offset + requestedBytes), limit: maximumUnrangedFragmentBytes,
                                            deadline: deadline, session: session, loads: loads) { response, chunk in
                 if response.statusCode == 206 {
                     window.append(chunk)
-                    guard window.count <= indexWindowBytes else { throw Invalid.media }
+                    guard window.count <= requestedBytes else { throw Invalid.media }
                     return true
                 }
                 guard offset == 0, response.expectedContentLength >= 0 else { throw Invalid.media }
@@ -410,6 +419,23 @@ extension HLSFragmentCadence {
 
         /// Where the next read must start: past a box being stepped over.
         var resumeOffset: Int { skipEnd ?? needed }
+
+        /// Read only a small unknown prefix. Once a header names a retained
+        /// box, its remaining extent drives bounded continuation; one following
+        /// header lets the walker skip media without requesting its payload.
+        var nextReadBytes: Int {
+            let available = total - resumeOffset
+            guard available > 0 else { return 0 }
+            if moof != nil {
+                let remaining = moofEnd - needed
+                return min(available, HLSFragmentCadence.indexWindowBytes, remaining + 16)
+            }
+            if !header.isEmpty {
+                let headerLength = header.count >= 4 && header.prefix(4).reduce(0, { ($0 << 8) | Int($1) }) == 1 ? 16 : 8
+                return min(available, max(1, headerLength - header.count))
+            }
+            return min(available, HLSFragmentCadence.initialIndexWindowBytes)
+        }
         var finished: Bool { header.isEmpty && moof == nil && resumeOffset == total && total >= 0 }
 
         private struct Malformed: Error {}
