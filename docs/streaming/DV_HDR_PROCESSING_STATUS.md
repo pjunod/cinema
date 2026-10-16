@@ -1633,7 +1633,7 @@ the Android and emulator source trees, shared reader assets, and consumed
 workflow and Make recipes. Changed selectors, runner, inputs, scope, raw output
 or job status refuse retention. Existing per-ID and failed-aggregate formats
 remain unchanged. Astra reviewed the design. The expanded existing aggregate
-Android control is owed once on the integrated effort; no task unit executes.
+Android control passed once on integrated effort `d30d16674`; no task unit executes.
 Current-main qualification, deployment and all physical HDR cases remain open.
 
 ### R49 — Integrate qualified prepared playback without cold HDR admission
@@ -1654,7 +1654,10 @@ can still acquire its first window. Existing mixed-catalog, bootstrap and two
 processing-admission controls cover these compositions. Seven incoming Auto
 preparation events retain their phase diagnostics under the existing parent HLS
 tracing target. The four behavior controls and existing split-child tracing
-audit remain owed once on the integrated effort. No unit body executes on the task branch.
+audit passed once on integrated effort `62f0b6845`. Its fifteen Rust, five Python
+and five iOS targeted bodies all pass; current native discovery records 1,906
+core, 4,267 daemon, 1,090 iOS and 1,074 tvOS identities. Discovery executes no
+unit body. No unit body executes on the task branch.
 
 The normal pinned Rust 1.97.1 integration hook passed formatting, workspace
 all-target Clippy, catalog and served JavaScript syntax. Incoming native/web
@@ -1665,3 +1668,27 @@ two-proof preparation describes the previous main base and cannot qualify this
 new combined source. Current-source qualification, deployment and all eighteen
 physical HDR checks remain open. Apple source build252 exceeds main251;
 Android173 is unchanged. Physical mobile builds and installs remain main-only.
+
+
+### R50 — Keep original incoming Python CI failures beside their repairs
+
+The incoming continuous-quality main change has two intact Python CI captures.
+Run 5249 contains sixteen real failures and two still-needed documentation
+passes. Run 5254 executes two validation and fourteen operations repairs. Its
+other 1,372 journal entries are inherited from 5249 and supply no new native
+execution credit.
+
+A closed decoder for those exact two runs preserves both complete logs, their
+original journal artifacts, source identities, actual job dispositions and
+ordered failures and repairs. Live authentication checks the historical PR
+payload, source-pinned producers, job identity and whole-log bytes. Native
+repair frames supply only their sixteen actual outcomes. Numeric suite exits
+and the interpreter binary digest remain unknown. Current-source applicability
+still decides whether an original pass can be retained. This exception applies
+only to the existing main-bound HDR promotion; it authorizes no other CI run.
+The existing finite-capture control gains paired-source, chronology, inherited
+membership, live-authority and current-invalidation refusals. Its changed body
+is owed once after effort integration; no task unit runs.
+
+The newer subtitle work on main is being reconciled separately. Current-main
+qualification, deployment and all eighteen physical HDR checks remain open.
