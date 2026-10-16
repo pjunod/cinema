@@ -1727,3 +1727,18 @@ invented, and opaque credit cannot discharge an earlier named failure.
 Current-source classification still removes invalidated cases. The existing
 finite-capture control covers these exclusions, unknowns, exact custody and
 failure-repair separation; its changed body remains owed once on the effort.
+
+
+Task gate 5288 stopped in history preflight before compilation or unit execution:
+the additive main merge duplicated one immutable landing record. The records
+have identical commit, tree, parents, title and pull identity. They are now
+consolidated with both original reasons retained; all three own-tree regression
+trailers remain mandatory. No audit boundary, erratum, waiver or execution
+result changes. The failed gate and complete original log remain preserved;
+the corrected head requires a new task gate.
+
+The ordinary local `make history-check` now parses the corrected ledger. Its
+remaining six diagnostics concern unpromoted effort commits, absent from the
+current main ancestry. That invocation has no authenticated effort-task
+baseline and is retained as a limited diagnostic; no additional main-landing
+errata are added. The real task gate must establish its own live baseline.
