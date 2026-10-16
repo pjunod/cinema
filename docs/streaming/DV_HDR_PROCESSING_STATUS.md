@@ -1742,3 +1742,21 @@ remaining six diagnostics concern unpromoted effort commits, absent from the
 current main ancestry. That invocation has no authenticated effort-task
 baseline and is retained as a limited diagnostic; no additional main-landing
 errata are added. The real task gate must establish its own live baseline.
+
+### R51 — Restore complete historical replicated fixtures
+
+PR #1139 passed all seven task checks in gate 5291 and landed on the effort.
+Current-main integration `1ea377504` passed all fifteen native compilation
+configurations plus check, Clippy and formatting, without executing test bodies.
+Its seven selected Python cases passed once. The twenty selected Rust cases
+produced nineteen passes and one failure: the replicated stale-marker retry
+fixture left the two managed subtitle tables behind after removing their view
+and triggers. The production shape verifier correctly refused that hybrid.
+
+The test-only rewind now checks that model receipts are empty before any
+mutation, then removes those two exact later tables with the existing ordered
+extension teardown. The production verifier remains strict. Original passes,
+the failed native output and the separate default-target listing are retained;
+only genuinely missing or invalidated observations may run on the effort after
+this task passes its gate. Final qualification, deployment and all eighteen
+physical HDR cases remain open.

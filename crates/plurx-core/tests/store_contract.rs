@@ -12618,8 +12618,23 @@ async fn assert_unactivated_contract_baseline(client: &Client) {
 // trigger inventory as proof that actual migration restores it.
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn drop_post_v39_extension_schema(client: &Client) -> Vec<(String, String)> {
+    // The independently versioned managed subtitle extension is newer too.
+    // Refuse populated model receipts before removing any schema: keeping its
+    // tables while dropping the resource view would create a partial extension.
+    let receipts: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT COUNT(*) AS value FROM subtitle_model_receipts",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("inspect managed model receipts before historical fixture rewind");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts[0].value, 0,
+        "cannot rewind populated managed model receipts"
+    );
     let mut rows = client
-        .query_consistent("SELECT type,name,sql FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
+        .query_consistent("SELECT type,name,sql FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update','subtitle_managed_schema','subtitle_model_receipts') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
         .await.expect("read later background schema inventory");
     let mut triggers = Vec::new();
     let statements = rows
