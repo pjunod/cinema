@@ -1361,9 +1361,17 @@ def authenticate(api, proof, document, repository, live_logs=None):
         kind = item['name'].split(':')[0]
         for record in item['records']:
             origin = record['origin']
+            from validation import nonrust_unit_cohort as cohort
+            if origin['execution'].get('legacy_capture') in cohort.INCOMING_PYTHON_FULL:
+                receipts.require(item.get('protocol') == 'source-cohort-v1'
+                                 and kind in {'validation', 'operations'}
+                                 and document['pr'] == 1045 and document['branch'] == 'effort/dv-hdr-repair'
+                                 and repository == 1,
+                                 'Incoming opaque Python is outside its one main-bound promotion')
+                cohort.incoming_python_policy(record)
+                continue
             if origin['kind'] != 'authenticated-ci':
                 continue
-            from validation import nonrust_unit_cohort as cohort
             if origin['execution'].get('legacy_capture') in {
                     row['raw_sha256'] for row in cohort.LINKED_PYTHON_CI_RUNS.values()}:
                 receipts.require(item.get('protocol') == 'source-cohort-v1'

@@ -589,6 +589,130 @@ def authenticate_linked_python_ci(api, proof, record, document, repository, live
                          'Linked original CI whole live log differs')
 
 
+# Original source-bound full suites have one unidentified skip each. Only the
+# reviewed unskippable subset may receive opaque command credit. No named row,
+# measured runtime or original tool-call identity is reconstructed.
+INCOMING_PYTHON_SOURCE = 'd440abf8ebb7c1cfa4cf00163260bc069a36e4ab'
+INCOMING_PYTHON_TREE = '20589a21aff411058fe9261e09c66f132f776c70'
+INCOMING_PYTHON_CUSTODY = {
+    'source_binding': 'dd24316e217c9ef77b652abe36c1ba00885d43c4b04faf7a46786f2a56485b10',
+    'receipt': '10fef05a641350902e08359048b6c3778e660b7ad6d349b45b1addbb6f89c48d',
+    'oracle_manifest': '9b6912a400a01cb964a8ae1741054e9d900602131595eeb8d3296a42d5aab5dc',
+}
+INCOMING_PYTHON_FULL = {
+    '1595c33d10a611b62896756ede62af23848d0bb3b39139b22e4fe8dbf0ba781b': {
+        'kind': 'validation', 'count': 359,
+        'command': ['python3', '-m', 'unittest', 'discover', '-s', 'tests/validation', '-p', 'test_*.py']},
+    '1bb1fc9694c6956f02e9db8ef423293a6b4ebba99eda94af4a58e50ec8750ef6': {
+        'kind': 'operations', 'count': 1049, 'command': ['make', 'operations-check']},
+}
+# Exact source/class/helper closure reviewed for this immutable capture.
+# No validation ID is admitted from its separately preserved skipped suite.
+INCOMING_PYTHON_SUBSETS = {'operations': ('test_api_doc_routes.ApiDocRoutesTest.test_every_registered_route_is_documented',
+                'test_api_doc_routes.ApiDocRoutesTest.test_no_documented_path_is_invented',
+                'test_docs_index.DocsIndexTest.test_every_docs_markdown_file_is_listed',
+                'test_docs_index.DocsIndexTest.test_every_index_link_resolves',
+                'test_docs_index.DocsIndexTest.test_no_reference_points_at_a_missing_docs_path',
+                'test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve',
+                'test_install.InstallerCase.test_dry_run_prints_the_plan_and_touches_nothing',
+                'test_install.InstallerCase.test_installer_stays_bash_3_2_clean_for_macos',
+                'test_install.InstallerCase.test_macos_corrupt_subtitle_package_does_not_stop_existing_service',
+                'test_install.InstallerCase.test_macos_failed_fresh_subtitle_promotion_leaves_no_installed_bundle',
+                'test_install.InstallerCase.test_macos_failed_subtitle_staging_keeps_old_bundle_and_running_agent',
+                'test_install.InstallerCase.test_macos_hands_back_what_an_earlier_root_run_left_before_using_it',
+                'test_install.InstallerCase.test_macos_install_renders_the_agent_for_this_user_and_bootstraps_it',
+                'test_install.InstallerCase.test_macos_installs_a_given_source_parser_and_refuses_one_that_is_not_webassembly',
+                'test_install.InstallerCase.test_macos_installs_the_engine_from_a_local_archive_without_downloading',
+                'test_install.InstallerCase.test_macos_installs_the_source_parser_beside_the_pinned_ffprobe',
+                'test_install.InstallerCase.test_macos_release_archive_installs_its_own_plurxd_and_clears_quarantine',
+                'test_install.InstallerCase.test_macos_subtitle_bundle_stages_before_stop_and_rolls_back_failed_promotion',
+                'test_install.InstallerCase.test_macos_uninstall_boots_the_agent_out_and_keeps_application_support',
+                'test_install.InstallerCase.test_macos_upgrade_keeps_the_operators_plist',
+                'test_install.InstallerCase.test_macos_upgrade_repoints_a_non_jellyfin_engine_and_keeps_a_chosen_jellyfin_one',
+                'test_install.InstallerCase.test_macos_upgrade_repoints_the_engine_through_sudo_when_launchagents_is_not_writable',
+                'test_install.InstallerCase.test_macos_writes_the_agent_through_sudo_when_launchagents_is_not_writable',
+                'test_license_notices.LicenseNoticesCase.test_every_relative_link_resolves',
+                'test_license_notices.LicenseNoticesCase.test_referenced_license_texts_exist',
+                'test_license_notices.LicenseNoticesCase.test_the_notices_survive_the_release_rewrite',
+                'test_macos_daemon_package.MacosDaemonPackageCase.test_failed_signing_does_not_publish_or_mutate_source_artifacts',
+                'test_release_debug.PackedDebugCase.test_export_and_runtime_keep_debug_beside_every_binary',
+                'test_release_publication.ReleasePublicationContractCase.test_audited_amd64_release_render_excludes_export_tools_and_keeps_arm_incumbent',
+                'test_release_publication.ReleasePublicationContractCase.test_digest_bound_release_omits_mutable_runtime_install',
+                'test_release_publication.ReleasePublicationContractCase.test_generated_dockerfile_keeps_only_the_tagged_runtime',
+                'test_release_publication.ReleasePublicationContractCase.test_generator_derives_current_two_binary_runtime',
+                'test_release_publication.ReleasePublicationContractCase.test_named_dolby_package_context_is_accepted_only_in_its_render_mode',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_catalog_pins_immutable_models_and_explicit_supported_languages',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_engine_identity_refuses_symlinks_and_missing_notices',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_engine_identity_rejects_changed_binary_source_options_and_companions',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_linux_architecture_cannot_be_mislabeled_without_cross_compilation',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_macos_installer_real_verifier_rejects_changed_binary_before_execution',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_macos_installer_rejects_unqualified_and_extra_build_options',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_portable_verifier_reaches_but_never_fakes_native_signature_qualification',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_source_archive_is_verified_before_extraction',
+                'test_subtitle_engine_package.SubtitleEnginePackageCase.test_speech_fixture_requires_recognizable_words_and_valid_timing',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_caption_parser_distinguishes_bounds_from_timing_accuracy',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_corpus_pins_source_and_licensed_reference_separately',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_fixture_noise_is_reproducible_and_silence_is_exact_zero',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_oversize_writer_is_stopped_and_reaped',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_real_film_retains_raw_failure_and_reports_exact_pcm_intersection',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_timeout_reaps_child_and_clean_environment_is_explicit',
+                'test_subtitle_recognition_qualification.RecognitionQualificationCase.test_word_error_counts_omission_insertion_and_substitution',
+                'test_web_test_inventory.WebTestInventory.test_every_node_test_file_is_executed_by_a_gate',
+                'test_web_test_inventory.WebTestInventory.test_the_recipe_names_no_test_file_that_is_gone',
+                'test_web_test_inventory.WebTestInventory.test_ungated_browser_fixtures_only_shrink'),
+ 'validation': ()}
+
+
+def incoming_python_policy(record):
+    execution = record['origin']['execution']
+    digest = execution.get('legacy_capture')
+    capture = INCOMING_PYTHON_FULL.get(digest)
+    receipts.require(capture is not None, 'Unknown incoming full Python capture')
+    kind = capture['kind']; selected = list(INCOMING_PYTHON_SUBSETS[kind])
+    receipts.require(selected and selected == sorted(set(selected))
+                     and record['source_commit'] == INCOMING_PYTHON_SOURCE
+                     and record['log'] == {'sha256_ref': digest}
+                     and type(record['exit_code']) is int and record['exit_code'] == 0
+                     and record['origin']['kind'] == 'attested-local'
+                     and record['origin']['identity'] == 'custody:sha256:' + INCOMING_PYTHON_CUSTODY['source_binding']
+                     and record['origin']['command'] == capture['command']
+                     and execution == {'mode': 'source-cohort-v1', 'kind': kind,
+                         'legacy_capture': digest, 'actual_execution_source_commit': INCOMING_PYTHON_SOURCE,
+                         'python_patch': None, 'interpreter_sha256': None, 'platform': None,
+                         'original_tool_call_id': None, 'skipped_method_ids': None,
+                         **{key: {'sha256_ref': sha} for key, sha in INCOMING_PYTHON_CUSTODY.items()}}
+                     and record['coverage'] == {'mode': 'python-discovery-subset', 'ids': selected},
+                     'Incoming opaque source, original command, unknowns or subset changed')
+    return capture
+
+
+def incoming_python_outcomes(proof, record, discovery):
+    capture = incoming_python_policy(record); kind = capture['kind']
+    metadata = {key: receipts.bounded_json(blob(proof, {'sha256_ref': sha}))
+                for key, sha in INCOMING_PYTHON_CUSTODY.items()}
+    binding, receipt = metadata['source_binding'], metadata['receipt']
+    receipts.require(binding['source_commit'] == INCOMING_PYTHON_SOURCE
+                     and binding['source_tree'] == INCOMING_PYTHON_TREE
+                     and binding['receipt_sha256'] == INCOMING_PYTHON_CUSTODY['receipt']
+                     and binding['oracle_manifest_sha256'] == INCOMING_PYTHON_CUSTODY['oracle_manifest']
+                     and binding['oracle_file_count'] == len(metadata['oracle_manifest']['files']) == 179,
+                     'Incoming source binding, original receipt or oracle changed')
+    rows = [row for row in receipt['results'] if row['domain'] == kind]
+    receipts.require(len(rows) == 1 and rows[0]['command'] == capture['command']
+                     and rows[0]['exit_code'] == 0
+                     and rows[0]['log_sha256'] == record['log']['sha256_ref'],
+                     'Incoming original executor receipt differs')
+    original_ids = set(discovery(INCOMING_PYTHON_SOURCE, kind))
+    selected = set(INCOMING_PYTHON_SUBSETS[kind])
+    receipts.require(len(original_ids) == capture['count'] and selected <= original_ids,
+                     'Incoming opaque whitelist left original source discovery')
+    text = blob(proof, record['log']).decode()
+    terminals = re.findall(r'^Ran ' + str(capture['count'])
+                           + r' tests in [0-9.]+s\n\s*\nOK \(skipped=1\)$', text, re.M)
+    receipts.require(len(terminals) == 1, 'Incoming outer suite or unknown skip changed')
+    return {name: 'opaque-pass' for name in selected}
+
+
 def require_capture_custody(proof, execution, binding_raw, binding):
     """Preserve an absent historical measurement; reconcile only a pinned one."""
     reference = execution.get('custody_supplement')
@@ -776,6 +900,7 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
     source_failures, source_repairs = {}, {}
     original_jvm_failures = set()
     linked_ci_sequences = {}
+    incoming_full_sequences = set()
     for record in sorted(item['records'], key=lambda row: row['sequence']):
         receipts.require(set(record) == {'sequence', 'source_commit', 'origin', 'changes', 'log', 'coverage', 'exit_code'},
                          'Unknown source-cohort execution fields')
@@ -799,7 +924,16 @@ def validate(item, proof, candidate, discovery, changed_inputs, clean_log, archi
         exact_selected_repairs = set()
         source_variant_failure = False
         legacy = execution.get('legacy_capture')
-        if legacy in {row['raw_sha256'] for row in LINKED_PYTHON_CI_RUNS.values()}:
+        if legacy in INCOMING_PYTHON_FULL:
+            receipts.require(legacy not in incoming_full_sequences, 'Incoming full capture enrolled twice')
+            incoming_full_sequences.add(legacy)
+            receipts.require(kind in {'validation', 'operations'}, 'Opaque Python cannot qualify another command')
+            actual = incoming_python_outcomes(proof, record, discovery)
+            receipts.require(set(actual) <= universe, 'Incoming opaque subset left current source')
+            opaque_sources.append({'sequence': sequence, 'source_commit': record['source_commit'],
+                                   'log_sha256': legacy, 'membership_ids': sorted(set(actual) - invalid),
+                                   'runtime_named_outcomes': None})
+        elif legacy in {row['raw_sha256'] for row in LINKED_PYTHON_CI_RUNS.values()}:
             run, _policy = linked_python_ci_policy(record)
             receipts.require(run not in linked_ci_sequences, 'Linked CI capture enrolled twice')
             linked_ci_sequences[run] = sequence

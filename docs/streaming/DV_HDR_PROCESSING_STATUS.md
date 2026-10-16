@@ -1715,3 +1715,15 @@ source-invalidated guard, rewind callers, current-version checks and changed
 queue SQL validator need fresh observations. Five incoming subtitle Store
 functional passes remain preserved, but lack canonical Linux/serial/8 MiB
 provenance, so those five canonical observations are still missing.
+
+
+The incoming subtitle Python suites report 359 and 1,049 cases with one
+unidentified skip each. Their complete originals, source binding, executor
+receipt and public-oracle manifest remain preserved. A finite, source-reviewed
+whitelist admits 52 operations methods whose module, class and helper closure
+cannot skip. They receive opaque subset credit only. No validation method is
+admitted from that capture, no skipped identity or runtime measurement is
+invented, and opaque credit cannot discharge an earlier named failure.
+Current-source classification still removes invalidated cases. The existing
+finite-capture control covers these exclusions, unknowns, exact custody and
+failure-repair separation; its changed body remains owed once on the effort.
