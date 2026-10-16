@@ -120,10 +120,10 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
-    # Runs5159 and5161 reached plurxd without diagnostics, then exhausted
-    # ten minutes on the shared compiler. Keep all checks and resource bounds;
-    # give this finite compile-only job time to complete and finalize its cache.
-    timeout-minutes: 20
+    # Preserve the larger-memory compiler lane and current main's finite
+    # cold-cache budget for every-target compilation and vendored Clippy.
+    timeout-minutes: 30
+    # Keep compilation within the runner's existing memory allocation.
     env:
       CARGO_BUILD_JOBS: "1"
     steps:

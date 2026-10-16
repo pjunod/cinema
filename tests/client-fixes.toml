@@ -4154,7 +4154,7 @@ test_anchor = "fun lostAcknowledgementReplaysTheSameRequestBeforeNewIntent("
 id = "apple.prepared-track-reconciliation-bounded-by-overlap"
 commits = ["130ab19a0"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "private func reconcilePreparedMediaSelections(to item: AVPlayerItem, overlapStartedAtMs: Int) async -> Bool {"
+source_anchor = "private func reconcilePreparedMediaSelections(to item: AVPlayerItem, successor: AVPlayer,"
 test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
 test_anchor = "func testCancelledMediaSelectionPreparationCannotApplyLateTracks("
 
@@ -4422,7 +4422,8 @@ test_anchor = "fun compactAcknowledgementsUseCurrentLedgerMediaFactsWithoutInven
 id = "apple.layer-readiness-clamped-to-remaining-overlap"
 commits = ["be001d003"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs),"
+source_anchor = '''boundMs: max(0, min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs,
+                readinessDeadlineMs - PlaybackControlSession.monotonicMs())),'''
 test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
 test_anchor = "func testPreparationAndAlignmentConsumeTheSamePhysicalOverlapDeadline("
 
@@ -6436,6 +6437,408 @@ source_anchor = "let successor = Session.shared.nextMediaFailoverURL(path,"
 test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
 test_anchor = "func testGrowingPreparationRecoversIngressAndCannotAttachAfterStop()"
 
+# Continuous-quality client corrections: live source/test anchors only.
+# These rows do not assert test execution or playback qualification.
+# The former unavailable-cadence retry was superseded by terminal refusals;
+# its launch-ID correction remains anchored separately below.
+
+[[fixes]]
+id = "apple.staged-selection-before-exposure"
+commits = ["0c2fcd962b5eb07bb79a9b0e603dd61b82f222a2"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func prepareStagedMediaSelections(to item: AVPlayerItem,"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testStagedSelectionsResolveBeforeTheIncumbentIsReplaced"
+
+[[fixes]]
+id = "apple.loaded-future-readiness-before-handoff"
+commits = ["0e3e079d991614781e5008080a1b70cacf730fc8"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func preparedLoadedRendezvous(_ item: AVPlayerItem,"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testStaticOriginalRunwayWaitsForMovingIncumbentFutureCoverage"
+
+[[fixes]]
+id = "apple.access-log-sampling-owned-single-flight"
+commits = ["12eb6b592926a3e58c8cb22cfbb9fbe9e5423690"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "final class PlayerAccessLogSampler"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testAccessLogSamplingRemainsSingleFlightAndRejectsReplacedOwners"
+
+[[fixes]]
+id = "apple.cadence-refusals-remain-terminal"
+commits = ["159c857af68ccd02ed38a607ad851f98385263c4"]
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "guard http.statusCode == 200 || (range != nil && http.statusCode == 206),"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "testRefusedFragmentsAreTerminalAndCancelBodyTransfer"
+
+[[fixes]]
+id = "apple.prepared-preroll-owned-cancellation"
+commits = ["811d49c344897bdcee5c26f85c817419661dcaac"]
+source = "clients/apple/Sources/PlayerSeekCompletion.swift"
+source_anchor = "static func runOwned("
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testPreparedPrerollTimeoutCancelsNativeRequestAndIgnoresLateSuccess"
+
+[[fixes]]
+id = "apple.auto-cost-refresh-complete-output"
+commits = ["89f04485ca5632d7054631d37c1e568469455531"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoNeedsEncodedCostRefresh(_ candidates: [QualityCandidate], outputs: [MeasuredCandidateOutput]?, current: String) -> Bool"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testAutoCostRefreshRequiresUniqueCompleteOutputRatherThanAdvertisedPeak"
+
+[[fixes]]
+id = "apple.rendezvous-preserves-sampling-slack"
+commits = ["a150efc31421b8bec836be9e5acfc7a9f1d2ec55"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "overlapRemainingMs - postSwapReserveMs - PreparedReplacementBounds.pollMs"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testPlannedAnchorToleratesSmallMediaLagWithoutSpendingItsPostSwapReserve"
+
+[[fixes]]
+id = "apple.hidden-successor-clock-ownership"
+commits = ["a9e62b680c1451630ea7d5803996ed349e66f974"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "func clockAnchor("
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testClockAnchorRefusesConsumedLeadAndPreservesPostSwapDeadline"
+
+[[fixes]]
+id = "apple.loaded-rendezvous-original-target"
+commits = ["adb43655fce8768cc1ae0368609593503786986c"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "static func planLoaded("
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testLoadedRendezvousRejectsDisconnectedFutureIsland"
+
+[[fixes]]
+id = "apple.physical-launch-large-explicit-ids"
+commits = ["fd322f23a94f758f6c9ff0b11f013e4a7fbce418"]
+source = "clients/apple/Sources/PlurxApp.swift"
+source_anchor = "return Int(arguments[index + 1]) ?? 0"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPhysicalAcceptanceLaunchPreservesLargeExplicitIDs"
+
+[[fixes]]
+id = "apple.cadence-preparation-before-future-freeze"
+commits = ["80d1bfff39d8765c9c2d957457a901562a1601f6"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func preparedCadenceProbeItemMs("
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testCadenceProbeStaysInsideActualReachableFutureEnvelope"
+
+[[fixes]]
+id = "apple.incumbent-fetch-preference-protects-overlap"
+commits = ["540fe73eb36d404b2e22ab75e4761e26cec4803c"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct PreparedIncumbentBufferPreference"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testIncumbentFetchPreferenceLeaseProtectsPhysicalOverlapAndReserve"
+
+[[fixes]]
+id = "apple.incumbent-fetch-preference-fast-playback"
+commits = []
+supplements = "apple.incumbent-fetch-preference-protects-overlap"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func restorationPreference(currentHint: Double)"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testIncumbentFetchPreferenceLeaseScalesFastPlaybackAndRejectsUnknownFacts"
+
+[[fixes]]
+id = "apple.cadence-small-index-read-budget"
+commits = ["9a2162c5c6b5c56db1eab66b8d70dcd303907721"]
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "static let initialIndexWindowBytes = 4_096"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "testTinyRangedCadenceIndexDoesNotFetchAQuarterMegabyte"
+
+[[fixes]]
+id = "apple.cadence-large-index-adaptive-continuation"
+commits = []
+supplements = "apple.cadence-small-index-read-budget"
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "var nextReadBytes: Int"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "testLargeAndMultipleMoofsContinueAdaptivelyWithoutReadingMedia"
+
+
+[[fixes]]
+id = "apple.prepared-acquisition-query-preservation"
+commits = ["7a0f39728e44c34d990a0944776b5fef15d047cd"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "func preparedAcquisitionURL("
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testPreparedAcquisitionPinsCapturedPositionAndPreservesMediaQueries"
+
+[[fixes]]
+id = "apple.prepared-acquisition-fixed-target"
+commits = []
+supplements = "apple.prepared-acquisition-query-preservation"
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "fields.append("
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testPreparedAcquisitionReplacesStaleHintsAndClampsOnlyNegativePosition"
+
+[[fixes]]
+id = "apple.pressure-acquisition-observed-intent"
+commits = ["1eb39847ab7c39d60003221feeaba9e70a17825d"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "struct PreparedAcquisitionAnchors: Equatable"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testAcquisitionPreservesObservedIntentAndBoundsRateScaledLead"
+
+[[fixes]]
+id = "apple.pressure-acquisition-fact-refusal"
+commits = []
+supplements = "apple.pressure-acquisition-observed-intent"
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "struct PreparedAcquisitionAnchors: Equatable"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testAcquisitionPreservesIdentityForUnprotectedIntentAndInvalidFacts"
+
+[[fixes]]
+id = "apple.pressure-acquisition-tail-bounds"
+commits = []
+supplements = "apple.pressure-acquisition-observed-intent"
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "struct PreparedAcquisitionAnchors: Equatable"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "testAcquisitionCapsBeforeEOFWithRunwayAndMinimumWallLead"
+
+[[fixes]]
+id = "apple.pressure-acquisition-final-clock"
+commits = []
+supplements = "apple.pressure-acquisition-observed-intent"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func preparedAcquisitionTargetHasRunway"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testFutureAcquisitionKeepsObservedClockAndRequiresItsOwnContiguousInterval"
+
+[[fixes]]
+id = "apple.pressure-rescue-acquisition-budget"
+commits = ["a4e676ad2619f258a9360bc16b7e0a5259c440e2"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoPressureNeedsMinimumAcquisitionCost("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testSeverePressureAcquisitionBudgetUsesOriginalBoundsAndActualRate"
+
+[[fixes]]
+id = "apple.pressure-rescue-unknown-facts"
+commits = []
+supplements = "apple.pressure-rescue-acquisition-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoPressureNeedsMinimumAcquisitionCost("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testPressureAcquisitionBudgetPreservesUnknownAndInvalidFacts"
+
+[[fixes]]
+id = "apple.pressure-rescue-measured-cost"
+commits = []
+supplements = "apple.pressure-rescue-acquisition-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoRecoveryCandidate("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testLimitedSeverePressureRanksMeasuredCostRatherThanHeight"
+
+[[fixes]]
+id = "apple.pressure-rescue-candidate-fences"
+commits = []
+supplements = "apple.pressure-rescue-acquisition-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoRecoveryCandidate("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testSeverePressureCostRankingRetainsCandidateFencesAndImprovement"
+
+[[fixes]]
+id = "apple.pressure-rescue-purpose-fences"
+commits = []
+supplements = "apple.pressure-rescue-acquisition-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoRecoveryCandidate("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testPressureRescueDoesNotOverrideDecoderOrUnmeasuredProducerRecovery"
+
+[[fixes]]
+id = "apple.transfer-pressure-distinct-receipts"
+commits = ["15e5a0d9593f0e2360eb57488c68aa8c457d6918", "f0afcf0a930f0b7008ac3873517cfaa976c696e1"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoTransferPressureEvidence"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testDistinctMildReceiptsAtSameClockBecomeUrgentBeforePeriodicTick"
+
+[[fixes]]
+id = "apple.transfer-pressure-replay-order"
+commits = []
+supplements = "apple.transfer-pressure-distinct-receipts"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoTransferPressureEvidence"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testDuplicateAndOlderReceiptsCannotResetOrRenewPressure"
+
+[[fixes]]
+id = "apple.transfer-pressure-unknown-body"
+commits = []
+supplements = "apple.transfer-pressure-distinct-receipts"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoTransferPressureEvidence"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testInvalidForeignAndUnmeasuredBodiesNeverSupplyPressureAuthority"
+
+[[fixes]]
+id = "apple.transfer-pressure-viewer-floor"
+commits = []
+supplements = "apple.transfer-pressure-distinct-receipts"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoTransferPressureEvidence"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testPressureEvidenceOwnerAndViewerResetRetireAllReceiptCredit"
+
+[[fixes]]
+id = "apple.transfer-pressure-bounded-window"
+commits = []
+supplements = "apple.transfer-pressure-distinct-receipts"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoTransferPressureEvidence"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testReceiptWindowIsBoundedAndExpiredMildCreditDoesNotRenew"
+
+[[fixes]]
+id = "apple.transfer-pressure-unchanged-thresholds"
+commits = []
+supplements = "apple.transfer-pressure-distinct-receipts"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoTransferPressureEvidence"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testPressureThresholdsKeepSevereAndTwoMildAuthority"
+
+[[fixes]]
+id = "apple.hidden-clock-startup-strict-contiguous-runway"
+commits = ["a8e3d952c78cf111a9ca78771d514d18f1783bda"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func preparedClockStartupHasRunway("
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testClockStartupRunwayRejectsPositiveGaps"
+
+[[fixes]]
+id = "server.cached-wait-watcher-current-accepted-authority"
+commits = []
+supplements = "apple.hidden-clock-startup-strict-contiguous-runway"
+source = "crates/plurxd/src/http/hls/preparation.rs"
+source_anchor = "fn cached_accepted_wait_is_current(active: &ActivePreparedSuccessor) -> Option<bool>"
+test = "crates/plurxd/src/http/hls/preparation.rs"
+test_anchor = "cached_accepted_wait_survives_actual_foreground_watcher_capacity_pressure"
+
+[[fixes]]
+id = "apple.cadence-disposal-before-monitor-and-preroll"
+commits = []
+supplements = "apple.hidden-clock-startup-strict-contiguous-runway"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func discardPreparedSuccessor() {"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "testCadencePreparationFinishesBeforeOneTargetIsFrozenAndDisposalCancelsIt"
+
+
+[[fixes]]
+id = "apple.severe-rescue-full-failed-preparation-budget"
+commits = ["7ed2a07dea9bc1fbc39d9eceee288cd0dd6607b2"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoPressureNeedsMinimumAcquisitionCost("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testSeverePressureRescueBudgetPreservesActualTVLowLinkOpportunity"
+
+[[fixes]]
+id = "apple.severe-rescue-original-overlap-rate-boundaries"
+commits = []
+supplements = "apple.severe-rescue-full-failed-preparation-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoPressureNeedsMinimumAcquisitionCost("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testSeverePressureAcquisitionBudgetUsesOriginalBoundsAndActualRate"
+
+
+[[fixes]]
+id = "apple.pause-publication-retains-pending-destination"
+commits = ["af82338f1ff45c6ccb07df3c6ebb08f7a7b907b4"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func setPlaybackRequested(_ requested: Bool, viewerOrigin: Bool) {"
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "testPausePublicationRetainsPendingSeekUntilPlayDispatchesOnce"
+
+[[fixes]]
+id = "server.cached-wait-contended-session-retains-witness"
+commits = ["f94f73211506883b24d1d4d7eeb07f8aa0841db5"]
+source = "crates/plurxd/src/http/hls/preparation.rs"
+source_anchor = "fn cached_accepted_wait_is_current("
+test = "crates/plurxd/src/http/hls/preparation.rs"
+test_anchor = "cached_accepted_wait_survives_contended_session_lock_during_foreground_pressure"
+
+[[fixes]]
+id = "server.cached-wait-contended-reader-retains-witness"
+commits = []
+supplements = "server.cached-wait-contended-session-retains-witness"
+source = "crates/plurxd/src/http/hls/preparation.rs"
+source_anchor = "fn cached_accepted_wait_is_current("
+test = "crates/plurxd/src/http/hls/preparation.rs"
+test_anchor = "cached_accepted_wait_survives_contended_reader_lock_during_foreground_pressure"
+
+[[fixes]]
+id = "server.cached-wait-contention-does-not-renew"
+commits = []
+supplements = "server.cached-wait-contended-session-retains-witness"
+source = "crates/plurxd/src/http/hls/preparation.rs"
+source_anchor = "pub(super) fn cancel_preparations_for_incumbent_wait("
+test = "crates/plurxd/src/http/hls/preparation.rs"
+test_anchor = "cached_accepted_wait_contention_keeps_control_witness_without_renewal"
+
+[[fixes]]
+id = "apple.incumbent-lease-rejects-positive-buffer-gap"
+commits = []
+supplements = "server.cached-wait-contended-session-retains-witness"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func acquirePreparedIncumbentBufferPreference("
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "testIncumbentFetchPreferenceLeaseRejectsPositiveGapInsideProtectedWindow"
+
+[[fixes]]
+id = "apple.cadence-sixty-four-request-bound"
+commits = []
+supplements = "server.cached-wait-contended-session-retains-witness"
+source = "clients/apple/Sources/HLSFragmentCadence.swift"
+source_anchor = "enum HLSFragmentCadence"
+test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
+test_anchor = "testFragmentIndexWalkFailsClosedPastSixtyFourRequestsOnManyFragments"
+
+
+[[fixes]]
+id = "apple.incumbent-lease-membership-rounding-strict-gap"
+commits = ["6e527f6fcb92b7da55339f3e4d33b40cfa9ade10", "69b4762afdb0c45d7d710c6c4145f50af23d56bd", "ce4fc068cbe76c4e911cec32c05cd87c01b44061"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "guard let runway = bufferedRunwaySeconds(gapTolerance: 0)"
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "testIncumbentFetchPreferenceLeaseRejectsPositiveGapInsideProtectedWindow"
+
+[[fixes]]
+id = "server.cached-wait-playing-hidden-by-sessions-contention"
+commits = []
+supplements = "apple.incumbent-lease-membership-rounding-strict-gap"
+source = "crates/plurxd/src/http/hls/preparation.rs"
+source_anchor = "fn arm_preparation_foreground_watch("
+test = "crates/plurxd/src/http/hls/preparation.rs"
+test_anchor = "cached_accepted_wait_defers_playing_revocation_until_session_lock_releases"
+
+
+[[fixes]]
+id = "apple.automatic-incumbent-buffer-lease-restoration"
+commits = []
+supplements = "apple.incumbent-lease-membership-rounding-strict-gap"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct PreparedIncumbentBufferPreference"
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "testAutomaticIncumbentFetchPreferenceLeaseRestoresAutomaticAndPreservesLaterOwner"
+
 
 [[fixes]]
 id = "diagnostics.tv-preview-follows-report-actions"
@@ -6453,3 +6856,37 @@ source = "crates/plurxd/src/web/player/stats.js"
 source_anchor = "const stream=statsStreamFormat(p);"
 test = "tests/playback/web-policy.test.js"
 test_anchor = "attached cached output reports its frozen frame and Metal renderer"
+
+[[fixes]]
+id = "cluster.relay-proof-positional-parameter-order"
+commits = ["decf8155c16d4d99d2d767de1e6a9acb4df4f7a3"]
+source = "crates/plurx-core/src/cluster/membership.rs"
+source_anchor = "const MEDIA_RELAY_ACQUISITION_PROOF_SQL:"
+test = "crates/plurx-core/src/cluster/membership.rs"
+test_anchor = "relay_acquisition_registration_is_atomic_and_rollback_claims_expire"
+
+[[fixes]]
+id = "apple.missing-cost-refresh-independent-fence"
+commits = ["03efc497c1ab6d1bd4308c1ad13fef9eb2d12482"]
+source = "clients/apple/Sources/PlayerAttempt.swift"
+source_anchor = "case autoMissingCostCatalogRefresh"
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid"
+
+[[fixes]]
+id = "apple.missing-cost-refresh-refuses-viewer-pause"
+commits = []
+supplements = "apple.missing-cost-refresh-independent-fence"
+source = "clients/apple/Sources/PlayerAttempt.swift"
+source_anchor = "case autoMissingCostCatalogRefresh"
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "testEveryMigratedFenceRefusesAContinuationAcrossAViewerPause"
+
+[[fixes]]
+id = "apple.missing-cost-refresh-refuses-previous-title"
+commits = []
+supplements = "apple.missing-cost-refresh-independent-fence"
+source = "clients/apple/Sources/PlayerAttempt.swift"
+source_anchor = "case autoMissingCostCatalogRefresh"
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle"

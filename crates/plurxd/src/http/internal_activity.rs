@@ -64,6 +64,8 @@ pub struct ActivitySnapshot {
 /// Bounded physical observations, not a promise that a particular job can run.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityWorkers {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitles: Option<crate::subtitle_models::WorkerObservation>,
     /// Exact current indexing engine; absent on peers predating reconciliation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analysis_engine: Option<String>,
@@ -88,6 +90,7 @@ pub(super) async fn local_workers(state: &AppState) -> ActivityWorkers {
     let children = plurx_core::process::priority::running();
     let heavy_in_use = usize::from(state.transcode.background_worker_in_use());
     ActivityWorkers {
+        subtitles: state.subtitle_models.local_observation().await,
         analysis_engine: if crate::ffmpeg::fragment_index_engine_is_current().await {
             Some(crate::ffmpeg::fragment_index_engine_digest().await)
         } else {
@@ -555,7 +558,11 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
         && !snapshot.node_id.is_empty()
         && snapshot.node_id.len() <= MAX_NODE_ID_BYTES
         && snapshot.workers.as_ref().is_none_or(|workers| {
-            workers.children.len() <= 32
+            workers
+                .subtitles
+                .as_ref()
+                .is_none_or(|observation| observation.bounded(expected_node_id))
+                && workers.children.len() <= 32
                 && workers.analysis_engine.as_ref().is_none_or(|engine| {
                     engine.len() == 64 && engine.bytes().all(|byte| byte.is_ascii_hexdigit())
                 })

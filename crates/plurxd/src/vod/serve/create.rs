@@ -898,8 +898,8 @@ impl VodServe {
         // as ordinary encoders. Keep the waiter alive across every attempt so
         // background indexing yields and cannot reclaim its released budget.
         // Speculative renewals never preempt an active viewer or wait here.
-        let _waiting = (priority == crate::admission::Priority::Live)
-            .then(|| first.admissions.wait_for_slot());
+        let mut waiting = (priority == crate::admission::Priority::Live)
+            .then(|| first.admissions.queue_for_slot());
         let deadline = Instant::now() + crate::admission::QUEUE_WAIT;
         loop {
             if let Some(permits) = Self::try_reserve_media_group(
@@ -911,6 +911,9 @@ impl VodServe {
                 priority,
             ) {
                 return Ok(permits);
+            }
+            if let Some(waiting) = waiting.as_mut() {
+                waiting.mark_capacity_blocked();
             }
             let now = Instant::now();
             if priority != crate::admission::Priority::Live || now >= deadline {
@@ -1002,6 +1005,21 @@ impl VodServe {
         // would be frozen at whatever the node booted with — and applying it
         // at `try_create` alone reached no production path at all.
         let req = prepared.request;
+        // Resolve may discard the incoming recipe in favour of a healthy
+        // cached rendition. Preserve this consumer's purpose before that.
+        let nonpreemptive_trial = prepared
+            .encoding
+            .as_ref()
+            .is_some_and(|encoding| encoding.nonpreemptive_trial);
+        let admission_priority = if prepared
+            .encoding
+            .as_ref()
+            .is_some_and(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
+        {
+            crate::admission::Priority::Speculative
+        } else {
+            crate::admission::Priority::Live
+        };
         let passive_grant = if req.passive_vod {
             if !req.vod_only || req.presentation != crate::transcode::Presentation::Vod {
                 return Err(crate::transcode::vod_refusal_error(
@@ -1226,7 +1244,7 @@ impl VodServe {
             }
         }
         let mut private_media = if continuous {
-            let permits = Self::reserve_media_group(&media, None).await?;
+            let permits = Self::reserve_media_group(&media, Some(admission_priority)).await?;
             media
                 .into_iter()
                 .zip(permits)
@@ -1309,6 +1327,10 @@ impl VodServe {
         }
         let mut replacement = Session {
             children: Vec::new(),
+            preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
+                req.start_seconds,
+                duration_ms,
+            ),
             passive_grant: passive_grant.clone(),
             retained_output,
             rendition: Some(Arc::clone(&rendition)),
@@ -1469,7 +1491,11 @@ impl VodServe {
                 (req.start_seconds.max(0.0) * 1000.0) as i64,
             );
             if Arc::ptr_eq(&child.rendition, &rendition) {
-                replacement_readers.insert(child.reader_id.clone(), Reader::new(entry));
+                replacement_readers.insert(child.reader_id.clone(), {
+                    let mut reader = Reader::with_priority(entry, admission_priority);
+                    reader.nonpreemptive_trial = nonpreemptive_trial;
+                    reader
+                });
             } else {
                 let readers = if companion_rendition
                     .as_ref()
@@ -1480,12 +1506,18 @@ impl VodServe {
                     audio_readers.as_mut().or(previous_readers.as_mut())
                 }
                 .expect("private media reader guard");
-                readers.insert(child.reader_id.clone(), Reader::new(entry));
+                readers.insert(child.reader_id.clone(), {
+                    let mut reader = Reader::with_priority(entry, admission_priority);
+                    reader.nonpreemptive_trial = nonpreemptive_trial;
+                    reader
+                });
                 *child.rendition.dormant_since.lock().expect("dormant lock") = None;
             }
         }
         replacement.children = std::mem::take(&mut private_media);
-        let authority = replacement.attachment_reader(start_entry);
+        let mut authority = replacement.attachment_reader(start_entry);
+        authority.admission_priority = admission_priority;
+        authority.nonpreemptive_trial = nonpreemptive_trial;
         replacement_readers.insert(session_id.clone(), authority);
         *rendition.dormant_since.lock().expect("dormant lock") = None;
         // A live entry with this id is replaced rather than refused, and the
@@ -2109,6 +2141,10 @@ impl VodServe {
         let duration_ms = plan_duration_ms(&rendition.plan);
         let replacement = Session {
             children: Vec::new(),
+            preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
+                req.start_seconds,
+                duration_ms,
+            ),
             passive_grant: None,
             retained_output: None,
             sdr_master_codecs: false,

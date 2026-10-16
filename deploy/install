@@ -23,6 +23,9 @@
 #                   macOS: a built plurx-source-parser.wasm to install instead
 #                   of building one (a release archive's own module, beside
 #                   this script, is used without it)
+#   --subtitle-engine-package DIR
+#                   macOS: verified pinned whisper.cpp bundle; release archives
+#                   supply it, and source installs build it automatically
 #   --uninstall     remove the service and the binary; keep data and config
 #   --dry-run       print every command instead of running it
 #
@@ -41,11 +44,12 @@ binary=
 prefix=
 ffmpeg_archive=
 source_parser=
+subtitle_engine_package=
 uninstall=0
 dry_run=0
 
 usage() {
-  sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 say() { printf '%s\n' "install: $*"; }
@@ -133,7 +137,26 @@ claim_for_user() {
 # including a declined sudo prompt under `set -e` or an interrupted build.
 temp_files=
 cleanup_temp_files() {
-  local f
+  local f parent uid
+  set +e
+  if [ "${subtitle_engine_promoted:-0}" = 1 ] || { [ -n "${subtitle_engine_backup:-}" ] && [ -d "$subtitle_engine_backup" ]; }; then
+    parent=$(dirname -- "$subtitle_engine_destination")
+    uid=$(id -u)
+    run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null
+    run_for_dir "$parent" rm -rf "$subtitle_engine_destination"
+    if [ -n "$subtitle_engine_backup" ]; then
+      run_for_dir "$parent" mv "$subtitle_engine_backup" "$subtitle_engine_destination"
+      subtitle_engine_backup=
+    fi
+    if [ -f "$HOME/Library/LaunchAgents/$macos_agent_label.plist" ]; then
+      run launchctl bootstrap "gui/$uid" "$HOME/Library/LaunchAgents/$macos_agent_label.plist"
+      run launchctl kickstart -k "gui/$uid/$macos_agent_label"
+    fi
+    say 'subtitle engine update failed; prior engine package restored (model data kept)'
+  fi
+  if [ -n "${subtitle_engine_stage:-}" ]; then
+    run_for_dir "$(dirname -- "$subtitle_engine_stage")" rm -rf "$subtitle_engine_stage"
+  fi
   for f in $temp_files; do rm -rf "$f"; done
 }
 trap cleanup_temp_files EXIT
@@ -157,6 +180,8 @@ while [ $# -gt 0 ]; do
     --ffmpeg-archive=*) ffmpeg_archive=${1#--ffmpeg-archive=} ;;
     --source-parser) shift; [ $# -gt 0 ] || die "--source-parser needs a path"; source_parser=$1 ;;
     --source-parser=*) source_parser=${1#--source-parser=} ;;
+    --subtitle-engine-package) shift; [ $# -gt 0 ] || die "--subtitle-engine-package needs a path"; subtitle_engine_package=$1 ;;
+    --subtitle-engine-package=*) subtitle_engine_package=${1#--subtitle-engine-package=} ;;
     --uninstall) uninstall=1 ;;
     --dry-run) dry_run=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -455,6 +480,73 @@ jellyfin_ffmpeg_sha256_x86_64=cb2b5c154d49a6b6bfe29fa6c16510e85dcbf60b805764121a
 macos_ffmpeg=
 macos_ffprobe=
 
+# The release archive carries the complete engine. A checkout builds it from
+# pinned source automatically; missing packaging is an install error, never a
+# claim that a clean service can generate subtitles. Models stay in server data.
+subtitle_engine_stage=
+subtitle_engine_backup=
+subtitle_engine_destination=
+subtitle_engine_promoted=0
+macos_prepare_subtitle_engine() {
+  local dir=$1 package verifier work
+  verifier=$here/verify-subtitle-engine
+  package=$subtitle_engine_package
+  if [ -z "$package" ] && [ -d "$here/subtitle-engine" ]; then package=$here/subtitle-engine; fi
+  if [ "$dry_run" = 1 ]; then
+    say "would stage and verify pinned whisper.cpp 1.9.2, then promote $dir/subtitle-engine after stopping the agent"
+    return
+  fi
+  if [ -z "$package" ]; then
+    [ -f "$root/scripts/build-subtitle-engine" ] || die 'release is missing its subtitle engine package'
+    command -v cmake >/dev/null 2>&1 || die 'building the pinned subtitle engine requires cmake; use a complete release archive'
+    work=$(mktemp -d "${TMPDIR:-/tmp}/plurx-subtitle-engine.XXXXXX")
+    temp_files="$temp_files $work"
+    package=$work/package
+    python3 "$root/scripts/build-subtitle-engine" --output "$package" --jobs 2 \
+      || die 'could not build the pinned subtitle engine'
+  fi
+  [ -f "$verifier" ] || die 'release is missing its subtitle engine verifier'
+  bash "$verifier" "$package" --static-only || die 'subtitle engine package verification failed; existing installation kept'
+  subtitle_engine_destination=$dir/subtitle-engine
+  [ ! -L "$subtitle_engine_destination" ] || die 'refusing existing subtitle engine directory symlink'
+  run_for_dir "$dir" install -d "$dir"
+  subtitle_engine_stage=$(run_for_dir "$dir" mktemp -d "$dir/.subtitle-engine-stage.XXXXXX")
+  run_for_dir "$dir" cp -R "$package/." "$subtitle_engine_stage/"
+  # Clear browser quarantine only on the verified copy, never on caller input.
+  if command -v xattr >/dev/null 2>&1; then
+    run_for_dir "$dir" xattr -dr com.apple.quarantine "$subtitle_engine_stage" 2>/dev/null || true
+  fi
+  bash "$verifier" "$subtitle_engine_stage" || die 'staged subtitle engine failed verification; existing installation kept'
+}
+
+macos_promote_subtitle_engine() {
+  local dir=$1
+  [ "$dry_run" != 1 ] || return 0
+  if [ -e "$subtitle_engine_destination" ]; then
+    subtitle_engine_backup=$(run_for_dir "$dir" mktemp -d "$dir/.subtitle-engine-backup.XXXXXX")
+    run_for_dir "$dir" rmdir "$subtitle_engine_backup"
+    run_for_dir "$dir" mv "$subtitle_engine_destination" "$subtitle_engine_backup"
+  fi
+  # EXIT cleanup restores the complete prior directory if promotion, daemon
+  # installation, or readiness fails. No mixed executable/manifest is exposed.
+  subtitle_engine_promoted=1
+  run_for_dir "$dir" mv "$subtitle_engine_stage" "$subtitle_engine_destination"
+  subtitle_engine_stage=
+  bash "$here/verify-subtitle-engine" "$subtitle_engine_destination" || die 'promoted subtitle engine failed verification'
+  say 'installed pinned subtitle engine; existing models and saved choices kept'
+}
+
+macos_finish_subtitle_engine() {
+  local retired=$subtitle_engine_backup
+  [ "$dry_run" != 1 ] || return 0
+  # Readiness commits this transaction. Failure to retire a backup must never
+  # roll the working bundle back to an only partly deleted prior directory.
+  subtitle_engine_backup=
+  subtitle_engine_promoted=0
+  [ -z "$retired" ] || run_for_dir "$(dirname -- "$subtitle_engine_destination")" rm -rf "$retired" \
+    || say "could not remove prior engine backup: $retired"
+}
+
 # The directory the pinned build lives in: beside the binary's prefix, never
 # on PATH, so nothing else on the Mac picks it up or replaces it.
 macos_ffmpeg_dir() {
@@ -696,9 +788,11 @@ macos_install() {
   macos_claim_prefix "$dir"
   macos_ensure_jellyfin_ffmpeg "$dir"
   macos_ensure_source_parser "$dir"
+  macos_prepare_subtitle_engine "$dir"
   # Boot a running agent out before its binary is replaced. A fresh install
   # has nothing to boot out and that is fine.
   run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
+  macos_promote_subtitle_engine "$dir"
   install_binary_to "$dir"
   claim_for_user --top "$agents"
   claim_for_user "$plist" "$data" "$HOME/Library/Logs/plurxd.log"
@@ -724,6 +818,7 @@ macos_install() {
   run launchctl enable "gui/$uid/$macos_agent_label"
   run launchctl kickstart -k "gui/$uid/$macos_agent_label"
   wait_ready 32400 "$HOME/Library/Logs/plurxd.log"
+  macos_finish_subtitle_engine
   [ "$dry_run" = 1 ] || launchctl print "gui/$uid/$macos_agent_label" | grep -E 'state|pid' || true
   say "logs: tail -f ~/Library/Logs/plurxd.log"
 }
@@ -739,6 +834,7 @@ macos_uninstall() {
   run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
   run_for_file "$plist" rm -f "$plist"
   run_for_dir "$dir" rm -f "$dir/plurxd"
+  run_for_dir "$dir" rm -rf "$dir/subtitle-engine"
   run_for_dir "$dir" rm -rf "$(dirname -- "$dir")/libexec/plurx"
   say "removed the agent, $dir/plurxd and its Jellyfin FFmpeg; kept ~/Library/Application Support/plurx"
 }

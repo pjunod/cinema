@@ -98,6 +98,10 @@ def _sees_daemon_sources(text: str) -> bool:
             continue
         for argument in arguments[:-1]:
             path = argument.removeprefix("./").rstrip("/")
+            # A retained recognizer build consumes this rights-cleared audio
+            # fixture only. No Rust source or broad crates/ directory passes.
+            if path == "crates/plurxd/src/subtitle_models/self-test.wav":
+                continue
             if path in ("", ".") or path.split("/")[0] in _DAEMON_SOURCES:
                 return True
     return False

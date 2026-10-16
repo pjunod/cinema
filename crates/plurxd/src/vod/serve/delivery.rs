@@ -383,6 +383,253 @@ impl VodServe {
         owner.file.as_ref().clone()
     }
 
+    /// Feed a retained-reader fixture through the real owner-local acceptance
+    /// state machine. No test-only proof or capacity claim is manufactured.
+    #[cfg(test)]
+    pub(crate) async fn accept_cached_wait_for_test(
+        &self,
+        route: &plurx_core::domain::MediaSessionRoute,
+        request: &crate::playback_control::ControlRequestV1,
+        successor: &str,
+    ) {
+        self.accept_cached_wait_while_sessions_held_for_test(route, request, successor, async {})
+            .await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn accept_cached_wait_while_sessions_held_for_test(
+        &self,
+        route: &plurx_core::domain::MediaSessionRoute,
+        request: &crate::playback_control::ControlRequestV1,
+        successor: &str,
+        observation: impl std::future::Future<Output = ()>,
+    ) {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let mut sessions = self.shared.sessions.lock().await;
+        {
+            let session = sessions
+                .get_mut(&route.session_id)
+                .expect("actual retained attachment");
+            let first = session.last_control_snapshot.is_none();
+            session.playback_id = route.playback_id.clone();
+            let snapshot = crate::playback_control::PlaybackDemandSnapshot::from(request);
+            let mut control = session.control.lock().expect("control lock");
+            let result = control
+                .accept(
+                    &route.incarnation_id,
+                    u64::try_from(route.owner_epoch).expect("owner epoch"),
+                    &request.client_instance_id,
+                    request.sequence,
+                    crate::playback_control::ControlAcceptance::observed(
+                        snapshot.platform(),
+                        &crate::playback_control::PreparedSuccessorObservation::NotRequested,
+                        None,
+                        snapshot.request_fingerprint.as_deref(),
+                        &snapshot.selection,
+                        snapshot.capabilities.as_ref(),
+                    ),
+                )
+                .expect("actual owner-local acceptance");
+            assert_eq!(
+                result.0,
+                crate::playback_control::ControlDisposition::Accepted
+            );
+            control.observe(&snapshot.selection, snapshot.capabilities.as_ref());
+            if first {
+                assert!(control.stage_preparation(
+                    successor.to_owned(),
+                    route.incarnation_id.clone(),
+                    crate::media_sessions::unix_ms() + 30_000,
+                    Some(request.selection.desired().digest()),
+                ));
+            }
+            session.last_control_snapshot = Some(snapshot);
+        }
+        // Keep only the real async sessions mutex across the observation.
+        // The accepted-control std mutex is released before awaiting.
+        observation.await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn while_cached_recovery_lock_held_for_test(
+        &self,
+        session_id: &str,
+        lock: &str,
+        observation: impl std::future::Future<Output = ()>,
+    ) {
+        match lock {
+            "sessions" => {
+                let _held = self.shared.sessions.lock().await;
+                observation.await;
+            }
+            "readers" => {
+                let rendition = self
+                    .shared
+                    .sessions
+                    .lock()
+                    .await
+                    .get(session_id)
+                    .expect("actual retained session")
+                    .rendition
+                    .clone()
+                    .expect("actual retained rendition");
+                let _held = rendition.readers.lock().await;
+                observation.await;
+            }
+            _ => panic!("finite actual cached-recovery lock fixture"),
+        }
+    }
+
+    /// Capture only an exact local accepted predecessor. The outer None is
+    /// lock contention; Some(None) is definite lack of accepted authority.
+    pub(crate) fn cached_prepared_wait_fence(
+        &self,
+        route: &plurx_core::domain::MediaSessionRoute,
+        successor: &str,
+        request: &crate::playback_control::ControlRequestV1,
+    ) -> Option<Option<crate::playback_control::AcceptedControlFence>> {
+        let sessions = self.shared.sessions.try_lock().ok()?;
+        let Some(session) = sessions.get(&route.session_id) else {
+            return Some(None);
+        };
+        if !session.renewable() || session.playback_id != route.playback_id {
+            return Some(None);
+        }
+        let control = match session.control.try_lock() {
+            Ok(control) => control,
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+            Err(std::sync::TryLockError::Poisoned(_)) => return Some(None),
+        };
+        if control.live_preparation_incarnation() != Some(successor) {
+            return Some(None);
+        }
+        Some((|| {
+            control.accepted_observation(crate::playback_control::AcceptedControlIdentity {
+                generation: route.incarnation_id.clone(),
+                owner_epoch: u64::try_from(route.owner_epoch).ok()?,
+                client_instance_id: request.client_instance_id.clone(),
+                sequence: request.sequence,
+                fingerprint: request.fingerprint()?,
+                desired_digest: request.selection.desired().digest(),
+            })
+        })())
+    }
+
+    /// Unknown is lock contention only, never new accepted authority.
+    pub(crate) fn cached_prepared_wait_is_current(
+        &self,
+        predecessor: &str,
+        successor: &str,
+        fence: &crate::playback_control::AcceptedControlFence,
+        intent: Option<&plurx_core::playback::MediaIntentEnvelope>,
+    ) -> Option<bool> {
+        let Some(intent) = intent else {
+            return Some(false);
+        };
+        let sessions = self.shared.sessions.try_lock().ok()?;
+        let Some(session) = sessions
+            .get(predecessor)
+            .filter(|session| session.renewable())
+        else {
+            return Some(false);
+        };
+        let Some(snapshot) = session.last_control_snapshot.as_ref() else {
+            return Some(false);
+        };
+        if snapshot.intent.as_ref() != Some(intent)
+            || snapshot.demand != crate::playback_control::PlaybackDemand::Active
+            || !matches!(
+                snapshot.render_state,
+                crate::playback_control::RenderState::Waiting
+                    | crate::playback_control::RenderState::Stalled
+            )
+        {
+            return Some(false);
+        }
+        let control = match session.control.try_lock() {
+            Ok(control) => control,
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+            Err(std::sync::TryLockError::Poisoned(_)) => return Some(false),
+        };
+        Some(
+            control.live_preparation_incarnation() == Some(successor)
+                && control.observation_is_current(fence),
+        )
+    }
+
+    /// Issue a private proof only for this exact completed retained reader.
+    /// The immutable artifact serves all bytes; its authority-only consumer
+    /// cannot request an encoder permit or borrow the incumbent's producer.
+    pub(crate) async fn cached_prepared_reader_owner(
+        &self,
+        session_id: &str,
+        incarnation: &str,
+        expected: &crate::transcode::RetainedOutputFacts,
+    ) -> Option<ResponseOwner> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        if !session.renewable()
+            || session.prepared_incarnation.as_deref() != Some(incarnation)
+            || !session.children.is_empty()
+            || session.retained_output.as_ref()?.facts() != *expected
+        {
+            return None;
+        }
+        let rendition = session.rendition.as_ref()?;
+        let readers = rendition.readers.lock().await;
+        let reader = readers.get(session_id)?;
+        if !reader.authority_only
+            || reader.draining_after_prepared_commit
+            || reader.admission_priority != crate::admission::Priority::Speculative
+        {
+            return None;
+        }
+        Some(session.response_owner())
+    }
+
+    /// Waiting cancellation cannot suspend or extend an accepted exchange.
+    /// None is a contended lock, never proof to mint or renew cached authority.
+    pub(crate) fn cached_prepared_reader_is_live(
+        &self,
+        session_id: &str,
+        incarnation: &str,
+        owner: &ResponseOwner,
+    ) -> Option<bool> {
+        if owner.tombstone.is_some() {
+            return Some(false);
+        }
+        let _lifecycle = owner.lifecycle.try_lock().ok()?;
+        let sessions = self.shared.sessions.try_lock().ok()?;
+        let Some(session) = sessions.get(session_id) else {
+            return Some(false);
+        };
+        if !session.renewable()
+            || session.prepared_incarnation.as_deref() != Some(incarnation)
+            || !Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
+            || !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+            || !session.children.is_empty()
+        {
+            return Some(false);
+        }
+        let (Some(actual), Some(retained), Some(rendition), Some(frozen)) = (
+            session.retained_output.as_ref(),
+            owner.retained_output.as_ref(),
+            session.rendition.as_ref(),
+            owner.rendition.as_ref(),
+        ) else {
+            return Some(false);
+        };
+        if !Arc::ptr_eq(actual, retained) || !Arc::ptr_eq(rendition, frozen) {
+            return Some(false);
+        }
+        let readers = rendition.readers.try_lock().ok()?;
+        Some(readers.get(session_id).is_some_and(|reader| {
+            reader.authority_only
+                && !reader.draining_after_prepared_commit
+                && reader.admission_priority == crate::admission::Priority::Speculative
+        }))
+    }
+
     pub(crate) async fn prepared_owner_matches(
         &self,
         session_id: &str,
@@ -446,11 +693,32 @@ impl VodServe {
                 }))
     }
 
-    /// Immutable playlist bytes: the same bytes for the session's whole life.
+    /// Full immutable rendition with this attachment's fixed acquisition hint.
+    /// The preferred start does not trim media or rebase its timestamps.
     pub async fn playlist(&self, session_id: &str) -> Option<VodPublication<Vec<u8>>> {
+        self.playlist_with_acquisition_start(session_id, None).await
+    }
+
+    /// This response's measured acquisition position never changes the stored
+    /// attachment hint or the shared rendition. Invalid hints retain baseline.
+    pub async fn playlist_with_acquisition_start(
+        &self,
+        session_id: &str,
+        acquisition_start_ms: Option<i64>,
+    ) -> Option<VodPublication<Vec<u8>>> {
         let publication = self.session_rendition(session_id).await?;
         let (result, owner) = match publication.result {
-            Ok((rendition, _, _)) => (Ok(rendition.playlist.clone()), publication.owner),
+            Ok((rendition, _, _)) => (
+                Ok(playlist_with_acquisition_start(
+                    &rendition.playlist,
+                    publication.owner.preferred_start_ms,
+                    acquisition_start_ms.filter(|_| {
+                        publication.owner.scalar_playlist && publication.owner.media_child.is_none()
+                    }),
+                    plan_duration_ms(&rendition.plan),
+                )),
+                publication.owner,
+            ),
             Err(error) => (Err(error), publication.owner),
         };
         Some(VodPublication { result, owner })
@@ -1462,4 +1730,130 @@ async fn read_child_init(
         .await
         .map_err(VodError::Io)?;
     Ok(Some(bytes))
+}
+
+/// HLS uses the start hint only for acquisition. The full playlist remains
+/// seekable, and PRECISE=NO lets the reader begin at the preceding segment;
+/// the player's ordinary ownership-fenced seek still establishes alignment.
+pub(super) fn preferred_playlist_start_ms(start_seconds: f64, duration_ms: i64) -> Option<i64> {
+    let milliseconds = start_seconds * 1_000.0;
+    if !start_seconds.is_finite()
+        || !milliseconds.is_finite()
+        || milliseconds < 1.0
+        || milliseconds >= duration_ms as f64
+        || milliseconds >= i64::MAX as f64
+    {
+        return None;
+    }
+    Some(milliseconds.floor() as i64)
+}
+
+pub(super) fn playlist_with_preferred_start(playlist: &[u8], start_ms: Option<i64>) -> Vec<u8> {
+    let Some(start_ms) = start_ms.filter(|start| *start > 0) else {
+        return playlist.to_vec();
+    };
+    playlist_with_start_tag(playlist, start_ms)
+}
+
+pub(super) fn playlist_with_acquisition_start(
+    playlist: &[u8],
+    attachment_start_ms: Option<i64>,
+    acquisition_start_ms: Option<i64>,
+    duration_ms: i64,
+) -> Vec<u8> {
+    if let Some(start) = acquisition_start_ms.filter(|start| *start >= 0 && *start < duration_ms) {
+        playlist_with_start_tag(playlist, start)
+    } else {
+        playlist_with_preferred_start(playlist, attachment_start_ms)
+    }
+}
+
+fn playlist_with_start_tag(playlist: &[u8], start_ms: i64) -> Vec<u8> {
+    // Rendition playlists are generated from validated immutable plans. Keep
+    // all their bytes except an existing start tag; never rewrite media URIs,
+    // durations, sequence numbers, discontinuities, or the ENDLIST promise.
+    let Ok(text) = std::str::from_utf8(playlist) else {
+        return playlist.to_vec();
+    };
+    let mut lines = text.split_inclusive('\n');
+    let Some(header) = lines
+        .next()
+        .filter(|line| line.ends_with('\n') && line.trim_end() == "#EXTM3U")
+    else {
+        return playlist.to_vec();
+    };
+    let mut output = Vec::with_capacity(playlist.len() + 72);
+    output.extend_from_slice(header.as_bytes());
+    output.extend_from_slice(
+        format!(
+            "#EXT-X-START:TIME-OFFSET={}.{:03},PRECISE=NO\n",
+            start_ms / 1_000,
+            start_ms % 1_000,
+        )
+        .as_bytes(),
+    );
+    for line in lines.filter(|line| !line.trim_start().starts_with("#EXT-X-START:")) {
+        output.extend_from_slice(line.as_bytes());
+    }
+    output
+}
+
+#[cfg(test)]
+mod cached_recovery_tests {
+    #[tokio::test]
+    async fn cached_reader_proof_requires_live_exact_incarnation_and_no_producer_demand() {
+        let (_temp, serve, facts, _) =
+            crate::vodserve::retained::test_post_attachment_output_facts().await;
+        let id = "00000000-0000-4000-8000-00000000cace";
+        let incarnation = "cached-recovery-incarnation";
+        let output = facts
+            .response_owner
+            .retained_output_facts()
+            .expect("actual immutable complete output");
+        assert!(
+            serve
+                .cached_prepared_reader_owner(id, incarnation, &output)
+                .await
+                .is_none(),
+            "ordinary cached publication is not a primed successor proof"
+        );
+        serve.mark_prepared_incarnation(id, incarnation).await;
+        let owner = serve
+            .cached_prepared_reader_owner(id, incarnation, &output)
+            .await
+            .expect("exact prepared retained reader");
+        assert_eq!(
+            serve.cached_prepared_reader_is_live(id, incarnation, &owner),
+            Some(true)
+        );
+        assert_eq!(
+            serve.cached_prepared_reader_is_live(id, "foreign-incarnation", &owner),
+            Some(false)
+        );
+        {
+            let _busy = owner.lifecycle.lock().await;
+            assert!(
+                serve
+                    .cached_prepared_reader_is_live(id, incarnation, &owner)
+                    .is_none(),
+                "contended lifecycle cannot mint a survival claim"
+            );
+        }
+        {
+            let _busy = serve.shared.sessions.lock().await;
+            assert_eq!(
+                serve.cached_prepared_reader_is_live(id, incarnation, &owner),
+                None
+            );
+        }
+        crate::vodserve::retained::test_make_attachment_uncaptured(&serve, id).await;
+        assert!(
+            serve.cached_prepared_reader_is_live(id, incarnation, &owner) == Some(false),
+            "cold attachment cannot retain an old cached proof"
+        );
+        assert!(serve
+            .cached_prepared_reader_owner(id, incarnation, &output)
+            .await
+            .is_none());
+    }
 }

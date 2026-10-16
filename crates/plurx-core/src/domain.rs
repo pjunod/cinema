@@ -649,6 +649,17 @@ pub struct SubtitleTranscription {
     pub pipeline_digest: String,
     pub adapter: String,
     pub generated_at_ms: i64,
+    /// Exact qualified engine used for this managed caption. Historical and
+    /// Advanced captions retain their original JSON without this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<SubtitleExecution>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SubtitleExecution {
+    pub engine_sha256: String,
+    pub platform: String,
 }
 
 impl MediaFile {

@@ -79,13 +79,13 @@ impl VodServe {
         {
             return None;
         }
-        let state = self
+        let mut state = self
             .shared
             .retained_artifacts
             .state
             .lock()
             .expect("retained registry lock");
-        let artifact = state.entries.values().find_map(|entry| {
+        let entry = state.entries.values_mut().find_map(|entry| {
             let artifact = &entry.artifact;
             let binding = artifact.candidate.as_ref()?;
             (binding.candidate_id == candidate.id
@@ -109,11 +109,21 @@ impl VodServe {
                             && requested.valid_snapshot()
                             && actual.byte_identity() == requested.byte_identity()
                     }))
-            .then(|| Arc::clone(artifact))
+            .then_some(entry)
         })?;
-        let binding = artifact.candidate.clone()?;
-        let proof = MeasuredCandidateCostProof { artifact, binding };
-        proof.artifact_facts().valid().then_some(proof)
+        let binding = entry.artifact.candidate.clone()?;
+        let proof = MeasuredCandidateCostProof {
+            artifact: Arc::clone(&entry.artifact),
+            binding,
+        };
+        if !proof.artifact_facts().valid() {
+            return None;
+        }
+        // A validated cost read is actual use of this exact retained output,
+        // just like acquisition. Invalid claims must not renew its idle grace.
+        entry.used = Instant::now();
+        entry.idle_since = None;
+        Some(proof)
     }
 }
 
@@ -1512,6 +1522,7 @@ impl RetainedArtifactRegistry {
             .as_ref()
             .is_some_and(|prepare| prepare.allowance.footprint().is_none())
         {
+            tracing::debug!(target: "plurxd::vodserve", phase = "reserve", reason = "footprint_missing", "complete output assembly refused");
             return Err(AssemblyRefusal::Refused);
         }
         let mut state = shared
@@ -1522,29 +1533,49 @@ impl RetainedArtifactRegistry {
         // One queued metadata clone at a time. Another rendition's assembly
         // is not a property of this output: defer, never refuse.
         if state.assembling {
+            tracing::debug!(target: "plurxd::vodserve", phase = "reserve", reason = "assembly_busy", "complete output assembly refused");
             return Err(AssemblyRefusal::Busy);
         }
         let reserved = state
             .preparations
             .values()
             .try_fold(0_u64, |sum, cap| sum.checked_add(*cap))
-            .ok_or(AssemblyRefusal::Refused)?;
+            .ok_or_else(|| {
+                tracing::debug!(target: "plurxd::vodserve", phase = "reserve", reason = "reserved_overflow", "complete output assembly refused");
+                AssemblyRefusal::Refused
+            })?;
         let own_cap = prepare_nonce
             .and_then(|nonce| state.preparations.get(&nonce).copied())
             .unwrap_or(0);
         let reserved = reserved
             .checked_sub(own_cap)
-            .ok_or(AssemblyRefusal::Refused)?;
-        if state.entries.contains_key(&rates.identity)
-            || state.artifact_count() - usize::from(prepare_nonce.is_some()) >= MAX_ARTIFACTS
-            || (prepare_nonce.is_some() && rates.wire_bytes > own_cap)
-            || state
-                .bytes
-                .checked_add(state.cold_capacity)
-                .and_then(|bytes| bytes.checked_add(reserved))
-                .and_then(|bytes| bytes.checked_add(own_cap.max(rates.wire_bytes)))
-                .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
+            .ok_or_else(|| {
+                tracing::debug!(target: "plurxd::vodserve", phase = "reserve", reason = "own_cap_underflow", "complete output assembly refused");
+                AssemblyRefusal::Refused
+            })?;
+        let refusal = if state.entries.contains_key(&rates.identity) {
+            Some("identity_exists")
+        } else if state.artifact_count() - usize::from(prepare_nonce.is_some()) >= MAX_ARTIFACTS {
+            Some("artifact_limit")
+        } else if prepare_nonce.is_some() && rates.wire_bytes > own_cap {
+            Some("wire_exceeds_own_cap")
+        } else if state
+            .bytes
+            .checked_add(state.cold_capacity)
+            .and_then(|bytes| bytes.checked_add(reserved))
+            .and_then(|bytes| bytes.checked_add(own_cap.max(rates.wire_bytes)))
+            .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
         {
+            Some("completed_budget")
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            tracing::debug!(target: "plurxd::vodserve", phase = "reserve", reason,
+                own_cap, wire_bytes = rates.wire_bytes, registry_bytes = state.bytes,
+                cold_capacity = state.cold_capacity, reserved_bytes = reserved,
+                completed_budget = rendition.completed_cache_budget,
+                artifact_count = state.artifact_count(), "complete output assembly refused");
             return Err(AssemblyRefusal::Refused);
         }
         let preparation_owner = preparation
@@ -1554,6 +1585,7 @@ impl RetainedArtifactRegistry {
             .as_ref()
             .is_some_and(|storage| !storage.assembly_begin())
         {
+            tracing::debug!(target: "plurxd::vodserve", phase = "reserve", reason = "storage_owner_not_ready", "complete output assembly refused");
             return Err(AssemblyRefusal::Refused);
         }
         state.bytes += rates.wire_bytes;
@@ -1590,11 +1622,13 @@ impl RetainedArtifactRegistry {
         // completed full-title preparation for a momentary GC pass.
         let preparing = self.collector.lock().await;
         if !self.own_namespace(&shared.base).await {
+            tracing::debug!(target: "plurxd::vodserve", phase = "namespace", reason = "ownership_unavailable", "complete output assembly refused");
             return false;
         }
         self.collect_orphans().await;
         let Ok(init_metadata) = tokio::fs::metadata(rendition.dir.path().join(INIT_NAME)).await
         else {
+            tracing::debug!(target: "plurxd::vodserve", phase = "init_metadata", reason = "metadata_unavailable", "complete output assembly refused");
             return false;
         };
         let init_bytes = init_metadata.len();
@@ -1604,9 +1638,11 @@ impl RetainedArtifactRegistry {
             0
         };
         let Some(extra_charge) = init_bytes.checked_add(manifest_charge) else {
+            tracing::debug!(target: "plurxd::vodserve", phase = "capacity", reason = "extra_charge_overflow", "complete output assembly refused");
             return false;
         };
         let Some(charge) = observation.rates.wire_bytes.checked_add(extra_charge) else {
+            tracing::debug!(target: "plurxd::vodserve", phase = "capacity", reason = "charge_overflow", "complete output assembly refused");
             return false;
         };
         drop(preparing);
@@ -1617,6 +1653,7 @@ impl RetainedArtifactRegistry {
                 .values()
                 .try_fold(0_u64, |sum, cap| sum.checked_add(*cap))
             else {
+                tracing::debug!(target: "plurxd::vodserve", phase = "capacity", reason = "reserved_overflow", "complete output assembly refused");
                 return false;
             };
             let transfer = reservation
@@ -1625,15 +1662,28 @@ impl RetainedArtifactRegistry {
                 .and_then(|storage| state.preparations.get(&storage.nonce).copied())
                 .unwrap_or(0)
                 .min(extra_charge);
-            if !state.startup_done
-                || !state.orphans.is_empty()
-                || state
-                    .bytes
-                    .checked_add(state.cold_capacity)
-                    .and_then(|bytes| bytes.checked_add(reserved))
-                    .and_then(|bytes| bytes.checked_add(extra_charge - transfer))
-                    .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
+            let refusal = if !state.startup_done {
+                Some("startup_pending")
+            } else if !state.orphans.is_empty() {
+                Some("orphans_pending")
+            } else if state
+                .bytes
+                .checked_add(state.cold_capacity)
+                .and_then(|bytes| bytes.checked_add(reserved))
+                .and_then(|bytes| bytes.checked_add(extra_charge - transfer))
+                .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
             {
+                Some("completed_budget")
+            } else {
+                None
+            };
+            if let Some(reason) = refusal {
+                tracing::debug!(target: "plurxd::vodserve", phase = "capacity", reason,
+                    registry_bytes = state.bytes, cold_capacity = state.cold_capacity,
+                    reserved_bytes = reserved, extra_charge, transfer,
+                    completed_budget = rendition.completed_cache_budget,
+                    startup_done = state.startup_done, orphan_count = state.orphans.len(),
+                    "complete output assembly refused");
                 return false;
             }
             if let Some(storage) = reservation.preparation_owner.as_ref() {
@@ -1679,16 +1729,28 @@ impl RetainedArtifactRegistry {
             tracing::debug!(target: "plurxd::vodserve", %error, artifact = %artifact.id,
                 "complete retained artifact assembly unavailable");
         }
+        if let Err(error) = &result {
+            tracing::debug!(target: "plurxd::vodserve", phase = "link", reason = "io_failure", io_kind = ?error.kind(), "complete output assembly refused");
+        }
         if let Some(preparation) = preparation {
             // The origin captured at offer time remains private until the
             // exact job settlement and post-statement source revalidation.
             // A revoked origin must never fall through to ordinary exposure.
-            if result.is_ok()
-                && preparation.live(rendition).await
-                && preparation.stage(Arc::clone(&artifact))
-            {
+            let linked = result.is_ok();
+            let live = linked && preparation.live(rendition).await;
+            let staged = live && preparation.stage(Arc::clone(&artifact));
+            if staged {
                 reservation.published = true;
                 completion.completed = true;
+            } else {
+                let reason = if !linked {
+                    "link_failed"
+                } else if !live {
+                    "preparation_not_live"
+                } else {
+                    "stage_refused"
+                };
+                tracing::debug!(target: "plurxd::vodserve", phase = "stage", reason, linked, live, staged, "complete output assembly refused");
             }
             preparation.progress.notify_waiters();
             return completion.completed;
@@ -1769,31 +1831,48 @@ impl RetainedArtifactRegistry {
         rendition: &Rendition,
         artifact: &Arc<RetainedVodArtifact>,
     ) -> io::Result<()> {
+        fn trace_io(reason: &'static str, error: io::Error) -> io::Error {
+            tracing::debug!(target: "plurxd::vodserve", phase = "link", reason, io_kind = ?error.kind(), "complete output assembly refused");
+            error
+        }
         let gate = shared.rendition_build_gate(&rendition.key);
         let _gate = gate.lock().await;
         let init = rendition.identity.lock().await.identity.clone();
         let _manifest = rendition.manifest.lock().await;
         if !recipe_engine_is_current(&rendition.recipe).await {
-            return Err(io::ErrorKind::InvalidData.into());
+            return Err(trace_io("engine_before", io::ErrorKind::InvalidData.into()));
         }
-        let valid = || {
-            !rendition.closed.load(Acquire)
+        let valid = |reason: &'static str| {
+            let open = !rendition.closed.load(Acquire);
+            let source_current = open
                 && rendition
                     .source
                     .as_ref()
-                    .is_some_and(|source| source.unchanged())
+                    .is_some_and(|source| source.unchanged());
+            let init_matches = source_current
                 && init
                     .as_ref()
-                    .is_some_and(|init| init.served_init == artifact.observation.served_init)
+                    .is_some_and(|init| init.served_init == artifact.observation.served_init);
+            let observation_matches = init_matches
                 && rendition
                     .output_measurement
                     .lock()
                     .expect("output measurement lock")
                     .complete_observation()
-                    .is_some_and(|now| now == artifact.observation)
+                    .is_some_and(|now| now == artifact.observation);
+            if !observation_matches {
+                tracing::debug!(target: "plurxd::vodserve", phase = "link", reason, open, source_current, init_matches, observation_matches, "complete output assembly refused");
+            }
+            observation_matches
         };
-        if !valid() || !recipe_engine_is_current(&rendition.recipe).await {
+        if !valid("valid_before") {
             return Err(io::ErrorKind::InvalidData.into());
+        }
+        if !recipe_engine_is_current(&rendition.recipe).await {
+            return Err(trace_io(
+                "engine_recheck",
+                io::ErrorKind::InvalidData.into(),
+            ));
         }
         let lease = Arc::clone(artifact);
         tokio::task::spawn_blocking(move || {
@@ -1802,17 +1881,19 @@ impl RetainedArtifactRegistry {
             std::fs::create_dir(&lease.directory)
         })
         .await
-        .map_err(io::Error::other)??;
+        .map_err(|error| trace_io("directory_task", io::Error::other(error)))?
+        .map_err(|error| trace_io("directory_create", error))?;
         let versions = rendition
             .publication_versions
             .lock()
             .expect("publication versions lock")
             .clone();
-        if tokio::fs::metadata(rendition.dir.path().join(INIT_NAME))
-            .await?
-            .len()
-            != artifact.init_bytes
-        {
+        let actual_init_bytes = tokio::fs::metadata(rendition.dir.path().join(INIT_NAME))
+            .await
+            .map_err(|error| trace_io("init_metadata", error))?
+            .len();
+        if actual_init_bytes != artifact.init_bytes {
+            tracing::debug!(target: "plurxd::vodserve", phase = "link", reason = "init_size", actual_bytes = actual_init_bytes, expected_bytes = artifact.init_bytes, "complete output assembly refused");
             return Err(io::ErrorKind::InvalidData.into());
         }
         retained_hard_link(
@@ -1820,41 +1901,56 @@ impl RetainedArtifactRegistry {
             rendition.dir.path().join(INIT_NAME),
             artifact.directory.join(INIT_NAME),
         )
-        .await?;
+        .await
+        .map_err(|error| trace_io("init_link", error))?;
         if rendition.private_storage.is_some()
             && shared
                 .hooks
                 .get()
                 .private_cleanup_failure("link_after_init")
         {
-            return Err(io::ErrorKind::PermissionDenied.into());
+            return Err(trace_io(
+                "injected_link_failure",
+                io::ErrorKind::PermissionDenied.into(),
+            ));
         }
         for (index, member) in artifact.observation.members.iter().enumerate() {
             if versions.get(index).copied().flatten() != Some(member.publication) {
+                tracing::debug!(target: "plurxd::vodserve", phase = "link", reason = "member_version", member_index = index, "complete output assembly refused");
                 return Err(io::ErrorKind::InvalidData.into());
             }
             let name = segment_name(index as u64);
             let source = rendition.dir.path().join(&name);
-            if tokio::fs::metadata(&source).await?.len() != member.bytes {
+            let actual_bytes = tokio::fs::metadata(&source)
+                .await
+                .map_err(|error| trace_io("member_metadata", error))?
+                .len();
+            if actual_bytes != member.bytes {
+                tracing::debug!(target: "plurxd::vodserve", phase = "link", reason = "member_size", member_index = index, actual_bytes, expected_bytes = member.bytes, "complete output assembly refused");
                 return Err(io::ErrorKind::InvalidData.into());
             }
-            retained_hard_link(artifact, source, artifact.directory.join(name)).await?;
+            retained_hard_link(artifact, source, artifact.directory.join(name))
+                .await
+                .map_err(|error| trace_io("member_link", error))?;
         }
-        if !valid() {
+        if !valid("valid_after") {
             return Err(io::ErrorKind::InvalidData.into());
         }
         if let Some(logical) = rendition.recipe.retained_logical.clone() {
             let manifest =
                 super::retained_manifest::ArtifactManifest::from_artifact(artifact, logical);
-            let seal = manifest.seal()?;
+            let seal = manifest
+                .seal()
+                .map_err(|error| trace_io("manifest_seal", error))?;
             let lease = Arc::clone(artifact);
             tokio::task::spawn_blocking(move || manifest.commit(&lease.directory))
                 .await
-                .map_err(io::Error::other)??;
+                .map_err(|error| trace_io("manifest_task", io::Error::other(error)))?
+                .map_err(|error| trace_io("manifest_commit", error))?;
             artifact
                 .sealed_identity
                 .set(seal)
-                .map_err(|_| io::ErrorKind::InvalidData)?;
+                .map_err(|_| trace_io("seal_already_set", io::ErrorKind::InvalidData.into()))?;
         }
         Ok(())
     }
@@ -2422,6 +2518,7 @@ mod tests {
         };
         let session = Session {
             children: Vec::new(),
+            preferred_start_ms: None,
             passive_grant: None,
             rendition: Some(Arc::clone(&fresh)),
             retained_output: Some(artifact),
@@ -3072,6 +3169,214 @@ mod tests {
             .reacquire_expected(&facts, &refusing.shared, &rendition, Duration::from_secs(5))
             .await
             .is_none());
+    }
+
+    async fn measured_cost_activity_fixture() -> (
+        tempfile::TempDir,
+        Arc<VodServe>,
+        Arc<Rendition>,
+        crate::transcode::RetainedOutputFacts,
+        SessionRequest,
+        plurx_core::playback::candidate::QualityCandidate,
+    ) {
+        let (temp, serve, rendition, facts, mut request) =
+            durable_fixture_with_candidate(true).await;
+        // Actual AAC producer delivery and Sink-completed hard-linked bytes;
+        // advertised candidate rates cannot create the returned proof.
+        request.audio_delivery = rendition.recipe.audio_delivery.clone();
+        let candidate = request
+            .candidate_context
+            .as_ref()
+            .expect("bound candidate")
+            .selected_candidate
+            .clone();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let assembling = serve
+                    .shared
+                    .retained_artifacts
+                    .state
+                    .lock()
+                    .expect("registry")
+                    .assembling;
+                if !assembling {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("assembly reservation settled");
+        let directory = temp.path().join(".retained").join(&facts.artifact_id);
+        assert_eq!(
+            tokio::fs::read(directory.join(INIT_NAME))
+                .await
+                .expect("retained init bytes"),
+            b"actual retained fixture init"
+        );
+        assert!(rendition.plan.len() > 1, "nonzero fragment fixture");
+        let last = rendition.plan.len() - 1;
+        assert_eq!(
+            tokio::fs::read(directory.join(segment_name(last as u64)))
+                .await
+                .expect("actual hard-linked complete body"),
+            vec![last as u8; 1000 + last]
+        );
+        (temp, serve, rendition, facts, request, candidate)
+    }
+
+    #[tokio::test]
+    async fn measured_candidate_cost_refreshes_use_then_retires_after_reads_stop() {
+        let (temp, serve, rendition, facts, request, candidate) =
+            measured_cost_activity_fixture().await;
+        let registry = &serve.shared.retained_artifacts;
+        let source = rendition.source.as_ref().expect("actual source fence");
+        let directory = temp.path().join(".retained").join(&facts.artifact_id);
+        assert!(directory.join(INIT_NAME).exists(), "real retained init");
+        let charged = registry.test_capacity_snapshot();
+        assert!(charged.0 > 0 && charged.3 == 1);
+        registry.test_expire_artifact(&facts);
+        let proof = serve
+            .measured_candidate_cost(&candidate, &request, source)
+            .expect("valid measured read renews the exact output");
+        assert_eq!(proof.artifact_facts(), facts);
+        assert!(proof.average_bps() > 0 && proof.rfc_peak_bps() > 0);
+        drop(proof);
+        registry.collect(temp.path()).await;
+        assert!(
+            directory.exists(),
+            "renewed output survives collection without a held proof"
+        );
+        assert_eq!(
+            registry.test_capacity_snapshot(),
+            charged,
+            "cost use adds no pin, charge, reservation or artifact"
+        );
+        let next = serve
+            .measured_candidate_cost(&candidate, &request, source)
+            .expect("real measured bytes remain available");
+        assert_eq!(next.artifact_facts(), facts);
+        drop(next);
+        registry.test_expire_artifact(&facts);
+        for _ in 0..4 {
+            registry.collect(temp.path()).await;
+        }
+        assert!(
+            !directory.exists(),
+            "same idle TTL reclaims output after reads stop"
+        );
+        assert_eq!(registry.test_capacity_snapshot(), (0, 0, 0, 0));
+        assert!(serve
+            .measured_candidate_cost(&candidate, &request, source)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn rejected_measured_candidate_reads_do_not_extend_retention() {
+        use plurx_core::playback::candidate::CandidateRoute;
+        let (temp, serve, rendition, facts, request, candidate) =
+            measured_cost_activity_fixture().await;
+        let registry = &serve.shared.retained_artifacts;
+        let source = rendition.source.as_ref().expect("actual source fence");
+        let directory = temp.path().join(".retained").join(&facts.artifact_id);
+        registry.test_expire_artifact(&facts);
+        let charged = registry.test_capacity_snapshot();
+        let before = {
+            let state = registry.state.lock().expect("registry");
+            let entry = state.entries.values().next().expect("real artifact");
+            (entry.used, entry.idle_since)
+        };
+        let mut wrong = request.clone();
+        wrong
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .owner_node_id = Some("foreign-node".into());
+        assert!(serve
+            .measured_candidate_cost(&candidate, &wrong, source)
+            .is_none());
+        wrong = request.clone();
+        wrong.audio_index = Some(7);
+        assert!(serve
+            .measured_candidate_cost(&candidate, &wrong, source)
+            .is_none());
+        wrong = request.clone();
+        wrong.audio_delivery = None;
+        assert!(serve
+            .measured_candidate_cost(&candidate, &wrong, source)
+            .is_none());
+        wrong = request.clone();
+        wrong.file_id += 1;
+        assert!(serve
+            .measured_candidate_cost(&candidate, &wrong, source)
+            .is_none());
+        let mut other = candidate.clone();
+        other.decoder_compatible = false;
+        assert!(serve
+            .measured_candidate_cost(&other, &request, source)
+            .is_none());
+        other = candidate.clone();
+        other.recipe_digest[31] ^= 1;
+        assert!(serve
+            .measured_candidate_cost(&other, &request, source)
+            .is_none());
+        other = candidate.clone();
+        other.route = CandidateRoute::Remux;
+        assert!(serve
+            .measured_candidate_cost(&other, &request, source)
+            .is_none());
+        other = candidate.clone();
+        other.grade = plurx_core::transcode::OutputGrade::Hdr10;
+        assert!(serve
+            .measured_candidate_cost(&other, &request, source)
+            .is_none());
+        let foreign_path = temp.path().join("other-source.bin");
+        tokio::fs::write(&foreign_path, b"different actual source object bytes")
+            .await
+            .expect("foreign source bytes");
+        let foreign_file = crate::vodserve::tests::media_file_at(foreign_path, 10_000);
+        let foreign_source = crate::fragment_index_cluster::open_source_fence(&foreign_file, None)
+            .await
+            .expect("foreign source fence");
+        assert!(serve
+            .measured_candidate_cost(&candidate, &request, &foreign_source)
+            .is_none());
+        // Corrupt one scalar on an already real, completed artifact. It must
+        // not produce or renew a proof; restoring it does not invent costs.
+        let average = {
+            let mut state = registry.state.lock().expect("registry");
+            let entry = state.entries.values_mut().next().expect("real artifact");
+            let artifact = Arc::get_mut(&mut entry.artifact).expect("sole registry owner");
+            let actual = artifact.observation.rates.average_bps;
+            artifact.observation.rates.average_bps = 0;
+            actual
+        };
+        assert!(serve
+            .measured_candidate_cost(&candidate, &request, source)
+            .is_none());
+        {
+            let mut state = registry.state.lock().expect("registry");
+            let entry = state.entries.values_mut().next().expect("real artifact");
+            Arc::get_mut(&mut entry.artifact)
+                .expect("no leaked rejected proof")
+                .observation
+                .rates
+                .average_bps = average;
+            assert_eq!(
+                (entry.used, entry.idle_since),
+                before,
+                "rejected claims and invalid facts never touch recency or idle grace"
+            );
+        }
+        assert_eq!(registry.test_capacity_snapshot(), charged);
+        for _ in 0..4 {
+            registry.collect(temp.path()).await;
+        }
+        assert!(
+            !directory.exists(),
+            "invalid reads do not prevent actual collection"
+        );
+        assert_eq!(registry.test_capacity_snapshot(), (0, 0, 0, 0));
     }
 
     #[tokio::test]

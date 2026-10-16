@@ -62,6 +62,7 @@ class KnownRedContractTest(unittest.TestCase):
         fixture_ids = {fixture["test"] for fixture in fixtures}
         self.assertEqual(fixture_ids, {
             "crates/plurxd/src/pipeprobe.rs::pipeprobe::tests::real_neutral_peak_gate_rejects_old_metal_units",
+            "crates/plurxd/src/subtitle_transcription.rs::subtitle_transcription::tests::managed_real_engine_held_fd_clean_environment_recognizes_fixture",
             "crates/plurxd/src/http/shared_receiver_forwarding_fixture.rs::http::shared_receiver_fixture::forwarding_fixture::sharing_receiver_nonowner_signed_http_resource_and_end_require_actual_driver_closure",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_confirmed_end",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b",
@@ -106,6 +107,20 @@ class KnownRedContractTest(unittest.TestCase):
             public_wire.cargo_name,
             "http::tests::public_copy_wire::public_copy_new_retained_attachment_freezes_measured_master_and_exact_mux_wire",
         )
+        subtitle_identity = (
+            "crates/plurxd/src/subtitle_transcription.rs::subtitle_transcription::tests::"
+            "managed_real_engine_held_fd_clean_environment_recognizes_fixture"
+        )
+        subtitle_fixtures = tuple(item for item in ignored if item.identity == subtitle_identity)
+        self.assertEqual(len(subtitle_fixtures), 1)
+        subtitle_fixture = subtitle_fixtures[0]
+        self.assertEqual(
+            subtitle_fixture.reason,
+            "requires PLURX_SUBTITLE_ENGINE, PLURX_TEST_SUBTITLE_MODEL and packaged ffmpeg",
+        )
+        validate_listed_tests(subtitle_fixtures, (subtitle_fixture.cargo_name,))
+        with self.assertRaisesRegex(KnownRedError, "absent"):
+            validate_listed_tests(subtitle_fixtures, ())
         admitted_identities = {capture_identity, public_wire_identity} | fixture_ids
         # Main's native FFmpeg/libvmaf qualification remains independently
         # admitted; keep it in addition to effort's two acquisition identities.

@@ -9,7 +9,7 @@ pub(super) async fn relay_if_remote(
 ) -> Result<Option<Response>, ApiError> {
     let media_resource = !matches!(
         resource,
-        RelayResource::Status | RelayResource::Delete | RelayResource::PassivePresence { .. }
+        RelayResource::Delete | RelayResource::PassivePresence { .. }
     );
     let resolution = if media_resource {
         state
@@ -59,13 +59,38 @@ pub(super) async fn relay_if_remote(
     for attempt in 0..2 {
         let deadline_unix_ms =
             resource_deadline_unix_ms(request_deadline).ok_or_else(response_publication_timeout)?;
+        let acquisition_requested = matches!(
+            &resource,
+            RelayResource::Playlist {
+                acquisition_start_ms: Some(_),
+                ..
+            }
+        );
+        let acquisition_supported = if acquisition_requested {
+            // This local lookup spends the original ingress budget. Missing,
+            // stale or unavailable proof preserves the legacy envelope; it
+            // never adds an HTTP negotiation request or a fresh deadline.
+            let proof_deadline = request_deadline.min(Instant::now() + Duration::from_millis(100));
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(proof_deadline),
+                state
+                    .membership
+                    .media_relay_acquisition_supported(&route.owner_node_id),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(false)
+        } else {
+            false
+        };
         let response = state
             .media_sessions
             .relay(
                 &route.owner_node_id,
                 &RelayRequest {
                     session_id: session_id.to_owned(),
-                    resource: resource.clone(),
+                    resource: resource.for_acquisition_peer(acquisition_supported),
                     deadline_unix_ms,
                     // The relay envelope has no peer capability version.
                     // Until both ends negotiate validator-aware Range, every
@@ -179,12 +204,17 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
             ))
             .await
         }
-        RelayResource::Playlist { native, subtitle } => {
+        RelayResource::Playlist {
+            native,
+            subtitle,
+            acquisition_start_ms,
+        } => {
             Box::pin(playlist_local_before(
                 state,
                 &request.session_id,
                 PlaylistQuery {
                     native,
+                    acquisition_start_ms,
                     subtitle,
                     diagnostic: None,
                 },
@@ -202,6 +232,7 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
                 &request.session_id,
                 PlaylistQuery {
                     native: None,
+                    acquisition_start_ms: None,
                     subtitle,
                     diagnostic,
                 },

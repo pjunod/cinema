@@ -497,6 +497,11 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/server"
         | "/api/v1/settings"
         | "/api/v1/subtitle-transcription"
+        | "/api/v1/subtitle-transcription/managed"
+        | "/api/v1/subtitle-transcription/models"
+        | "/api/v1/subtitle-transcription/models/{id}/install"
+        | "/api/v1/subtitle-transcription/models/{id}/verify"
+        | "/api/v1/subtitle-transcription/jobs/{id}"
         | "/api/v1/subtitle-provider"
         | "/api/v1/developer/readiness"
         | "/api/v1/developer/macos-video-processing/reprobe"
@@ -1690,8 +1695,29 @@ pub fn router(state: AppState) -> Router {
             put(crate::subtitle_transcription::update_settings),
         )
         .route(
+            "/subtitle-transcription/managed",
+            get(crate::subtitle_models::api::settings)
+                .put(crate::subtitle_models::api::update_settings),
+        )
+        .route(
+            "/subtitle-transcription/models",
+            get(crate::subtitle_models::api::models),
+        )
+        .route(
+            "/subtitle-transcription/models/{id}/install",
+            post(crate::subtitle_models::install),
+        )
+        .route(
+            "/subtitle-transcription/models/{id}/verify",
+            post(crate::subtitle_models::verify),
+        )
+        .route(
+            "/subtitle-transcription/jobs/{id}",
+            get(crate::subtitle_models::api::job),
+        )
+        .route(
             "/files/{id}/subtitles/transcribe",
-            post(crate::subtitle_transcription::enqueue),
+            get(crate::subtitle_models::api::options).post(crate::subtitle_models::generate),
         )
         .route("/settings", put(system::update_settings))
         .route(
@@ -2889,6 +2915,7 @@ mod tests {
     use super::*;
 
     mod public_copy_wire;
+    mod subtitle_generation;
 
     async fn slow_test_handler() -> &'static str {
         tokio::time::sleep(Duration::from_millis(40)).await;
