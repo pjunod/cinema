@@ -95,7 +95,32 @@ pub(crate) const ENCODED_OUTPUT_SQLITE_SCHEMA: i64 = 97;
 // These single-row stages must remain materialized: flattening the repeated
 // verdict fields duplicates correlated subqueries into tens of thousands of
 // planner operations, making migration and ordinary admission needlessly slow.
-pub(super) const ENQUEUE_SQL: &str = r#"
+// Both ingress and first-claim SQL use the same atomic configuration predicates.
+// Typed EXCEPT compares this flat legacy Settings document semantically, retaining
+// missing-field defaults while refusing nulls, duplicates, unknown fields and drift.
+macro_rules! subtitle_managed_admission { () => { r#"EXISTS (SELECT 1 FROM settings managed JOIN settings legacy ON legacy.key='subtitles.transcription.config'
+ WHERE managed.key='subtitles.transcription.managed.v1'
+ AND CASE WHEN json_valid(managed.value) AND json_valid(legacy.value) THEN
+ json_type(managed.value)='object' AND json_extract(managed.value,'$.version')=1
+ AND json_extract(managed.value,'$.mode')='managed' AND json_type(managed.value,'$.enabled')='true'
+ AND json_type(legacy.value)='object' AND json_type(managed.value,'$.legacy_snapshot')='object'
+ AND (SELECT count(*) FROM json_each(legacy.value))=(SELECT count(DISTINCT key) FROM json_each(legacy.value))
+ AND NOT EXISTS (SELECT 1 FROM json_each(legacy.value) field WHERE field.key NOT IN ('enabled','interval_mins','command','model_path','language')
+  OR (field.key='enabled' AND field.type NOT IN ('true','false'))
+  OR (field.key='interval_mins' AND (field.type!='integer' OR field.value<0 OR field.value>4294967295))
+  OR (field.key IN ('command','model_path','language') AND field.type!='text'))
+ AND NOT EXISTS (SELECT key,value,type FROM json_each(json_patch('{"enabled":false,"interval_mins":0,"command":"whisper-cli","model_path":"","language":"en"}',legacy.value))
+  EXCEPT SELECT key,value,type FROM json_each(json_patch('{"enabled":false,"interval_mins":0,"command":"whisper-cli","model_path":"","language":"en"}',json_extract(managed.value,'$.legacy_snapshot'))))
+ AND NOT EXISTS (SELECT key,value,type FROM json_each(json_patch('{"enabled":false,"interval_mins":0,"command":"whisper-cli","model_path":"","language":"en"}',json_extract(managed.value,'$.legacy_snapshot')))
+  EXCEPT SELECT key,value,type FROM json_each(json_patch('{"enabled":false,"interval_mins":0,"command":"whisper-cli","model_path":"","language":"en"}',legacy.value)))
+ ELSE 0 END)"# }; }
+macro_rules! subtitle_advanced_admission { () => { r#"EXISTS (SELECT 1 FROM settings legacy WHERE legacy.key='subtitles.transcription.config'
+ AND CASE WHEN json_valid(legacy.value) THEN json_type(legacy.value)='object' AND json_type(legacy.value,'$.enabled')='true' ELSE 0 END)
+ AND NOT EXISTS (SELECT 1 FROM settings managed WHERE managed.key='subtitles.transcription.managed.v1'
+ AND CASE WHEN json_valid(managed.value) THEN json_extract(managed.value,'$.version') IS NOT 1 OR json_extract(managed.value,'$.mode') IS NOT 'advanced' ELSE 1 END)"# }; }
+
+pub(super) const ENQUEUE_SQL: &str = concat!(
+    r#"
 WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
  SELECT CASE WHEN EXISTS (SELECT 1 FROM background_predictions WHERE state = 'pending'
    AND request_id = COALESCE(json_extract(body,'$.subtitle_request.request_id'),json_extract(body,'$.analysis_request.request_id')))
@@ -225,13 +250,25 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
     WHEN json_extract(body,'$.payload.kind') = 'media_probe' AND active_job IS NULL
       AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'media_probe' AND state IN ('queued','running','cancelling')
         AND json_extract(payload_json,'$.coordinator') = json_extract(body,'$.payload.coordinator')) >= 128 THEN 'queue_full'
-    WHEN json_extract(body,'$.payload.kind') = 'subtitle_transcribe' AND NOT EXISTS (
+    WHEN json_extract(body,'$.payload.kind')='subtitle_transcribe_managed' AND NOT ("#,
+    subtitle_managed_admission!(),
+    r#") THEN 'producer_fenced'
+    WHEN json_extract(body,'$.payload.kind')='subtitle_transcribe' AND NOT ("#,
+    subtitle_advanced_admission!(),
+    r#") THEN 'producer_fenced'
+    WHEN json_extract(body,'$.payload.kind') IN ('subtitle_transcribe','subtitle_transcribe_managed') AND NOT EXISTS (
       SELECT 1 FROM files WHERE id = json_extract(body,'$.payload.file_id')
         AND size = json_extract(body,'$.payload.source_size') AND mtime = json_extract(body,'$.payload.source_mtime')
         AND probe_json IS NOT NULL) THEN 'source_changed'
-    WHEN json_extract(body,'$.payload.kind') = 'subtitle_transcribe' AND active_job IS NULL
-      AND (SELECT COUNT(*) FROM background_jobs WHERE kind = 'subtitle_transcribe'
+    WHEN json_extract(body,'$.payload.kind') IN ('subtitle_transcribe','subtitle_transcribe_managed') AND active_job IS NULL
+      AND (SELECT COUNT(*) FROM background_jobs WHERE kind IN ('subtitle_transcribe','subtitle_transcribe_managed')
         AND state IN ('queued','running','cancelling')) >= 32 THEN 'queue_full'
+    WHEN json_extract(body,'$.payload.kind') = 'subtitle_model_operation' AND active_job IS NULL
+      AND ((SELECT COUNT(*) FROM background_jobs WHERE kind='subtitle_model_operation'
+          AND state IN ('queued','running','cancelling')) >= 64
+        OR (SELECT COUNT(*) FROM background_jobs WHERE kind='subtitle_model_operation'
+          AND target_node_id=json_extract(body,'$.payload.target_node_id')
+          AND state IN ('queued','running','cancelling')) >= 8) THEN 'queue_full'
     WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND NOT EXISTS (
       SELECT 1 FROM items WHERE id = json_extract(body,'$.payload.item_id')) THEN 'source_changed'
     WHEN json_extract(body,'$.payload.kind') = 'semantic_embedding' AND EXISTS (
@@ -385,7 +422,8 @@ SELECT json_extract(body, '$.id'), 'enqueue', body,
     ELSE json_object('outcome', outcome) END
 FROM classified
 RETURNING result_json
-"#;
+"#
+);
 
 pub(super) const JOB_JSON: &str = r#"json_object(
     'id', id, 'payload_version', payload_version, 'payload', json(payload_json),
@@ -403,7 +441,8 @@ pub(super) const JOB_JSON: &str = r#"json_object(
     'created_at_ms', created_at_ms, 'updated_at_ms', updated_at_ms
 )"#;
 
-pub(super) const CLAIM_SQL: &str = r#"
+pub(super) const CLAIM_SQL: &str = concat!(
+    r#"
 UPDATE background_jobs SET
   failed_attempts = failed_attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
   attempt_errors = CASE WHEN state = 'running' THEN
@@ -416,6 +455,13 @@ UPDATE background_jobs SET
 WHERE id = json_extract($1, '$.job_id')
   AND revision = json_extract($1, '$.expected_revision')
   AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')
+  AND (kind!='subtitle_transcribe_managed' OR ("#,
+    subtitle_managed_admission!(),
+    r#"))
+  AND (kind!='subtitle_transcribe' OR ("#,
+    subtitle_advanced_admission!(),
+    r#"))
+  AND (kind!='subtitle_transcribe_managed' OR EXISTS (SELECT 1 FROM files file WHERE file.id=json_extract(background_jobs.payload_json,'$.file_id') AND file.size=json_extract(background_jobs.payload_json,'$.source_size') AND file.mtime=json_extract(background_jobs.payload_json,'$.source_mtime') AND file.probe_json IS NOT NULL))
   -- Match the subtitle projection's preconditions before its trigger runs. A
   -- settled request is an ordinary lost claim, never an ambiguous SQL failure.
   AND (kind != 'subtitle_extract' OR EXISTS (SELECT 1 FROM analysis_requests request JOIN files file ON file.id = request.file_id
@@ -440,6 +486,10 @@ WHERE id = json_extract($1, '$.job_id')
  AND file.size = json_extract(background_jobs.payload_json,'$.source_size') AND file.mtime = json_extract(background_jobs.payload_json,'$.source_mtime')
  AND (json_extract(background_jobs.payload_json,'$.coordinator.resource') = 'repair:probe'
    OR json_extract(background_jobs.payload_json,'$.coordinator.resource') = 'scan:library:' || item.library_id))))
+  AND (kind != 'subtitle_model_operation' OR NOT EXISTS (
+    SELECT 1 FROM background_jobs other WHERE other.kind='subtitle_model_operation'
+      AND other.id != background_jobs.id AND other.target_node_id=background_jobs.target_node_id
+      AND other.state IN ('running','cancelling') AND other.lease_expires_ms > json_extract($1,'$.now_ms')))
   AND (target_node_id IS NULL OR target_node_id = json_extract($1, '$.node_id'))
   AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))
   AND (retry_deadline_ms = 0 OR retry_deadline_ms > json_extract($1, '$.now_ms'))
@@ -520,7 +570,8 @@ WHERE id = json_extract($1, '$.job_id')
                     AND viewer.job_id = held.request_id
                     AND viewer.state = 'pending'
                     AND viewer.deadline_ms > json_extract($1, '$.now_ms'))) >= 1))
-"#;
+"#
+);
 
 const RENEW_SQL: &str = r#"
 WITH inputs AS (
@@ -606,6 +657,8 @@ pub enum JobKind {
     ArtifactHydrate,
     SubtitleExtract,
     SubtitleTranscribe,
+    SubtitleTranscribeManaged,
+    SubtitleModelOperation,
     LibraryScan,
     MetadataRefresh,
     ArtifactVerify,
@@ -625,6 +678,8 @@ impl JobKind {
             | Self::FragmentIndexBuild
             | Self::ArtifactHydrate
             | Self::SubtitleTranscribe
+            | Self::SubtitleTranscribeManaged
+            | Self::SubtitleModelOperation
             | Self::SubtitleExtract
             | Self::ArtifactVerify
             | Self::ArtworkDerivative
@@ -825,6 +880,24 @@ pub enum JobPayload {
         model_sha256: String,
         pipeline_digest: String,
     },
+    SubtitleTranscribeManaged {
+        file_id: i64,
+        audio_index: i64,
+        source_size: i64,
+        source_mtime: i64,
+        language: String,
+        model_sha256: String,
+        pipeline_digest: String,
+        profile: super::background_jobs_transcription::ManagedProfile,
+    },
+    SubtitleModelOperation {
+        action: super::background_jobs_transcription::ModelAction,
+        model_id: String,
+        catalog_revision: String,
+        model_sha256: String,
+        adapter_contract: String,
+        target_node_id: String,
+    },
     LibraryScan {
         library_id: i64,
         generation: String,
@@ -866,6 +939,8 @@ impl JobPayload {
             Self::ArtifactHydrate { .. } => JobKind::ArtifactHydrate,
             Self::SubtitleExtract { .. } => JobKind::SubtitleExtract,
             Self::SubtitleTranscribe { .. } => JobKind::SubtitleTranscribe,
+            Self::SubtitleTranscribeManaged { .. } => JobKind::SubtitleTranscribeManaged,
+            Self::SubtitleModelOperation { .. } => JobKind::SubtitleModelOperation,
             Self::LibraryScan { .. } => JobKind::LibraryScan,
             Self::MetadataRefresh { .. } => JobKind::MetadataRefresh,
             Self::ArtifactVerify { .. } => JobKind::ArtifactVerify,
@@ -880,7 +955,8 @@ impl JobPayload {
             Self::EncodedOutputPrepare { intent, .. } => Some(&intent.target_node_id),
             Self::CopyOutputPrepare { intent, .. } => Some(&intent.target_node_id),
             Self::ArtifactHydrate { target_node_id, .. }
-            | Self::ArtifactVerify { target_node_id, .. } => Some(target_node_id),
+            | Self::ArtifactVerify { target_node_id, .. }
+            | Self::SubtitleModelOperation { target_node_id, .. } => Some(target_node_id),
             _ => None,
         }
     }
@@ -1015,6 +1091,38 @@ impl JobPayload {
                     && super::background_jobs_transcription::valid_language(language)
                     && digest(model_sha256)
                     && digest(pipeline_digest)
+            }
+            Self::SubtitleTranscribeManaged {
+                file_id,
+                audio_index,
+                source_size,
+                language,
+                model_sha256,
+                pipeline_digest,
+                profile,
+                ..
+            } => {
+                *file_id > 0
+                    && *source_size > 0
+                    && *audio_index >= 0
+                    && super::background_jobs_transcription::whisper_language(language)
+                    && digest(model_sha256)
+                    && digest(pipeline_digest)
+                    && profile.validate()
+            }
+            Self::SubtitleModelOperation {
+                model_id,
+                catalog_revision,
+                model_sha256,
+                adapter_contract,
+                target_node_id,
+                ..
+            } => {
+                identifier(model_id)
+                    && identifier(catalog_revision)
+                    && digest(model_sha256)
+                    && identifier(adapter_contract)
+                    && identifier(target_node_id)
             }
             Self::MediaProbe {
                 file_id,
@@ -1599,6 +1707,22 @@ pub trait BackgroundJobStore: Send + Sync {
         content_digest: &str,
         model_digest: &str,
     ) -> Result<super::background_jobs_embeddings::EmbeddingLookup, StoreError>;
+    async fn write_subtitle_configuration(
+        &self,
+        request: super::background_jobs_transcription::SubtitleConfigurationWrite,
+    ) -> Result<bool, StoreError>;
+    async fn observe_subtitle_job(
+        &self,
+        request: super::background_jobs_transcription::ObserveSubtitleJob,
+    ) -> Result<bool, StoreError>;
+    async fn publish_subtitle_model(
+        &self,
+        request: super::background_jobs_transcription::PublishSubtitleModel,
+    ) -> Result<bool, StoreError>;
+    async fn subtitle_model_receipts(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<super::background_jobs_transcription::SubtitleModelReceipt>, StoreError>;
     async fn publish_transcription_job(
         &self,
         request: super::background_jobs_transcription::PublishTranscription,
@@ -2013,6 +2137,30 @@ LIMIT 1
         model_digest: &str,
     ) -> Result<super::background_jobs_embeddings::EmbeddingLookup, StoreError> {
         super::background_jobs_embeddings::lookup(self, item_id, content_digest, model_digest).await
+    }
+    async fn write_subtitle_configuration(
+        &self,
+        request: super::background_jobs_transcription::SubtitleConfigurationWrite,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_transcription::write_configuration(self, request).await
+    }
+    async fn observe_subtitle_job(
+        &self,
+        request: super::background_jobs_transcription::ObserveSubtitleJob,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_transcription::observe(self, request).await
+    }
+    async fn publish_subtitle_model(
+        &self,
+        request: super::background_jobs_transcription::PublishSubtitleModel,
+    ) -> Result<bool, StoreError> {
+        super::background_jobs_transcription::publish_model(self, request).await
+    }
+    async fn subtitle_model_receipts(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<super::background_jobs_transcription::SubtitleModelReceipt>, StoreError> {
+        super::background_jobs_transcription::model_receipts(self, node_id).await
     }
     async fn publish_transcription_job(
         &self,
@@ -3422,5 +3570,69 @@ mod principal_tests {
         let old = artifact.consumer_id();
         artifact.principal = interest.principal;
         assert_ne!(old, artifact.consumer_id());
+    }
+}
+
+#[cfg(test)]
+mod subtitle_admission_tests {
+    #[test]
+    fn managed_admission_matches_closed_legacy_default_and_typed_semantics() {
+        let db = rusqlite::Connection::open_in_memory().expect("SQLite");
+        db.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)")
+            .expect("settings");
+        let defaults = serde_json::json!({"enabled":false,"interval_mins":0,"command":"whisper-cli","model_path":"","language":"en"});
+        let managed = serde_json::json!({"version":1,"mode":"managed","enabled":true,"legacy_snapshot":defaults});
+        db.execute(
+            "INSERT INTO settings VALUES('subtitles.transcription.managed.v1',?1)",
+            [managed.to_string()],
+        )
+        .expect("managed");
+        for (raw, expected) in [
+            ("{}", true),
+            (r#"{ "language":"en", "enabled":false }"#, true),
+            ("null", false),
+            ("", false),
+            ("broken", false),
+            (r#"{"enabled":null}"#, false),
+            (r#"{"enabled":0}"#, false),
+            (r#"{"interval_mins":null}"#, false),
+            (r#"{"interval_mins":-1}"#, false),
+            (r#"{"command":null}"#, false),
+            (r#"{"enabled":false,"enabled":false}"#, false),
+            (r#"{"unknown":false}"#, false),
+            (r#"{"enabled":true}"#, false),
+            (r#"{"command":"other"}"#, false),
+            ("[]", false),
+        ] {
+            db.execute(
+                "INSERT OR REPLACE INTO settings VALUES('subtitles.transcription.config',?1)",
+                [raw],
+            )
+            .expect("legacy input");
+            let allowed: bool = db
+                .query_row(
+                    concat!("SELECT (", subtitle_managed_admission!(), ")"),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("closed admission predicate");
+            assert_eq!(allowed, expected, "legacy document {raw:?}");
+        }
+        db.execute(
+            "DELETE FROM settings WHERE key='subtitles.transcription.config'",
+            [],
+        )
+        .expect("legacy absent");
+        let allowed: bool = db
+            .query_row(
+                concat!("SELECT (", subtitle_managed_admission!(), ")"),
+                [],
+                |row| row.get(0),
+            )
+            .expect("absent predicate");
+        assert!(
+            !allowed,
+            "absence is not explicit defaults after managed activation"
+        );
     }
 }
