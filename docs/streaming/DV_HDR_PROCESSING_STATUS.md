@@ -1701,3 +1701,17 @@ is replayed for this source-identical Android command.
 
 The newer subtitle work on main is being reconciled separately. Current-main
 qualification, deployment and all eighteen physical HDR checks remain open.
+
+
+R50 also reconciles the incoming v111 subtitle schema with historical test
+rewinds. The shared test helper refuses populated model receipts, then removes
+the new managed tables and triggers before dropping the common queue. Its
+existing view-removal loop still removes the replaced resource view; historical
+replay restores the historical schema before applying v111. The downgrade
+coverage guard records the new migration and checks that refusal preserves a
+model receipt. Two deliberate current-end assertions advance to 111; their
+historical markers and data-preservation assertions stay intact. Only the
+source-invalidated guard, rewind callers, current-version checks and changed
+queue SQL validator need fresh observations. Five incoming subtitle Store
+functional passes remain preserved, but lack canonical Linux/serial/8 MiB
+provenance, so those five canonical observations are still missing.
