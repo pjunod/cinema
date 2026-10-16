@@ -6882,3 +6882,61 @@ source = "clients/apple/Sources/PlayerAttempt.swift"
 source_anchor = "case autoMissingCostCatalogRefresh"
 test = "clients/apple/Tests/AttemptScopesTests.swift"
 test_anchor = "testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle"
+
+
+# Qualification commit 30a94b90 includes one Android behavior correction and
+# Apple registry/source-contract/callback-fixture corrections. The supplemental
+# fixture rows name the actual changed observation/holding code, not a new
+# production reporter behavior.
+[[fixes]]
+id = "https.qualification-client-corrections"
+commits = ["30a94b90456924f556be7903f7f92c960b9f8c34"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "// Keep the shared transport options contiguous in their contract"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
+test_anchor = "transportOptionsFollowTheSharedContractOrder"
+
+[[fixes]]
+id = "https.apple-developer-registry-matches-shipped-diagnostics"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Sources/LiveTvSettingsView.swift"
+source_anchor = '"Remote diagnostics · advisory readiness",'
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testEveryDeveloperCardThatStaysSaysWhatItWaitsOn"
+
+[[fixes]]
+id = "https.apple-auto-tick-source-contract-retains-parameterized-function"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func tickDisplayAwareAuto(pressureOnly: Bool = false)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testArmedBoundaryReplanEndsWithStallRecoveryAndSkipsBlockedCandidates"
+
+[[fixes]]
+id = "https.apple-terminal-fixture-holds-actual-captured-response"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+source_anchor = 'XCTAssertEqual(controlExchanges.firstResponse(withReadiness: "ready"), 1)'
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testEndRevokesATerminalPublicationAlreadyPastTheCaptureGuard"
+
+[[fixes]]
+id = "https.apple-subtitle-failure-fixture-holds-complete-readiness-batch"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+source_anchor = "let staleCallbacks = callbacks.takeAll()"
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testQueuedSubtitleFailureIsDeliveredOnlyToItsCurrentIntent"
+
+[[fixes]]
+id = "https.apple-subtitle-ready-fixture-holds-complete-readiness-batch"
+commits = []
+supplements = "https.qualification-client-corrections"
+source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+source_anchor = "let staleCallbacks = callbacks.takeAll()"
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testQueuedSubtitleReadinessIsDeliveredForItsCurrentSession"
