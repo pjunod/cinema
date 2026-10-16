@@ -123,6 +123,7 @@ fn fits_after_release(
 #[derive(Debug, Default)]
 struct PermitState {
     live_waiting: usize,
+    live_capacity_waiting: usize,
     hardware_live: usize,
     hardware_background: usize,
     software_live_permits: usize,
@@ -396,7 +397,14 @@ impl SwPool {
 
     /// Announce that a live session is waiting for CPU, so background work
     /// yields. Same guard the hardware queue uses; the pool shares its state.
+    #[cfg(test)]
     pub fn wait_for_capacity(&self) -> LiveWait {
+        let mut waiting = self.queue_for_capacity();
+        waiting.mark_capacity_blocked();
+        waiting
+    }
+
+    pub(crate) fn queue_for_capacity(&self) -> LiveWait {
         let mut permits = self
             .permits
             .lock()
@@ -406,6 +414,7 @@ impl SwPool {
         LiveWait {
             permits: Arc::clone(&self.permits),
             started: std::time::Instant::now(),
+            capacity_blocked: false,
         }
     }
 
@@ -579,7 +588,8 @@ impl RetainedTranscodePermit<'_> {
 
 /// A live start queuing for a slot.
 ///
-/// Its *existence* is the yield signal, which is why it is a guard and not a
+/// Its existence preserves fair admission. Only a failed resource attempt
+/// marks capacity pressure that may cancel a prepared successor. It is a guard, not a
 /// flag somebody sets and clears. A flag left set by a start that failed
 /// between setting and clearing would park the producer for the life of the
 /// process — silently, since a producer that never runs looks exactly like a
@@ -591,6 +601,23 @@ pub struct LiveWait {
     /// queuing and dropped the moment it has a slot or gives up, so its age at
     /// drop is `plurx_admission_wait_seconds{pool="encode_permit"}`.
     started: std::time::Instant,
+    capacity_blocked: bool,
+}
+
+impl LiveWait {
+    /// Fair admission registration is not pressure until a resource attempt
+    /// fails. Keep that distinction across retries and release it with this guard.
+    pub(crate) fn mark_capacity_blocked(&mut self) {
+        if self.capacity_blocked {
+            return;
+        }
+        let mut permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        permits.live_capacity_waiting += 1;
+        self.capacity_blocked = true;
+    }
 }
 
 impl Drop for LiveWait {
@@ -605,6 +632,10 @@ impl Drop for LiveWait {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         debug_assert!(permits.live_waiting > 0);
         permits.live_waiting = permits.live_waiting.saturating_sub(1);
+        if self.capacity_blocked {
+            debug_assert!(permits.live_capacity_waiting > 0);
+            permits.live_capacity_waiting = permits.live_capacity_waiting.saturating_sub(1);
+        }
     }
 }
 
@@ -1072,7 +1103,15 @@ impl Admissions {
 
     /// Announce that a live start is queuing. Hold the guard for as long as the
     /// wait lasts; drop it the moment the start has a slot or has given up.
+    #[cfg(test)]
     pub fn wait_for_slot(&self) -> LiveWait {
+        let mut waiting = self.queue_for_slot();
+        waiting.mark_capacity_blocked();
+        waiting
+    }
+
+    /// Register fairness before the first attempt without claiming blocked capacity.
+    pub(crate) fn queue_for_slot(&self) -> LiveWait {
         let mut permits = self
             .permits
             .lock()
@@ -1082,6 +1121,7 @@ impl Admissions {
         LiveWait {
             permits: Arc::clone(&self.permits),
             started: std::time::Instant::now(),
+            capacity_blocked: false,
         }
     }
 
@@ -1095,6 +1135,15 @@ impl Admissions {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .live_waiting
+            > 0
+    }
+
+    /// Only failed resource admission may preempt a prepared successor.
+    pub(crate) fn live_capacity_is_waiting(&self) -> bool {
+        self.permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .live_capacity_waiting
             > 0
     }
 
@@ -1501,6 +1550,61 @@ pub fn software_budget() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_free_live_admission_preserves_preparation_without_losing_fairness() {
+        let admissions = Admissions::new();
+        let queued = admissions.queue_for_slot();
+        assert!(admissions.live_is_waiting());
+        assert!(!admissions.live_capacity_is_waiting());
+        // Background work still cannot jump the registered foreground start.
+        assert!(admissions
+            .try_admit_software(4, 1, Priority::Background)
+            .is_none());
+        let permit = admissions
+            .try_admit_software(4, 1, Priority::Live)
+            .expect("free live capacity");
+        assert!(
+            !admissions.live_capacity_is_waiting(),
+            "a successful first fit must not cancel preparation"
+        );
+        drop(queued);
+        assert!(!admissions.live_is_waiting());
+        drop(permit);
+    }
+
+    #[test]
+    fn blocked_live_capacity_preempts_until_grant_or_cancellation() {
+        let admissions = Admissions::new();
+        let held = admissions
+            .try_admit_software(4, 4, Priority::Speculative)
+            .expect("prepared capacity");
+        let mut first = admissions.queue_for_slot();
+        assert!(admissions
+            .try_admit_software(4, 1, Priority::Live)
+            .is_none());
+        first.mark_capacity_blocked();
+        first.mark_capacity_blocked();
+        let mut second = admissions.queue_for_slot();
+        assert!(admissions
+            .try_admit_software(4, 1, Priority::Live)
+            .is_none());
+        second.mark_capacity_blocked();
+        assert!(admissions.live_capacity_is_waiting());
+        drop(first);
+        assert!(
+            admissions.live_capacity_is_waiting(),
+            "cancelling one waiter must preserve the other"
+        );
+        drop(held);
+        let granted = admissions
+            .try_admit_software(4, 1, Priority::Live)
+            .expect("released preparation admits real waiter");
+        drop(second);
+        assert!(!admissions.live_capacity_is_waiting());
+        assert!(!admissions.live_is_waiting());
+        drop(granted);
+    }
 
     #[test]
     fn a_handoff_reservation_is_claimable_only_by_its_token() {

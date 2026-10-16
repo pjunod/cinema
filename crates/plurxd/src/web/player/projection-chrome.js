@@ -90,7 +90,9 @@ function renderPlayerInfo(){
     +(bits.length?`<div class="pimeta">${bits.join(' <i>·</i> ')}</div>`:``)
     +(m.overview?`<p>${esc(m.overview)}</p>`:``)
     +(PLAYER&&PLAYER.libraryChannel?`<div class="lc-actions"><button onclick="libraryChannelWatchFromStart()">Watch from start</button><span class="pill">FOLLOWING</span></div>`:``)
+    +(WATCH?.page?watchGenerationAction(watchCurrentFile()):"")
     +(m.return_channel_id?`<div class="lc-actions"><button onclick="returnToLibraryChannel()">Return to channel</button></div>`:``);
+  c.querySelector("[data-watch-generate]")?.addEventListener("click",event=>watchGenerateSubtitles(event.currentTarget));
 }
 // Build the panel's payload from an item (plus its ancestors, so an episode can
 // name its show). Kept next to the renderer so the two stay in step.

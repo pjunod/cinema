@@ -8042,7 +8042,7 @@ test("cached captions follow the attached local or shared owner namespace and fe
 test("paused subtitle selection projects ordinal zero and Off immediately", async () => {
   const policy=require("../../crates/plurxd/src/web/playback-policy.js");
   const h=new Function("PlaybackPolicy",[
-    "const file={id:'1',video_codec:'h264',subtitle_streams:[{index:0,language:'eng',title:'English'}]};",
+    "const ME=null;const file={id:'1',video_codec:'h264',subtitle_streams:[{index:0,language:'eng',title:'English'}]};",
     "let PLAYER={fileId:'1',curSub:-1,subs:file.subtitle_streams,sessionId:'caption-session',offset:0,hls:{subtitleDisplay:false,subtitleTrack:-1}};",
     "const WATCH={accepted:true,page:{files:[file],playable:file},folds:{subs:false,audio:false}};",
     "const video={paused:true,currentTime:10,textTracks:[{mode:'disabled'}],querySelectorAll:()=>[]};",
@@ -8055,7 +8055,7 @@ test("paused subtitle selection projects ordinal zero and Off immediately", asyn
     "function audioFactLabel(t){return t.title;}function subFactLabel(t){return t.title;}function langName(){return 'English';}",
     ...["setSub","clearSubs","rememberPlaybackSelection","pbSyncSubIcon","watchCurrentFile",
       "watchSelectedAudio","watchSelectedSub","watchTrackChip","watchFoldButton","watchTrackRow",
-      "watchDeliveryRow","watchLedgerHtml","watchBindLedger","watchRenderLedger","watchFolds"].map(shippedSource),
+      "watchDeliveryRow","watchLedgerHtml","watchBindLedger","watchRenderLedger","watchFolds","watchRenderSubtitleGeneration","watchCanGenerateSubtitles","watchGenerationAction"].map(shippedSource),
     "return {setSub,video,player:PLAYER,ledger,band,ccOn:()=>ccOn};",
   ].join("\n"))(policy);
   await h.setSub(0);

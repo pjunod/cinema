@@ -2,6 +2,73 @@ import Foundation
 import XCTest
 @testable import plurx
 
+final class PreparedAcquisitionURLTests: XCTestCase {
+    func testPreparedAcquisitionPinsCapturedPositionAndPreservesMediaQueries() throws {
+        let original = try XCTUnwrap(URL(string:
+            "https://example.invalid/media/master.m3u8?native=1&subtitle=en%2Fforced&token=a%2Bb%3D&empty=#track"))
+        let actual = try XCTUnwrap(preparedAcquisitionURL(original, filmPositionMs: 296_065))
+        XCTAssertEqual(actual.absoluteString,
+            "https://example.invalid/media/master.m3u8?native=1&subtitle=en%2Fforced&token=a%2Bb%3D&empty=&acquisition_start_ms=296065#track")
+        XCTAssertEqual(original.query, "native=1&subtitle=en%2Fforced&token=a%2Bb%3D&empty=")
+    }
+
+    func testPreparedAcquisitionReplacesStaleHintsAndClampsOnlyNegativePosition() throws {
+        let original = try XCTUnwrap(URL(string:
+            "https://example.invalid/master.m3u8?acquisition_start_ms=12&native=1&%61cquisition_start_ms=99"))
+        for position in [0, -1, Int.min] {
+            let actual = try XCTUnwrap(preparedAcquisitionURL(original, filmPositionMs: position))
+            XCTAssertEqual(actual.absoluteString,
+                "https://example.invalid/master.m3u8?native=1&acquisition_start_ms=0")
+        }
+        let bare = try XCTUnwrap(URL(string: "https://example.invalid/master.m3u8"))
+        XCTAssertEqual(preparedAcquisitionURL(bare, filmPositionMs: Int.max)?.query,
+                       "acquisition_start_ms=\(Int.max)")
+    }
+}
+
+final class PreparedAcquisitionAnchorTests: XCTestCase {
+    private func anchors(_ observed: Int = 618_000, advance: Bool = true,
+                         runway: Double? = 16, rate: Double = 1,
+                         overlap: Int = 12_000, duration: Int? = 900_000) -> PreparedAcquisitionAnchors {
+        PreparedAcquisitionAnchors(observedIntentFilmMs: observed, allowsAdvance: advance,
+            actualRunwaySeconds: runway, playbackRate: rate,
+            overlapRemainingMs: overlap, durationMs: duration)
+    }
+
+    func testAcquisitionPreservesObservedIntentAndBoundsRateScaledLead() {
+        let normal = anchors()
+        XCTAssertEqual(normal.observedIntentFilmMs, 618_000)
+        XCTAssertEqual(normal.acquisitionFilmMs, 624_000)
+        XCTAssertEqual(anchors(runway: 32, rate: 2).acquisitionFilmMs, 630_000)
+        XCTAssertEqual(anchors(rate: 0.5).acquisitionFilmMs, 621_000)
+        XCTAssertEqual(anchors(overlap: 6_000).acquisitionFilmMs, 619_900)
+        XCTAssertEqual(anchors(overlap: 5_000).acquisitionFilmMs, 618_000)
+        XCTAssertEqual(anchors(runway: 15.999).acquisitionFilmMs, 618_000)
+        XCTAssertEqual(anchors(runway: 31.999, rate: 2).acquisitionFilmMs, 618_000)
+    }
+
+    func testAcquisitionPreservesIdentityForUnprotectedIntentAndInvalidFacts() {
+        XCTAssertEqual(anchors(advance: false).acquisitionFilmMs, 618_000,
+            "manual, paused, seeking and voluntary requests retain their observed anchor")
+        XCTAssertEqual(anchors(runway: nil).acquisitionFilmMs, 618_000)
+        XCTAssertEqual(anchors(duration: nil).acquisitionFilmMs, 618_000)
+        for invalid in [Double.nan, .infinity, -.infinity, -1, 0, 17] {
+            XCTAssertEqual(anchors(rate: invalid).acquisitionFilmMs, 618_000)
+        }
+        for invalid in [Double.nan, .infinity, -.infinity, -1] {
+            XCTAssertEqual(anchors(runway: invalid).acquisitionFilmMs, 618_000)
+        }
+        XCTAssertEqual(anchors(Int.max, duration: Int.max).acquisitionFilmMs, Int.max)
+    }
+
+    func testAcquisitionCapsBeforeEOFWithRunwayAndMinimumWallLead() {
+        XCTAssertEqual(anchors(895_000).acquisitionFilmMs, 898_000)
+        XCTAssertEqual(anchors(897_500).acquisitionFilmMs, 897_500)
+        XCTAssertEqual(anchors(897_500).observedIntentFilmMs, 897_500)
+        XCTAssertEqual(anchors(advance: true, duration: 1_000).acquisitionFilmMs, 618_000)
+    }
+}
+
 final class PreparedFailureDiagnosticTests: XCTestCase {
     func testPreparedFailureDiagnosticExcludesResourceCredentials() {
         let secretURL = "https://example.invalid/media?token=private-playback-credential"
@@ -797,6 +864,48 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
         await coordinator.commit()
         XCTAssertNil(coordinator.pendingAcknowledgement)
         XCTAssertEqual(coordinator.phase, .building)
+    }
+
+    func testInitialParkingAllowsOnlyPrecedingTolerance() {
+        XCTAssertEqual(PreparedSeekPolicy.initialParking.toleranceBeforeMs, 2_000)
+        XCTAssertEqual(PreparedSeekPolicy.initialParking.toleranceAfterMs, 0)
+        XCTAssertEqual(PreparedSeekPolicy.exactAlignment.toleranceBeforeMs, 0)
+        XCTAssertEqual(PreparedSeekPolicy.exactAlignment.toleranceAfterMs, 0)
+    }
+
+    func testInitialParkingRetainsOriginalTargetWithNonzeroOrigin() {
+        XCTAssertTrue(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 632_082, mediaOriginMs: 600_000, ranges: [30...35]))
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 632_082, mediaOriginMs: 600_000, ranges: [30...34]))
+    }
+
+    func testInitialParkingCallbackRequiresOriginalTargetRunway() {
+        // Parking at 370 s has runway, but the original 372.082 s target does not.
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 372_082, mediaOriginMs: 0, ranges: [370...373]))
+        XCTAssertTrue(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 372_082, mediaOriginMs: 0, ranges: [370...374.082]))
+    }
+
+    func testInitialParkingRejectsBufferedIslandAndPositiveGap() {
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 10_000, mediaOriginMs: 0, ranges: [0...9, 11...20]))
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 10_000, mediaOriginMs: 0, ranges: [9...11, 11.001...13]))
+        XCTAssertTrue(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 10_000, mediaOriginMs: 0, ranges: [11...13, 9...11]))
+    }
+
+    func testInitialParkingRejectsInvalidTargetAndRangeFacts() {
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: -1, mediaOriginMs: 0, ranges: [0...20]))
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 10_000, mediaOriginMs: -1, ranges: [0...20]))
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 10_000, mediaOriginMs: 0, ranges: [0...Double.infinity]))
+        XCTAssertFalse(PreparedSeekPolicy.originalTargetHasRunway(
+            filmPositionMs: 10_000, mediaOriginMs: 0, ranges: [-1...20]))
     }
 
     func testStalledInitialSeekConsumesRemainingReadinessAndSettlesFailed() async {

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "fixture": "base-film.raw.vtt",
+  "bytes": 6813,
+  "sha256": "97e9bd9222522300ede5f533027a30e326510dcaafde41b9c2fb6d58d550e47d",
+  "source": "https://download.blender.org/demo/movies/ToS/tears_of_steel_720p.mov",
+  "source_sha256": "efa9062d9cdb7a338e40ad530dfdf234806743f29ae6a1a136b97ece4e588e8f",
+  "attribution": "Tears of Steel, (CC) Blender Foundation | mango.blender.org",
+  "license": "CC BY 3.0",
+  "license_source": "https://mango.blender.org/sharing/",
+  "license_url": "https://creativecommons.org/licenses/by/3.0/",
+  "changes": "Machine transcription of the source audio with pinned whisper.cpp base; unnormalized output retained solely as timing regression input. Not a human-audited transcript or a word-error-rate reference.",
+  "model_sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+  "decoded_samples_16000hz": 11745489,
+  "decoded_end_floor_ms": 734093
+}

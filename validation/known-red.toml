@@ -101,3 +101,11 @@ owner = "hdr-tone-map"
 reason = "requires an Apple Silicon Metal device and pinned Jellyfin FFmpeg"
 requires = "macOS Apple Silicon; pinned Jellyfin FFmpeg with VideoToolbox and Metal"
 command = "cargo test --locked -p plurxd --bin plurxd pipeprobe::tests::real_neutral_peak_gate_rejects_old_metal_units -- --ignored --exact --nocapture"
+# Packaged-engine qualification needs explicit immutable engine/model assets;
+# it is an opt-in fixture, not a temporarily broken product test.
+[[fixtures]]
+test = "crates/plurxd/src/subtitle_transcription.rs::subtitle_transcription::tests::managed_real_engine_held_fd_clean_environment_recognizes_fixture"
+owner = "subtitles"
+reason = "Actual managed child execution requires a qualified packaged engine, matching self-test fixture, catalog model bytes and packaged FFmpeg; ordinary test runners do not install those assets."
+requires = "PLURX_SUBTITLE_ENGINE, PLURX_TEST_SUBTITLE_MODEL and absolute packaged PLURX_FFMPEG"
+command = "PLURX_SUBTITLE_ENGINE=/path/to/package/bin/subtitle-engine/whisper-cli PLURX_TEST_SUBTITLE_MODEL=/path/to/ggml-base.en.bin PLURX_FFMPEG=/path/to/package/bin/ffmpeg cargo test --locked -p plurxd --bin plurxd subtitle_transcription::tests::managed_real_engine_held_fd_clean_environment_recognizes_fixture -- --ignored --exact --nocapture"

@@ -1,5 +1,51 @@
 import Foundation
 
+/// Pin acquisition to the same film position used to prime this prepared item.
+/// Keep unrelated query bytes intact, including credentials and media options.
+func preparedAcquisitionURL(_ url: URL, filmPositionMs: Int) -> URL? {
+    guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+    let key = "acquisition_start_ms"
+    var fields = components.percentEncodedQuery?.components(separatedBy: "&") ?? []
+    fields.removeAll { field in
+        let encodedKey = field.components(separatedBy: "=")[0]
+        return encodedKey.removingPercentEncoding == key
+    }
+    fields.append("\(key)=\(max(0, filmPositionMs))")
+    components.percentEncodedQuery = fields.joined(separator: "&")
+    return components.url
+}
+
+/// Preserve viewer intent separately from a fixed, bounded acquisition point.
+/// The visible incumbent must reach that point naturally before exposure.
+struct PreparedAcquisitionAnchors: Equatable {
+    let observedIntentFilmMs: Int
+    let acquisitionFilmMs: Int
+
+    init(observedIntentFilmMs: Int, allowsAdvance: Bool, actualRunwaySeconds: Double?,
+         playbackRate: Double, overlapRemainingMs: Int, durationMs: Int?) {
+        let observed = max(0, observedIntentFilmMs)
+        self.observedIntentFilmMs = observed
+        var acquisition = observed
+        if allowsAdvance, playbackRate.isFinite, playbackRate > 0, playbackRate <= 16,
+           let runway = actualRunwaySeconds, runway.isFinite,
+           runway >= Double(PreparedReplacementBounds.overlapMs
+                + PreparedCommitRendezvous.postSwapReserveMs) / 1_000 * max(1, playbackRate),
+           let maximumLead = PreparedCommitRendezvous.commitLeadWallMs(overlapRemainingMs: overlapRemainingMs),
+           let durationMs, durationMs > PreparedReplacementBounds.switchRunwayMs {
+            let lead = min(PreparedReplacementBounds.metadataMs, maximumLead)
+            let maximum = Double(observed) + playbackRate * Double(lead)
+            let ceiling = durationMs - PreparedReplacementBounds.switchRunwayMs
+            let candidate = min(maximum, Double(ceiling)).rounded(.down)
+            if lead >= 1_000, candidate.isFinite, candidate >= Double(observed),
+               candidate - Double(observed) >= playbackRate * 1_000,
+               candidate < Double(Int.max), let value = Int(exactly: candidate) {
+                acquisition = value
+            }
+        }
+        acquisitionFilmMs = acquisition
+    }
+}
+
 /// Resource URLs and NSError descriptions may contain playback credentials.
 /// Preserve only the typed framework domain and code for retained failures.
 func preparedSuccessorErrorDetail(_ error: NSError?) -> String {
@@ -374,6 +420,47 @@ struct PreparedReplacementLedger: Equatable {
 
 // MARK: - Bounds
 
+/// Initial parking loads media near the requested film position while hidden.
+/// Its backward ceiling is a seek policy, not a claim about segment duration.
+/// Final rendezvous alignment never inherits this tolerance.
+enum PreparedSeekPolicy: Equatable {
+    case initialParking
+    case exactAlignment
+
+    var toleranceBeforeMs: Int { self == .initialParking ? 2_000 : 0 }
+    var toleranceAfterMs: Int { 0 }
+
+    /// Merge only overlapping or exactly touching finite intervals. An
+    /// intervening positive gap is never playable media, however short it is.
+    static func contiguousRanges(_ ranges: [ClosedRange<Double>]) -> [ClosedRange<Double>] {
+        let valid = ranges.filter { $0.lowerBound.isFinite && $0.lowerBound >= 0
+            && $0.upperBound.isFinite && $0.upperBound >= $0.lowerBound }
+            .sorted { $0.lowerBound < $1.lowerBound }
+        var merged: [ClosedRange<Double>] = []
+        for range in valid {
+            if let last = merged.last, range.lowerBound <= last.upperBound {
+                merged[merged.count - 1] = last.lowerBound...max(last.upperBound, range.upperBound)
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
+    }
+
+    static func originalTargetHasRunway(
+        filmPositionMs: Int, mediaOriginMs: Int, ranges: [ClosedRange<Double>]
+    ) -> Bool {
+        guard filmPositionMs >= 0, mediaOriginMs >= 0 else { return false }
+        let targetSeconds = Double(max(0, filmPositionMs - mediaOriginMs)) / 1_000
+        let covering = contiguousRanges(ranges).first {
+            $0.lowerBound <= targetSeconds && $0.upperBound >= targetSeconds
+        }
+        guard let covering else { return false }
+        return covering.upperBound >= targetSeconds
+            + Double(PreparedReplacementBounds.switchRunwayMs) / 1_000
+    }
+}
+
 /// How long a successor may take, and how much runway makes it worth
 /// switching to.
 ///
@@ -445,7 +532,53 @@ struct PreparedCommitRendezvous: Equatable {
     /// overlap that remains cannot afford a switch at all.
     static func commitLeadWallMs(overlapRemainingMs: Int) -> Int? {
         guard overlapRemainingMs > postSwapReserveMs + 1_000 else { return nil }
-        return min(PreparedReplacementBounds.alignmentMs * 2, overlapRemainingMs - postSwapReserveMs)
+        // Leave one existing poll interval for wall/media clock sampling and
+        // bounded startup lag. The anchor's exact reserve check stays unchanged.
+        return min(PreparedReplacementBounds.alignmentMs * 2,
+                   overlapRemainingMs - postSwapReserveMs - PreparedReplacementBounds.pollMs)
+    }
+
+    /// Choose one future point whose exact seek and post-target runway are
+    /// already loaded. The ordinary lead remains an upper bound, not a reason
+    /// to seek beyond those bytes and fetch while the overlap expires.
+    static func planLoaded(
+        stagedFilmPositionMs: Int,
+        incumbentFilmPositionMs: Int,
+        mediaOriginMs: Int,
+        playbackRate: Double,
+        overlapRemainingMs: Int,
+        loadedItemRanges: [ClosedRange<Double>]
+    ) -> PreparedCommitRendezvous? {
+        guard stagedFilmPositionMs >= 0, incumbentFilmPositionMs >= 0, mediaOriginMs >= 0,
+              playbackRate.isFinite, playbackRate > 0,
+              let maximumLeadWallMs = commitLeadWallMs(overlapRemainingMs: overlapRemainingMs)
+        else { return nil }
+        let current = Double(incumbentFilmPositionMs)
+        // One second of actual wall lead leaves the incumbent moving toward
+        // a fixed target. Both cadence inspection and seeking keep their
+        // existing bounds; consuming this lead later still refuses exposure.
+        let minimumFilmMs = max(max(Double(stagedFilmPositionMs), Double(mediaOriginMs)),
+            current + playbackRate * 1_000)
+        let maximumFilmMs = current + min(16, playbackRate) * Double(maximumLeadWallMs)
+        guard minimumFilmMs.isFinite, maximumFilmMs.isFinite,
+              minimumFilmMs <= maximumFilmMs, maximumFilmMs < Double(Int.max) else { return nil }
+        let runwaySeconds = Double(PreparedReplacementBounds.switchRunwayMs) / 1_000
+        let originalTargetSeconds = Double(max(0, stagedFilmPositionMs - mediaOriginMs)) / 1_000
+        // Readiness admitted the interval containing the original target. A
+        // disconnected future island cannot stand in for that interval.
+        guard let range = PreparedSeekPolicy.contiguousRanges(loadedItemRanges).first(where: {
+            $0.lowerBound <= originalTargetSeconds && $0.upperBound >= originalTargetSeconds
+        }) else { return nil }
+        let loadedCeilingMs = Double(mediaOriginMs) + (range.upperBound - runwaySeconds) * 1_000
+        let candidateMs = min(maximumFilmMs, loadedCeilingMs).rounded(.down)
+        guard candidateMs.isFinite, candidateMs >= minimumFilmMs,
+              candidateMs >= 0, candidateMs < Double(Int.max),
+              let filmMs = Int(exactly: candidateMs), filmMs >= mediaOriginMs else { return nil }
+        let itemMs = filmMs - mediaOriginMs
+        let itemSeconds = Double(itemMs) / 1_000
+        guard itemSeconds >= range.lowerBound,
+              itemSeconds + runwaySeconds <= range.upperBound else { return nil }
+        return PreparedCommitRendezvous(filmPositionMs: filmMs, itemPositionMs: itemMs)
     }
 
     /// Never behind the staged position: a successor asked to seek backwards
@@ -462,6 +595,48 @@ struct PreparedCommitRendezvous: Equatable {
             filmPositionMs: film,
             itemPositionMs: max(0, film - mediaOriginMs)
         )
+    }
+
+    struct ClockAnchor: Equatable {
+        let hostSeconds: Double
+        let earliestItemMs: Double
+    }
+
+    /// Bind the already aligned successor to the incumbent's current film
+    /// clock. Reject a consumed lead rather than inventing another rendezvous.
+    func clockAnchor(
+        incumbentFilmMs: Double, hostSeconds: Double, rate: Double,
+        frameDurationSeconds: Double, overlapRemainingMs: Int
+    ) -> ClockAnchor? {
+        guard incumbentFilmMs.isFinite, incumbentFilmMs >= 0,
+              hostSeconds.isFinite, hostSeconds >= 0,
+              rate.isFinite, rate > 0,
+              frameDurationSeconds.isFinite, frameDurationSeconds > 0,
+              frameDurationSeconds <= 1, overlapRemainingMs > 0 else { return nil }
+        let leadFilmMs = Double(filmPositionMs) - incumbentFilmMs
+        let leadWallMs = leadFilmMs / rate
+        let anchor = hostSeconds + leadWallMs / 1_000
+        let earliestItemMs = Double(itemPositionMs) - leadFilmMs
+        guard leadFilmMs > frameDurationSeconds * 1_000,
+              leadWallMs + Double(Self.postSwapReserveMs) <= Double(overlapRemainingMs),
+              earliestItemMs.isFinite, earliestItemMs >= 0,
+              anchor.isFinite, anchor > hostSeconds,
+              anchor < Double(Int64.max) / 1_000_000_000 else { return nil }
+        return ClockAnchor(hostSeconds: anchor, earliestItemMs: earliestItemMs)
+    }
+
+    func clocksMatch(
+        incumbentFilmMs: Double, successorItemMs: Double,
+        frameDurationSeconds: Double
+    ) -> Bool {
+        guard incumbentFilmMs.isFinite, incumbentFilmMs >= 0,
+              successorItemMs.isFinite, successorItemMs >= 0,
+              frameDurationSeconds.isFinite, frameDurationSeconds > 0,
+              frameDurationSeconds <= 1 else { return false }
+        let successorFilmMs = successorItemMs + Double(filmPositionMs) - Double(itemPositionMs)
+        let toleranceMs = frameDurationSeconds * 1_000
+        return abs(incumbentFilmMs - Double(filmPositionMs)) <= toleranceMs
+            && abs(successorFilmMs - incumbentFilmMs) <= toleranceMs
     }
 
     /// A completed seek and a layer's old ready bit do not identify its new
