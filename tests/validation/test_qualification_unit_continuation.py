@@ -236,6 +236,114 @@ class CompleteCommandUnitCase(unittest.TestCase):
         changed=copy.deepcopy(data);changed['command'][-1]='a';record['origin']['command']=shlex.join(changed['command'])
         with self.assertRaises(receipts.ReceiptError):inspect(changed,bulk,'bulk')
         record['origin']['command']=original
+        # The newer immutable cohort has unframed whole native logs and separate
+        # actual executor/compiler observations. Exercise its full admission path.
+        def effort_fixture(**alterations):
+            proof = fixture(); item = proof['commands'][0]
+            env = item['environment']; binary = argv[0]
+            profile = env['runtime']['profile']; pins = {}; captures = []; rows = [{} for _ in range(5)]
+            def put(key, value):
+                text = value if isinstance(value, str) else json.dumps(value)
+                blob = log(text); proof['logs'][blob['sha256']] = blob
+                pins[key] = blob['sha256']; return blob['sha256']
+            records = []
+            for ordinal in range(6, 21):
+                name = 'case' + str(ordinal)
+                failed = ordinal == 20
+                text = ('\nrunning 1 test\ntest ' + name + ' ... '
+                    + ('\nthread panicked at fixture\nFAILED\n' if failed else 'ok\n')
+                    + 'test result: ' + ('FAILED. 0 passed; 1 failed' if failed else 'ok. 1 passed; 0 failed')
+                    + '; 0 ignored; 0 measured; 371 filtered out; finished in 1.00s\n')
+                blob = log(text); proof['logs'][blob['sha256']] = blob
+                actual_argv = [binary, name, '--exact', '--nocapture', '--test-threads=1']
+                row = {'index': ordinal, 'test_id': name, 'suite': 'store_contract', 'argv': actual_argv,
+                    'actual_features': env['features'], 'actual_profile': profile,
+                    'runtime': {'RUST_MIN_STACK': '8388608', 'RUST_TEST_THREADS': None, 'test_threads': 1},
+                    'native_exit': 101 if failed else 0, 'observed_exit': 101 if failed else 0,
+                    'log_sha256': blob['sha256'], 'log_bytes': len(text.encode()),
+                    'binary_sha256_before': 'c'*64, 'binary_sha256_after': 'c'*64,
+                    'fingerprint': fp, 'fingerprint_path': '/owned/.fingerprint/plurx-core-0123456789abcdef/test-integration-test-store_contract.json',
+                    'fingerprint_sha256_before': 'e'*64, 'cancelled_signals': [], 'cleanup_errors': []}
+                if not failed or alterations.get('invent_failed_fingerprint'):
+                    row['fingerprint_sha256_after'] = 'e'*64
+                rows.append(row); captures.append((ordinal, name, blob['sha256']))
+                record = copy.deepcopy(item['records'][0])
+                record.update(sequence=ordinal, source_commit=CANDIDATE, exit_code=row['native_exit'],
+                    log={'sha256_ref': blob['sha256']}, coverage={'mode': 'rust', 'first_line': 1,
+                        'last_line': len(text.splitlines()), 'format': 'rust-serial',
+                        'outcomes': {name: 'fail' if failed else 'pass'}})
+                record['origin'].update(command=shlex.join(actual_argv), execution={
+                    'mode': 'original-effort-native', 'first_line': 1, 'ordinal': ordinal})
+                records.append(record)
+            compiler_text = json.dumps({'reason': 'compiler-artifact', 'executable': binary,
+                'target': {'name': alterations.get('compiler_target', 'store_contract'), 'kind': ['test']},
+                'features': env['features'], 'profile': profile}) + '\n' + json.dumps({'reason': 'build-finished', 'success': True}) + '\n'
+            put('compiler_stdout', compiler_text)
+            put('compiler_binding', {'source_commit': CANDIDATE, 'archive_sha256': 'd'*64,
+                'action': 1, 'compiler_exit': 0, 'unit_bodies_executed': 0, 'refusal': None,
+                'bounded_stdout_sha256': pins['compiler_stdout'], 'bounded_stdout_bytes': len(compiler_text.encode()),
+                'argv': ['cargo', 'test', '--no-run', '--message-format=json', '--locked', '-p', 'plurx-core',
+                    '--features', q.STORE_FEATURES, '--test', 'store_contract']})
+            unit = {'source_commit': CANDIDATE, 'branch': 'effort/dv-hdr-repair',
+                'source_archive_sha256': 'd'*64, 'compiler_inventory_sha256': 'f'*64,
+                'source_review_sha256': '9'*64, 'unit_bodies_selected': 20,
+                'prior_applicable_passing_bodies_selected': 0, 'source_clean_before': True,
+                'state': 'failed', 'commands': rows, 'observed_outcomes': [{} for _ in range(19)],
+                'cancelled_signals': [], 'finished_utc': '2026-10-16T03:51:28+00:00'}
+            if alterations.get('invent_source_clean_after'): unit['source_clean_after'] = True
+            put('unit_result', unit)
+            put('source_observation', {'source_commit': CANDIDATE, 'source_archive_sha256': 'd'*64,
+                'compiler_inventory_sha256': 'f'*64, 'state': 'PASS', 'unit_bodies_executed': 0,
+                'source_clean_before': True, 'source_clean_after': True, 'cancelled_signals': [],
+                'started_utc': '2026-10-16T03:53:46+00:00'})
+            for label, exit_code in [('unit', 1), ('source_observation', 0)]:
+                put(label + '_driver', 'original ' + label + ' driver')
+                log_key = 'unit_controller_log' if label == 'unit' else 'source_observation_log'
+                put(log_key, 'original ' + label + ' controller stdout')
+                put(label + '_controller', {'source_commit': CANDIDATE, 'branch': 'effort/dv-hdr-repair',
+                    'compiler_inventory_sha256': 'f'*64, 'source_review_sha256': '9'*64,
+                    'state': 'finished', 'refusal': None, 'remote_completion_observed': True,
+                    'remote_completion_unknown': False, 'remote_wrapper_exit': exit_code,
+                    'observed_ssh_exit': exit_code, 'driver_sha256': pins[label + '_driver'],
+                    'driver_sha256_after': pins[label + '_driver'], 'log_sha256': pins[log_key],
+                    'cleanup_errors': [], 'cancelled_signals': []})
+            for record in records:
+                record['origin']['execution']['bindings'] = {key: {'sha256_ref': value} for key, value in pins.items()}
+            repair = copy.deepcopy(fixture()['commands'][0]['records'][0]); name = captures[-1][1]
+            repair_argv = ['/owned/store_contract-deadbeef', name, '--exact', '--test-threads=1']
+            text = 'COMMAND ' + json.dumps(repair_argv) + '\nrunning 1 test\ntest ' + name + ' ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored;\nNATIVE_EXIT 0\n'
+            blob = log(text); proof['logs'][blob['sha256']] = blob
+            repair.update(sequence=21, log={'sha256_ref': blob['sha256']})
+            repair['origin']['command'] = shlex.join(repair_argv)
+            repair['coverage']['outcomes'] = {name: 'pass'}
+            item['records'] = records + [repair]
+            names = [entry[1] for entry in captures]
+            item['inventory']['ids'] = names; item['inventory']['list_log'] = log(''.join(name + ': test\n' for name in names))
+            item['obligations'] = [{'sequence': 20, 'category': 'native-failure'}]
+            return proof, {'source': CANDIDATE, 'compiler_inventory': 'f'*64, 'pins': pins, 'captures': captures}
+        proof, policy = effort_fixture()
+        with patch.object(q, 'EFFORT_NATIVE_CAPTURE', policy):
+            self.assertIn('store_contract', self.validate(proof))
+            for change in ['omit-pass', 'omit-failure', 'reorder', 'omit-repair', 'omit-obligation', 'slice', 'exit', 'false-exit', 'true-exit', 'binding']:
+                altered = copy.deepcopy(proof); item = altered['commands'][0]
+                if change == 'omit-pass': item['records'].pop(0)
+                elif change == 'omit-failure': item['records'].pop(-2)
+                elif change == 'reorder': item['records'][0]['sequence'], item['records'][1]['sequence'] = 7, 6
+                elif change == 'omit-repair': item['records'].pop()
+                elif change == 'omit-obligation': item['obligations'] = []
+                elif change == 'slice': item['records'][0]['coverage']['first_line'] = 2
+                elif change == 'exit': item['records'][-2]['exit_code'] = 0
+                elif change == 'false-exit': item['records'][0]['exit_code'] = False
+                elif change == 'true-exit': item['records'][0]['exit_code'] = True
+                else: item['records'][0]['origin']['execution']['bindings']['unit_driver']['sha256_ref'] = '0'*64
+                with self.subTest(effort_capture=change), self.assertRaises(receipts.ReceiptError): self.validate(altered)
+            altered = copy.deepcopy(proof); altered['commands'][0]['invocation'] = COMMAND.replace('--test store_contract', '--test other')
+            with self.assertRaises(receipts.ReceiptError):
+                self.validate(altered, commands={'store_contract:1': altered['commands'][0]['invocation']})
+        for alterations in [{'invent_failed_fingerprint': True}, {'invent_source_clean_after': True}, {'compiler_target': 'other'}]:
+            altered, policy = effort_fixture(**alterations)
+            with patch.object(q, 'EFFORT_NATIVE_CAPTURE', policy), self.subTest(effort_capture=alterations), self.assertRaises(receipts.ReceiptError):
+                self.validate(altered)
 
     def test_original_unknown_exit_failure_needs_its_exact_obligation(self):
         record=fixture()['commands'][0]['records'][0];record['exit_code']=None

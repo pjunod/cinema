@@ -1053,7 +1053,212 @@ def local_binary_target(identity, item, witness, argv):
     return {**identity, 'cargo': {**identity['cargo'], **flag}}
 
 
-def bound_execution(record, item, raw, source_commands=historical_canonical):
+EFFORT_NATIVE_CAPTURE = {'source': '1ea377504144002e976261c7defa596485f2ff6c',
+ 'compiler_inventory': 'b26c6410ded543c8ad3df2fd5d54f68a806b88b319e8a05455c3f15a7ebeb772',
+ 'pins': {'unit_result': 'e9f33d13a795abb9ee741fe2de3cdcae700048c671aa6a01432e1462db8913a1',
+          'unit_driver': 'b8d1b110068a3916a483a8a3b05ddc1a1e3f7e7c382a77057bbd1ed309e58123',
+          'unit_controller': '82c698b1ea9ce47d3fbe3b1520160b8aed58bdc1572756180951884c9fad7529',
+          'unit_controller_log': 'caace24496cf59a807206477f0d95f033c5ab98de21ad7081a788083620edc2e',
+          'compiler_stdout': 'de525d97a769e816ae2cd39fbb2cb58c80b365df9e3ec6d8a7506b999f509222',
+          'compiler_binding': '2f1263d31655dac99398ef644c12568caef8530789e994d21a5fa7e435cc5b8a',
+          'source_observation': '037c3a0b9c83193ec2e735aba53a07bc9dfedeae1233ed57b9f1571a48f6073e',
+          'source_observation_driver': '9557eae43adf52e6d9ae54bef78a2edc1009369f573cdcfd59ff59e1c751df4d',
+          'source_observation_controller': '15e9bb293be36f506f4c5080919536dc25b760a4275fbe9311260731a2f7103b',
+          'source_observation_log': '687f03176380f141d571e22df605557b113b47b03095eaadf259bc26a35c021b'},
+ 'captures': [(6,
+               'populated_v14_sqlite_import_has_exact_three_voter_parity',
+               '625d529fc7488928247dc28347ceabe9d656728fbcd651c795853893bca6fefe'),
+              (7,
+               'populated_current_sqlite_import_preserves_new_durable_rows_only',
+               'c5d40568751adf426b7dbf453c8204e015c924254926a56eed11012681a0de64'),
+              (8,
+               'populated_v14_and_current_sources_activate_once_and_reopen_replicated',
+               '04405dc4a2f2d2ea557fd1f98ef51b001051097b14ac4bfd28481445debb9a15'),
+              (9,
+               'sharing_catalogue_source::sharing_catalogue_allocator_three_voters_preserves_import_ids_and_fenced_identity',
+               '3fbae8b7d5de6dd5913ad8f5e142608073885d713542baf49499289f175d2809'),
+              (10,
+               'sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue',
+               '935634ef5278c95d4b26ac69d19d25e23308e9e9b76e0f3419e79ff199e0dc26'),
+              (11,
+               'sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_requests',
+               '5487ad60e2c98f4ed38ec00c3bc133221dcbc541428119bee4f66f7d213d2ae1'),
+              (12,
+               'background_jobs::background_jobs_transcription_publication_is_atomic_namespaced_and_stop_fenced',
+               '9f59966c8cebde36bf5866cae08f3bd0cd8b746e7ab0ab1d866820d14e202cde'),
+              (13,
+               'background_jobs::managed_subtitle_model_operations_are_node_bounded_stop_fenced_and_not_media_readers',
+               'c6c74e2efd9f8c29fb83743b545fa8667efa5f9df8b58b52bee05f60318b8fea'),
+              (14,
+               'background_jobs::managed_subtitle_configuration_cas_fences_legacy_writers_atomically',
+               '8470c46e432388995b88bb61ef70242c24ec901e18f7730be73d32238814bff3'),
+              (15,
+               'background_jobs::subtitle_configuration_disable_and_legacy_drift_atomically_fence_new_admission',
+               '8f6c8606e44d5d937a27725a6ffa2517dd3356b0c64c29fb355d483df6f70ca7'),
+              (16,
+               'background_jobs::managed_caption_execution_provenance_survives_publish_reopen_and_legacy_roundtrip',
+               '1a2f6c5151540d4d452d13ae483ff28854138d637c96cd121d74b8ca9124d534'),
+              (17,
+               'contract_inventory_matches_every_store_method',
+               '246720d3a9290098b55f2b526eed53e4112dd37510706d84124eff9251f8264c'),
+              (18,
+               'fresh_bootstrap_installs_the_subtitle_source_schema_it_stamps',
+               'f6e40e0c7887b8cbeea94a56dcad62a1f95f9b3df3d8d99a40ffabb10649d759'),
+              (19,
+               'fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree',
+               'c5a3e8ba162143f2ebd1216888c286a6871705397982573fbaf6b288ba574fa6'),
+              (20,
+               'replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idempotent',
+               '41d061eb9561311f071c378b16bc370f8dd196fc65e8dc2d5c2b0c8c2f25bddc')]}
+
+
+def original_effort_native(record, item, raw, proof):
+    """Read one immutable, unframed native run through its original sidecars.
+
+    This closed cohort retains fourteen passes and one failure. The later clean
+    source observation is separate custody, never a missing post-run measurement.
+    """
+    from validation import nonrust_unit_cohort as cohort
+    contract = EFFORT_NATIVE_CAPTURE
+    witness = record['origin']['execution']
+    expected_bindings = {key: {'sha256_ref': digest} for key, digest in contract['pins'].items()}
+    receipts.require(proof is not None and item['name'] == 'store_contract:1'
+                     and record['source_commit'] == contract['source']
+                     and record['origin']['kind'] == 'attested-local'
+                     and set(witness) == {'mode', 'first_line', 'ordinal', 'bindings'}
+                     and witness['first_line'] == 1 and type(witness['ordinal']) is int
+                     and witness['bindings'] == expected_bindings,
+                     'Unknown original effort native custody')
+    captures = {index: (test_id, digest) for index, test_id, digest in contract['captures']}
+    ordinal = witness['ordinal']
+    receipts.require(ordinal in captures, 'Original effort native ordinal is outside the closed cohort')
+    test_id, digest = captures[ordinal]
+    receipts.require(retention.digest(raw.encode()) == digest
+                     and record['log'] == {'sha256_ref': digest}
+                     and record['coverage'] == {'mode': 'rust', 'first_line': 1,
+                         'last_line': len(raw.splitlines()), 'format': 'rust-serial',
+                         'outcomes': {test_id: 'fail' if ordinal == 20 else 'pass'}},
+                     'Original effort native whole log or outcome differs')
+    # Explicit references keep every original authority visible to bounded packers.
+    blobs = {key: cohort.blob(proof, reference) for key, reference in witness['bindings'].items()}
+    decoded = {key: receipts.bounded_json(blobs[key]) for key in (
+        'unit_result', 'unit_controller', 'compiler_binding',
+        'source_observation', 'source_observation_controller')}
+    unit = decoded['unit_result']; controller = decoded['unit_controller']
+    observation = decoded['source_observation']; observer = decoded['source_observation_controller']
+    compiler = decoded['compiler_binding']
+    source = contract['source']; archive = source_archive_digest(source)
+    receipts.require(unit['source_commit'] == source and unit['branch'] == 'effort/dv-hdr-repair'
+                     and unit['source_archive_sha256'] == archive
+                     and unit['compiler_inventory_sha256'] == contract['compiler_inventory']
+                     and unit['unit_bodies_selected'] == 20
+                     and unit['prior_applicable_passing_bodies_selected'] == 0
+                     and unit['source_clean_before'] is True and 'source_clean_after' not in unit
+                     and 'unit_bodies_executed' not in unit and unit['state'] == 'failed'
+                     and not unit['cancelled_signals'] and len(unit['commands']) == 20
+                     and len(unit['observed_outcomes']) == 19,
+                     'Original effort failure or unknown source measurement was changed')
+    for authority, driver_key, log_key, exit_code in (
+            (controller, 'unit_driver', 'unit_controller_log', 1),
+            (observer, 'source_observation_driver', 'source_observation_log', 0)):
+        receipts.require(authority['source_commit'] == source
+                         and authority['branch'] == 'effort/dv-hdr-repair'
+                         and authority['compiler_inventory_sha256'] == contract['compiler_inventory']
+                         and authority['source_review_sha256'] == unit['source_review_sha256']
+                         and authority['state'] == 'finished' and authority['refusal'] is None
+                         and authority['remote_completion_observed'] is True
+                         and authority['remote_completion_unknown'] is False
+                         and authority['remote_wrapper_exit'] == authority['observed_ssh_exit'] == exit_code
+                         and authority['driver_sha256'] == authority['driver_sha256_after'] == contract['pins'][driver_key]
+                         and authority['log_sha256'] == contract['pins'][log_key]
+                         and not authority['cleanup_errors'] and not authority['cancelled_signals'],
+                         'Original owned executor did not finish with intact capture custody')
+    receipts.require(observation['source_commit'] == source
+                     and observation['source_archive_sha256'] == archive
+                     and observation['compiler_inventory_sha256'] == contract['compiler_inventory']
+                     and observation['state'] == 'PASS' and observation['unit_bodies_executed'] == 0
+                     and observation['source_clean_before'] is True and observation['source_clean_after'] is True
+                     and not observation['cancelled_signals']
+                     and unit['finished_utc'] < observation['started_utc'],
+                     'Later source-only observation is missing or predates the native run')
+    row = unit['commands'][ordinal - 1]
+    features = STORE_FEATURES.split(',') + ['hiqlite-store']
+    profile = record['environment']['runtime']['profile']
+    argv = row['argv']; fingerprint = row['fingerprint']
+    receipts.require(row['index'] == ordinal and row['test_id'] == test_id
+                     and row['suite'] == 'store_contract'
+                     and row['actual_features'] == record['environment']['features'] == features
+                     and row['actual_profile'] == profile
+                     and row['runtime'] == {'RUST_MIN_STACK': '8388608', 'RUST_TEST_THREADS': None, 'test_threads': 1}
+                     and type(record['exit_code']) is int
+                     and row['native_exit'] == row['observed_exit'] == record['exit_code'] == (101 if ordinal == 20 else 0)
+                     and row['log_sha256'] == digest and row['log_bytes'] == len(raw.encode())
+                     and argv[1:] == [test_id, '--exact', '--nocapture', '--test-threads=1']
+                     and record['origin']['command'] == shlex.join(argv)
+                     and retention.DIGEST.fullmatch(row['binary_sha256_before'])
+                     and row['binary_sha256_after'] == row['binary_sha256_before']
+                     and not row['cancelled_signals'] and not row['cleanup_errors'],
+                     'Original native target, runtime, exit or intact binary differs')
+    receipts.require(retention.DIGEST.fullmatch(row['fingerprint_sha256_before'])
+                     and (('fingerprint_sha256_after' not in row) if ordinal == 20 else
+                          row['fingerprint_sha256_after'] == row['fingerprint_sha256_before']),
+                     'Original failed fingerprint observation was invented or passing fingerprint changed')
+    suffix = Path(argv[0]).name.rsplit('-', 1)[-1]
+    path = Path(row['fingerprint_path'])
+    receipts.require(re.fullmatch(r'[0-9a-f]{16}', suffix) is not None
+                     and Path(argv[0]).is_absolute() and Path(argv[0]).name == 'store_contract-' + suffix
+                     and path.name == 'test-integration-test-store_contract.json'
+                     and path.parent.name == 'plurx-core-' + suffix and path.parent.parent.name == '.fingerprint'
+                     and fingerprint.get('rustc') == RUSTC_FINGERPRINT
+                     and fingerprint.get('profile') == TEST_PROFILE_FINGERPRINTS[0]
+                     and fingerprint.get('compile_kind') == 0 and fingerprint.get('rustflags') == []
+                     and json.loads(fingerprint['features']) == features
+                     and any(entry.get('CheckDepInfo', {}).get('dep_info') ==
+                         'debug/.fingerprint/plurx-core-' + suffix + '/dep-test-integration-test-store_contract'
+                         for entry in fingerprint.get('local', [])),
+                     'Original native compiler fingerprint or target linkage differs')
+    receipts.require(compiler['source_commit'] == source and compiler['archive_sha256'] == archive
+                     and compiler['action'] == 1 and compiler['compiler_exit'] == 0
+                     and compiler['unit_bodies_executed'] == 0 and compiler['refusal'] is None
+                     and compiler['bounded_stdout_sha256'] == contract['pins']['compiler_stdout']
+                     and compiler['bounded_stdout_bytes'] == len(blobs['compiler_stdout'])
+                     and compiler['argv'] == ['cargo', 'test', '--no-run', '--message-format=json', '--locked',
+                         '-p', 'plurx-core', '--features', STORE_FEATURES, '--test', 'store_contract'],
+                     'Original no-run compiler authority differs')
+    target = rust_identity(item['invocation'])
+    build = normalized_cargo(shlex.join(compiler['argv']), compile_only=True)
+    keys = {'-p', '--manifest-path', '--test', '--bin', '--lib', '--no-default-features', '--release'}
+    receipts.require({key: value for key, value in build['cargo'].items() if key in keys}
+                     == {key: value for key, value in target['cargo'].items() if key in keys}
+                     and {feature for feature in target['cargo'].get('--features', '').split(',') if feature} <= set(features)
+                     and target['environment'].get('RUST_MIN_STACK') == '8388608'
+                     and '--test-threads=1' in target['harness']
+                     and record['environment']['runtime']['test_threads'] == 1
+                     and record['environment']['runtime']['rust_min_stack'] == 8388608,
+                     'Original native compiler target or canonical runtime differs')
+    frames = [receipts.bounded_json(line.encode()) for line in blobs['compiler_stdout'].decode().splitlines()]
+    finished = [frame for frame in frames if frame.get('reason') == 'build-finished']
+    artifacts = [frame for frame in frames if frame.get('reason') == 'compiler-artifact'
+                 and frame.get('executable') == argv[0] and frame['target']['name'] == 'store_contract'
+                 and frame['target']['kind'] == ['test']]
+    receipts.require(len(finished) == len(artifacts) == 1 and finished[0].get('success') is True
+                     and artifacts[0]['features'] == features and artifacts[0]['profile'] == profile,
+                     'Original Cargo JSON does not identify the actual native test artifact')
+    actual = retention.log_outcomes(raw, 'rust-serial')
+    receipts.require(actual == record['coverage']['outcomes'], 'Original complete native outcome differs')
+    require_native_terminals(raw, actual, record['exit_code'], record['origin']['command'])
+    return raw
+
+
+def complete_effort_native_ordinals(records):
+    cohort = [record for record in sorted(records, key=lambda row: row['sequence'])
+              if record['origin']['execution']['mode'] == 'original-effort-native']
+    if cohort:
+        receipts.require([row['origin']['execution']['ordinal'] for row in cohort] == list(range(6, 21)),
+                         'Original effort native cohort omits, repeats or reorders a captured execution')
+
+
+def bound_execution(record, item, raw, source_commands=historical_canonical, *, proof=None):
     """No receipt-selected slice can remove another outcome from one execution."""
     kind = item['name'].split(':')[0]
     origin = record['origin']
@@ -1062,6 +1267,8 @@ def bound_execution(record, item, raw, source_commands=historical_canonical):
     lines = raw.splitlines()
     first = witness['first_line']
     receipts.require(type(first) is int and 0 < first <= len(lines), 'Invalid command anchor')
+    if witness['mode'] == 'original-effort-native':
+        return original_effort_native(record, item, raw, proof)
     if witness['mode'] == 'original-serial-rotation':
         return original_serial_rotation(record, item, raw, source_commands)
     if witness['mode'] == 'local-openraft-original':
@@ -1520,7 +1727,7 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
             receipts.require(invalid <= set(ids), 'Unknown affected command unit')
             raw = clean_log(command_log(proof, record))
             if kind in RUST_KINDS:
-                bodies[sequence] = bound_execution(record,item,raw)
+                bodies[sequence] = bound_execution(record,item,raw,proof=proof)
             actual = coverage(record, raw, kind, discovery)
             receipts.require(set(actual) <= set(ids), 'Execution belongs to another command inventory')
             if kind == 'android_jvm':
@@ -1540,6 +1747,7 @@ def validate(proof, candidate, existing=(), commands=canonical, discovery=frozen
                          and all(last_pass.get(test_id, 0) > sequence for test_id, sequence in last_failure.items()), 'Incomplete or failed applicable command coverage')
         if kind in RUST_KINDS:
             complete_original_capture_ordinals(records)
+            complete_effort_native_ordinals(records)
             completion_obligations(item,records,result,bodies)
         else:
             receipts.require(item['obligations'] == [] and all(row['exit_code'] == 0 for row in records),
