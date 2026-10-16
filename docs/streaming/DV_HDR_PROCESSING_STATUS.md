@@ -1771,3 +1771,40 @@ command headers are added to old output. The existing sidecar control now checks
 complete admission and refusal of omissions, reordering, invented measurements,
 wrong targets and a missing failure repair. That changed control is owed once on
 the main-bound effort alongside the two genuinely affected Store cases.
+
+
+### R52 — Store repeated applicability data once
+
+R51 passed all seven compile-only task checks in gate 5307 and landed as
+`4178879f7`. Its current-source compiler/inventory checks passed without unit
+bodies. The two affected feature-qualified Store cases and the expanded
+sidecar control passed once on that effort. The earlier nineteen Rust and seven
+Python passes remain retained, alongside their original failure and repair.
+
+The required evidence tables exceed the two-child limit even after complete
+cross-child deduplication: their unique encoded data totals 10,871,952 bytes.
+Dropping original logs or custody is not an acceptable packing operation. A
+map-specific column dictionary stores repeated paths, source hashes, affected
+identity lists and reasons once. Canonical ASCII index rows reconstruct each
+exact source-bound applicability map before the existing path, source-hash and
+invalidation checks run. Full manifests and inline version-one proofs retain
+their existing forms; this adds no general reference chaining or source
+exemption. Signed inputs and cached structural slots remain unchanged.
+
+Dictionary bytes, compact-map bytes and every unique reconstructed map all
+consume the existing shared decoding budget. Repeated identity visits are
+bounded before constructing a row; expanded bytes are streamed and charged
+without refunds. Child-local references, duplicate paths, malformed indices,
+source/candidate mismatches and mutated tables are refused. The two 4 MiB
+children, 1,024-table ceiling, 32 MiB/524,288-node aggregate and per-object
+limits remain unchanged. The current-source measurement reconstructs all 120
+maps and preserves every original runtime field: both children fit, using
+25,246,265 decoded bytes and 337,798 nodes together. This is unqualified
+measurement, not authenticated enrollment or permission to deploy.
+
+Four existing controls cover exact reconstruction, bounds, cache mutation,
+shared accounting, generic-suite integration and canonical-command integration.
+They remain owed once on the main-bound effort after this task passes its gate.
+No applicable Rust, Apple, Android or playback body is repeated for encoding.
+Current-main qualification, deployment and all eighteen physical HDR cases
+remain open.

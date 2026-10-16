@@ -263,6 +263,40 @@ class OriginalScopeEvidenceCase(unittest.TestCase):
             with self.assertRaises(receipts.ReceiptError):
                 retention.expanded_document(changed)
 
+            dictionary={'format':'source-applicability-dictionary-v1','paths':['input.rs'],
+                'hashes':[retention.digest(b'old'),retention.digest(b'new')],
+                'affected_ids':[[]], 'reasons':[]}
+            dictionary_blob=log(json.dumps(dictionary))
+            manifest={'format':'source-applicability-columns-v1','source_commit':'a'*40,
+                'candidate':'b'*40,'dictionary':{'sha256_ref':dictionary_blob['sha256']},
+                'rows':'0,0,1,0\n'}
+            manifest_blob=log(json.dumps(manifest))
+            current=copy.deepcopy(suite)
+            current['records'][0].update(source_commit='a'*40,changes={'sha256_ref':manifest_blob['sha256']})
+            suite_blob=log(json.dumps(current))
+            proof['command_units']['logs'].update({row['sha256']:row for row in
+                [dictionary_blob,manifest_blob,suite_blob]})
+            proof['lanes']['rust']=[{'sha256_ref':suite_blob['sha256']}]
+            original=copy.deepcopy(proof)
+            from validation.unit_evidence_objects import Objects,StructuralBudget
+            budget=StructuralBudget()
+            decoded=retention.expanded_document(proof,Objects(proof['command_units']['logs'],budget))
+            measured=(budget.bytes,budget.nodes)
+            self.assertEqual(proof,original)
+            witness=decoded['lanes']['rust'][0]['records'][0]['changes']['input.rs']
+            self.assertEqual(witness,{'before':retention.digest(b'old'),'after':retention.digest(b'new'),'affected_ids':[]})
+            with patch.object(commands,'validate',return_value={}):
+                adopted,_=retention.validate(decoded,'b'*40,
+                    differences=lambda a,b:{'input.rs'}if a!=b else set(),
+                    source=lambda commit,path:b'new'if commit=='b'*40 else b'old')
+                self.assertEqual(adopted['rust']['passed'],1)
+                self.assertEqual((budget.bytes,budget.nodes),measured)
+                witness['after']='f'*64
+                with self.assertRaises(receipts.ReceiptError):
+                    retention.validate(decoded,'b'*40,
+                        differences=lambda a,b:{'input.rs'}if a!=b else set(),
+                        source=lambda commit,path:b'new'if commit=='b'*40 else b'old')
+
     def test_generic_ci_authentication_uses_bounded_integer_ids_and_one_live_origin(self):
         proof = fixture()
         records = proof['lanes']['rust'][0]['records']
