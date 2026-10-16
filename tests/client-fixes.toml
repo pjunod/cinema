@@ -7017,3 +7017,11 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "&& !showingLayout && !showingDvrActivity && detail == nil"
 test = "clients/apple/UITests/TVLiveNavigationTests.swift"
 test_anchor = "func testLiveFullscreenRevealMoreReportAndBackRetainSession()"
+
+[[fixes]]
+id = "apple.tv-playback-releases-directional-focus"
+commits = ["fe561010fbcd4617a5962a9a5adadc90ee96bc17"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "if focused != value { focused = value }"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "Guide return Right reaches Channels pass"
