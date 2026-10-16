@@ -14,6 +14,16 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class TVNavigationRunnerTests(unittest.TestCase):
+    def test_exported_screenshots_use_portable_distinct_names(self):
+        # This real capture name rejected the entire CI evidence upload.
+        name = RUNNER.screenshot_name("Down reaches library:filter.png")
+        self.assertNotIn(":", name)
+        self.assertTrue(name.endswith(".png"))
+        self.assertNotEqual(name, RUNNER.screenshot_name("Down reaches library?filter.png"))
+        self.assertEqual(RUNNER.screenshot_name("Guide first row.png"), "Guide first row.png")
+        for invalid in '<>:"/\\|?*\r\n\x00':
+            self.assertNotIn(invalid, RUNNER.screenshot_name("Capture" + invalid + ".png"))
+
     def test_requires_every_native_journey_to_execute_and_pass(self):
         RUNNER.verify_summary({"passedTests": 2, "failedTests": 0, "skippedTests": 0}, 2)
         for summary in [

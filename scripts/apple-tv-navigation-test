@@ -9,6 +9,7 @@ import datetime
 import hashlib
 import json
 import plistlib
+import re
 import shutil
 from pathlib import Path
 import subprocess
@@ -55,6 +56,16 @@ def verify_summary(summary, expected):
     if (summary.get("passedTests") != expected or summary.get("failedTests") != 0
             or summary.get("skippedTests") != 0):
         raise RuntimeError(f"Incomplete native journey execution: {summary}")
+
+
+def screenshot_name(name):
+    """Artifact uploads reject native capture names containing e.g. colons."""
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '-', name)
+    if safe == name:
+        return name
+    path = Path(safe)
+    digest = hashlib.sha256(name.encode()).hexdigest()[:12]
+    return f"{path.stem}-{digest}{path.suffix}"
 
 
 def source_snapshot():
@@ -147,7 +158,7 @@ def main():
                     capture = Path(line.split("=", 1)[1])
                     if device in capture.parts and capture.is_file():
                         (output / "screenshots").mkdir(exist_ok=True)
-                        shutil.copy2(capture, output / "screenshots" / capture.name)
+                        shutil.copy2(capture, output / "screenshots" / screenshot_name(capture.name))
                         receipt["screenshots"] = str(output / "screenshots")
             subprocess.run(["xcrun", "simctl", "shutdown", device], capture_output=True)
             subprocess.run(["xcrun", "simctl", "delete", device], capture_output=True)
