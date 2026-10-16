@@ -2191,6 +2191,8 @@ struct LiveTvView: View {
     /// The pill that opened Info, More or Layout over fullscreen, so closing
     /// the sheet puts focus back on its opener.
     @State private var coverSheetOpener: FocusTarget?
+    /// The mounted cover owns its focus; the browser FocusState is covered.
+    @State private var coverControl: FocusTarget?
     /// The browse view the page showed before the temporary guide switched it
     /// to Guide, restored when the guide closes so "return to browser" returns
     /// to the page the viewer actually left.
@@ -2441,8 +2443,10 @@ struct LiveTvView: View {
             guard remoteNavigation.activeScope == "live-tv" else { return }
             let target: FocusTarget
             switch remoteNavigation.requestedFocus {
-            case "live:channels": target = .channels
-            case "live:guide": target = .guide
+            case "live:channels": target = fullscreen ? .pillChannels : .channels
+            case "live:guide": target = fullscreen ? .pillGuide : .guide
+            case "live:play" where fullscreen: target = .pillPlay
+            case "live:guide-close" where temporaryGuide: target = .guideClose
             case "live:guide-time": target = .guideTime
             default: return
             }
@@ -2451,7 +2455,8 @@ struct LiveTvView: View {
             await Task.yield()
             guard !Task.isCancelled, remoteNavigation.activeScope == "live-tv",
                   remoteNavigation.focusRequestRevision == revision else { return }
-            focusedControl = target
+            if fullscreen { coverControl = target }
+            else { focusedControl = target }
         }
         #endif
         .onChange(of: browse) { _, _ in remoteNavigation.contextChanged(); updateLiveRemoteOrder() }
@@ -2885,6 +2890,11 @@ struct LiveTvView: View {
         }
         #if os(tvOS)
         .buttonStyle(TVReadableButtonStyle(prominent: false))
+        .liveTvRemoteAdapter(
+            .root,
+            state: { .menu },
+            apply: { outcome, _ in applyLiveOutcome(outcome) }
+        )
         #endif
         .padding(48)
         .frame(minWidth: 420, minHeight: 360, alignment: .topLeading)
@@ -3829,7 +3839,7 @@ struct LiveTvView: View {
                     if fullscreen {
                         // The temporary guide: nothing above the grid but the
                         // panel's Close, and the pills are not drawn.
-                        focusedControl = .guideClose
+                        coverControl = .guideClose
                     } else if tvLayout.presented == .guideOverlay {
                         focusedControl = .overClose
                     } else {
@@ -4004,6 +4014,7 @@ struct LiveTvView: View {
 
     private func closeTemporaryGuide() {
         guard temporaryGuide || browseBeforeTemporaryGuide != nil else { return }
+        coverControl = .pillGuide
         temporaryGuide = false
         guideFocusRequested = false
         if let before = browseBeforeTemporaryGuide {
@@ -4420,6 +4431,12 @@ struct LiveTvView: View {
         .foregroundStyle(.white)
     }
 
+    private var coverControlInput: LiveTvRemoteAdapter {
+        LiveTvRemoteAdapter(scope: .root, state: { liveInputState }) { outcome, _ in
+            applyLiveOutcome(outcome)
+        }
+    }
+
     private func liveSurfaceButtons(focus: FocusState<FocusTarget?>.Binding) -> some View {
         HStack(spacing: 16) {
             Button { live.togglePause() } label: {
@@ -4430,13 +4447,15 @@ struct LiveTvView: View {
             }
             .focused(focus, equals: .pillPlay)
             .accessibilityIdentifier("live-player-play")
-            .remoteControl("live:play", label: live.paused ? "Play live" : "Pause") { live.togglePause() }
+            .modifier(coverControlInput)
+            .remoteControl("live:play", label: live.paused ? "Play live" : "Pause", managesFocus: false) { live.togglePause() }
             Button { openTemporaryGuide() } label: {
                 Label("Guide", systemImage: "rectangle.grid.3x2")
             }
             .focused(focus, equals: .pillGuide)
             .accessibilityIdentifier("live-player-guide")
-            .remoteControl("live:guide", label: "Guide") { openTemporaryGuide() }
+            .modifier(coverControlInput)
+            .remoteControl("live:guide", label: "Guide", managesFocus: false) { openTemporaryGuide() }
             // Focus on the list is requested when the cover has gone
             // (`restoreBrowseFocusAfterCover`), not here while it is still up.
             Button { browse = .list; fullscreen = false } label: {
@@ -4444,17 +4463,20 @@ struct LiveTvView: View {
             }
             .focused(focus, equals: .pillChannels)
             .accessibilityIdentifier("live-player-channels")
-            .remoteControl("live:channels", label: "Channels") { browse = .list; fullscreen = false }
+            .modifier(coverControlInput)
+            .remoteControl("live:channels", label: "Channels", managesFocus: false) { browse = .list; fullscreen = false }
             Button { coverSheetOpener = .pillInfo; showStreamInfo() } label: {
                 Label("Info", systemImage: "info.circle")
             }
             .focused(focus, equals: .pillInfo)
             .accessibilityIdentifier("live-player-info")
+            .modifier(coverControlInput)
             Button { coverSheetOpener = .pillMore; showingMore = true } label: {
                 Label("More", systemImage: "ellipsis")
             }
             .focused(focus, equals: .pillMore)
             .accessibilityIdentifier("live-player-more")
+            .modifier(coverControlInput)
             Spacer()
             Text("MENU hides · PLAY/PAUSE \(live.paused ? "resumes" : "pauses")")
                 .font(LiveTvType.surfaceHint)
@@ -4504,9 +4526,9 @@ struct LiveTvView: View {
                         endPoint: .bottom
                     )
                     .frame(height: 520)
-                    NativePlaybackFocusRegion(preferred: FocusTarget.pillPlay, requested: focusedControl,
+                    NativePlaybackFocusRegion(preferred: coverControl ?? .pillPlay, requested: coverControl,
                                               changed: { overlayGeneration &+= 1 },
-                                              focusChanged: { focusedControl = $0 }) { focus in
+                                              focusChanged: { coverControl = $0 }) { focus in
                         liveBottomBand(channel: channel, airing: airing, focus: focus)
                     }
                 }
@@ -4590,17 +4612,28 @@ struct LiveTvView: View {
                                 // Focus returns to the Guide pill through
                                 // `onChange(of: temporaryGuide)`, deferred past
                                 // the update that re-inserts the pills.
-                                Button("Close") { closeTemporaryGuide() }
-                                    .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
-                                    .focusEffectDisabled()
-                                    .focused($focusedControl, equals: .guideClose)
-                                    .remoteControl("live:guide-close", label: "Close guide") { closeTemporaryGuide() }
+                                LiveTvGuideCloseButton(
+                                    focusRequested: coverControl == .guideClose,
+                                    focusChanged: { active in
+                                        if active { coverControl = .guideClose }
+                                        else if coverControl == .guideClose { coverControl = nil }
+                                    },
+                                    close: closeTemporaryGuide
+                                )
                             }
                             tvBrowseContent(
                                 contentWidth: max(640, Double(geometry.size.width) - 40),
                                 rows: 5
                             )
                         }
+                        // The guide's scroll/focus subtree must own Back.
+                        // Otherwise the cover's native dismissal can win
+                        // before its outer playback adapter receives it.
+                        .liveTvRemoteAdapter(
+                            .root,
+                            state: { .temporaryGuide },
+                            apply: { outcome, _ in applyLiveOutcome(outcome) }
+                        )
                         .padding(20)
                         .frame(height: 520)
                         .background(Palette.bg)
@@ -4648,7 +4681,7 @@ struct LiveTvView: View {
             overlayVisible = false
         }
         #if os(tvOS)
-        .onAppear { focusedControl = overlayVisible ? .pillPlay : .reveal }
+        .onAppear { coverControl = overlayVisible ? .pillPlay : .reveal }
         .onChange(of: overlayVisible) { _, visible in
             if visible {
                 // Deferred like the hide direction below, and for the same
@@ -4656,27 +4689,27 @@ struct LiveTvView: View {
                 // tvOS drops a `@FocusState` aimed at a view that does not
                 // exist yet. Undeferred, the assignment was dropped, focus
                 // stayed on the reveal layer, and because it had not changed
-                // the bounce in `onChange(of: focusedControl)` never ran.
-                focusedControl = nil
+                // the bounce in `onChange(of: coverControl)` never ran.
+                coverControl = nil
                 Task { @MainActor in
                     await Task.yield()
                     guard fullscreen, overlayVisible else { return }
-                    focusedControl = .pillPlay
+                    coverControl = .pillPlay
                 }
             } else {
-                focusedControl = nil
+                coverControl = nil
                 Task { @MainActor in
                     await Task.yield()
                     guard fullscreen, !overlayVisible, !temporaryGuide,
                           !showingInfo, !showingMore, !showingLayout, detail == nil
                     else { return }
-                    focusedControl = .reveal
+                    coverControl = .reveal
                 }
             }
         }
-        .onChange(of: focusedControl) { _, target in
+        .onChange(of: coverControl) { _, target in
             if overlayVisible { overlayGeneration &+= 1 }
-            if overlayVisible, target == .reveal { focusedControl = .pillPlay }
+            if overlayVisible, target == .reveal { coverControl = .pillPlay }
         }
         .onChange(of: temporaryGuide) { _, up in
             overlayGeneration &+= 1
@@ -4684,11 +4717,11 @@ struct LiveTvView: View {
             // are re-inserted by this same update, so the write is deferred
             // like every other write aimed at a view that is being inserted.
             guard !up, fullscreen else { return }
-            focusedControl = nil
+            coverControl = nil
             Task { @MainActor in
                 await Task.yield()
                 guard fullscreen, !temporaryGuide else { return }
-                focusedControl = overlayVisible ? .pillGuide : .reveal
+                coverControl = overlayVisible ? .pillGuide : .reveal
             }
         }
         #endif
@@ -4733,13 +4766,13 @@ struct LiveTvView: View {
         else { return }
         let opener = coverSheetOpener ?? .pillPlay
         coverSheetOpener = nil
-        focusedControl = nil
+        coverControl = nil
         Task { @MainActor in
             await Task.yield()
             guard fullscreen, overlayVisible, !temporaryGuide,
                   !showingInfo, !showingMore, !showingLayout, detail == nil
             else { return }
-            focusedControl = opener
+            coverControl = opener
         }
         #endif
     }
@@ -4860,3 +4893,23 @@ private struct LiveRemoteProgrammeControl: ViewModifier {
         }
     }
 }
+
+#if os(tvOS)
+/// The temporary guide's Close owns focus inside the mounted player cover.
+private struct LiveTvGuideCloseButton: View {
+    @FocusState private var focused: Bool
+    let focusRequested: Bool
+    let focusChanged: (Bool) -> Void
+    let close: () -> Void
+
+    var body: some View {
+        Button("Close", action: close)
+            .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+            .focusEffectDisabled()
+            .focused($focused)
+            .remoteControl("live:guide-close", label: "Close guide", managesFocus: false, activate: close)
+            .task(id: focusRequested) { focused = focusRequested }
+            .onChange(of: focused) { _, active in focusChanged(active) }
+    }
+}
+#endif

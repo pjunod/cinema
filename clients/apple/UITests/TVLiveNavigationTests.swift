@@ -136,6 +136,21 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         for (identifier, name) in [("live-player-guide", "Guide"), ("live-player-channels", "Channels"), ("live-player-info", "Info"), ("live-player-more", "More")] {
             remote.press(.right)
             assertFocus(app.buttons[identifier], in: app, context: "Live Right reaches " + name)
+            if identifier == "live-player-guide" {
+                remote.press(.select)
+                let programme = app.buttons.matching(NSPredicate(format:
+                    "identifier BEGINSWITH 'live-guide-programme:news:'"
+                )).firstMatch
+                assertFocus(programme, in: app, context: "Fullscreen guide enters the playing channel programme")
+                remote.press(.menu)
+                assertFocus(app.buttons[identifier], in: app, context: "Fullscreen guide Back restores Guide pill")
+                remote.press(.select)
+                assertFocus(programme, in: app, context: "Fullscreen guide reopens at the playing programme")
+                remote.press(.up)
+                assertFocus(app.buttons["Close"], in: app, context: "Fullscreen guide Up reaches Close")
+                remote.press(.select)
+                assertFocus(app.buttons[identifier], in: app, context: "Fullscreen guide Close restores Guide pill")
+            }
         }
         remote.press(.select)
         let report = app.buttons["diagnostics-open"]
@@ -148,7 +163,8 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         remote.press(.menu)
         assertFocus(more, in: app, context: "Live More Back restores pill")
         remote.press(.menu)
-        assertFocus(app.buttons["live-player-reveal"], in: app, context: "Live controls Back returns to hidden video")
+        assertFocus(app.buttons["live-player-reveal"], in: app,
+                    context: "Live controls Back returns to hidden video", timeout: 2)
         remote.press(.menu)
         assertFocus(channel, in: app, context: "Live fullscreen Back restores channel")
         XCTAssertEqual(server.requestCount("POST /api/v1/live-tv/channels/news/sessions"), 1)

@@ -175,10 +175,11 @@ class TVNavigationTestCase: XCTestCase {
     }
 
     func assertFocus(_ target: XCUIElement, in app: XCUIApplication, context: String,
+                             timeout: TimeInterval = 5,
                              file: StaticString = #filePath, line: UInt = #line) {
         let expectation = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in self.hasNativeFocus(target, in: app) }, object: nil)
-        let result = XCTWaiter.wait(for: [expectation], timeout: 5)
+        let result = XCTWaiter.wait(for: [expectation], timeout: timeout)
         let focusDebug = app.staticTexts["choice-focus-debug"]
         if focusDebug.exists { print("NATIVE_CHOICE_FOCUS_DEBUG=\(focusDebug.label)") }
         let screenshot = app.screenshot()

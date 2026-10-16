@@ -1444,10 +1444,10 @@ final class LiveTvTests: XCTestCase {
             .components(separatedBy: "private var fullscreenSurface: some View {")[1]
             .components(separatedBy: "private func applyLiveOutcome")[0]
         XCTAssertTrue(fullscreen.contains(
-            ".onAppear { focusedControl = overlayVisible ? .pillPlay : .reveal }"
+            ".onAppear { coverControl = overlayVisible ? .pillPlay : .reveal }"
         ))
         XCTAssertTrue(fullscreen.contains(
-            "target == .reveal { focusedControl = .pillPlay }"
+            "target == .reveal { coverControl = .pillPlay }"
         ))
         for guardPart in [
             "guard fullscreen",
@@ -1466,14 +1466,14 @@ final class LiveTvTests: XCTestCase {
         let infoDismissal = fullscreen
             .components(separatedBy: ".onChange(of: showingInfo)")[1]
             .components(separatedBy: ".onChange(of: showingMore)")[0]
-        XCTAssertFalse(infoDismissal.contains("focusedControl"))
+        XCTAssertFalse(infoDismissal.contains("coverControl"))
         let opener = source
             .components(separatedBy: "private func returnFocusToCoverSheetOpener()")[1]
             .components(separatedBy: "#endif")[0]
         XCTAssertTrue(opener.contains("let opener = coverSheetOpener ?? .pillPlay"))
-        XCTAssertTrue(opener.contains("focusedControl = nil"))
+        XCTAssertTrue(opener.contains("coverControl = nil"))
         XCTAssertTrue(opener.contains("await Task.yield()"))
-        XCTAssertTrue(opener.contains("focusedControl = opener"))
+        XCTAssertTrue(opener.contains("coverControl = opener"))
         XCTAssertTrue(source.contains("Button { coverSheetOpener = .pillInfo; showStreamInfo() }"))
         XCTAssertTrue(source.contains("Button { coverSheetOpener = .pillMore; showingMore = true }"))
     }
@@ -1565,10 +1565,10 @@ final class LiveTvTests: XCTestCase {
         //    Watch, the temporary guide's Close, the Over picture Close — not
         //    always to the toolbar.
         XCTAssertTrue(source.contains("onTopBoundary: { edge in"))
-        XCTAssertTrue(source.contains("focusedControl = .guideClose"))
+        XCTAssertTrue(source.contains("coverControl = .guideClose"))
         XCTAssertTrue(source.contains("focusedControl = .overClose"))
         XCTAssertTrue(source.contains("guidePageTopBoundary(edge)"))
-        XCTAssertTrue(source.contains(".focused($focusedControl, equals: .guideClose)"))
+        XCTAssertTrue(source.contains("focusRequested: coverControl == .guideClose"))
         XCTAssertTrue(source.contains(".focused($focusedControl, equals: .overClose)"))
         XCTAssertFalse(source.contains("onToolbarBoundary"))
 
@@ -1601,7 +1601,7 @@ final class LiveTvTests: XCTestCase {
         XCTAssertTrue(source.contains("Button { browse = .list; fullscreen = false } label: {"))
         XCTAssertFalse(source.contains("Button { requestChannelFocus(); fullscreen = false }"))
         XCTAssertTrue(source.contains("if browseBeforeTemporaryGuide == nil { browseBeforeTemporaryGuide = browse }"))
-        XCTAssertTrue(source.contains("focusedControl = overlayVisible ? .pillGuide : .reveal"))
+        XCTAssertTrue(source.contains("coverControl = overlayVisible ? .pillGuide : .reveal"))
         XCTAssertFalse(source.contains("focusedControl = .guide\n"),
                        "no undeferred write to a segment that may be under the cover")
         // Neither request resigns the toolbar's focus first — that handed the
@@ -2662,7 +2662,7 @@ final class LiveTvTests: XCTestCase {
         // assertion had been failing on main ever since: the fast lane
         // compiles the Apple target and does not run it.
         XCTAssertTrue(source.contains("if !overlayVisible && !temporaryGuide {"))
-        XCTAssertTrue(source.contains("focusedControl = .reveal"))
+        XCTAssertTrue(source.contains("coverControl = .reveal"))
         // Tuning stays inside the selected browse layout. The viewer chooses
         // fullscreen explicitly with Return to live or by selecting the
         // already-playing channel.

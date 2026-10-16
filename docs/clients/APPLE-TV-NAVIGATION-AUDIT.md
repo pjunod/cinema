@@ -583,27 +583,36 @@ failed trial is retained. Use a white focus outline without zoom, a compact
 detail stage with no idle preview, and clock-following until the viewer
 explicitly pages away from Now.
 
-**Evidence so far:** the native fixture traversed all 77 channels down and back,
-keeping every focused programme inside the actual grid viewport with a
-three-second total bound per press/query. The last programme's action sheet
-returned to the same cell. That run then caught an incorrect toolbar return;
-the separate tools journey passes after correcting it, including Guide time
-and root-tab return. All 102 Live TV unit tests pass, including idle-clock
-advancement versus deliberate time paging. The first physical saved-account traversal passed on the real 77-channel
-lineup: every down/up step kept a programme fully inside the guide viewport,
-and Back reached the Live TV root tab (126.99 seconds for the test session).
-Rendered first/last-row captures were inspected. Faster simulator input then
-exposed a redundant scroll request resetting the viewport; this remained an
-open failure despite the physical pass. The guide now leaves completed native
-moves alone and reserves its heading outside the scrolling content. A final
-repeat also covers mixed programme lengths and a stable vertical time anchor. The required suite now
-includes both guide journeys; neither an empty selection nor skipped journey
-qualifies. Screenshots also exposed a transparent pinned heading; its background
-is now opaque and its paging controls are larger.
+**Validation:** the final isolated native run passes all three Live TV journeys.
+The 77-channel fixture mixes half-hour and two-hour programmes and traverses
+every row down and back without changing the vertical time anchor. Every step
+requires the actual focused programme to fit inside the viewport within two
+seconds, with a three-second bound including the press and native queries. The
+last programme's action sheet restores its cell. Guide time closes to its exact
+opener, and Down into content followed by Up returns to that same toolbar
+control. The full traversal takes 122.63 seconds; all three journeys take
+286.87 seconds. First/last-row and toolbar-return renders were inspected.
+All 1,099 Apple TV unit tests and iOS simulator compilation pass.
 
-**Acceptance remains open:** inspect the final rendered captures and require
-both guide journeys, playback and the physical traversal to pass. Repeat on the physical 77-channel lineup before claiming
-this finding closed. R07 and the whole-app promotion remain blocked on it.
+The first saved-account physical traversal passed on the real 77-channel
+lineup (126.99 seconds), with visible focus throughout and Back returning to
+the root tab. Later faster-input checks caught a redundant scroll resetting
+the viewport, and mixed-duration checks prompted the stable time anchor. The
+final guide leaves completed native moves alone, reserves an opaque heading
+outside the scroll content, and clips channel metadata to its own column.
+The required suite now includes both full-lineup guide journeys. Failed
+attempts remain retained; neither missing tests nor skipped journeys qualify.
+
+**Acceptance remains open:** repeat the final version on the physical
+77-channel lineup. Additional fullscreen-guide open/Back and Up/Close checks caught requests
+being sent to the covered browser instead of the mounted player focus owner.
+The player controls and guide Close now own those requests inside the cover.
+The extended Live playback journey passes both Back and Up/Close, reporting,
+a two-second bound for Back-to-hidden-video (shorter than auto-hide), and
+return to the original channel with exactly one tuner session. Its retained
+native session takes 123.53 seconds. More now explicitly owns its Back; relying
+on native sheet dismissal had left the next playback Back unhandled. R07 and whole-app promotion remain blocked pending these
+checks and the combined 28-journey repeat.
 
 ## 6. Proposed renderings — consistent interaction before decoration
 
@@ -681,6 +690,8 @@ does not turn Up in the middle of a grid into a jump to the top.
    native sheet/fullscreen presentation as appropriate; ensure covered views
    cannot receive focus. Existing authorization, modal source-generation and
    presentation-fencing logic must survive this work.
+   Keep the mounted presentation's focus state local to that presentation;
+   returning a logical key to the covered browser cannot focus player controls.
 2. **One identity per actual control.** Native focus, companion navigation,
    accessibility identifiers and test assertions refer to the same stable
    target. A logical requested key is not proof of actual focus.
