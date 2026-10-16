@@ -7,7 +7,7 @@ use plurx_core::{
     sharing_catalogue_details::FileRevision,
     sharing_receiver_sessions::{ReceiverProducerKind, ReceiverSessionIntent, RemoteSourceRecipe},
     store::{
-        media_session_principal_rebuild_schema, sharing_catalogue::ReceiverCatalogueScope,
+        sharing_catalogue::ReceiverCatalogueScope, SharingReceiverIngressStore,
         SharingReceiverSessionStore,
     },
 };
@@ -17,40 +17,11 @@ use uuid::Uuid;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("actual voter observer");
-    assert_eq!(
-        client
-            .metrics_db()
-            .await
-            .expect("membership")
-            .membership_config
-            .voter_ids()
-            .count(),
-        3
-    );
-    for statement in media_session_principal_rebuild_schema().split("-- next statement\n") {
-        client
-            .execute(
-                statement.trim().trim_end_matches(';').to_owned(),
-                hiqlite::params!(),
-            )
-            .await
-            .expect("frozen principal fixture before first session query");
-    }
+    with_installed_source_three_voters(|store, client, _members| async move {
+
     client
         .execute(
-            "INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1000)",
+            "INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1000) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             hiqlite::params!(),
         )
         .await
@@ -1013,6 +984,12 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                 attachment: attachment.clone(),
                 confirmation: "a".repeat(64),
             };
+            assert!(store.receiver_ingress_snapshot(&retained).await.expect("custody observation").is_none());
+            assert_eq!(store.retire_receiver_session(&witness).await.expect("unsealed retirement refuses"), ReceiverRetirementOutcome::Refused);
+            let identity = plurx_core::sharing_receiver_delivery::receiver_retained_owner_identity(&activation.recipe_json, &attachment).expect("canonical retained binding identity");
+            let sealed = store.seal_receiver_ingress_route(&retained, &identity).await.expect("seal retained empty ingress").expect("exact route fence");
+            assert!(sealed.state.is_sealed());
+            assert_eq!(sealed.state.open().count(), 0, "metadata fixture registered no physical ingress");
             client.execute("UPDATE sharing_delivery_grants SET state='active' WHERE token_hash=? AND incarnation_id=?",hiqlite::params![delivery.token_hash.clone(),attachment.owner.incarnation_id]).await.expect("retained grant corruption fixture");
             client.execute("CREATE TRIGGER retirement_ignore_grant BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignored grant revocation");
             assert_eq!(
@@ -1124,6 +1101,7 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
             );
         }
     }
+    }).await;
 }
 
 /// This witness exercises metadata only; it never represents a Source producer
@@ -1159,37 +1137,8 @@ async fn sharing_receiver_pending_retirement_three_voters_refuses_takeover_and_i
         store::SharingReceiverRetirementStore,
     };
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("actual voter observer");
-    assert_eq!(
-        client
-            .metrics_db()
-            .await
-            .expect("real roster")
-            .membership_config
-            .voter_ids()
-            .count(),
-        3
-    );
-    for s in media_session_principal_rebuild_schema().split("-- next statement\n") {
-        client
-            .execute(
-                s.trim().trim_end_matches(';').to_owned(),
-                hiqlite::params!(),
-            )
-            .await
-            .expect("exact principal layout");
-    }
+    with_installed_source_three_voters(|store, client, _members| async move {
+
     for assigned in [false, true] {
         let user = store
             .create_user(&format!("pending-{assigned}"), "hash", false)
@@ -1349,6 +1298,7 @@ async fn sharing_receiver_pending_retirement_three_voters_refuses_takeover_and_i
             .await
             .expect("next case");
     }
+    }).await;
 }
 
 /// Metadata-only witness: the claim CAS stands in for the daemon's private
@@ -1393,40 +1343,11 @@ async fn sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirme
         },
     };
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("actual voter observer");
-    assert_eq!(
-        client
-            .metrics_db()
-            .await
-            .expect("membership")
-            .membership_config
-            .voter_ids()
-            .count(),
-        3
-    );
-    for statement in media_session_principal_rebuild_schema().split("-- next statement\n") {
-        client
-            .execute(
-                statement.trim().trim_end_matches(';').to_owned(),
-                hiqlite::params!(),
-            )
-            .await
-            .expect("principal layout");
-    }
+    with_installed_source_three_voters(|store, client, _members| async move {
+
     client
         .execute(
-            "INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1000)",
+            "INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1000) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             hiqlite::params!(),
         )
         .await
@@ -1660,6 +1581,16 @@ async fn sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirme
             .expect("record"),
         ReceiverSourceWrite::Refused
     );
+    let current_route = store.media_session_route_by_incarnation(&inc).await.expect("claimed route").expect("retained exact owner");
+    assert!(store.receiver_ingress_snapshot(&current_route).await.expect("custody observation").is_none());
+    let unsealed = OrphanNeverDispatched { intent: won.intent().clone(), owner: won.owner().clone() };
+    assert_eq!(store.retire_receiver_session(&unsealed).await.expect("unsealed orphan retirement refuses"), ReceiverRetirementOutcome::Refused);
+    // Metadata-only, never-dispatched fixture: no transport registered or End
+    // acknowledgement is fabricated. Install the exact route's empty fence.
+    let identity = format!("{:x}", sha2::Sha256::digest(serde_json::to_vec(&serde_json::json!({"incarnation":won.owner().incarnation_id,"session":won.owner().session_id,"node":won.owner().owner_node_id,"epoch":won.owner().owner_epoch,"request":won.owner().request_id})).expect("metadata owner identity")));
+    let sealed = store.seal_receiver_ingress_route(&current_route, &identity).await.expect("seal never-dispatched empty ingress").expect("exact orphan route fence");
+    assert!(sealed.state.is_sealed());
+    assert_eq!(sealed.state.open().count(), 0, "metadata fixture registered no physical ingress");
     let mut old_owner = won.owner().clone();
     old_owner.owner_node_id = "B-dead".into();
     old_owner.owner_epoch = route.owner_epoch;
@@ -1711,4 +1642,167 @@ async fn sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirme
         .expect("inventory")
         .orphans
         .is_empty());
+    }).await;
+}
+
+// Use the daemon's actual join and Source installation path. Catch test panics
+// only to drain owned voters before unwinding; no readiness evidence is mocked.
+pub(super) async fn with_installed_source_three_voters<F, Fut>(test: F)
+where
+    F: FnOnce(HiqliteAuthStore, Client, InstalledSourceMembers) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+    use futures_util::FutureExt;
+    use plurx_core::cluster::membership::{
+        FinalizeJoinRequest, MembershipManager, RedeemJoinRequest,
+    };
+    async fn redeem(
+        State(manager): State<MembershipManager>,
+        Json(request): Json<RedeemJoinRequest>,
+    ) -> StatusCode {
+        match manager.redeem(&request).await {
+            Ok(()) => StatusCode::NO_CONTENT,
+            Err(_) => StatusCode::CONFLICT,
+        }
+    }
+    async fn finalize(
+        State(manager): State<MembershipManager>,
+        Json(request): Json<FinalizeJoinRequest>,
+    ) -> StatusCode {
+        match manager.finalize(&request).await {
+            Ok(()) => StatusCode::NO_CONTENT,
+            Err(_) => StatusCode::CONFLICT,
+        }
+    }
+    install_contract_crypto_provider();
+    let roots = (0..3)
+        .map(|_| tempfile::tempdir().expect("owned Source voter root"))
+        .collect::<Vec<_>>();
+    let observed = startup_observer::MeasuredPeers::default();
+    let mut members = Vec::new();
+    let mut gateway = None;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("owned join gateway");
+        let address = listener.local_addr().expect("join address");
+        let mut config = one_voter_config(roots[0].path());
+        config.server.bind = address;
+        config.cluster.join_url = format!("http://{address}");
+        drop(SqliteStore::open(&roots[0].path().join("plurx.db")).expect("baseline SQLite"));
+        members.push(
+            observed
+                .select(&config, false)
+                .await
+                .expect("actual first voter"),
+        );
+        let manager = members[0].membership_manager();
+        let app = Router::new()
+            .route("/api/v1/cluster/join/redeem", post(redeem))
+            .route("/api/v1/cluster/join/finalize", post(finalize))
+            .with_state(manager.clone())
+            .merge(startup_observer::MeasuredPeers::route(manager.clone()));
+        gateway = Some(tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("join gateway");
+        }));
+        for root in &roots[1..] {
+            let token = manager
+                .issue_token(Duration::from_secs(120))
+                .await
+                .expect("actual join invitation");
+            let token_path = root.path().join("join.token");
+            std::fs::write(&token_path, format!("{}\n", token.token)).expect("owned join token");
+            let mut joined = one_voter_config(root.path());
+            joined.server.bind = format!("127.0.0.1:{}", contract_free_ports(1)[0])
+                .parse()
+                .expect("node HTTP origin");
+            joined.cluster.join_token_file = token_path;
+            members.push(
+                observed
+                    .select(&joined, true)
+                    .await
+                    .expect("actual joined voter"),
+            );
+        }
+        let client = members[0].local_client().expect("actual Source client");
+        assert_eq!(
+            client
+                .metrics_db()
+                .await
+                .expect("actual membership")
+                .membership_config
+                .voter_ids()
+                .count(),
+            3
+        );
+        members[0]
+            .store
+            .put_setting("sharing_enabled", "true")
+            .await
+            .expect("saved Source choice");
+        for member in &members {
+            member
+                .membership_manager()
+                .prepare_purpose_master(Arc::clone(&member.credential_key))
+                .await
+                .expect("selected purpose master");
+        }
+        for (index, member) in members.iter_mut().enumerate() {
+            assert_eq!(
+                member
+                    .prepare_source_schema_before_serving()
+                    .await
+                    .expect("actual rolling Source installation"),
+                index == 2
+            );
+        }
+        for member in &members {
+            assert!(member
+                .membership_manager()
+                .source_layout_ready()
+                .await
+                .expect("verified Source layout"));
+        }
+        let store = HiqliteAuthStore::open(
+            client.clone(),
+            &roots[0].path().join("contract-telemetry.db"),
+        )
+        .await
+        .expect("installed Source store");
+        let context = InstalledSourceMembers {
+            local_node: members[0].identity.node_id.clone(),
+            local_raft: members[0].identity.raft_id,
+            other_raft: members[1].identity.raft_id,
+            credential: Arc::clone(&members[0].credential_key),
+        };
+        test(store, client, context).await;
+    })
+    .catch_unwind()
+    .await;
+    let mut shutdown_error = None;
+    for member in &members {
+        if let Err(error) = member.shutdown().await {
+            shutdown_error.get_or_insert(error);
+        }
+    }
+    if let Some(task) = gateway {
+        task.abort();
+        let _ = task.await;
+    }
+    drop(observed);
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+    assert!(
+        shutdown_error.is_none(),
+        "owned voter shutdown: {shutdown_error:?}"
+    );
+}
+
+pub(super) struct InstalledSourceMembers {
+    pub local_node: String,
+    pub local_raft: u64,
+    pub other_raft: u64,
+    pub credential: Arc<plurx_core::secrets::CredentialKey>,
 }

@@ -220,6 +220,23 @@ async fn sharing_principal_owner_deletion_and_revocation_fence_three_voter_autho
     {
         result.expect("populate two independent grants");
     }
+    // Candidate DDL is a three-voter SQL authority fixture, not an admitted
+    // Source installation. Production readers must continue to reject it.
+    let error = store
+        .media_session_route_by_incarnation("00000000-0000-4000-a000-000000000001")
+        .await
+        .expect_err("candidate-only runtime layout must refuse");
+    assert!(
+        error
+            .to_string()
+            .contains("incomplete session ownership layout"),
+        "{error}"
+    );
+    assert_owner_deletion_and_revocation(&client).await;
+    drop(store);
+}
+
+async fn assert_installed_principal_reads(store: &HiqliteAuthStore, client: &Client) {
     for id in [
         "00000000-0000-4000-a000-000000000001",
         "00000000-0000-4000-a000-000000000002",
@@ -281,26 +298,29 @@ async fn sharing_principal_owner_deletion_and_revocation_fence_three_voter_autho
         .expect("cross-grant read")
         .is_none());
     client.execute("UPDATE media_playback_pointers SET current_incarnation_id='00000000-0000-4000-a000-000000000001' WHERE share_grant_id='00000000-0000-4000-a000-000000000001'", hiqlite::params!()).await.expect("restore pointer fixture");
+}
+
+async fn assert_owner_deletion_and_revocation(client: &Client) {
     client
         .execute("DELETE FROM users WHERE id=1", hiqlite::params!())
         .await
         .expect("delete local owner");
-    assert_eq!(text_rows(&client, "SELECT state || ':' || terminal_reason || ':' || lease_expires_at_ms AS value FROM media_sessions WHERE incarnation_id='live'".into()).await, ["ended:deleted:0"]);
-    assert_eq!(text_rows(&client, "SELECT CAST(expires_at_ms AS TEXT) AS value FROM job_leases WHERE resource='session:live'".into()).await, ["0"]);
+    assert_eq!(text_rows(client, "SELECT state || ':' || terminal_reason || ':' || lease_expires_at_ms AS value FROM media_sessions WHERE incarnation_id='live'".into()).await, ["ended:deleted:0"]);
+    assert_eq!(text_rows(client, "SELECT CAST(expires_at_ms AS TEXT) AS value FROM job_leases WHERE resource='session:live'".into()).await, ["0"]);
     assert_eq!(
         text_rows(
-            &client,
+            client,
             "SELECT state AS value FROM sharing_delivery_grants WHERE incarnation_id='live'".into()
         )
         .await,
         ["revoked"]
     );
-    assert_eq!(text_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='sharing' AND state='active'".into()).await, ["2"]);
+    assert_eq!(text_rows(client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='sharing' AND state='active'".into()).await, ["2"]);
     client.execute("INSERT INTO users(id,username,password_hash,is_admin,created_at) VALUES(1,'replacement','hash',0,2)", hiqlite::params!()).await.expect("reuse local numeric ID");
-    assert_eq!(text_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='local' AND user_id=1 AND state!='ended'".into()).await, ["0"]);
+    assert_eq!(text_rows(client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='local' AND user_id=1 AND state!='ended'".into()).await, ["0"]);
     client.execute("UPDATE sharing_exports SET state='revoked' WHERE id='00000000-0000-4000-a000-000000000001'", hiqlite::params!()).await.expect("revoke first grant");
-    assert_eq!(text_rows(&client, "SELECT state || ':' || terminal_reason || ':' || lease_expires_at_ms AS value FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000001'".into()).await, ["ended:revoked:0"]);
-    assert_eq!(text_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='sharing' AND state='active'".into()).await, ["1"]);
+    assert_eq!(text_rows(client, "SELECT state || ':' || terminal_reason || ':' || lease_expires_at_ms AS value FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000001'".into()).await, ["ended:revoked:0"]);
+    assert_eq!(text_rows(client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='sharing' AND state='active'".into()).await, ["1"]);
     client
         .execute(
             "DELETE FROM sharing_exports WHERE id='00000000-0000-4000-a000-000000000002'",
@@ -308,21 +328,42 @@ async fn sharing_principal_owner_deletion_and_revocation_fence_three_voter_autho
         )
         .await
         .expect("delete second grant");
-    assert_eq!(text_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='sharing'".into()).await, ["2"]);
-    assert_eq!(text_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='sharing' AND state!='ended'".into()).await, ["0"]);
+    assert_eq!(text_rows(client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='sharing'".into()).await, ["2"]);
+    assert_eq!(text_rows(client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='sharing' AND state!='ended'".into()).await, ["0"]);
     assert_eq!(
         text_rows(
-            &client,
+            client,
             "SELECT session_id AS value FROM media_session_terminal_acks".into()
         )
         .await,
         ["ended-session"]
     );
     assert!(text_rows(
-        &client,
+        client,
         "SELECT owner_key AS value FROM media_playback_pointers".into()
     )
     .await
     .is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_installed_source_routes_isolate_principals_and_fence_deleted_or_revoked_owners() {
+    let _case = HIQLITE_CASE.lock().await;
+    let (_root, selected, store, client) =
+        super::sharing_principal_runtime::selected_local_source_fixture().await;
+    super::sharing_principal_runtime::activate_selected_source_fixture(&selected).await;
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-sharing.sql"))
+        .await
+        .expect("independent shared owners on actual Source layout")
+    {
+        result.expect("seed two independent shared grants");
+    }
+    assert_installed_principal_reads(&store, &client).await;
+    assert_owner_deletion_and_revocation(&client).await;
     drop(store);
+    selected
+        .shutdown()
+        .await
+        .expect("settle actual installed Source fixture");
 }

@@ -561,11 +561,49 @@ pub(crate) fn remove_jellyfin_compatibility_schema(connection: &rusqlite::Connec
         .expect("remove v98-v101 Jellyfin compatibility schema");
 }
 
+/// Rewind the complete empty managed extension in a disposable historical DB.
+#[allow(dead_code)]
+pub(crate) fn remove_managed_subtitle_schema(connection: &rusqlite::Connection) {
+    // The later extension owns triggers on files/settings that reference the
+    // queue. Remove its complete empty layout before dropping queue tables.
+    let receipts: i64 = connection
+        .query_row("SELECT count(*) FROM subtitle_model_receipts", [], |row| {
+            row.get(0)
+        })
+        .expect("count managed fixture receipts");
+    assert_eq!(
+        receipts, 0,
+        "historical fixture has no managed model receipts"
+    );
+    let managed_jobs: i64 = connection.query_row(
+        "SELECT count(*) FROM background_jobs WHERE kind IN ('subtitle_transcribe_managed','subtitle_model_operation')", [], |row| row.get(0),
+    ).expect("count managed fixture work");
+    assert_eq!(managed_jobs, 0, "historical fixture has no managed work");
+    connection
+        .execute_batch(
+            "DROP TRIGGER subtitle_managed_source_changed;
+         DROP TRIGGER subtitle_managed_source_deleted;
+         DROP TRIGGER subtitle_managed_config_write;
+         DROP TABLE subtitle_model_receipts;
+         DROP TABLE subtitle_managed_schema;
+         DROP VIEW background_job_required_resources;",
+        )
+        .expect("remove complete managed fixture extension");
+    let predecessor_view = include_str!("../../src/store/background_jobs_probe.sql")
+        .split("-- next statement\n")
+        .find(|sql| sql.contains("CREATE VIEW IF NOT EXISTS background_job_required_resources"))
+        .expect("canonical predecessor resources view");
+    connection
+        .execute_batch(predecessor_view)
+        .expect("restore canonical pre-managed fixture resources view");
+}
+
 /// Wind a current test database back across the durable-queue introduction.
 /// This touches the common queue and its v87 analysis-source reservations,
 /// never production migration.
 #[allow(dead_code)]
 pub(crate) fn remove_common_queue_schema(connection: &rusqlite::Connection) {
+    remove_managed_subtitle_schema(connection);
     connection
         .execute_batch("ALTER TABLE dv_conversions DROP COLUMN requested_manually;")
         .expect("remove later DV request provenance");

@@ -1,7 +1,6 @@
 //! Production writers against the admitted Local and installed Source layouts.
 use super::*;
 use plurx_core::playback_principal::PlaybackPrincipal;
-use plurx_core::store::media_session_principal_rebuild_schema;
 
 const REQUEST_INCARNATION: &str = "00000000-0000-4000-a000-000000000080";
 const RETRY_INCARNATION: &str = "00000000-0000-4000-a000-000000000081";
@@ -473,28 +472,66 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sharing_rebuilt_local_preparation_rejoin_abort_preserve_principal_fences() {
-    let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("fixture client");
+// This is an actual selected Local store and its owned membership lifecycle,
+// not a candidate DDL projection. Activation uses the same supported factories
+// as the request-writer regression above and keeps active Local rows intact.
+pub(super) async fn selected_local_source_fixture() -> (
+    tempfile::TempDir,
+    plurx_core::cluster::migration::SelectedStore,
+    HiqliteAuthStore,
+    Client,
+) {
+    install_contract_crypto_provider();
+    let root = tempfile::tempdir().expect("owned installed Source fixture");
+    drop(SqliteStore::open(&root.path().join("plurx.db")).expect("Source SQLite"));
+    let mut selected = startup_observer::select_applied_singleton(&one_voter_config(root.path()))
+        .await
+        .expect("actual applied Source singleton");
+    assert!(!selected
+        .prepare_source_schema_before_serving()
+        .await
+        .expect("disabled Source startup preserves Local layout"));
+    let client = selected.local_client().expect("actual singleton client");
+    let store = HiqliteAuthStore::open(client.clone(), &root.path().join("runtime-local.db"))
+        .await
+        .expect("verified Local predecessor store");
     for result in client
         .batch(include_str!("../fixtures/session-principal-local.sql"))
         .await
-        .expect("local fixture")
+        .expect("local retention fixture")
     {
-        result.expect("seed local fixture");
+        result.expect("seed Local ownership before actual activation");
     }
+    (root, selected, store, client)
+}
+
+pub(super) async fn activate_selected_source_fixture(
+    selected: &plurx_core::cluster::migration::SelectedStore,
+) {
+    selected
+        .store
+        .put_setting("sharing_enabled", "true")
+        .await
+        .expect("explicit Source activation choice");
+    let membership = selected.membership_manager();
+    membership
+        .coordinate_purpose_keys()
+        .await
+        .expect("actual purpose-key factory");
+    assert!(membership
+        .coordinate_source_schema_live()
+        .await
+        .expect("actual Source installer preserves active Local ownership"));
+    assert!(membership
+        .source_layout_ready()
+        .await
+        .expect("exact installed Source layout"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_rebuilt_local_preparation_rejoin_abort_preserve_principal_fences() {
+    let _case = HIQLITE_CASE.lock().await;
+    let (_root, selected, store, client) = selected_local_source_fixture().await;
     let current = "00000000-0000-4000-a000-000000000090";
     current_media_session(
         &store,
@@ -505,18 +542,7 @@ async fn sharing_rebuilt_local_preparation_rejoin_abort_preserve_principal_fence
         "candidate preparation",
     )
     .await;
-    let statements: Vec<(String, hiqlite::Params)> = media_session_principal_rebuild_schema()
-        .split("-- next statement\n")
-        .map(|sql| {
-            (
-                sql.trim().trim_end_matches(';').to_owned(),
-                hiqlite::params!(),
-            )
-        })
-        .collect();
-    for result in client.txn(statements).await.expect("candidate transaction") {
-        result.expect("candidate rebuild");
-    }
+    activate_selected_source_fixture(&selected).await;
     for result in client
         .batch(include_str!("../fixtures/session-principal-sharing.sql"))
         .await
@@ -524,12 +550,12 @@ async fn sharing_rebuilt_local_preparation_rejoin_abort_preserve_principal_fence
     {
         result.expect("seed shared owners");
     }
-    // The schema projection is fixed for one Store lifetime. Reopen after
-    // the fixture rebuild, as the coordinated upgrade path requires.
+    // Reopen the now-installed Source layout before exercising preparation
+    // transitions, retaining the actual selected membership owner.
     drop(store);
     let store = HiqliteAuthStore::open(
         client.clone(),
-        &cluster._root.path().join("candidate-reopened-telemetry.db"),
+        &_root.path().join("installed-reopened-telemetry.db"),
     )
     .await
     .expect("reopen rebuilt fixture store");
@@ -630,42 +656,18 @@ async fn sharing_rebuilt_local_preparation_rejoin_abort_preserve_principal_fence
     assert_eq!(request_rows(&client, "SELECT CAST(lease_expires_at_ms AS TEXT) AS value FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000001'").await, ["9000"]);
     assert_eq!(request_rows(&client, "SELECT CAST(revision AS TEXT) || ':' || expires_at_ms || ':' || updated_at_ms AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000001'").await, ["3:9000:10"]);
     assert_eq!(request_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM cache_consumer_pins WHERE consumer_kind='media_session' AND consumer_id='00000000-0000-4000-a000-000000000001' AND consumer_epoch=1 AND expires_at_ms=9000").await, ["1"]);
+    drop(store);
+    selected
+        .shutdown()
+        .await
+        .expect("settle actual Source fixture owner");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sharing_rebuilt_local_activation_preserves_owner_and_foreign_lease() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("fixture client");
-    for result in client
-        .batch(include_str!("../fixtures/session-principal-local.sql"))
-        .await
-        .expect("local fixture")
-    {
-        result.expect("local seed");
-    }
-    let statements: Vec<(String, hiqlite::Params)> = media_session_principal_rebuild_schema()
-        .split("-- next statement\n")
-        .map(|sql| {
-            (
-                sql.trim().trim_end_matches(';').to_owned(),
-                hiqlite::params!(),
-            )
-        })
-        .collect();
-    for result in client.txn(statements).await.expect("candidate transaction") {
-        result.expect("candidate rebuild");
-    }
+    let (_root, selected, store, client) = selected_local_source_fixture().await;
+    activate_selected_source_fixture(&selected).await;
     for result in client
         .batch(include_str!("../fixtures/session-principal-sharing.sql"))
         .await
@@ -839,42 +841,18 @@ async fn sharing_rebuilt_local_activation_preserves_owner_and_foreign_lease() {
     )
     .expect("shared principal");
     assert!(store.activate_media_session(&missing).await.is_err());
+    drop(store);
+    selected
+        .shutdown()
+        .await
+        .expect("settle actual Source fixture owner");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sharing_rebuilt_local_commit_binds_receipt_to_actual_predecessor_session() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("fixture client");
-    for result in client
-        .batch(include_str!("../fixtures/session-principal-local.sql"))
-        .await
-        .expect("local fixture")
-    {
-        result.expect("local seed");
-    }
-    let statements: Vec<(String, hiqlite::Params)> = media_session_principal_rebuild_schema()
-        .split("-- next statement\n")
-        .map(|sql| {
-            (
-                sql.trim().trim_end_matches(';').to_owned(),
-                hiqlite::params!(),
-            )
-        })
-        .collect();
-    for result in client.txn(statements).await.expect("candidate transaction") {
-        result.expect("candidate rebuild");
-    }
+    let (_root, selected, store, client) = selected_local_source_fixture().await;
+    activate_selected_source_fixture(&selected).await;
     for result in client
         .batch(include_str!("../fixtures/session-principal-sharing.sql"))
         .await
@@ -1004,42 +982,18 @@ async fn sharing_rebuilt_local_commit_binds_receipt_to_actual_predecessor_sessio
         assert_eq!(staged.principal, principal);
         assert_eq!(staged.staged_incarnation_id, grant);
     }
+    drop(store);
+    selected
+        .shutdown()
+        .await
+        .expect("settle actual Source fixture owner");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sharing_rebuilt_local_renewal_takeover_refuse_shared_and_deleted_owners() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("fixture client");
-    for result in client
-        .batch(include_str!("../fixtures/session-principal-local.sql"))
-        .await
-        .expect("local fixture")
-    {
-        result.expect("local seed");
-    }
-    let statements: Vec<(String, hiqlite::Params)> = media_session_principal_rebuild_schema()
-        .split("-- next statement\n")
-        .map(|sql| {
-            (
-                sql.trim().trim_end_matches(';').to_owned(),
-                hiqlite::params!(),
-            )
-        })
-        .collect();
-    for result in client.txn(statements).await.expect("candidate transaction") {
-        result.expect("candidate rebuild");
-    }
+    let (_root, selected, store, client) = selected_local_source_fixture().await;
+    activate_selected_source_fixture(&selected).await;
     for result in client
         .batch(include_str!("../fixtures/session-principal-sharing.sql"))
         .await
@@ -1156,42 +1110,18 @@ async fn sharing_rebuilt_local_renewal_takeover_refuse_shared_and_deleted_owners
         .expect("deleted local takeover refusal")
         .is_none());
     assert_eq!(request_rows(&client, "SELECT owner_node_id || ':' || fence || ':' || revision || ':' || expires_at_ms || ':' || updated_at_ms AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000160'").await, ["successor-owner:2:3:9000:10"]);
+    drop(store);
+    selected
+        .shutdown()
+        .await
+        .expect("settle actual Source fixture owner");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sharing_rebuilt_cleanup_preserves_foreign_preparations_and_retires_shared_routes() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("fixture client");
-    for result in client
-        .batch(include_str!("../fixtures/session-principal-local.sql"))
-        .await
-        .expect("local fixture")
-    {
-        result.expect("local seed");
-    }
-    let statements: Vec<(String, hiqlite::Params)> = media_session_principal_rebuild_schema()
-        .split("-- next statement\n")
-        .map(|sql| {
-            (
-                sql.trim().trim_end_matches(';').to_owned(),
-                hiqlite::params!(),
-            )
-        })
-        .collect();
-    for result in client.txn(statements).await.expect("candidate transaction") {
-        result.expect("candidate rebuild");
-    }
+    let (_root, selected, store, client) = selected_local_source_fixture().await;
+    activate_selected_source_fixture(&selected).await;
     for result in client
         .batch(include_str!("../fixtures/session-principal-sharing.sql"))
         .await
@@ -1390,42 +1320,18 @@ async fn sharing_rebuilt_cleanup_preserves_foreign_preparations_and_retires_shar
         .await
         .expect("deleted local handoff replay refusal")
         .is_none());
+    drop(store);
+    selected
+        .shutdown()
+        .await
+        .expect("settle actual Source fixture owner");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sharing_rebuilt_terminal_ack_and_projection_retire_only_exact_shared_owner() {
     let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("fixture client");
-    for result in client
-        .batch(include_str!("../fixtures/session-principal-local.sql"))
-        .await
-        .expect("local fixture")
-    {
-        result.expect("local seed");
-    }
-    let statements: Vec<(String, hiqlite::Params)> = media_session_principal_rebuild_schema()
-        .split("-- next statement\n")
-        .map(|sql| {
-            (
-                sql.trim().trim_end_matches(';').to_owned(),
-                hiqlite::params!(),
-            )
-        })
-        .collect();
-    for result in client.txn(statements).await.expect("candidate transaction") {
-        result.expect("candidate rebuild");
-    }
+    let (_root, selected, store, client) = selected_local_source_fixture().await;
+    activate_selected_source_fixture(&selected).await;
     for result in client
         .batch(include_str!("../fixtures/session-principal-sharing.sql"))
         .await
@@ -1634,4 +1540,9 @@ async fn sharing_rebuilt_terminal_ack_and_projection_retire_only_exact_shared_ow
             .expect("other grant retained ack"),
         Some(acknowledgement)
     );
+    drop(store);
+    selected
+        .shutdown()
+        .await
+        .expect("settle actual Source fixture owner");
 }

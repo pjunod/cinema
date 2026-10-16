@@ -13728,6 +13728,7 @@ fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
         );
         conn.execute_batch(include_str!("fixtures/fragment-prune-worst.sql"))
             .expect("populated upgrade workload");
+        queue_fixture::remove_managed_subtitle_schema(&conn);
         drop_composed_v92_v93_columns(&conn);
         conn.execute_batch(
             "DROP INDEX analysis_requests_result_target_force;
@@ -18170,7 +18171,39 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     // wire identities, compatibility logins and bounded negotiations
     // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
     // v102–v103).
-    assert_eq!(report.tables.len(), 77);
+    // Sharing adds fourteen v104 tables and the v105 ingress custody table.
+    // They are planned even for v14, whose source has no rows for any of them.
+    let sharing_tables = [
+        "sharing_identity",
+        "sharing_invitations",
+        "sharing_exports",
+        "sharing_export_libraries",
+        "sharing_imports",
+        "sharing_viewers",
+        "sharing_assignments",
+        "sharing_watch",
+        "sharing_rotations",
+        "sharing_import_rotations",
+        "sharing_catalogue_revisions",
+        "sharing_endpoint_manifest",
+        "sharing_relay_upstream",
+        "sharing_delivery_grants",
+        "sharing_ingress_custody",
+    ];
+    assert_eq!(report.tables.len(), 92);
+    assert_eq!(
+        report
+            .tables
+            .iter()
+            .filter(|table| table.table.starts_with("sharing_"))
+            .map(|table| (table.table.as_str(), table.row_count))
+            .collect::<std::collections::BTreeMap<_, _>>(),
+        sharing_tables
+            .into_iter()
+            .map(|name| (name, 0))
+            .collect::<std::collections::BTreeMap<_, _>>(),
+        "v14 reports every later sharing table with no imported rows",
+    );
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -18312,10 +18345,11 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
 
     let source = tempfile::tempdir().expect("current SQLite import fixture directory");
     let source_path = populated_current_import_fixture(source.path());
-    // This shared fixture seeds the old domain rows with SQL. Run the actual
-    // v71 upgrade before calling it a current backup, so live work has the
-    // same sealed mapping and common queue rows a real upgraded daemon has.
-    let connection = rusqlite::Connection::open(&source_path).expect("open upgrade fixture");
+    // This current-schema fixture seeds legacy domain rows with SQL after
+    // startup sealed an empty queue inbox. Run the real capture payload again
+    // against that empty inbox; this prepares current import data, not evidence
+    // of a historical schema upgrade. Keep all later domain rows and lineage.
+    let connection = rusqlite::Connection::open(&source_path).expect("open current fixture");
     assert_eq!(
         connection
             .query_row("SELECT COUNT(*) FROM background_jobs", [], |row| row
@@ -18323,15 +18357,24 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
             .expect("empty common queue fixture"),
         0
     );
+    let inbox_rows: i64 = connection
+        .query_row("SELECT count(*) FROM background_job_legacy", [], |row| {
+            row.get(0)
+        })
+        .expect("current fixture inbox");
+    assert_eq!(inbox_rows, 0, "capture starts with an empty fixture inbox");
     connection
-        .execute_batch(
-            "DELETE FROM background_job_migration;
-            ALTER TABLE dv_conversions DROP COLUMN requested_manually;
-            PRAGMA user_version = 70;",
-        )
-        .expect("stage pre-queue fixture");
+        .execute_batch("DELETE FROM background_job_migration;")
+        .expect("clear empty current-fixture capture seal");
+    connection
+        .execute_batch(include_str!("../src/store/background_jobs_schema.sql"))
+        .expect("capture current-fixture legacy rows with production schema payload");
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("current fixture schema version");
+    assert_eq!(version, plurx_core::store::SQLITE_SCHEMA_VERSION);
     drop(connection);
-    let upgraded = SqliteStore::open(&source_path).expect("apply common queue migration");
+    let upgraded = SqliteStore::open(&source_path).expect("reopen current queue fixture");
     assert!(upgraded
         .import_legacy_jobs(1_000)
         .await
@@ -36074,6 +36117,20 @@ fn watch_fence_reader(store: &Arc<HiqliteAuthStore>, applied_index: u64) -> Cata
 }
 
 #[cfg(feature = "cluster-read-cost-validation")]
+async fn counted_watch_read<T>(
+    operation: impl Future<Output = Result<T, plurx_core::error::StoreError>>,
+) -> Result<T, plurx_core::error::StoreError> {
+    let request = plurx_core::store::HttpStoreOperationCounts::default();
+    let result = plurx_core::store::scope_http_store_operations(request.clone(), operation).await;
+    assert_eq!(
+        request.watch_reads(),
+        1,
+        "exactly one watch-state statement"
+    );
+    result
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
 fn assert_watch_read_path(store: &HiqliteAuthStore, local: bool, label: &str) {
     let counts = store.validation_operation_counts();
     assert_eq!(
@@ -36081,7 +36138,10 @@ fn assert_watch_read_path(store: &HiqliteAuthStore, local: bool, label: &str) {
             counts.consistent_query_calls,
             counts.non_consistent_query_calls
         ),
-        if local { (0, 1) } else { (1, 0) },
+        // The bounded path first reads its saved preference locally under
+        // the same proof, then issues the one separately counted watch read.
+        // Authority paths do not perform that bounded preference lookup.
+        if local { (0, 2) } else { (1, 0) },
         "{label}: expected {} watch read",
         if local { "one local" } else { "one Authority" }
     );
@@ -36151,10 +36211,13 @@ async fn watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_wri
     // header: Authority. Its record cannot prove the user wrote nothing
     // through a peer since.
     writer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&writer, commit + 1_000)
-        .watch_map(fixture.user, &ids, None)
-        .await
-        .expect("writer without header");
+    let actual = counted_watch_read(watch_fence_reader(&writer, commit + 1_000).watch_map(
+        fixture.user,
+        &ids,
+        None,
+    ))
+    .await
+    .expect("writer without header");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&writer, false, "writer without X-Plurx-Read-After");
 
@@ -36163,20 +36226,26 @@ async fn watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_wri
     // the bounded lag proof and the client's floor alone would allow a local
     // read.
     writer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&writer, commit - 1)
-        .watch_map(fixture.user, &ids, Some(progress_index))
-        .await
-        .expect("writer below its fence");
+    let actual = counted_watch_read(watch_fence_reader(&writer, commit - 1).watch_map(
+        fixture.user,
+        &ids,
+        Some(progress_index),
+    ))
+    .await
+    .expect("writer below its fence");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&writer, false, "writer below its own write");
 
     // Node A once it has applied the write, for the client that echoed it:
     // local, and it sees the write.
     writer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&writer, commit)
-        .watch_map(fixture.user, &ids, Some(commit))
-        .await
-        .expect("writer at its fence");
+    let actual = counted_watch_read(watch_fence_reader(&writer, commit).watch_map(
+        fixture.user,
+        &ids,
+        Some(commit),
+    ))
+    .await
+    .expect("writer at its fence");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&writer, true, "writer at its own write");
 
@@ -36185,55 +36254,77 @@ async fn watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_wri
     // however far ahead it is.
     let peer = Arc::new(open_contract_hiqlite_store(&cluster).await);
     peer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&peer, commit + 1_000)
-        .watch_map(fixture.user, &ids, None)
-        .await
-        .expect("peer without header");
+    let actual = counted_watch_read(watch_fence_reader(&peer, commit + 1_000).watch_map(
+        fixture.user,
+        &ids,
+        None,
+    ))
+    .await
+    .expect("peer without header");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&peer, false, "peer without X-Plurx-Read-After");
 
     // With the writer's index echoed and applied past it: local.
     peer.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&peer, commit)
-        .watch_map(fixture.user, &ids, Some(commit))
-        .await
-        .expect("peer with header, applied");
+    let actual = counted_watch_read(watch_fence_reader(&peer, commit).watch_map(
+        fixture.user,
+        &ids,
+        Some(commit),
+    ))
+    .await
+    .expect("peer with header, applied");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&peer, true, "peer applied past X-Plurx-Read-After");
 
     // With the header but not yet applied: Authority.
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit - 1)
-        .watch_map(fixture.user, &ids, Some(commit))
-        .await
-        .expect("peer with header, behind");
+    counted_watch_read(watch_fence_reader(&peer, commit - 1).watch_map(
+        fixture.user,
+        &ids,
+        Some(commit),
+    ))
+    .await
+    .expect("peer with header, behind");
     assert_watch_read_path(&peer, false, "peer behind X-Plurx-Read-After");
 
     // Every reader method takes the same fence, not only the watch map.
     let containers = vec![fixture.show, fixture.season];
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit + 1_000)
-        .watch_summary(fixture.user, &ids, &containers, None)
-        .await
-        .expect("peer summary without header");
+    counted_watch_read(watch_fence_reader(&peer, commit + 1_000).watch_summary(
+        fixture.user,
+        &ids,
+        &containers,
+        None,
+    ))
+    .await
+    .expect("peer summary without header");
     assert_watch_read_path(&peer, false, "summary without header");
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit + 1_000)
-        .progress_rails(fixture.user, 20, None)
-        .await
-        .expect("peer rails without header");
+    counted_watch_read(watch_fence_reader(&peer, commit + 1_000).progress_rails(
+        fixture.user,
+        20,
+        None,
+    ))
+    .await
+    .expect("peer rails without header");
     assert_watch_read_path(&peer, false, "rails without header");
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit + 1_000)
-        .watch_rollup(fixture.user, fixture.show, None)
-        .await
-        .expect("peer rollup without header");
+    counted_watch_read(watch_fence_reader(&peer, commit + 1_000).watch_rollup(
+        fixture.user,
+        fixture.show,
+        None,
+    ))
+    .await
+    .expect("peer rollup without header");
     assert_watch_read_path(&peer, false, "rollup without header");
     peer.validation_reset_operation_counts();
-    watch_fence_reader(&peer, commit)
-        .watch_rollup(fixture.user, fixture.show, Some(commit))
-        .await
-        .expect("peer rollup with header");
+    counted_watch_read(watch_fence_reader(&peer, commit).watch_rollup(
+        fixture.user,
+        fixture.show,
+        Some(commit),
+    ))
+    .await
+    .expect("peer rollup with header");
     assert_watch_read_path(&peer, true, "rollup with header");
 }
 
@@ -36306,47 +36397,62 @@ async fn watch_fence_a_peers_older_record_does_not_prove_a_write_through_another
     let applied = phone_index - 1;
     assert!(applied >= tv_index, "B has applied its own write");
     node_b.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&node_b, applied)
-        .watch_map(fixture.user, &ids, None)
-        .await
-        .expect("B without header");
+    let actual = counted_watch_read(watch_fence_reader(&node_b, applied).watch_map(
+        fixture.user,
+        &ids,
+        None,
+    ))
+    .await
+    .expect("B without header");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&node_b, false, "B's own older record, no header");
     let containers = vec![fixture.show, fixture.season];
     node_b.validation_reset_operation_counts();
-    watch_fence_reader(&node_b, applied)
-        .watch_summary(fixture.user, &ids, &containers, None)
-        .await
-        .expect("B summary without header");
+    counted_watch_read(watch_fence_reader(&node_b, applied).watch_summary(
+        fixture.user,
+        &ids,
+        &containers,
+        None,
+    ))
+    .await
+    .expect("B summary without header");
     assert_watch_read_path(&node_b, false, "B summary, no header");
     node_b.validation_reset_operation_counts();
-    watch_fence_reader(&node_b, applied)
-        .progress_rails(fixture.user, 20, None)
+    counted_watch_read(watch_fence_reader(&node_b, applied).progress_rails(fixture.user, 20, None))
         .await
         .expect("B rails without header");
     assert_watch_read_path(&node_b, false, "B rails, no header");
     node_b.validation_reset_operation_counts();
-    watch_fence_reader(&node_b, applied)
-        .watch_rollup(fixture.user, fixture.show, None)
-        .await
-        .expect("B rollup without header");
+    counted_watch_read(watch_fence_reader(&node_b, applied).watch_rollup(
+        fixture.user,
+        fixture.show,
+        None,
+    ))
+    .await
+    .expect("B rollup without header");
     assert_watch_read_path(&node_b, false, "B rollup, no header");
 
     // A client floor older than B's own write is raised by B's record.
     node_b.validation_reset_operation_counts();
-    watch_fence_reader(&node_b, tv_index - 1)
-        .watch_map(fixture.user, &ids, Some(1))
-        .await
-        .expect("B below its own write");
+    counted_watch_read(watch_fence_reader(&node_b, tv_index - 1).watch_map(
+        fixture.user,
+        &ids,
+        Some(1),
+    ))
+    .await
+    .expect("B below its own write");
     assert_watch_read_path(&node_b, false, "B below its own record");
 
     // The phone's index, echoed and applied on B: local, and it shows the
     // episode watched.
     node_b.validation_reset_operation_counts();
-    let actual = watch_fence_reader(&node_b, phone_index)
-        .watch_map(fixture.user, &ids, Some(phone_index))
-        .await
-        .expect("B with the phone's index");
+    let actual = counted_watch_read(watch_fence_reader(&node_b, phone_index).watch_map(
+        fixture.user,
+        &ids,
+        Some(phone_index),
+    ))
+    .await
+    .expect("B with the phone's index");
     assert_eq!(serde_json::to_value(actual).expect("serialize"), expected);
     assert_watch_read_path(&node_b, true, "B applied past the echoed write");
 }
@@ -36478,18 +36584,25 @@ async fn watch_summary_and_progress_rails_are_one_read_matching_the_separate_rea
     assert_eq!(request.watch_reads(), 1, "rails: one counted watch read");
 
     store.validation_reset_operation_counts();
-    let summary = watch_fence_reader(&store, commit)
-        .watch_summary(fixture.user, &item_ids, &container_ids, Some(commit))
-        .await
-        .expect("local summary");
+    let summary = counted_watch_read(watch_fence_reader(&store, commit).watch_summary(
+        fixture.user,
+        &item_ids,
+        &container_ids,
+        Some(commit),
+    ))
+    .await
+    .expect("local summary");
     check_summary(summary, "local");
     assert_watch_read_path(&store, true, "local summary is one local read");
 
     store.validation_reset_operation_counts();
-    let rails = watch_fence_reader(&store, commit)
-        .progress_rails(fixture.user, 20, Some(commit))
-        .await
-        .expect("local rails");
+    let rails = counted_watch_read(watch_fence_reader(&store, commit).progress_rails(
+        fixture.user,
+        20,
+        Some(commit),
+    ))
+    .await
+    .expect("local rails");
     assert_eq!(
         serde_json::to_value(rails).expect("serialize rails"),
         expected_rails,
