@@ -261,7 +261,7 @@ impl TranscodeManager {
         sw_budget: usize,
         max_hw: usize,
     ) -> Result<LiveAdmission, String> {
-        let _queued = (priority == Priority::Live).then(|| self.admissions.wait_for_slot());
+        let mut queued = (priority == Priority::Live).then(|| self.admissions.queue_for_slot());
         let deadline = Instant::now() + max_wait;
 
         if preferred != Encoder::Software {
@@ -310,6 +310,9 @@ impl TranscodeManager {
                     // A slot exists but the CPU the decode needs does not.
                     // Bounded, and answered honestly: the old accounting would
                     // have started here and simply not reserved the cores.
+                    if let Some(waiting) = queued.as_mut() {
+                        waiting.mark_capacity_blocked();
+                    }
                     let now = Instant::now();
                     if now < deadline {
                         tokio::time::sleep(ADMISSION_POLL.min(deadline - now)).await;
@@ -326,6 +329,9 @@ impl TranscodeManager {
                     return Err(capacity_error(why));
                 }
 
+                if let Some(waiting) = queued.as_mut() {
+                    waiting.mark_capacity_blocked();
+                }
                 let now = Instant::now();
                 if now < deadline {
                     tokio::time::sleep(ADMISSION_POLL.min(deadline - now)).await;
@@ -405,6 +411,9 @@ impl TranscodeManager {
                     hw_slot: None,
                     sw_permit: Some(permit),
                 });
+            }
+            if let Some(waiting) = queued.as_mut() {
+                waiting.mark_capacity_blocked();
             }
             let now = Instant::now();
             if now < deadline {

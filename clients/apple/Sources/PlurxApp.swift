@@ -20,19 +20,30 @@ struct PlaybackAcceptanceLaunch: Equatable {
         defaults: UserDefaults = .standard,
         arguments: [String] = ProcessInfo.processInfo.arguments
     ) -> Self? {
-        let fileId = defaults.integer(forKey: "plurx.acceptance.fileId")
+        let fileId = integer("plurx.acceptance.fileId", defaults: defaults, arguments: arguments)
         guard fileId > 0 else { return nil }
-        let height = defaults.integer(forKey: "plurx.acceptance.height")
+        let height = integer("plurx.acceptance.height", defaults: defaults, arguments: arguments)
         return Self(
             requestedOrigin: originArgument(arguments) ?? "",
-            itemId: max(0, defaults.integer(forKey: "plurx.acceptance.itemId")),
+            itemId: max(0, integer("plurx.acceptance.itemId", defaults: defaults, arguments: arguments)),
             fileId: fileId,
-            startMs: max(0, defaults.integer(forKey: "plurx.acceptance.startMs")),
-            durationMs: max(0, defaults.integer(forKey: "plurx.acceptance.durationMs")),
+            startMs: max(0, integer("plurx.acceptance.startMs", defaults: defaults, arguments: arguments)),
+            durationMs: max(0, integer("plurx.acceptance.durationMs", defaults: defaults, arguments: arguments)),
             title: defaults.string(forKey: "plurx.acceptance.title") ?? "Playback acceptance",
             height: height > 0 ? height : nil,
             probesEnabled: defaults.bool(forKey: "plurx.acceptance.probe")
         )
+    }
+
+    /// The defaults argument domain can truncate a decimal launch ID. Read
+    /// explicit integer arguments directly, retaining the full platform Int.
+    /// Invalid explicit values never fall back to a saved or truncated value.
+    private static func integer(_ key: String, defaults: UserDefaults, arguments: [String]) -> Int {
+        guard let index = arguments.firstIndex(of: "-" + key) else {
+            return defaults.integer(forKey: key)
+        }
+        guard arguments.indices.contains(index + 1) else { return 0 }
+        return Int(arguments[index + 1]) ?? 0
     }
 
     private static func originArgument(_ arguments: [String]) -> String? {

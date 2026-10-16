@@ -882,7 +882,14 @@ impl Shared {
             index,
             policy: shipped_policy(timescale),
             working_set_budget: settings.working_set_bytes,
-            completed_cache_budget: settings.completed_cache_bytes,
+            // A private full-output obligation is admitted against its own
+            // retained-output budget. Ordinary completed-cache admission stays
+            // independently closed when its configured budget is zero.
+            completed_cache_budget: if private_storage.is_some() {
+                settings.output_budget_bytes
+            } else {
+                settings.completed_cache_bytes
+            },
             materialize_budget: settings.materialize_budget,
             manifest: Mutex::new(manifest),
             output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),

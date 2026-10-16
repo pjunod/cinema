@@ -49,6 +49,29 @@ final class PlayerSeekCompletion {
         }
     }
 
+    /// Run a native operation only while its captured owner still holds it.
+    /// Cancellation and timeout return independently of its callback; disposing
+    /// the native request releases that callback without letting it publish late.
+    static func runOwned(
+        operation: @escaping @MainActor () async -> Bool,
+        cancelOperation: @escaping @MainActor () -> Void,
+        ownsOperation: @escaping @MainActor () -> Bool,
+        waitForDeadline: @escaping @MainActor () async throws -> Void
+    ) async -> Outcome {
+        guard !Task.isCancelled, ownsOperation() else { return .cancelled }
+        var began = false
+        let outcome = await run(operation: {
+            guard !Task.isCancelled, ownsOperation() else { return false }
+            began = true
+            return await operation()
+        }, waitForDeadline: waitForDeadline)
+        let stillOwned = !Task.isCancelled && ownsOperation()
+        if outcome != .finished(true) || !stillOwned {
+            if began { cancelOperation() }
+        }
+        return stillOwned ? outcome : .cancelled
+    }
+
     private func finish(_ result: Outcome) {
         guard outcome == nil else { return }
         outcome = result

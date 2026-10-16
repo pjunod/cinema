@@ -751,6 +751,7 @@ async fn insert_control_session(
         session_id.to_owned(),
         Session {
             children: Vec::new(),
+            preferred_start_ms: None,
             passive_grant: None,
             rendition: Some(rendition),
             retained_output: None,
@@ -804,6 +805,7 @@ async fn insert_terminal_session(
         session_id.to_owned(),
         Session {
             children: Vec::new(),
+            preferred_start_ms: None,
             passive_grant: None,
             rendition: None,
             retained_output: None,

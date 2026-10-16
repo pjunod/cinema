@@ -92,3 +92,143 @@ external display capture not measured. CQ0 is a runnable partial milestone;
 its missing physical/API and media evidence is not converted into a pass.
 The upstream ownership/integration delta review required by §1.2 is still
 outstanding and cannot be replaced by this isolated prototype review.
+
+## 5. Fable source review — corrections awaiting qualification
+
+**Updated:** 2026-10-15. Fable reviewed `ca00c3ed8` against
+`6e01ef879`, including the Apple 245 source package. The corrections are recorded in `f94f73211` (Apple 248), following
+the `e2315d3a4` Apple 247 checkpoint. Source review does not qualify a different hardware build.
+
+| Finding | Current disposition | Remaining evidence |
+|---|---|---|
+| F1, major: a busy cached-reader or accepted-wait lock cancels a sealed recovery under foreground pressure | Authored tri-state probes. Unknown preserves only an existing unexpired witness. Definitive negative checks cancel; fresh authority requires definite success. | Pinned Rust 1.97.1 all-targets compilation passed. Three actual-lock watcher/control regressions are authored, unrun. |
+| F2, minor: physical incumbent protection bridges telemetry's positive-gap tolerance | Lease acquisition explicitly requests zero gap tolerance; ordinary runway telemetry retains its existing tolerance. | Real-controller gap, contiguous admission and restoration regression authored; Apple compilation and execution pending. |
+| README build mismatch | Already corrected by Apple 247 before this review arrived. | Current README and project both report 247. |
+| N6, request-bound coverage | Added an injected-fetch regression with valid many-fragment media; it requires refusal after exactly 64 requests and includes a valid small control. | Authored, unrun; no request-budget change. |
+| N4, shared-controller parity | Recorded as a separate parity gap outside this correction batch. | No shared-controller acceptance claimed. |
+
+The new regression anchors are:
+
+- `crates/plurxd/src/http/hls/preparation.rs::cached_accepted_wait_survives_contended_session_lock_during_foreground_pressure`
+- `crates/plurxd/src/http/hls/preparation.rs::cached_accepted_wait_survives_contended_reader_lock_during_foreground_pressure`
+- `crates/plurxd/src/http/hls/preparation.rs::cached_accepted_wait_contention_keeps_control_witness_without_renewal`
+- `clients/apple/Tests/PlayerResumeTests.swift::testIncumbentFetchPreferenceLeaseRejectsPositiveGapInsideProtectedWindow`
+- `clients/apple/Tests/HLSFragmentCadenceTests.swift::testFragmentIndexWalkFailsClosedPastSixtyFourRequestsOnManyFragments`
+
+### Source context requested by Fable
+
+`http/hls/control.rs` returns HTTP 429 with `control_rate_limited` when
+`media_sessions.admit_control` rejects the ingress control budget. This
+source path explains a possible response, not the cause of a particular
+metadata-ready receipt: that still requires its exact response and request
+chronology. It does not establish a media HTTP 503 cause or authorize a
+client retry.
+
+`PlayerController` converts native transfer completion dates into a
+`PlaybackControlSession.monotonicMs()` timestamp when observing the metrics.
+`AutoCompletedTransfer.ageMs` subsequently subtracts that timestamp from the
+same uptime clock, rejecting a backwards value with `Int.max`. The initial
+age conversion uses wall-clock dates; it is not an independent monotonic
+native completion timestamp. Provide these source contexts in the next
+review package rather than claiming them present in the original package.
+
+Catalog counts describe distinct recorded `commits` values, not distinct
+regression ID prefixes. At the committed Apple 247 checkpoint there were
+712 rows, 712 unique IDs and 588 distinct recorded `commits` values.
+
+### Hardware and owner-policy hold
+
+Phone 247's clock diagnostic was stopped before READY and before native
+launch after a new owner instruction prohibited app builds and installs
+from unmerged source, including diagnostics. All 159 recorded owned
+process identities were absent at independent closure. Three cost proofs
+completed; no native frames or quality changes were captured. This is a
+policy-stopped attempt, not media acceptance or a reproduced playback
+failure. Earlier failed captures remain preserved.
+
+The owner subsequently clarified that the main-only build/install instruction
+applies to mobile apps only. iPhone and Android builds/installations stay held;
+Apple TV qualification resumes on the corrected source. No merge is authorized.
+Unit bodies remain unexecuted under the explicit deferred-test instruction.
+
+
+## 6. Fable follow-up — Apple 248 accepted with one admission risk
+
+**Updated:** 2026-10-15. Fable verified the Apple 248 source and final hardware
+packages, accepting F1/F2/N6 with no blocker. Desk execution of regression
+bodies is not test execution. The review identifies the following corrections:
+
+| Finding | Disposition | Evidence still required |
+|---|---|---|
+| S1: stale comment says unknown cancels | Clarify that unknown preserves only an existing unexpired witness and cannot mint/renew it. | Compile and source inspection. |
+| S2: strict gap tolerance also rejects membership rounding | Apple 249 splits membership and gap tolerances; the lease retains 0.25-second membership while requiring zero inter-range gap. Clock-startup remains strict for both. | Extended actual-controller regression, compilation and changed-source TV campaign. |
+| S3: duplicate tombstone check | Remove the redundant inner condition; retain the pre-lock rejection. | Compile. |
+| S4: ledger overstates revocation observable behind a busy sessions table | §10.326 now names lock-free revocations and the accepted/preparation bound while sessions remain busy. | Sessions-held invalidation regression where authored; unit execution stays deferred. |
+| S5: missing contexts | Include `playback_control.rs` (`AcceptedControlFence::still_live`) and Apple `PreparedReplacement.swift` (`preparedAcquisitionURL`) in the next package. | Rehash exact committed inputs. |
+| E1: previous TV pass does not prove corrected paths executed | Add attributable watcher-unknown and lease acquire/refuse diagnostics without altering authority or acceptance. | Preserved TV248 logs subsequently yield 22 acquisitions and 22 successful restorations; no refusal count exists in old source. Count future observations separately; do not force contention on shared hardware. |
+
+E2–E8 are accepted limits: no lock-contention hardware cause is established;
+SDK exit 1 remains a false wrapper, with completed measurements adjudicated
+separately. App absence at a census is not clean-shutdown proof. TV measurements
+cover public source under an inverse-verified observer patch, not the shipping
+binary. Phone 247 does not qualify changed mobile source. Recorded settled
+known-session HLS GET refusal absence is not a blanket route/lifetime claim.
+Optical/audio/menu continuity remain unmeasured. No unit bodies or CI lanes have
+run on correction commits; final batched qualification remains mandatory before
+an authorized merge. The owner still prohibits merging this work now.
+
+The mobile policy is physical-only: new mobile builds intended for installation
+and installs require committed main source; Simulator/emulator/CI/test-only
+mobile builds are exempt and cannot later be reused physically. TV work is
+exempt. The earlier broad policy-stop remains historical, not the current rule.
+
+
+Apple 249 extends the existing actual-controller lease regression and adds
+`crates/plurxd/src/http/hls/preparation.rs::cached_accepted_wait_defers_playing_revocation_until_session_lock_releases`.
+The latter holds the real sessions mutex while accepting Rendering, proves
+bounded witness survival without renewal, then requires cancellation after
+release. No unit body has run; compilation is reported separately.
+
+
+### S2 follow-up — current coverage precedes rounding fallback
+
+Source inspection after the split identifies an actual new corner: a nearby
+range ending behind the playhead shadows a later range containing it. Apple
+250 prefers exact membership, then preserves the existing tolerant fallback.
+The same actual-controller regression covers current coverage, the stale
+preceding range, a positive gap ahead, admission and restoration. No body ran.
+The review context and bounded evidence are recorded in build §10.328.
+
+Superseded 249 r4 stopped before READY and SDK; it is not a media failure.
+Changed-source compilation and qualification remain pending. Final Fable
+follow-up must assess the Apple 250 source, rather than treating the compiled
+Apple 249 packet as the final candidate. No merge is authorized.
+
+
+## 7. Fable Apple250 re-review — follow-ups for direct promotion
+
+**Updated:** 2026-10-15. The re-review clears S1–S5 and E1 with no blocker in
+the correction delta and accepts TV250 evidence within its stated decoded-output
+scope. Apple251 closes R1 by preferring the greatest-end tolerant fallback and
+P1 by allowing automatic zero buffering to take a protected lease, restoring
+zero without overwriting later ownership. Both use actual-controller regressions.
+S4 is corrected: owner epoch, desired intent and attachment revoke through the
+atomic accepted fence without waiting for sessions; Playing snapshots may wait.
+R2 extra HTTP-path contention telemetry is optional and is not added: the bounded
+watcher-tail count cannot establish all contention-path execution or absence.
+F1 remains covered by authored real-lock fixtures, now due for final unit execution.
+
+The owner authorized direct merge after each required unit passes once, with
+only failures rerun. No batched merge session exists. This supersedes the earlier
+merge hold and deferred-unit checkpoint; it does not restart full review or the
+hardware campaign. TV250 does not qualify changed251 hardware; new physical
+mobile builds and installs await main. Canonical ledger: §10.329.
+
+
+Final named-unit execution exposes the production relay proof's `$2`-before-`$1`
+positional binding error, corrected without changing authority predicates. The
+Pause failure is an invalid `direct` fixture; actual `direct_play` is used and
+initial setup must not create HLS. Production Pause code is unchanged. Successful
+Apple methods are retained; only failed methods rerun, with 38 server cases
+still unexecuted at this source checkpoint. This is failed-test remediation,
+not another full review or hardware cycle.
