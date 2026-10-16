@@ -3,6 +3,97 @@ import XCTest
 
 @MainActor
 final class TVLiveNavigationTests: TVNavigationTestCase {
+    func testGuide77ChannelsKeepsNativeFocusVisibleAndResponsive() throws {
+        let server = try TVNavigationServer(guideChannelCount: 77)
+        let origin = try server.start()
+        defer { server.stop() }
+        let app = openLibrary(origin: origin)
+        defer { app.terminate() }
+        remote.press(.menu)
+        let tab = app.tabBars.buttons["Live TV"]
+        reachForSetup(tab, in: app, limit: 8)
+        remote.press(.select)
+        let guide = app.buttons["Guide"]
+        reachForSetup(guide, in: app, limit: 16)
+        assertFocus(guide, in: app, context: "Full lineup Guide opener")
+        remote.press(.select)
+        func cell(_ row: Int) -> XCUIElement {
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "\(100 + row) · Guide station \(row), Programme \(row) slot 0,")).firstMatch
+        }
+        assertFocus(cell(0), in: app, context: "Guide enters current first programme")
+        let grid = app.scrollViews["live-guide-grid"]
+        XCTAssertTrue(grid.exists)
+        var bounds = grid.frame
+        bounds.origin.y += 42 // The pinned time heading is not a programme viewport.
+        bounds.size.height -= 42
+        func step(_ direction: XCUIRemote.Button, to row: Int) {
+            let began = Date()
+            remote.press(direction)
+            let target = cell(row)
+            let visibleFocus = { target.exists && target.hasFocus && bounds.contains(target.frame) }
+            // Check immediately: XCTest's predicate waiter otherwise adds a
+            // one-second polling floor to every already-completed remote move.
+            if !visibleFocus() {
+                let focus = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in visibleFocus() }, object: nil)
+                let result = XCTWaiter.wait(for: [focus], timeout: 2)
+                if result != .completed { print("GUIDE_STEP_FAILURE=\(app.debugDescription)") }
+                XCTAssertEqual(result, .completed,
+                               "Remote press must promptly reveal programme row \(row)")
+            }
+            XCTAssertLessThan(Date().timeIntervalSince(began), 3,
+                              "Native focus queries must not stall the app")
+        }
+        for row in 1...76 { step(.down, to: row) }
+        step(.down, to: 76)
+        assertFocus(cell(76), in: app, context: "Last of 77 guide channels stays visible")
+        remote.press(.select)
+        XCTAssertTrue(app.buttons["Watch"].waitForExistence(timeout: 3), app.debugDescription)
+        remote.press(.menu)
+        assertFocus(cell(76), in: app, context: "Programme Back restores visible last guide cell")
+        for row in stride(from: 75, through: 0, by: -1) { step(.up, to: row) }
+        assertFocus(cell(0), in: app, context: "Guide returns to first channel after full traversal")
+
+    }
+
+    func testGuideToolsAndTimeReturnKeepNativeFocus() throws {
+        let server = try TVNavigationServer(guideChannelCount: 77)
+        let origin = try server.start()
+        defer { server.stop() }
+        let app = openLibrary(origin: origin)
+        defer { app.terminate() }
+        remote.press(.menu)
+        let tab = app.tabBars.buttons["Live TV"]
+        reachForSetup(tab, in: app, limit: 8)
+        remote.press(.select)
+        let guide = app.buttons["Guide"]
+        reachForSetup(guide, in: app, limit: 16)
+        assertFocus(guide, in: app, context: "Full lineup Guide opener")
+        remote.press(.select)
+        func cell(_ row: Int) -> XCUIElement {
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "\(100 + row) · Guide station \(row), Programme \(row) slot 0,")).firstMatch
+        }
+        assertFocus(cell(0), in: app, context: "Guide enters current first programme")
+        remote.press(.up)
+        assertFocus(app.buttons["Watch"], in: app, context: "Guide Up reaches programme actions")
+        remote.press(.up)
+        assertFocus(guide, in: app, context: "Programme Up returns to Guide toolbar")
+        for label in ["Recordings", "Search", "Guide time"] {
+            remote.press(.right)
+            let button = app.buttons.matching(NSPredicate(format: "label == %@ AND hasFocus == true", label)).firstMatch
+            XCTAssertTrue(button.waitForExistence(timeout: 2), "Toolbar Right reaches \(label)")
+        }
+        let time = app.buttons["Guide time"]
+        remote.press(.select)
+        assertFocus(app.buttons["choice:earlier"], in: app, context: "Guide time owns focus")
+        remote.press(.down)
+        assertFocus(app.buttons["choice:now"], in: app, context: "Guide time Now reachable")
+        remote.press(.select)
+        assertFocus(time, in: app, context: "Guide time restores exact opener")
+        remote.press(.up)
+        assertFocus(tab, in: app, context: "Full lineup leaves root tabs responsive")
+
+    }
+
     func testLiveFullscreenRevealMoreReportAndBackRetainSession() throws {
         let server = try TVNavigationServer()
         let origin = try server.start()

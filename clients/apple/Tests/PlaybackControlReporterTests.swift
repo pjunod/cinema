@@ -1754,7 +1754,7 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertTrue(candidate.contains("(autoBlockedUntil[$0.id] ?? 0) <= now"))
         // The tick asks for the candidate inside take, so only a produced
         // candidate spends the boundary.
-        let tick = try body("private func tickDisplayAwareAuto() {", until: "let link: Double? = {")
+        let tick = try body("private func tickDisplayAwareAuto(", until: "let link: Double? = {")
         XCTAssertTrue(tick.contains("produce: { autoOriginalBoundaryCandidate(now: now) }"))
         // A viewer quality change bumps the viewer action the re-plan fence reads.
         let quality = try body("func selectQuality(_ height: Int?) {", until: "selectedHeight = height")

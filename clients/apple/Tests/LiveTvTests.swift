@@ -1545,8 +1545,13 @@ final class LiveTvTests: XCTestCase {
         for key in [".picture", ".watch", ".record", ".recordSeries", ".remind"] {
             XCTAssertTrue(source.contains(".focused($focusedControl, equals: \(key))"), key)
         }
-        XCTAssertTrue(source.contains("return moveDetailFocus(input, region: .onNow)"))
-        XCTAssertTrue(source.contains("return moveDetailFocus(input, region: .guideStage)"))
+        XCTAssertTrue(source.contains("return moveDetailFocus(input, from: source, region: region)"))
+        for region in ["onNow", "guideStage"] {
+            XCTAssertTrue(source.contains("detailInput(from: .picture, region: .\(region))"))
+        }
+        for key in ["watch", "record", "recordSeries", "remind"] {
+            XCTAssertTrue(source.contains("detailInput(from: .\(key), region: browse == .guide ? .guideStage : .onNow)"))
+        }
         XCTAssertTrue(source.contains("programmeActions(channel, programme, keyed: true)"))
         let region = source
             .components(separatedBy: "private func moveDetailFocus(")[1]
@@ -2872,6 +2877,21 @@ final class LiveTvTests: XCTestCase {
         try await Task.sleep(nanoseconds: UInt64(LiveTvInputRouting.channelCoalesceMilliseconds + 250) * 1_000_000)
         XCTAssertEqual(requests.starts, 1, "three presses inside the window are one tuner start")
         XCTAssertEqual(LiveTvInputRouting.channelCoalesceMilliseconds, 350)
+    }
+
+    func testGuideFollowingNowAdvancesAfterIdleWithoutOverridingManualPaging() {
+        let old = 1_800 * 100
+        let later = old + 5_400 + 75
+        let available = LiveTvGuideWindow(start: old - 3_600, end: later + 21_600)
+        XCTAssertEqual(LiveTvGridMetrics.followingWindowStart(
+            current: old, now: later, followsNow: true, available: available), old + 5_400)
+        XCTAssertEqual(LiveTvGridMetrics.followingWindowStart(
+            current: old, now: later, followsNow: false, available: available), old)
+        XCTAssertEqual(LiveTvGridMetrics.followingWindowStart(
+            current: old, now: later, followsNow: true, available: nil), old + 5_400)
+        let short = LiveTvGuideWindow(start: old, end: old + 900)
+        XCTAssertEqual(LiveTvGridMetrics.followingWindowStart(
+            current: old, now: later, followsNow: true, available: short), old)
     }
 
     /// A hard-coded 300 pt slot filled 58% of a 1920 pt screen and could never

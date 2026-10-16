@@ -560,6 +560,51 @@ this missing visual assertion. All four corrected journeys pass, and the hidden 
 visually checked. The corrected build 239 is installed on the paired Apple TV.
 Final promotion stays held until the correction and the updated gate pass.
 
+### F32 · P0 · N — full Live TV guide stalls and loses visible focus
+
+**Evidence:** the owner supplied a physical-TV photograph of the 77-channel
+lineup, reported invisible focus and sluggish navigation, then clarified that
+the guide nearly froze the entire UI. A native shipping-route fixture with 77
+channels reproduces a tens-of-seconds accessibility stall on guide entry. The
+eager grid realizes every channel/programme control, while scroll geometry
+changes update the grid. The two-channel playback fixture did not exercise
+that load. The photograph also shows a large idle preview, clipped bottom rows,
+a selected-segment background extending into the safe area, and a timeline
+still anchored to the time the app opened.
+
+**Implemented repair:** realize guide rows lazily, use a vertical TV
+viewport with explicit time paging, remove per-scroll origin publication on TV,
+keep one focus binding per cell and toolbar control, and route each direction
+from the control receiving it. Up through programme actions returns to the
+active Guide/On now mode; a transient native arrival cannot change that
+boundary. Choice sheets still restore their exact toolbar opener. The first lazy-row trial eliminated the long entry stall but
+exposed native focus moving before the outer custom direction handler; that
+failed trial is retained. Use a white focus outline without zoom, a compact
+detail stage with no idle preview, and clock-following until the viewer
+explicitly pages away from Now.
+
+**Evidence so far:** the native fixture traversed all 77 channels down and back,
+keeping every focused programme inside the actual grid viewport with a
+three-second total bound per press/query. The last programme's action sheet
+returned to the same cell. That run then caught an incorrect toolbar return;
+the separate tools journey passes after correcting it, including Guide time
+and root-tab return. All 102 Live TV unit tests pass, including idle-clock
+advancement versus deliberate time paging. The first physical saved-account traversal passed on the real 77-channel
+lineup: every down/up step kept a programme fully inside the guide viewport,
+and Back reached the Live TV root tab (126.99 seconds for the test session).
+Rendered first/last-row captures were inspected. Faster simulator input then
+exposed a redundant scroll request resetting the viewport; this remained an
+open failure despite the physical pass. The guide now leaves completed native
+moves alone and reserves its heading outside the scrolling content. A final
+repeat also covers mixed programme lengths and a stable vertical time anchor. The required suite now
+includes both guide journeys; neither an empty selection nor skipped journey
+qualifies. Screenshots also exposed a transparent pinned heading; its background
+is now opaque and its paging controls are larger.
+
+**Acceptance remains open:** inspect the final rendered captures and require
+both guide journeys, playback and the physical traversal to pass. Repeat on the physical 77-channel lineup before claiming
+this finding closed. R07 and the whole-app promotion remain blocked on it.
+
 ## 6. Proposed renderings — consistent interaction before decoration
 
 The [gallery](apple-tv-navigation/index.html) includes twelve annotated design
