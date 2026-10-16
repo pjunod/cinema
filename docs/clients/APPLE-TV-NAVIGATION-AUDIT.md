@@ -657,6 +657,15 @@ other job but exhausted its thirty-minute server compile allowance without a
 compiler diagnostic; the effort compiler now has the same sixty-minute
 allowance as the main compiler, with all checks retained.
 
+The first full follow-up repeat exposed a timing failure between activity
+return and the Guide pill; its failed receipt and captures are retained.
+An isolated trace passed and showed the countdown restarting on actual focus
+changes. The harness now checks already-settled native focus immediately,
+rather than spending XCTest's first polling interval on every assertion; it
+retains the same focus predicate, failure timeout, screenshots and deliberate
+idle deadlines. The expanded Live journey passes with that harness (89.37
+seconds). A complete clean-source repeat remains required before promotion.
+
 ## 6. Proposed renderings — consistent interaction before decoration
 
 The [gallery](apple-tv-navigation/index.html) includes twelve annotated design

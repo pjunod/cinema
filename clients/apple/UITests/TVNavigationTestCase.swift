@@ -177,9 +177,17 @@ class TVNavigationTestCase: XCTestCase {
     func assertFocus(_ target: XCUIElement, in app: XCUIApplication, context: String,
                              timeout: TimeInterval = 5,
                              file: StaticString = #filePath, line: UInt = #line) {
-        let expectation = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in self.hasNativeFocus(target, in: app) }, object: nil)
-        let result = XCTWaiter.wait(for: [expectation], timeout: timeout)
+        // Observe completed native moves immediately. XCTest's first polling
+        // interval otherwise spends a second of the player's four-second
+        // idle allowance on every assertion without sending any remote input.
+        let result: XCTWaiter.Result
+        if hasNativeFocus(target, in: app) {
+            result = .completed
+        } else {
+            let expectation = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in self.hasNativeFocus(target, in: app) }, object: nil)
+            result = XCTWaiter.wait(for: [expectation], timeout: timeout)
+        }
         let focusDebug = app.staticTexts["choice-focus-debug"]
         if focusDebug.exists { print("NATIVE_CHOICE_FOCUS_DEBUG=\(focusDebug.label)") }
         let screenshot = app.screenshot()
