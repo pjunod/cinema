@@ -1329,3 +1329,30 @@ marker, protocol and exact schema together: only absent predecessor 80 may
 migrate, and only exact supported 81/82 may settle a concurrent winner. The
 same-write predecessor and post-DDL shape assertions remain required. These
 repairs require new independent review and focused qualification.
+
+
+### Full current-base qualification retains additional fixture failures
+
+Promotion 5306 rejects the unchanged Apple/Android build counters against
+current main. Increase the source counters to Apple 252 and Android 172 for
+the already integrated release-input changes; no branch app installation or
+new physical acceptance is implied.
+
+The parallel complete core run exposes three more historical-fixture failures.
+The encoded-output and historical-ready-subtitle cases rewind below the managed
+subtitle extension while leaving that extension installed, so reopen correctly
+refuses duplicate schema creation. Both now use the existing exact-shape,
+current-version, no-Source, empty-managed-work fixture rewind before changing
+older objects or the version. The Dolby Vision migration inventory gains the
+v111 entry whose actual removal both shared downgrade callers already perform.
+The production migration and all data/history assertions remain unchanged.
+Original isolated failures and the complete run retain their actual verdicts;
+these corrections require independent review, focused runs and a fresh complete
+promotion candidate.
+
+Two further complete-core failures pin the old SQLite schema version 110 in
+the sharing-upgrade and populated v6-rebuild controls. Explicitly advance both
+pins to 111, naming the appended managed-subtitle migration, while retaining
+all private-lineage refusal and preserved-library/data checks. The first Apple
+build-reference suite also catches the Android README's old live counter; its
+current claim moves to 172 while historical status entries remain intact.
