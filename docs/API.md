@@ -14,15 +14,17 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-11, plurx has 362 routes declared by the ordinary listener's
-assembled router. The ordinary listener (`:32400` by default) serves the five
-surfaces below.
+As of 2026-10-15, plurx has 364 routes declared by the ordinary listener's
+assembled router. The ordinary HTTP listener (`:32400` by default) and optional
+additional
+HTTPS listener (`:32443`, off by default) serve the identical five surfaces
+below. HTTPS requires restart and explicit client trust.
 Sharing uses a separate private TLS listener with its own peer credentials
 (§24). Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 362 routes across the registered routers.
+plurx has 364 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -447,6 +449,9 @@ of never storing it.
 | PUT | `/api/v1/system/transcoder` | admin | Saves this node's backend preference for its next restart |
 | POST | `/api/v1/system/transcoder` | admin | Starts an idle-node capability check and benchmark |
 | POST | `/api/v1/system/video-processing/reprobe` | admin | Requests a new node-local video-processing compatibility generation (macOS processing graphs, or Linux strict Dolby graphs with their per-graph refusal reasons) and returns the current reports. Saved preferences and running plans are unchanged |
+| GET | `/api/v1/system/https` | admin | Addressed-node saved, desired and actually active HTTPS configuration, decimal-string revision, environment overrides and loaded public certificate facts; no-store |
+| PUT | `/api/v1/system/https` | admin | Saves restart-only node-local HTTPS intent with required node identity and revision guards; 16 KiB JSON, no forwarding or replicated settings |
+| GET | `/api/v1/system/https/certificate` | admin | Downloads only the loaded active public certificate chain as PEM; no-store, attachment, 404 when inactive |
 | GET | `/api/v1/system/logs` | admin | Tail of the in-memory log ring |
 | GET | `/api/v1/system/playback-events` | admin | Node-local playback observations |
 | GET | `/api/v1/system/library-shape` | admin | Codec and HDR census over the library |
@@ -618,6 +623,56 @@ mapping" and "check Curator's URL and key".
 `GET /api/v1/system/library-shape` is a separate route rather than a field
 here because it is a table scan, and `/system` is polled by the settings page
 every few seconds.
+
+### 5.2a Node-local HTTPS — `/api/v1/system/https`
+
+These admin-only routes address the node that receives the request. They do
+not forward to a leader or write replicated settings. Exact GET/PUT intent
+and GET certificate operations remain eligible on learners and in maintenance;
+existing authentication, removal and serving fences still apply.
+
+GET is `Cache-Control: no-store`. Its `saved` configuration precedes explicit
+environment overrides; `desired` is effective at the next boot; `active` and
+`certificate` describe this process's loaded listener and identity. A changed
+file does not change active facts. `restart_required` compares desired with
+active. `overrides` names environment-controlled fields whose underlying saved
+values must be preserved. The configuration fields are `enabled`, `port`,
+`cert_file`, `key_file` and `sans`; paths refer to the server/container's file
+system. Both paths empty select a persistent self-signed identity.
+
+PUT replaces desired intent using a required node and revision guard:
+
+```json
+{"node_id":"addressed-node-id","revision":"9007199254740993","desired":{"enabled":true,"port":32443,"cert_file":"","key_file":"","sans":["localhost","127.0.0.1","::1","media1"]}}
+```
+
+`revision` is a canonical decimal u64 **string**, never a JSON number; the
+node-local file retains an integer. Node/revision mismatch and attempted edits
+to environment-controlled fields return named 409 conflicts. Overflow refuses
+the save. Invalid intent or malformed/unknown JSON fields return sanitized
+400 responses; bodies over 16 KiB return 413. Error text never repeats request
+material. Every successful save increments the published revision, including a
+save that leaves the same choices in place. Reload explicitly after a conflict;
+never retry against another node automatically.
+
+A save changes desired intent only and never restarts, provisions keys or
+reloads the listener. Enabling validates existing material read-only; first
+generated enable defers identity creation to startup. Disabling does not open
+obsolete identity paths. Failure before publication leaves revision and intent
+unchanged. Publication followed by failed directory sync is a committed success
+with `durability_confirmed: false`; the new revision is current, and the UI
+warns that crash durability is unconfirmed. Normal saves return true. The last
+observed outcome remains on GET for this process, including when the original
+HTTP waiter disconnected. Such cancellation cannot interrupt adoption after
+publication.
+
+GET `/api/v1/system/https/certificate` returns an attachment named
+`plurx-https-certificate.pem`, `Content-Type: application/x-pem-file` and
+`Cache-Control: no-store`. It derives only CERTIFICATE blocks from the active
+loaded chain, never the managed private bundle; inactive HTTPS returns 404.
+The JSON facts include mode, leaf DER SHA-256 fingerprint, SANs and expiry.
+Trust installation remains an explicit client operation; downloading the chain
+or displaying a URL does not establish browser or device trust.
 
 ### 5.3 `POST /api/v1/system/storage`
 

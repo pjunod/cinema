@@ -56,3 +56,8 @@ scripts/*.fleet.json
 # The pinned TypeScript that scripts/web-types installs with `npm ci`. Dev-only;
 # the lockfile beside it is what is committed (THIRD-PARTY-NOTICES §7).
 /tools/web-types/node_modules/
+
+# Node-local public HTTPS identity/intent must never enter source control,
+# including installations that select a data directory other than /data.
+**/https/identity.pem
+**/https-settings.json

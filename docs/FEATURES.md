@@ -963,6 +963,19 @@ node; the cluster is the next phase. Detail: [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ---
 
+### Optional native HTTPS
+
+An additional public HTTPS listener is off by default. Settings → Developer
+controls the addressed node's restart-only choice, using persistent generated
+self-signed identity or supplied server-side chain/key files. Saved, desired
+and actually active configuration stay distinct. Admins can download only the
+loaded public certificate chain and inspect its fingerprint; no private key
+is returned. Existing HTTP/discovery and internal cluster transports retain
+their addresses. Client trust and physical playback qualification remain open
+in [the HTTPS ledger](server/HTTPS-BUILD.md); the permanent switch moves to
+System after acceptance. [Operations](OPERATIONS.md#optional-https-and-persistent-identity)
+explains precedence, permissions and explicit identity replacement.
+
 ## 9. Trakt — "your history, everywhere"
 
 **What it does:** an optional, admin-linked [Trakt.tv](https://trakt.tv)

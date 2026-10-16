@@ -1,11 +1,14 @@
 # HTTPS implementation — optional encrypted access to the public API
 
-**Status:** reviewed; ready to build · **Written:** 2026-10-15
+**Status:** implementation built; physical acceptance open; merge qualification tracked by task and promotion PRs · **Written:** 2026-10-15
 **Decider:** Paul · **Baseline:** `9eb7f6738`
 
 [Adversarial review](HTTPS-REVIEW.md) is resolved. This is the behavior contract. [HTTPS-BUILD.md](HTTPS-BUILD.md) owns tasks and
 evidence. Re-verify interfaces against current source before implementation.
 Read [security](../SECURITY.md) and [operations](../OPERATIONS.md) alongside it.
+The independently reviewed workflow amendment in the build ledger integrates
+H1–H4 as checkpoints of one end-to-end task PR #1118; the behavior contract,
+exact-head effort gate and full final promotion requirements are unchanged.
 
 ## 1. Objective and scope
 
@@ -90,15 +93,25 @@ means this process's loaded configuration. Return `saved` separately as the
 pre-environment node-file/base configuration. Both are normalized. Never
 return PEM/key bytes in the JSON DTO; file references are admin-only. PUT requires matching `node_id` and `revision`,
 replaces the desired object, rejects unknown fields, and has a 16 KiB limit.
+On the JSON API, revision is a canonical decimal u64 string, including values
+above JavaScript’s exact integer range; the local envelope retains an integer.
+Reject noncanonical strings and refuse overflow without mutation.
 Stale revision/node mismatch returns 409 without mutation. Persist revisions
 across restart; never reset the counter. The UI reports conflicts and asks
 for a fresh load, never automatically retries on another node. Serialize writes;
-atomically replace a restrictive, bounded node-local file. Failed persistence
-leaves in-memory state unchanged. PUT changing an env-owned field returns an
+atomically replace a restrictive, bounded node-local file. Failure before atomic publication leaves in-memory state unchanged. Rename
+is the publication point: if the subsequent directory sync fails, the save
+is committed with durability uncertainty, not rolled back. Adopt the new
+in-memory desired/revision and return success with
+`durability_confirmed: false` and a visible warning; never invite a blind
+retry. A normal successful sync returns `durability_confirmed: true`. PUT changing an env-owned field returns an
 explicit conflict; edits to other fields remain valid. Persist only editable
 choices,
 preserving the previous pre-env values of overridden fields: echoed env
 values must not become sticky after that environment variable is removed.
+The save worker owns serialization through publication and in-memory adoption,
+even when its HTTP waiter disconnects. A canceled waiter cannot leave the
+process serving a stale revision after a file was published.
 The revision covers persisted configuration; the node guard and current env
 validation still apply independently. Report restart needed without claiming a future bind can succeed.
 
@@ -108,7 +121,13 @@ managed identity, validate shape and storage readiness without provisioning;
 Save may succeed and startup alone creates the identity. Use a separate
 settings loader/card, naming the node edited. Include enabled, port, supplied chain/key paths, and SAN inputs
 in the Developer card and its lazy loader. Keep replicated `/settings`
-unchanged. Errors and logs never include PEM material, request bodies or private bytes.
+unchanged. If the replicated settings read fails, retain its error and Retry,
+and independently load only the local HTTPS card. Fence local GET results by
+page generation and operation epoch so a late GET cannot undo a newer save.
+Exact GET/PUT HTTPS intent and GET public-certificate routes remain eligible
+on learners and during maintenance; existing AdminUser, removal and serving
+fences still apply. No neighboring system route receives this exception.
+Errors and logs never include PEM material, request bodies or private bytes.
 
 The desired file is `data_dir/https-settings.json`, with a versioned envelope:
 
@@ -157,9 +176,12 @@ GET never provisions/rotates identity. Never destroy an identity on disable.
 Supplied mode reads a leaf-first chain and one unencrypted supported key,
 each bounded to 1 MiB. Verify PEM format, key match, current validity and
 server-auth suitability; accept private CA/self-signed certificates without
-requiring public-CA trust. Reject unrelated/malformed PEM material. Follow
+requiring public-CA trust. Reject unrelated/malformed PEM material. On Unix, follow
 legitimate supplied-file symlinks used by certificate managers but validate
-the opened regular file/size. Opening and reading must be bounded: use
+the opened regular file/size. Windows accepts regular local disk PEM paths
+through the existing no-reparse helper; device, pipe and UNC namespaces and
+certificate-manager symlinks are unsupported and rejected before traversal.
+Windows compilation/physical safety remains unqualified in this increment. Opening and reading must be bounded: use
 nonblocking/safe regular-file opening so a FIFO/device cannot hang before
 metadata validation. Test a named pipe and a symlink to one. Never overwrite
 supplied files. Client trust
@@ -192,7 +214,9 @@ Do not navigate automatically or transfer a
 token between origins. Explain that the new origin may require sign-in.
 
 Audit API, HLS/media, range, subtitles, artwork, WebSocket, remote-control and
-QR URLs. Relative URLs inherit HTTPS; WebSockets inherit wss. Existing
+QR URLs. Relative URLs inherit HTTPS. There is no current product WebSocket
+endpoint; generic Hyper upgrades remain supported without a product playback
+qualification claim. Existing
 cluster peer proxy paths must retain the browser's origin. Any unavoidable
 cross-node redirect must not downgrade an HTTPS browser to HTTP: use the
 same-origin proxy or return an explicit bounded unsupported-route error.

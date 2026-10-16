@@ -21,6 +21,17 @@ trusted_proxies = []
 # 0 turns this listener off; /jellyfin on the main port always works.
 jellyfin_port = 8096
 
+# HTTPS configuration/identity are staged on the HTTPS effort branch; the
+# listener and Developer editor arrive in the following milestones.
+[server.https]
+enabled = false
+port = 32443
+# Both empty generate a persistent self-signed identity; otherwise absolute
+# leaf-first PEM chain and unencrypted PEM key paths are required.
+cert_file = ""
+key_file = ""
+sans = ["localhost", "127.0.0.1", "::1"]
+
 [storage]
 # Authoritative database, node identity, and compatibility root. Created if
 # missing. Empty cache/transcode overrides preserve the legacy child layout.

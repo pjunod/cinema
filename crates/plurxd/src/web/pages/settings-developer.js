@@ -337,7 +337,7 @@ async function saveCinemaRemoteInvitations(button){
 }
 
 function diagnosticDeveloperCard(){return setCard(`${cardHead("Diagnostic ZIP reports","Bounded local evidence for bug and issue attachments.",'<span class="pill">Qualification pending</span>')}<p>Help → Report a problem saves a ZIP with a readable summary and structured evidence. Attach it to an issue using your usual reporting channel. Web download and phone sharing are available. Native TVs offer a temporary local QR download on trusted Wi-Fi; physical-device sampling remains.</p>${devGraduation("archive export, privacy and recovery have applicable client and device receipts, including native TV file transfer.","this advisory card is removed; reporting remains in Help and the player.")}<button type="button" onclick="showDiagnostics()">Open reporting</button>`);}
-function developerPanel(settings,readiness){
+function developerPanel(settings,readiness,httpsCard=""){
   // Only features that are not yet fully active or fully tested wait here,
   // each saying what it waits on (devGraduation). Everything that graduated
   // lives in its own section; the links below are the way back to them.
@@ -348,7 +348,7 @@ function developerPanel(settings,readiness){
     ${clustered?`<a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health, placement, clocks and backups</span></a>`:""}
   </nav>`;
   return `${setHead("Developer","Features still waiting on qualification. Each card says what it waits on; none of them is gated by it.")}
-      ${destinations}${diagnosticDeveloperCard()}
+      ${destinations}${httpsCard}${diagnosticDeveloperCard()}
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection"><h2>Shared libraries and remotes</h2><p>Private sharing between separate Cinemas, and companion remotes.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
@@ -567,4 +567,100 @@ async function saveSdrMasterCodecs(btn){
     const card=document.getElementById("sdr-codecs-card");if(card)card.outerHTML=sdrMasterCodecsCard(saved,DEVELOPER_READINESS);
     toast("SDR master CODECS preference saved");
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}
+
+// Addressed-node HTTPS controls are independent of replicated /settings.
+function httpsSettingsMount(value,error){
+  return `<div id="settings-https">${httpsSettingsCard(value,error)}</div>`;
+}
+function httpsConnectionUrl(value,href=location.href){
+  const url=new URL(href);
+  if(!value?.active?.enabled) return null;
+  url.protocol="https:";url.port=String(value.active.port);
+  url.username="";url.password="";url.pathname="/";url.search="";url.hash="";
+  return url.href;
+}
+function httpsSettingsCard(value,error){
+  if(!value) return setCard(`${cardHead("HTTPS","Connections to this node; HTTP remains available.","")}
+    <p>${error?`HTTPS settings are unavailable: ${esc(error)}`:"Loading this node’s HTTPS settings…"}</p>
+    <button class="ghost sm" onclick="reloadHttpsSettings(this)">Reload this node</button>`);
+  const desired=value.desired,active=value.active,cert=value.certificate;
+  const fields=new Set(value.overrides||[]),locked=name=>fields.has(name)?" disabled":"";
+  const link=httpsConnectionUrl(value);
+  return setCard(`${cardHead("HTTPS","Connections to this node; HTTP remains available.",`<span class="pill">${active.enabled?"Active":"Inactive"}</span>`)}
+    <p>Addressed node: <code>${esc(value.node_id)}</code> · revision <code>${esc(value.revision)}</code></p>
+    <p>${value.restart_required?"Saved changes require this node to restart.":"The desired configuration matches this process."} Save never restarts the server.</p>
+    <details><summary>Saved, desired and active configuration</summary><table><thead><tr><th>State</th><th>Enabled / port</th><th>Identity files or generated names</th></tr></thead><tbody>${[["Saved before environment",value.saved],["Desired next boot",desired],["Active process",active]].map(([label,config])=>`<tr><td>${label}</td><td>${config.enabled?"On":"Off"} / ${esc(config.port)}</td><td>${config.cert_file?`${esc(config.cert_file)}<br>${esc(config.key_file)}`:`Self-signed: ${esc(config.sans.join(", "))}`}</td></tr>`).join("")}</tbody></table></details>
+    <label class="chk"><input id="https-enabled" type="checkbox"${desired.enabled?" checked":""}${locked("enabled")}> Enable HTTPS after restart</label>
+    <div class="setrow"><label for="https-port">HTTPS port</label><input id="https-port" type="number" min="1" max="65535" value="${esc(desired.port)}"${locked("port")}></div>
+    <p>Leave both paths empty for a persistent self-signed identity. Supplied paths refer to files on the server or inside its container, never this browser’s computer.</p>
+    <div class="setrow"><label for="https-cert">Certificate chain PEM path</label><input id="https-cert" value="${esc(desired.cert_file)}"${locked("cert_file")}></div>
+    <div class="setrow"><label for="https-key">Private key PEM path</label><input id="https-key" value="${esc(desired.key_file)}"${locked("key_file")}></div>
+    <div class="setrow"><label for="https-sans">Self-signed DNS names and IP addresses (one per line)</label><textarea id="https-sans" rows="4"${locked("sans")}>${esc(desired.sans.join("\n"))}</textarea></div>
+    <p>Generated identities retain their key and certificate across restarts and disable/enable. Changing their names or replacing an expired identity requires explicit file replacement while stopped. Add every hostname or address clients will use before first enable.</p>
+    ${fields.size?`<p>Environment-controlled fields: ${esc([...fields].join(", "))}. Their saved underlying values are preserved.</p>`:""}
+    ${cert?`<p>Active identity: ${esc(cert.mode)} · expires ${esc(new Date(cert.expires_at_seconds*1000).toISOString())}<br>SHA-256 <code>${esc(cert.sha256)}</code><br>Names: ${esc(cert.sans.join(", "))}</p><button class="ghost sm" onclick="downloadHttpsCertificate(this)">Download active public certificate chain</button>`:"<p>No HTTPS identity is active in this process.</p>"}
+    ${link?`<p><a href="${esc(link)}" target="_blank" rel="noopener noreferrer">Open unverified HTTPS address</a> · This uses the browser’s current hostname and active port. Verify this node’s identity and trust first; the new origin needs its own sign-in.</p>`:""}
+    ${value.durability_confirmed===false?'<p class="err" role="alert">The settings were published, but directory sync could not confirm crash durability. This revision is current; reload before another save and check local storage.</p>':""}
+    ${devGraduation("browser and native client trust, streaming, cluster and physical-device qualification are recorded.","the permanent HTTPS controls move to Settings → System.")}
+    <div class="err" id="https-error" role="alert"></div><button onclick="saveHttpsSettings(this)">Save HTTPS settings</button> <button class="ghost" onclick="reloadHttpsSettings(this)">Reload this node</button>`);
+}
+function applyHttpsSettings(value,error){
+  const mount=document.getElementById("settings-https");
+  if(mount) mount.innerHTML=httpsSettingsCard(value,error);
+}
+async function loadHttpsCard(generation){
+  try{
+    const value=await loadSettingsKey("https",generation);
+    if(settingsCurrent(generation,"developer")) applyHttpsSettings(value);
+  }catch(error){
+    if(!error?.staleHttps&&settingsCurrent(generation,"developer")) applyHttpsSettings(null,error.message||"request failed");
+  }
+}
+async function reloadHttpsSettings(btn){
+  const generation=PAGE_RENDER_GENERATION;
+  if(!settingsCurrent(generation,"developer")) return;
+  if(btn)btn.disabled=true;
+  SETTINGS_HTTPS_EPOCH++;SETTINGS_LOADED.delete("https");
+  await loadHttpsCard(generation);
+}
+async function saveHttpsSettings(btn){
+  const generation=PAGE_RENDER_GENERATION,mount=document.getElementById("settings-https"),snapshot=SETTINGS_DATA.https;
+  if(!snapshot||!settingsCurrent(generation,"developer")||!mount) return;
+  const err=document.getElementById("https-error"),desired={...snapshot.desired};
+  // Env-owned fields are sent unchanged, preserving their masked saved values.
+  const fields=new Set(snapshot.overrides||[]),read=(name,id,parse)=>{
+    if(!fields.has(name)) desired[name]=parse(document.getElementById(id));
+  };
+  read("enabled","https-enabled",node=>node.checked);
+  read("port","https-port",node=>Number(node.value));
+  read("cert_file","https-cert",node=>node.value.trim());read("key_file","https-key",node=>node.value.trim());
+  read("sans","https-sans",node=>node.value.split(/\r?\n/).map(name=>name.trim()).filter(Boolean));
+  SETTINGS_HTTPS_EPOCH++;
+  if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const value=await api("/system/https",{method:"PUT",body:{node_id:snapshot.node_id,revision:snapshot.revision,desired}});
+    if(!settingsCurrent(generation,"developer")||document.getElementById("settings-https")!==mount) return;
+    SETTINGS_HTTPS_EPOCH++;
+    SETTINGS_DATA.https=value;SETTINGS_LOADED.add("https");applyHttpsSettings(value);
+    toast("HTTPS settings saved; restart this node to apply changes");
+  }catch(error){
+    if(!settingsCurrent(generation,"developer")||document.getElementById("settings-https")!==mount) return;
+    if(err)err.textContent=(error.message||"Save failed")+(error.status===409?" Reload this node before editing again.":"");
+    if(btn)btn.disabled=false;
+  }
+}
+async function downloadHttpsCertificate(btn){
+  const generation=PAGE_RENDER_GENERATION;
+  if(btn)btn.disabled=true;
+  try{
+    const response=await api("/system/https/certificate",{raw:true}),blob=await response.blob();
+    if(!settingsCurrent(generation,"developer")) return;
+    const url=URL.createObjectURL(blob),link=document.createElement("a");
+    link.href=url;link.download="plurx-https-certificate.pem";link.click();URL.revokeObjectURL(url);
+  }catch(error){
+    if(settingsCurrent(generation,"developer")){
+      const err=document.getElementById("https-error");if(err)err.textContent=error.message||"Certificate download failed";
+    }
+  }finally{if(btn&&btn.isConnected)btn.disabled=false;}
 }
