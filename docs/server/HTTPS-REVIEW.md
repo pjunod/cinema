@@ -1,6 +1,6 @@
 # HTTPS review — adversarial findings and disposition
 
-**Status:** design approved with incorporated clarifications · **Reviewed:**
+**Status:** design approved; final implementation review and correction recorded · **Reviewed:**
 2026-10-15 · **Baseline:** `9eb7f6738`
 
 Independent adversarial review of [the contract](HTTPS-IMPLEMENTATION.md) and
@@ -56,3 +56,23 @@ freeze/fresh-main integration, exactly one fresh adversarial built-code review
 with Sol-owned fixes, full qualification receipt and Main promotion gate remain
 mandatory. Parent manages and reviews; Sol implements. This verdict approves
 task sizing only, not built-code correctness or physical/device acceptance.
+
+## 5. Single final implementation review — promotion PR #1134
+
+The independent read-only review examined frozen head `e95621a5f` (tree
+`6ead3b9e0d239d68f5d0fa90f1161d70da136ac0`) against main `5b8f8fe78`.
+It requested changes for one P2: a delayed PUT completion could overwrite a
+newer Reload or Save because the existing generation and outer-mount guards
+still matched. No other actionable defect was identified; this is not physical
+trust/playback acceptance or a substitute for qualification.
+
+Sol's correction captures the PUT operation epoch and checks it before both
+success and error effects. The existing page/mount checks and GET fences stay
+in place; no numeric revision comparison is introduced. The shipped-function
+regression `HTTPS obsolete PUT completions cannot replace a newer reload or save`
+first fails against the reviewed source, then covers both delayed success and
+rejection after a different-node Reload and after Reload plus a newer Save.
+It verifies cache, card, operation epoch, feedback, toast and button stability.
+Parent verifies this narrow correction directly; no second adversarial review
+is requested. The final exact-tree qualification receipt and Main promotion
+gate remain required, with physical trust/playback/Windows acceptance open.

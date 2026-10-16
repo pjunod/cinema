@@ -636,16 +636,16 @@ async function saveHttpsSettings(btn){
   read("port","https-port",node=>Number(node.value));
   read("cert_file","https-cert",node=>node.value.trim());read("key_file","https-key",node=>node.value.trim());
   read("sans","https-sans",node=>node.value.split(/\r?\n/).map(name=>name.trim()).filter(Boolean));
-  SETTINGS_HTTPS_EPOCH++;
+  const epoch=++SETTINGS_HTTPS_EPOCH;
   if(err)err.textContent="";if(btn)btn.disabled=true;
   try{
     const value=await api("/system/https",{method:"PUT",body:{node_id:snapshot.node_id,revision:snapshot.revision,desired}});
-    if(!settingsCurrent(generation,"developer")||document.getElementById("settings-https")!==mount) return;
+    if(epoch!==SETTINGS_HTTPS_EPOCH||!settingsCurrent(generation,"developer")||document.getElementById("settings-https")!==mount) return;
     SETTINGS_HTTPS_EPOCH++;
     SETTINGS_DATA.https=value;SETTINGS_LOADED.add("https");applyHttpsSettings(value);
     toast("HTTPS settings saved; restart this node to apply changes");
   }catch(error){
-    if(!settingsCurrent(generation,"developer")||document.getElementById("settings-https")!==mount) return;
+    if(epoch!==SETTINGS_HTTPS_EPOCH||!settingsCurrent(generation,"developer")||document.getElementById("settings-https")!==mount) return;
     if(err)err.textContent=(error.message||"Save failed")+(error.status===409?" Reload this node before editing again.":"");
     if(btn)btn.disabled=false;
   }

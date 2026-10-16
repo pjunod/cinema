@@ -2224,6 +2224,57 @@ test("HTTPS reads cannot overwrite a newer successful PUT or paint errors after 
   }
 });
 
+test("HTTPS obsolete PUT completions cannot replace a newer reload or save",async()=>{
+  for(const saveAgain of [false,true])for(const failure of [false,true]){
+    const before={node_id:"node-one",revision:"9007199254740993",desired:{enabled:false,port:32443,cert_file:"",key_file:"",sans:["localhost"]},overrides:[]};
+    const committed={...before,revision:"9007199254740994",desired:{...before.desired,enabled:true}};
+    const reloaded=saveAgain?committed:{...before,node_id:"node-two",revision:"0",desired:{...before.desired,port:34443}};
+    const saved={...committed,revision:"9007199254740995",desired:{...committed.desired,enabled:false,port:32444}};
+    const effects=[],mount={innerHTML:"initial"},error={textContent:""};
+    const nodes={"settings-https":mount,"https-error":error,"https-enabled":{checked:true},"https-port":{value:"32443"},"https-cert":{value:""},"https-key":{value:""},"https-sans":{value:"localhost"}};
+    const button=name=>{let disabled=false;return Object.defineProperty({},"disabled",{get:()=>disabled,set:value=>{disabled=value;effects.push(["button",name,value]);}});};
+    let resolveOld,rejectOld,calls=0;
+    const harness=new Function("document","api","settingsCurrent","applyHttpsSettings","toast",`
+      let SETTINGS_HTTPS_EPOCH=0;const PAGE_RENDER_GENERATION=1;
+      const SETTINGS_DATA={https:arguments[5]},SETTINGS_LOADED=new Set(["https"]),SETTINGS_LOADS=new Map();
+      const SETTINGS_ENDPOINTS={https:async()=>arguments[6]};
+      ${shippedSource("loadSettingsKey")}
+      ${shippedSource("loadHttpsCard")}
+      ${shippedSource("reloadHttpsSettings")}
+      ${shippedSource("saveHttpsSettings")}
+      return {save:saveHttpsSettings,reload:reloadHttpsSettings,data:SETTINGS_DATA,epoch:()=>SETTINGS_HTTPS_EPOCH};
+    `)({getElementById:id=>nodes[id]},(path,options)=>{
+      assert.equal(path,"/system/https");assert.equal(options.method,"PUT");
+      if(++calls===1)return new Promise((resolve,reject)=>{resolveOld=resolve;rejectOld=reject;});
+      assert.equal(options.body.node_id,"node-one");assert.equal(options.body.revision,committed.revision);
+      assert.equal(options.body.desired.port,32444);return Promise.resolve(saved);
+    },()=>true,value=>{
+      effects.push(["paint",value.node_id,value.revision]);
+      mount.innerHTML=value.node_id+":"+value.revision+":"+value.desired.port;
+      nodes["https-enabled"].checked=value.desired.enabled;nodes["https-port"].value=String(value.desired.port);
+      error.textContent="";
+    },message=>effects.push(["toast",message]),before,reloaded);
+    const oldButton=button("old"),oldSave=harness.save(oldButton);
+    await harness.reload(button("reload"));
+    let latest=reloaded;
+    if(saveAgain){
+      nodes["https-enabled"].checked=false;nodes["https-port"].value="32444";
+      await harness.save(button("new"));latest=saved;
+    }
+    assert.equal(harness.data.https,latest);
+    const markup=mount.innerHTML,epoch=harness.epoch(),priorEffects=effects.slice();
+    error.textContent="newer operation status";
+    if(failure)rejectOld(Object.assign(Error("obsolete PUT failed"),{status:409}));else resolveOld(committed);
+    await oldSave;
+    assert.equal(harness.data.https,latest,"obsolete PUT must not replace the newer node/revision/settings");
+    assert.equal(mount.innerHTML,markup,"obsolete PUT must not repaint the current card");
+    assert.equal(harness.epoch(),epoch,"obsolete PUT must not supersede newer operations");
+    assert.deepEqual(effects,priorEffects,"obsolete PUT must not paint, toast or modify buttons");
+    assert.equal(error.textContent,"newer operation status","obsolete rejection must not replace newer feedback");
+    assert.equal(calls,saveAgain?2:1);
+  }
+});
+
 test("HTTPS isolated loader ignores late navigation and reports its own failure",async()=>{
   let resolve,generation=1,paints=[];
   const load=new Function("loadSettingsKey","settingsCurrent","applyHttpsSettings",`${shippedSource("loadHttpsCard")} return loadHttpsCard;`)(
