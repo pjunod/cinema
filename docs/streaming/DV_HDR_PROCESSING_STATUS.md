@@ -1651,8 +1651,10 @@ marks capacity pressure only after an actual resource refusal. The incoming
 cold bootstrap fallback also requires processed candidates to satisfy their
 existing executable HDR10/HEVC and production checks. Ordinary cold encoding
 can still acquire its first window. Existing mixed-catalog, bootstrap and two
-processing-admission controls cover these compositions; execution remains owed
-on the integrated effort. No unit body executes on the task branch.
+processing-admission controls cover these compositions. Seven incoming Auto
+preparation events retain their phase diagnostics under the existing parent HLS
+tracing target. The four behavior controls and existing split-child tracing
+audit remain owed once on the integrated effort. No unit body executes on the task branch.
 
 The normal pinned Rust 1.97.1 integration hook passed formatting, workspace
 all-target Clippy, catalog and served JavaScript syntax. Incoming native/web

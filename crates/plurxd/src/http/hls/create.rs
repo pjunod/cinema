@@ -1959,7 +1959,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
                 }
             }
             if let Some(ceiling) = auto_bootstrap_ceiling {
-                tracing::debug!(target: "plurxd::auto_prepare", phase = "catalog",
+                tracing::debug!(target: "plurxd::http::hls", context = "auto_prepare", phase = "catalog",
                     catalog_count = worker_catalog.len(), safe_count = catalog.len(),
                     partial_count = worker_catalog.iter().filter(|entry| entry.partial).count(),
                     local_count = worker_catalog.iter().filter(|entry| entry.node_id == state.node_id).count(),
