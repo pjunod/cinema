@@ -123,6 +123,10 @@ jobs:
     # still compiling, without a compiler error. Allow the full all-target
     # check and vendor Clippy to finish; preserve every required command.
     timeout-minutes: 30
+    # Match the main lane's memory bound: simultaneous all-target rustc
+    # processes otherwise thrash at the runner service's 4 GiB soft limit.
+    env:
+      CARGO_BUILD_JOBS: "1"
     steps:
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
