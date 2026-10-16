@@ -63,6 +63,53 @@ impl From<&mut hiqlite::Row<'_>> for JsonRow {
     }
 }
 
+struct ManagedShapeRow(String, String);
+impl From<&mut hiqlite::Row<'_>> for ManagedShapeRow {
+    fn from(row: &mut hiqlite::Row<'_>) -> Self {
+        Self(row.get("name"), row.get("sql"))
+    }
+}
+
+// Only bootstrap's single coordinator installs baseline schema. Even a delayed
+// retry must not replace an adjunct view installed after its shape observation.
+fn probe_bootstrap_statements(shape: &[(String, String)]) -> Result<Vec<String>, StoreError> {
+    const ABSENT_GUARD: &str = "INSERT INTO cluster_meta(singleton) SELECT NULL WHERE EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write'))";
+    let schema = super::background_jobs_probe::SCHEMA;
+    let managed = shape
+        .iter()
+        .any(|(name, _)| name != "background_job_required_resources");
+    let (schema, guard) = if managed {
+        if super::subtitle_managed_schema::version(shape)? != Some(1) {
+            return Err(StoreError::Migration(
+                "bootstrap requires an exact managed extension".into(),
+            ));
+        }
+        // Keep the probe index and publish trigger. The exact closed suffix
+        // replaces a predecessor view and must never touch an installed adjunct.
+        let (prefix, _) = schema
+            .split_once("-- next statement\nDROP VIEW IF EXISTS background_job_required_resources;")
+            .ok_or_else(|| StoreError::Migration("probe view boundary changed".into()))?;
+        (prefix, None)
+    } else {
+        // The write-time assertion shares the same transaction as DROP/CREATE.
+        // A concurrent completed or partial install therefore refuses the retry
+        // before any view can be replaced, rather than relying on this read.
+        (schema, Some(ABSENT_GUARD))
+    };
+    validate_sql(schema)?;
+    Ok(guard
+        .into_iter()
+        .map(str::to_owned)
+        .chain(
+            schema
+                .split("-- next statement")
+                .map(str::trim)
+                .filter(|sql| !sql.is_empty())
+                .map(str::to_owned),
+        )
+        .collect())
+}
+
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     validate_sql(SCHEMA)?;
     for result in timeout_store(client.batch(SCHEMA)).await? {
@@ -106,8 +153,23 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.batch(super::background_jobs_embeddings::SCHEMA)).await? {
         result.map_err(database_error)?;
     }
-    validate_sql(super::background_jobs_probe::SCHEMA)?;
-    for result in timeout_store(client.batch(super::background_jobs_probe::SCHEMA)).await? {
+    let managed_shape = timeout_store(
+        client
+            // authority: installed adjunct shape decides whether bootstrap may replace its predecessor view.
+            .query_consistent_map::<ManagedShapeRow, _>(
+                super::subtitle_managed_schema::SHAPE_SQL,
+                params!(),
+            ),
+    )
+    .await?
+    .into_iter()
+    .map(|row| (row.0, row.1))
+    .collect::<Vec<_>>();
+    let probe = probe_bootstrap_statements(&managed_shape)?
+        .into_iter()
+        .map(|sql| (sql, params!()))
+        .collect::<Vec<_>>();
+    for result in timeout_store(client.txn(probe)).await? {
         result.map_err(database_error)?;
     }
     validate_sql(super::background_jobs_integrity::SCHEMA)?;
@@ -235,5 +297,68 @@ impl QueueSql for HiqliteAuthStore {
             };
             Ok(rows.into_iter().map(|row| row.0).collect())
         }
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+    use crate::store::SqliteStore;
+
+    fn shape(conn: &rusqlite::Connection) -> Vec<(String, String)> {
+        conn.prepare(super::super::subtitle_managed_schema::SHAPE_SQL)
+            .expect("shape query")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("shape rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("complete shape")
+    }
+
+    #[test]
+    fn bootstrap_probe_preserves_managed_view_and_refuses_partial_extension() {
+        let conn = rusqlite::Connection::open_in_memory().expect("bootstrap fixture");
+        SqliteStore::apply_migrations_for_test(&conn, 111).expect("actual current SQLite schema");
+        let before = shape(&conn);
+        let statements = probe_bootstrap_statements(&before).expect("exact installed extension");
+        assert_eq!(
+            statements.len(),
+            2,
+            "retain both probe index and publish trigger"
+        );
+        for sql in statements {
+            conn.execute_batch(&sql).expect("idempotent probe prefix");
+        }
+        assert_eq!(
+            shape(&conn),
+            before,
+            "managed resource obligations remain exact"
+        );
+        conn.execute_batch("DROP TRIGGER subtitle_managed_source_deleted")
+            .expect("partial extension witness");
+        assert!(
+            probe_bootstrap_statements(&shape(&conn)).is_err(),
+            "partial extension cannot be silently repaired"
+        );
+    }
+
+    #[test]
+    fn bootstrap_probe_absence_guard_refuses_a_concurrent_managed_install() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("bootstrap race fixture");
+        SqliteStore::apply_migrations_for_test(&conn, 110).expect("actual predecessor schema");
+        let plan = probe_bootstrap_statements(&shape(&conn)).expect("observed absent extension");
+        conn.execute_batch("CREATE TABLE cluster_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL); INSERT INTO cluster_meta VALUES(1,81);").expect("actual singleton refusal constraints");
+        conn.execute_batch(super::super::subtitle_managed_schema::SCHEMA)
+            .expect("another installer wins after the observation");
+        let installed = shape(&conn);
+        let transaction = conn.transaction().expect("owned bootstrap transaction");
+        let refusal = transaction
+            .execute(&plan[0], [])
+            .expect_err("write-time guard must refuse before DROP VIEW");
+        assert!(
+            matches!(refusal, rusqlite::Error::SqliteFailure(error, _) if error.code == rusqlite::ErrorCode::ConstraintViolation),
+            "only the actual constraint refusal proves the write-time fence"
+        );
+        transaction.rollback().expect("rollback refused retry");
+        assert_eq!(shape(&conn), installed, "concurrent winner remains intact");
     }
 }

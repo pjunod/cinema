@@ -1126,6 +1126,19 @@ compilation is absent by the maintainer's October 11 pipeline amendment; no
 Windows success is claimed. Production deployment and the broader codec,
 caption, optical and device matrices are not inferred from these records.
 
+## October 15 inherited Android navigation prerequisite
+
+Promotion run 5228's Android instrumented suite completes 78 tests with one
+failure: the shared transport-order control expects Right from Playback
+settings to reach Playback info, but the new Report a problem button
+intercepts it. An isolated owned Android TV emulator reproduces the same
+failure in the eight-test focus class. Moving reporting after the contiguous
+standard options restores Settings → Info → Picture in picture. The same
+control now also proves Right reaches reporting afterward and Left returns
+to Picture in picture; no focus assertion is removed. All eight focus tests
+then pass on the owned API36 emulator. Failed baseline/build/test output is
+retained, and no branch app is installed on a physical device. Independent
+review, task qualification and fresh full promotion remain required.
 ## October 15 inherited Apple qualification prerequisite
 
 Full promotion run 5228 passes policy/preflight and the fast Rust compiler,
@@ -1244,3 +1257,69 @@ Both carry explicit authority reasons and the exact slice count becomes 48.
 The overall unannotated ceiling stays 237 and both injected-read refusal
 controls remain required. The initial integrated four-case census failure
 (two pass, two fail) is preserved alongside the corrected rerun.
+
+Task gate 5235 refuses the missing client-fix history anchor before compilation;
+its failed receipt is preserved. The exact reviewed runtime commit and its
+existing instrumented regression are now named in the client-fix catalog.
+This catalog repair adds no runtime change or new device claim.
+
+### Combined remaining qualification candidate
+
+Task 5283 refuses a malformed client catalog after the Android/main merge
+resolution loses one table separator. Reconstruct the catalog from qualified
+effort `876162e2f` plus the exact independently reviewed Android row: every
+existing entry is byte-for-value unchanged, all IDs remain unique, and the
+repository loader and source/test anchors validate locally. The reviewed
+Android source commits and original eight-test emulator proof join the
+prerequisite candidate in #1137; #1129 is superseded only after that source
+lands through the combined required gate. No failed gate is relabelled green.
+
+Complete the existing reviewed historical and actual-Source fixture imports
+from `d326ed2d648096b932b1e1bffc048b20e8d514f0`; upstream commits
+`5f4c82f38` and `9887e4d19` record their Astra review. Preserve current main's
+managed-subtitle tests and the corrected HDR reference-white assertion.
+The current-main rerun passes four of five historical controls; read-index
+replay correctly refuses the partial managed-subtitle extension left after
+its historical queue rewind. Its fixture now requires baseline/no Source,
+the current marker and complete six-object inventory, zero model receipts
+and no managed accepted work before atomically restoring the published
+predecessor resource view. Production schema guards and migrations stay
+unchanged; the recorded failed run remains evidence for the corrected rerun.
+
+
+The independent combined review requests two caller/oracle corrections: invoke
+that managed rewind for both read-index opens, and capture the full trigger
+name/SQL inventory before removing the three managed triggers. Both corrections
+retain the exact restored-definition comparison; the revised source is approved.
+The corrected complete read-index case passes locally in 10.13 seconds.
+
+The complete v32 case then reaches its retained runtime reservation assertion and
+exposes a separate production compatibility omission: the closed predecessor
+inventory lacks the exact published v18/v31 session declarations after their
+real additive migrations. Import the two pinned SQL variants and their existing
+regression from `a06e00e10`, without admitting arbitrary layouts. The test keeps
+historical row values and additive defaults, and refuses a substituted owner
+constraint or extra index. Independent review verifies published provenance and
+approves this narrow compatibility delta. Its focused execution and the fresh
+exact-candidate gates remain separate requirements; the failed reservation log
+is preserved.
+
+
+The wider affected-case run preserves six additional failures: repeated
+bootstrap replaces an installed managed resource view, two SQLite downgrade
+fixtures retain the newer managed extension, and concurrent lineage migration
+can reject a genuine custody-migration winner. All ten actual selected Source
+runtime cases pass in that run. No complete-suite success is claimed.
+
+Bootstrap now preserves only an exact installed managed view while retaining
+the probe index and publish trigger. The predecessor-view replacement has a
+same-transaction absence assertion, so an extension installed after the shape
+read cannot be overwritten. The existing full retry scenario also checks its
+model receipt, accepted job, resource obligation and exact view survive.
+SQLite queue rewinds require current version 111, no Source installation,
+exact managed objects/marker and no accepted managed work or receipts before
+atomically restoring the published predecessor. Custody settlement reads its
+marker, protocol and exact schema together: only absent predecessor 80 may
+migrate, and only exact supported 81/82 may settle a concurrent winner. The
+same-write predecessor and post-DDL shape assertions remain required. These
+repairs require new independent review and focused qualification.
