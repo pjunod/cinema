@@ -714,7 +714,10 @@ the native transition settles: focus is Libraries while the accessibility tree
 still reports Live TV about a quarter-second after the press. The forward check
 already allows five seconds; the isolated follow-up applies that same bounded
 route check in reverse, preserving actual focus and no-Select assertions. The
-failed run remains retained; this test correction still requires verification. Complete-candidate qualification remains open.
+failed run remains retained: 27 of 28 journeys pass, with no skips. The corrected
+root traversal passes twice (54.22 and 53.75 seconds) on unchanged source, with
+actual focus and route checks in both directions. Complete-candidate qualification
+remains open.
 
 ### F35 · P1 · N — Favorite has no Down destination in a short channel row
 
@@ -732,6 +735,24 @@ live to own actual focus before tuning. Two complete native channel playback
 repeats pass (78.11 and 73.56 seconds), and the full-width Watch focus rendering
 was inspected. iOS compilation and the 1,101-unit suite pass on the combined
 candidate. Complete app qualification remains open.
+
+### F36 · P2 · N — final synopsis focus outline meets the scroll clip
+
+The coordinating visual review of the complete run finds the final paragraph's
+white focus outline clipped at the bottom of the reading viewport. The final
+text is readable and Back restores About, but a passing focus assertion alone
+does not establish a complete visible outline. This view also serves Shared
+About.
+
+The reading stack now reserves eight points inside its scroll viewport. A native
+regression requires every focused paragraph, plus four points of outline
+clearance, to fit within that viewport. The strengthened assertion fails on the
+prior layout (39.23 seconds). With clearance, the local journey passes in 46.99
+seconds and the complete Shared journey in 73.60 seconds. The coordinating
+agent inspected the new final-paragraph capture: all four sides of the focus
+outline are visible, with space above Close. The prior screenshot and negative
+result are retained. This follow-up still needs complete-candidate qualification.
+R03/R11.
 
 ## 6. Proposed renderings — consistent interaction before decoration
 

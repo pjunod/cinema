@@ -18,10 +18,17 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
         reachForSetup(about, in: app, limit: 8)
         assertFocus(about, in: app, context: "About opener")
         remote.press(.select)
+        let readingViewport = app.scrollViews["info-reading-scroll"]
+        XCTAssertTrue(readingViewport.waitForExistence(timeout: 5))
         for index in 0..<4 {
             if index > 0 { remote.press(.down) }
             let paragraph = app.descendants(matching: .any).matching(identifier: "info:paragraph:\(index)").firstMatch
             assertFocus(paragraph, in: app, context: "Synopsis region \(index + 1)")
+            let outlineFits = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                readingViewport.frame.contains(paragraph.frame.insetBy(dx: -4, dy: -4))
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [outlineFits], timeout: 2), .completed,
+                           "Synopsis focus outline fits inside the reading viewport")
             if index == 3 { XCTAssertTrue(paragraph.label.contains("FINAL SYNOPSIS LINE")) }
         }
         remote.press(.menu)

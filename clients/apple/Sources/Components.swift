@@ -534,7 +534,11 @@ struct TVReadableInformation: View {
                                 .remoteControl("info:paragraph:\(index)", label: "Synopsis part \(index + 1)") {}
                         }
                     }
+                    // Keep the focus stroke inside the scroll viewport even
+                    // when the first or last reading region is at its edge.
+                    .padding(8)
                 }
+                .accessibilityIdentifier("info-reading-scroll")
                 .onChange(of: navigation.focusRequestRevision) { _, _ in
                     guard navigation.activeScope == scope, let key = navigation.requestedFocus else { return }
                     proxy.scrollTo(key, anchor: .center)
