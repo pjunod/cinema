@@ -1690,5 +1690,14 @@ The existing finite-capture control gains paired-source, chronology, inherited
 membership, live-authority and current-invalidation refusals. Its changed body
 is owed once after effort integration; no task unit runs.
 
+The subtitle integration adds only browser commands to the complete Makefile.
+All twelve other Android command-input projections remain identical. Retention
+admits that one reviewed complete Makefile digest beside the original, while
+still requiring the original thirteen inputs exactly. Arbitrary additions,
+shadow assignments and changed Android recipes remain refused. The existing
+aggregate control gains an explicit additive-Make admission/refusal check; its
+changed body is owed once on the integrated effort. No instrumentation body
+is replayed for this source-identical Android command.
+
 The newer subtitle work on main is being reconciled separately. Current-main
 qualification, deployment and all eighteen physical HDR checks remain open.
