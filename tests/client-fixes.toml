@@ -7025,3 +7025,11 @@ source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
 source_anchor = "if focused != value { focused = value }"
 test = "clients/apple/UITests/TVLiveNavigationTests.swift"
 test_anchor = "Guide return Right reaches Channels pass"
+
+[[fixes]]
+id = "apple.tv-channel-watch-spans-favorite-column"
+commits = ["6e608dbfe6f54d751ee6dd74a9abc018a5ab8416"]
+source = "clients/apple/Sources/LibraryChannels.swift"
+source_anchor = 'Text(channel.enabled ? "Watch live" : "Disabled")'
+test = "clients/apple/UITests/TVPlaybackNavigationTests.swift"
+test_anchor = "Down from Favorite reaches Watch across a short programme row"
