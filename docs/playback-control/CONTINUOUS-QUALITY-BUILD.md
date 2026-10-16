@@ -9963,3 +9963,1992 @@ Android TV as the evidence for this change.
 Evidence: `docs/evidence/continuous-browser-2026-10-11/campaign-extract.json`
 holds every manual change of the three runs, the hashes of the full receipts,
 and the `mpstat` and `pidstat` window around Firefox change 12.
+
+### 10.307 · October 12 postmerge hardware acceptance (2026-10-12)
+
+**Scope and ownership.** Resume from the operator's October 12 handoff.
+Implementation and repairs #994, #1020, #1024 and #1029 are merged; #978 is
+closed. There is no remaining implementation branch to revive. Preserve the
+Chrome and Android TV passes. Live chat, worker and process inventories found
+no other general continuous-quality owner. Independent HDR owners confirmed
+their separate scope; their Safari tab and unknown native processes were not
+interrupted. All work uses an independent clone.
+
+**Exact source.** The clone and source-only lab extraction contain
+`1f02b7938a2f3924de6a3969483e38ffe3e8bd6f`. The handed-off scripts referenced
+deleted binaries, so the lab copied the deployed server executable read-only
+into its own directory. The image revision and executable version both match
+that source. Its SHA-256 is
+`a32d4ceeb0e8a07e06bd699d4095ecd2c923389323060e3cf4426beb0a31969b`.
+No production service changed; neither `.git` nor credentials travelled with
+source. Client versions remain Android 165 and Apple 231. These campaigns do
+not require a new production client release.
+
+**Firefox: PASS.** Run the committed
+`scripts/continuous-quality-qualification` against that executable, with
+Firefox and its children on CPUs 0–3,8,9 and the daemon/encoders on
+4–7,10–15. An external 3,000-second supervisor records each owned process's
+PID, parent, start ticks and affinity, plus shared process CPU ticks and load.
+It changes affinity only for descendants of its own campaign, after checking
+birth identity.
+
+- All 15 manual changes passed; video-gap p95 and maximum were 84.04 ms.
+- All 5 actual Auto changes presented 1080/720/1080/720/1080 at fixed
+  100/10/25/10/25 Mb/s.
+- TTFF was 1,801 ms; observed clock rate was 1.000×, with zero hitches and
+  stalls. Session and player identities remained unchanged.
+- End census had 1 exiting producer immediately, then 0 at 1/3/5 seconds.
+  The final process-birth audit found none of the 75 owned processes alive.
+- No sampled owned encoder overlapped the browser CPU set. Maximum one-minute
+  host load was 3.785 on 16 logical CPUs. Two production daemons remained;
+  their peak sampled CPU use was 88.3% of one core. No foreign encoder or Rust
+  compiler appeared in the recorded census.
+
+This resolves the missing callback campaign in §10.306 without waiving a
+limit. It does not identify the cause of the earlier failures or supply an
+optical capture. The report retains `browser_video_partial` evidence scope.
+Raw result SHA-256:
+`f532bce2b3fd06f3e42e0a8c79471b6ef6e814e18ca4e634b6f9a763bb0c6c40`.
+
+**Wireless Android phone: PASS.** The operator explicitly authorized the
+existing physical ADB server on port 5037, and clarified that Android is
+wireless. A paired Pixel 11 Pro XL was awake, unlocked and stopped on an
+existing production error screen. That app and its data were preserved.
+Compile only `:app:assembleCapabilityProbe` from the exact source, then install
+its separate `tv.plurx.app.capabilityprobe` package. No unit suite runs.
+APK SHA-256:
+`ef4e598b57f7811cb742d16e76139ce3ca85c5f461ffcc69d4dd64f096053d07`.
+
+Use ordinary UI to connect to the isolated lab, log into its fabricated
+account, select initial 720p and play the deterministic MPEG4/AAC clock
+fixture. Android 17 requires local-network permission even for manual server
+entry; only the diagnostic package receives that permission. Production
+permissions and pairing remain unchanged.
+
+The bounded actor keeps all credentials on the lab node. Before each UI
+request it records the current accepted hardware probe and arms the next
+numbered target. Acceptance requires a fresh `via=continuous` outcome,
+advancing frame/film counters, the requested actual frame height and a newer
+intent revision in the same family/session. Auto requires an unsuperseded,
+current accepted transaction and unique transaction identity. Errors, stalls,
+new 100 ms frame gaps, nonprogressing frames or owner changes abort the run;
+neither selected UI labels nor retained/fallback outcomes count as delivery.
+
+- All 15 manual 720↔480 changes passed. Request-to-delivery time ranged from
+  12,054 to 14,056 ms; it is preparation latency, not a display gap.
+- Following a fresh automatic 720p presentation, all 5 applied cliffs passed:
+  480/720/480/720/480 at 3/60/3/60/3 Mb/s. This repeats the native fixed-link
+  protocol in §10.305; the browser's 100/10/25 protocol remains separate.
+- One continuous session and family remained active. The family declares
+  video rates 3,000,000 b/s at 480p and 6,000,000 b/s at 720p, plus shared AAC
+  at 160,000 b/s. The 3 Mb/s cliff therefore exercises the cheapest-lower-rung
+  recovery rule when no declared cost fits the link.
+- Observe 32,534 hardware frames: maximum gap 98 ms, zero gaps at or above
+  100 ms, zero nonprogressing frames and zero stalls.
+- Actor and external supervisor exited 0 without timeout. Birth-checked
+  cleanup found none of the 67 owned processes alive. Remove the temporary
+  diagnostic app and read back production Android 165. No pairing or global
+  ADB setting changes were made.
+
+Hardware journal SHA-256:
+`ea9138786ea1bdbc3e45e653f5c5c943a580978b9e71b1466b1a4f8edd18ef92`.
+Disposable actor source SHA-256:
+`e726a9962bb5bc383077011fefb73dd957b6b8bffb30cdce220bc6256bf0021f`.
+Hardware callbacks and client stall observations do not replace independent
+optical or audible-output measurements. After cleanup the wireless ADB list
+and mDNS advertisements were empty; no reconnect, restart or re-pairing was
+attempted, and the completed pass is retained.
+
+**Remaining hardware and installs.** Separate current-source CQ Lab iOS and
+tvOS build-231 apps compile. Both paired iPhones and the tablet with the
+larger display report passcode required. The unlocked smaller tablet has an
+existing production Plurx process. The TV has existing production and older
+CQ Lab build-216 processes, which the HDR owner confirmed were not theirs.
+Leave these processes intact pending an unlock or explicit idle/cleanup
+reply. The independent HDR Safari owner released its lane before the campaign in
+§10.308. HDR phases do not count as a continuous-quality series.
+Physical iPhone/TV and Safari campaigns, unreachable client installs, and the
+broader independent-output/source/pressure limits remain open.
+
+**Infrastructure and policy.** #995 remains open on October 12. Preserve the
+handoff's reports of compiler OOMs, checkout/auth hangs, the offline Apple
+runner, cold-build timeout and moving-main preflight ruling; they have not
+been silently waived or claimed repaired here. This continuation runs no
+unit suites and makes no new implementation merge. Any new reviewed change
+goes to the operator's designated batched-merge chat for final qualification.
+
+
+### 10.308 Safari LAN HTTP qualification and verifier diagnosis — October 12
+
+**Status: failed acceptance; diagnosis in progress.** After the independent
+HDR worker released Safari, use a separate owned native Safari window against
+an isolated Linux daemon from the same `1f02b7938` deployment. Native controls
+perform every playback, quality and close action. The adapter only installs
+measurement observers and reads the lab page. The committed `runOneCase` and
+`mixedCase` scoring limits remain unchanged.
+
+One adapter-only preparation attempt started no media. Two subsequent attempts
+timed out at the 30-second first-frame deadline. Preserve both failures: the
+first had one decoded 1080p frame while paused; the second had no advancing
+frame. Each actor retired every owned process (46, 48 and 45 respectively).
+A read-only observer then confirmed valid 0–2-second video/audio buffers and
+paused transport. A native Play click after preparation started the fixture.
+
+That run presented all 15 requested 1080p/720p manual changes in the same
+session and player, but **failed**: transition video-gap p95 and maximum were
+2,000 ms, with 53 wait events, 10 stalls and 52 hitches. Auto was not run because
+the manual series failed. The long 116,566 ms handoff field includes the
+operator's delay opening a hidden quality menu; it is not a measured 116-second
+backend switch latency. Supply stalls also occurred independently at successive
+two-second media boundaries. No limit was relaxed and no partial pass was
+promoted. End retired the producers and all 55 owned processes exited.
+Raw receipt SHA-256:
+`971d90e540fa8d965b96a48b67179baa63b55617604bc91507cad60e1233dc36`.
+
+A separate deterministic 4 MiB timing diagnostic found that Safari LAN HTTP
+has no secure-context WebCrypto: the shipped attachment worker took 2,289 and
+2,329 ms to compute the correct SHA-256. A secure localhost control took 9 and
+2 ms with the same digest. Allocation, synchronous-batch and unrolled JavaScript
+experiments were insufficient; preserve their results rather than ship them.
+A fixed 2 MiB WebAssembly compression candidate, with the full JavaScript
+fallback retained, took 493 and 487 ms over LAN HTTP and returned the same
+standard digest. This is timing evidence, not playback acceptance. A focused
+three-manual-change diagnostic explicitly overrides that one verifier asset
+to check the suspected supply bottleneck before any production edit.
+
+The iPhone still reports passcode required. Existing production and unclaimed
+older CQ Lab TV processes remain untouched. All Android connections are wireless;
+no USB connection, ADB restart or pairing changes are required. Firefox and
+Android passes in §10.307 are retained; no unit suite was rerun.
+
+
+**Candidate binding correction and steady evidence.** The first intended
+verifier-override diagnostics still served the original script: the app's
+versioned asset URL carried a query string that the adapter's exact-path match
+missed. Reject those attempts as candidate evidence. The corrected adapter
+matches the parsed pathname, counts actual override requests and refuses to
+measure unless the served-byte SHA matches the bound candidate. Preserve all
+original-code failures and the no-media supervisor path failure separately.
+
+With the candidate actually served, a 40-second steady 1080p diagnostic passed:
+TTFF 2,618 ms, clock rate 1.002×, maximum presentation/callback gap 57 ms, zero
+wait events, stalls, hitches or dropped frames, and 59.9 seconds of runway at
+End. It started without the extra native Play action required by the slow
+verifier attempts. Real worker observations show 2 MiB video sample-fact jobs
+around 219–244 ms and full verification around 489 ms. All 45 owned processes
+retired without timeout. Raw receipt SHA-256:
+`cdff880b63183eecf777b4ba150daf21828c49da13efb170b53034ec92a8a4b6`.
+This diagnostic proves the suspected verification bottleneck, not the complete
+15-manual/5-Auto acceptance series. That series remains due on an exact built
+candidate, without the diagnostic asset override.
+
+**Source repair under qualification.** Keep native WebCrypto as the first
+choice. On LAN HTTP, use a fixed 2 MiB WebAssembly compression instance when
+available, with at most 1 MiB per synchronous batch; retain the complete
+JavaScript SHA implementation when compilation is unavailable. Hash output,
+attachment cancellation, worker retirement, byte limits and reservation proofs
+are unchanged. There is no feature gate or manual switch for this internal
+compute repair.
+
+The embedded module is built from [`scripts/continuous-sha256.c`](../../scripts/continuous-sha256.c).
+Run `scripts/generate-continuous-sha` to check it, or add `--write` to regenerate.
+The recorded compiler is Apple clang 21.0.0, with the pinned Rust 1.97.1
+`rust-lld`; the generator also accepts `--clang` and `--wasm-ld`. Compiler
+upgrades can change module bytes and require normal review. The module imports
+nothing and its memory cannot grow beyond 2 MiB. Generated object/module files
+live only in a temporary directory and are removed by the generator.
+
+New regressions cover large concurrent hashes across padding/batch boundaries,
+continued SHA availability when WebAssembly is denied, and attachment-worker
+hashing without native WebCrypto. They are added but not executed before final
+adversarial review and the designated merge chat's fast lane.
+
+
+### 10.309 Exact Safari verifier build, retained failures and focused Auto pass — October 12
+
+The source repair in §10.308 is committed as `26c172d6b341ef6f9e464f5d7dd6775fb17bd34e`.
+A source-only archive compiled on the lab with Rust 1.97.1, locked offline dependencies,
+two compiler jobs, incremental compilation disabled and the dev profile's debug
+symbols disabled. Debug assertions remain enabled. The daemon reports
+`cq-safari-lan-g26c172d6b`; binary SHA-256 is
+`2d1b297cfeb7fd5eb995b16611ff93f2df47dfad5fdfe95fea32f36d032e490b`.
+The actual versioned production asset matches committed SHA-256
+`3cc293162e46465d502ff0faf24c394999140a1d2645d89275bc734be4ec1866`.
+These campaigns serve compiled assets without the diagnostic override.
+
+**Startup receipt.** Safari reached playable 1080p media but remained paused;
+the first exact-build attempt failed before switching. All 50 owned processes
+retired. The private measurement adapter now requests an ordinary native Play
+click only when media is ready and paused. This changes neither product source
+nor scoring limits.
+
+**First complete manual receipt: failed timing.** All 15 manual changes ran
+with zero hitches, stalls or dropped frames; maximum/p95 callback gap was 69 ms.
+One switch measured 119,332 ms against the unchanged 90,000 ms limit, including
+the operator's delayed response to the native action request. Preserve the
+overall failure rather than subtract that delay after the fact. Auto did not run.
+All 69 owned processes retired. Raw receipt SHA-256:
+`d703ccc48315b16daa388282e342eec955d687d684e17173c0d6d8b599b7b2c4`.
+
+**Journaled 15-manual receipt: failed frame bound.** Native action request and
+completion times are now recorded. Every switch met the timing limit (maximum
+85,442 ms), with zero hitches, stalls or dropped frames. One 135 ms callback
+interval failed the 100 ms p95 bound. Its presented-frame count advanced by
+three, but that does not prove intermediate physical presentation; the failure
+stands. Auto did not run. All 66 owned processes retired. Raw receipt SHA-256:
+`eae4d6ad0701778ccd290bea116eba0393abde7e9bd321bb006bbb27b90057f9`.
+
+**Focused three-manual/five-Auto receipt: passed.** Three alternating manual
+changes passed with maximum/p95 gap 61 ms. All five actual Auto presentations
+then alternated 1080p/720p/1080p/720p/1080p in one attachment at the fixed
+100/10/25/10/25 Mb/s links. Auto gaps were 68, 60, 61, 58 and 72 ms; mixed p95
+was 72 ms. TTFF was 12,125 ms including native startup interaction, clock rate
+1.004×, with zero hitches, stalls or drops. All 56 owned processes retired.
+Raw receipt SHA-256:
+`4856be96884f33383092c2f9ee12a146710aa67a9327cc36ac614e5cbc59d380`.
+This is `browser_video_partial` evidence. It does not replace a qualifying
+15-manual/five-Auto series or prove independent optical/audio continuity.
+
+**Native readiness.** The paired phone is unlocked and production Apple 231
+is installed. A separate signed private frame-observation app, build 231 and
+bundle `tv.plurx.cq.frames20261012`, is installed without replacing production
+or the earlier QA apps. It has not launched playback. The observer distinguishes
+decoded frame media timestamps from callback timing; its scope is
+`AVPlayerItemVideoOutput_partial`, not optical or audio evidence. A private
+manual-intent harness is being prepared against Apple's documented prepared
+handoff contract (§7.3), rather than assuming browser session-ID invariance.
+Installed idle apps do not reserve hardware; only active use does.
+
+No unit suite has been run during this continuation. Final adversarial review,
+the requested external review checkpoint and the merge coordinator's affected
+fast lane remain ahead.
+
+
+### 10.310 Lab restart and remaining native qualification — October 12
+
+The next isolated native startup failed before any playback: its committed-source
+staging directory was absent. Inspection also found the exact verifier binary and
+the earlier remote Firefox, Android and Safari raw-report directories absent. The
+lab node reported eight minutes of uptime at 22:32 UTC, consistent with a recent
+reboot clearing temporary storage; the specific deletion mechanism is not proved.
+Local compact summaries and the ledger's previously recorded hashes remain. Those
+hashes are historical identifiers, not a claim that the missing raw files can now
+be inspected. Do not fabricate replacements or turn failures into passes.
+
+Restore committed source only and rebuild the same `26c172d6b` candidate with the
+pinned toolchain and profile recorded in §10.309 before running another campaign.
+The first failed startup's process-birth census has no residual owned process.
+Neither an older production binary nor a diagnostic asset override substitutes
+for this build. The final Safari 15-manual/five-Auto series remains due.
+
+The private Apple actor exercises the actual public manual-selection action and
+joins prepared offers, committed acknowledgements, accepted successor control
+responses and advancing decoded target frames. It follows the documented native
+prepared-handoff contract (§7.3), permitting predecessor/successor sessions while
+retaining logical viewer and file ownership. Its evidence remains partial:
+`AVPlayerItemVideoOutput` is not independent optical/audio observation or proof
+of physical quality-menu taps. The separate phone app is installed; a separate
+TV app is being compiled. Production and older QA apps are preserved. Idle
+installed apps reserve no hardware; only an active run claims a device.
+
+
+### 10.311 Restored verifier and native first-switch diagnosis — October 12
+
+The restored source-only `26c172d6b` build reproduces the exact daemon SHA-256
+recorded in §10.309. The lab runner must explicitly bind its fixture probe;
+a startup without that binding failed before creating media. A separate native
+UI deadline failure also preceded playback. Both remain failures, not playback
+qualification.
+
+A subsequent complete 15-manual Safari series had maximum/p95 callback gap
+64 ms, zero hitches, stalls, drops or waits, and one player/session. It nevertheless
+failed the unchanged 90-second action limit twice: operator response contributed
+to measured ready times of 93,433 and 101,511 ms. Auto therefore did not run.
+Raw synthetic receipt SHA-256:
+`78bf45298432275189a428211d29dbf6233277f7f504d5ef5d6a1f952e909991`.
+A sanitized local summary and the empty residual-process census are retained.
+A dedicated operator is running the complete series again. Its first attempt
+selected a background fixture link instead of the exact quality-menu row;
+that operator failure was preserved and all 77 owned processes retired. The
+replacement matches the complete native quality-menu row and verifies that the
+player remains present after each selection. Neither change relaxes a scorer.
+
+**Phone diagnosis.** The latest bounded first-720p diagnostic completed its
+seek to 5,110 ms, then reached buffer-ready but failed the frame-duration
+checkpoint. The actual cadence inspector observed playlist HTTP 200, init HTTP
+200 and fragment HTTP 503 before returning unverified. The asset exposed no
+video tracks; the ready item exposed a video track whose minimum frame duration
+was invalid. This observation establishes an unavailable fragment response,
+not its server-side cause. No 720p landing or manual/Auto acceptance is claimed.
+The earlier metadata-ready failure remains a separate unresolved observation.
+
+The DEBUG launch path also read an item ID of `2147483647` from its defaults
+argument domain while the explicit launch argument and synthetic backend item
+were `2213361592683154835`. The proposed correction reads explicit decimal
+integer arguments directly and refuses malformed explicit values rather than
+falling back to saved defaults. This changes diagnostic launch intake only.
+
+**TV diagnosis.** The newer targeted TV diagnostic failed at metadata-ready,
+before its cadence inspector ran. It does not establish an HTTP cause. The
+previous TV frame-duration failure and the phone's actual inspector response
+remain distinct receipts. Both unique QA apps exited, their isolated backend
+processes retired, and production and older QA apps were preserved. Neither
+idle device is reserved.
+
+The proposed public cadence correction retries only HTTP 503 on the same URL
+and Range, with a 100 ms delay and the original absolute preparation deadline.
+Refused response bodies cannot supply sample evidence; every attempt cancels
+its actual transfer task on exit. Authorization failures remain terminal. The
+parser, sample proof and admission limits are unchanged. Source integration and
+regressions are prepared; affected compilation and a fresh bounded first-switch
+reproduction are still required before any native acceptance claim.
+
+The six new Apple regression cases remain unexecuted under the agreed workflow:
+final adversarial review first, the external-review checkpoint, then the merge
+coordinator's affected fast lane, with only failed tests repeated. No unit suite
+has been run during this implementation continuation.
+
+**Dedicated full Safari receipt: passed.** On the restored exact `26c172d6b`
+verifier, all 15 manual selections and five actual Auto presentations passed the
+unchanged campaign scorer. Manual maximum/p95 gap was 87 ms and maximum readiness
+was 69,652 ms. Auto presented 1080p/720p/1080p/720p/1080p at fixed
+100/10/25/10/25 Mb/s, with gaps 59/72/107/87/61 ms. The combined 20-change p95 was
+87 ms. The 107 ms Auto maximum is retained explicitly: this pass does not mean
+every interval was below 100 ms. TTFF was 8,625 ms, clock rate 1.002×, with zero
+hitches, stalls or dropped frames. Player, session and family remained stable.
+The runner recorded its CPU assignment, without claiming independently sampled
+affinity evidence. Four End samples had no children; all 96 owned processes
+retired with zero same-birth residuals, and the owned Safari tab was left blank.
+Raw synthetic receipt SHA-256:
+`7a4b9e966b06c5940ffc94f950b47ba28c8dbc0cc57aa7e905dd0d1b242d04fc`.
+A sanitized local receipt preserves per-switch timings, identity and cleanup.
+This closes the full Safari campaign in its `browser_video_partial` scope;
+independent optical/audio and Safari iOS evidence are not claimed by this run.
+
+**Apple candidate and retained terminal failures.** Current main `290346685`
+was integrated as `d909f4f2e`; public correction `fd322f23a` claims Apple 232.
+Normal pinned hooks passed. Both iOS and tvOS test targets compiled with
+`build-for-testing`; no unit tests executed. Private signed QA apps retain build
+231 and distinct bundle identities; their executable provenance is recorded
+separately from the public correction.
+
+The updated phone now proves that its actual full-width item ID matches the
+fresh isolated backend's item. Its bounded first-720p attempt still fails: the
+actual inspector sees playlist/init HTTP 200, then fragment 503 followed by 410
+on the same fragment. The 410 precedes cadence failure and the failed
+acknowledgement; the later disposal therefore does not explain that refusal.
+No 720p landing passes. The updated TV reaches metadata-ready and buffer-ready,
+then its actual inspector receives playlist HTTP 410 after 84 ms with 3,911 ms
+remaining. Its actual runtime item-ID readback was not observed in this attempt;
+a private identity/seek probe is prepared for the next diagnostic. No TV target
+landing passes. All 55 owned TV backend processes retire, the unique app exits,
+and production and the earlier QA apps remain intact.
+
+HTTP status alone does not establish the terminal cause. Some legacy ownership
+paths classify a retired control as pending, then consult durable terminal state
+when response authorization finds the owner gone; these need not produce a VOD
+terminal-enum log. The next bounded diagnostic captures only fixed response codes,
+synthetic-session state and terminal-reason enums, and numeric timestamps from
+the isolated lab database. It does not retry 410, extend preparation, or export
+unfiltered logs or signed URLs. Native acceptance remains open.
+
+The committed integrated backend `fd322f23a94f758f6c9ff0b11f013e4a7fbce418`
+builds with Rust 1.97.1 and the recorded locked/offline dev profile in 258 seconds.
+It reports `cq-integrated-gfd322f23a`; binary SHA-256 is
+`cdb6cf1a5e205f6bcdf29a0dc73523da19fc422e6e23e7ec448de28ed72968d5`.
+Its source-only archive transferred neither `.git` nor credentials. Two compiler
+jobs used a CPU set separate from the native diagnostic. The earlier exact
+Safari verifier was retained at a stable isolated path before the warm build
+directory was reused. This is compilation evidence, not a new runtime pass.
+
+The next bounded phone diagnostic again observed terminal HTTP 410 before its
+failed acknowledgement, but its read-only database helper returned unavailable.
+No terminal cause is inferred from that result. The helper's fixed field-presence
+and categorical SQLite-error diagnostics must be validated with an isolated
+bootstrap before another physical run. The private actor removes its runtime
+on close, so no retrospective database recovery is claimed. Filtered synthetic
+receipts remain; unfiltered local log exports were removed.
+
+**Server-first correction, at Paul's direction.** The generic client HTTP 503
+retry introduced in `fd322f23a` is removed from the candidate. Calling the
+observed refusal transient was premature: its actual cause has not been proved.
+The server's quality-change path must be corrected rather than masked by an app
+retry. The separately proved full-width DEBUG launch-ID correction remains,
+as does cancelling the actual cadence transfer task and refusing error-body
+media evidence. A regression covers terminal 503/401/403/410 responses, one
+request and no refused body contribution; it remains unexecuted until the agreed
+final fast lane. The native cadence and landing requirements are unchanged.
+
+The device-free bootstrap identifies the diagnostic helper failure: the active
+legacy schema lacks `principal_kind`, while the helper queried it unconditionally.
+Its correction uses observed schema fields and parameterized synthetic UUID/local
+user predicates. This is a private evidence-tool correction, not a change to
+application authorization or media admission. The terminal reason still requires
+an actual capture.
+
+**Cancellation cause captured.** The current non-retrying TV probe verifies its
+full-width runtime item ID and observes `foreground_claimed` increase from zero
+to one before the first HTTP 503. The other seven cancellation buckets remain
+zero. That first response is `response_state_changed`; the following 410 is
+`media_session_ended`. The failed client acknowledgement arrives about 10.9
+seconds after the refusal. All 71 owned backend processes retire, the unique
+QA app exits, and the existing production and earlier QA processes remain intact.
+This proves the foreground-admission watcher initiates this cancellation.
+
+The source currently registers a Live admission guard before attempting a free
+first fit. The preparation watcher treats that fairness registration as blocked
+capacity and can retire a prepared successor while admission is merely in
+progress. The pending server correction preserves fairness registration and
+separates actual capacity pressure, marked only after a failed resource attempt.
+Actual blocked foreground demand must continue to preempt prepared capacity;
+no owner exemption or client retry is introduced. Its compiler checks and
+physical landing evidence are pending. Unit regressions remain deferred to the
+agreed final lane.
+
+Server correction `9d2bb526e8995b89b7135f4629791d7aa0700620` now covers
+the five production admission-registration paths. Rust 1.97.1 affected
+all-target compile/Clippy and the normal catalog/format/workspace-Clippy/JavaScript
+hook pass. Regression cases cover free first-fit fairness, blocked-demand
+preemption and multi-waiter cleanup, and source-copy pressure release; none has
+executed yet. The exact committed-source Linux rebuild is running before the
+next physical quality change. A passing compiler is not hardware qualification.
+
+The exact committed server correction rebuilds in 160 seconds on the warm
+Linux target with Rust 1.97.1, locked/offline, two compiler jobs and a CPU set
+separate from native playback. Binary version is
+`plurxd 0.3.0 (cq-native-g9d2bb526e)` and SHA-256 is
+`40def617d1fd0aaa4f5913929ebe31ac5c2a74ddad8c13653cf77e5f707c60c6`.
+Only the server crate rebuilds; source transfer contains no Git directory or
+credentials, and temporary archives/extraction are removed. Phone first-switch
+qualification is now starting on this binary. No unit tests execute.
+
+**Corrected-server phone result remains failed.** On exact `9d2bb526e`, the
+actual first 720p transition has zero landings. Its real 5,038 ms seek completes
+in 237.7 ms, and the bounded wait reports landed. Nevertheless,
+`foreground_claimed` increases from zero to one by the first fragment 410
+(`media_session_ended`); the other seven cancellation buckets remain zero.
+The failed client acknowledgement follows the refusal. No 503 is observed in
+this attempt, but that does not qualify the transition or establish that the
+server lifecycle fault is resolved. The queue-registration correction is
+insufficient; the actual blocked admission that triggers the watcher still
+needs attribution. Incumbent decoded-frame maximum gap is 59.28 ms.
+The corrected backend removes all 63 owned processes; the two baseline
+readiness runtimes separately remove all 70 and 74 owned processes. The unique
+phone app exits and its process is absent. No full native campaign starts.
+
+**Actual capacity conflict confirmed by TV.** The awake TV's bounded first720
+run on exact `9d2bb526e` also fails with zero landings. On-node fixed-field
+admission telemetry shows a Speculative request for three software threads
+while four are used, followed by a Live request for four while three are used.
+Both observe software budget five, hardware use zero/limit two, no background
+hold, no retained reservations, and `over_budget=false`. The second record has
+one Live waiter. Each request fits alone; their combined seven-thread demand
+does not fit the real five-thread policy. No budget is raised and no acceptance
+requirement is relaxed. Partial incumbent frame maximum gap is 53.95 ms.
+The remaining server diagnosis is why the manual preparation's existing
+predecessor handoff does not protect this resource transfer before foreground
+pressure retires its successor. Compilation and removal of 503 alone do not
+resolve the failed offered transition.
+
+The TV's same-run cancellation capture records `foreground_claimed=1` by
+first503/410, with all other reasons zero. Its first503 is
+`response_state_changed`, followed four milliseconds later by playlist410
+`media_session_ended`; the failed acknowledgement follows the503 by434ms.
+Actual cadence playlist410 arrives in71ms with3,926ms remaining. All69
+owned backend processes retire and the unique QA process is absent. The TV
+had rebooted, so prior process IDs are not used to claim production-process
+continuity. Handoff-reason/yield proof was not captured before automatic
+owned-log cleanup; it is unknown, not inferred from the resource numbers.
+A bounded device-free reproduction is prepared to capture those fixed enums
+before cleanup; it will not constitute native or display acceptance.
+
+**Handoff expiry reproduced without hardware.** A bounded synthetic client on
+exact `9d2bb526e` observes the successor request at01:12:31.512735UTC and
+predecessor yield at01:12:31.525777UTC. The incumbent then refuses Live
+admission at01:12:33.515711UTC, 1,989.934ms after that yield, requesting four
+threads against the successor's three under budget five. Its fixed handoff
+reason is `not_prepared`; foreground cancellation increases to one and an
+actual media503 follows. The run contains22 media200 responses and one503.
+This establishes the two-second handoff expiry/re-admission path rather than
+merely inferring it from source. The synthetic metadata acknowledgement was
+rejected400 because its QA input was incomplete, so native acknowledgement
+equivalence and acceptance are not claimed.
+
+The pending correction retains the two-second fail-safe for unclaimed or
+abandoned requests. A successfully admitted exact claim instead remains bound
+to its matching staged preparation, only through that preparation's bounded
+lifetime, with commit/abort and explicit incumbent-waiting cleanup authoritative.
+The timeout is not globally increased; no client retry or capacity override is
+introduced. Compiler checks and corrected native qualification remain pending.
+
+The bounded handoff correction is committed as
+`e2d246a3743861d16f04fda6ddf91b769e9762fa`. Rust1.97.1 affected all-target
+check passes in95seconds; the normal catalog/format/workspace all-target
+Clippy/JavaScript hook passes, with Clippy113seconds. No unit executes.
+The added regression keeps an admitted prepared handoff beyond the retry
+expiry, prevents incumbent re-admission, then verifies abort releases it;
+the existing unclaimed-expiry regression remains unchanged. Exact Linux
+rebuild and native landing evidence are pending.
+
+**Bounded-handoff TV result: transfer commits; continuity still fails.** Exact
+`e2d246a` builds in144seconds with Rust1.97.1. Binary SHA-256 is
+`747786887e9b8229c362403a018e9766b899c356aacdc2b12ec389e3ab7f8975`.
+Its first720 run records25 actual decoded720 rows, metadata-ready/buffer-ready
+and an accepted committed acknowledgement. Requested-handoff and yielded-permit
+counts are one each; all eight cancellation counters remain zero. This proves
+the transfer now crosses the old expiry/cancellation boundary.
+
+The unchanged strict scorer nevertheless fails on a208.0698ms active720
+decoded-output gap. The first exposed successor row has rate zero/changing true;
+the next distinct720 row has rate one/changing false208ms later. Callback
+maximum102.4639ms is retained, so selection work alone is not assigned the whole
+gap. The committed acknowledgement follows the second row by46ms. Public
+Local playback exposes the paused successor before awaiting asynchronous media
+selection reconciliation and starting it. That exposed suspension path is being
+corrected with exact staged-item/attempt ownership rather than bypassed active
+selection guards.
+
+A remaining503 is `media_owner_transition` on the successor,105ms after its
+first-frame timestamp and114ms before the accepted commit; no410 occurs. This
+requires a separate server ownership-transition correction, not a client retry.
+All66 owned processes retire and the unique TV app exits. Full native campaigns
+remain unqualified.
+
+Current main `6dc031387` is integrated as `08be988faab7afb06790c22eb561d3806e5d7434`
+before final qualification; its normal pinned commit hook passes. The focused
+`e2d246a` run above is diagnostic evidence on its stated source, not acceptance
+of the newly integrated tree. Safari iOS session creation is refused with a
+Web Inspector reference; no session/media starts and its owned driver is cleaned.
+The required device settings cannot be checked by the operator currently, so
+Safari iOS remains explicitly blocked. No unit tests execute.
+
+**Combined corrections ready for qualification.** Public Apple correction
+`0c2fcd962b5eb07bb79a9b0e603dd61b82f222a2` resolves genuine staged audio/subtitle
+operations before alignment and exposure, under exact item/player/attempt and
+viewer ownership. iOS and tvOS test targets compile; normal hooks pass. Its two
+regressions cover nonactive staged-item application and late owner/viewer changes;
+unit execution remains deferred. Both distinct private QA apps now include that
+patch with their existing frame/seek/HTTP probes preserved.
+
+The remaining refusal's resource hash proves it was the successor status route.
+`ae62361c5f5955a52629361d2207c44117ebb260` uses existing exact prepared-media
+authorization for status in relay and local reads, retaining publication-owner
+checks and all ended/expired/foreign ownership fences. Delete, passive presence
+and control remain fenced. A staged/committed/ended status regression is added
+but unexecuted; pinned all-target Clippy and normal hooks pass. No client retry
+is added. The combined committed-source Linux build and native campaigns will
+run next on unchanged five-thread policy and continuity bounds.
+
+**Combined server and retained failures.** The committed combined source
+`bc96526a7dd3b39cdd41f2781d1858ac7d5af050` builds with pinned Rust1.97.1
+in233seconds. Its `cq-native-gbc96526a7` binary SHA-256 is
+`e01bb5793791cf8d2374908caeb2267b1408868b25908336f8e6b195b9011dc7`.
+No unit executes. A phone run on that exact server has no HTTP refusals and
+all eight cancellation counters remain zero, but fails the unchanged100ms
+active decoded-output limit with a383.408ms cross-item gap. The private
+observer attaches its new output only after active-player adoption;17 playing
+callbacks precede its first new pixel across a317.698ms observer interval.
+All69 owned backend processes retire and its unique QA process exits. That
+failed partial observation remains recorded, not promoted to acceptance.
+
+A separate private measurement output is then preattached to the hidden
+successor and retained through adoption; hidden decoded frames never enter
+scoring. On the same exact server the first720 transition still fails with
+a166.677ms observed gap. The tap is8.099seconds old at the first active720
+pixel; its first active callback precedes that pixel by83.829ms. The last
+1080 row and first720 row both report playing/presenting. An accepted
+committed acknowledgement follows. No HTTP refusal occurs and every
+cancellation counter remains zero; all68 owned backend processes retire and
+the exact phone QA process is absent. Neither full manual nor Auto acceptance
+is claimed because the campaign stops at its first failed switch.
+
+The first-active timestamp is an observer callback, not an exact surface
+promotion timestamp. The private output also drains hidden samples while
+parked; whether it omits an already aligned visible frame needs measurement.
+The next private diagnostic records exact promotion/play checkpoints and
+active sample availability without scoring hidden frames or changing the
+100ms limit. Apple TV qualification on the frozen combined candidate proceeds
+independently. Safari iOS remains blocked on unavailable device settings.
+
+**Query-only phone diagnostic separates the observer gap.** On the same
+`bc96526a7` server, a private query-only hidden tap retains its aligned sample
+until the item is active. One focused manual720 switch passes the unchanged
+100ms decoded-output bar: cross-item gap68.652ms, maximum decoded gap74.594ms
+and callback maximum68.652ms. First active acquisition reports a genuine
+1280×720 pixel buffer, `hasNew=true` and `copy_available=true`, at active tap
+age zero. Its14333.333ms film timestamp matches the last1080 sample but has
+new attachment identity; the existing scorer preserves that identity. Hidden
+frames remain excluded and no advancing film sample is manufactured.
+
+Exact surface promotion takes0.3325ms; the path from before promotion through
+playback start takes3.81675ms. First active acquisition follows playback
+start by55.5427ms. This supports the private hidden-consumption diagnosis
+and does not justify another production playback change. The earlier383ms
+and166ms failed observer receipts remain preserved; neither proves physical
+display failure. The focused run completes one manual action, no Auto series,
+with no HTTP refusals and49 owned backend processes retired without residuals.
+Full15-manual/five-Auto qualification and independent physical display/audio
+evidence remain separate requirements.
+
+**Full phone campaign exposes a later admission failure.** The query-only
+observer's full campaign on the same combined server completes one manual
+change, no Auto series, then fails the second1080 presentation deadline.
+Decoded-output maximum99.741ms and callback maximum54.070ms remain below
+the strict frame limit; this failure is missing second preparation, not an
+observed frame gap. The fixed control outcome is `declined` with
+`seek_pending=true`; effective playback remains720. No503/410 occurs, but
+`foreground_claimed` increases from zero to one; the other seven cancellation
+buckets remain zero. The seek flag alone therefore does not establish cause.
+
+Fixed admission evidence records the first successor request and predecessor
+yield at02:23:00.329572UTC and02:23:00.343125UTC. Live requests for four
+threads, while the successor holds three under budget five, report
+`not_prepared` at02:23:09.440831UTC and02:23:15.465633UTC. The first accepted
+commit rebound is recorded at02:23:09.454UTC and the second declined offer
+at02:23:16.271UTC. Those timestamps narrow investigation to admission,
+predecessor retirement and newly staged ownership; they do not alone identify
+which preparation the final cancellation belongs to. All69 owned backend
+processes retire without residuals, the exact phone QA process exits and
+private bootstrap material is removed. Further campaigns wait for a concrete
+correction; no whole-campaign retry or additional unit execution occurs.
+
+**Bounded provenance capture (2026-10-13).** A private instrumented server
+built from the combined candidate records the exact initial1080 rendition
+requesting Live admission at06:08:49.231789UTC after the first720 durable
+activation; the predecessor becomes superseded at06:08:49.463UTC. This
+establishes the requester relationship, without attributing a later
+preparation cancellation to that request. The focused phone capture ends
+before a joined manual landing: a same-720-attachment decoded gap112.154ms
+exceeds the unchanged100ms limit, with callback maximum61.879ms. All eight
+cancellation deltas remain zero. The first active720 pixel is immediate;
+AVPlayer reports waiting while the requested output time moves backwards
+before advancing. Startup clock settlement needs separation from physical
+presentation continuity. No hidden frame is scored and no optical/audio
+acceptance is claimed.
+
+The isolated phone supervisor retires50 owned processes and the TV launch
+attempt retires57, both with zero residuals. The TV console exits before a
+usable capture. Device inspection finds neither unique QA app active;
+hardware is released. Private diagnostic instrumentation is not shipping
+code. Unit suites remain deferred under the operator's explicit final-review
+and batched-merge policy.
+
+**Predecessor drain correction, implementation in progress.** Exact successful
+prepared settlement now marks only the bound predecessor's root and child
+readers as draining before releasing the encoder handoff. Draining readers
+retain their eviction windows and admitted GET obligations; their obsolete
+playback anchor and marker speculation stop contributing proactive producer
+demand. Other readers of the same cached rendition remain active. Encoder
+admission rechecks this demand after its asynchronous policy read and holds
+the reader guard through queue registration and admission. This closes the
+in-flight policy-read race without globally changing cached encoder priority.
+Two focused regressions cover exact ownership, abort, protected bytes,
+admitted response drain and a paused admission crossing commit; they are
+written and compiled only, with execution deferred to the final fast lane.
+
+**Aligned Apple pipeline priming, implementation in progress.** After final
+selection and seek alignment, the hidden paused successor now prerolls at
+the captured intended rate before decoded alignment and rendezvous. Native
+priming consumes the existing overlap allowance, requires ready player and
+item status, and retains exact player/item/viewer/rate ownership. Timeout,
+cancellation or owner loss cancels the pending preroll and preserves the
+incumbent. Three focused regressions exercise deadline disposal, task
+cancellation and late native success after ownership changes. This targets
+the measured successor startup wait; it does not change automatic waiting,
+frame scoring or the100ms qualification limit. Hardware evidence remains
+owed after compilation.
+
+**Exact corrected probe and native cached-successor proof.** The bounded
+API-order probe now retries the same packet through425 owner transition,
+preserving sequence one and acknowledgement timestamp. It subsequently
+accepts47 control packets with23 transition refusals and no409; this is
+synthetic ordering evidence only. Its second1080 preparation reuses the
+initial cached rendition and asks as Live, then ends as replaced without an
+offer. The58 owned processes retire without residuals.
+
+The phone independently reproduces that defect on committed server8ca2487b6
+and the exact private app carrying bounded preroll: one manual720 landing,
+no Auto series, maximum decoded gap97.518ms and callback64.172ms. The
+second1080 preparation is created at06:37:58.619UTC and ends as replaced
+at06:37:58.815UTC, with cache identity reuse confirmed by an on-node join.
+The foreground_claimed cancellation delta is one; the other seven remain
+zero. All49 owned processes retire without residuals and the exact QA app
+exits. The first-switch pass has only2.482ms margin; startup waiting and the
+requested-time backward jump remain observable. It neither proves preroll
+eliminates startup waiting nor claims optical/audio continuity. The scoped
+cached-reader admission-purpose correction now has independent native and
+synthetic cause evidence; full campaigns wait for that correction.
+
+**Scoped cache admission correction, compiling.** Consumer priority and
+nonpreemptive trial purpose are captured before a healthy cached rendition
+can replace the incoming recipe. Root and private child readers retain that
+purpose; family reservation uses it explicitly. The driver aggregates actual
+current reader and admitted-GET purpose after the policy read, under the
+reader guard. Only genuine Live demand registers foreground pressure;
+prepared-only reuse cannot inherit an obsolete Live wait. Exact commit
+promotes only its own root and child readers. A handoff requires the exact
+incarnation still named by a live predecessor slot; historical committed
+markers and nonpreemptive trials cannot claim it. Cached encoder identity
+and unrelated viewer priority remain independent.
+
+The focused regression recreates four requested threads beside a committed
+three-thread incumbent under budget five, then verifies prepared-only
+refusal, unrelated Live admission, detachment, exact promotion and trial
+restrictions. It is written for the final fast lane, with no unit execution
+during this implementation pass.
+
+
+**Scoped admission runtime proof and synchronized Apple clock correction.**
+Exact server `e796a2ed71da858d3b728bd908897203e21e6f81` compiles with
+pinned Rust 1.97.1. Its bounded API-order probe reaches the second1080
+prepared offer with Speculative admission, with53 owned processes retired
+and no residuals. This is ordering evidence, not native acceptance.
+
+On that server, the phone and TV focused captures fail the unchanged decoded
+continuity limit at114.464ms and203.257ms respectively. Both record zero
+media503/410 responses and zero deltas in all eight cancellation reasons.
+The phone retires50 owned processes and the TV53; both unique QA apps exit.
+The TV's first720 frame arrives0.605ms after play, but its item clock then
+moves backward69.042ms before advancing to the next frame. The observer was
+attached7.962seconds earlier, and the cross-item gap was46.749ms. Preserve
+this startup failure rather than attribute it to an attachment blind spot.
+
+The Apple correction schedules the muted hidden successor against the
+incumbent's current clock using AVPlayer's host-clock synchronization API.
+It requires contiguous loaded media from the scheduled immediate start
+through the unchanged target and switch runway. If the loaded interval
+starts ahead of the incumbent, it waits within the original overlap for
+the incumbent to enter it; it never moves the target or extends the deadline.
+Exposure requires both players actually playing at the captured rate with
+film clocks agreeing within measured frame cadence. It does not restart
+the successor at exposure. Apple's precise scheduling API requires temporary
+`automaticallyWaitsToMinimizeStalling = false`; the successor's original
+policy is restored after the proof or refusal. Five numeric regressions
+cover rate/origin mapping, exhausted lead/reserve, invalid clocks, cadence
+and backward-startup refusal. Units remain deferred. Hardware qualification
+of this correction remains due.
+
+
+**Clock correction qualification and conservative planning.** The exact
+clock correction `a9e62b680` builds iOS and tvOS test targets without executing
+units. A focused phone two-switch capture accepts both commits with zero
+origin mismatch, maximum decoded gap97.535ms and no cancellation increments;
+all54 owned processes retire. Its subsequent full campaign fails at the
+third switch:114.016ms decoded gap and102.480ms callback gap. Playback clocks
+are already running and advancing; retain that failure. A bounded
+three-switch diagnostic accepts all three commits with86.642ms maximum
+decoded gap,77.695ms callback gap, zero cancellation increments and65 owned
+processes retired. Fixed numeric checkpoints measure post-proof predecessor
+disposal and waiting-policy restoration in a few milliseconds in that run;
+they do not establish a teardown cause for the earlier pause.
+
+TV still fails before a staged commit in the latest diagnostic. The durable
+initial session is superseded, its preparation is replaced and a fresh720
+attachment appears. A predecessor-superseded cancellation increments once,
+with60 owned processes retired and no residuals. A separate private QA
+readiness/reopen checkpoint captures the path before abandonment; it changes
+neither production behavior nor the scorer. The earlier ordinary TV
+clock-anchor refusal and failed phone second commit remain preserved.
+
+The planner can spend all available lead above the exact post-swap reserve,
+leaving zero clock-sampling slack. Reserve one existing100ms poll interval
+before choosing the fixed future target. Keep the original overlap deadline,
+exact4000ms post-swap reserve and measured cadence checks unchanged. A numeric
+regression demonstrates50ms of media-clock lag without consuming that
+reserve, and still refuses one millisecond below it. This prevents a
+mathematically brittle anchor; it does not claim to explain the unmeasured
+inputs of historical refusals or eliminate the callback pause. Compilation
+and exact updated hardware qualification remain due; units are deferred.
+
+
+**Updated phone campaign and Auto bootstrap diagnosis.** Public Apple source
+`a150efc31`, with the unchanged isolated server `e796a2ed7`, accepts all15
+manual changes in the full campaign. Maximum decoded gap is98.9769ms and
+maximum callback gap86.2850ms; all82 owned backend processes retire, with
+zero residuals. The first Auto action reaches its deadline without an actual
+Auto commit. This is a manual-only pass, not full native acceptance.
+
+A bounded private diagnostic applies manual720 followed by Auto through the
+same controller action. It confirms saved Auto, a retained manual incumbent,
+no active candidate binding, and no transfer receipt. All three protocol
+readiness checks pass; six catalog candidates are valid. The completed body
+is a fresh network200 with an ETag, but cannot authorize adaptation without
+its candidate binding and receipt. The actual portrait presentation target
+is1125×2436; the full campaign's1080/720 Auto series also needs a real
+landscape presentation before that series is meaningful. The diagnostic
+records frame gaps above100ms and remains explicitly unqualified. Earlier
+short attempts stopped on a frame gap or the private command validator;
+neither proves an Auto result. The completed bounded capture retires all68
+owned backend processes. No admission, receipt or scoring threshold is waived.
+
+**TV cancellation identified.** A private transport diagnostic records
+AVAudioSession `oldDeviceUnavailable` (raw2), followed by transport pause,
+viewer epoch1→2 and prepared-action abandonment. The app is inactive at that
+boundary. This is audio-route loss rather than a measured prepared-clock
+refusal. Existing route-removal pause behavior remains intact; a visible,
+awake display/app is needed for further TV acceptance. All51 owned backend
+processes retire with no residuals. This evidence does not establish why the
+OS changed foreground or audio route, and does not qualify the TV campaign.
+
+
+**Authoritative manual-to-Auto bootstrap repair.** Prepared planning now
+negotiates a real, complete and dispatchable candidate at or below the manual
+incumbent when unnamed Auto has no current binding. It uses the existing
+ordinary explicit-candidate planner to construct the actual successor and
+checks its returned candidate identity and raster/rung ceiling. The incumbent
+is not relabeled. Fresh runtime display/decoder capabilities participate in
+Auto planning. Existing receipt registration may measure the new candidate's
+own bodies; an upward implicit switch still requires transition admission.
+
+An actual planner regression covers the legacy720-to-Auto binding and keeps
+the predecessor unattributed. A negative catalog regression refuses larger
+actual/recipe outputs, partial/parser-only entries, incompatible/forged and
+unsustainable candidates. Pinned Rust1.97.1 all-target compilation and Clippy
+with denied warnings pass; units are written/compiled but remain deferred.
+Exact isolated-server hardware proof is next; no Auto pass is claimed yet.
+
+
+**Bootstrap runtime refusal and ordinary Auto ceiling.** The exact
+`ed2295b02` server accepts the actual unnamed Auto request, reports staging,
+then offers no preparation. The private phone app verifies real landscape
+geometry2436×1125. Its bounded diagnostic accepts one manual action, no Auto
+commit; all72 owned processes retire. The first landscape attempt fails only
+the private console protocol because its local geometry event was forwarded;
+that bridge mistake is corrected, and its42-process cleanup remains recorded.
+
+Structured DEBUG tracing at `2ed23494f` confirms a legacy manual predecessor,
+no candidate, valid decoder/planning capabilities, and an eligible bootstrap.
+The catalog contains six rows and an ordinarily selected bound candidate,
+but the first repair admits zero rows and fails planning. All70 owned
+processes retire; no unit suite is executed. The isolated log collector
+persists only fixed phase/count/boolean facts before deleting the runtime.
+
+`partial` marks an unfinished discovery sweep, not an incomplete candidate
+recipe. Ordinary initial Auto already permits locally resolved partial rows
+when no complete compatible rows exist. Bootstrap now uses that same
+negotiation with an internal ceiling on both actual raster and requested
+rung. The ceiling cannot be supplied in a client body. Named and foreign
+partial admission remain restricted, source/decoder/recipe bindings remain
+authoritative, and the full canonical catalog remains available for later
+measured upgrades. The predecessor remains unattributed until a real
+successor is committed. The prior strict lookup and duplicate named replan
+are removed. Regressions retain their names and cover a landscape request
+that normally chooses1080 but must bootstrap at or below manual720, alongside
+local/foreign/complete/named catalog boundaries. Compile-only checks and
+exact hardware verification are recorded when completed; no pass is assumed.
+
+
+The narrowed bootstrap refuses rolling presentation because the negotiated
+VOD recipe digest cannot truthfully describe rolling bytes. This preserves
+the incumbent and reports unsupported output. Pinned Rust1.97.1 all-target
+Clippy with denied warnings passes on the exact revised source; formatting
+and whitespace checks pass. Units remain unexecuted. The catalog boundary
+regression also covers forged identities, incompatible decoders, larger
+actual/rung geometry, unsustainable and parser-only rows. Runtime proof of
+the corrected ordinary negotiation remains next.
+
+
+**Apple refresh of completed Auto costs.** A prepared canonical attachment can
+be valid before its complete encoded output measurements exist. Apple now
+refreshes missing measurements through the existing playback-decision API,
+with one request per thirty seconds and a five-second cancellation deadline.
+The response must still own the lifecycle, viewer action, recipe, source,
+file, attached session/candidate, item and real presentation target. It
+updates only the candidate catalog and measured outputs; it does not rename
+the attachment or reset Auto evidence, cooldown or switch budget. Invalid
+catalog identity and duplicate candidate IDs are refused. Conflicting output
+proofs remain duplicated so the existing unique-proof check refuses them.
+
+iOS and tvOS build-for-testing pass, including the two ownership/proof
+regressions, without executing units. Real cost proof still requires completed
+production full-mux output jobs; partial preparation and advertised bitrate
+remain insufficient. Native runtime verification remains outstanding.
+
+
+**Cold bootstrap production and rung correction.** The exact89f04485c phone
+diagnostic completes one manual change and no Auto commit. Fixed tracing
+reports candidate encode-route refusal; all68 owned processes retire.
+The bounded filter had required measured sustainable production before a
+first attachment, while ordinary cold Auto may stage an encoded route with
+unknown production. It now retains identity, decoder, positive geometry,
+dispatch authority and both incumbent ceilings without inventing production
+proof. Scoped preparation still owns actual admission. Its fallback selects
+an offered encoded rung within the ceiling instead of searching for the
+unbounded default1080 after narrowing to720. Early fixed catalog counts
+now survive selection refusal. The existing boundary regression explicitly
+admits unknown production without changing its measured playable verdict.
+Units remain deferred.
+
+
+**Local prepared output publication parity.** Ordinary canonical session
+creation hands complete-output preparation to a bounded owned worker, but
+first local prepared attachments did not publish that work. After actual
+attachment, the local path now offers the same work under the existing
+output-preparation setting. Recovery, split families, disabled preparation,
+actual retained outputs, missing canonical source/caps/recipe and foreign
+ownership do not enqueue. A queue-only owner is bound to the actual local
+source/cache owner; the attached context and strict retained-byte reuse
+authority are unchanged. The worker restores current source/settings and
+revalidates the exact recipe before publishing a durable job.
+
+Cold production remains unknown rather than falsely sustainable. The
+regression exercises the real bounded receiver with a cold canonical
+attachment, proves no attachment-context mutation, and refuses foreign,
+missing, disabled, incompatible or forged ownership. Pinned all-target
+compilation and denied-warning Clippy pass without executing units. Genuine
+full-mux jobs and exact native verification remain next.
+
+
+**Actual audio authority for completed output costs.** Exact000f352ee
+API-only setup now offers a canonical1080 Auto successor when given the
+existing unnamed height hint, and separately accepts exact named creation.
+Both attempts refuse setup success because no matching output job appears.
+The video-only capability reconstruction supplies no audio sink claim;
+encoded-output publication requires one. No missing job or proof is hidden.
+All setup processes retire; failed records remain.
+
+A focused physical phone capture obtains the actual full planning caps with
+five audio sinks and the actual decoder snapshot. Both stay on the isolated
+node with private permissions; only capture/count facts are exported. It is
+a capability capture, not playback qualification. All63 owned processes
+retire, and its owned bootstrap is removed.
+
+Prepared replanning now restores audio decoders/sinks from the validated
+predecessor claim into an existing negotiated video capability context.
+Absent claims stay absent, invalid claims refuse preparation, and empty
+legacy capability paths stay unchanged. This preserves actual audio
+authority and output recipe without inventing a sink. The existing bootstrap
+regression now covers real stereoAAC source/typed sink claims, equal output
+audio and canonical context, alongside absent/invalid claim boundaries.
+Pinned all-target compilation, denied-warning Clippy and formatting pass;
+units remain deferred. Private prewarm uses the actual full planning caps
+and exact production identities, with full-mux proof still required.
+
+
+**Completed-output assembly diagnosis.** The exact audio-authority candidate
+queues a real canonical1080 output job using the captured phone capabilities.
+Three attempts reach `preparation assembly failed`; the first two consume
+233.699s and219.696s, with no lease yield. Those durations do not establish a
+production timeout: assembly starts only after complete output measurement.
+No complete retained proof is published, and no hardware campaign starts.
+Normal shutdown retires all259 owned processes, with zero residuals and the
+private bootstrap removed.
+
+Fixed structured assembly diagnostics distinguish reservation, namespace,
+metadata, capacity, linking and staging refusals. They report fixed reasons
+and bounded accounting facts without identifiers or paths. The next isolated
+attempt stops at its first failure so repeated full encodes do not hide the
+cause. No unit suite runs before final review and batched qualification.
+
+
+**Preparation budget ownership.** Source inspection finds a mismatch when
+`cache.max_gb` is absent: complete-output preparation reserves against its
+50GiB default budget, but rendition assembly uses the ordinary admission
+budget, which deliberately remains zero when unset. Consequently a real
+full-title encode can be admitted and then refused only at assembly.
+The isolated actor does not configure this setting. A read-only fresh-server
+probe confirms its actual absence before another expensive encode: no encode
+starts, and all44 owned processes retire with zero residuals.
+
+Private full-output renditions now retain the budget that admitted their
+preparation. Ordinary rendition admission keeps its existing zero-when-unset
+policy and never admits private preparation storage. The focused regression
+uses actual complete-copy preparation with ordinary admission zero and a
+positive preparation budget, requiring a real measured retained result.
+Explicit zero preparation budget remains refused. Units are written but
+deferred to the final review and batched fast lane.
+
+
+**Isolated storage headroom.** The corrected-budget attempt reaches the
+first1080 completion boundary, then the isolated node reports disk quota
+exceeded. No completed proof or native pass is claimed. The remote
+supervisor cannot finish its birth-ledger receipt, so only the later bounded
+process census is retained: no owned actor, backend, supervisor, fixture
+encoder or probe remains. Twelve obsolete verifier binaries are removed,
+reclaiming5.94GB; the current server and diagnostic binary, source, actual
+capabilities and evidence remain. The rerun waits for adequate scratch
+headroom and adds the separate3Mb/s down/recovery check after the unchanged
+15-manual/five-Auto series, preserving both verdicts independently.
+
+
+**First genuine completed proof on the corrected budget.** After reclaiming
+6.92GB of obsolete owned verifier copies, the fresh isolated node has
+10.19GB of headroom. Exact656d2532d publishes its canonical1080 complete
+full-mux proof on the first attempt after239.412s: unique proof, measured
+average8,161,655bps and RFC peak8,811,808bps. This crosses the previous
+assembly-failure boundary. The720 and480 costs and both native campaigns
+remain outstanding; this server result is not a hardware qualification.
+
+
+**Three genuine measured costs before native launch.** The fresh corrected
+server completes all three canonical jobs on their first attempts in
+530.723s. Each candidate has exactly one qualified complete full-mux proof:
+
+| Rung | Actual average (bps) | Actual RFC peak (bps) |
+| --- | ---: | ---: |
+|1080 |8,161,655 |8,811,808 |
+|720 |4,160,929 |4,557,460 |
+|480 |2,159,853 |2,434,764 |
+
+The measured480 output fits3Mb/s. The1080 output's1.8× upgrade headroom
+fits25Mb/s. Preparation restores the original setting and ends its own
+sessions before exposing the native bootstrap. The phone SDK launches
+promptly after an unlocked preflight, with the unchanged15-manual/five-Auto
+scorer followed by a separate3Mb/s down-and-recovery verdict. Actual
+capabilities, identities and joins stay private on the isolated node.
+
+
+**Preserved strict phone failure after genuine costs.** The combined phone
+run completes three manual landings, then fails during the fourth switch
+to1080:109.379ms decoded-output gap,92.682ms callback gap, all eight
+server cancellation deltas zero. Auto and the supplemental low-link bar
+never start. The interval stays on the same1080 item with rate1 and moving
+film/host clocks. This does not prove optical continuity or pass the100ms
+bar. Promotion occurs before the interval; measured predecessor teardown
+and policy restoration each take less than1ms, ruling them out as its
+long delay. All218 owned backend processes retire, zero residuals; the
+SDK wrapper closes, and both owned bootstraps are removed.
+
+A separate private QA build moves JSON serialization and console writes
+onto a bounded ordered writer, with explicit evidence invalidation on
+overflow. Row timestamps, decoded-pixel criteria and the strict scorer
+remain unchanged. Fixed numeric spans measure native observation getters
+and any observer call taking10ms or longer. Build, signing and installation
+pass without units. The focused capture completes all four manual landings
+with no errors: maximum decoded gap94.8355ms and callback gap71.269ms.
+All eight cancellation deltas remain zero; all78 owned backend processes
+retire with zero residuals. This short diagnostic contains no Auto or
+low-link acceptance. Both owned bootstraps and the SDK wrapper are closed.
+
+The104 getter snapshots identify four access-log reads lasting36–56ms.
+Those reads overlap the four longest callback silences; the maximum
+access-log read is55.927ms within a56.192ms snapshot. Every other getter
+stays below0.4ms. This measured correlation motivates asynchronous,
+item-owned throughput sampling rather than speculative teardown changes.
+The public fix is in progress; the exact656 server remains unchanged.
+Unit regressions remain deferred to final review and batched merge.
+
+
+**Playback-thread sampling correction and full phone outcome.** Public
+`12eb6b592` moves all Apple controller access-log reads to one bounded
+background sampler. Actual scalar facts carry exact item, session and
+lifecycle ownership; replaced or late results cannot publish. One native
+read remains in flight even after invalidation, preventing worker growth.
+The two-second poll admits facts for at most two poll periods. Switch and
+pressure observations consume each actual sample once; authoritative
+network-transfer receipts remain separate. Two ownership regressions are
+added but not executed. Both test targets compile and the normal hook
+passes.
+
+Current main integrates cleanly as `a0446f3d2`. Exact integrated iOS/tvOS
+build-for-testing, pinned formatting/Clippy/syntax and Linux compilation
+pass without unit execution. The Linux binary SHA256 is
+`017ed394c9b4e54a4fec788fc8b33b592f8f867227eda4218ea80b62fd9b685b`.
+
+The corrected private phone build completes all15 manual changes with no
+errors: maximum decoded gap82.913ms and callback gap53.108ms. Across336
+snapshots, the cached access-log lookup takes at most0.040ms; the entire
+snapshot takes at most0.746ms. No observer span reaches10ms and the bounded
+writer records zero overflows. This is decoded-output evidence, not optical
+or audio qualification.
+
+The full campaign still fails its unchanged300-second Auto presentation
+deadline. Auto commits an actual720p bootstrap, with current candidate,
+catalog and completed-network receipt/ETag bindings; it does not produce the
+expected first1080p upgrade. Scored Auto changes and supplemental low-link
+changes remain zero. All eight cancellation deltas and known planner-refusal
+counts are zero. Cleanup verifies226 owned processes with zero residuals;
+the SDK wrapper and both owned bootstraps are closed.
+
+The three prewarm proofs were freshly re-read together at538.177seconds;
+they were not accumulated stale success counters. Unleased retained artifacts
+can retire after300seconds, while measured-cost lookup does not refresh
+that idle lease. This is a source hypothesis for later missing cost authority,
+not a captured retirement or established cause. The previous daemon log was
+removed by normal cleanup and successful idle retirement emits no trace.
+The next private diagnostic prepares only a genuine1080p proof and records
+exact chooser exits, per-rung matching proof counts, runway and timer ages.
+It cannot claim the full manual/Auto or low-link acceptance bars.
+
+
+**Cold Auto capacity refusal and scoped bootstrap purpose.** The next short
+phone diagnostic freshly prepares one genuine1080 complete full-mux proof.
+The client sees exactly one matching qualified descriptor at8,815,772bps;
+720 and480 have no completed proofs. The diagnostic completes its manual720
+landing but never reaches a canonical Auto incumbent. All28 chooser ticks
+stop at the initial guard;22 report the missing incumbent candidate, with
+manual retention and no active preparation. Runway, fitting and upgrade
+quiet/headroom checks have not run. Their absent fields are not failed
+thresholds and cannot justify changing those thresholds.
+
+The exact Auto720 preparation is planned with its canonical binding and
+activated after257ms. The client receives two failed acknowledgements at
+6,091.112ms and6,317.234ms after the first offer, before metadata-ready,
+hidden output, alignment or commit. No HTTP refusal is observed. The server
+join finds the target waiting for three software threads while its
+predecessor holds three and the budget is five. Speculative admission
+registers no live waiter. Its handoff reason is `not_prepared`; there is no
+producer spawn or init/fragment body before the original six-second native
+readiness bound. A playlist200 does not prove playable successor bytes.
+
+The source assigns `nonpreemptive_trial` to every automatic candidate
+recipe. This includes an actual bounded manual-to-Auto bootstrap, although
+its predecessor still owns the only usable capacity. Attachment correctly
+preserves incoming consumer purpose across cache resolution, but that
+purpose consequently forbids the bootstrap's predecessor handoff.
+
+Public `aec293fc1` derives bounded bootstrap purpose from the validated
+first-prime ledger, exact durable manual predecessor and staged canonical
+VOD successor. Source, principal and playback must match; decoder authority
+and canonical candidate identity must exist; successor height cannot exceed
+the manual incumbent. Local and remote first primes share this derivation.
+The private purpose reaches only the exact session's attached readers,
+including a replayed first prime. Cached encoding identity and another
+reader's voluntary trial remain unchanged. Existing incarnation, exclusive
+predecessor and capacity-fit checks still decide the handoff. The native
+six-second deadline, encoder budget and strict continuity scorer are unchanged.
+
+The shared-cache regression covers three-thread incumbent and target demand
+against a five-thread budget, a voluntary reader sharing the target Arc, and
+an unrelated predecessor reader that prevents exclusive handoff. The
+classifier regression in `d075287ee` separately rejects voluntary/upward
+proposals, foreign principal/playback/source, missing decoder authority and
+unbound or mismatched canonical identity. Pinned Rust1.97.1 all-target
+compilation, strict Clippy, formatting and both normal commit hooks pass.
+These regressions are compiled, not executed. Exact Linux compilation and
+post-fix native binding/upgrade evidence are pending. The prepared next
+120-second diagnostic preserves the one-manual720/unnamed-Auto sequence and
+fresh1080 proof; it is not a full15-manual/five-Auto or low-link campaign.
+
+
+### 10.312 Validated retained costs and loaded native rendezvous
+
+**Implementation is built; native acceptance remains open.** Draft PR #1048
+contains the retained-cost repair and the native preparation correction.
+The final adversarial review, external Fable review checkpoint and batched
+merge coordinator's fast lane have not run.
+
+A source-bound diagnostic captured the exact qualified1080p artifact retiring
+through idle expiry after300,006ms without a lease. Valid measured-cost reads
+had not refreshed its use. Public `7018bf615` validates the same retained
+entry's artifact facts before refreshing its use and clearing idle state.
+Invalid or foreign reads extend nothing; pins, expiry, accounting and retained
+budget remain unchanged. Pinned Rust1.97.1 compilation, strict Clippy and the
+exact Linux build pass. The two retention regressions are compiled, not run.
+The fixed-server phone campaign keeps all three genuine cost proofs valid
+through389seconds of Auto after15 manual changes and one1080p Auto upgrade.
+Its78.91ms maximum decoded gap is partial evidence, not the full acceptance.
+
+The private qualification tools needed separate corrections. Console transport
+now verifies ordered original-byte packets before unchanged scoring. A strict
+fixed-link fixture removes250ms idle burst credit: the earlier nominal10Mb/s
+phone link actually measured11.6–12Mb/s and could not prove downshift. A later
+phone run credited12 manual changes; its actual13th accepted, healthy native
+commit was rejected by the observer after repeated offers overwrote the first
+binding. Immutable first-offer retention fixes that observer. A deliberate
+empty manual-route candidate string remains valid. These private corrections
+do not add application503 retries or relax wire, owner or frame checks.
+
+The strict TV campaign completes15 manual changes and one Auto upgrade below
+79ms, then fails the lower replacements. A focused late-position diagnostic
+captures the cause:720p target372,082ms has loaded media only through361,961ms
+at its four-second seek bound;480p target383,107ms has loaded media only through
+377,961ms. Both targets are seekable. The successor serially fetches13–14seconds
+of earlier fragments while sharing10Mb/s with its incumbent. This is absent
+target media, not a proven seek hang despite a loaded target.
+
+A private preceding-only initial-parking experiment removes that backward
+fetch, but does not complete recovery. Its480p initial target386,065ms parks at
+386,000ms. The final exact target393,966ms lies beyond its loaded386,000–390,011ms
+window and again times out. The production correction therefore separates
+initial parking from final exact alignment and chooses one fixed future
+rendezvous within the actual contiguous loaded window that admitted the
+original target. It preserves the original target and media origin, two-second
+runway, original overlap and four-second bounds, exact final seeking, decoded
+alignment, clock matching and display ownership. A later buffer island cannot
+supply the missing runway. Consumption of the future lead still refuses
+exposure. Both Apple targets compile with build-for-testing; no units execute.
+The new numeric regressions cover source position, gaps, lead, rate and invalid
+facts. The corrected full physical campaigns remain to be qualified.
+
+Low-link qualification now prepares a genuine360p full-mux output in addition
+to1080p,720p and480p. The actual480p peak exceeded3Mb/s and could not establish
+a fitting lower choice. Production already offers lower candidates; the
+private harness had omitted their measurements. Only an exact qualified
+output cost and actual accepted landing can close the3Mb/s recovery/rebound
+bar. Its thresholds and the15-manual/five-Auto series remain unchanged.
+
+The two late TV diagnostics close213 and222 owned processes respectively,
+with zero residuals and closed SDK wrappers. The rejected new diagnostic
+field was caught before launch and removed; that preparation closes71 owned
+processes with zero residuals. Failed and incomplete captures remain failed
+or incomplete. Existing Chrome, Firefox, Android TV, wireless Android and
+macOS Safari evidence retains its original source and scope. Safari iOS
+settings, independent physical display/audio, broader source/pressure cases
+and unreachable installations remain explicit limits. No new native full pass
+or whole-matrix acceptance is claimed.
+
+
+The combined current-main candidate `ec15fe629` compiles on pinned Rust1.97.1
+and both public Apple build-for-testing targets without executing units.
+The exact signed QA artifacts preserve the private instrumentation. Four
+real completed full-mux costs remain finite; in this candidate's new fixture,
+480p peaks near2.44Mb/s and360p near1.54Mb/s, both below3Mb/s. These new facts
+do not rewrite the earlier fixture whose480p cost exceeded3Mb/s.
+
+A short phone diagnostic exposed a private acquisition defect: the launcher
+merged SDK stderr into stdout, allowing a system log to interrupt an original
+frame-packet envelope. The private launcher now keeps stdout bytes untouched,
+drains stderr into bounded terminal facts, and invalidates capture if CQ
+bytes appear there. Its source-bound60-second smoke closes with zero malformed
+or oversized stdout records, zero CQ records on stderr, and successful bridge
+and collector exits. The supervisor closes65 owned processes with zero
+residuals. This proves the bounded transport smoke, not full phone acceptance.
+
+A fresh TV diagnostic provides the missing loaded-plan evidence. All playback
+and ownership guards allow the first manual change. The original target is
+5,416ms and its contiguous loaded interval is4,000–7,989.333ms. The incumbent
+has advanced to7,944ms; a future target with one-second lead and two-second
+runway needs coverage through10,944ms. Readiness admitted the original target,
+then commit refused that future plan before the final exact seek. The repair
+aligns readiness admission with the actual future-plan predicate and waits
+for that predicate after media-selection work within the original readiness
+and physical-overlap deadlines. Neither the target lead, runway, exact seek
+nor the exposure proof is relaxed. Both public Apple build-for-testing
+targets compile the correction and its numeric regression without executing
+units. Physical qualification of this additional correction remains pending.
+
+The preceding short TV attempt fails earlier following audio-device and
+foreground loss. Its playlist response is410 for an already ended session,
+not503. The successor is replaced before that GET and the incumbent is
+superseded; those bounded facts do not establish a separate server defect.
+Cold admission contention remains recorded without attributing that teardown
+to a codec or hiding it with an application retry. The two short TV attempts
+close68 and52 owned processes with zero residuals. Failed attempts remain
+failed. The full corrected15-manual/five-Auto and3Mb/s recovery/rebound
+campaigns, formal adversarial review and Fable checkpoint remain open.
+
+
+The corrected first-manual TV diagnostic on `0e3e079d9` commits its exact
+10,000ms target within loaded4,000–14,000ms media. It credits one manual
+change, records a54.313ms maximum decoded gap, and closes53 owned processes
+with zero residuals. This is a focused repair proof, not full TV acceptance.
+
+The subsequent full phone campaign on the same public source fails after
+15 of15 manual changes and one of five Auto changes. Maximum decoded gap is
+68.348ms and transport framing remains clean. At the fixed10Mb/s stage,
+720p fetches2,200,764bytes from its first two fragments before the initial
+293,106ms seek starts3.932seconds after the offer. An incumbent1080p fragment
+transfer overlaps those startup reads. The successor does not reach future
+readiness within its original12-second deadline. These timings prove default
+startup acquisition, not a scheduler queue wait.
+
+The following480p attempt prepares its cadence after freezing a315,989ms
+future point. Cadence inspection takes833ms. A decoded incumbent sample
+6.351ms before seeking is already at315,791.667ms, leaving197.333ms of lead;
+the subsequent clock-anchor check sees the incumbent past the target and
+correctly refuses exposure. Auto eventually commits360p, which does not
+satisfy the required720p landing at this stage. The failed run is not accepted
+by changing the expected rung, retry policy or original bounds. All274 owned
+processes close with zero residuals, and the SDK is closed. Startup acquisition
+and cadence ordering repairs remain in progress; full corrected native
+acceptance, adversarial review and the Fable checkpoint remain open.
+
+
+The startup repair gives each authorized VOD attachment a fixed requested-start
+hint using [HLS `EXT-X-START`](https://www.rfc-editor.org/rfc/rfc8216.html#section-4.3.5.2).
+Its media origin, complete rendition graph and exact alignment remain unchanged;
+repeated reads retain the same attachment bytes. Cadence preparation now starts
+while the successor is hidden and loading. Commit chooses its single future
+point only after a matching cadence interval and actual loaded runway coexist.
+Both Apple app and regression targets compile with build-for-testing without
+unit execution. Physical evidence must establish whether these repairs close
+the Auto failures.
+
+
+### 10.313 — requested acquisition works; speculative incumbent fetching competes with readiness
+
+The short TV diagnostic on public `123ec52bd` uses QA build239. It completes
+15 manual changes and the first Auto step with a79.090ms maximum decoded gap.
+The required720p preparation at10Mb/s fails, and480p subsequently commits.
+This is not an Auto2 pass or full qualification. The SDK closes and all156
+owned backend processes close with zero residuals.
+
+The requested-start hint works:720p first acquires fragments146 and147,
+not0 and1. Those200 responses finish1.673 and3.633seconds after the offer.
+Initial parking reaches293,123ms at3.763seconds, with metadata ready at
+3.774seconds. The measured loaded interval is292,000–295,989.333ms. The
+incumbent is already at296,865ms, so its future point and two-second runway
+require coverage through299,865ms:3,875.667ms beyond that loaded end.
+
+Preparation expires at11.999seconds in metadataReady with no item error,
+zero readiness remaining and zero physical overlap remaining. No cadence
+failure is recorded. The terminal AVFoundation loaded interval is unmeasured;
+it must not be inferred from downloaded bytes. Meanwhile incumbent requests
+fetch media at354–362seconds while playback is near305seconds. Both players
+request speculative forward buffering on the same capped link. Later720p
+fragments finish through10.675seconds, and the next response closes partially
+at11.974seconds. Every observed playback request is200; a503 retry is not
+part of this repair.
+
+The correction gives the incumbent an item-owned forward-buffer
+preference only when its actual contiguous runway already covers the unchanged
+12-second overlap plus the four-second reserve. It reduces speculative
+fetching while visible playback continues. The original preference must be
+restored when preparation ends, without overwriting a newer owner or changing
+loaded media, playback rate, seek policy, deadlines, expected rungs or exposure
+proofs. This is an AVFoundation preference, so new physical evidence must show
+whether it actually frees sufficient capacity. Both final iOS and tvOS build-for-testing targets compile the correction and
+its two regression anchors without executing units. Physical qualification
+remains pending; units stay deferred until final review and batched merge.
+
+### 10.314 — owned fetch preference works; future coverage is the readiness limit
+
+On public `0a7ce34b9`, the strict short TV series completes15 manual changes
+and1 Auto change, with an83.221ms maximum decoded-frame gap. Required720p
+still fails and480p recovers. This failure remains preserved. The incumbent
+preference lease acquires60→16seconds with59.830seconds of actual runway and
+restores60seconds. Identity-joined transfers show no incumbent segment request
+competing with the720p acquisition before the deadline. The correction therefore
+removes the observed speculative contention, but is insufficient by itself.
+At12.024seconds,720p is still metadataReady: its loaded interval is
+298,000–318,010.667ms, the parked item is300,121ms and the moving incumbent is
+312,125ms. Those terminal facts do not prove coverage before the admission cutoff.
+Three cadence probes succeed; cadence success alone does not admit bufferReady.
+All155 owned processes close with zero residuals.
+
+A separate private diagnostic changes only the actor's normal manual-count
+guards from15 to1 and uses the existing explicit native count1 channel. It keeps
+normal Auto scoring, strict link pacing, zero burst, requested rungs and every
+readiness/overlap bound. Auto first establishes1080p, then commits the required
+720p at10Mb/s. The diagnostic completes1 manual and2 Auto changes with no errors
+and a66.753ms maximum decoded-frame gap. It is not full qualification.
+All149 owned processes close with zero residuals; the SDK closes first.
+
+Bounded private snapshots preserve each existing gate's short-circuit order and
+full numerical precision; only diagnostic values round to whole milliseconds.
+The server's200-character detail limit is respected. Missing or unevaluated
+checks remain unknown. Required720p has all earlier readiness gates true, while
+its loaded future rendezvous is false: at2.377seconds its original target is
+153,084ms, incumbent155,461ms and loaded range152,000–156,000ms. At5.554seconds,
+incumbent158,638ms still needs coverage through161,638ms, beyond the160,000ms
+loaded end. At5.761seconds the range reaches162,000ms and the incumbent is
+158,845ms; the unchanged future-point predicate admits with6.239seconds of
+physical overlap left. Neither voluntary-pressure guards nor a failed cadence
+proof explain those measured false predicates.
+
+The earlier failed capture includes three206 metadata reads of262,144bytes,
+each taking443–460ms; two overlap acquisition of the next successor fragment.
+A read-only audit during the new capture inspects16 actual cached720p fragments.
+Each has one1,844–1,856byte moof; complete index metadata and the following mdat
+header fit a1,980–1,992byte prefix. This audit is scoped to the100Mb/s mode-arm
+720p artifact, not an identity-joined10Mb/s downstage transfer. It establishes
+unnecessary metadata bytes, not a new qualification pass or readiness exception.
+
+For the full campaigns, a fresh900.01-second fixture is stream-copied from the
+preserved1,800-second source. Its SHA256 is
+`8b85173c8a49a0e3ba5395c1449462868b3b3d3549572e498663d6f3a93370c9`.
+Independent24-frame prefix and final-second comparisons match the original;
+video/audio codec, raster and cadence are unchanged. Each new campaign must
+measure its own complete output costs and finish all15 manual changes,5 Auto
+changes and both actual3Mb/s downshift/recovery landings before EOF. The shorter
+fixture saves preparation resources; truncation or missing receipts cannot pass.
+No old cost or acceptance proof transfers to this fixture.
+
+Full phone/TV qualification, formal adversarial review and the requested Fable
+checkpoint remain open. No units have executed; the batched merge coordinator
+owns final affected fast-lane execution after review.
+
+### 10.315 — inspect bounded fragment metadata without speculative media bytes
+
+Cadence inspection now begins with a4KiB unknown prefix. Once a box header
+identifies a retained moof, the remaining metadata extent and one following
+extended header determine the next read, capped at the existing256KiB window.
+An incomplete header requests only its remaining8/16-byte header bytes. Media
+payloads are skipped by their declared box extent rather than acquired for
+inspection. Large or multiple moofs still use bounded adaptive continuation
+instead of exhausting the request allowance on small reads.
+
+The existing4MiB retained-index bound,64-request limit,16MiB unranged-response
+limit, exact box tiling, Content-Range validation, terminal HTTP failures,
+deadline and task cancellation are unchanged. The readiness, future-point,
+runway, cadence scope and exposure policies are unchanged. No retries or feature
+gates are introduced.
+
+The regressions cover one4KiB206 request for a small index before a40MB media
+payload, and adaptive completion of3MB/800KB moofs separated by two40MB virtual
+media payloads without downloading those payloads. Both iOS and tvOS
+build-for-testing targets compile the repair and regressions successfully;
+no unit test executes. Physical qualification remains pending on the next
+integrated Apple build240.
+
+
+### 10.316 — measure acquisition-clock lag before changing prepared hints
+
+The full Apple240 TV900 capture on `b6ba64703` completes all15 manual changes
+but fails after the first Auto step. Required720p remains metadata-ready,480p
+recovers, and the original Auto deadline expires. The maximum decoded-frame gap
+is63.256ms. Actual cadence inspection now uses4KiB206 responses and completes
+in207ms; smaller metadata reads alone do not resolve readiness. The SDK closes
+and all187 owned backend processes close with zero residuals.
+
+A separate private capture preserves the normal15 manual changes, strict fixed
+links, zero burst, original scoring and every readiness/overlap bound. It reads
+the actual start tag from the playlist response already being delivered; it
+makes no additional media requests. Early buffer facts come from bounded
+snapshots of the existing readiness polls. Identifiers and response ownership
+joins remain on the qualification node; exported facts contain numbers and
+fixed enums only.
+
+For the actual required720p transfer at10Mb/s, the playlist advertises
+`TIME-OFFSET=295.016,PRECISE=NO`; native preparation targets296.065seconds.
+The1.049-second lag crosses the294/296-second fragment boundary. A precise
+playlist/transfer join confirms both ends of the request belong to the10Mb/s
+stage. Matching prior accepted control positions do not, by themselves, prove
+which control exchange created the stage.
+
+At3.464seconds the loaded interval is294.000–297.989seconds, short of the
+original target's two-second runway. By4.311seconds, original-target runway and
+all earlier evaluated admission predicates pass, but the loaded future point
+still fails. At6.973seconds only927ms of allowable wall lead remains, below
+the unchanged1,000ms minimum; the loaded end303.984seconds is2.054seconds short
+of the required306.038seconds. Sufficient buffer geometry appears at8.254seconds,
+after physical admission has expired. No observed row admits the720p successor.
+Skipped predicates remain unknown. Cadence inspection is not admission evidence.
+
+The diagnostic stops after a proven720p failure and a same-owner, healthy480p
+recovery. It awards no second Auto credit or full qualification. The console
+bridge and filter close with exit0, and all174 owned processes close with zero
+residuals. TheTV and phone are released for other sessions.
+
+The next repair binds response-scoped acquisition to the same captured native
+film position used by the prepared item's original seek and readiness target.
+It must retain the immutable rendition, full timeline, exact response owner,
+final alignment, original deadlines and exposure proofs. No client retry or
+feature gate is involved. Updated daemons register the implemented relay protocol in the existing
+heartbeat transaction. A selected remote owner receives the optional hint only
+when its capability belongs to its current heartbeat and committed in-process
+membership. The lookup uses the local replicated database within the original
+request deadline and makes no extra HTTP probe. Missing, stale, rolled-back or
+unsupported claims retain the legacy wire shape and attachment hint. The
+receiving owner applies the same response-scoped scalar-VOD transformation;
+unknown fields are never sent blindly to an older strict relay decoder.
+
+Server and native repairs are committed and compiled. The authored regressions
+cover query preservation, invalid/zero offsets, immutable response ownership,
+actual HTTP publication fences, atomic heartbeat registration and strict old/new
+relay shapes. Both Apple app/test targets compile without unit execution. The
+replicated-storage regression requires `make unit-core` or explicit
+`--features hiqlite-store` when the coordinator runs it. Fresh native
+qualification remains open. Skipping the earlier fragment is not yet a proven
+repair. No units have executed. Formal adversarial
+review starts only after qualification; the requested Fable checkpoint follows
+that review and its fixes, before the batched merge coordinator's fast lane.
+
+### 10.317 — acquire future media without moving the viewer's clock
+
+The Apple 241 phone capture on `6dac64442` passes the original 15 manual and 5 Auto
+changes, with a 76.441 ms maximum decoded-frame gap. Its separate 3 Mb/s series
+stalls before any low-link landing. All 188 owned processes close with zero
+residuals. The TV 241 full attempt measures its four output costs but the SDK
+launch is refused because the device is asleep; it receives zero manual, Auto
+or low-link credit. TV wake readiness remains pending.
+
+An isolated private incumbent-hint experiment reduces the advisory forward
+preference from 16 to 4 seconds while retaining the actual 16-second protection.
+It does not cancel an already outstanding 2.137 MB incumbent body, which overlaps
+the successor's acquisition for the six-second metadata window. A 480p successor
+loads 104–108seconds while the incumbent reaches 111seconds; a later 360p successor
+reaches metadata-ready but its loaded 114–126second interval trails the incumbent
+at 127seconds when readiness expires. The observed media responses are 200; these
+failures are not 503 refusals. The hint-only patch is rejected and is not part of
+the public repair.
+
+A separate private probe `f22185c5f` retains the captured viewer position as an
+immutable observation and gives pressure-driven Auto acquisition its own bounded
+future anchor. The response URL hint, initial hidden seek and loaded-media proof
+use that same anchor. The visible incumbent continues at its own clock until
+the final exact rendezvous; it is never paused, sought or advanced to the
+acquisition position. Original owner, item, viewer-action and rate fences remain.
+Unknown, paused, backward, unsafe-rate or infeasible end-of-title facts retain ordinary
+acquisition. No feature switch is added.
+
+The private probe records two actual low-link landings: 360p at 3 Mb/s and 1080p
+recovery, with no errors and a 69.696 ms maximum decoded-frame gap. The 360p
+acquisition anchor is six wall seconds ahead; its initial exact position is
+124,076 ms and the final exact rendezvous is 125,976 ms. Independent typed landing
+joins verify the actual offer, accepted wire acknowledgement, media ownership
+and decoded frames. This is a focused diagnostic, not the original 15-manual/
+5-Auto qualification, and it makes no largest-fitting-rung claim.
+
+The public two-anchor repair is committed in `1eb39847a` for Apple 242;
+exact final iOS/tvOS compilation and full qualification remain pending. The 77 authored regression
+anchors (73 retained plus 4 for this repair) have not executed. Metadata 6 seconds,
+readiness 12 seconds, reserve 4 seconds, minimum lead 1 second, runway 2 seconds and
+100ms readiness polls are unchanged; final cadence, seek, decoded alignment,
+clock matching and exposure proofs remain mandatory.
+
+Fresh full phone/TV qualification on the final Apple 242 tree, final adversarial
+review and the requested Fable checkpoint remain open. The earlier6dac full
+series does not qualify changed242 code. Independent display/audio, Safari iOS
+and the broader source/pressure matrix retain their existing limits. Units stay
+deferred through review to the authorized batched merge coordinator.
+
+### 10.318 — full Apple 242 low-link refusal and exhausted protection
+
+The exact `32422998e` / Apple 242 phone capture passes the original 15 manual and
+5 Auto changes with an 80.132 ms maximum decoded-frame gap and four fresh complete
+output-cost proofs. The separate 3 Mb/s series then stalls with zero low-link
+landings. The SDK/backend are closed; all 216 owned processes have zero residuals.
+The complete campaign is not qualified.
+
+The first 480p pressure attempt advances its acquisition anchor by 6,000 ms and
+acquires the incumbent-buffer preference with 16.871 seconds of actual runway.
+It fails the original six-second metadata bound. The next 360p attempt retains
+ordinary acquisition, advancing by zero; its initial seek to 629,093 ms succeeds,
+but the actual loaded interval is 628,000–639,989.333 ms at the twelve-second
+readiness failure while the incumbent is at 639,866 ms with only 89.251 ms of
+remaining runway. The interval does not supply the required future lead/runway.
+The earlier focused successful 360p probe advanced acquisition by six seconds;
+that diagnostic does not qualify this full capture.
+
+All twelve captured refusals are HTTP 410 on the actual 360p successor; no 503
+is observed. The first refusal occurs 11.526 seconds after the offer, before
+the failed acknowledgement and native stall, with no preceding DELETE. The
+recorded response code is `media_session_ended`; its body cause is unknown.
+Existing cancellation metrics record one `incumbent_waiting` increment at the
+first refusal and no expiry, ownership or intent-cancellation increments. An
+accepted predecessor control exchange finishes one millisecond before that
+refusal. The frozen actor does not preserve ordinary control demand/render-state
+bodies, and the bounded server tail has no exact owner cancellation line; the
+metric supports the incumbent-waiting explanation but does not reconstruct that
+missing request body or prove an exact incarnation-level cause. Bridge teardown
+follows the terminal failure and is not attributed as its cause.
+
+Client pressure selection and server preparation-cancellation repairs are being
+investigated against these preserved facts. Original deadlines, physical
+protection and acceptance remain unchanged. Fresh full phone/TV qualification,
+formal adversarial review and the requested Fable checkpoint remain open; no
+unit bodies have executed.
+
+### 10.319 — bounded severe-pressure acquisition and sealed cached recovery
+
+Apple 243 keeps the existing severe-pressure classification and uses actual
+contiguous incumbent runway and playback rate to choose the lowest measured
+output peak only while the original metadata, overlap and reserve budget is
+limited. Invalid or unknown facts, mild pressure, decoder recovery and ordinary
+selection retain their prior ranking. Candidate identity, decoder, grade,
+rejection and strictly lower-cost fences remain. Measured peak is a cost proxy;
+it does not prove native startup latency. This emergency choice may select 360p
+before the nominal largest fitting 480p; normal headroom policy still governs
+subsequent upgrades. No deadline, readiness requirement or feature gate changes.
+
+The server retains an already primed cached Auto recovery reader during an
+accepted incumbent Waiting/Stalled control only when its private, durable
+retained-output seal, exact live local response owner, original deadline and
+current accepted quality intent all match. Canonical downward Auto and the
+existing validated bounded manual-to-Auto bootstrap are the eligible purposes.
+The reader is authority-only and has no producer children. Cold, remote, stale,
+unknown, contended, voluntary and superseded work retains cancellation. Explicit
+user cancellation remains authoritative. Waiting makes the decision without
+awaiting Store or peer work; late proof publication cannot recreate a removed
+registration, and a retained keeper's exact pending token is preserved.
+
+The earlier Apple 242 full-series pass and low-link failure remain distinct
+evidence in §10.318. Exact combined-source compilation, fresh full phone/TV
+qualification, final adversarial review and Fable remain the next evidence.
+Authored unit bodies remain deferred through reviews to batched merge. Safari
+iOS automation, independent optical/audio measurements and the broader source
+and pressure matrix remain explicit acceptance limits.
+
+### 10.320 — Apple 243 pressure admission delay and TV launcher failure
+
+The exact Apple 243 phone candidate passes all 15 manual and 5 Auto changes,
+with all twenty typed landing predicates satisfied and a 64.396 ms maximum
+decoded-frame gap. Its separate 3 Mb/s extension fails with a native stall and
+zero low-link landings. Joined low-stage media responses are HTTP 200, and no
+cancellation counter increases before cleanup. The previous HTTP 410 failure
+does not recur in this run; this does not establish which retained-reader branch
+was exercised because ordinary control demand bodies remain unmeasured.
+
+The first 360p proposal starts with 12.986 seconds of actual contiguous runway,
+below the unchanged 16-second future-acquisition protection. It consequently
+uses the observed acquisition anchor, completes its exact initial seek in 6.134
+seconds and exhausts the original 12-second readiness bound. The incumbent is
+then beyond the successor's loaded interval. No failed landing receives credit.
+
+Source diagnosis finds that completed-transfer pressure is evaluated only on a
+five-second tick, while the latest transfer overwrites prior arrivals. The prior
+7.657 Mb/s sample is only the first mild observation; the next 2.925 Mb/s sample
+is severe and starts recovery too late. A repair to process distinct current-owner
+completed receipts promptly is in progress. Severity thresholds, mild two-body
+authority, cooldowns and physical acquisition protection are retained; no new
+buffer-only authority or client HTTP retry is proposed.
+
+Two TV attempts close without a healthy native baseline. The second completes
+four fresh costs but its private launcher reads the install receipt from the
+wrong directory and never launches the SDK. That one-line path is corrected and
+offline startup-input checks pass. This is a harness failure, not native playback
+qualification. Phone and TV supervisors close 226 and 165 owned processes
+respectively with zero residuals; the earlier TV attempt closes 188 with zero.
+
+The shared host records four OOM-counter increments. The bounded kernel window
+contains a killed process whose role and birth are unmeasured. No exact CQ victim
+is established, and the phone's low-link failure is not attributed to that event.
+Sampled allocation and free-memory observations are not continuous peak proofs.
+Fresh exact-source phone/TV acceptance, final adversarial review and Fable remain
+open. Unit bodies executed: zero.
+
+
+### 10.321 — prompt completed-transfer pressure in Apple 244
+
+Apple 244 processes each distinct valid completed incumbent transfer at arrival.
+Its bounded receipt ledger binds item, attempt, viewer epoch, session, candidate
+and canonical origin. Actual viewer/item boundaries retire older completions;
+invalid, stale, duplicate and out-of-order bodies cannot reset or renew pressure.
+Two distinct mild bodies remain necessary, and the existing severe threshold is
+unchanged. Missing catalog costs retain valid body/advisory evidence but authorize
+no urgent pressure action. A pressure-only evaluation skips ordinary upgrade and
+viewer-boundary replanning and does not consume their five-second schedule.
+Cooldown, switch budget, candidate fences and original acquisition bounds remain.
+
+The preserved Apple 243 severe body was reported while presenting and not stalled,
+with 16.784 seconds of actual contiguous runway and age 4 ms. The periodic tick
+uses that exact body 3.794 seconds later. Native selection-to-offer delay is a
+further 1.159 seconds: the first accepted control says staging, and the next
+request starts 1.051 seconds later and returns offered. The one-second staging
+cadence is client-owned. Prompt evidence handling removes scheduling latency;
+it does not guarantee that the later acquisition still has sixteen seconds of
+protection. No reconstructed runway or runtime pass is claimed.
+
+The iOS app and regression targets compile on the committed timing repair;
+unit bodies remain unrun. Separate phone and TV QA products retain their prior
+instrumentation overlays. Exact final artifact binding, focused timing capture,
+fresh full native acceptance and final adversarial/Fable reviews remain open.
+
+### 10.322 — completed Apple 244 decoded-output qualification
+
+The committed candidate `f0afcf0a930f0b7008ac3873517cfaa976c696e1`
+completes the original 900-second campaign on both physical clients. Each run
+measures four fresh production costs, then performs 15 manual changes, five Auto
+changes and the separate 3 Mb/s downshift followed by recovery at 25 Mb/s. All
+22 landings on each client satisfy the sixteen typed offer, acknowledgment,
+owner, wire and decoded-frame checks. No failed or diagnostic landing is counted.
+
+| Client | Full-series maximum decoded gap | Low-series maximum decoded gap | Owned processes closed | Residual processes |
+| --- | --- | --- | --- | --- |
+| iPhone, Apple 244 | 62.878 ms | 65.330 ms | 186 | 0 |
+| Apple TV, Apple 244 | 64.774 ms | 68.824 ms | 181 | 0 |
+
+Both original actors finish with zero errors and exit zero. The separately
+verified media-proxy refusal writer, closed journals and normal cleanup support
+zero HTTP 503 and 410 refusals within the actors' known-session HLS GET scope.
+Successful HTTP response journals are capped; their 200/206 counts do not prove
+complete response totals. Non-media API statuses remain unmeasured. No new OOM
+counter increment occurs during these runs. Resource samples do not prove a
+continuous peak or identify the victims of earlier host OOM events.
+
+These are decoded-output results using the preserved QA measurement overlays,
+not independent optical or audio continuity evidence. Safari iOS remains
+deferred, and the broader source, pressure and platform matrix remains open.
+The earlier focused phone diagnostic earns no full-series credit. Both SDK
+wrappers and backends are closed, their transient server runtimes are cleaned
+up, and neither physical device remains reserved by this project.
+
+### 10.323 — adversarial findings and Apple 245 correction
+
+Three independent reviewers inspect the complete accumulated Rust, Apple and
+integration batch after the 244 campaigns close. They identify five actionable
+issues: the foreground-capacity watcher can cancel a cached recovery preserved
+by an accepted waiting report; clock startup can accept a positive unloaded gap
+through a telemetry tolerance; a cadence-disposal source assertion is stale;
+the history catalog contains a missing source anchor; and six corrective commit
+prefixes have more than one catalog owner.
+
+The correction keeps cached recovery authority tied to the current accepted
+wait and current registered owner, rather than exempting every cached reader.
+Hidden clock startup requires strictly contiguous loaded media; ordinary
+telemetry retains its existing tolerance. The cadence assertion checks actual
+cancellation order, and catalog rows retain one owner per corrective commit.
+No preparation deadline, pressure threshold, application HTTP retry or feature
+gate is added or relaxed.
+
+Independent checks of the corrections require a same-intent waiting heartbeat
+and a delayed older HTTP continuation to preserve the current bounded keeper.
+New intent revisions, non-waiting demand and owner movement still revoke it.
+Supplementary catalog rows preserve each additional live source/test obligation
+without claiming the primary corrective commit a second time.
+
+Apple 245 identifies the corrected native source. Its compilation, exact-source
+device qualification and independent review of the corrections remain pending.
+The passing 244 results qualify their recorded source only. Unit bodies executed
+remain zero; affected fast-lane units are deferred to final reviews and the
+designated batched-merge session. Fable readiness is not yet claimed.
+
+
+### 10.324 — physical Apple 245 evidence and complete rescue budgeting
+
+Fresh build245 captures retain the original fixed-link, 900-second campaign.
+The phone completes15 manual changes,5 Auto changes and both3→25Mb/s low-link
+landings. All22 landings pass sixteen typed joins, with17,858 decoded frames,
+66.693ms maximum decoded gap, zero errors and211 owned processes closed with
+zero residuals. Its observer is deliberately stopped after the actual full and
+low verdicts; the SDK returns1 rather than an expected signal exit. The original
+controller verdict stays false. Completed playback measurements and owned
+cleanup are accepted separately; normal SDK exit and the CLI cancellation reason
+remain unproven. This is not optical/audio continuity evidence.
+
+The TV completes the same15manual/5Auto main series at83.323ms maximum gap, but
+its active1080p incumbent genuinely stalls during the separate3Mb/s phase.
+Its20 main-series landings satisfy all sixteen joins. The failed full campaign
+closes214 owned processes with zero residuals. The first rescue selects720p
+with23.027seconds of sampled runway and22.692seconds at preparation. That
+candidate receives HTTP200 media but fails the six-second metadata bound.
+The later360p candidate acquires without a future headstart and remains behind
+the moving incumbent; its final loaded interval lacks3.400seconds of required
+future coverage. The later480p candidate also fails. These failed observations
+remain preserved; no pass or server-refusal absence is inferred from them.
+
+The severe-pressure acquisition budget previously counted a first metadata
+failure plus a protected second attempt:6+12+4seconds. A first attempt can
+instead become metadata-ready and consume its full twelve-second overlap.
+Apple246 therefore budgets both full overlaps plus the unchanged reserve:
+12+12+4seconds. Under the measured23-second case, existing severe authority
+selects the cheapest measured compatible lower candidate while the original
+sixteen-second future-acquisition protection can still hold. Ample runway and
+non-severe evidence retain ordinary fitting-rung selection. This selection
+budget is not a guarantee against control, queue or network latency.
+
+No pressure threshold, candidate fence, cooldown, upgrade clock, metadata or
+overlap deadline, loaded-range proof or reserve changes. No HTTP retry, feature
+switch or relaxed acceptance is added. The actual-trace selector regression is
+authored but unrun. Compilation and fresh exact-source native qualification are
+pending. The external Fable package remains bound to the earlier ca00c3ed8
+source; this follow-up must be supplied as a separate review delta. Nothing is
+merged, and unit bodies remain deferred to the batched merge coordinator.
+
+
+### 10.325 — preserve Pause intent through publication
+
+The exact Apple 246 phone campaign passes all fifteen manual and five Auto
+landings, including all sixteen typed joins per landing, with a maximum decoded
+frame gap of 66.7594 ms. Its separate low-link campaign fails with a native
+stall and no low-link landing. The first 360p successor reaches metadata and
+buffer readiness, then refuses commit at `clock-anchor`; it does not fail the
+old metadata-readiness stage. The exact frozen rendezvous and clock-gate inputs
+are missing from that observer. A separate QA-only trace is being prepared;
+no larger budget or weaker clock/runway proof is justified by these facts.
+
+Two TV 246 attempts fail before the first manual landing. The first records one
+predecessor 503 `response_state_changed` and eight successor 410s. The second
+records eight successor 410s. The latter's bounded owner trace rules out an
+initial-open drain race: startup finishes before the quality tap. A later
+`issueSeek`, entered by the post-publication transport continuation, advances
+the viewer epoch and creates another session while the manual prepared wait is
+pending. The captured trace does not identify the initiating transport intent
+or establish an audio/HDMI cause. The failed acknowledgements and diagnostic
+connection closure occur after the server sessions have been superseded.
+
+Source inspection exposes an independent correctness bug in that continuation:
+Pause publishes its held intent but then can dispatch a pending seek, retry a
+failed item or admit repair. A quality tap's presentation pin can therefore
+become an unsolicited create while paused. Apple 247 returns after retaining
+Pause's publication floor, preserving the pending destination and selection.
+Only a later Play proceeds through the existing ownership fences to dispatch
+that destination or admit repair. There is no HTTP retry or session-failure
+mask, and no feature switch or acceptance relaxation.
+
+The controlled controller regression holds the actual intent publisher, pauses
+before a coalesced seek can dispatch, and waits for the actual publication and
+seek tasks to settle. Pause must produce no seek or create and preserve its
+pending target; a subsequent published Play dispatches it exactly once. Its
+unit body is authored but unrun under the owner's deferred-test instruction.
+
+The earlier full-series phone pass does not qualify Apple 247. The new source,
+exact native acceptance and external review delta remain pending. All failures
+and original false transport receipts are preserved, and independent optical
+and audio continuity remain unmeasured. Nothing is merged.
+
+
+### 10.326 — preserve bounded cached witnesses during lock contention
+
+Fable's external source review identifies a major cached-recovery cancellation
+bug: nonblocking lifecycle, session, control or reader lock contention was read
+as definite invalidity by the foreground watcher. The corrected probes distinguish
+unknown from definite false. Only an already sealed, unexpired accepted witness
+survives unknown; unknown cannot mint or renew one. Cancellation, fence liveness,
+accepted/preparation deadlines and the owner tombstone remain lock-free revocations.
+Owner-epoch rollover, desired-intent changes and attachment invalidation clear
+the shared atomic accepted fence and revoke lock-free. Only render-state snapshot
+changes such as Playing remain behind the busy sessions table and become
+observable when it unlocks; until then only the existing witness survives,
+bounded by the earlier accepted/preparation deadline. A definite accepted-state failure still
+beats an unknown reader probe.
+No asynchronous wait is introduced under the preparation registry lock.
+
+Apple 248 also requires zero positive-gap tolerance when acquiring the physical
+incumbent buffer-preference lease. Ordinary runway telemetry retains its existing
+0.25-second tolerance. The new real-controller regression covers the gap refusal,
+contiguous admission, restoration and later-owner preference preservation.
+An injected-fetch cadence regression covers the existing 64-request bound using
+valid many-fragment media and a small successful control, without changing policy.
+
+Three real-lock server regressions hold the actual session or reader table across
+multiple watcher ticks under live capacity pressure. They require the successor
+and pending token to survive, forbid renewal under contention, then require a
+new accepted Rendering snapshot to cancel even while the reader table is busy.
+All five regression bodies are authored and unrun. Pinned Rust all-targets
+compilation passed before integration; exact committed-source compilation remains
+required. The full Fable dispositions are in the companion review record.
+
+The owner clarified that main-only app builds/installations apply to mobile apps.
+iPhone and Android qualification therefore await an authorized main landing;
+Apple TV compilation and qualification proceed on this correction. The prior
+phone 247 clock diagnostic was safely stopped before READY/native launch, with
+all 159 owned process identities absent and no playback acceptance credit.
+The low-link clock refusal remains undiagnosed; no weakened deadline, runway,
+reserve, ownership condition or client HTTP retry is introduced. Nothing merges.
+
+
+### 10.327 — separate lease membership from protected-window continuity
+
+Fable's follow-up review of Apple 248 (`53e0ef051`) finds no blocker in F1,
+F2 or the cadence request-bound regression, but identifies a lease admission
+risk: zero tolerance also rejects a playhead a few milliseconds outside the
+first loaded range. Apple 249 separates playhead membership tolerance from
+inter-range gap tolerance. The physical incumbent lease keeps the ordinary
+0.25-second membership allowance while refusing every positive gap between
+ranges inside its protected window. Clock-startup admission retains its prior
+zero tolerance for both checks; ordinary telemetry keeps both defaults.
+
+Product diagnostics identify a lease refusal by bounded reason and log an
+acquisition/restoration through the existing surface channel. The server
+foreground watcher identifies preserved unknown authority without creating or
+renewing a witness. These observations do not change admission or scoring.
+The comment at the incumbent-wait call site and redundant tombstone check are
+corrected; the accepted-fence and acquisition-URL contexts accompany the next
+review package. No HTTP retry, gate, deadline or buffer reserve is added.
+
+The previous exact Apple 248 TV observer campaign completes 15 manual changes,
+five actual Auto changes and both low-link landings. All 22 landings satisfy
+16 typed checks, with zero campaign errors and a 64.504 ms maximum decoded gap.
+The existing phone 247 clock observer separately completes the same series at
+61.052 ms; it does not qualify Apple 248 or 249 mobile source. A follow-up read-only projection of the preserved TV client-log journal finds
+22 lease acquisitions (60 to 16 seconds) and 22 successful restorations. This
+proves delivered acquisition/restoration observations, not all invocations or
+zero refusals: the old source did not emit refusal telemetry. No capture proves
+execution of the F1 contention branch, or the S2 rounding case on hardware. The original
+SDK wrappers remain false after intentional completed-capture stop/exit 1;
+completed decoded measurements are accepted separately from normal SDK exit.
+Owned app absence is a census, not a campaign-bound proof of clean app exit.
+Server process births are independently absent (TV 168, phone 187). Optical,
+audio and menu continuity remain unmeasured; old failed captures remain failed.
+
+New source compilation and TV regression qualification remain pending. Unit
+bodies are deferred to the final batched candidate and must each pass once;
+only failures rerun. Only mobile builds intended for physical installation and
+those installs require committed main source. Simulator/test-only mobile and
+non-mobile TV work are exempt. Physical new-source iOS qualification remains
+pending until an authorized main build. Nothing is merged or authorized to merge.
+
+
+### 10.328 — prefer the range actually containing the playhead
+
+Source inspection of the S2 tolerance split finds one new false refusal:
+at playhead 10 seconds, ranges [0, 9.9] and [10, 40] make tolerant first-match
+membership choose the earlier range. With strict gap tolerance it then returns
+zero runway, despite 30 seconds of actual current coverage. Apple 250 first
+selects an interval actually containing the playhead and only then falls back
+to tolerant membership for timebase rounding. Ordinary 0.25-second joining
+and zero-tolerance clock admission retain their behavior. A gap behind the
+playhead cannot hide current coverage; a positive gap ahead still refuses
+the physical preference lease.
+
+The actual-controller regression now covers both cases: current coverage
+acquires the 16-second preference and restores 60 seconds, while a gap ahead
+keeps the original preference. Prior 5 ms rounding, internal gap, touching,
+restoration and later-owner cases remain. Bodies are authored, not executed.
+
+The superseded Apple 249 campaign r4 stopped before READY/native launch after
+three cost proofs. All 161 process births are absent; no unit, resource or
+media failure is inferred. Its earlier r3 completed all four costs but refused
+production-idle admission before SDK; all 175 births are absent. A later census
+measures production Plurx running, without recording the original combined
+assertion operands. All three contacted validation owners deny TV use. The
+owner authorized closing idle production Plurx; the next reviewed harness
+performs exact identity-revalidated closure at READY and persists the original
+idle operands before the unchanged assertion, within the same 65-second cutoff.
+It changes neither product code nor scoring, and does not prove why the
+production process reappeared. No previous false or stopped receipt is rewritten.
+
+Apple 249 compilation and exact-source proof remain valid for that historical
+tree. Apple 250 compilation and physical TV qualification are pending. New
+physical mobile builds/installations await authorized committed main source.
+The final unit lane remains deferred to the batched integrated candidate;
+nothing is merged or authorized to merge. Canonical acceptance remains partial.
+
+
+### 10.329 — close the Apple250 re-review follow-ups
+
+Fable re-reviewed exact Apple250 source and its TV evidence and found no blocker
+in the correction delta. The TV250 observer completed 15 manual, five actual
+Auto and two low-link transitions: 22 landings with 16 typed checks each, zero
+reported errors and a 67.0887 ms maximum decoded gap. All 199 recorded backend
+births are absent. Original SDK wrapper false/exit1 after intentional completed
+stop remains preserved; completed decoded measurements are adjudicated separately.
+This does not prove shipping-binary, optical, audio or menu continuity.
+
+Apple251 addresses the two low-severity follow-ups without restarting hardware
+or full review. R1 chooses the membership-qualified fallback with greatest upper
+bound when no interval actually contains the clock. At playhead10 with ranges
+[9.8,9.95] and [10.02,40], the future rounding-qualified range yields30 seconds;
+it does not join a positive gap inside the protected window. The existing actual
+controller regression covers this admission and restoration to60.
+
+For P1, zero forward buffering means AVFoundation automatic, not a smaller
+explicit budget. An automatic incumbent may take the same16-second lease only
+when existing contiguous runway covers the unchanged overlap and reserve.
+Cleanup restores zero only while the captured item still has the lease hint;
+a later owner's preference remains untouched. Explicit positive preferences at
+or below the protected reserve remain ineligible. Policy and actual-controller
+regressions cover automatic acquisition/restoration, later ownership, insufficient
+runway and a positive internal gap. No feature gate or HTTP retry is added.
+
+S4 wording above now distinguishes lock-free atomic owner/intent/attachment
+revocation from Playing snapshots hidden behind the sessions lock. The owner
+has authorized final fast-lane units and merge directly; no batched merge session
+exists. Each required test must pass once on the integrated candidate, with only
+failures rerun. Compilation and final unit evidence are pending at this source
+checkpoint. New physical mobile builds/installations remain main-only; no new
+hardware campaign is requested or claimed for251.
+
+
+The first final named-test pass finds two failures. The relay registration
+regression exposes a production SQL binding bug: SQLite assigns named `$N`
+slots by first appearance, while Hiqlite binds sequentially. Moving the `$1`
+membership predicate before `$2` owner restores the original intended proof
+without weakening membership, heartbeat, owner or expiry requirements. The
+existing atomic-registration/rollback/expiry regression covers this correction.
+The Pause regression's fixture uses unsupported legacy `direct` instead of
+actual wire `direct_play`, entering transcode before the transport sequence.
+Correcting that fixture and asserting no initial create isolates the intended
+Pause/Play behavior; production Pause code is unchanged. The 60 successful
+Apple methods remain retained; only failed cases are due for rerun, and the
+38 server anchors have not executed yet. No full suite, review or hardware
+campaign is restarted. Final source, per-test and fast-lane receipts belong
+to the promotion record rather than a new hardware claim.
+
+
+The resumed exact bd0 Rust run completes39 named cases:35 pass, four fail in
+fixture setup. Two purpose tests supply a non-UUID incarnation to the real
+eligible-route validator and never reach their target assertions; they now use
+a valid canonical UUID. The manual-to-Auto fixture starts its incumbent at360p
+and requires the ordinary720p cold-start control to be a real upgrade before
+asserting the360p bootstrap ceiling. It no longer assumes an unmeasured1080p
+software production proof, and still checks canonical identity, upgrade catalog,
+audio authority and rolling-media refusal. Private-output control16 reserves
+64MiB while an incumbent already occupies the shared retention budget; its test
+budget now allows128MiB for coexistence. Ordinary completed caching remains zero
+and the zero-output-budget refusal control is unchanged. These are test-only
+repairs; production admission and authority stay unchanged. Retain35 passed Rust
+cases and61 Apple passes; rerun only the four failed cases before final fast lane.
