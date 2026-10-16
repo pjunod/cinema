@@ -1808,3 +1808,20 @@ They remain owed once on the main-bound effort after this task passes its gate.
 No applicable Rust, Apple, Android or playback body is repeated for encoding.
 Current-main qualification, deployment and all eighteen physical HDR cases
 remain open.
+
+
+### R53 — Declare the generic control fixture's finite lane
+
+R52 passed all seven compile-only task checks in gate 5316 and landed as
+`a23a42305`. Its once-only four-control effort run produced three passes and
+one error. The generic map control supplied only the synthetic `core` suite
+but left the production three-suite Rust cohort active; the unchanged
+completeness verifier correctly refused that incomplete fixture. The local
+control now declares its finite one-suite cohort while exercising the real
+source/path/hash validator. No production cohort or decoder changes.
+
+The original four-case log, error and three passes remain preserved. After
+this task's gate and normal effort merge, only that failed existing control
+is owed again. Compiler/inventory checks, final evidence enrollment and
+qualification remain distinct; deployment and all eighteen physical HDR
+cases remain open.
