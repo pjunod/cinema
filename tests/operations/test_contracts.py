@@ -2238,6 +2238,17 @@ assert.equal(context.ACT_TIMER, null);
         # Whole-job budget includes checkout/toolchain/cache setup plus the
         # unchanged all-target compile and vendored denied-warning Clippy.
         self.assertRegex(effort_jobs["rust_compile"], r"(?m)^    timeout-minutes: 20$")
+        effort_rust_env = re.search(
+            r"(?ms)^    env:\n(.*?)(?=^    \S)", effort_jobs["rust_compile"]
+        )
+        self.assertIsNotNone(
+            effort_rust_env, "effort compilation must bound Cargo concurrency at job scope"
+        )
+        self.assertEqual(
+            [line.strip() for line in effort_rust_env.group(1).splitlines()
+             if line.strip() and not line.strip().startswith("#")],
+            ['CARGO_BUILD_JOBS: "1"'],
+        )
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
         # PR #962 raised the main fast lane's preflight to fifteen minutes so
         # its receipt publications finish; the effort gate keeps ten.

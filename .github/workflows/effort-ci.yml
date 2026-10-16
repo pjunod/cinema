@@ -122,6 +122,10 @@ jobs:
     # Whole-job setup/cache costs left ~8m33s for the unchanged compile pair
     # in runs 5174/5191/5197. Allow completion while retaining a finite bound.
     timeout-minutes: 20
+    env:
+      # Match the main fast lane's explicit compiler memory bound even when
+      # a host runner does not inherit the VM recovery service environment.
+      CARGO_BUILD_JOBS: "1"
     steps:
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
