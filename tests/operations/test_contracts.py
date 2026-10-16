@@ -2157,6 +2157,7 @@ assert.equal(context.ACT_TIMER, null);
             ),
             ["make effort-rust-check", "make hiqlite-vendor-clippy"],
         )
+        self.assertIn("timeout-minutes: 30", effort_jobs["rust_compile"])
         self.assertEqual(
             list(fast_rust_steps),
             [
