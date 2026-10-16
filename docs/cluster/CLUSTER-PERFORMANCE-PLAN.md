@@ -376,7 +376,7 @@ slices:
   the P0 instrumentation budget. The runner now supplies a validation-only
   control switch in the same exact image, crosses control/instrumented state
   order with topology order in complete four-sequence blocks, retains
-  topology-v2 raw data plus every node's observed switch/count attestation for
+  topology-v3 raw data plus every node's observed switch/count attestation for
   both arms, and requires every CPU and wall upper confidence bound to remain
   below the registered 2% budget. The physical campaign itself
   remains outstanding until the named machines are idle and the image is

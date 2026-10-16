@@ -2175,6 +2175,36 @@ struct SnapshotPurgeEvidence {
     purged_index: u64,
 }
 
+/// The finite trigger writes can finish before the asynchronous image copy.
+/// Observe completion without adding writes or renewing the recovery budget.
+async fn await_snapshot_publication<T>(
+    previous: Option<u64>,
+    deadline: Instant,
+    mut observe: impl std::ops::AsyncFnMut() -> Result<(Option<u64>, T)>,
+) -> Result<T> {
+    let deadline = tokio::time::Instant::from_std(deadline);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            bail!("snapshot publication exceeded recovery deadline");
+        }
+        let (index, status) = tokio::time::timeout_at(deadline, observe())
+            .await
+            .map_err(|_| anyhow::anyhow!("snapshot publication exceeded recovery deadline"))??;
+        // timeout_at may poll a ready observation before checking its timer.
+        // Never accept that value after the original absolute deadline.
+        if tokio::time::Instant::now() >= deadline {
+            bail!("snapshot publication exceeded recovery deadline");
+        }
+        if index.is_some_and(|snapshot| previous.is_none_or(|old| snapshot > old)) {
+            return Ok(status);
+        }
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(50)).min(deadline),
+        )
+        .await;
+    }
+}
+
 async fn trigger_and_wait_for_snapshot(
     cluster: &mut ClusterProcesses,
     leader: u64,
@@ -2208,7 +2238,11 @@ async fn trigger_and_wait_for_snapshot(
                 return Ok(status);
             }
         }
-        bail!("low-threshold workload did not publish a new snapshot")
+        await_snapshot_publication(previous, deadline, async || {
+            let status = request_status(cluster, leader).await?;
+            Ok((status.snapshot_index, status))
+        })
+        .await
     })
     .await?;
     let snapshot = status
@@ -3620,9 +3654,7 @@ pub(super) fn process_resources(_client: &Client) -> Result<ProcessResourceCount
 }
 
 fn snapshot_file(root: &Path, node_id: u64) -> Result<SnapshotFileEvidence> {
-    let snapshots = root
-        .join(format!("node-{node_id}"))
-        .join("state_machine/snapshots");
+    let snapshots = crate::node_hiqlite_directory(root, node_id).join("state_machine/snapshots");
     let snapshot_id = std::fs::read_to_string(snapshots.join("current"))?
         .trim()
         .to_owned();
@@ -3642,9 +3674,7 @@ fn snapshot_file_by_id(
     {
         bail!("invalid current snapshot pointer {snapshot_id:?}");
     }
-    let snapshots = root
-        .join(format!("node-{node_id}"))
-        .join("state_machine/snapshots");
+    let snapshots = crate::node_hiqlite_directory(root, node_id).join("state_machine/snapshots");
     let path = snapshots.join(snapshot_id);
     let mut file = File::open(&path).with_context(|| format!("open snapshot {path:?}"))?;
     let bytes = file.metadata()?.len();
@@ -5235,14 +5265,90 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_publication_can_arrive_after_the_bounded_trigger_load() {
+        let mut samples = std::collections::VecDeque::from([
+            (None, "absent"),
+            (Some(20), "old"),
+            (Some(21), "new"),
+        ]);
+        let deadline = (tokio::time::Instant::now() + Duration::from_secs(1)).into_std();
+        let result = await_snapshot_publication(Some(20), deadline, async || {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(samples
+                .pop_front()
+                .expect("only the three planned observations"))
+        })
+        .await
+        .expect("publication may finish after the finite trigger load");
+        assert_eq!(result, "new");
+        assert!(
+            samples.is_empty(),
+            "absence and the old index cannot settle publication"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_snapshot_publication_deadline_does_not_start_an_observation() {
+        let mut called = false;
+        let deadline = tokio::time::Instant::now().into_std();
+        let result = await_snapshot_publication(Some(20), deadline, async || {
+            called = true;
+            Ok((Some(21), ()))
+        })
+        .await;
+        assert!(result
+            .expect_err("an expired budget cannot accept a snapshot")
+            .to_string()
+            .contains("deadline"));
+        assert!(!called, "the old budget must not start another request");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_publication_observation_is_bounded_by_the_remaining_budget() {
+        let start = tokio::time::Instant::now();
+        let deadline = start + Duration::from_millis(50);
+        let mut completed = false;
+        let result = await_snapshot_publication(Some(20), deadline.into_std(), async || {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            completed = true;
+            Ok((Some(21), ()))
+        })
+        .await;
+        assert!(result
+            .expect_err("a slow request cannot extend the absolute budget")
+            .to_string()
+            .contains("deadline"));
+        assert!(
+            !completed,
+            "the owned request future must be dropped at its deadline"
+        );
+        assert_eq!(tokio::time::Instant::now(), deadline);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_publication_completion_after_the_absolute_deadline_is_refused() {
+        let start = tokio::time::Instant::now();
+        let deadline = start + Duration::from_millis(50);
+        let result = await_snapshot_publication(Some(20), deadline.into_std(), async || {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            Ok((Some(21), "late snapshot"))
+        })
+        .await;
+        assert!(result
+            .expect_err("a late ready value cannot settle publication")
+            .to_string()
+            .contains("deadline"));
+        assert!(tokio::time::Instant::now() >= deadline);
+    }
+
     #[tokio::test]
     async fn installed_snapshot_evidence_survives_rotation_after_threshold_writes() {
         let root = tempfile::tempdir().expect("snapshot rotation fixture root");
-        let source_snapshots = root.path().join("node-1").join("state_machine/snapshots");
-        let target_snapshots = root
-            .path()
-            .join(format!("node-{TARGET_NODE}"))
-            .join("state_machine/snapshots");
+        let source_snapshots =
+            crate::node_hiqlite_directory(root.path(), 1).join("state_machine/snapshots");
+        let target_snapshots =
+            crate::node_hiqlite_directory(root.path(), TARGET_NODE).join("state_machine/snapshots");
         std::fs::create_dir_all(&source_snapshots).expect("create source snapshot fixture");
         std::fs::create_dir_all(&target_snapshots).expect("create target snapshot fixture");
         let installed_id = "00000000-0000-7000-8000-000000000001";

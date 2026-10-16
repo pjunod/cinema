@@ -93,6 +93,87 @@ async fn a_one_voter_bootstrap_and_reopen_retain_local_membership_admission() {
     assert!(cluster.node_ids().is_empty());
 }
 
+/// The membership snapshot floor must inspect the running database, not an
+/// empty durability-probe directory that merely has free filesystem space.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_voter_publishes_storage_readiness_from_its_actual_snapshot_database() {
+    let root = tempfile::tempdir().expect("canonical storage voter root");
+    let (mut cluster, actual_root) = plurx_cluster_check::with_port_retry(|attempt| {
+        let attempt_root = root.path().join(format!("attempt-{attempt}"));
+        async move {
+            let cluster =
+                ClusterProcesses::start(&harness_binary(), &attempt_root, allocate_nodes(1)?)
+                    .await?;
+            Ok((cluster, attempt_root))
+        }
+    })
+    .await
+    .expect("start real storage-preflight voter");
+    let proof: anyhow::Result<()> = async {
+        cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+        cluster
+            .request(1, Request::ForceHeartbeat)
+            .await?
+            .require_ok()?;
+        let database = actual_root.join("node-1/hiqlite/state_machine/db/plurx.db");
+        let requirement = hiqlite::snapshot_admission::snapshot_storage_requirement(&database);
+        anyhow::ensure!(
+            requirement.is_ok(),
+            "production snapshot admission must measure the actual live image: {requirement:?}"
+        );
+        let status = match cluster.request(1, Request::MembershipStatus).await? {
+            Response::MembershipStatus { status } => status,
+            response => anyhow::bail!("unexpected real storage status: {response:?}"),
+        };
+        let local = status
+            .nodes
+            .iter()
+            .find(|node| node.raft_id == 1)
+            .ok_or_else(|| anyhow::anyhow!("real voter missing from its roster"))?;
+        anyhow::ensure!(
+            local.voter_storage_ready,
+            "real target-local preflight: {local:?}"
+        );
+        anyhow::ensure!(
+            local
+                .storage_headroom_bytes
+                .is_some_and(|available| available >= requirement.expect("known requirement")),
+            "storage proof must cover the live image and WAL"
+        );
+        cluster
+            .request(
+                1,
+                Request::ForceCompaction {
+                    phase: "canonical-storage-regression".to_owned(),
+                    background: Vec::new(),
+                },
+            )
+            .await?
+            .require_ok()?;
+        let snapshots = actual_root.join("node-1/hiqlite/state_machine/snapshots");
+        let current = std::fs::read_to_string(snapshots.join("current"))?;
+        let current = current.trim();
+        anyhow::ensure!(
+            !current.is_empty()
+                && !current.contains(['/', '\\'])
+                && current != "."
+                && current != "..",
+            "snapshot pointer must name one local image"
+        );
+        anyhow::ensure!(
+            std::fs::metadata(snapshots.join(current))?.len() > 0,
+            "actual snapshot proof must live beside the configured database"
+        );
+        Ok(())
+    }
+    .await;
+    cluster
+        .shutdown_all()
+        .await
+        .expect("settle real storage voter on success or failure");
+    proof.expect("real database, snapshot and membership storage proof must agree");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_heartbeat_worker_is_single_and_joined_at_node_shutdown() {
     let root = tempfile::tempdir().expect("heartbeat worker root");
@@ -552,8 +633,8 @@ async fn a_one_voter_cluster_proves_the_whole_request_protocol() {
         .await
         .expect("no voter exited during the run");
 
-    // A candidate one schema version behind is refused, and refusing it must not
-    // touch raft membership.
+    // A candidate below the ordinary-open baseline is refused; the optional
+    // higher Source marker is not that baseline. Refusal must not touch membership.
     let voters_before = metrics_voters(&mut cluster).await;
     let refused = run_incompatible_preflight(&harness_binary(), &specs)
         .await
@@ -1325,9 +1406,9 @@ fn a_voter_config_lands_in_its_own_data_directory() {
         config.nodes[1].addr_raft, launch.nodes[1].raft,
         "peer addresses must come from the launch payload"
     );
-    assert_eq!(config.filename_db, "auth.db");
+    assert_eq!(config.filename_db, "plurx.db");
 
-    let data_dir = root.path().join("node-2");
+    let data_dir = root.path().join("node-2/hiqlite");
     assert!(
         data_dir.is_dir(),
         "the voter's data directory must exist after configuration"

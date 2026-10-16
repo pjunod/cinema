@@ -48,7 +48,7 @@ use plurx_core::cluster::migration::status::{
     ReplicationHealth, ReplicationMonitor, ReplicationStatus,
 };
 use plurx_core::cluster::migration::{
-    production_hiqlite_defaults_with_read_pool, ActivationMarker,
+    production_hiqlite_defaults_with_read_pool, ActivationMarker, HIQLITE_ACTIVE_DIRNAME,
 };
 use plurx_core::cluster::ClusterIdentity;
 use plurx_core::domain::{
@@ -64,7 +64,7 @@ use plurx_core::store::{
     LibraryStore, MediaStore, OfflinePackageStore, PlaybackTelemetryStore, ReconcileOutcome,
     RootFingerprintStatus, SettingsStore, SubtitleSourcePublication, TraktStore,
     TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore, AUTH_PROTOCOL_MAX,
-    AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION,
+    AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_BASELINE_VERSION, AUTH_SCHEMA_VERSION,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -136,6 +136,7 @@ pub use transport_recovery::{
     TRANSPORT_RECOVERY_ROLE_REPORT_SCHEMA_VERSION, TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
 };
 
+const NODE_DATABASE_FILENAME: &str = "plurx.db";
 const RAFT_SECRET: &str = "plurx-m1b-raft-secret";
 const API_SECRET: &str = "plurx-m1b-api-secret";
 const OLD_WATERMARK_HANDLER_ENV: &str = "HQLITE_TEST_OLD_DB_QUORUM_WATERMARK_HANDLER";
@@ -9515,12 +9516,10 @@ pub async fn prove_local_fts_rebuild(
     baseline: &CatalogView,
     voter: u64,
 ) -> Result<()> {
-    let path = cluster
-        .root
-        .join(format!("node-{voter}"))
+    let path = node_hiqlite_directory(&cluster.root, voter)
         .join("state_machine")
         .join("db")
-        .join("auth.db");
+        .join(NODE_DATABASE_FILENAME);
     let connection = rusqlite::Connection::open_with_flags(
         &path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -9799,8 +9798,8 @@ pub async fn node(launch: NodeLaunch) -> Result<()> {
     };
     let replication = ReplicationMonitor::replicated(
         client.clone(),
-        launch.root.join(format!("node-{}", launch.node_id)),
-        "auth.db",
+        node_hiqlite_directory(&launch.root, launch.node_id),
+        NODE_DATABASE_FILENAME,
     );
     let (passive_shutdown, passive_shutdown_signal) = tokio::sync::oneshot::channel();
     tokio::spawn(replication.clone().passive_metrics_loop(async move {
@@ -13226,14 +13225,15 @@ pub async fn preflight_voter(preflight: Preflight) -> Result<()> {
     }
 }
 
-/// Start a candidate voter one schema version behind and return the refusal it
-/// printed. Any other exit status is itself a failure.
+/// Start a candidate below the ordinary-open schema baseline and return its
+/// refusal. The higher opt-in Source marker is not the compatibility floor.
+/// Any other exit status is itself a failure.
 pub async fn run_incompatible_preflight(executable: &Path, specs: &[NodeSpec]) -> Result<String> {
     run_preflight(
         executable,
         specs,
         ClusterCompatibility {
-            schema_version: AUTH_SCHEMA_VERSION - 1,
+            schema_version: AUTH_SCHEMA_BASELINE_VERSION - 1,
             ..ClusterCompatibility::CURRENT
         },
         Some(42),
@@ -13297,6 +13297,13 @@ async fn run_preflight(
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
+/// Use the same nested active directory as membership's target-local snapshot
+/// preflight. The node root still owns telemetry and durable membership files.
+fn node_hiqlite_directory(root: &Path, node_id: u64) -> PathBuf {
+    root.join(format!("node-{node_id}"))
+        .join(HIQLITE_ACTIVE_DIRNAME)
+}
+
 /// Build the hiqlite configuration for one voter and create its data dir.
 pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
     let mut defaults = production_hiqlite_defaults_with_read_pool(launch.read_pool_size);
@@ -13312,7 +13319,7 @@ pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
         defaults.raft_config.replication_lag_threshold =
             validation_raft_config.replication_lag_threshold;
     }
-    let data_dir = launch.root.join(format!("node-{}", launch.node_id));
+    let data_dir = node_hiqlite_directory(&launch.root, launch.node_id);
     std::fs::create_dir_all(&data_dir)?;
     Ok(NodeConfig {
         node_id: launch.node_id,
@@ -13328,7 +13335,7 @@ pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
         listen_addr_api: Cow::Owned(launch.listen_addr.clone()),
         listen_addr_raft: Cow::Owned(launch.listen_addr.clone()),
         data_dir: Cow::Owned(data_dir.to_string_lossy().into_owned()),
-        filename_db: Cow::Borrowed("auth.db"),
+        filename_db: Cow::Borrowed(NODE_DATABASE_FILENAME),
         secret_raft: RAFT_SECRET.to_owned(),
         secret_api: API_SECRET.to_owned(),
         tls_raft: Some(ServerTlsConfig::TlsAutoCertificates),

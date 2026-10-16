@@ -2268,7 +2268,7 @@ assert.equal(context.ACT_TIMER, null);
         full_jobs = workflow_job_blocks(".github/workflows/ci.yml")
         for lane, rust_job, minutes in (
             ("effort", effort_jobs["rust_compile"], 30),
-            ("full compiler", full_jobs["rust_compile"], 20),
+            ("full compiler", full_jobs["rust_compile"], 30),
         ):
             with self.subTest(lane=lane):
                 self.assertRegex(rust_job, rf"(?m)^    timeout-minutes: {minutes}$")
@@ -3441,7 +3441,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(contract_commands), 14)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=70", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=74", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
         exact_regressions = (

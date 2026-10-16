@@ -1312,7 +1312,11 @@ vote: it changes no majority, adds no failure tolerance, and is not a substitute
 for the third voter this section asks for.
 
 `make cluster-check` now creates
-`target/validation/cluster-topology-semantic.json`. It starts fresh independent
+`target/validation/cluster-topology-semantic.json`. Raw schema/workload v3 pins
+256 bounded catalogue operations to exactly 512 local queries: one saved
+local-read preference lookup and one catalogue lookup per operation, with zero
+consistent queries or errors. Raw v2 evidence is rejected rather than reinterpreted;
+the unchanged outer campaign v2 also validates each retained raw v3 pair. It starts fresh independent
 three- and four-process clusters, sends the same 64 quorum-acknowledged setting
 writes to each elected leader, and records raw controller-to-node acknowledged
 write round trips in microseconds, type-7 p50/p95/p99 values, quorum size,
@@ -1857,7 +1861,7 @@ and cleanup authority. Its control arm disables only the Store operation timer
 through a validation-only hook compiled into `plurx-cluster-check`; production
 `plurxd` has no switch and always instruments Store calls. The runner
 counterbalances control/instrumented order independently from 3/4-voter order,
-retains one ordinary topology-v2 artifact for every arm, and compares aggregate
+retains one ordinary topology-v3 artifact for every arm, and compares aggregate
 CPU and wall time for both topologies against the registered 2% budget:
 
 ```bash

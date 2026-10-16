@@ -1161,7 +1161,7 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-contracts
 cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=70 scripts/require-test-count $(CARGO) test --locked \
+	PLURX_EXPECT_TEST_COUNT=74 scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery --lib
 	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
 	  transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly \
@@ -1553,6 +1553,7 @@ web-check: web-unit-check ## Test playback policy, embedded JS, and every shippe
 # does apart from the two real-browser scripts.
 web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/diagnostics-wire.test.js tests/web/diagnostics-recorder.test.js
+	@node --test tests/web/cinema-remote-browser-support.test.js
 	@node --test tests/web/cinema-remote-client.test.js
 	@node --test tests/web/cinema-remote-controller.test.js
 	@node --test tests/web/cinema-remote-guard.test.js
