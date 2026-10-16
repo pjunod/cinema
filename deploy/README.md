@@ -3,6 +3,16 @@
 plurx is a single static binary (`plurxd`) plus an embedded web app. Pick the
 path that matches your setup.
 
+Managed offline subtitle setup initially ships its pinned recognizer in the
+Linux Docker image and the native macOS release archive/source installer.
+macOS keeps the verified bundle in `bin/subtitle-engine/` beside `plurxd`;
+Docker uses `/usr/local/bin/subtitle-engine/`. The macOS source installer
+builds the engine automatically and needs CMake among its build prerequisites.
+Native Linux `.deb`/`.rpm`, native systemd source installs, Windows, Raspberry
+Pi native installs and binary-only installs do not yet package this managed
+engine and are unqualified for setup without a terminal. Existing advanced
+local-engine configuration remains separate from managed package readiness.
+
 This document deploys the server. Native Android and Apple delivery runs from
 the macOS Ansible controller because that host owns adb pairing, Xcode signing,
 and App Store Connect authentication; see

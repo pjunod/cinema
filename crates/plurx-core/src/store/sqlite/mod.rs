@@ -1305,6 +1305,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::invitations::MIGRATION_V3,
     // v110: refuse destructive cleanup of incompatible legacy broker references.
     super::invitations::MIGRATION_V4,
+    // v111: managed subtitle jobs and media-independent model reservations.
+    super::subtitle_managed_schema::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1839,6 +1841,8 @@ impl SqliteStore {
             applied?;
             tracing::info!(version, "applied schema migration");
         }
+
+        super::subtitle_managed_schema::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

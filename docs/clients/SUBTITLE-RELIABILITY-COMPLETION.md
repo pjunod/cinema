@@ -75,6 +75,14 @@ handoffs against actual titles. AVPlayer testing also showed that answering
 
 ## 3. Project reconciliation and remaining work
 
+**2026-10-15 usability follow-up:** the engine and retained short synthetic
+app acceptance below remain valid historical evidence. They do not establish
+fresh installation, full-length transcription quality/throughput or deployed
+worker readiness. The [subtitle generation usability plan](../features/SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md)
+now owns managed executable/model setup, worker-aware requests, job feedback,
+completion refresh and their qualification. That work is proposed, not built;
+this ledger continues to own the earlier cross-client subtitle repair.
+
 | Work | Current state | Completion requirement |
 |---|---|---|
 | [Original reliability handoff](SUBTITLE-RELIABILITY-HANDOFF.md) | Earlier implementation is on main; residual defects above were missed | Integrate repairs; repeat selection/off/seek/quality cases on available clients |

@@ -134,10 +134,10 @@ jobs:
     if: needs.scope.outputs.rust == 'true'
     # All-target metadata can exceed general runners' soft memory ceiling.
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
-    # Includes toolchain/cache setup and every-target compilation on cold runners.
-    timeout-minutes: 20
+    # Include cold toolchain/cache setup and every-target compilation.
+    timeout-minutes: 30
+    # Bound Cargo before parallel working sets reach the runner's memory cap.
     env:
-      # Match main's bound rather than the host's visible CPU count.
       CARGO_BUILD_JOBS: "1"
     steps:
       - name: Check out the candidate

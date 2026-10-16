@@ -245,6 +245,7 @@ pub mod classification_schedule;
 pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
+mod subtitle_managed_schema;
 pub mod watched_drain;
 
 #[cfg(feature = "hiqlite-contract-tests")]
