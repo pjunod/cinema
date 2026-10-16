@@ -7033,3 +7033,11 @@ source = "clients/apple/Sources/LibraryChannels.swift"
 source_anchor = 'Text(channel.enabled ? "Watch live" : "Disabled")'
 test = "clients/apple/UITests/TVPlaybackNavigationTests.swift"
 test_anchor = "Down from Favorite reaches Watch across a short programme row"
+
+[[fixes]]
+id = "apple.tv-live-transport-single-direction-owner"
+commits = ["86171c0e21dc9906a54459cd80c6c3fd057d6354"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "LiveTvRemoteAdapter(scope: .controls, state: { liveInputState })"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "Left edge retains Pause during active input"
