@@ -134,6 +134,8 @@ then graduate it to System. Built source awaiting physical proof is
 | 2026-10-15 | Full qualification runtime allowances | Run #5244 exhausted Rust unit/SQLite 30 minutes (9m37 compile plus about 20 minutes of core execution), legacy Store 40 minutes (2m39 compile, 181 passes and three known fixture failures among 367 before timeout), and WAL 30 minutes (all observed exact WAL tests passed; killed while compiling the remaining daemon regression). The core suite grew from 1,142 to 1,892 cases; its three unfinished finite workloads cover 4,100 migration rows, 8,193 history rows and 5,000 ranking comparisons. Use bounded whole-job allowances of 90 minutes for unit/SQLite, 120 for the serial Store+schema lane and 60 for WAL. These are provisional until a fresh complete run proves them. Preserve every command, feature, execution mode, serial Store thread setting, assertion, compiler concurrency and production/per-test deadline; do not skip, shard or retry tests. Strict workflow/command regression fails on all three old ceilings and passes on the new declared bounds. |
 | 2026-10-15 | Full qualification Apple fixture prerequisites | Run #5244's iPhone suite executed 1,089 tests and found six failures in five named tests before diagnostic collection ended. The Auto tick gained a parameter (`15e5a0d95`), so its source-contract slice now matches the function prefix while retaining semantic assertions. Register the already-shipped diagnostics Developer card (`4e523845b`) and require its actual explicit Awaiting/graduation statement. Processing-generation callbacks (`e3970c07d`) now precede readiness callbacks: fixtures observe the actual readiness-bearing response plus a following request before holding/replaying its complete queued batch, preserving current/session/end/new-intent delivery assertions. The terminal race now holds the actual terminal first response after its capture guard, then proves End revokes publication. No reporter/player behavior or timeout changes. The required generated Apple counter advances 251 to 252; all 168 selected iOS tests pass, including the complete shared session class; platform-wide qualification and physical acceptance are not inferred from that focused result. |
 | 2026-10-15 | Full qualification package source input | Run #5244's amd64 package rejected Fontconfig input whose old URL returned a Git landing page; arm64 qualification passed separately. Reproduce the previously trusted archive hash from the pinned upstream commit, then use the immutable official GitHub mirror archive with all 618 source objects, executable bits and symlinks equivalent after root normalization. Retain the original trusted equivalence and source version; change only the archive URL/hash/root and identify public input/hashes on checksum rejection. A cold audit verifies all 169 unique pinned downloads (226,960,530 bytes); the four focused packaging suites pass 37 tests with one existing Linux-only linker contract skipped on macOS. No checksum check or source-version requirement is relaxed. |
+| 2026-10-15 | Current-main subtitle integration | After the reviewed qualification repair commit, normally merge main `220157aba` with both subtitle efforts. Preserve managed subtitle setup/generation, its independent schema and browser checks alongside HTTPS. Resolve only four conflict files: combined API inventory has 369 routes; exact additive ownership counts are 973 namespaced spawns, 1,784 timers and 767 launch-shaped methods; validation paths cover both features. Retain main's independently measured 30-minute effort compiler bound with one Cargo job; the separate full compiler repair remains 20 minutes/one job. Combined all-target check passes on pinned Rust 1.97.1 (2m45), settings pass 74 cases, both new real subtitle browser cases pass, and 138 operations/docs/route/ownership/package checks pass (one existing Linux-only package skip on macOS). The current core census (24 cases) and complete configuration filter (22 cases) pass; the two managed-schema reads change only their maintained census pin from 46 to 48, retaining the 237 unannotated ceiling. Historical fixture rewind now removes the complete disposable managed-subtitle extension only after proving its model receipts empty, preserving exact trigger restoration and the production partial-schema refusal. Prior browser snapshots are historical; final current-source structural/Live TV and affected Store results are required before qualification. |
+| 2026-10-15 | Repeated managed-subtitle bootstrap | The current historical analysis regression exposed a real second-bootstrap failure before any fixture rewind: the legacy probe installer replaced the complete managed resource view, so strict extension validation refused the resulting hybrid. Preflight before base DDL refuses partial shapes, including a missing view or marker row; permit only the empty fresh install and measured exact resource/probe predecessors. Preserve a canonical complete managed view and marker. For a predecessor, execute exact snapshot guard, probe replacement and complete managed install in one transaction; a concurrent winner aborts the stale proposal before DROP, and only strict current-winner read-back can settle it. Keep receipt/queue data, active Source marker and ordinary version recognition intact. Dedicated pure and real replicated regressions cover fresh/legacy/current/partial, rollback, stale-winner and supported concurrent retries. All four managed-schema pure tests, 24 census tests and 22 configuration cases pass. All 21 focused replicated Store cases pass, including the three populated new bootstrap regressions, the unmasked original analysis retry, 13 historical migrations, offline audio and the original three qualification failures; three strict schema negatives also pass. The current Store inventory is 374 cases (seven more than #5244), not a claim that all 374 ran locally. The final bootstrap-fixed HTTPS filter passes 29 tests, the nine existing startup/drain regressions pass individually, and locked workspace all-target checking passes in 34.31 seconds. The two new reads have adjacent authority reasons and an exact census pin of four; the 237 unannotated ceiling and SQLite transaction inventory scope are unchanged. |
 
 Post-review persistence clarification: rename publishes the revision. A later
 directory-sync error is a committed save with `durability_confirmed: false`;
@@ -265,7 +267,7 @@ retains its meaningful Developer switch and graduation line; it moves to System
 only after the named trust/playback acceptance is recorded. Readiness never
 silently changes the saved switch.
 
-## 9. Combined current-source verification
+## 9. Combined checkpoint verification and final-source boundary
 
 The unified candidate restored all H1–H4 checkpoints after the independently
 reviewed §2 amendment. No behavior-contract change was introduced during
@@ -273,7 +275,9 @@ consolidation. Parent's checkpoint source/document reviews remain recorded;
 they do not replace the one fresh adversarial built-code review at final
 promotion. Superseded run #5203 is canceled, not a passing gate.
 
-Current combined source passed these pinned Rust 1.97.1 commands:
+The unified task checkpoint passed these pinned Rust 1.97.1 commands;
+later main integrations and exact promotion bindings are recorded in §5 and
+the task/promotion receipts:
 
 ```bash
 cargo +1.97.1 test --locked -p plurx-core --features hiqlite-store --lib config::
@@ -314,14 +318,15 @@ installer, Docker hardware/startup, CI budget/timeout/preflight/runner and cache
 sweep passed all 125 tests. This includes the earlier host-temp-path installer
 case; the earlier default-temp failure remains recorded in §8. Catalog lint
 (3,534 governed files), infrastructure-name and whitespace checks passed.
-The complete PR body carries 106 unique resolvable regression anchors, including
+The complete PR body carries 111 unique resolvable regression anchors, including
 all prior checkpoint anchors and the selected existing regressions.
 
-The normal commit hook remains mandatory before push. A fresh exact-final-head
-Effort development gate is required before task integration; earlier/canceled
-attempts never substitute for it. Promotion requires a frozen candidate with
-current main integrated, one fresh adversarial built-code review with Sol-owned
-fixes, the full exact-tree qualification receipt and Main promotion gate.
+The normal commit hook remains mandatory before push. The fresh task-head
+Effort development gate passed before task integration; earlier/canceled
+attempts never substitute for it. The single fresh adversarial implementation
+review and Sol-owned correction are complete, as recorded in §5. Promotion
+still requires a frozen candidate with current main integrated, the full
+exact-tree qualification receipt and Main promotion gate.
 Task and promotion PR receipts record the actual run/tree bindings and merge
 outcomes. This work does not authorize deployment, service restart or live
 HTTPS setting changes.

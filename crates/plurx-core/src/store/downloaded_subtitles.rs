@@ -104,8 +104,28 @@ fn valid_identity(track: &DownloadedSubtitle) -> bool {
                 && super::background_jobs::digest(&origin.artifact_key)
                 && super::background_jobs::digest(&origin.model_sha256)
                 && super::background_jobs::digest(&origin.pipeline_digest)
-                && origin.adapter == "whisper.cpp"
+                && ((origin.adapter == "whisper.cpp" && origin.execution.is_none())
+                    || valid_managed_provenance(origin))
                 && origin.generated_at_ms >= 0
         }
     }
+}
+
+/// Closed contract for the currently qualified managed engine; historical
+/// Advanced captions keep the legacy adapter and no execution extension.
+pub(super) fn valid_managed_provenance(origin: &crate::domain::SubtitleTranscription) -> bool {
+    origin.adapter == "whisper.cpp-1.9.2-cpu-v1"
+        && origin.execution.as_ref().is_some_and(|execution| {
+            super::background_jobs::digest(&execution.engine_sha256)
+                && matches!(
+                    execution.platform.as_str(),
+                    "macos-arm64"
+                        | "macos-x86_64"
+                        | "macos-universal"
+                        | "linux-aarch64"
+                        | "linux-arm64"
+                        | "linux-x86_64"
+                        | "linux-amd64"
+                )
+        })
 }

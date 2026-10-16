@@ -215,7 +215,7 @@ graduates in this change; **(c)** unclear, stays and is listed for Paul.
 | Rolling output retention (added 2026-10-04) | `vod_rolling_retention` | main-merge defects build, 2026-10-04 | built; default off | a qualified fleet run: retention stays inside its headroom on every node and released artifacts are deleted within a tick | (a) stays → Paul chooses: Settings → Playback beside the cache budget, or removed |
 | Prepared quality handoff | `prepared_quality_handoff` | [QUALITY-SWITCH-CONTINUITY-BUILD](../playback-control/QUALITY-SWITCH-CONTINUITY-BUILD.md) | in execution | M2-Android, M1-web, M3; physical-client fleet receipt | (a) stays → Settings → Playback → **graduated 2026-10-10** to Settings → Playback |
 | Second player in this browser | browser-local | same | same | same | (a) stays → moves with prepared handoff → **graduated 2026-10-10** to Settings → Playback |
-| Generate subtitles offline | `subtitle-transcription` configuration | [Subtitle completion ledger](../clients/SUBTITLE-RELIABILITY-COMPLETION.md) | active | Real transcription, cancellation, source replacement and caption playback | Permanent controls move to Maintenance |
+| Generate subtitles offline | `subtitle-transcription` configuration | [Managed usability ledger](SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md) | Maintenance placement in the consolidated 2026-10-15 candidate; essential final-tree acceptance pending | Retained provisional single-server setup, cancellation and caption playback evidence does not replace final integrated-tree qualification | Permanent web server setup controls live in Settings → Maintenance; the old Developer deep link remains an alias |
 | PGS subtitle overlay | `pgs_overlay` | [APPLE-PGS-OVERLAY-ACCEPTANCE](../clients/APPLE-PGS-OVERLAY-ACCEPTANCE.md) | open | Apple and Android physical acceptance | (a) stays → Settings → Playback → **graduated 2026-10-10** to Settings → Playback |
 | Parallel playback subtitle ranges | none (automatic) | K-09 | merged: M0–M5 | fleet evidence of a peer range exchange | (a) stays → card removed → **removed 2026-10-10**; no switch, the behaviour is simply on |
 | Stored PGS tracks | `subtitle_stored_sources` | K-09 | merged: M0–M5 | fleet and device evidence | (a) stays → Settings → Maintenance → **graduated 2026-10-10** to Settings → Maintenance, after the Stored subtitle tracks panel |
@@ -310,8 +310,10 @@ libraries, Cinema remote control, Cinema background invitations, Adaptive
 Auto quality, Fit Auto to display, Network priors, Dolby Vision for HDR
 output, FEL preservation, Measured per-title encoding, Reordered VOD frames,
 CODECS on SDR master playlists, Unverified HEVC copy, Complete-output
-preparation, Rolling output retention, Mac video processing, Mac HEVC output
-and Generate subtitles offline. Android Developer keeps Match television
+preparation, Rolling output retention, Mac video processing and Mac HEVC output.
+Generate subtitles offline moves to Maintenance in the consolidated usability
+candidate; this navigation change does not qualify broader fleet or movie-quality
+claims. Android Developer keeps Match television
 refresh rate (display cadence), shared libraries and the remotes cards; Apple
 Developer keeps Cinema remotes, Screen invitations and the shared libraries
 card. Each still prints its **Leaves Developer when … Then …** line.

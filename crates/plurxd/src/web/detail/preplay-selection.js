@@ -104,7 +104,7 @@ function prePlayPickers(f){
   const find=f.subtitle_search_enabled?`<button class="ghost sm" onclick="findSubtitles(${idArg})">Find subtitles</button><div id="subtitle-search-${id}"></div>`:"";
   const generate=typeof ME!=="undefined"&&ME&&ME.is_admin&&f.video_codec?`<button class="ghost sm" onclick="generateSubtitles(${idArg},this)">Generate subtitles</button><div id="subtitle-generate-${id}" role="status" aria-live="polite"></div>`:"";
   // Nothing to choose between: one audio track and no subtitles at all.
-  if(auds.length<2 && !subs.length) return find+generate;
+  if(auds.length<2 && !subs.length) return (generate?`<div id="pp-sub-field-${id}"></div>`:"")+find+generate;
   const pd=f.playback_defaults||{}, ad=pd.audio||{}, sd=pd.subtitle||{};
   const sel=prePlaySelection(context)||{audio:null,subtitle:null};
   const defAudio=auds.find(a=>a.index===ad.selected_index);
@@ -116,13 +116,13 @@ function prePlayPickers(f){
         ${opt("",defAudio?`Default · ${audioFactLabel(defAudio)}`:"Default",sel.audio==null)}
         ${auds.map(a=>opt(a.index,audioFactLabel(a),sel.audio===a.index)).join("")}
       </select></div>`:"";
-  const subField=subs.length?`<div class="ppfield">
+  const subField=`<div id="pp-sub-field-${id}">${subs.length?`<div class="ppfield">
       <label for="pp-s-${id}">Subtitles</label>
       <select id="pp-s-${id}" onchange="setPrePlay(${idArg},'subtitle',this.value)">
         ${opt("",defSub?`Default · ${subFactLabel(defSub)}`:"Default · Off",sel.subtitle==null)}
         ${opt(-1,"Off",sel.subtitle===-1)}
         ${subs.map(s=>opt(s.index,subFactLabel(s),sel.subtitle===s.index)).join("")}
-      </select></div>`:"";
+      </select></div>`:""}</div>`;
   return `<div class="preplay">
     <div class="pprow">${audioField}${subField}</div>${find}${generate}
     <div class="ppnote" id="pp-n-${id}" role="status">${esc(PREPLAY_SCOPE_NOTE)}</div></div>`;
@@ -831,21 +831,120 @@ function classicItemBody(p){
     </div></div>`;
 }
 
+/** @returns {HTMLElement & {_subtitleGeneration?:any}|null} */
+function subtitleGenerationPanel(id){return document.getElementById(`subtitle-generate-${id}`);}
+/** @returns {HTMLSelectElement} */
+function subtitleGenerationInput(id){return /** @type {HTMLSelectElement} */ (document.getElementById(id));}
+function subtitleGenerationCurrent(state){
+  return subtitleUiCurrent(state.capture)&&state.panel.isConnected&&state.panel._subtitleGeneration===state&&WATCH_ITEM_PAGE===state.page&&state.page.files.includes(state.file)&&prePlaySelection(state.context)===state.selection&&(!state.player||(PLAYER===state.player&&PLAYER.started&&PLAYER.preplay===state.playerSelection&&PLAYER.curAudio===state.playerAudio&&PLAYER.curSub===state.playerSubtitle));
+}
+function subtitleGenerationLanguage(track){return typeof track?.normalized_language==="string"?track.normalized_language:"";}
+
+function subtitleGenerationLanguages(state,selected=""){
+  const model=state.models.find(row=>row.id===state.options.model_id),languages=state.options.supported_languages||model?.languages||[];
+  return subtitleLanguageOptions(languages,selected);
+}
+function subtitleGenerationForm(state){
+  const id=state.options.file_id,tracks=state.options.audio_tracks||[],selection=playbackSelection(typeof PLAYER!=="undefined"?PLAYER:null,state.context),index=selection?.audio??state.player?.audio?.[state.player.curAudio]?.index??state.file.playback_defaults?.audio?.selected_index??tracks.find(track=>track.default)?.index??tracks[0]?.index;
+  const track=tracks.find(row=>row.index===index),language=subtitleGenerationLanguage(track);
+  return `<div class="card" style="padding:16px;margin-top:8px"><label for="sg-a-${id}">Spoken audio track</label><select id="sg-a-${id}" onchange="subtitleGenerationAudioChanged('${id}')">${tracks.map(audio=>`<option value="${esc(String(audio.index))}"${audio.index===index?" selected":""}>${esc(audio.title||`Audio ${audio.index}`)} · ${esc(audio.language||"language untagged")}</option>`).join("")}</select>
+    <label for="sg-l-${id}">Spoken language · generation does not translate</label><select id="sg-l-${id}">${subtitleGenerationLanguages(state,language)}</select>
+    <p class="hint" id="sg-language-note-${id}">${language?"Confirm that this is the language spoken in the chosen audio track.":"This audio is untagged. Choose its spoken language explicitly."}</p>
+    <p class="hint">Model: ${esc(state.models.find(row=>row.id===state.options.model_id)?.label||state.options.model_id||"Advanced existing installation")}. This runs in the background; movie-length work may take a while. Machine-generated captions may contain mistakes.</p>
+    ${!state.options.enabled?'<p class="hint">Subtitle generation is disabled. Enable it in Settings before requesting work.</p>':""}
+    <button class="sm" onclick="submitSubtitleGeneration('${id}',this)">Generate from this audio</button> <a href="#/settings/maintenance/enable-subtitle-transcription">Model setup</a><div id="sg-status-${id}" role="status" aria-live="polite"></div></div>`;
+}
+function subtitleGenerationAudioChanged(id){
+  const state=subtitleGenerationPanel(id)?._subtitleGeneration;if(!state||!subtitleGenerationCurrent(state))return;
+  const track=state.options.audio_tracks.find(row=>String(row.index)===subtitleGenerationInput(`sg-a-${id}`).value),language=subtitleGenerationLanguage(track);
+  subtitleGenerationInput(`sg-l-${id}`).innerHTML=subtitleGenerationLanguages(state,language);
+  document.getElementById(`sg-language-note-${id}`).textContent=language?"Confirm that this is the language spoken in the chosen audio track.":"This audio is untagged. Choose its spoken language explicitly.";
+}
 async function generateSubtitles(fileId,button){
-  const panel=document.getElementById(`subtitle-generate-${fileId}`);
-  if(!panel||!button)return;
-  button.disabled=true;
-  panel.textContent="Requesting local transcription…";
-  try{
-    const result=await api(`/files/${encodeURIComponent(fileId)}/subtitles/transcribe`,{method:"POST",body:{}});
-    if(!panel.isConnected)return;
-    if(result.outcome!=="accepted"&&result.outcome!=="existing"){
-      const reasons={queue_full:"The background queue is full. Try again after current work finishes.",source_changed:"The media file changed. Refresh this page before trying again.",conflict:"Another request changed this job. Refresh Activity to see its current state.",no_demand:"This file does not need transcription for the configured language."};
-      panel.textContent=reasons[result.outcome]||"Transcription was not queued. Check Activity and transcription settings.";
-      return;
+  const panel=subtitleGenerationPanel(fileId);
+  if(!panel||!button||!ME?.is_admin)return;
+  const context=playbackFileContext(fileId);if(context.source_ref.kind!=="local")return;
+  const page=WATCH_ITEM_PAGE,file=page?.files.find(row=>playbackFileKey(row.fileContext)===playbackFileKey(context));if(!file)return;
+  const player=typeof PLAYER!=="undefined"&&samePlaybackFile(PLAYER,context)&&PLAYER.started?PLAYER:null;
+  const state={capture:subtitleUiCapture(),panel,context,page,file,selection:prePlaySelection(context),player,playerSelection:player?.preplay,playerAudio:player?.curAudio,playerSubtitle:player?.curSub};panel._subtitleGeneration=state;
+  button.disabled=true;panel.textContent="Loading audio and model choices…";
+  try{const [options,catalog]=await Promise.all([api(`/files/${encodeURIComponent(fileId)}/subtitles/transcribe`),api("/subtitle-transcription/models")]);
+    if(!subtitleGenerationCurrent(state))return;
+    if(options.version!==1||options.file_id!==context.source_ref.file_id||typeof options.source_size!=="string"||typeof options.source_mtime!=="string")throw Error("The source identity could not be confirmed. Refresh this title.");
+    state.options=options;state.models=catalog.models||[];state.workers=catalog.workers||[];panel.innerHTML=subtitleGenerationForm(state);
+  }catch(error){if(subtitleGenerationCurrent(state))panel.textContent=error.message||"Could not load generation choices. Check model setup in Settings.";}
+  finally{if(subtitleUiCurrent(state.capture)&&button.isConnected)button.disabled=false;}
+}
+async function submitSubtitleGeneration(fileId,button){
+  const state=subtitleGenerationPanel(fileId)?._subtitleGeneration,status=document.getElementById(`sg-status-${fileId}`);
+  if(!state||!status||!subtitleGenerationCurrent(state))return;
+  const audioIndex=Number(subtitleGenerationInput(`sg-a-${fileId}`).value),language=subtitleGenerationInput(`sg-l-${fileId}`).value,model=state.models.find(row=>row.id===state.options.model_id);
+  if(!Number.isSafeInteger(audioIndex)||!state.options.audio_tracks.some(row=>row.index===audioIndex)){status.textContent="Choose an available audio track.";return;}
+  if(!language||!(state.options.supported_languages||model?.languages||[]).includes(language)){status.textContent="Choose a spoken language supported by this model.";return;}
+  const audio=state.options.audio_tracks.find(row=>row.index===audioIndex),tag=subtitleGenerationLanguage(audio);
+  if(tag&&tag!==language){status.textContent="The selected language does not match this audio track. Choose matching spoken audio.";return;}
+  const request={};state.request=request;button.disabled=true;status.textContent="Requesting local transcription…";
+  try{const result=await api(`/files/${encodeURIComponent(fileId)}/subtitles/transcribe`,{method:"POST",body:{version:1,audio_index:audioIndex,language,model_id:state.options.model_id,source_size:state.options.source_size,source_mtime:state.options.source_mtime}});
+    if(!subtitleGenerationCurrent(state)||state.request!==request)return;
+    if(!["accepted","existing"].includes(result.outcome)){
+      status.textContent=({queue_full:"The background queue is full. Try again after current work finishes.",source_changed:subtitleReason("source_changed"),conflict:"Another request changed this job. Refresh Activity to see its current state.",no_demand:"This file already has captions for the chosen language."})[result.outcome]||"Transcription was not queued. Check Activity and model setup.";return;
     }
-    panel.innerHTML=`${result.outcome==="existing"?"This transcription is already queued or running.":"Transcription queued."} <a href="#/activity">Follow progress or stop it in Activity</a>. Refresh this title after completion to select the generated captions.`;
-  }catch(error){
-    if(panel.isConnected){panel.textContent=error.message||"Could not request transcription.";const link=document.createElement("a");link.href="#/settings/developer";link.textContent=" Configure offline transcription";panel.append(link);}
-  }finally{if(button.isConnected)button.disabled=false;}
+    if(typeof result.job_id!=="string"||typeof result.artifact_key!=="string"||result.file_id!==fileId||result.source_size!==state.options.source_size||result.source_mtime!==state.options.source_mtime)throw Error("The accepted source identity could not be confirmed. Check Activity before retrying.");
+    state.jobId=result.job_id;state.artifact=result.artifact_key;state.audioIndex=audioIndex;state.language=language;state.jobObservation=null;
+    status.innerHTML=`${result.outcome==="existing"?"This transcription is already queued or running.":"Transcription queued."} ${subtitleJobLink(result.job_id,"Follow progress or cancel this job in Activity")}`;
+    pollSubtitleGeneration(state,request);
+  }catch(error){if(subtitleGenerationCurrent(state)&&state.request===request)status.textContent=error.message||"Could not request transcription.";}
+  finally{if(subtitleUiCurrent(state.capture)&&button.isConnected)button.disabled=false;}
+}
+function subtitleGenerationJobText(job,workers=[]){
+  const phases={queued:"Queued",downloading:"Downloading model",verifying:"Testing model",decoding:"Decoding audio",transcribing:"Transcribing speech",validating:"Validating captions",publishing:"Publishing captions",succeeded:"Published",failed:"Failed",cancelled:"Cancelled"};
+  return `${phases[job.phase]||phases[job.state]||"Working"}${job.node_id?" · worker "+(workers.find(worker=>worker.node_id===job.node_id)?.label||"assigned"):""}${job.started_at_ms?" · "+Math.max(0,Math.floor((Date.now()-job.started_at_ms)/60000))+" min elapsed":""}${job.reason?" · "+subtitleReason(job.reason):""}${job.yield_count?" · interrupted attempts restart from the beginning":""}`;
+}
+async function pollSubtitleGeneration(state,request){
+  if(!subtitleGenerationCurrent(state)||state.request!==request)return;
+  const id=state.options.file_id,status=document.getElementById(`sg-status-${id}`),flight={};state.statusFlight=flight;
+  try{const job=await api(`/subtitle-transcription/jobs/${encodeURIComponent(state.jobId)}`);
+    if(!subtitleGenerationCurrent(state)||state.request!==request||state.statusFlight!==flight)return;
+    if(job.job_id!==state.jobId||job.file_id!==id||job.artifact_key!==state.artifact||job.source_size!==state.options.source_size||job.source_mtime!==state.options.source_mtime)throw Error("This job no longer matches the requested source.");
+    const old=state.jobObservation;
+    if(old&&((job.attempt<old.attempt)||(job.attempt===old.attempt&&job.fence!==old.fence)||(job.attempt===old.attempt&&job.updated_at_ms<old.updated_at_ms))){setTimeout(()=>pollSubtitleGeneration(state,request),3000);return;}
+    state.jobObservation=job;
+    status.innerHTML=`${esc(subtitleGenerationJobText(job,state.workers))}. ${subtitleJobLink(state.jobId)}`;
+    if(job.state==="succeeded"){
+      if(job.result_ref!==state.artifact){status.insertAdjacentHTML("beforeend","<p>Publication identity is unavailable. Refresh the title after checking Activity.</p>");return;}
+      await completeSubtitleGeneration(state,request,job);return;
+    }
+    if(!["failed","cancelled"].includes(job.state))setTimeout(()=>pollSubtitleGeneration(state,request),3000);
+  }catch(error){if(subtitleGenerationCurrent(state)&&state.request===request&&state.statusFlight===flight)status.innerHTML=`${esc(error.message||"Could not refresh transcription progress.")} <button class="ghost sm" onclick="retrySubtitleGenerationStatus('${id}')">Retry status</button> ${subtitleJobLink(state.jobId)}`;}
+}
+function retrySubtitleGenerationStatus(id){
+  const state=subtitleGenerationPanel(id)?._subtitleGeneration;
+  if(state&&subtitleGenerationCurrent(state)&&state.request)pollSubtitleGeneration(state,state.request);
+}
+async function completeSubtitleGeneration(state,request,job){
+  const id=state.options.file_id;
+  const current=()=>subtitleGenerationCurrent(state)&&state.request===request&&state.jobObservation===job;
+  const fileId=id,options=await api(`/files/${encodeURIComponent(fileId)}/subtitles/transcribe`);
+  if(!current())return;
+  if(options.file_id!==id||options.source_size!==state.options.source_size||options.source_mtime!==state.options.source_mtime)throw Error(subtitleReason("source_changed"));
+  const caption=(options.captions||[]).find(row=>row.artifact_key===job.result_ref&&row.source_size===options.source_size&&row.source_mtime===options.source_mtime&&Number.isSafeInteger(row.index)&&row.index>=0);
+  if(!caption)throw Error("The job finished, but its generated caption is not selectable yet. Refresh this title.");
+  const track=(options.subtitle_streams||[]).find(row=>row.index===caption.index);
+  if(!track)throw Error("The published caption is not present in title metadata yet. Refresh this title.");
+  // Only subtitle metadata changes. Never reload the item (which clears PREPLAY),
+  // replace the video, or choose a newly published track on the viewer's behalf.
+  state.file.subtitle_streams=options.subtitle_streams;
+  const mount=document.getElementById(`pp-sub-field-${id}`),sel=prePlaySelection(state.context)||{subtitle:null};
+  if(mount){const opt=(value,label,on)=>`<option value="${esc(String(value))}"${on?" selected":""}>${esc(label)}</option>`;mount.innerHTML=`<div class="ppfield"><label for="pp-s-${id}">Subtitles</label><select id="pp-s-${id}" onchange="setPrePlay('${id}','subtitle',this.value)">${opt("","Default",sel.subtitle==null)}${opt(-1,"Off",sel.subtitle===-1)}${options.subtitle_streams.map(row=>opt(row.index,subFactLabel(row),sel.subtitle===row.index)).join("")}</select></div>`;}
+  if(typeof PLAYER!=="undefined"&&samePlaybackFile(PLAYER,state.context)&&PLAYER.started)PLAYER.subs=options.subtitle_streams;
+  if(typeof watchRenderLedger==="function"&&typeof WATCH!=="undefined"&&WATCH?.page===state.page)watchRenderLedger();
+  state.readyIndex=caption.index;
+  document.getElementById(`sg-status-${id}`).innerHTML=`Captions ready — use generated subtitles. <button class="sm" onclick="useGeneratedSubtitles('${id}')">Use generated subtitles</button> ${subtitleJobLink(state.jobId)}`;
+}
+function useGeneratedSubtitles(id){
+  const state=subtitleGenerationPanel(id)?._subtitleGeneration;
+  if(!state||!subtitleGenerationCurrent(state)||!Number.isSafeInteger(state.readyIndex))return;
+  if(typeof PLAYER!=="undefined"&&samePlaybackFile(PLAYER,state.context)&&PLAYER.started){setSub(state.readyIndex);return;}
+  setPrePlay(state.context,"subtitle",String(state.readyIndex));
+  const picker=/** @type {HTMLSelectElement|null} */ (document.getElementById(`pp-s-${id}`));if(picker)picker.value=String(state.readyIndex);
 }

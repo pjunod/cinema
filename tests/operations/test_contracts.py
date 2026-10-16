@@ -2266,10 +2266,12 @@ assert.equal(context.ACT_TIMER, null);
         # Whole-job budget includes checkout/toolchain/cache setup plus the
         # unchanged all-target compile and vendored denied-warning Clippy.
         full_jobs = workflow_job_blocks(".github/workflows/ci.yml")
-        for lane, rust_job in (("effort", effort_jobs["rust_compile"]),
-                               ("full compiler", full_jobs["rust_compile"])):
+        for lane, rust_job, minutes in (
+            ("effort", effort_jobs["rust_compile"], 30),
+            ("full compiler", full_jobs["rust_compile"], 20),
+        ):
             with self.subTest(lane=lane):
-                self.assertRegex(rust_job, r"(?m)^    timeout-minutes: 20$")
+                self.assertRegex(rust_job, rf"(?m)^    timeout-minutes: {minutes}$")
                 rust_env = re.search(r"(?ms)^    env:\n(.*?)(?=^    \S)", rust_job)
                 self.assertIsNotNone(rust_env, "bound Cargo concurrency at job scope")
                 self.assertEqual(
@@ -2287,6 +2289,17 @@ assert.equal(context.ACT_TIMER, null);
         # its receipt publications finish; the effort gate keeps ten.
         self.assertIn("timeout-minutes: 15", fast_jobs["preflight"])
         self.assertIn("timeout-minutes: 10", effort_jobs["preflight"])
+        self.assertIn("timeout-minutes: 30", effort_jobs["rust_compile"])
+        effort_rust_header = effort_jobs["rust_compile"].split("\n    steps:", 1)[0]
+        self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"', effort_rust_header)
+        self.assertEqual(
+            re.findall(r"(?m)^[ \t]*CARGO_BUILD_JOBS: [^\n]+$", effort_jobs["rust_compile"]),
+            ['      CARGO_BUILD_JOBS: "1"'],
+        )
+        self.assertIn(
+            "if: always() && steps.cargo-cache.outputs.local == 'true'",
+            effort_rust_steps["Enforce persistent Cargo bounds"],
+        )
         fast_rust_steps = workflow_step_blocks(fast_jobs["rust_compile"])
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")

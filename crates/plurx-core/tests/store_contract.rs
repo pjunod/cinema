@@ -12558,17 +12558,80 @@ async fn drop_later_sharing_schema_from_historical_fixture(client: &Client) {
         .expect("commit disposable sharing schema rewind");
 }
 
+// Rewind the independently installed extension only in disposable historical
+// queue fixtures. Keep all pre-extension queue rows and restore its canonical
+// resources view, so forward open sees a complete predecessor rather than a
+// marker paired with later or missing owned objects.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn rewind_managed_subtitle_extension_in_historical_fixture(client: &Client) {
+    let receipts: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM subtitle_model_receipts",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("count disposable managed model receipts");
+    assert_eq!(
+        receipts[0].value, 0,
+        "historical fixture must contain no managed model receipts"
+    );
+    let mut objects = client.query_consistent(
+        "SELECT type,name FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources') ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",
+        hiqlite::params!(),
+    ).await.expect("read complete managed fixture extension");
+    assert_eq!(
+        objects.len(),
+        6,
+        "rewind only the complete managed extension"
+    );
+    let mut statements = objects
+        .iter_mut()
+        .map(|row| {
+            let kind = row.get::<String>("type");
+            let name = row.get::<String>("name");
+            (format!("DROP {} \"{}\"", kind, name), hiqlite::params!())
+        })
+        .collect::<Vec<_>>();
+    let predecessor_view = include_str!("../src/store/background_jobs_probe.sql")
+        .split("-- next statement\n")
+        .find(|sql| sql.contains("CREATE VIEW IF NOT EXISTS background_job_required_resources"))
+        .expect("canonical pre-extension resources view");
+    statements.push((predecessor_view.to_owned(), hiqlite::params!()));
+    client
+        .txn(statements)
+        .await
+        .expect("rewind complete managed fixture extension")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit complete managed fixture extension rewind");
+}
+
 // Background job objects (v49+) and sharing (v70) did not exist in v27/v31.
 // Keeping them blocks old column removal/table rebuilds and leaves extension
 // columns/tables that forward migration would add a second time. These fixtures
 // seed no extension rows; remove the later schema. The two later Jellyfin
 // watch triggers also reference media_sessions while old fixtures replace it.
-// Retain the background and removed watch-trigger inventory as proof that
-// actual forward migration restores every trigger.
+// Retain the background, managed-subtitle and removed watch-trigger inventory
+// as proof that actual forward migration restores every trigger.
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn drop_post_v39_extension_schema(client: &Client) -> Vec<String> {
+    // The independently installed managed-subtitle extension owns later queue
+    // triggers and replaces the resources view. Rewind it as one complete
+    // fixture extension; keeping its marker while removing its triggers would
+    // fabricate a partial layout that production must reject.
+    let receipts: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM subtitle_model_receipts",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("count disposable managed model receipts");
+    assert_eq!(
+        receipts[0].value, 0,
+        "historical fixture must contain no managed model receipts"
+    );
     let mut rows = client
-        .query_consistent("SELECT type,name FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
+        .query_consistent("SELECT type,name FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name GLOB 'subtitle_managed_*' OR name='subtitle_model_receipts' OR name='analysis_required_resources' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
         .await.expect("read later background schema inventory");
     let mut triggers = Vec::new();
     let statements = rows
@@ -14139,7 +14202,7 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
         .collect::<Vec<_>>();
     assert_eq!(
         restored_triggers, expected_background_triggers,
-        "historical migration must restore every current background and removed watch trigger"
+        "historical migration must restore every current background, managed-subtitle and removed watch trigger"
     );
 
     // The migrated store is the working store, not merely a shaped one.
@@ -16351,6 +16414,213 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             .expect("inspect migrated v11-through-v13 schema");
         assert_eq!(rows.len(), 1, "{sql}");
         assert_eq!(rows[0].value, expected, "{sql}");
+    }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+mod managed_bootstrap_regressions {
+    use super::*;
+    use plurx_core::store::background_jobs::{
+        BackgroundJobStore, EnqueueJob, EnqueueOutcome, JobPayload, JobRequest,
+    };
+    use plurx_core::store::background_jobs_transcription::{ModelAction, SubtitleModelReceipt};
+
+    async fn populated_fixture() -> (ContractCluster, Client, HiqliteAuthStore) {
+        let cluster = ContractCluster::start().await;
+        let store = open_contract_hiqlite_store(&cluster).await;
+        let client = Client::remote(
+            cluster.addresses.clone(),
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            false,
+            None,
+        )
+        .await
+        .expect("managed bootstrap client");
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let outcome = store
+            .enqueue_job(EnqueueJob {
+                id: job_id.clone(),
+                payload: JobPayload::SubtitleModelOperation {
+                    action: ModelAction::Verify,
+                    model_id: "bootstrap-model".into(),
+                    catalog_revision: "catalog-v1".into(),
+                    model_sha256: "a".repeat(64),
+                    adapter_contract: "whisper.cpp-1.9.2-cpu-v1".into(),
+                    target_node_id: "node-a".into(),
+                },
+                dedupe_key: job_id.clone(),
+                priority: 0,
+                not_before_ms: 1000,
+                now_ms: 1000,
+                request: JobRequest {
+                    scope: "subtitle-model".into(),
+                    request_id: job_id.clone(),
+                    request_digest: "c".repeat(64),
+                    consumer_kind: "subtitle_model".into(),
+                    consumer_ref: job_id.clone(),
+                    target_node_id: Some("node-a".into()),
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .expect("seed populated managed queue");
+        assert!(matches!(outcome, EnqueueOutcome::Accepted { .. }));
+        let receipt = SubtitleModelReceipt {
+            node_id: "node-a".into(),
+            boot_id: "boot-a".into(),
+            model_id: "bootstrap-model".into(),
+            model_sha256: "a".repeat(64),
+            adapter_contract: "whisper.cpp-1.9.2-cpu-v1".into(),
+            engine_sha256: "b".repeat(64),
+            model_file_identity: "model:identity".into(),
+            engine_file_identity: "engine:identity".into(),
+            job_id,
+            fence: 1,
+            verified_at_ms: 1000,
+        };
+        client.execute("INSERT INTO subtitle_model_receipts(node_id,model_id,receipt_json) VALUES($1,$2,$3)",
+            hiqlite::params!(receipt.node_id.clone(),receipt.model_id.clone(),serde_json::to_string(&receipt).expect("receipt JSON")))
+            .await.expect("seed retained model receipt");
+        let receipts = store
+            .subtitle_model_receipts("node-a")
+            .await
+            .expect("read seeded model receipt");
+        assert_eq!(receipts.len(), 1);
+        let resources: Vec<I64Value> = client.query_consistent_map(
+            "SELECT count(*) AS value FROM background_job_required_resources WHERE resource_key='subtitle_model:node-a'",hiqlite::params!())
+            .await.expect("managed resource contract");
+        assert_eq!(
+            resources[0].value, 1,
+            "populated fixture exercises the managed view"
+        );
+        (cluster, client, store)
+    }
+
+    async fn snapshot(client: &Client) -> Vec<String> {
+        let mut snapshot = client.query_consistent_map::<SchemaText,_>(
+            "SELECT value FROM (
+             SELECT json_object('kind','schema','name',name,'sql',sql) AS value FROM sqlite_master
+               WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources')
+             UNION ALL SELECT json_object('kind','receipt','node',node_id,'model',model_id,'receipt',receipt_json) FROM subtitle_model_receipts
+             UNION ALL SELECT json_object('kind','job','id',id,'payload',payload_json,'state',state,'revision',revision,'created_at_ms',created_at_ms) FROM background_jobs
+             UNION ALL SELECT json_object('kind','marker','version',version) FROM subtitle_managed_schema
+             ) ORDER BY value",hiqlite::params!()).await.expect("snapshot populated managed extension")
+            .into_iter().map(|row|row.value).collect::<Vec<_>>();
+        let views: Vec<I64Value> = client.query_consistent_map(
+            "SELECT count(*) AS value FROM sqlite_master WHERE type='view' AND name='background_job_required_resources'", hiqlite::params!(),
+        ).await.expect("observe optional resource view in partial fixture");
+        if views[0].value == 1 {
+            snapshot.extend(client.query_consistent_map::<SchemaText,_>(
+                "SELECT json_object('kind','resource','job',job_id,'resource',resource_key) AS value FROM background_job_required_resources", hiqlite::params!(),
+            ).await.expect("snapshot existing resource view").into_iter().map(|row|row.value));
+        }
+        snapshot.sort();
+        snapshot
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeated_bootstrap_preserves_populated_managed_receipts_queue_and_view() {
+        let _case = HIQLITE_CASE.lock().await;
+        let (cluster, client, store) = populated_fixture().await;
+        let before = snapshot(&client).await;
+        let marker = replicated_schema_marker(&client).await;
+        drop(store);
+        HiqliteAuthStore::bootstrap(
+            client.clone(),
+            CONTRACT_INSTANCE_ID,
+            &cluster._root.path().join("managed-repeat.db"),
+        )
+        .await
+        .expect("repeat populated bootstrap");
+        assert_eq!(snapshot(&client).await, before);
+        assert_eq!(replicated_schema_marker(&client).await, marker);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeated_bootstrap_refuses_partial_managed_extension_without_repair() {
+        let _case = HIQLITE_CASE.lock().await;
+        let (cluster, client, store) = populated_fixture().await;
+        drop(store);
+        let mut declarations = client.query_consistent_map::<SchemaText,_>(
+            "SELECT sql AS value FROM sqlite_master WHERE name IN ('background_job_required_resources','subtitle_managed_source_changed') ORDER BY name", hiqlite::params!(),
+        ).await.expect("retain exact declarations for independent partial cases");
+        assert_eq!(declarations.len(), 2);
+        let view = declarations.remove(0).value;
+        let trigger = declarations.remove(0).value;
+        for (ordinal, (damage, restore, expected_error)) in [
+            (
+                "DROP TRIGGER subtitle_managed_source_changed",
+                trigger,
+                "partial or incompatible",
+            ),
+            (
+                "DROP VIEW background_job_required_resources",
+                view,
+                "partial or incompatible",
+            ),
+            (
+                "DELETE FROM subtitle_managed_schema",
+                "INSERT INTO subtitle_managed_schema VALUES(1,1)".into(),
+                "marker missing",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            client
+                .execute(damage, hiqlite::params!())
+                .await
+                .expect("manufacture independent partial managed extension");
+            let partial = snapshot(&client).await;
+            let result = HiqliteAuthStore::bootstrap(
+                client.clone(),
+                CONTRACT_INSTANCE_ID,
+                &cluster
+                    ._root
+                    .path()
+                    .join(format!("managed-partial-{ordinal}.db")),
+            )
+            .await;
+            let error = match result {
+                Ok(_) => panic!("partial managed extension must refuse bootstrap"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(expected_error),
+                "{damage}: {error}"
+            );
+            assert_eq!(
+                snapshot(&client).await,
+                partial,
+                "refusal must not repair or discard {damage}"
+            );
+            // Restore the exact retained fixture declaration only to isolate the
+            // next corruption; production bootstrap itself must never repair it.
+            client
+                .execute(restore, hiqlite::params!())
+                .await
+                .expect("restore independent test fixture");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_repeated_bootstraps_preserve_populated_managed_extension() {
+        let _case = HIQLITE_CASE.lock().await;
+        let (cluster, client, store) = populated_fixture().await;
+        let before = snapshot(&client).await;
+        drop(store);
+        let first_path = cluster._root.path().join("managed-repeat-a.db");
+        let second_path = cluster._root.path().join("managed-repeat-b.db");
+        let (first, second) = tokio::join!(
+            HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &first_path),
+            HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &second_path)
+        );
+        first.expect("first concurrent current-layout repeat");
+        second.expect("second concurrent current-layout repeat");
+        assert_eq!(snapshot(&client).await, before);
     }
 }
 
@@ -37635,6 +37905,7 @@ async fn replicated_schema_marker(client: &Client) -> i64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     async fn rewind_non_idempotent_columns(client: &Client) {
+        rewind_managed_subtitle_extension_in_historical_fixture(client).await;
         drop_later_sharing_schema_from_historical_fixture(client).await;
         downgrade_dv_request_provenance(client).await;
         // v60 also adds a column. Remove its dependent triggers before replaying

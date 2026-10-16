@@ -1,7 +1,33 @@
-# HTTPS promotion integration: keep PR #1048 source census and HTTPS deltas
-# together: namespaced spawns 952 + 13 = 965; timers 1761 + 11 = 1772;
-# process-shaped methods 756 + 7 = 763. Both reviewed ownership accounts
-# remain below; no selector, module scope or equality constraint changes.
+# HTTPS/subtitle promotion integration: main220157aba carries the reviewed
+# managed-subtitle deltas; preserve all HTTPS and prior main attributions.
+# Namespaced spawns 960 + 13 = 973; timers 1773 + 11 = 1784;
+# launch-shaped methods 760 + 7 = 767. Scope/patterns/equality stay exact.
+# Integrated census: main 5b8f8fe78 plus managed subtitle owners from 75bc459b.
+# Reviewed independent deltas compose: spawn 960, timers 1773, constructors 272,
+# launch-shaped methods 760, UFCS lifecycle 67 and kill-on-drop 104.
+# Preserve both dated attributions, every pattern/scope and exact equality.
+
+# Managed subtitle setup census (main 443c44c -> reviewed single-server runtime):
+# +8 namespaced spawns are awaited blocking filesystem work: artifacts.rs owns
+# engine inspection, cancellable model verification, reserved temporary creation,
+# final hash/sync and corrupt-artifact inspection; subtitle_transcription.rs owns
+# decoded-PCM inspection, private macOS executable staging and Advanced header
+# discovery. The manager retains its operation through cancellation/cleanup;
+# refresh may time-bound read-only engine inspection, never large model hashing.
+# +12 namespaced timers: three manager observation/admission bounds; Advanced
+# enqueue's bounded model open; the capacity watcher replacing enable watching
+# (one removed timer); and eight finite regression startup/completion/Stop waits.
+# +5 process constructors: four bounded.rs test-only environment constructors
+# (one bare executable is refused before spawn) and the shutdown fixture's
+# isolated self-invocation. The decoder/recognizer
+# construction moved into Pipeline with zero net change; production children
+# retain the existing bounded collector, held descriptors and confirmed reap.
+# +4 launch-shaped matches: two reqwest Response::status reads start no process;
+# two test-only .output calls collect isolated environment/shutdown children.
+# +1 UFCS lifecycle call is libc::kill(pid, 0), proving the managed shutdown
+# fixture's child has been reaped; it sends no signal. +1 kill-on-drop belongs
+# to that fixture's 30-second bounded isolated self-invocation. No scope or
+# structural pattern changes, new detached inference owner or rolling producer.
 
 # PR #1048 continuous-quality census since d6326a764 (exact source deltas):
 # Bounded VOD lookup 9 -> 11: response.rs adds the acquisition-start facade's
@@ -2994,7 +3020,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # process launch. +1 cancellation regression waiter is aborted and awaited;
 # the test then acquires the worker-held guard to observe completed file work
 # and adoption before temporary directory teardown.
-expected_occurrences = 965
+expected_occurrences = 973
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4633,7 +4659,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # a short observation that the worker still holds its guard, and completed
 # adoption deadline. All are awaited in the fixture; the bounded blocking
 # channel observer always releases the worker on timeout/disconnection.
-expected_occurrences = 1772
+expected_occurrences = 1784
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5077,7 +5103,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # production-copy fixture collection. Each runs finite owned media to
 # completion synchronously before its fixture is released. No task or timer
 # constructor is added; existing probe collector bounds remain unchanged.
-expected_occurrences = 267
+expected_occurrences = 272
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5705,7 +5731,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # HTTPS H3: +3 status reads, not launches: sanitized JsonRejection's body
 # limit classification and two HTTP certificate/fenced-response assertions.
 # No OS process, producer or child-reaping obligation is added.
-expected_occurrences = 763
+expected_occurrences = 767
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6063,7 +6089,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # #870 adds one test-only libc::kill(pid, 0) liveness observation after its
 # owned cancelled probe has settled; it verifies ESRCH and sends no signal.
 # Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
-expected_occurrences = 66
+expected_occurrences = 67
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6195,7 +6221,7 @@ pattern = "kill_on_drop\\s*\\("
 # No repair delta; preserve current main's already reconciled fixture owners.
 # Acceptance root-cause batch: +2 unwind guards on the same two test-only
 # sleep producers; normal settlement is Step::Terminate's confirmed reap.
-expected_occurrences = 103
+expected_occurrences = 104
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

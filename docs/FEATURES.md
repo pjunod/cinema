@@ -373,15 +373,18 @@ the physical Apple/Android device matrix remains a release acceptance step.
   matches for missing configured languages. Each source revision can hold
   eight downloaded tracks of at most 256 KiB each. Provider quotas still
   apply. See [operation and setup](OPERATIONS.md#download-missing-subtitles).
-- **Generate missing subtitles offline.** Administrators can choose **Generate
-  subtitles** on a local title's detail page. Configure the optional worker in
-  **Settings → Developer** with an installed whisper.cpp executable and model,
-  a spoken language and an optional missing-language sweep interval. Activity
-  shows queued/running work and owns Stop. Generated WebVTT is labelled as
-  machine-generated and appears in the ordinary subtitle picker on all
-  clients; no media-library file is modified. CPU execution is bounded and
-  models are never downloaded by the job. See
-  [offline transcription](OPERATIONS.md#generate-subtitles-offline).
+- **Generate missing subtitles offline.** Administrators configure Managed
+  generation in **Settings → Maintenance**, install a catalog model on named
+  workers and let the durable job verify it automatically. The service package
+  supplies the CPU recognizer. In the web player, generate from a local title or during playback
+  with an exact audio/spoken-language choice; Activity shows the accepted job
+  and owns Stop. Web completion adds the matching machine-generated track without
+  reloading playback or changing Off; select Use explicitly. Models persist
+  across restarts and must verify for the current boot. Advanced command/path
+  setup remains available. Input and resource use are bounded; recognition
+  accuracy and each client/platform's acceptance are recorded in the
+  [qualification ledger](features/SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md).
+  See [offline transcription](OPERATIONS.md#generate-subtitles-offline).
 - **Track facts are ready before playback.** Every file in the native item-detail
   response carries its complete audio/subtitle lists plus `playback_defaults`:
   the exact audio and subtitle indices the shared server policy would select,

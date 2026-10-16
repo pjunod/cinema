@@ -2,10 +2,12 @@
 """Assemble a native macOS daemon candidate in a new directory; never install.
 
 Usage: package-macos --daemon BUILT_PLURXD --ffmpeg-package COMBINED_PACKAGE
-       --output NEW_DIRECTORY [--sign DEVELOPER_ID_IDENTITY] [--debug-symbols MATCHED_DSYM]
+       --subtitle-engine-package VERIFIED_ENGINE --output NEW_DIRECTORY
+       [--sign DEVELOPER_ID_IDENTITY] [--debug-symbols MATCHED_DSYM]
 The combined FFmpeg package must already contain its exact-source WASM parser
 and provenance. The daemon and both tools live together in bin/: the daemon's
 ordinary sibling resolver finds these defaults; explicit operator paths win.
+The verified subtitle engine is copied as a complete bin/subtitle-engine bundle.
 Only copied daemon bytes are signed. Default ad-hoc signing produces a local
 candidate, not a notarized distribution or a fresh-install acceptance receipt.
 """
@@ -27,6 +29,15 @@ import tempfile
 def recipe():
     path = Path(__file__).with_name("build-macos-video-ffmpeg")
     loader = importlib.machinery.SourceFileLoader("macos_daemon_package", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def engine_recipe():
+    path = Path(__file__).with_name("build-subtitle-engine")
+    loader = importlib.machinery.SourceFileLoader("macos_subtitle_engine", str(path))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
@@ -123,7 +134,7 @@ def validate_debug_symbols(daemon, symbols):
     return [{"architecture": architecture, "uuid": identity} for architecture, identity in executable_ids]
 
 
-def assemble(daemon, package, output, signing_identity, debug_symbols=None):
+def assemble(daemon, package, output, signing_identity, debug_symbols=None, engine_package=None):
     tool = recipe()
     if not daemon.is_absolute() or daemon.is_symlink() or not daemon.is_file():
         raise ValueError("daemon must be an explicit regular built artifact")
@@ -135,10 +146,19 @@ def assemble(daemon, package, output, signing_identity, debug_symbols=None):
     source_symbol_files = ({str(item.relative_to(debug_symbols)): {"bytes": item.stat().st_size, "sha256": tool.digest(item)}
                             for item in symbol_entries(debug_symbols)} if debug_symbols is not None else None)
     manifest = validate_native_package(package)
+    if engine_package is None:
+        raise ValueError("native daemon package requires the pinned subtitle engine package")
+    engine_facts = engine_recipe().verify(engine_package)
+    if engine_facts.get("platform") not in ["macos-arm64", "macos-x86_64", "macos-universal"]:
+        raise ValueError("native daemon package requires a macOS subtitle engine")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".macos-package-", dir=output.parent) as temporary:
         stage = Path(temporary) / "package"
         shutil.copytree(package, stage / "bin")
+        if (stage / "bin/subtitle-engine").exists():
+            raise ValueError("native media package conflicts with the subtitle engine")
+        shutil.copytree(engine_package, stage / "bin/subtitle-engine")
+        engine_recipe().verify(stage / "bin/subtitle-engine")
         executable = stage / "bin/plurxd"
         if executable.exists():
             raise ValueError("native FFmpeg package unexpectedly contains a daemon")
@@ -194,6 +214,7 @@ def assemble(daemon, package, output, signing_identity, debug_symbols=None):
                  "artifacts": {name: tool.digest(stage / "bin" / name)
                                for name in ["plurxd", "ffmpeg", "ffprobe", "plurx-source-parser.wasm"]},
                  "signing_entitlements": required, "debug_symbols": symbol_facts,
+                 "subtitle_engine": engine_facts,
                  "qualification": "assembly/signature integrity only; no notarization or fresh-install receipt"}
         (provenance / "manifest.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
         stage.rename(output)
@@ -204,13 +225,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--daemon", type=Path, required=True)
     parser.add_argument("--ffmpeg-package", type=Path, required=True)
+    parser.add_argument("--subtitle-engine-package", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--debug-symbols", type=Path, help="explicit paired dSYM; UUID match and regular entries required; absence is recorded")
     parser.add_argument("--sign", default="-", help="explicit Developer ID identity; default '-' is a local ad-hoc candidate")
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("native daemon signing requires macOS")
-    print(json.dumps(assemble(args.daemon, args.ffmpeg_package, args.output, args.sign, args.debug_symbols), sort_keys=True))
+    print(json.dumps(assemble(args.daemon, args.ffmpeg_package, args.output, args.sign, args.debug_symbols,
+                              args.subtitle_engine_package), sort_keys=True))
 
 
 if __name__ == "__main__":

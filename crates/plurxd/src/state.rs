@@ -768,6 +768,7 @@ pub struct AppState {
     /// binding and response verification stay per request inside the
     /// transport; nothing about a credential is held here.
     pub(crate) live_tv_peers: Arc<crate::http::live_tv::LiveTvPeers>,
+    pub(crate) subtitle_models: Arc<crate::subtitle_models::Runtime>,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -1155,6 +1156,7 @@ impl AppState {
             }
             None => crate::settings_changes::SettingsChangeSource::LocalOnly,
         };
+        let subtitle_models = Arc::new(crate::subtitle_models::Runtime::new(&data_dir));
         let backup = crate::backup::BackupManager::new(
             Arc::clone(&store),
             Arc::clone(&jobs),
@@ -1281,6 +1283,7 @@ impl AppState {
             settings_changes,
             live_tv,
             live_tv_peers,
+            subtitle_models,
             server_name,
             node_id,
             cluster_advertisement,

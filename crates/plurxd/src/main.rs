@@ -87,6 +87,7 @@ mod source_probe;
 mod state;
 mod store_result;
 mod storeprobe;
+mod subtitle_models;
 mod subtitle_ranges;
 mod subtitle_ride_along;
 mod subtitle_source;

@@ -196,6 +196,25 @@ function memoryStorage(initial) {
   return { getItem: (k) => (map.has(k) ? map.get(k) : null), setItem: (k, v) => map.set(k, String(v)), map };
 }
 
+test("legacy subtitle setup links route to Maintenance", () => {
+  const r=routing(memoryStorage(),"#/settings/developer/enable-subtitle-transcription");
+  assert.equal(r.settingsRouteTab(r.location.hash),"maintenance");
+  assert.equal(r.settingsTab(),"maintenance");
+  assert.match(shippedConst("SETTINGS_KEPT_MOUNTS"),/maintenance:\["enable-subtitle-transcription"\]/);
+});
+
+test("subtitle setup belongs to Maintenance without a temporary Developer card", () => {
+  const panels=developerPanels(), settings={}, readiness={features:[]};
+  assert.doesNotMatch(panels.developerPanel(settings,readiness),/Configure transcription|Generate subtitles offline/);
+  const maintenance=panels.maintenancePanel(settings,null,readiness);
+  assert.match(maintenance,/Generate subtitles offline/);
+  assert.match(maintenance,/Configure transcription/);
+  assert.match(maintenance,/id="subtitle-transcription-form"/);
+  const card=shippedSource("subtitleTranscriptionCard");
+  assert.match(card,/id:"enable-subtitle-transcription"/);
+  assert.doesNotMatch(card,/devGraduation|Leaves Developer when/);
+});
+
 test("every section is a route, grouped in the rail's order", () => {
   const r = routing(memoryStorage(), "#/settings/playback");
   assert.deepEqual(r.SET_GROUPS.map(([group]) => group), ["Content", "Playback", "Server", "Outside", "Developer"]);
@@ -1129,6 +1148,16 @@ test("a section repaint carries kept settings cards across as live nodes", () =>
   // Analysis keeps the backfill card across its own panel's Save.
   const backfill=make("subbackfillcard"); dom={subbackfillcard:backfill}; active=null;
   assert.deepEqual(keep.capture("analysis").nodes,[backfill]);
+  const setup=make("enable-subtitle-transcription"); setup.savedEnabled=false; setup.unsavedLanguage="sv";
+  dom={"enable-subtitle-transcription":setup}; active=setup.child;
+  const setupKeep=keep.capture("maintenance");
+  const setupReplacement=make("enable-subtitle-transcription"); dom={"enable-subtitle-transcription":setupReplacement};
+  keep.restore(setupKeep);
+  assert.equal(setupReplacement.replaced,setup,"Maintenance keeps the live setup and its saved/unsaved controls");
+  assert.equal(setupReplacement.replaced.savedEnabled,false);
+  assert.equal(setupReplacement.replaced.unsavedLanguage,"sv");
+  assert.equal(setup.child.focused,1);
+
   assert.deepEqual(keep.capture("playback").nodes,[],"other sections redraw everything, as before");
   const render=shippedSource("renderSettings");
   assert.ok(render.indexOf("captureSettingsMounts(tab)")<render.indexOf('innerHTML=`<div class="setlayout">'),"captured before the repaint");
@@ -1938,39 +1967,41 @@ test("a standalone server keeps every local switch; cluster switches live only i
 });
 
 test("transcription readiness never overrides enable or disables Save", async () => {
-  const form=new Function("esc",`${shippedSource("subtitleTranscriptionForm")} return subtitleTranscriptionForm;`)(String);
-  const missing={enabled:true,command:"whisper-cli",model_path:"",language:"en",interval_mins:0,
-    readiness:{ready:false,command_available:false,model_available:false,reason:"Install a local model."}};
+  const helpers=["subtitleLanguageName","subtitleLanguageOptions","subtitleModelSize","subtitleModelOptions","subtitleModelEvidence","subtitleReason","subtitleTranscriptionForm"].map(shippedSource).join("\n");
+  const form=new Function("esc",`${helpers} return subtitleTranscriptionForm;`)(esc);
+  const missing={version:1,revision:"1",mode:"managed",enabled:true,model_id:"base",advanced:{command:"whisper-cli",model_path:""},language:"en",interval_mins:0};
   const html=form(missing);
   assert.match(html,/id="st-enabled" type="checkbox" checked/);
-  assert.doesNotMatch(html,/disabled/);
-  assert.match(html,/Worker readiness:<\/b> Not ready/);
-  const nodes={"subtitle-transcription-form":{isConnected:true,innerHTML:""},"st-status":{isConnected:true,textContent:""},
-    "st-enabled":{checked:true},"st-command":{value:"whisper-cli"},"st-model":{value:""},"st-language":{value:"en"},"st-interval":{value:"0"}};
+  assert.doesNotMatch(html,/<button[^>]*disabled[^>]*>Save/);
+  assert.match(html,/Readiness never changes this saved choice/);
+  const nodes={"subtitle-transcription-form":{isConnected:true,innerHTML:"",_subtitleSetup:{capture:{},edit:0,catalog:{models:[],workers:[]},revision:"1"}},"st-status":{isConnected:true,textContent:""},
+    "st-enabled":{checked:true},"st-mode":{value:"managed"},"st-model-id":{value:"base"},"st-command":{value:"whisper-cli"},"st-model":{value:""},"st-language":{value:"en"},"st-interval":{value:"0"}};
   let request;
-  const save=new Function("document","api","subtitleTranscriptionForm",`${shippedSource("saveSubtitleTranscription")} return saveSubtitleTranscription;`)(
-    {getElementById:id=>nodes[id]},async(path,options)=>{request={path,...options};return missing;},form);
+  const save=new Function("document","api","subtitleTranscriptionForm","subtitleUiCurrent","subtitleSetupPanel",`${shippedSource("saveSubtitleTranscription")} return saveSubtitleTranscription;`)(
+    {getElementById:id=>nodes[id]},async(path,options)=>{request={path,...options};return missing;},form,()=>true,()=>nodes["subtitle-transcription-form"]);
   await save({isConnected:true,disabled:false});
-  assert.equal(request.path,"/subtitle-transcription");
+  assert.equal(request.path,"/subtitle-transcription/managed");
   assert.equal(request.body.enabled,true);
   assert.equal(request.body.interval_mins,0);
-  assert.equal(request.body.model_path,"");
+  assert.equal(request.body.expected_revision,"1");
   assert.match(nodes["st-status"].textContent,/Saved/);
 });
 
 test("transcription queue refusal is not displayed as successful work", async () => {
-  const panel={isConnected:true,textContent:"",innerHTML:""},button={isConnected:true,disabled:false};
+  const status={isConnected:true,textContent:"",innerHTML:""},button={isConnected:true,disabled:false};
+  const state={capture:{},options:{file_id:"42",source_size:"100",source_mtime:"10",model_id:"base",audio_tracks:[{index:0,language:"en",normalized_language:"en"}]},models:[{id:"base",languages:["en"]}]};
+  const nodes={"subtitle-generate-42":{_subtitleGeneration:state},"sg-status-42":status,"sg-a-42":{value:"0"},"sg-l-42":{value:"en"}};
   let outcome="queue_full";
-  const generate=new Function("document","api",`${shippedSource("generateSubtitles")}\nreturn generateSubtitles;`)(
-    {getElementById:()=>panel},async()=>({outcome,job_id:"job-a"}));
+  const generate=new Function("document","api","subtitleGenerationCurrent","subtitleUiCurrent","subtitleReason","subtitleJobLink","subtitleGenerationLanguage","pollSubtitleGeneration","subtitleGenerationPanel","subtitleGenerationInput",`${shippedSource("submitSubtitleGeneration")}\nreturn submitSubtitleGeneration;`)(
+    {getElementById:id=>nodes[id]},async()=>({outcome,job_id:"job-a",artifact_key:"artifact",file_id:"42",source_size:"100",source_mtime:"10"}),()=>true,()=>true,String,id=>`<a href="#/activity/jobs/${id}">Activity</a>`,track=>track.normalized_language,()=>{},id=>nodes[`subtitle-generate-${id}`],id=>nodes[id]);
   await generate("42",button);
-  assert.match(panel.textContent,/queue is full/);
-  assert.equal(panel.innerHTML,"");
+  assert.match(status.textContent,/queue is full/);
+  assert.equal(status.innerHTML,"");
   assert.equal(button.disabled,false);
   outcome="existing";
   await generate("42",button);
-  assert.match(panel.innerHTML,/already queued or running/);
-  assert.match(panel.innerHTML,/#\/activity/);
+  assert.match(status.innerHTML,/already queued or running/);
+  assert.match(status.innerHTML,/#\/activity\/jobs\/job-a/);
   assert.equal(button.disabled,false);
 });
 

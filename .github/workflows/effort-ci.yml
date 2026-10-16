@@ -119,12 +119,12 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    # Whole-job setup/cache costs left ~8m33s for the unchanged compile pair
-    # in runs 5174/5191/5197. Allow completion while retaining a finite bound.
-    timeout-minutes: 20
+    # The job includes every-target compilation and vendored Clippy with a
+    # runner-local cache; allow a cold runner to finish all existing checks.
+    timeout-minutes: 30
+    # Host-executed runners do not necessarily export the documented Cargo
+    # budget. Bound this job before parallel compiler working sets hit its cap.
     env:
-      # Match the main fast lane's explicit compiler memory bound even when
-      # a host runner does not inherit the VM recovery service environment.
       CARGO_BUILD_JOBS: "1"
     steps:
       - name: Check out the candidate

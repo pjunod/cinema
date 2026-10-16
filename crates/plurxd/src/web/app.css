@@ -730,6 +730,8 @@
   .pinfo{position:absolute;left:0;bottom:82px;z-index:4;padding:0 20px;max-width:min(760px,62vw);
     color:#fff;pointer-events:none;transition:opacity .2s ease-out;text-shadow:0 1px 5px rgba(0,0,0,.85)}
   .player.idle .pinfo{opacity:0}
+  .player.idle .pinfo:focus-within{opacity:1}
+  .pinfo [data-watch-generate]{pointer-events:auto;margin-top:8px}
   .pinfo.off,.pinfo:empty{display:none}
   .pinfo h3{margin:0 0 4px;font-size:18px;font-weight:650;letter-spacing:.01em;line-height:1.2}
   .pinfo .pimeta{font-size:11.5px;opacity:.82;margin-bottom:5px}

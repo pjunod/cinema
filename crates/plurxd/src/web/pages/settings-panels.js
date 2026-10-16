@@ -16,6 +16,7 @@ const SET_TABS=SET_GROUPS.flatMap(([,tabs])=>tabs);
 // address bar names the section and the back button walks between them.
 function isSettingsRoute(h){ return h==="#/settings"||h==="#/admin"||(typeof h==="string"&&h.startsWith("#/settings/")); }
 function settingsRouteTab(h){
+  if(h==="#/settings/developer/enable-subtitle-transcription") return "maintenance";
   const m=/^#\/settings\/([a-z]+)(?:\/[a-z0-9-]+)?$/.exec(h||"");
   return m&&SET_TABS.some(x=>x[0]===m[1])?m[1]:null;
 }
@@ -53,7 +54,7 @@ let SETTINGS_SHOWN_TAB=null;
 // the live DOM node, so an unsaved edit, the Save it enabled, an open readiness
 // disclosure and focus all survive; the card's own Save replaces it from the
 // server's answer, and a fresh visit to the section draws it anew.
-const SETTINGS_KEPT_MOUNTS={cluster:["cluster-settings"],analysis:["subbackfillcard"]};
+const SETTINGS_KEPT_MOUNTS={cluster:["cluster-settings"],analysis:["subbackfillcard"],maintenance:["enable-subtitle-transcription"]};
 let SETTINGS_PENDING_KEEP=null;
 function captureSettingsMounts(tab){
   const nodes=(SETTINGS_KEPT_MOUNTS[tab]||[]).map(id=>document.getElementById(id))
@@ -188,7 +189,7 @@ function maintenancePanel(settings,dv,readiness){
     ${togRow("job-boot","Scan every library at startup","About 30 seconds after the server starts — a server switched off while files landed doesn't notice them until its next scheduled run.",settings.scan_on_startup)}
     ${setCardFoot("saveMaintenance")}`);
   return `${setHead("Maintenance","Background work this node does on its own: what is scheduled, what it costs, and where to turn it off.")}
-    <div class="setgrid2">${jobs}${precachePanel(settings)}${subtitleStorePanel(settings)}${subtitleStoredSourcesCard(settings,readiness)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${telemetryPanel(settings)}</div>`;
+    <div class="setgrid2">${jobs}${precachePanel(settings)}${subtitleStorePanel(settings)}${subtitleStoredSourcesCard(settings,readiness)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${subtitleTranscriptionCard()}${telemetryPanel(settings)}</div>`;
 }
 const PRODUCE_EVERY=[[0,"Never"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"]];
 const CACHE_SIZES=[0,10,25,50,100,250,500,1000];
