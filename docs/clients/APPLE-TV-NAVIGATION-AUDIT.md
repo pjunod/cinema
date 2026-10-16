@@ -607,17 +607,22 @@ attempts remain retained; neither missing tests nor skipped journeys qualify.
 
 **Physical acceptance:** the final saved-account device repeat passes all
 77 channels down and up, visible focus, a three-second response bound per
-step, no future-programme drift and Back to the root tab (135.38 seconds).
-First/last-row captures were inspected; a final visual cleanup removes codec
-badges clipped inside the channel column. Additional fullscreen-guide open/Back and Up/Close checks caught requests
+step, no future-programme drift and Back to the root tab (137.94 seconds).
+This final build also removes codec badges clipped inside the channel column;
+its first/last-row captures were inspected on the physical TV. Additional fullscreen-guide open/Back and Up/Close checks caught requests
 being sent to the covered browser instead of the mounted player focus owner.
 The player controls and guide Close now own those requests inside the cover.
 The extended Live playback journey passes both Back and Up/Close, reporting,
 a two-second bound for Back-to-hidden-video (shorter than auto-hide), and
 return to the original channel with exactly one tuner session. Its retained
 native session takes 123.53 seconds. More now explicitly owns its Back; relying
-on native sheet dismissal had left the next playback Back unhandled. The combined 28-journey repeat and mandatory promotion gate remain open;
-this device result does not close the remaining whole-app acceptance matrix.
+on native sheet dismissal had left the next playback Back unhandled. The combined 28-journey repeat passes with zero failures and zero skips on
+clean source `0c52e02868687c845da2ff2b0a46095fc42c3e21` (2,249.15 seconds).
+The receipt verifies unchanged source across the run and preserves the native
+result bundle and portable screenshot exports. The refreshed integration
+candidate has identical Apple source; its current-main Rust compilation,
+Clippy and focused gate contracts pass. Mandatory promotion remains open,
+as does the remaining physical accessibility/gesture acceptance matrix.
 
 ## 6. Proposed renderings — consistent interaction before decoration
 
@@ -657,7 +662,7 @@ observed behavior and remaining limits, not pixel-for-pixel equivalence.
 | R04 | Failed foreground refresh keeps the shelf, shows Retry and returns focus to the retained title after success. | Native lifecycle journey and actual capture inspected. |
 | R05 | Search retains its query through failure/Retry and restores the selected result after detail. | Native journey and final query, Retry and result-return captures inspected; explicit TV text contrast remains readable on the dark background. |
 | R06 | Movie, Live, channel and Shared players hide chrome, reveal without unintended activation, put reporting inside More and restore the opener. | Native individual journeys pass. Shared keeps a direct Quality shortcut; its choices use the same owned presentation. This is a functional variation from the illustrative More layout. |
-| R07 | Compact Live toolbar; named channel actions; channel layouts use explicit choices; future programmes open information. | Native Live/channel journeys pass individually; Live browse and fullscreen captures inspected. Guide paging and reminder expiry are separate outstanding matrix rows. |
+| R07 | Compact Live toolbar; named channel actions; channel layouts use explicit choices; future programmes open information. | Native Live/channel journeys pass individually; Live browse and fullscreen captures inspected. Full-lineup guide paging, toolbar return and fullscreen-guide exit now pass; reminder expiry remains a separate outstanding matrix row. |
 | R08 | Title-first recording row spans the content width, opens detail and returns exactly; rule confirmation starts on Keep; manual scheduling uses named channels. | Native journey and actual row/confirmation captures inspected. Destructive commit and disappearing-row stress remain separate from safe cancellation. |
 | R09 | Help is a visible category; reporting offers an explicit phone export and Advanced controls. Instructions wrap fully. | Native Settings/report journey and corrected instruction capture inspected. Physical couch-distance QR scanning remains open. |
 | R10 | Retry, different server and Help are in the connection form. Help uses secondary styling. Recovery is visible during discovery, and late discovery cannot override a newer retry/server choice. | Native five-second recovery, direct Down through Retry → server choice → Help, report return and saved-sign-in reuse pass individually. Actual recovery captures inspected. |
@@ -838,7 +843,7 @@ none of the packages is a qualified release merely because it compiles.
 | T2 · Playback presentation | `LiveTvView`, `LibraryChannels`, `PlayerView`, diagnostics | T1 | **Partly proven:** [PR #1110](http://forge.lan:3000/noirr/plurx/pulls/1110). Native future-programme details/Close and current-programme single-session behavior pass; explicit layout change/reopen/Back passes. Library-channel hidden Play/Pause, first-direction reveal, More → Report → Back and session retention now pass. Reports moved inside More. Ordinary movie and Live TV native journeys also pass: hidden picture → reveal → More → Report → Back retains the playback session and returns to the original item/channel. Shared playback now passes initial Pause focus, hidden-picture reveal, selected Quality entry, exact menu/report return and a single retained session. The Shared title also exposes the same focusable About reading panel as local titles, with a native final-paragraph and exact-return assertion. |
 | T3 · Browsing and details | `LibraryView`, `HomeView`, `SearchView`, `DetailView`, `Components` | T1 | **Partly proven:** bounded tools sidebar, identity restoration, explicit Jump loading, episode details and complete synopsis, fixed Search query and recovery. Native full synopsis/Back and unchanged-query Search Retry/result return pass. Full Grid/Rows journeys now pass at 416 and 5,000 titles, including Jump A/M/Z/M, bounded tools access and exact content return. Empty and single-title libraries pass. Eleven focused browsing unit regressions and iOS simulator compilation pass; the synopsis has a visible focus cue. A foreground Home refresh failure now retains cached titles, exposes a reachable Retry and restores the retained title when Retry disappears; the native lifecycle journey passes. |
 | T4 · Secondary screens and visual consistency | DVR, Settings, diagnostics, remotes, theme, info | T1; serialize shared-file work with T2/T3 | **Partly proven:** native Settings quality selection/Back, Help → phone QR report → Advanced → Done/Back, recording details, safe rule cancellation and named manual channel selection pass. DVR title rows span the content region so Down from a middle category cannot hit a gap. Remote pairing revocation and registration reset now pass safe Cancel entry and exact opener return in an ad hoc signed simulator build. The fixture uses the normal saved-server identity and Keychain registration. DVR title scaling and report instruction wrapping are corrected and visually checked after passing native reruns. Saved-connection recovery now exposes Retry and contextual Help while network discovery continues, rather than hiding all actions behind a spinner. A repeated native run first caught the delayed recovery; the corrected run requires Retry within five seconds and preserves the saved sign-in. Final integrated and physical acceptance remain open. |
-| T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | **Awaiting promotion and remaining physical acceptance:** F29; all 26 source-bound native journeys pass, as do 1,037 unit tests, iOS compilation and the effort gate. The final saved-account physical TV library journey passes on 491 titles. Gestures, accessibility, couch-distance QR and the listed dynamic-state stress cases remain unaccepted. No deployment claimed. |
+| T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | **Awaiting promotion and remaining physical acceptance:** F29; all 28 source-bound native journeys pass at `0c52e0286` with no failures/skips, as do 1,099 unit tests and iOS compilation. The refreshed combined candidate still requires its effort and promotion gates. Saved-account physical checks pass on the 491-title library and all 77 guide channels; corrected build 252 is installed. Gestures, accessibility, couch-distance QR and the listed dynamic-state stress cases remain unaccepted. The installed TV correction does not constitute main promotion or complete physical qualification. |
 
 **Integrated development evidence, October 15:** the full 1,037-test tvOS unit
 suite and iOS simulator compilation pass again after Shared About and connection
