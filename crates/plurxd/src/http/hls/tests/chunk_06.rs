@@ -5963,6 +5963,31 @@ fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
     let mut cold = local.clone(); cold.candidate.sustainable = false;
     assert_eq!(preparation_catalog_workers(&[cold.clone()],"local",true,Some(720)).len(),1,"unknown production may stage a bounded first attachment, without claiming sustainable proof");
     assert!(!cold.candidate.playable(),"bootstrap admission does not manufacture measured production");
+    let ordinary_cold = cold.candidate.clone();
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&ordinary_cold), 720).is_some(),
+        "ordinary first-window admission needs no fabricated production proof");
+    let mut processed_cold = ordinary_cold.clone();
+    processed_cold.processed_hdr10 = true;
+    processed_cold.grade = plurx_core::transcode::OutputGrade::Hdr10;
+    processed_cold.planned_codec = Some("hevc".into());
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed_cold), 720).is_none(),
+        "a descriptive processed recipe cannot borrow ordinary cold admission");
+    let mut processed = processed_cold.clone();
+    processed.sustainable = true;
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed), 720).is_some(),
+        "qualified executable processed output can stage within the ceiling");
+    let mut wrong_grade = processed.clone();
+    wrong_grade.grade = plurx_core::transcode::OutputGrade::Sdr;
+    let mut wrong_codec = processed.clone();
+    wrong_codec.planned_codec = Some("h264".into());
+    for refused in [processed_cold, wrong_grade, wrong_codec] {
+        assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&refused), 720).is_none());
+        let mixed = [refused, ordinary_cold.clone()];
+        assert!(auto_bootstrap_encode_fallback(&mixed, 720).is_some_and(|candidate| !candidate.processed_hdr10),
+            "stale processed hints cannot replace a usable ordinary bootstrap");
+    }
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed), 480).is_none(),
+        "processed output never escapes the actual bootstrap height ceiling");
     let mut zero_geometry = local.clone(); zero_geometry.candidate.width = 0;
     let mut parser_only = local.clone(); parser_only.dispatch_supported = false;
     assert!(preparation_catalog_workers(&[forged,incompatible,larger_actual,larger_rung,zero_geometry,parser_only],"local",true,Some(720)).is_empty(), "bounded bootstrap rejects invalid identity/decoder/raster/rung/work admission");

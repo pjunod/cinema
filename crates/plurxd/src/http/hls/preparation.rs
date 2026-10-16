@@ -444,7 +444,7 @@ fn arm_preparation_foreground_watch(active: ActivePreparedSuccessor) {
                     // One attributable product event per exact watcher, emitted
                     // outside the registry lock, not on each 25 ms busy tick.
                     reported_cached_contention = true;
-                    tracing::info!(target: "plurxd::auto_prepare", phase = "cached_wait_watch",
+                    tracing::info!(target: "plurxd::http::hls", context = "auto_prepare", phase = "cached_wait_watch",
                         outcome = "lock_contention_preserved", sample = "first_per_watcher",
                         %successor, %preparation, witness_remaining_ms, preparation_remaining_ms,
                         "Cached recovery preserves existing wait witness under lock contention");
@@ -1292,7 +1292,7 @@ async fn plan_preparation_with_candidate(
             }
         );
     if matches!(selection.quality, QualitySelection::Auto { .. }) {
-        tracing::debug!(target: "plurxd::auto_prepare", phase = "eligibility",
+        tracing::debug!(target: "plurxd::http::hls", context = "auto_prepare", phase = "eligibility",
             predecessor_automatic = predecessor.request.automatic,
             predecessor_candidate_present = predecessor.candidate_id.is_some(),
             decoder_caps_present = predecessor.decoder_caps.is_some(), planning_caps_present = planning_caps.is_some(),
@@ -1675,7 +1675,7 @@ async fn plan_preparation_with_candidate(
             .as_ref()
             .map(|catalog| catalog.candidates.as_slice())
             .unwrap_or_default();
-        tracing::debug!(target: "plurxd::auto_prepare", phase = "catalog",
+        tracing::debug!(target: "plurxd::http::hls", context = "auto_prepare", phase = "catalog",
             catalog_count = workers.len(), safe_count = preparation_catalog_workers(workers, &state.node_id, true, Some(delivered_height)).len(),
             partial_count = workers.iter().filter(|entry| entry.partial).count(), local_count = workers.iter().filter(|entry| entry.node_id == state.node_id).count(),
             playable_count = workers.iter().filter(|entry| entry.candidate.playable()).count(),
@@ -1931,7 +1931,7 @@ pub(super) async fn process_preparation_candidate(
                 selection.quality,
                 crate::playback_control::QualitySelection::Auto { .. }
             ) {
-                tracing::debug!(target: "plurxd::auto_prepare", phase = "stage", outcome = "planning_failed", "Auto preparation stage");
+                tracing::debug!(target: "plurxd::http::hls", context = "auto_prepare", phase = "stage", outcome = "planning_failed", "Auto preparation stage");
             }
             tracing::warn!(
                 target: "plurxd::http::hls",
@@ -2028,7 +2028,7 @@ pub(super) async fn process_preparation_candidate(
             crate::playback_control::PreparationDecision::Prepare { .. } => "prepare",
             crate::playback_control::PreparationDecision::Fallback { .. } => "fallback",
         };
-        tracing::debug!(target: "plurxd::auto_prepare", phase = "planned",
+        tracing::debug!(target: "plurxd::http::hls", context = "auto_prepare", phase = "planned",
             current_automatic = delivered.quality_auto, proposed_automatic = proposed.quality_auto,
             candidate_bound = candidate.candidate_context.is_some(), selected_present = selected_candidate.is_some(),
             proposed_height = proposed.height, delivered_height = delivered.height,
@@ -2124,7 +2124,7 @@ fn trace_auto_preparation_stage(
     outcome: &'static str,
 ) {
     if candidate.automatic {
-        tracing::debug!(target: "plurxd::auto_prepare", phase = "stage", outcome, "Auto preparation stage");
+        tracing::debug!(target: "plurxd::http::hls", context = "auto_prepare", phase = "stage", outcome, "Auto preparation stage");
     }
 }
 
