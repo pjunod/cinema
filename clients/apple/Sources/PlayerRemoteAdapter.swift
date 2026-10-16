@@ -371,10 +371,19 @@ struct NativePlaybackFocusRegion<Key: Hashable, Content: View>: View {
     @ViewBuilder let content: (FocusState<Key?>.Binding) -> Content
     var body: some View {
         content($focused)
-            .defaultFocus($focused, preferred, priority: .userInitiated)
+            // Request entry once. A defaultFocus preference that follows the
+            // observed control is reapplied during directional movement and
+            // can make one press skip the adjacent control.
             .onAppear { focused = preferred }
-            .onChange(of: requested) { _, value in focused = value }
-            .onChange(of: focused) { _, value in focusChanged(value); changed() }
+            .onChange(of: requested) { _, value in
+                // The parent also observes actual focus. Do not turn that
+                // observation into a second native request that can arrive
+                // after the viewer has already moved to the next control.
+                if focused != value { focused = value }
+            }
+            .onChange(of: focused) { _, value in
+                focusChanged(value); changed()
+            }
     }
 }
 #endif

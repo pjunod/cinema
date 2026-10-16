@@ -666,6 +666,31 @@ retains the same focus predicate, failure timeout, screenshots and deliberate
 idle deadlines. The expanded Live journey passes with that harness (89.37
 seconds). A complete clean-source repeat remains required before promotion.
 
+### F34 · P1 · N/S — playback defaults compete with directional focus
+
+Two full follow-up runs fail intermittently after activity or fullscreen-guide
+return: the requested next pill never retains focus, then the idle timer hides
+the controls. Both failed receipts, logs and captures remain retained. The
+immediate-focus assertion improvement alone does not close this failure.
+
+The instrumented repeat isolates a double movement: one Right press moves from
+Guide to Channels and then Info within 37 milliseconds. Every actual change
+restarts the countdown, which hides four seconds after the final change with
+the same generation. This rules out a stale countdown in that reproduction.
+The shared playback region had a default preference that followed observed
+focus, plus a parent feedback path that could request that focus again.
+[Apple documents the default-focus priority](https://developer.apple.com/documentation/swiftui/view/defaultfocus(_:_:priority:));
+changing its priority to automatic still failed the stronger native repeat.
+
+The candidate removes the changing default preference, requests entry once,
+and ignores explicit requests already equal to the region's actual focus.
+Presentation restoration remains explicit. The native Live journey alternates
+Right/Left four times after guide closure and requires actual Channels/Guide
+focus on every move before proceeding. The first diagnostic run passes this
+sequence and the complete playback journey (99.22 seconds). Temporary tracing
+has been removed; repeated Live/channel checks and complete-candidate
+qualification remain in progress. This row is not final acceptance.
+
 ## 6. Proposed renderings — consistent interaction before decoration
 
 The [gallery](apple-tv-navigation/index.html) includes twelve annotated design

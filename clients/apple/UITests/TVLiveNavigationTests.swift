@@ -164,6 +164,16 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
                 assertFocus(app.buttons["Close"], in: app, context: "Fullscreen guide Up reaches Close")
                 remote.press(.select)
                 assertFocus(app.buttons[identifier], in: app, context: "Fullscreen guide Close restores Guide pill")
+                // Restoration must release ownership to the next remote move,
+                // including repeated moves across the former idle deadline.
+                for pass in 1...4 {
+                    remote.press(.right)
+                    assertFocus(app.buttons["live-player-channels"], in: app,
+                                context: "Guide return Right reaches Channels pass \(pass)")
+                    remote.press(.left)
+                    assertFocus(app.buttons[identifier], in: app,
+                                context: "Guide return Left reaches Guide pass \(pass)")
+                }
             }
         }
         remote.press(.select)
