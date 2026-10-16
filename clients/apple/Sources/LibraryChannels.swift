@@ -1097,11 +1097,10 @@ struct LibraryChannelsView: View {
         .onAppear { channelChromeVisible = true; chromeGeneration += 1 }
         #if os(tvOS)
         .task(id: chromeGeneration) {
-            guard channelChromeVisible, !channelMore, !controller.paused, !controller.systemPaused,
-                  controller.playbackError == nil else { return }
-            do { try await Task.sleep(nanoseconds: LiveTvInputRouting.overlayAutoHideNanoseconds) } catch { return }
-            guard !Task.isCancelled, !channelMore else { return }
-            channelChromeVisible = false
+            if await PlaybackControlAutoHide.afterDelay(while: {
+                channelChromeVisible && !channelMore && !controller.paused
+                    && !controller.systemPaused && controller.playbackError == nil
+            }) { channelChromeVisible = false }
         }
         #endif
         .sheet(isPresented: $channelMore, onDismiss: {
@@ -1124,6 +1123,7 @@ struct LibraryChannelsView: View {
         .onChange(of: controller.paused) { _, _ in chromeGeneration += 1 }
         .onChange(of: controller.systemPaused) { _, _ in chromeGeneration += 1 }
         .onChange(of: controller.playbackError) { _, error in
+            chromeGeneration += 1
             if error != nil { channelChromeVisible = true }
         }
     }

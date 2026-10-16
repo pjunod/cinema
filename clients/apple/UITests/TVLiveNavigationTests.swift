@@ -102,7 +102,7 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
     }
 
     func testLiveFullscreenRevealMoreReportAndBackRetainSession() throws {
-        let server = try TVNavigationServer()
+        let server = try TVNavigationServer(activeDvrRecording: true)
         let origin = try server.start()
         defer { server.stop() }
         let app = openLibrary(origin: origin)
@@ -128,6 +128,20 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         assertHiddenFixtureVideoIsUnobstructed(in: app)
         remote.press(.right)
         assertFocus(pause, in: app, context: "Live first Right reveals Pause")
+        remote.press(.up)
+        let activity = app.buttons.matching(NSPredicate(format: "label == %@", "Recording activity")).firstMatch
+        assertFocus(activity, in: app, context: "Live Up reaches Recording activity")
+        remote.press(.select)
+        XCTAssertTrue(app.staticTexts["1 recording"].waitForExistence(timeout: 5), app.debugDescription)
+        // Deliberately cross the four-second idle deadline while the sheet owns focus.
+        let afterHideDeadline = Date().addingTimeInterval(5)
+        let pastDeadline = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in Date() >= afterHideDeadline }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [pastDeadline], timeout: 7), .completed)
+        remote.press(.menu)
+        assertFocus(activity, in: app, context: "Recording activity Back restores its exact opener")
+        remote.press(.down)
+        assertFocus(pause, in: app, context: "Recording activity returns to playback controls")
         let more = app.buttons["live-player-more"]
         XCTAssertEqual(pause.label, "Pause", "The reveal press must not pause playback")
         // Exercise the actual four-step transport row. Generic geometric

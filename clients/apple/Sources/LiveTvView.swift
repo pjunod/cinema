@@ -2513,7 +2513,8 @@ struct LiveTvView: View {
                 .sheet(item: $detail, onDismiss: { returnGuideFocusAfterProgrammeSheet() }) {
                     programme in programmeDetail(programme)
                 }
-                .sheet(isPresented: $showingDvrActivity) {
+                .sheet(isPresented: $showingDvrActivity,
+                       onDismiss: { returnFocusToCoverSheetOpener() }) {
                     NavigationStack { DvrCaptureActivityView() }
                 }
                 .sheet(isPresented: coverSheet($showingInfo),
@@ -4417,9 +4418,13 @@ struct LiveTvView: View {
                     .lineLimit(2)
             }
             if dvr.indicatorLabel != nil {
-                Button { showingDvrActivity = true } label: {
+                Button {
+                    coverSheetOpener = .pillActivity
+                    showingDvrActivity = true
+                } label: {
                     Label("Recording activity", systemImage: "record.circle")
                 }
+                .accessibilityIdentifier("live-player-recording-activity")
                 .buttonStyle(LiveSurfacePillStyle())
                 .focusEffectDisabled()
                 .focused(focus, equals: .pillActivity)
@@ -4673,12 +4678,11 @@ struct LiveTvView: View {
         }
         #endif
         .task(id: overlayGeneration) {
-            guard overlayVisible, !temporaryGuide, !showingInfo, !showingMore, !showingLayout,
-                  detail == nil, live.playing, !live.paused else { return }
-            try? await Task.sleep(nanoseconds: LiveTvInputRouting.overlayAutoHideNanoseconds)
-            guard !Task.isCancelled, !temporaryGuide, !showingInfo, !showingMore, !showingLayout,
-                  detail == nil, live.playing, !live.paused else { return }
-            overlayVisible = false
+            if await PlaybackControlAutoHide.afterDelay(while: {
+                overlayVisible && !temporaryGuide && !showingInfo && !showingMore
+                    && !showingLayout && !showingDvrActivity && detail == nil
+                    && live.playing && !live.paused
+            }) { overlayVisible = false }
         }
         #if os(tvOS)
         .onAppear { coverControl = overlayVisible ? .pillPlay : .reveal }
@@ -4729,6 +4733,7 @@ struct LiveTvView: View {
         .onChange(of: showingInfo) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: showingMore) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: showingLayout) { _, _ in overlayGeneration &+= 1 }
+        .onChange(of: showingDvrActivity) { _, _ in overlayGeneration &+= 1 }
         .onChange(of: live.paused) { _, _ in overlayGeneration &+= 1 }
         // Only a session that has actually finished closes the surface, and
         // it can finish on either edge. `watch()` detaches before it awaits
@@ -4762,17 +4767,18 @@ struct LiveTvView: View {
         // More → Layout: More's dismissal arrives with Layout already open.
         // The opener is Layout's to restore, so it is kept.
         guard fullscreen, overlayVisible, !temporaryGuide,
-              !showingInfo, !showingMore, !showingLayout, detail == nil
+              !showingInfo, !showingMore, !showingLayout, !showingDvrActivity, detail == nil
         else { return }
-        let opener = coverSheetOpener ?? .pillPlay
+        let requestedOpener = coverSheetOpener ?? .pillPlay
         coverSheetOpener = nil
         coverControl = nil
         Task { @MainActor in
             await Task.yield()
             guard fullscreen, overlayVisible, !temporaryGuide,
-                  !showingInfo, !showingMore, !showingLayout, detail == nil
+                  !showingInfo, !showingMore, !showingLayout, !showingDvrActivity, detail == nil
             else { return }
-            coverControl = opener
+            coverControl = requestedOpener == .pillActivity && dvr.indicatorLabel == nil
+                ? .pillPlay : requestedOpener
         }
         #endif
     }

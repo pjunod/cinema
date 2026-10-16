@@ -407,3 +407,19 @@ extension View {
     }
 }
 #endif
+
+/// A countdown never authorizes hiding from the state it saw before waiting.
+/// Presentation ownership, pause and failure may all change during the delay.
+@MainActor
+enum PlaybackControlAutoHide {
+    static func afterDelay(
+        while eligible: () -> Bool,
+        delay: () async throws -> Void = {
+            try await Task.sleep(nanoseconds: LiveTvInputRouting.overlayAutoHideNanoseconds)
+        }
+    ) async -> Bool {
+        guard eligible() else { return false }
+        do { try await delay() } catch { return false }
+        return !Task.isCancelled && eligible()
+    }
+}

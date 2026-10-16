@@ -12,6 +12,7 @@ final class TVNavigationServer: @unchecked Sendable {
     private let playableShared: Bool
     private var failSearch: Bool
     private let homeTitles: Bool
+    private let activeDvrRecording: Bool
     private let guideChannelCount: Int
     private var failHome = false
     private var failConnection = false
@@ -24,7 +25,7 @@ final class TVNavigationServer: @unchecked Sendable {
 
     func requestCount(_ path: String) -> Int { queue.sync { requestCounts[path, default: 0] } }
 
-    init(itemCount: Int = 416, includeShows: Bool = false, failSearch: Bool = false, playableTitles: Bool = false, playableShared: Bool = false, homeTitles: Bool = false, guideChannelCount: Int = 2) throws {
+    init(itemCount: Int = 416, includeShows: Bool = false, failSearch: Bool = false, playableTitles: Bool = false, playableShared: Bool = false, homeTitles: Bool = false, guideChannelCount: Int = 2, activeDvrRecording: Bool = false) throws {
         self.itemCount = itemCount
         self.includeShows = includeShows
         self.failSearch = failSearch
@@ -32,6 +33,7 @@ final class TVNavigationServer: @unchecked Sendable {
         self.playableShared = playableShared
         self.homeTitles = homeTitles
         self.guideChannelCount = guideChannelCount
+        self.activeDvrRecording = activeDvrRecording
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters)
@@ -217,7 +219,7 @@ final class TVNavigationServer: @unchecked Sendable {
                      "slots": ["max": 2, "reserve": 0, "recording": 0], "pad_start_s": 0, "pad_end_s": 0, "reminder_lead_s": 30]
         case "/api/v1/dvr/overview":
             value = ["version": 1, "server_now_ms": epoch, "availability": "complete", "runtime_supported": true,
-                     "observation_age_ms": 0, "counts": ["recording": 0, "attention": 0], "active_truncated": false, "active": []]
+                     "observation_age_ms": 0, "counts": ["recording": activeDvrRecording ? 1 : 0, "attention": 0], "active_truncated": false, "active": []]
         case "/api/v1/dvr/schedule":
             value = ["conflicts": 0, "rows": [recording(id: "scheduled", state: "scheduled")]]
         case "/api/v1/dvr/recordings":

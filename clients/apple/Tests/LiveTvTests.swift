@@ -280,6 +280,46 @@ final class LiveTvTests: XCTestCase {
         XCTAssertNil(controller.playbackError, "a stopped tune cannot restore its failure")
     }
 
+    func testAutoHideRechecksChannelFailureAfterCountdown() async {
+        let controller = LibraryChannelPlayerController()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        controller.player.replaceCurrentItem(with: item)
+        let armed = expectation(description: "Countdown suspended while playback is healthy")
+        var continuation: CheckedContinuation<Void, Never>?
+        let countdown = Task { @MainActor in
+            await PlaybackControlAutoHide.afterDelay(while: { controller.playbackError == nil }, delay: {
+                await withCheckedContinuation { continuation = $0; armed.fulfill() }
+            })
+        }
+        await fulfillment(of: [armed], timeout: 2)
+        controller.handleItemFailure(item, sequence: 0)
+        XCTAssertNotNil(controller.playbackError)
+        continuation?.resume()
+        let hide = await countdown.value
+        XCTAssertFalse(hide, "An error arriving during the countdown must retain its recovery controls")
+        await controller.stop()
+    }
+
+    func testAutoHideRechecksPresentationAndCancellationAfterCountdown() async {
+        for cancellation in [false, true] {
+            var presentationOpen = false
+            let armed = expectation(description: "Countdown armed before a newer owner")
+            var continuation: CheckedContinuation<Void, Never>?
+            let countdown = Task { @MainActor in
+                await PlaybackControlAutoHide.afterDelay(while: { !presentationOpen }, delay: {
+                    await withCheckedContinuation { continuation = $0; armed.fulfill() }
+                })
+            }
+            await fulfillment(of: [armed], timeout: 2)
+            if cancellation { countdown.cancel() } else { presentationOpen = true }
+            continuation?.resume()
+            let hide = await countdown.value
+            XCTAssertFalse(hide, "A newer presentation or input must retire the old hide request")
+        }
+        let hide = await PlaybackControlAutoHide.afterDelay(while: { true }, delay: {})
+        XCTAssertTrue(hide, "An unchanged idle surface still hides normally")
+    }
+
     func testAppleTvLibraryChannelsOfferFullscreenWithoutRetuning() throws {
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let source = try String(
@@ -1470,10 +1510,10 @@ final class LiveTvTests: XCTestCase {
         let opener = source
             .components(separatedBy: "private func returnFocusToCoverSheetOpener()")[1]
             .components(separatedBy: "#endif")[0]
-        XCTAssertTrue(opener.contains("let opener = coverSheetOpener ?? .pillPlay"))
+        XCTAssertTrue(opener.contains("let requestedOpener = coverSheetOpener ?? .pillPlay"))
         XCTAssertTrue(opener.contains("coverControl = nil"))
         XCTAssertTrue(opener.contains("await Task.yield()"))
-        XCTAssertTrue(opener.contains("coverControl = opener"))
+        XCTAssertTrue(opener.contains("coverControl = requestedOpener == .pillActivity && dvr.indicatorLabel == nil"))
         XCTAssertTrue(source.contains("Button { coverSheetOpener = .pillInfo; showStreamInfo() }"))
         XCTAssertTrue(source.contains("Button { coverSheetOpener = .pillMore; showingMore = true }"))
     }
@@ -2620,15 +2660,14 @@ final class LiveTvTests: XCTestCase {
             source.contains("state: { .fullscreenHidden }"),
             "the reveal adapter must report liveInputState, never assert a state it cannot know"
         )
-        XCTAssertEqual(
-            source.components(separatedBy: "detail == nil, live.playing, !live.paused").count - 1,
-            2,
-            """
-            `detail` belongs in BOTH auto-hide guards, entry and post-sleep. \
-            In one only, a programme sheet opened during those four seconds \
-            still lets the chrome hide underneath it
-            """
-        )
+        let countdown = source.components(separatedBy: ".task(id: overlayGeneration)")[1]
+            .components(separatedBy: "#if os(tvOS)")[0]
+        XCTAssertTrue(countdown.contains("PlaybackControlAutoHide.afterDelay"),
+                      "The shared countdown rechecks its predicate after waiting")
+        XCTAssertTrue(countdown.contains("detail == nil"),
+                      "Programme sheets must keep the playback controls mounted")
+        XCTAssertTrue(countdown.contains("!showingDvrActivity"),
+                      "Recording activity must retain its playback opener")
         // Both directions of the overlay change defer past the update that
         // inserts the view they then want focused, because tvOS drops an
         // assignment aimed at a view that does not exist yet. Undeferred, the
