@@ -52,6 +52,8 @@ fn kind_slot(kind: JobKind) -> usize {
         JobKind::CopyOutputPrepare => 10,
         JobKind::EncodedOutputPrepare => 11,
         JobKind::SubtitleTranscribe => 12,
+        JobKind::SubtitleTranscribeManaged => 13,
+        JobKind::SubtitleModelOperation => 14,
     }
 }
 

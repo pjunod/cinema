@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""Build or verify the pinned, relocatable CPU subtitle recognizer.
+
+Build: --output NEW_DIRECTORY [--source-archive PINNED_TARBALL] [--jobs N].
+Verify: --verify PACKAGE_DIRECTORY. The directory carries whisper-cli,
+subtitle-engine.json, licenses and the shared production self-test fixture.
+No model is downloaded by this packaging recipe.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import tarfile
+import tempfile
+import urllib.request
+
+ROOT = Path(__file__).resolve().parents[1]
+PIN = json.loads((Path(__file__).with_name("subtitle-engine-manifest.json")).read_text())
+
+
+def digest(path):
+    result = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            result.update(chunk)
+    return result.hexdigest()
+
+
+def regular(path):
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"package requires a regular file: {path.name}")
+    return path
+
+
+def verify(package):
+    if package.is_symlink() or not package.is_dir():
+        raise ValueError("engine package must be a real directory")
+    if {item.name for item in package.iterdir()} != {"whisper-cli", "subtitle-engine.json", "self-test.wav", "whisper.cpp.LICENSE.txt", "whisper-models.LICENSE.txt"}:
+        raise ValueError("engine package contains missing or unexpected files")
+    manifest = json.loads(regular(package / "subtitle-engine.json").read_text())
+    for key in ["version", "adapter_contract", "source_commit", "source_archive_sha256", "build_options"]:
+        if manifest.get(key) != PIN[key]:
+            raise ValueError(f"unqualified subtitle engine {key}")
+    binary = regular(package / "whisper-cli")
+    if not os.access(binary, os.X_OK):
+        raise ValueError("subtitle engine is not executable")
+    if binary.stat().st_size != manifest.get("binary_bytes") or digest(binary) != manifest.get("binary_sha256"):
+        raise ValueError("subtitle engine binary digest/length mismatch")
+    for name, fact in manifest.get("companions", {}).items():
+        if name not in ["self-test.wav", "whisper.cpp.LICENSE.txt", "whisper-models.LICENSE.txt"]:
+            raise ValueError("unexpected engine companion")
+        item = regular(package / name)
+        if item.stat().st_size != fact.get("bytes") or digest(item) != fact.get("sha256"):
+            raise ValueError("engine companion digest/length mismatch")
+    if set(manifest.get("companions", {})) != {"self-test.wav", "whisper.cpp.LICENSE.txt", "whisper-models.LICENSE.txt"}:
+        raise ValueError("missing engine notices or fixture")
+    return manifest
+
+
+def unpack(archive, destination):
+    if archive.stat().st_size != PIN["source_archive_bytes"] or digest(archive) != PIN["source_archive_sha256"]:
+        raise ValueError("subtitle engine source archive digest/length mismatch")
+    prefix = "whisper.cpp-" + PIN["source_commit"]
+    with tarfile.open(archive) as source:
+        for member in source.getmembers():
+            parts = Path(member.name).parts
+            if not parts or parts[0] != prefix or ".." in parts or member.issym() or member.islnk():
+                raise ValueError("unsafe engine source archive member")
+            if not (member.isdir() or member.isfile()):
+                raise ValueError("special engine source archive member")
+        source.extractall(destination)
+    return destination / prefix
+
+
+def run(argv, **kwargs):
+    return subprocess.run(argv, check=True, timeout=600, **kwargs)
+
+
+def loader_dependencies(binary):
+    command = ["/usr/bin/otool", "-L", str(binary)] if platform.system() == "Darwin" else ["ldd", str(binary)]
+    result = run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    text = result.stdout
+    if any(token in text.lower() for token in ["not found", "libggml", "libwhisper", "libomp", "libgomp", "homebrew", "@rpath"]):
+        raise ValueError("subtitle engine has an unbundled runtime library")
+    if platform.system() == "Darwin":
+        for line in text.splitlines()[1:]:
+            if not line.startswith("\t"):
+                continue  # fat Mach-O architecture headings
+            if not line.strip().startswith(("/usr/lib/", "/System/Library/")):
+                raise ValueError("subtitle engine depends on a non-system macOS library")
+    if platform.system() == "Linux":
+        for line in text.splitlines():
+            name = line.strip().split()[0]
+            if not (name in ["linux-vdso.so.1", "libstdc++.so.6", "libm.so.6", "libgcc_s.so.1", "libc.so.6"]
+                    or name.startswith(("/lib/ld-linux-", "/lib64/ld-linux-"))):
+                raise ValueError("subtitle engine depends on an unqualified Linux runtime library")
+    return [re.sub(r"\s+\(0x[0-9a-f]+\)", "", line).strip() for line in text.splitlines()
+            if line.startswith("\t")]
+
+
+def build(output, archive=None, jobs=2, architecture=None):
+    if output.exists() or not output.is_absolute() or output.is_symlink():
+        raise ValueError("output must be a new absolute directory")
+    if not 1 <= jobs <= 32:
+        raise ValueError("build jobs must be between 1 and 32")
+    system = platform.system()
+    if system not in ["Darwin", "Linux"]:
+        raise ValueError("subtitle engine packaging supports Linux and macOS")
+    machine = architecture or platform.machine()
+    if machine not in ["arm64", "aarch64", "x86_64"]:
+        raise ValueError("unsupported engine architecture")
+    if system == "Linux" and machine.replace("aarch64", "arm64") != platform.machine().replace("aarch64", "arm64"):
+        raise ValueError("Linux engine architecture must match the native build host")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".subtitle-engine-", dir=output.parent) as temporary:
+        work = Path(temporary)
+        if archive is None:
+            archive = work / "source.tar.gz"
+            request = urllib.request.Request(PIN["source_url"], headers={"User-Agent": "plurx-engine-builder/1"})
+            with urllib.request.urlopen(request, timeout=60) as response, archive.open("wb") as target:
+                remaining = PIN["source_archive_bytes"] + 1
+                while chunk := response.read(min(1024 * 1024, remaining)):
+                    target.write(chunk)
+                    remaining -= len(chunk)
+                    if remaining <= 0:
+                        raise ValueError("subtitle source exceeds pinned length")
+        source = unpack(archive, work)
+        arguments = [f"-D{key}={value}" for key, value in sorted(PIN["build_options"].items())]
+        if system == "Darwin":
+            arguments += [f"-DCMAKE_OSX_ARCHITECTURES={machine}", "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"]
+        # Ambient CFLAGS/CXXFLAGS/LDFLAGS or CMake overrides must not silently
+        # change a build whose manifest advertises only the reviewed options.
+        build_env = {key: os.environ[key] for key in ["PATH", "HOME", "TMPDIR", "SOURCE_DATE_EPOCH"] if key in os.environ}
+        build_env["LC_ALL"] = "C"
+        run(["cmake", "-S", str(source), "-B", str(work / "build"), *arguments], env=build_env)
+        cache = (work / "build/CMakeCache.txt").read_text()
+        for key, value in PIN["build_options"].items():
+            if not any(line.startswith(key + ":") and line.endswith("=" + value) for line in cache.splitlines()):
+                raise ValueError("CMake did not accept pinned option " + key)
+        compiler = next(line.split("=", 1)[1] for line in cache.splitlines() if line.startswith("CMAKE_CXX_COMPILER:FILEPATH="))
+        run(["cmake", "--build", str(work / "build"), "--target", "whisper-cli", "--parallel", str(jobs)], env=build_env)
+        stage = work / "package"
+        stage.mkdir()
+        binary = stage / "whisper-cli"
+        shutil.copyfile(work / "build/bin/whisper-cli", binary)
+        binary.chmod(0o755)
+        if system == "Darwin":
+            run(["/usr/bin/codesign", "--force", "--sign", "-", str(binary)])
+        # The archive's immutable source identity is authoritative; upstream
+        # source-only builds report an unknown git hash in diagnostic output.
+        observed = run([str(binary), "--version"], env={"LC_ALL": "C"}, stdout=subprocess.PIPE, text=True).stdout.strip()
+        if observed != "whisper.cpp version: 1.9.2":
+            raise ValueError("engine reports an unexpected release")
+        dependencies = loader_dependencies(binary)
+        for relative, name in [("licenses/whisper.cpp.LICENSE.txt", "whisper.cpp.LICENSE.txt"),
+                               ("licenses/whisper-models.LICENSE.txt", "whisper-models.LICENSE.txt"),
+                               ("crates/plurxd/src/subtitle_models/self-test.wav", "self-test.wav")]:
+            shutil.copyfile(ROOT / relative, stage / name)
+        facts = {key: PIN[key] for key in ["version", "adapter_contract", "source_commit", "source_archive_sha256", "build_options"]}
+        facts.update(platform=("macos" if system == "Darwin" else "linux") + "-" + machine,
+                     binary_sha256=digest(binary), binary_bytes=binary.stat().st_size,
+                     runtime_dependencies=dependencies, release_observation=observed,
+                     compiler=run([compiler, "--version"], stdout=subprocess.PIPE, text=True, env=build_env).stdout.splitlines()[0],
+                     cmake=run(["cmake", "--version"], stdout=subprocess.PIPE, text=True).stdout.splitlines()[0],
+                     companions={name: {"sha256": digest(stage / name), "bytes": (stage / name).stat().st_size}
+                                 for name in ["self-test.wav", "whisper.cpp.LICENSE.txt", "whisper-models.LICENSE.txt"]})
+        (stage / "subtitle-engine.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
+        verify(stage)
+        stage.rename(output)
+        return facts
+
+
+def combine(packages, output):
+    if platform.system() != "Darwin" or output.exists() or not output.is_absolute():
+        raise ValueError("universal assembly requires macOS and a new absolute output")
+    receipts = [verify(package) for package in packages]
+    if {item["platform"] for item in receipts} != {"macos-arm64", "macos-x86_64"}:
+        raise ValueError("universal assembly requires one qualified slice of each architecture")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".subtitle-universal-", dir=output.parent) as temporary:
+        stage = Path(temporary) / "package"
+        shutil.copytree(packages[0], stage)
+        binary = stage / "whisper-cli"
+        binary.unlink()
+        run(["/usr/bin/lipo", "-create", "-output", str(binary), *[str(package / "whisper-cli") for package in packages]])
+        run(["/usr/bin/codesign", "--force", "--sign", "-", str(binary)])
+        facts = receipts[0].copy()
+        facts.update(platform="macos-universal", binary_bytes=binary.stat().st_size,
+                     binary_sha256=digest(binary), slices=receipts,
+                     runtime_dependencies=loader_dependencies(binary))
+        (stage / "subtitle-engine.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
+        verify(stage)
+        stage.rename(output)
+        return facts
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--output", type=Path)
+    action.add_argument("--verify", type=Path)
+    parser.add_argument("--source-archive", type=Path)
+    parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--architecture", choices=["arm64", "x86_64"])
+    parser.add_argument("--combine", type=Path, nargs=2, metavar=("ARM_PACKAGE", "INTEL_PACKAGE"))
+    args = parser.parse_args()
+    try:
+        facts = (verify(args.verify) if args.verify else combine(args.combine, args.output)
+                 if args.combine else build(args.output, args.source_archive, args.jobs, args.architecture))
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        parser.exit(1, f"subtitle engine: {error}\n")
+    print(json.dumps(facts, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

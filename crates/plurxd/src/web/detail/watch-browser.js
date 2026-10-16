@@ -127,6 +127,7 @@ function watchLedgerHtml(){
     ${vid?`<dt>Video</dt><dd>${esc(vid)}</dd>`:""}
     <dt>Audio</dt><dd>${auds.length?watchTrackRow("audio",auds,selA,audioLabel,null):"None"}</dd>
     ${(subs.length||f.video_codec)?`<dt>Subtitles</dt><dd>${watchTrackRow("subs",subs,selS,subLabel,offChip)}</dd>`:""}
+    ${watchCanGenerateSubtitles(f)?`<dt>Captions</dt><dd>${watchGenerationAction(f)}</dd>`:""}
     ${delivery?`<dt>Delivery</dt><dd>${delivery}</dd>`:""}
     <dt>File</dt><dd><span class="watch-fn">${esc(f.filename||"")}</span>${file?`<span class="watch-fmeta">${esc(file)}</span>`:""}</dd></dl>`;
 }
@@ -143,19 +144,52 @@ function watchBindLedger(node){
     // burned track would start a fresh transcode. Refuse it here.
     if(PLAYER&&f&&want!==watchSelectedSub(f))setSub(want);
   }));
+  node.querySelectorAll("[data-watch-generate]").forEach(b=>b.addEventListener("click",()=>watchGenerateSubtitles(b)));
   node.querySelectorAll("[data-watch-fold]").forEach(b=>b.addEventListener("click",()=>watchToggleFold(b.dataset.watchFold)));
+}
+function watchGenerationAction(file){
+  return watchCanGenerateSubtitles(file)?`<button type="button" class="ghost sm" data-watch-generate="${esc(String(file.id))}">Generate subtitles</button>`:"";
+}
+function watchCanGenerateSubtitles(file){
+  return !!(ME?.is_admin&&file?.available&&file.video_codec&&playbackFileContextForFile(file).source_ref.kind==="local");
+}
+// The side ledger, wide ledger and title-info dialog mirror track facts. Job
+// state belongs to one mount outside all three, so their refreshes cannot
+// disconnect an open form, interrupt polling or steal focus from its controls.
+function watchRenderSubtitleGeneration(){
+  const mount=/** @type {HTMLElement & {_subtitleFileKey?:string|null}} */ (document.getElementById("watch-subtitle-generation"));if(!mount)return;
+  const file=watchCurrentFile(),key=watchCanGenerateSubtitles(file)?playbackFileKey(playbackFileContextForFile(file)):null;
+  if(mount._subtitleFileKey===key)return;
+  mount._subtitleFileKey=key;mount.hidden=!key;
+  mount.innerHTML=key?`<div id="subtitle-generate-${esc(String(file.id))}" tabindex="-1" role="status" aria-live="polite"></div>`:"";
+}
+async function watchGenerateSubtitles(button){
+  const file=watchCurrentFile();if(!watchCanGenerateSubtitles(file)||button.dataset.watchGenerate!==String(file.id))return;
+  const owner=WATCH,dialog=button.closest("dialog");if(dialog?.open)dialog.close();
+  if(WATCH.mode==="full"){
+    if(document.fullscreenElement&&document.exitFullscreen){try{await document.exitFullscreen();}catch(error){return;}}
+    else if(isFullscreenAnywhere()){exitFullscreenAnywhere();return;}
+    if(WATCH!==owner||watchCurrentFile()!==file)return;
+    watchReturnBrowser();
+  }
+  watchRenderSubtitleGeneration();
+  const panel=subtitleGenerationPanel(String(file.id));if(!panel)return;
+  panel.focus({preventScroll:true});panel.scrollIntoView({block:"nearest"});
+  await generateSubtitles(String(file.id),button);
+  if(panel.isConnected&&subtitleGenerationPanel(String(file.id))===panel)panel.querySelector("select")?.focus({preventScroll:true});
 }
 function watchRenderLedger(){
   if(!WATCH?.page)return;
+  watchRenderSubtitleGeneration();
   const html=watchLedgerHtml();
   // A re-render replaces the control that had focus; put focus back on the
   // same control so a keyboard fold or switch does not drop to <body>.
-  const active=document.activeElement,keep=active&&active.closest&&active.closest(".watch-ledger-host")?["watchAudio","watchSub","watchFold"].map(k=>active.dataset[k]!=null?`[data-${k.replace(/[A-Z]/g,m=>"-"+m.toLowerCase())}="${active.dataset[k]}"]`:null).find(Boolean):null;
+  const active=document.activeElement,focusedHost=active&&active.closest&&active.closest(".watch-ledger-host"),keep=focusedHost?["watchAudio","watchSub","watchFold","watchGenerate"].map(k=>active.dataset[k]!=null?`[data-${k.replace(/[A-Z]/g,m=>"-"+m.toLowerCase())}="${active.dataset[k]}"]`:null).find(Boolean):null;
   for(const id of ["watch-ledger","watch-band-ledger"]){
     const node=document.getElementById(id);if(!node)continue;
     node.innerHTML=html;
     watchBindLedger(node);
-    if(keep&&active.closest(`#${id}`)){const again=node.querySelector(keep);if(again)again.focus({preventScroll:true});}
+    if(keep&&focusedHost===node){const again=node.querySelector(keep);if(again)again.focus({preventScroll:true});}
   }
   const f=watchCurrentFile();
   WATCH.ledgerSig=f?`${watchSelectedAudio(f)}|${watchSelectedSub(f)}|${WATCH.accepted}|${PLAYER?.sessionId||""}|${PLAYER?.vod||false}|${PLAYER?.method||""}|${PLAYER?._mediaAttachmentOrdinal||0}`:"";

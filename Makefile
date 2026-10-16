@@ -1488,6 +1488,23 @@ library-rows-browser-check: ## Test grouped library rows with the provisioned Pl
 		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
 		--test tests/web/library-rows.browser.cjs
 
+.PHONY: subtitle-generation-browser-check
+subtitle-generation-browser-check: ## Run subtitle setup and attached playback regressions in provisioned Chromium
+	@set -eu; \
+		pw_module="$${PLAYWRIGHT_MODULE:-}"; pw_node="$${PLAYWRIGHT_NODE:-}"; \
+		if [ -z "$$pw_module" ]; then \
+			pw_module="$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')" || { echo 'subtitle browser check requires provisioned Python Playwright or PLAYWRIGHT_MODULE' >&2; exit 2; }; \
+		fi; \
+		if [ -z "$$pw_node" ]; then \
+			pw_node="$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')" || { echo 'subtitle browser check requires provisioned Playwright Node or PLAYWRIGHT_NODE' >&2; exit 2; }; \
+		fi; \
+		[ -x "$$pw_node" ] || { echo 'subtitle browser check: PLAYWRIGHT_NODE must name an executable runtime' >&2; exit 2; }; \
+		command -v ffmpeg >/dev/null 2>&1 || { echo 'subtitle browser check requires provisioned FFmpeg with the libx264 encoder' >&2; exit 2; }; \
+		fixture_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/plurx-subtitle-browser.XXXXXX")"; \
+		trap 'rm -rf "$$fixture_dir"' EXIT HUP INT TERM; \
+		ffmpeg -nostdin -v error -f lavfi -i 'color=c=black:s=640x360:r=24:d=120' -an -c:v libx264 -preset ultrafast -pix_fmt yuv420p -movflags +faststart "$$fixture_dir/watch.mp4" || { echo 'subtitle browser check could not generate its bounded H.264 fixture' >&2; exit 2; }; \
+		PLAYWRIGHT_MODULE="$$pw_module" WATCH_MEDIA="$$fixture_dir/watch.mp4" "$$pw_node" --test tests/web/subtitle-generation.browser.cjs tests/web/watch-subtitle-generation.browser.cjs
+
 # Regenerating the golden is a deliberate act that shows up in a git diff, never
 # a side effect of a normal run — a golden that rewrites itself asserts nothing.
 # Run this when you MEANT to change the UI, then read the diff before committing.
@@ -1573,6 +1590,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/analysis-reconciliation.test.js
 	@node --test tests/web/analysis-coverage.test.js
 	@node tests/web/settings-sections.test.js
+	@node --test tests/web/subtitle-generation.test.js
 	# HDR10-E appears only for an accepted current-generation processing report.
 	@node --test tests/web/dv-processing-badge.test.js
 	@node --test tests/web/subtitle-downloads.test.js

@@ -360,56 +360,176 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}
       <div class="setsection" id="enable-macos-video"><h2>Mac video processing</h2><p>Worker-local compatibility and outstanding visual and streaming qualification.</p></div>${macosVideoProcessingCard(settings,readiness)}
-      <div class="setsection" id="enable-macos-hevc"><h2>Mac HEVC output</h2><p>Independent output negotiation and HDR presentation qualification.</p></div>${macosHevcOutputCard(settings,readiness)}
-      <div class="setsection" id="enable-subtitle-transcription"><h2>Generate subtitles</h2><p>Optional local transcription for media without suitable captions.</p></div>${subtitleTranscriptionCard()}`;
+      <div class="setsection" id="enable-macos-hevc"><h2>Mac HEVC output</h2><p>Independent output negotiation and HDR presentation qualification.</p></div>${macosHevcOutputCard(settings,readiness)}`;
 }
 function subtitleTranscriptionCard(){
   return setCard(`${cardHead("Generate subtitles offline","Create machine-generated captions locally with whisper.cpp.")}
       <p>Runs as background work. You can follow progress and stop queued or running transcription in Activity.</p>
       <button class="sm" onclick="openSubtitleTranscription(this)">Configure transcription</button>
-      <div id="subtitle-transcription-form"></div>
-      ${devGraduation("real transcription, cancellation, source replacement and generated-caption playback are qualified on the supported workers and clients.","the permanent controls move to Settings → Maintenance.")}`);
+      <div id="subtitle-transcription-form"></div>`,{id:"enable-subtitle-transcription"});
 }
-function subtitleTranscriptionForm(settings){
-  const readiness=settings.readiness||{};
-  return `<label><input id="st-enabled" type="checkbox"${settings.enabled?" checked":""}> Enable offline subtitle generation</label>
-      <p class="hint">Applies to new requests. Stop existing work in Activity. The checks below are advisory and never change your saved choice.</p>
-      <label for="st-command">whisper.cpp executable on the worker</label><input id="st-command" autocomplete="off" value="${esc(settings.command||"whisper-cli")}">
-      <label for="st-model">Local model file on the worker</label><input id="st-model" autocomplete="off" value="${esc(settings.model_path||"")}">
-      <label for="st-language">Spoken language code</label><input id="st-language" maxlength="12" value="${esc(settings.language||"en")}">
+// Async setup and generation results belong to the account and page that
+// requested them. A connected node alone is insufficient after sign-out/sign-in.
+/** @returns {HTMLElement & {_subtitleSetup?: any, _subtitleLoad?: object}|null} */
+function subtitleSetupPanel(){return document.getElementById("subtitle-transcription-form");}
+/** @returns {HTMLInputElement} */
+function subtitleSetupInput(id){return /** @type {HTMLInputElement} */ (document.getElementById(id));}
+/** @returns {HTMLInputElement[]} */
+function subtitleSetupWorkers(checked=false){return [.../** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('input[name="st-worker"]'+(checked?":checked":"")))];}
+function subtitleUiCapture(){return {auth:AUTH_GENERATION,token:TOKEN,page:PAGE_RENDER_GENERATION,route:location.hash};}
+function subtitleUiCurrent(c){return !!ME?.is_admin&&c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.page===PAGE_RENDER_GENERATION&&c.route===location.hash;}
+function subtitleReason(reason){
+  return ({disabled:"Paused: subtitle generation is disabled.",missing_model:"Install the selected model on a compatible worker.",insufficient_disk:"This worker could not safely reserve model storage. Free space or check its storage support, then retry Install.",model_download_failed:"The model download failed. Check this worker’s network access, then retry Install.",engine_unavailable:"This worker’s packaged engine is unavailable or unqualified. Update or repair its supported server package, then run Test.",queue_full:"The background queue is full. Retry after current work finishes.",model_verification_failed:"The model failed its integrity or transcription test. Retry Install.",waiting_for_worker:"Waiting for a compatible worker to take this job.",worker_source_unavailable:"Waiting for a verified worker with access to this media source.",worker_observation_unavailable:"Current worker status is unavailable. Refresh worker status or check the job in Activity.",worker_not_current:"This worker is no longer a current cluster member. Refresh worker status and choose a current worker.",no_compatible_worker:"Waiting for a compatible verified worker.",source_unavailable:"No compatible worker can read this source.",waiting_for_playback_capacity:"Waiting for playback capacity. An interrupted attempt starts again.",worker_interrupted:"The worker stopped. Waiting for another attempt.",decode_failed:"The audio could not be decoded.",no_speech_detected:"The selected audio is silent. Choose another audio track.",inference_failed:"Speech recognition failed.",inference_timeout:"Speech recognition exceeded its time limit.",output_invalid:"The generated captions failed validation.",output_too_large:"The generated captions exceed the size limit.",source_changed:"The media file changed. Refresh this title before trying again.",legacy_profile_incompatible:"This older request cannot run with the current setup. Cancel it and create a new request.",configuration_conflict:"The transcription configuration changed. Reload Settings before saving."})[reason]||"The worker has not reported an actionable reason. Check the job in Activity.";
+}
+function subtitleJobLink(id,label="Follow this job in Activity"){
+  return typeof id==="string"&&/^[a-zA-Z0-9_-]{1,128}$/.test(id)?`<a href="#/activity/jobs/${encodeURIComponent(id)}">${esc(label)}</a>`:"";
+}
+function subtitleLanguageName(code){try{return new Intl.DisplayNames(["en"],{type:"language"}).of(code)||code;}catch(error){return code;}}
+function subtitleLanguageOptions(languages,selected=""){
+  const codes=[...new Set(languages||[])];
+  return `<option value="">Choose the spoken language</option>${selected&&!codes.includes(selected)?`<option value="${esc(selected)}" selected>${esc(subtitleLanguageName(selected))} · unavailable for this model</option>`:""}${codes.map(code=>`<option value="${esc(code)}"${code===selected?" selected":""}>${esc(subtitleLanguageName(code))}</option>`).join("")}`;
+}
+function subtitleModelSize(bytes){const value=Number(bytes);return Number.isFinite(value)&&value>=0?(value>=1048576?`${(value/1048576).toFixed(1)} MiB`:`${Math.round(value/1024)} KiB`):"Size unknown";}
+function subtitleSetupModelChanged(){
+  const panel=subtitleSetupPanel(),setup=panel?._subtitleSetup,language=subtitleSetupInput("st-language");if(!setup||!language)return;
+  const model=setup.catalog.models.find(row=>row.id===subtitleSetupInput("st-model-id").value);
+  language.innerHTML=subtitleLanguageOptions(model?.languages||[],language.value);refreshSubtitleModels();
+}
+function subtitleModelOptions(models,selected){
+  const rows=(models||[]).map(model=>`<option value="${esc(model.id)}"${model.id===selected?" selected":""}>${esc(model.label||model.id)} · ${esc(subtitleModelSize(model.download_bytes))}</option>`).join("");
+  return (models||[]).some(model=>model.id===selected)?rows:`<option value="${esc(selected||"")}" selected>${esc(selected||"Choose a model")}${selected?" · unavailable in this catalog":""}</option>${rows}`;
+}
+function subtitleTranscriptionForm(settings,catalog={models:[],workers:[]}){
+  const advanced=settings.advanced||{},managed=settings.mode!=="advanced";
+  return `<div oninput="subtitleSetupEdited()" onchange="subtitleSetupEdited()">
+      <label class="tog"><span>Enable offline subtitle generation</span><input id="st-enabled" type="checkbox"${settings.enabled?" checked":""}></label>
+      <p class="hint">Disabled pauses queued work and refuses new requests. A running attempt may finish; Cancel it in Activity. Readiness never changes this saved choice.</p>
+      <label for="st-mode">Setup</label><select id="st-mode" onchange="subtitleSetupMode()"><option value="managed"${managed?" selected":""}>Managed installation</option><option value="advanced"${managed?"":" selected"}>Advanced · existing local installation</option></select>
+      <div id="st-managed"${managed?"":" hidden"}><label for="st-model-id">Model for new requests</label><select id="st-model-id" onchange="subtitleSetupModelChanged()">${subtitleModelOptions(catalog.models,settings.model_id)}</select><p class="hint">Models download only when you choose Install. Audio and captions stay on your servers.</p></div>
+      <div id="st-advanced"${managed?" hidden":""}><label for="st-command">Existing whisper.cpp executable on the worker</label><input id="st-command" autocomplete="off" value="${esc(advanced.command||"whisper-cli")}"><label for="st-model">Existing local model file on the worker</label><input id="st-model" autocomplete="off" value="${esc(advanced.model_path||"")}"></div>
+      <label for="st-language">Default spoken language</label><select id="st-language">${subtitleLanguageOptions((catalog.models||[]).find(model=>model.id===settings.model_id)?.languages||(catalog.models||[]).flatMap(model=>model.languages||[]),settings.language||"en")}</select>
       <label for="st-interval">Check for missing subtitles every (minutes; 0 for manual requests only)</label><input id="st-interval" type="number" min="0" max="10080" step="1" value="${esc(String(settings.interval_mins||0))}">
-      <p class="hint">Audio and captions stay on your servers. Models must already be installed. Captions are labelled as machine-generated and may contain mistakes.</p>
-      <div role="status"><b>Worker readiness:</b> ${readiness.ready?"Ready":"Not ready"}. ${esc(readiness.reason||"")}</div>
-      <ul><li>Executable: ${readiness.command_available?"available":"not found"}</li><li>Model: ${readiness.model_available?"available":"not found"}</li></ul>
-      <button class="sm" onclick="saveSubtitleTranscription(this)">Save</button><div id="st-status" role="status" aria-live="polite"></div>`;
+      <p class="hint">Generation transcribes speech; it does not translate. Machine-generated captions may contain mistakes.</p>
+      ${settings.mode_status&&!["ok","advanced"].includes(settings.mode_status)?`<p class="hint">${esc(subtitleReason("configuration_conflict"))}</p>`:""}
+      <button class="sm" onclick="saveSubtitleTranscription(this)">Save</button></div><div id="st-status" role="status" aria-live="polite"></div>
+      <div id="st-model-evidence">${subtitleModelEvidence(catalog,settings.model_id)}</div><div id="st-operation-status" role="status" aria-live="polite"></div>`;
 }
+function subtitleModelStatus(status){
+  return ({missing:"missing",installed:"installed",verified:"verified",verification_failed:"verification failed",unverified_cache:"Download cached · install to finish setup",unknown:"unknown"})[status]||"unknown";
+}
+function subtitleModelEvidence(catalog,modelId){
+  const model=(catalog.models||[]).find(row=>row.id===modelId);
+  return `<h3>Install and test a model</h3>${model?`<p>${esc(model.label||model.id)} · ${esc(subtitleModelSize(model.download_bytes))} · ${esc(model.license||"")}</p><details class="setdetails"><summary>Advanced model identity</summary><p class="hint">SHA-256: ${esc(model.sha256||"")} · ${esc(model.source||"")}</p></details>`:`<p class="hint">Select a catalog model to install.</p>`}
+    <p class="hint">Choose named workers that can run this engine. Installation and testing use background jobs. Installed alone does not mean verified.</p>
+    ${(catalog.workers||[]).map(worker=>{const fresh=Number.isFinite(worker.expires_at_ms)&&worker.expires_at_ms>Date.now()&&worker.observed_at_ms<=Date.now()+30000;const entry=(worker.models||[]).find(row=>row.model_id===modelId);const status=fresh?(entry?.status||"missing"):"unknown";return `<div><label class="chk"><input type="checkbox" name="st-worker" value="${esc(worker.node_id)}"${worker.eligible&&fresh&&worker.engine?.status==="available"?" checked":" disabled"}> ${esc(worker.label||worker.node_id)}</label> · ${esc(subtitleModelStatus(status))} · engine ${esc(fresh?worker.engine?.status||"unknown":"unknown")}${entry?.verified_at_ms?` · tested ${esc(new Date(entry.verified_at_ms).toLocaleString())}`:""}${entry?.reason?`<p class="hint">${esc(subtitleReason(entry.reason))}</p>`:""}${!fresh?'<p class="hint">Worker observation is stale; readiness is unknown.</p>':""}</div>`;}).join("")||'<p class="hint">No eligible worker observations are available.</p>'}
+    <button class="sm" onclick="subtitleModelOperation('install',this)">Install selected model</button> <button class="sm" onclick="subtitleModelOperation('verify',this)">Test selected model</button> <button class="ghost sm" onclick="refreshSubtitleModels()">Refresh worker status</button>`;
+}
+function subtitleSetupEdited(){const panel=subtitleSetupPanel();if(panel?._subtitleSetup)panel._subtitleSetup.edit++;}
+function subtitleSetupMode(){const advanced=subtitleSetupInput("st-mode").value==="advanced";document.getElementById("st-managed").hidden=advanced;document.getElementById("st-advanced").hidden=!advanced;}
 async function openSubtitleTranscription(button){
-  const panel=document.getElementById("subtitle-transcription-form");
-  if(!panel)return;
+  const panel=subtitleSetupPanel();
+  if(!panel||!ME?.is_admin)return;
+  const capture=subtitleUiCapture(),request={};panel._subtitleLoad=request;
   if(button)button.disabled=true;
   try{
-    const settings=await api("/subtitle-transcription");
-    if(panel.isConnected)panel.innerHTML=subtitleTranscriptionForm(settings);
-  }catch(error){if(panel.isConnected)panel.textContent=error.message||"Could not load transcription settings.";}
-  finally{if(button&&button.isConnected)button.disabled=false;}
+    const [settingsRead,catalogRead]=await Promise.allSettled([api("/subtitle-transcription/managed"),api("/subtitle-transcription/models")]);
+    if(!subtitleUiCurrent(capture)||!panel.isConnected||panel._subtitleLoad!==request)return;
+    if(settingsRead.status!=="fulfilled")throw settingsRead.reason;
+    const settings=settingsRead.value,catalog=catalogRead.status==="fulfilled"?catalogRead.value:{models:[],workers:[]};
+    panel._subtitleSetup={capture,catalog,edit:0,revision:settings.revision};panel.innerHTML=subtitleTranscriptionForm(settings,catalog);
+    if(catalogRead.status!=="fulfilled")document.getElementById("st-operation-status").textContent="Model and worker observations are unavailable. Your settings remain editable. Use Refresh worker status to try again.";
+  }catch(error){if(subtitleUiCurrent(capture)&&panel.isConnected&&panel._subtitleLoad===request)panel.textContent=error.message||"Could not load transcription settings.";}
+  finally{if(subtitleUiCurrent(capture)&&button?.isConnected)button.disabled=false;}
 }
 async function saveSubtitleTranscription(button){
-  const panel=document.getElementById("subtitle-transcription-form"),status=document.getElementById("st-status");
-  if(!panel||!status)return;
+  const panel=subtitleSetupPanel(),status=document.getElementById("st-status"),setup=panel?._subtitleSetup;
+  if(!setup||!status||!subtitleUiCurrent(setup.capture))return;
   const input=id=>/** @type {HTMLInputElement} */ (document.getElementById(id));
   const interval=Number(input("st-interval").value);
   if(!Number.isInteger(interval)||interval<0||interval>10080){status.textContent="Choose a whole number of minutes from 0 to 10080.";return;}
-  const body={enabled:input("st-enabled").checked,
-    command:input("st-command").value.trim(),
-    model_path:input("st-model").value.trim(),
-    language:input("st-language").value.trim(),interval_mins:interval};
-  if(button)button.disabled=true;
-  status.textContent="Saving…";
+  const body={version:1,expected_revision:setup.revision,mode:input("st-mode").value,enabled:input("st-enabled").checked,model_id:input("st-model-id").value,language:input("st-language").value.trim(),interval_mins:interval};
+  if(body.mode==="advanced")body.advanced={command:input("st-command").value.trim(),model_path:input("st-model").value.trim()};
+  const revision=setup.edit,request={};setup.save=request;
+  if(button)button.disabled=true;status.textContent="Saving…";
   try{
-    const saved=await api("/subtitle-transcription",{method:"PUT",body});
-    if(panel.isConnected){panel.innerHTML=subtitleTranscriptionForm(saved);document.getElementById("st-status").textContent="Saved. Worker readiness does not change this choice.";}
-  }catch(error){if(status.isConnected)status.textContent=error.message||"Could not save transcription settings.";}
-  finally{if(button&&button.isConnected)button.disabled=false;}
+    const saved=await api("/subtitle-transcription/managed",{method:"PUT",body});
+    if(!subtitleUiCurrent(setup.capture)||!panel.isConnected||panel._subtitleSetup!==setup||setup.save!==request)return;
+    setup.revision=saved.revision;
+    if(setup.edit===revision){
+      input("st-enabled").checked=saved.enabled;
+      for(const [id,value]of [["st-mode",saved.mode],["st-model-id",saved.model_id],["st-language",saved.language],["st-interval",String(saved.interval_mins)],["st-command",saved.advanced?.command||"whisper-cli"],["st-model",saved.advanced?.model_path||""]])input(id).value=value;
+    }
+    document.getElementById("st-status").textContent=setup.edit===revision?"Saved. Worker readiness does not change this choice.":"Saved the submitted choices. Your newer edits are still unsaved.";
+  }catch(error){if(subtitleUiCurrent(setup.capture)&&status.isConnected&&panel._subtitleSetup===setup)status.textContent=error.message||"Could not save transcription settings.";}
+  finally{if(subtitleUiCurrent(setup.capture)&&button?.isConnected)button.disabled=false;}
+}
+async function refreshSubtitleModels(){
+  const panel=subtitleSetupPanel(),setup=panel?._subtitleSetup,mount=document.getElementById("st-model-evidence");
+  if(!setup||!mount||!subtitleUiCurrent(setup.capture))return;
+  const modelId=subtitleSetupInput("st-model-id").value,request={},operation=setup.operation;setup.refresh=request;
+  const selected=subtitleSetupWorkers(true).map(node=>node.value);
+  try{const catalog=await api("/subtitle-transcription/models");if(!subtitleUiCurrent(setup.capture)||panel._subtitleSetup!==setup||setup.refresh!==request||setup.operation!==operation||!mount.isConnected||subtitleSetupInput("st-model-id").value!==modelId)return;setup.catalog=catalog;subtitleSetupInput("st-model-id").innerHTML=subtitleModelOptions(catalog.models,modelId);mount.innerHTML=subtitleModelEvidence(catalog,modelId);for(const node of subtitleSetupWorkers())if(!node.disabled)node.checked=selected.includes(node.value);}
+  catch(error){if(subtitleUiCurrent(setup.capture)&&mount.isConnected&&setup.refresh===request&&setup.operation===operation)document.getElementById("st-operation-status").innerHTML=`${setup.operationRows?.length?subtitleModelOperationsHtml(setup):""}<p>${esc(error.message||"Could not refresh worker status.")} <button class="ghost sm" onclick="refreshSubtitleModels()">Retry worker status</button></p>`;}
+}
+async function subtitleModelOperation(action,button){
+  const panel=subtitleSetupPanel(),setup=panel?._subtitleSetup,status=document.getElementById("st-operation-status");
+  if(!setup||!status||!subtitleUiCurrent(setup.capture)||!["install","verify"].includes(action))return;
+  const modelId=subtitleSetupInput("st-model-id").value,nodeIds=subtitleSetupWorkers(true).filter(node=>!node.disabled).map(node=>node.value);
+  if(!(setup.catalog.models||[]).some(model=>model.id===modelId)){status.textContent="Choose an available catalog model.";return;}
+  if(!nodeIds.length){status.textContent="Choose at least one eligible worker.";return;}
+  const request={};setup.operation=request;button.disabled=true;status.textContent=action==="install"?"Requesting model installation…":"Requesting model verification…";
+  try{const result=await api(`/subtitle-transcription/models/${encodeURIComponent(modelId)}/${action}`,{method:"POST",body:{version:1,node_ids:nodeIds}});
+    if(!subtitleUiCurrent(setup.capture)||panel._subtitleSetup!==setup||setup.operation!==request||!status.isConnected)return;
+    const operations=result.operations||[];
+    setup.operationRows=operations.map(operation=>({...operation,model_id:modelId}));
+    status.innerHTML=subtitleModelOperationsHtml(setup);
+    pollSubtitleModelOperations(setup,operations.filter(op=>["accepted","existing"].includes(op.outcome)).map(op=>op.job_id));
+  }catch(error){if(subtitleUiCurrent(setup.capture)&&status.isConnected&&setup.operation===request)status.textContent=error.message||"Could not request model work.";}
+  finally{if(subtitleUiCurrent(setup.capture)&&button.isConnected)button.disabled=false;}
+}
+function subtitleModelOutcome(outcome){
+  return ({accepted:"queued",existing:"already queued",queue_full:"queue full",conflict:"configuration changed",source_changed:"source changed",no_demand:"no work needed",unsupported_worker:"unsupported worker",unavailable_worker:"worker unavailable",worker_not_current:"worker is no longer current",insufficient_disk:"storage unavailable",model_download_failed:"download failed",model_verification_failed:"verification failed",engine_unavailable:"engine unavailable",missing_model:"model missing",disabled:"disabled",configuration_conflict:"configuration changed"})[outcome]||"not accepted";
+}
+function subtitleModelOperationsHtml(setup){
+  return (setup.operationRows||[]).map(row=>{const job=row.job,label=(setup.catalog.workers||[]).find(worker=>worker.node_id===row.node_id)?.label||row.node_id,reason=job?.reason||row.reason||(!["accepted","existing"].includes(row.outcome)?row.outcome:null);return `<p>${esc(label)}: ${esc(job?.phase||job?.state||subtitleModelOutcome(row.outcome))}${reason?" · "+esc(subtitleReason(reason)):""}. ${subtitleJobLink(row.job_id)}</p>`;}).join("")||"No operation was accepted.";
+}
+function retrySubtitleModelOperations(){
+  const setup=subtitleSetupPanel()?._subtitleSetup;if(!setup||!subtitleUiCurrent(setup.capture))return;
+  const ids=(setup.operationRows||[]).filter(row=>["accepted","existing"].includes(row.outcome)&&(!["succeeded","failed","cancelled"].includes(row.job?.state)||row.awaitingObservation)).map(row=>{row.observationDeadline=null;return row.job_id;});
+  pollSubtitleModelOperations(setup,ids);
+}
+function subtitleModelObservationPending(setup,row){
+  const job=row.job;
+  if(job?.state!=="succeeded")return false;
+  const worker=(setup.catalog.workers||[]).find(worker=>worker.node_id===row.node_id);
+  const model=worker?.models?.find(model=>model.model_id===row.model_id);
+  return !worker||!Number.isFinite(worker.observed_at_ms)||worker.observed_at_ms>Date.now()+30000||!Number.isFinite(worker.expires_at_ms)||worker.expires_at_ms<=Date.now()||
+    model?.status!=="verified";
+}
+async function pollSubtitleModelOperations(setup,ids){
+  if(!ids.length||!subtitleUiCurrent(setup.capture))return;
+  const panel=subtitleSetupPanel();if(panel?._subtitleSetup!==setup)return;
+  const request=setup.operation;
+  try{const jobs=await Promise.all(ids.map(id=>api(`/subtitle-transcription/jobs/${encodeURIComponent(id)}`)));
+    if(!subtitleUiCurrent(setup.capture)||panel._subtitleSetup!==setup||setup.operation!==request)return;
+    for(const job of jobs){const row=(setup.operationRows||[]).find(operation=>operation.job_id===job.job_id);if(row)row.job=job;}
+    document.getElementById("st-operation-status").innerHTML=subtitleModelOperationsHtml(setup);
+    await refreshSubtitleModels();
+    if(!subtitleUiCurrent(setup.capture)||panel._subtitleSetup!==setup||setup.operation!==request)return;
+    const pending=jobs.filter(job=>!["succeeded","failed","cancelled"].includes(job.state)).map(job=>job.job_id);
+    let updating=false;
+    for(const job of jobs){
+      const row=(setup.operationRows||[]).find(row=>row.job_id===job.job_id);if(!row)continue;
+      row.awaitingObservation=subtitleModelObservationPending(setup,row);
+      if(row.awaitingObservation){
+        if(row.observationDeadline==null)row.observationDeadline=Date.now()+30000;
+        if(Date.now()<row.observationDeadline)pending.push(job.job_id);
+        updating=true;
+      }
+    }
+    if(updating)document.getElementById("st-operation-status").innerHTML+=`<p>Verification status is updating. <button class="ghost sm" onclick="retrySubtitleModelOperations()">Refresh verification status</button></p>`;
+    if(pending.length)setTimeout(()=>{if(setup.operation===request)pollSubtitleModelOperations(setup,pending);},3000);
+  }catch(error){if(subtitleUiCurrent(setup.capture)&&panel._subtitleSetup===setup&&setup.operation===request)document.getElementById("st-operation-status").innerHTML=`${subtitleModelOperationsHtml(setup)}<p>${esc(error.message||"Could not refresh model work.")} <button class="ghost sm" onclick="retrySubtitleModelOperations()">Retry status</button></p>`;}
 }
 
 function hevcCopyCard(settings){
