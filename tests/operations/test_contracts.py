@@ -2109,7 +2109,7 @@ assert.equal(context.ACT_TIMER, null);
         # its receipt publications finish; the effort gate keeps ten.
         self.assertIn("timeout-minutes: 15", fast_jobs["preflight"])
         self.assertIn("timeout-minutes: 10", effort_jobs["preflight"])
-        self.assertIn("timeout-minutes: 30", effort_jobs["rust_compile"])
+        self.assertIn("timeout-minutes: 60", effort_jobs["rust_compile"])
         effort_rust_header = effort_jobs["rust_compile"].split("\n    steps:", 1)[0]
         self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"', effort_rust_header)
         self.assertEqual(
@@ -2168,7 +2168,7 @@ assert.equal(context.ACT_TIMER, null);
             ),
             ["make effort-rust-check", "make hiqlite-vendor-clippy"],
         )
-        self.assertIn("timeout-minutes: 30", effort_jobs["rust_compile"])
+        self.assertIn("timeout-minutes: 60", effort_jobs["rust_compile"])
         self.assertIn('CARGO_BUILD_JOBS: "1"', effort_jobs["rust_compile"])
         self.assertEqual(
             list(fast_rust_steps),

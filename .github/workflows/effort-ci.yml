@@ -120,8 +120,9 @@ jobs:
     if: needs.scope.outputs.rust == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     # The job includes every-target compilation and vendored Clippy with a
-    # runner-local cache; allow a cold runner to finish all existing checks.
-    timeout-minutes: 30
+    # runner-local cache. Run 5287 exceeded thirty minutes on the daemon
+    # target; match the main compiler budget without dropping any checks.
+    timeout-minutes: 60
     # Host-executed runners do not necessarily export the documented Cargo
     # budget. Bound this job before parallel compiler working sets hit its cap.
     env:
