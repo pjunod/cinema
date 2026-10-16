@@ -1311,11 +1311,17 @@ fixtures retain the newer managed extension, and concurrent lineage migration
 can reject a genuine custody-migration winner. All ten actual selected Source
 runtime cases pass in that run. No complete-suite success is claimed.
 
-Bootstrap now preserves only an exact installed managed view while retaining
-the probe index and publish trigger. The predecessor-view replacement has a
-same-transaction absence assertion, so an extension installed after the shape
-read cannot be overwritten. The existing full retry scenario also checks its
-model receipt, accepted job, resource obligation and exact view survive.
+Main #1140 lands while task gate 5293 starts, invalidating that gate's
+main-to-effort ancestry. Its simpler non-destructive bootstrap creates the
+probe-era view before the older resource installer and omits the migration-only
+DROP. Adopt that exact main implementation: IF NOT EXISTS preserves an existing
+managed view across retries and concurrent bootstraps, while final strict shape
+verification remains required. The full retry scenario retains its model
+receipt, accepted job, resource obligation and exact-view assertions. The earlier
+reviewed guarded candidate and its two superseded helper tests remain preserved
+in private evidence archive 106; they do not describe the final implementation.
+The extra bootstrap shape read is removed, restoring that census slice to two;
+the overall unannotated ceiling stays 237.
 SQLite queue rewinds require current version 111, no Source installation,
 exact managed objects/marker and no accepted managed work or receipts before
 atomically restoring the published predecessor. Custody settlement reads its
