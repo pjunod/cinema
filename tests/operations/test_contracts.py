@@ -541,12 +541,12 @@ assert.equal(context.ACT_TIMER, null);
         contract = runpy.run_path(
             str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_port_contract"
         )
-        ports = contract["free_ports"](0, 3)
+        ports = contract["free_ports"](0, 4)
 
-        self.assertEqual(len(ports), 3)
-        self.assertEqual(len(set(ports)), 3)
+        self.assertEqual(len(ports), 4)
+        self.assertEqual(len(set(ports)), 4)
         self.assertTrue(all(port > 0 for port in ports))
-        self.assertIn("self.port, self.raft_port, self.api_port = free_ports", script)
+        self.assertIn("self.port, self.raft_port, self.api_port, self.jellyfin_port = free_ports", script)
         self.assertIn('raft_bind = "127.0.0.1:{self.raft_port}"', script)
         self.assertIn('api_bind = "127.0.0.1:{self.api_port}"', script)
 
@@ -2693,6 +2693,7 @@ assert.equal(context.ACT_TIMER, null);
 
         clustered_store_tests = (
             "clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure",
+            "login_token_insert_requires_the_verified_password_version",
         )
         for test_name in clustered_store_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -2703,6 +2704,7 @@ assert.equal(context.ACT_TIMER, null);
                 command,
             )
             self.assertIn("--test store_contract", command)
+            self.assertIn("RUST_MIN_STACK=8388608", command)
             self.assertIn("-- --exact --test-threads=1", command)
 
         proxy_writer_test = (
@@ -2736,7 +2738,7 @@ assert.equal(context.ACT_TIMER, null);
             if " snapshot_metrics --lib -- --test-threads=1" in command
         ]
         self.assertEqual(len(snapshot_metrics), 1)
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=10", snapshot_metrics[0])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=13", snapshot_metrics[0])
         self.assertIn("run: make cluster-daemon-check", workflow)
 
     def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):
@@ -3299,7 +3301,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(contract_commands), 14)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=67", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=72", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
         exact_regressions = (

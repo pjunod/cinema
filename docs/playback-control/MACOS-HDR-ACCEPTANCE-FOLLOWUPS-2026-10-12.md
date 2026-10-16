@@ -1157,3 +1157,66 @@ the failed log and raise only the effort preflight to the existing fast
 lane's finite 15-minute receipt-publication budget. Every history, policy,
 validation and operations check remains required; the full main preflight
 keeps its existing budget. The exact-head task gate must run again.
+## October 15 inherited qualification prerequisites
+
+Full promotion run 5228 preserves failures in the existing validation fixtures
+and inventories as well as the Apple and Android controls recorded separately.
+The prerequisite port takes the reviewed census, canonical cluster identity,
+production storage layout, one-voter readiness, asynchronous snapshot and
+real HLS browser fixtures from `d326ed2d648096b932b1e1bffc048b20e8d514f0`.
+It retains the production consistent-read ceiling of 237, exact transaction
+inventories, failure controls and original Makefile commands. The topology
+performs two local queries per bounded operation, so its 256 operations require
+exactly 512 local queries and zero Authority queries.
+
+The reviewed Linux UI structure comes from
+`d0433b54b98312996045913acbe0b7e12d546ff7`, SHA-256
+`5fcd0589e40ee70ca25240345256b63e239442f5d9a653d79464c2df17de3419`.
+The fixture waits for the current boot's caption probe and a stable empty child
+inventory before captures, reserves four distinct listeners and supplies real
+HLS structure. The earlier macOS capture's readiness and first-activity
+differences remain preserved; importing the Linux golden does not claim a new
+matching capture.
+
+Pinned Rust 1.97.1 workspace/all-target checking and all 84 operation contracts
+pass on the port. Focused consistent-read census, placeholder census, named
+transaction inventory, topology schema and actual one-voter bootstrap/reopen
+checks pass. All 70 macOS transport controls pass with no failures or ignored
+cases, including both new delayed-snapshot controls. The attempted Linux count
+wrapper correctly refuses 70 against 72; that failure is retained. Two cleanup
+controls are Linux-only, so the shipping Linux requirement remains exactly 72.
+Run 5228 also completes all 13 WAL snapshot-metric tests successfully before
+its stale count of ten refuses them; the guard now requires all 13. Daemon
+activity cases execute serially against the actual production storage layout.
+
+Astra approves the frozen 17-file source delta, SHA-256
+`70fad91d01c1f78b7823e4fd57c04723fa2716b2b10d25a89662cd9a007bb22b`.
+Its review leaves integration and exact-candidate task/full gates required.
+All three failed legacy Store controls reproduce the same mixed-sharing-lineage
+refusal locally. Their historical downgrade fixtures still contain later empty
+sharing tables. The port adds the existing guarded fixture rewind: it requires
+the actual baseline marker, no Source activation and zero rows in every
+inventoried sharing table before removing those disposable tables. Each of the
+three real controls then passes, including the populated three-voter fragment
+prune and playback-mutation case. Production lineage refusal is unchanged.
+The first local baseline compiler log was reused accidentally during rerun; its
+exact panic/result is retained as a labelled terminal excerpt. Both other full
+local baseline logs, all baseline result metadata and the original CI log are
+preserved. The full Rust/Store job deadlines still require a new complete run.
+
+The repaired browser fixture subsequently captures all 78 views with no page
+or console errors; all 10,597 structural facts match the reviewed golden on
+macOS as well. This uses the unchanged web/backend source surface from the
+previous local build and the corrected fixture, rather than claiming a new
+exact-candidate package build. Astra's Store caller review requests the four
+companion baseline assertions for offline-audio and read-index replay. Those
+exact assertions are ported without relaxing any guard, and both complete
+replay callers pass locally. The initial 17-file approval and this addressed
+caller finding remain separately identified.
+
+The legacy Store job in run 5228 completes only 188 of 367 serial controls
+before its 40-minute deadline, including three now-reproduced fixture failures.
+Its measured throughput projects roughly 75 minutes including compilation.
+The complete job therefore receives a finite 95-minute budget; no case,
+assertion, failure status or required receipt is removed. The Rust unit job
+keeps its existing budget pending the full affected local suite.

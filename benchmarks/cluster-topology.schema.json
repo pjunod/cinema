@@ -215,7 +215,7 @@
         "catalogue_read_target": { "type": "integer", "minimum": 1 },
         "catalogue_read_errors": { "const": 0 },
         "catalogue_read_consistent_query_calls": { "const": 0 },
-        "catalogue_read_non_consistent_query_calls": { "const": 256 },
+        "catalogue_read_non_consistent_query_calls": { "const": 512 },
         "local_catalogue_read_p50_us": { "type": "number", "minimum": 0 },
         "local_catalogue_read_p95_us": { "type": "number", "minimum": 0 },
         "local_catalogue_read_p99_us": { "type": "number", "minimum": 0 },

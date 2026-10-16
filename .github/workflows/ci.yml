@@ -400,7 +400,9 @@ jobs:
       needs.scope.outputs.cluster_auth == 'true' &&
       needs.scope.outputs.execution_mode != 'accelerated'
     runs-on: [self-hosted, Linux, X64, lab, ci-store]
-    timeout-minutes: 40
+    # Run 5228 completed 188 of 367 serial controls before the 40m cutoff.
+    # Preserve the full inventory with a finite budget for its measured runtime.
+    timeout-minutes: 95
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

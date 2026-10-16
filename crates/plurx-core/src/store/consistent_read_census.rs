@@ -54,11 +54,11 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_jellyfin_play.rs", 4),
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_live_tv_resource.rs", 1),
-    ("hiqlite_media.rs", 71),
+    ("hiqlite_media.rs", 72),
     ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 7),
     ("hiqlite_reading.rs", 2),
-    ("hiqlite_sessions.rs", 36),
+    ("hiqlite_sessions.rs", 37),
     ("hiqlite_sharing.rs", 1),
     ("hiqlite_shared_cache.rs", 4),
     ("hiqlite_timeline_annotations.rs", 2),
@@ -221,13 +221,25 @@ fn raised(name: &str) -> Vec<(&'static str, usize)> {
         .collect()
 }
 
+// Synthetic controls need a saturated test ceiling even when production gains
+// justified reads or removes old sites. The historical production ceiling stays
+// unchanged; the fixture cannot silently borrow its unused headroom.
+fn saturated_fixture_ceiling() -> usize {
+    let current = STORE_SOURCES
+        .iter()
+        .map(|(_, source)| sites(source).into_iter().filter(|reason| !reason).count())
+        .sum();
+    assert!(current <= UNANNOTATED_CEILING);
+    current
+}
+
 #[test]
 fn consistent_read_census_refuses_a_synthetic_extra_read_in_a_fixture_copy() {
     let fixture = with_synthetic_reading_site("");
     let failure = census(
         &borrowed(&fixture),
         CONSISTENT_READ_SITES,
-        UNANNOTATED_CEILING,
+        saturated_fixture_ceiling(),
     )
     .expect_err("an unpinned extra consistent read must fail the census");
     assert!(failure.contains("hiqlite_reading.rs: 3 consistent-read sites, table pins 2"));
@@ -237,7 +249,7 @@ fn consistent_read_census_refuses_a_synthetic_extra_read_in_a_fixture_copy() {
     let failure = census(
         &borrowed(&fixture),
         &raised("hiqlite_reading.rs"),
-        UNANNOTATED_CEILING,
+        saturated_fixture_ceiling(),
     )
     .expect_err("an unexplained new consistent read must fail the census");
     assert!(failure.contains("carry no `// authority: <reason>` comment"));
@@ -291,7 +303,7 @@ fn consistent_read_census_admits_a_raised_entry_with_an_authority_reason() {
     census(
         &borrowed(&fixture),
         &raised("hiqlite_reading.rs"),
-        UNANNOTATED_CEILING,
+        saturated_fixture_ceiling(),
     )
     .unwrap_or_else(|failures| panic!("an explained, pinned read is admitted:\n{failures}"));
 
@@ -300,7 +312,7 @@ fn consistent_read_census_admits_a_raised_entry_with_an_authority_reason() {
     census(
         &borrowed(&fixture),
         &raised("hiqlite_reading.rs"),
-        UNANNOTATED_CEILING,
+        saturated_fixture_ceiling(),
     )
     .expect_err("an empty authority reason must not admit the read");
 }
