@@ -303,7 +303,7 @@ installer, Docker hardware/startup, CI budget/timeout/preflight/runner and cache
 sweep passed all 125 tests. This includes the earlier host-temp-path installer
 case; the earlier default-temp failure remains recorded in §8. Catalog lint
 (3,534 governed files), infrastructure-name and whitespace checks passed.
-The complete PR body carries 66 unique resolvable regression anchors, including
+The complete PR body carries 67 unique resolvable regression anchors, including
 all prior checkpoint anchors and the selected existing regressions.
 
 The normal commit hook remains mandatory before push. A fresh exact-final-head
