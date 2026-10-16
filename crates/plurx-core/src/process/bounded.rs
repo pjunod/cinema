@@ -138,6 +138,33 @@ pub async fn output_command(
     max_output_bytes: usize,
     work: super::ChildWork,
 ) -> io::Result<Output> {
+    output_command_environment(command, wall_time, max_output_bytes, work, true).await
+}
+
+/// Bounded CPU child with held descriptors and an LC_ALL-only environment.
+/// Absolute executable and library-qualified package paths are required.
+pub async fn output_command_clean_env(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+) -> io::Result<Output> {
+    if !std::path::Path::new(command.as_std().get_program()).is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "managed child executable must be absolute",
+        ));
+    }
+    output_command_environment(command, wall_time, max_output_bytes, work, false).await
+}
+
+async fn output_command_environment(
+    command: &mut Command,
+    wall_time: Duration,
+    max_output_bytes: usize,
+    work: super::ChildWork,
+    inherit_service_environment: bool,
+) -> io::Result<Output> {
     check_cancellation()?;
     let cancellation = cancellation().unwrap_or_default();
     command
@@ -147,19 +174,21 @@ pub async fn output_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    for name in [
-        "PATH",
-        "LD_LIBRARY_PATH",
-        "DYLD_LIBRARY_PATH",
-        "LIBVA_DRIVER_NAME",
-        "LIBVA_DRIVERS_PATH",
-        "VDPAU_DRIVER",
-        "CUDA_VISIBLE_DEVICES",
-        "NVIDIA_VISIBLE_DEVICES",
-        "NVIDIA_DRIVER_CAPABILITIES",
-    ] {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
+    if inherit_service_environment {
+        for name in [
+            "PATH",
+            "LD_LIBRARY_PATH",
+            "DYLD_LIBRARY_PATH",
+            "LIBVA_DRIVER_NAME",
+            "LIBVA_DRIVERS_PATH",
+            "VDPAU_DRIVER",
+            "CUDA_VISIBLE_DEVICES",
+            "NVIDIA_VISIBLE_DEVICES",
+            "NVIDIA_DRIVER_CAPABILITIES",
+        ] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
         }
     }
     #[cfg(unix)]
@@ -266,6 +295,70 @@ mod tests {
         .expect("bounded output");
         assert!(output.status.success());
         assert_eq!(output.stdout.len(), 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn managed_cpu_environment_excludes_ambient_service_and_loader_values() {
+        const CHILD: &str = "PLURX_TEST_MANAGED_CPU_ENV_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = tokio::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", "process::bounded::tests::managed_cpu_environment_excludes_ambient_service_and_loader_values", "--nocapture"])
+                .env(CHILD, "1")
+                .env("PATH", "/sentinel-only")
+                .env("LD_LIBRARY_PATH", "/sentinel-loader")
+                .env("DYLD_LIBRARY_PATH", "/sentinel-dyld")
+                .env("GGML_BACKEND_PATH", "/sentinel-ggml")
+                .env("CUDA_VISIBLE_DEVICES", "sentinel-gpu")
+                .env("HTTPS_PROXY", "https://credential-sentinel.invalid")
+                .output().await.expect("isolated ambient environment test");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let relative = output_command_clean_env(
+            &mut Command::new("env"),
+            Duration::from_secs(5),
+            16384,
+            TEST_WORK,
+        )
+        .await
+        .expect_err("bare executable is not package qualification");
+        assert_eq!(relative.kind(), io::ErrorKind::InvalidInput);
+        let clean = output_command_clean_env(
+            &mut Command::new("/usr/bin/env"),
+            Duration::from_secs(5),
+            16384,
+            TEST_WORK,
+        )
+        .await
+        .expect("clean child");
+        assert!(clean.status.success());
+        assert_eq!(
+            String::from_utf8(clean.stdout).expect("UTF-8 environment"),
+            "LC_ALL=C\n"
+        );
+        let legacy = output_command(
+            &mut Command::new("/usr/bin/env"),
+            Duration::from_secs(5),
+            16384,
+            TEST_WORK,
+        )
+        .await
+        .expect("legacy child");
+        let legacy = String::from_utf8(legacy.stdout).expect("UTF-8 environment");
+        assert!(legacy.lines().any(|line| line == "PATH=/sentinel-only"));
+        assert!(legacy
+            .lines()
+            .any(|line| line == "LD_LIBRARY_PATH=/sentinel-loader"));
+        assert!(legacy
+            .lines()
+            .any(|line| line == "CUDA_VISIBLE_DEVICES=sentinel-gpu"));
+        assert!(!legacy.contains("HTTPS_PROXY="));
+        assert!(!legacy.contains("GGML_BACKEND_PATH="));
     }
 
     #[cfg(unix)]

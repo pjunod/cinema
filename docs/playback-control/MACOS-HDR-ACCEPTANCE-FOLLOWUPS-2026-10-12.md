@@ -1218,5 +1218,29 @@ The legacy Store job in run 5228 completes only 188 of 367 serial controls
 before its 40-minute deadline, including three now-reproduced fixture failures.
 Its measured throughput projects roughly 75 minutes including compilation.
 The complete job therefore receives a finite 95-minute budget; no case,
-assertion, failure status or required receipt is removed. The Rust unit job
-keeps its existing budget pending the full affected local suite.
+assertion, failure status or required receipt is removed. The full Rust job has a separate incomplete-suite deadline, recorded below.
+
+The complete local core run also exposes a macOS-only stale cached-subtitle
+expectation: the QSV graph correctly includes the explicit Fontconfig provider,
+while the test expects the platform-neutral string. Its repaired control checks
+the exact `-vf` value with the required platform provider, retains the single
+hardware download/upload and no-zscale assertions, and changes no production
+graph. The original full-suite failure and isolated panic are preserved.
+Run 5228's full Rust job likewise exhausts 30 minutes after compilation and
+1,917 unit-result rows, before the unit/SQLite receipt; its finite budget is
+60 minutes, retaining the entire suite and all required receipts.
+
+The complete core suite on the prerequisite Rust snapshot finishes in
+1,266.50 seconds: 1,880 pass, one cached-subtitle expectation fails and five
+opt-in cases are ignored. All eight earlier core failures pass in that run.
+The platform-corrected subtitle control then passes separately on the
+current-main integration (one pass, zero failures). These are separate results,
+not a claim of a fully green rerun. The new complete promotion remains required.
+
+Rechecking the current-main integration finds two additional authoritative
+managed-subtitle schema reads in `hiqlite.rs`: current shape decides whether
+replicated DDL may run, and the installed marker must agree with that shape.
+Both carry explicit authority reasons and the exact slice count becomes 48.
+The overall unannotated ceiling stays 237 and both injected-read refusal
+controls remain required. The initial integrated four-case census failure
+(two pass, two fail) is preserved alongside the corrected rerun.

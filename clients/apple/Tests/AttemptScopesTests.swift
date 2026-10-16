@@ -116,6 +116,7 @@ final class AttemptScopesTests: XCTestCase {
         .recoveryEvidenceAfterStagedPoll: [.open],
         .autoInitialLayout: [.initialDecision],
         .autoCatalogRefresh: [.lifecycle, .viewerAction],
+        .autoMissingCostCatalogRefresh: [.lifecycle, .viewerAction],
         .autoQualityOffer: [.lifecycle, .viewerAction],
         // Rollback keeps the viewer's newer transport intent, so it answers
         // to the title, the attachment and a seek, never to a Pause.
@@ -209,6 +210,7 @@ final class AttemptScopesTests: XCTestCase {
             .recoveryEvidenceAfterStagedPoll: .open,
             .autoInitialLayout: .initialDecision,
             .autoCatalogRefresh: .lifecycle,
+            .autoMissingCostCatalogRefresh: .lifecycle,
             .autoQualityOffer: .lifecycle,
             .preparedPipelineRollback: .lifecycle,
             .preparedCommit: .viewerAction,

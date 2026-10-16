@@ -968,6 +968,78 @@ impl JobFence {
         Ok(published)
     }
 
+    pub(crate) async fn observe_subtitle(
+        &self,
+        phase: plurx_core::store::background_jobs_transcription::SubtitlePhase,
+    ) -> Result<bool, StoreError> {
+        let state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        self.0
+            .store
+            .observe_subtitle_job(
+                plurx_core::store::background_jobs_transcription::ObserveSubtitleJob {
+                    token,
+                    phase,
+                    now_ms: unix_ms()?,
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn publish_subtitle_model(
+        &self,
+        source: plurx_core::store::background_jobs::JobPayload,
+        mut receipt: plurx_core::store::background_jobs_transcription::SubtitleModelReceipt,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let now_ms = unix_ms()?;
+        receipt.node_id = token.node_id.clone();
+        receipt.boot_id = token.boot_id.clone();
+        receipt.job_id = token.job_id.clone();
+        receipt.fence = token.fence;
+        receipt.verified_at_ms = now_ms;
+        let mut request = plurx_core::store::background_jobs_transcription::PublishSubtitleModel {
+            token,
+            source,
+            receipt,
+            now_ms,
+        };
+        let result = match self.0.store.publish_subtitle_model(request.clone()).await {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_subtitle_model(request).await?
+            }
+        };
+        let published = result;
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
     pub(crate) async fn publish_transcription(
         &self,
         source: plurx_core::store::background_jobs::JobPayload,

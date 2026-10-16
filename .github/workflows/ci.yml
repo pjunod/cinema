@@ -305,7 +305,9 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-    timeout-minutes: 30
+    # Run 5228 exhausted 30m after compilation and 1917 unit result rows,
+    # before the full unit/SQLite receipt. Keep the entire suite and a finite cap.
+    timeout-minutes: 60
     steps:
       - name: Capture mounted runner workspace owner
         run: |
@@ -1159,6 +1161,8 @@ jobs:
         run: make cinema-remote-browser-check
       - name: Test grouped library rows in a real browser
         run: make library-rows-browser-check
+      - name: Test subtitle model setup and generated-caption completion in a real browser
+        run: make subtitle-generation-browser-check
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize

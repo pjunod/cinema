@@ -4491,11 +4491,21 @@ mod tests {
             subtitle_file: Some(PathBuf::from("/cache/scary-forced.vtt")),
             ..Default::default()
         };
-        let joined = hls_args(&f, Encoder::Qsv, &opts, Pacing::unpaced(), "/tmp/s").join(" ");
-
-        assert!(
-            joined.contains(
-                "vpp_qsv=w=1920:h=1080:tonemap=1:format=nv12,hwdownload,format=nv12,subtitles='/cache/scary-forced.vtt',hwupload=extra_hw_frames=64,format=qsv"
+        let args = hls_args(&f, Encoder::Qsv, &opts, Pacing::unpaced(), "/tmp/s");
+        let joined = args.join(" ");
+        let filter = args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("video filter");
+        let provider = if cfg!(target_os = "macos") {
+            ":font_provider=fontconfig"
+        } else {
+            ""
+        };
+        assert_eq!(
+            args[filter + 1],
+            format!(
+                "vpp_qsv=w=1920:h=1080:tonemap=1:format=nv12,hwdownload,format=nv12,subtitles='/cache/scary-forced.vtt'{provider},hwupload=extra_hw_frames=64,format=qsv"
             ),
             "{joined}"
         );

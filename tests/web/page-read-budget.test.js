@@ -802,6 +802,7 @@ test("Activity stale loads cannot install the page timer", async () => {
     "location", "layoutChrome", "renderActivityBody", "setPageTimer", "setPagePhase", "paintActivityBody",
     `let PAGE_RENDER_GENERATION=0,ACTIVITY_SNAPSHOT=null;
      const ACTIVITY_DVR={rows:[]};
+     const ACTIVITY_VIEW={pendingJob:null},history={state:null};
      const DVR_PAGE={selectedId:null,detailBusy:false,selected:null};
      function selectDvrDetail(){} function scheduleDvrHistoryRefresh(){}
      ${shippedTopLevelSource("viewActivity")};
@@ -834,6 +835,7 @@ test("Activity paints its cached body before a slow current refresh", async () =
     "location","layoutChrome","renderActivityBody","setPageTimer","setPagePhase","paintActivityBody",
     `let PAGE_RENDER_GENERATION=1,ACTIVITY_SNAPSHOT={marker:"cached"};
      const ACTIVITY_DVR={rows:[]};
+     const ACTIVITY_VIEW={pendingJob:null},history={state:null};
      const DVR_PAGE={selectedId:null,detailBusy:false,selected:null};
      function selectDvrDetail(){} function scheduleDvrHistoryRefresh(){}
      ${shippedTopLevelSource("viewActivity")}; return {viewActivity};`,

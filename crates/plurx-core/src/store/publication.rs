@@ -1205,6 +1205,7 @@ impl<'a> PublicationStore<'a> {
             || !matches!(
                 request.payload,
                 super::background_jobs::JobPayload::SubtitleTranscribe { .. }
+                    | super::background_jobs::JobPayload::SubtitleTranscribeManaged { .. }
             )
         {
             return Err(StoreError::Task(

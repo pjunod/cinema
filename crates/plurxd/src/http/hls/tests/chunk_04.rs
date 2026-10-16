@@ -1446,7 +1446,7 @@ async fn a_committed_successor_survives_the_predecessors_retirement() {
 async fn incumbent_wait_cancels_planning_without_cancelling_a_later_ask() {
     let playback_id = unique_playback_id("incumbent-wait-planning");
     let planning = PendingCandidateGuard::begin(&playback_id, "optional-target");
-    cancel_preparations_for_incumbent_wait(&playback_id);
+    cancel_preparations_for_incumbent_wait(&playback_id, None);
     assert!(planning.cancelled());
     assert!(pending_candidate_for_playback(&playback_id).is_none());
     assert!(pending_candidate_superseded(

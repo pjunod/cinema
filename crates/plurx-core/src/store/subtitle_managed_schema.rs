@@ -1,0 +1,249 @@
+//! Independently versioned queue extension; existing composed ordinals stay put.
+use crate::error::StoreError;
+use std::sync::LazyLock;
+
+pub(crate) const SCHEMA: &str = include_str!("subtitle_managed_schema.sql");
+pub(crate) const SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources') ORDER BY name";
+
+#[cfg(feature = "hiqlite-store")]
+pub(crate) fn statements() -> Vec<String> {
+    SCHEMA
+        .split("-- next statement")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+fn rows(conn: &rusqlite::Connection) -> Result<Vec<(String, String)>, StoreError> {
+    let mut query = conn.prepare(SHAPE_SQL)?;
+    let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::from)
+}
+pub(crate) fn verify_sqlite(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    if version(&rows(conn)?)? != Some(1) {
+        return Err(StoreError::Migration(
+            "managed subtitle schema missing".into(),
+        ));
+    }
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=1",
+        [],
+        |row| row.get(0),
+    )?;
+    if count != 1 {
+        return Err(StoreError::Migration(
+            "managed subtitle schema marker missing".into(),
+        ));
+    }
+    Ok(())
+}
+fn normalize(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+// SQLite normalizes IF NOT EXISTS and terminal semicolons when storing DDL.
+// Measure that normalization instead of inventing a second SQL parser.
+type SchemaShape = Vec<(String, String)>;
+static SHAPES: LazyLock<(SchemaShape, SchemaShape)> = LazyLock::new(|| {
+    let conn = rusqlite::Connection::open_in_memory().expect("closed schema fixture");
+    conn.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(id TEXT,kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT,target_node_id TEXT); CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);").expect("closed stubs");
+    let old = super::background_jobs_probe::SCHEMA
+        .split("CREATE VIEW IF NOT EXISTS background_job_required_resources")
+        .nth(1)
+        .expect("historical view");
+    conn.execute_batch(&format!(
+        "CREATE VIEW IF NOT EXISTS background_job_required_resources{old}"
+    ))
+    .expect("historical resources");
+    let before = rows(&conn).expect("historical rows");
+    conn.execute_batch(SCHEMA).expect("managed schema");
+    (before, rows(&conn).expect("managed rows"))
+});
+pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreError> {
+    let canonical = |rows: &[(String, String)]| {
+        rows.iter()
+            .map(|(name, sql)| (name.clone(), normalize(sql)))
+            .collect::<Vec<_>>()
+    };
+    if canonical(shape) == canonical(&SHAPES.0) {
+        Ok(None)
+    } else if canonical(shape) == canonical(&SHAPES.1) {
+        Ok(Some(1))
+    } else {
+        Err(StoreError::Migration(
+            "managed subtitle schema is partial or incompatible".into(),
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod tests {
+    use super::*;
+    use crate::store::SqliteStore;
+    #[test]
+    fn managed_extension_preserves_old_lineage_and_resource_rows_and_refuses_partial_shape() {
+        let conn = rusqlite::Connection::open_in_memory().expect("schema contract fixture");
+        SqliteStore::apply_migrations_for_test(&conn, 110).expect("schema contract fixture");
+        let old_lineage: String = conn
+            .query_row(super::super::schema_lineage::FINGERPRINT_QUERY, [], |row| {
+                row.get(0)
+            })
+            .expect("schema contract fixture");
+        assert_eq!(
+            version(&rows(&conn).expect("schema contract fixture"))
+                .expect("schema contract fixture"),
+            None
+        );
+        // The historical view's definition is unchanged for every historical
+        // kind, including provider and media-domain unions.
+        let historical_view: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='background_job_required_resources'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema contract fixture");
+        conn.execute_batch(&historical_view.replace(
+            "background_job_required_resources",
+            "old_required_resources",
+        ))
+        .expect("schema contract fixture");
+        conn.execute_batch("BEGIN")
+            .expect("schema contract fixture");
+        conn.execute_batch(SCHEMA).expect("schema contract fixture");
+        assert_eq!(
+            version(&rows(&conn).expect("schema contract fixture"))
+                .expect("schema contract fixture"),
+            Some(1)
+        );
+        let new_lineage: String = conn
+            .query_row(super::super::schema_lineage::FINGERPRINT_QUERY, [], |row| {
+                row.get(0)
+            })
+            .expect("schema contract fixture");
+        assert_eq!(
+            old_lineage, new_lineage,
+            "old recognizer inputs remain byte-identical"
+        );
+        conn.execute_batch("INSERT INTO libraries(id,name,kind,paths) VALUES(1,'a','movies','[\"/media/a\",\"/media/b\"]'),(2,'b','movies','[\"/other\"]'); INSERT INTO background_storage_domains VALUES(1,'/media/a','nas'),(1,'/media/b','nas'),(2,'/other','disk'); INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,1,'movie','A','A'),(2,2,'movie','B','B'); INSERT INTO files(id,item_id,path,size,mtime) VALUES(1,1,'/media/a/a',10,100),(2,2,'/other/b',20,200);").expect("schema contract fixture");
+        for (i, kind) in crate::store::background_jobs::JOB_METRIC_KINDS
+            .iter()
+            .enumerate()
+        {
+            if kind.starts_with("subtitle_model") {
+                continue;
+            }
+            let payload = format!(
+                r#"{{"kind":"{kind}","file_id":{},"library_id":{}}}"#,
+                i % 3,
+                i % 3
+            );
+            conn.execute("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms) VALUES(?1,?2,1,?3,?1,0,'queued',0,0,0)",rusqlite::params![format!("j{i}"),kind,payload]).expect("schema contract fixture");
+        }
+        let changed:i64=conn.query_row("SELECT (SELECT count(*) FROM (SELECT * FROM old_required_resources EXCEPT SELECT * FROM background_job_required_resources)) + (SELECT count(*) FROM (SELECT * FROM background_job_required_resources EXCEPT SELECT * FROM old_required_resources))",[],|row|row.get(0)).expect("schema contract fixture");
+        assert_eq!(
+            changed, 0,
+            "old binaries read identical resource obligations"
+        );
+        conn.execute_batch("ROLLBACK")
+            .expect("schema contract fixture");
+        assert_eq!(
+            version(&rows(&conn).expect("schema contract fixture"))
+                .expect("schema contract fixture"),
+            None,
+            "interruption rolls back complete install"
+        );
+        conn.execute_batch(SCHEMA).expect("schema contract fixture");
+        assert_eq!(
+            version(&rows(&conn).expect("schema contract fixture"))
+                .expect("schema contract fixture"),
+            Some(1),
+            "replay recognizes complete winner"
+        );
+        conn.execute_batch("DROP TABLE subtitle_model_receipts")
+            .expect("schema contract fixture");
+        assert!(
+            version(&rows(&conn).expect("schema contract fixture")).is_err(),
+            "marker alone cannot certify install"
+        );
+    }
+    #[test]
+    fn managed_extension_and_source82_layout_commute_and_startup_replay_detects_drift() {
+        for extension_first in [true, false] {
+            let conn = rusqlite::Connection::open_in_memory().expect("schema contract fixture");
+            SqliteStore::apply_migrations_for_test(&conn, 110).expect("schema contract fixture");
+            conn.execute_batch("PRAGMA foreign_keys=OFF; CREATE TABLE cluster_meta(singleton INTEGER PRIMARY KEY,schema_version INTEGER); INSERT INTO cluster_meta VALUES(1,81);").expect("schema contract fixture");
+            // Source activation normally follows membership/purpose-key setup.
+            // These presence-only fixtures are NOT cluster admission evidence.
+            for name in [
+                "cluster_nodes",
+                "cluster_node_capabilities",
+                "cluster_join_tokens",
+                "cluster_node_join_staging",
+                "cluster_node_removals",
+                "cluster_node_removal_attempts",
+                "cluster_sharing_membership_intents",
+                "cluster_sharing_join_intents",
+                "cluster_sharing_join_declarations",
+                "cluster_sharing_membership_generation",
+            ] {
+                conn.execute_batch(&format!("CREATE TABLE {name}(fixture INTEGER)"))
+                    .expect("schema contract fixture");
+            }
+            conn.execute_batch(
+                super::super::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA,
+            )
+            .expect("schema contract fixture");
+            if extension_first {
+                conn.execute_batch(SCHEMA).expect("schema contract fixture");
+            }
+            for statement in super::super::sharing_source_schema::layout_statements() {
+                conn.execute_batch(&statement)
+                    .unwrap_or_else(|error| panic!("Source layout: {error}: {statement}"));
+            }
+            conn.execute_batch(super::super::sharing_source_schema::BOOT_INTENTS_SCHEMA)
+                .expect("schema contract fixture");
+            conn.execute_batch(super::super::sharing_source_schema::INSTALLATION_SCHEMA)
+                .expect("schema contract fixture");
+            conn.execute_batch(super::super::sharing_source_schema::TRANSACTION_SCHEMA)
+                .expect("schema contract fixture");
+            conn.execute_batch("UPDATE cluster_meta SET schema_version=82; INSERT INTO sharing_source_schema_installation VALUES(1,71,printf('%064d',0),1); INSERT INTO sharing_source_schema_transaction_guard VALUES(1,1);").expect("schema contract fixture");
+            let guard = super::super::sharing_source_schema::installed_guard();
+            let source_ready = |conn: &rusqlite::Connection| {
+                conn.query_row(
+                    &format!("SELECT CASE WHEN ({guard}) THEN 1 ELSE 0 END"),
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("schema contract fixture")
+            };
+            assert_eq!(
+                source_ready(&conn),
+                1,
+                "actual Source82 installed recognizer accepts layout"
+            );
+            if !extension_first {
+                conn.execute_batch(SCHEMA).expect("schema contract fixture");
+            }
+            assert_eq!(
+                source_ready(&conn),
+                1,
+                "managed adjunct preserves Source recognizer in either order"
+            );
+            assert_eq!(
+                version(&rows(&conn).expect("schema contract fixture"))
+                    .expect("schema contract fixture"),
+                Some(1)
+            );
+            let old = SHAPES.0[0].1.clone();
+            conn.execute_batch(&format!(
+                "DROP VIEW background_job_required_resources; {old}"
+            ))
+            .expect("schema contract fixture");
+            assert!(
+                version(&rows(&conn).expect("schema contract fixture")).is_err(),
+                "startup refuses historical view replay under new marker"
+            );
+        }
+    }
+}
