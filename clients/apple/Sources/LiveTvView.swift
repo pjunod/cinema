@@ -1536,9 +1536,9 @@ struct LiveTvGuideGrid: View {
                                     Text(row.channel.guideNumber).font(LiveTvType.secondary.weight(.semibold))
                                     Text(row.channel.guideName).font(LiveTvType.badge)
                                         .foregroundStyle(Palette.muted).lineLimit(1)
-                                    // Clipped at the column edge, as on the web, rather
-                                    // than squeezed into ellipses one badge at a time.
+                                    #if !os(tvOS)
                                     LiveTvFormatBadges(channel: row.channel).fixedSize()
+                                    #endif
                                 }
                                 .frame(width: max(1, dimensions.channelColumnWidth - 12
                                     - (row.logo == nil ? 0 : Double(LiveTvGridMetrics.stationChipWidth + LiveTvGridMetrics.stationChipGap))),

@@ -599,20 +599,25 @@ lineup (126.99 seconds), with visible focus throughout and Back returning to
 the root tab. Later faster-input checks caught a redundant scroll resetting
 the viewport, and mixed-duration checks prompted the stable time anchor. The
 final guide leaves completed native moves alone, reserves an opaque heading
-outside the scroll content, and clips channel metadata to its own column.
+outside the scroll content, and keeps channel labels inside their own column. Physical screenshots exposed
+clipped diagnostic badges; TV guide rows now show station identity only, with
+technical formats retained in stream information.
 The required suite now includes both full-lineup guide journeys. Failed
 attempts remain retained; neither missing tests nor skipped journeys qualify.
 
-**Acceptance remains open:** repeat the final version on the physical
-77-channel lineup. Additional fullscreen-guide open/Back and Up/Close checks caught requests
+**Physical acceptance:** the final saved-account device repeat passes all
+77 channels down and up, visible focus, a three-second response bound per
+step, no future-programme drift and Back to the root tab (135.38 seconds).
+First/last-row captures were inspected; a final visual cleanup removes codec
+badges clipped inside the channel column. Additional fullscreen-guide open/Back and Up/Close checks caught requests
 being sent to the covered browser instead of the mounted player focus owner.
 The player controls and guide Close now own those requests inside the cover.
 The extended Live playback journey passes both Back and Up/Close, reporting,
 a two-second bound for Back-to-hidden-video (shorter than auto-hide), and
 return to the original channel with exactly one tuner session. Its retained
 native session takes 123.53 seconds. More now explicitly owns its Back; relying
-on native sheet dismissal had left the next playback Back unhandled. R07 and whole-app promotion remain blocked pending these
-checks and the combined 28-journey repeat.
+on native sheet dismissal had left the next playback Back unhandled. The combined 28-journey repeat and mandatory promotion gate remain open;
+this device result does not close the remaining whole-app acceptance matrix.
 
 ## 6. Proposed renderings — consistent interaction before decoration
 
