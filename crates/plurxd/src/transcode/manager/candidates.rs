@@ -1543,6 +1543,7 @@ impl TranscodeManager {
         CandidateExecutionContext {
             catalog_query: None,
             prepared_processing: None,
+            ordinary_request: None,
             retained_output: None,
             canonical_caps: None,
             selected_candidate: candidate.clone(),

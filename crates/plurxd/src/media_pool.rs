@@ -512,6 +512,20 @@ pub(crate) fn create_advisory_deadline(maximum: Duration) -> tokio::time::Instan
         .unwrap_or_else(|_| deadline_after(maximum))
 }
 
+/// The deadline of an optional enhancement of a start that is already
+/// resolved, such as processed HDR qualification: [`advisory_share`] of the
+/// create budget left when the enhancement begins, at most `maximum`. The
+/// ordinary start, its admissibility, catalog, placement and durable writes
+/// keep at least half of what remained, whatever the enhancement spends.
+/// Deliberately not the memoized [`create_advisory_deadline`], which the same
+/// create's advisory-evidence reads share. One `maximum` window outside a
+/// create.
+pub(crate) fn create_enhancement_deadline(maximum: Duration) -> tokio::time::Instant {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| advisory_share(budget.deadline, maximum))
+        .unwrap_or_else(|_| deadline_after(maximum))
+}
+
 /// The source link identity this create already fenced, if `matches` accepts
 /// it. `None` outside a create.
 pub(crate) fn create_source_link(
@@ -2536,6 +2550,39 @@ mod tests {
         // Outside any create the free function is a no-op.
         mark_create_phase("outside");
         assert!(!budget.phases().contains("outside"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn enhancement_deadline_leaves_the_create_at_least_half_of_what_remains() {
+        let budget = CreateStartupBudget::new(10_000);
+        let create_deadline = budget.deadline;
+        budget
+            .scope(async move {
+                // Spent 4 s on the ordinary start: 6 s remain, so the
+                // enhancement gets 3 s, not its 8 s maximum.
+                tokio::time::advance(Duration::from_secs(4)).await;
+                let now = tokio::time::Instant::now();
+                let deadline = create_enhancement_deadline(Duration::from_secs(8));
+                assert_eq!(deadline - now, Duration::from_secs(3));
+                assert!(create_deadline - deadline >= Duration::from_secs(3));
+                // The maximum binds when half of what remains exceeds it.
+                let short = create_enhancement_deadline(Duration::from_millis(500));
+                assert_eq!(short - now, Duration::from_millis(500));
+                // It is not the memoized advisory-evidence window: that one
+                // is minted once and keeps answering the same instant.
+                let advisory = create_advisory_deadline(Duration::from_secs(2));
+                tokio::time::advance(Duration::from_secs(2)).await;
+                assert_eq!(advisory, create_advisory_deadline(Duration::from_secs(2)));
+                let later = create_enhancement_deadline(Duration::from_secs(8));
+                assert_eq!(later - tokio::time::Instant::now(), Duration::from_secs(2));
+            })
+            .await;
+        // Outside a create the enhancement takes one `maximum` window.
+        let now = tokio::time::Instant::now();
+        assert_eq!(
+            create_enhancement_deadline(Duration::from_secs(8)) - now,
+            Duration::from_secs(8)
+        );
     }
 
     #[tokio::test]

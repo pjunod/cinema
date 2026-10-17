@@ -303,6 +303,64 @@
         );
     }
 
+    /// A processed Auto candidate enhances an ordinary start the create has
+    /// already resolved. Nothing that happens to the enhancement afterwards —
+    /// not being admitted by the playback's evidence, the catalog refusing its
+    /// row, or the worker finding its prepared graph gone — may turn that
+    /// start into a refusal: each leaves the ordinary start in place and its
+    /// reason on the plan notes, where the other Dolby Vision decisions are.
+    ///
+    /// A control-flow property of the same `async fn` as the two above, pinned
+    /// where it lives for the same reason.
+    #[test]
+    fn a_processed_candidate_that_cannot_be_adopted_or_consumed_degrades_with_its_reason() {
+        let source = hls_product_source();
+        let qualification = source
+            .split_once(".qualify_processed_hdr10_auto(")
+            .expect("processed qualification call")
+            .1
+            .split_once("crate::media_pool::mark_create_phase(\"processed_qualification\");")
+            .expect("the qualification phase mark")
+            .0;
+        assert!(
+            !qualification.contains("ApiError::"),
+            "no outcome of the enhancement may abort the ordinary start: {qualification}"
+        );
+        assert_eq!(
+            qualification.matches("plan_notes.push(processing_declined_note(").count(),
+            2,
+            "a candidate not adopted and a qualification refused each leave their reason"
+        );
+        assert!(
+            qualification.contains("ordinary_link_source_binding = link_source_binding.take();"),
+            "the ordinary candidate's link binding is kept for a dispatch that degrades"
+        );
+        let degraded = source
+            .split_once("    let Some((owner_node_id, info, guard, local_serving_generation, degraded_processing)) =")
+            .expect("the dispatch result carries the worker's degrade reason")
+            .1
+            .split_once("    if owner_node_id == state.node_id {")
+            .expect("the activation that follows dispatch")
+            .0;
+        for restored in [
+            "plan_notes.push(processing_declined_note(&reason));",
+            "request = ordinary;",
+            "link_source_binding = ordinary_link_source_binding.take();",
+            "remote_request.candidate_catalog =",
+            "remote_request.candidate_id = request",
+            "remote_request.request = worker_request;",
+        ] {
+            assert!(
+                degraded.contains(restored),
+                "a degraded dispatch answers and records the ordinary request: {restored}"
+            );
+        }
+        assert_eq!(
+            super::create::processing_declined_note("the graph expired"),
+            "Dolby Vision processing declined: the graph expired"
+        );
+    }
+
     /// The reservation is a control-flow property of one `async fn` that needs
     /// a store, a transcode manager and an authenticated owner to reach, so
     /// nothing executes it. Pin it where it lives instead: reverting the

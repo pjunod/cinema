@@ -27,6 +27,7 @@ impl TranscodeManager {
                 processed_dv_profile: encoding
                     .filter(|encoding| encoding.preserves_processed_dv())
                     .map(|_| 8),
+                degraded_processing: None,
                 retained_output: facts.response_owner.retained_output_facts(),
                 audio_delivery: facts.audio_delivery,
                 playlist_url: format!("/api/v1/hls/{}/index.m3u8", recovered.start.session_id),
@@ -59,6 +60,7 @@ impl TranscodeManager {
         let encoder = *session.encoder_label.lock().await;
         Some(StartInfo {
             processed_dv_profile: None,
+            degraded_processing: None,
             retained_output: None,
             audio_delivery: session.audio_delivery.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),

@@ -739,6 +739,13 @@ pub(crate) struct PlanReview {
     pub mismatched: bool,
 }
 
+/// The plan note a declined or degraded processed HDR candidate leaves on the
+/// start it fell back to: the decision is reported where the other Dolby
+/// Vision decisions of a create are, next to `delivered_dynamic_range`.
+pub(super) fn processing_declined_note(reason: &str) -> String {
+    format!("Dolby Vision processing declined: {reason}")
+}
+
 /// Put the reconciled plan onto the request that will actually be built, and
 /// hand back the notes that explain it.
 ///
@@ -3054,6 +3061,9 @@ async fn create_with_purpose_inner(
     // The pre-start half reuses the source fence this create's advisory reads
     // already took (one fence per request); the post-acceptance half below
     // fences the source again, because its whole point is to see a change.
+    // The ordinary candidate's link binding, kept while a processed candidate
+    // replaces it, so a dispatch that degrades back restores the right one.
+    let mut ordinary_link_source_binding = None;
     let mut link_source_binding = if candidate_auto_policy {
         if let (Some(identity), Some(source), Some(context), Some(route)) = (
             identity.as_ref(),
@@ -3094,7 +3104,7 @@ async fn create_with_purpose_inner(
         })));
     }
     let fingerprint = purpose.bind_policy(&mut request, resolved.intent_fingerprint)?;
-    let plan_notes = resolved.plan_notes;
+    let mut plan_notes = resolved.plan_notes;
     let native_subtitles = resolved.native_subtitles;
     let native_subtitle = resolved.native_subtitle;
     let now_ms = unix_ms();
@@ -3511,51 +3521,80 @@ async fn create_with_purpose_inner(
                         )
                         .await;
                     }
-                    if admitted
+                    // The processed candidate is an enhancement of the
+                    // ordinary start already resolved above. Whatever keeps it
+                    // from being adopted here leaves that start in place and
+                    // is reported with it, like every other declined
+                    // qualification.
+                    let adopted = if !admitted
                         .iter()
                         .any(|admitted| admitted.id == candidate.id && admitted.playable())
                     {
-                        let context = processed.candidate_context.as_ref().ok_or_else(|| {
-                            ApiError::ServiceUnavailable("qualified HDR context missing".into())
-                        })?;
-                        if let Some(catalog) = quality_catalog.as_mut() {
-                            upsert_processed_worker_candidate(
-                                catalog,
-                                crate::media_pool::WorkerQualityCandidate {
-                                    node_id: state.node_id.clone(),
-                                    candidate: candidate.clone(),
-                                    binding: context.planning_binding.clone(),
-                                    partial: false,
-                                    dispatch_supported: true,
-                                },
-                            )
-                            .map_err(|reason| ApiError::Conflict(reason.into()))?;
-                        }
-                        processed.quality_catalog = quality_catalog
+                        Err("the processed candidate was not admitted by the recovery \
+                             and link evidence of this playback"
+                            .to_owned())
+                    } else {
+                        let context = processed
+                            .candidate_context
                             .as_ref()
-                            .map(|catalog| Arc::new(catalog.clone()));
-                        state.transcode.remember_processed_candidate(&processed);
-                        height = i64::from(candidate.target_height);
-                        candidate_route = Some(candidate.route);
-                        link_source_binding = if let Some(identity) = identity.as_ref() {
-                            link_receipts::request_binding_until(
-                                identity,
-                                source,
-                                candidate.recipe_digest,
-                                candidate.route,
-                                advisory,
-                            )
-                            .await
-                        } else {
-                            None
-                        };
-                        request = processed;
+                            .ok_or_else(|| "qualified HDR context missing".to_owned());
+                        match context {
+                            Ok(context) => match quality_catalog.as_mut() {
+                                Some(catalog) => upsert_processed_worker_candidate(
+                                    catalog,
+                                    crate::media_pool::WorkerQualityCandidate {
+                                        node_id: state.node_id.clone(),
+                                        candidate: candidate.clone(),
+                                        binding: context.planning_binding.clone(),
+                                        partial: false,
+                                        dispatch_supported: true,
+                                    },
+                                )
+                                .map_err(|reason| {
+                                    format!("the quality catalog refused the candidate: {reason}")
+                                }),
+                                None => Ok(()),
+                            },
+                            Err(reason) => Err(reason),
+                        }
+                    };
+                    match adopted {
+                        Ok(()) => {
+                            processed.quality_catalog = quality_catalog
+                                .as_ref()
+                                .map(|catalog| Arc::new(catalog.clone()));
+                            state.transcode.remember_processed_candidate(&processed);
+                            height = i64::from(candidate.target_height);
+                            candidate_route = Some(candidate.route);
+                            ordinary_link_source_binding = link_source_binding.take();
+                            link_source_binding = if let Some(identity) = identity.as_ref() {
+                                link_receipts::request_binding_until(
+                                    identity,
+                                    source,
+                                    candidate.recipe_digest,
+                                    candidate.route,
+                                    advisory,
+                                )
+                                .await
+                            } else {
+                                None
+                            };
+                            request = processed;
+                        }
+                        Err(reason) => {
+                            tracing::warn!(target: "plurxd::http::hls", %reason,
+                                "processed Auto candidate not adopted; retaining ordinary candidate");
+                            plan_notes.push(processing_declined_note(&reason));
+                        }
                     }
                 }
             }
             Ok(None) => {}
-            Err(reason) => tracing::warn!(target: "plurxd::http::hls", %reason,
-                "processed Auto qualification refused; retaining ordinary candidate"),
+            Err(reason) => {
+                tracing::warn!(target: "plurxd::http::hls", %reason,
+                    "processed Auto qualification refused; retaining ordinary candidate");
+                plan_notes.push(processing_declined_note(&reason));
+            }
         }
         crate::media_pool::mark_create_phase("processed_qualification");
     }
@@ -3797,10 +3836,11 @@ async fn create_with_purpose_inner(
                     )
                     .await?;
                 let crate::transcode::ClusterSessionStart {
-                    info,
+                    mut info,
                     replacement,
                     created,
                 } = started;
+                let degraded_processing = info.degraded_processing.take();
                 let session_id = info.session_id.clone();
                 let response = RemoteStartResponse::from(info);
                 let guard = Some(if created {
@@ -3833,7 +3873,12 @@ async fn create_with_purpose_inner(
                         "the local worker lost authority before shared-cache pinning",
                     ));
                 }
-                Ok((response, guard, Some(admitted_serving_generation)))
+                Ok((
+                    response,
+                    guard,
+                    Some(admitted_serving_generation),
+                    degraded_processing,
+                ))
             });
             match tokio::time::timeout_at(placement_deadline, &mut start_task).await {
                 Ok(Ok(result)) => result.map_err(|error| session_start_error(id, error)),
@@ -3900,7 +3945,7 @@ async fn create_with_purpose_inner(
                             "media worker {candidate} did not return an activation generation"
                         )));
                     };
-                    Ok((started.info, guard, Some(target_generation)))
+                    Ok((started.info, guard, Some(target_generation), None))
                 }
                 Err(error) => Err(ApiError::ServiceUnavailable(format!(
                     "media worker {candidate} could not start the session: {error:?}"
@@ -3908,11 +3953,11 @@ async fn create_with_purpose_inner(
             }
         };
         match result {
-            Ok((info, guard, serving_generation)) if info.is_valid() => {
-                started = Some((candidate, info, guard, serving_generation));
+            Ok((info, guard, serving_generation, degraded)) if info.is_valid() => {
+                started = Some((candidate, info, guard, serving_generation, degraded));
                 break;
             }
-            Ok((_info, _guard, _serving_generation)) => {
+            Ok((_info, _guard, _serving_generation, _degraded)) => {
                 // The armed guard aborts an invalid local result just as the
                 // peer transport rejects and aborts an invalid remote result.
                 tracing::warn!(
@@ -3934,12 +3979,50 @@ async fn create_with_purpose_inner(
         }
     }
     crate::media_pool::mark_create_phase("dispatch");
-    let Some((owner_node_id, info, guard, local_serving_generation)) = started else {
+    let Some((owner_node_id, info, guard, local_serving_generation, degraded_processing)) = started
+    else {
         return Err(last_error.unwrap_or_else(|| {
             ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
         }));
     };
     request_guard.disarm();
+    if let Some(reason) = degraded_processing {
+        // The worker served the ordinary request the processed candidate
+        // enhanced. Everything written or answered from here describes that
+        // request: its candidate identity, its link binding and its recipe.
+        let ordinary = request
+            .candidate_context
+            .as_ref()
+            .and_then(|context| context.ordinary_request.as_deref())
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::Internal(
+                    "the worker degraded a processed start that carried no ordinary request"
+                        .to_owned(),
+                )
+            })?;
+        plan_notes.push(processing_declined_note(&reason));
+        request = ordinary;
+        candidate_route = request
+            .candidate_context
+            .as_ref()
+            .map(|context| context.selected_candidate.route);
+        link_source_binding = ordinary_link_source_binding.take();
+        remote_request.candidate_catalog = request.candidate_context.as_ref().and_then(|context| {
+            Some(crate::media_sessions::CandidateCatalogContext {
+                caps: context.canonical_caps.clone()?,
+                candidate: context.selected_candidate.clone(),
+                binding: context.planning_binding.clone()?,
+            })
+        });
+        remote_request.candidate_id = request
+            .candidate_context
+            .as_ref()
+            .map(|context| context.candidate_id);
+        let mut worker_request = request.clone();
+        worker_request.request_id = Some(incarnation_id.clone());
+        remote_request.request = worker_request;
+    }
     if !ingress_serving_authority.is_current(ingress_serving_generation) {
         return Err(ApiError::ServiceUnavailable(
             "the ingress node lost serving authority during worker placement".to_owned(),

@@ -5277,6 +5277,7 @@ mod tests {
         let incarnation = uuid::Uuid::new_v4().to_string();
         let info = crate::transcode::StartInfo {
             processed_dv_profile: None,
+            degraded_processing: None,
             audio_delivery: prepared.request().audio_delivery.clone(),
             retained_output: None,
             session_id: session.clone(),

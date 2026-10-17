@@ -508,6 +508,12 @@ pub struct CandidateExecutionContext {
     /// Durable/remote reconstruction never carries this process-local credit.
     pub(crate) prepared_processing:
         Option<Arc<PreparedCandidateOnce<crate::vodserve::PreparedRootAdmission>>>,
+    /// The already-resolved ordinary request a processed Auto candidate
+    /// enhances. Dispatch serves it, and reports why, when the prepared
+    /// processing cannot be consumed; a processed candidate the client named
+    /// itself carries none and is refused instead. Process-private, like
+    /// `prepared_processing`: durable/remote reconstruction never carries it.
+    pub(crate) ordinary_request: Option<Box<SessionRequest>>,
     /// Private exact artifact chosen using a live measured-cost proof. The
     /// actual dispatch reacquires it; this is never client-supplied authority.
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
@@ -1256,6 +1262,10 @@ pub struct StartInfo {
     /// Profile of an admitted, prepared processed presentation. Independent
     /// of the physical transcode kind and its PQ base grade; never source tags.
     pub(crate) processed_dv_profile: Option<u8>,
+    /// The request was dispatched with a processed Auto candidate that could
+    /// not be consumed, and this session serves the ordinary request it
+    /// enhanced instead; the reason, for the create's plan notes.
+    pub(crate) degraded_processing: Option<String>,
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
     pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,
