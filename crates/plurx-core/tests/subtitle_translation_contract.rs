@@ -81,6 +81,24 @@ async fn durable_preparation_stop_and_exact_replay_never_resurrect_work() {
         job.supported_payload().expect("typed payload").kind(),
         JobKind::SubtitleTranslationPrepare
     );
+    // The queued preparation is observed as a JSON object. A bare scalar
+    // subquery would hand the outer object a string, hiding the current job.
+    use plurx_core::store::subtitle_translation_read::{TranslationQuery, TranslationRead};
+    let observed = store
+        .read_subtitle_translation(TranslationRead {
+            user_id: 1,
+            now_ms: 1050,
+            query: TranslationQuery::Operation {
+                operation_id: op.clone(),
+            },
+        })
+        .await
+        .expect("operation read");
+    assert_eq!(observed[0]["active_job"]["job_id"], jobid.as_str());
+    assert_eq!(
+        observed[0]["active_job"]["kind"],
+        "subtitle_translation_prepare"
+    );
     let stopped = store
         .mutate_subtitle_translation(mutate(
             TranslationAction::Stop {

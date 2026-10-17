@@ -527,6 +527,29 @@ fn timestamp_ms(value: &str) -> Result<i64, StoreError> {
         .ok_or_else(invalid)
 }
 
+/// Cues this core owns, plus how many valid cues the recognizer returned for
+/// the whole decoded window (core and context).
+#[cfg(unix)]
+struct OwnedCues {
+    cues: Vec<TranslationCue>,
+    recognized: usize,
+}
+
+/// A signal-bearing core's result. An empty recognizer result over decoded
+/// speech has not established silence, so it stays a failure. When the
+/// recognizer did return cues but every one lies in this window's left or
+/// right context, it attributed that speech to the neighbouring cores, whose
+/// own windows cover it as their core; this core owns no cue, which is a valid
+/// empty result. At the source's first and last core there is no context on
+/// the outer side, so nothing can be attributed past the file's ends.
+#[cfg(unix)]
+fn signal_core_cues(owned: OwnedCues) -> Result<Vec<TranslationCue>, StoreError> {
+    if owned.recognized == 0 {
+        return Err(failure("output_invalid"));
+    }
+    Ok(owned.cues)
+}
+
 /// Intersect time domains only. Complete cue text is retained literally; this
 /// never promises word alignment or silently deduplicates repeated speech.
 #[cfg(unix)]
@@ -538,7 +561,7 @@ fn owned_cues(
     decoded_samples: i64,
     core_begin_ms: i64,
     core_end_ms: i64,
-) -> Result<Vec<TranslationCue>, StoreError> {
+) -> Result<OwnedCues, StoreError> {
     if vtt.len() > 256 * 1024 || !vtt.starts_with("WEBVTT\n") || vtt.contains('\r') {
         return Err(failure("output_invalid"));
     }
@@ -556,6 +579,7 @@ fn owned_cues(
     }
     let mut previous_start = None;
     let mut cues = Vec::new();
+    let mut recognized = 0usize;
     let mut blocks = vtt.split("\n\n");
     if blocks.next() != Some("WEBVTT") {
         return Err(failure("output_invalid"));
@@ -591,6 +615,7 @@ fn owned_cues(
         {
             return Err(failure("output_invalid"));
         }
+        recognized += 1;
         let absolute = |ms: i64| {
             ms.checked_mul(RATE / 1_000)
                 .and_then(|sample| anchor_sample.checked_add(sample))
@@ -618,7 +643,7 @@ fn owned_cues(
     // An actually decoded digital-silent core may use empty coverage, but an
     // empty recognizer result over speech is not established silence. The
     // caller owns that distinction and must not turn failures into coverage.
-    Ok(cues)
+    Ok(OwnedCues { cues, recognized })
 }
 
 #[cfg(unix)]
@@ -870,7 +895,7 @@ async fn infer_window(
         let vtt = std::str::from_utf8(&bytes)
             .map_err(|_| failure("output_invalid"))?
             .replace("\r\n", "\n");
-        cues = owned_cues(
+        cues = signal_core_cues(owned_cues(
             &vtt,
             asset_id,
             core_index,
@@ -878,10 +903,7 @@ async fn infer_window(
             decoded.clock.samples,
             window.core_begin_ms,
             window.core_end_ms,
-        )?;
-        if cues.is_empty() {
-            return Err(failure("output_invalid"));
-        }
+        )?)?;
     }
     crate::subtitle_transcription::managed_artifacts_unchanged(engine, model)?;
     if std_file_identity(&decoded.file).ok() != Some(decoded.identity) {
@@ -1206,7 +1228,8 @@ mod tests {
             20_000,
             40_000,
         )
-        .expect("test setup");
+        .expect("test setup")
+        .cues;
         assert_eq!(cues.len(), 1);
         assert_eq!((cues[0].start_ms, cues[0].end_ms), (20_000, 22_000));
         assert_eq!(cues[0].text, "A & B <b> literal");
@@ -1238,7 +1261,9 @@ mod tests {
     fn cue_overlap_is_ordered_but_no_text_deduplication_is_fabricated() {
         let asset = "ab".repeat(32);
         let vtt = "WEBVTT\n\n00:00:00.000 --> 00:00:03.000\nrepeat\n\n00:00:02.000 --> 00:00:04.000\nrepeat\n\n00:00:04.000 --> 00:00:05.000\noutside\n\n";
-        let cues = owned_cues(vtt, &asset, 0, 0, 4 * RATE, 0, 4_000).expect("test setup");
+        let cues = owned_cues(vtt, &asset, 0, 0, 4 * RATE, 0, 4_000)
+            .expect("test setup")
+            .cues;
         assert_eq!(cues.len(), 2);
         assert!(cues.iter().all(|cue| cue.text == "repeat"));
         let decreasing = vtt.replace("00:00:02.000 -->", "00:00:00.000 -->").replace(
@@ -1246,6 +1271,25 @@ mod tests {
             "00:00:01.000 --> 00:00:03.000",
         );
         assert!(owned_cues(&decreasing, &asset, 0, 0, 4 * RATE, 0, 4_000).is_err());
+    }
+
+    #[test]
+    fn context_attributed_speech_leaves_core_empty_but_silent_recognizer_still_fails() {
+        let asset = "ab".repeat(32);
+        // The last short core of a 61.14 s source: decoded window 55.0-61.14 s,
+        // core 60.0-61.14 s. The recognizer dated the closing sentence 0-3.48 s
+        // into the window, inside the left context the previous core owns.
+        let tail = "WEBVTT\n\n00:00:00.000 --> 00:00:03.480\n normally in combination with practical experience\n\n";
+        let owned = owned_cues(tail, &asset, 2, 55 * RATE, 98_240, 60_000, 61_140)
+            .expect("valid recognizer output");
+        assert_eq!((owned.cues.len(), owned.recognized), (0, 1));
+        assert!(signal_core_cues(owned)
+            .expect("context-owned speech")
+            .is_empty());
+        let silent = owned_cues("WEBVTT\n\n", &asset, 2, 55 * RATE, 98_240, 60_000, 61_140)
+            .expect("well-formed empty output");
+        assert_eq!(silent.recognized, 0);
+        assert!(signal_core_cues(silent).is_err());
     }
 
     fn wav(samples: &[i16]) -> std::fs::File {
