@@ -1335,6 +1335,8 @@ paths = [
   "scripts/paperwork",
   "scripts/outline",
   "scripts/quiet",
+  "scripts/ci-failures",
+  "scripts/ci-failures.fleet.example.json",
   "scripts/ci-flake-report",
   "scripts/publish-badge",
   "scripts/ripwire",
