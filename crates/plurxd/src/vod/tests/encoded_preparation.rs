@@ -87,7 +87,7 @@ async fn encoded_preparation_consumer(with_live_pressure: bool) {
     drop(heavy); active.finish().await;
     assert_eq!(store.background_job(&job.id).await.expect("job").expect("row").state, JobState::Succeeded);
     let encoding = manager.resolve_encoded_output_test(&selected, &resolved_file).await.expect("fresh resolver");
-    serve.try_create(VodRecipeRequest { soundtrack: None, companion: None, request: &selected, encoding: Some(encoding),
+    serve.try_create(VodRecipeRequest { root_admission: None, soundtrack: None, companion: None, request: &selected, encoding: Some(encoding),
         retained_capture: RetainedOutputCapture::New, measured_candidate: None }, &resolved_file, &settings(),
         VodAttribution { user_name: "user", item_title: "encoded", supersession_user: "user" }, "later-encoded".into())
         .await.expect("compatible new attachment");
@@ -379,7 +379,7 @@ async fn automatic_encoded_canonical_carrier_survives_claim_completion_and_new_a
     };
     serve
         .try_create(
-            VodRecipeRequest { soundtrack: None, companion: None,
+            VodRecipeRequest { root_admission: None, soundtrack: None, companion: None,
                 request: &selected,
                 encoding: Some(encoding),
                 retained_capture: RetainedOutputCapture::New,

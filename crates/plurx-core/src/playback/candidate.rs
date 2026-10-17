@@ -221,6 +221,10 @@ pub struct QualityCandidate {
     /// Descriptive server-resolved output codec; the exact recipe remains authoritative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planned_codec: Option<String>,
+    /// Descriptive preference for a server-qualified processed HDR10 recipe.
+    /// This marker carries no execution or effective-processing authority.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub processed_hdr10: bool,
     /// False only for exact compatible legacy cache recipes; identity remains distinct.
     #[serde(
         default = "normalized_geometry_default",
@@ -265,6 +269,10 @@ impl QualityCandidate {
             && self.width > 0
             && self.height > 0
             && self.decoder_compatible
+            && (!self.processed_hdr10
+                || (self.route == CandidateRoute::Encode
+                    && self.grade == crate::transcode::OutputGrade::Hdr10
+                    && self.planned_codec.as_deref() == Some("hevc")))
             && (self.complete_cache || self.sustainable)
     }
 }
@@ -319,10 +327,14 @@ pub fn select_quality_candidate(
                 _ => true,
             }
     };
+    let prefer_processed = candidates
+        .iter()
+        .filter(fits_link)
+        .any(|candidate| candidate.processed_hdr10);
     if let Some(original) = candidates
         .iter()
         .filter(fits_link)
-        .filter(|candidate| candidate.route != CandidateRoute::Encode)
+        .filter(|candidate| !prefer_processed && candidate.route != CandidateRoute::Encode)
         .max_by_key(|candidate| u64::from(candidate.width) * u64::from(candidate.height))
     {
         return Some(original);
@@ -331,6 +343,7 @@ pub fn select_quality_candidate(
         .iter()
         .filter(fits_link)
         .filter(|candidate| candidate.route == CandidateRoute::Encode)
+        .filter(|candidate| !prefer_processed || candidate.processed_hdr10)
         .collect();
     eligible.sort_by_key(|candidate| {
         (
@@ -385,6 +398,7 @@ mod policy_regressions {
     ) -> QualityCandidate {
         let recipe_digest = [height as u8; 32];
         QualityCandidate {
+            processed_hdr10: false,
             id: CandidateId::for_recipe_digest(recipe_digest),
             recipe_digest,
             route,
@@ -439,6 +453,32 @@ mod policy_regressions {
             2160
         );
     }
+    #[test]
+    fn processed_hdr10_preference_requires_exact_playable_shape_and_production() {
+        let original = candidate(2160, CandidateRoute::Remux, true, false);
+        let mut processed = candidate(720, CandidateRoute::Encode, true, false);
+        processed.processed_hdr10 = true;
+        processed.grade = crate::transcode::OutputGrade::Hdr10;
+        processed.planned_codec = Some("hevc".into());
+        let picked = |processed: QualityCandidate| {
+            select_quality_candidate(&[original.clone(), processed], aspect(), None, None)
+                .expect("ordinary original remains playable")
+                .height
+        };
+        assert_eq!(picked(processed.clone()), 720);
+        let mut unavailable = processed.clone();
+        unavailable.sustainable = false;
+        assert_eq!(picked(unavailable), 2160);
+        let mut incompatible = processed.clone();
+        incompatible.decoder_compatible = false;
+        assert_eq!(picked(incompatible), 2160);
+        let mut wrong_codec = processed.clone();
+        wrong_codec.planned_codec = Some("h264".into());
+        assert_eq!(picked(wrong_codec), 2160);
+        processed.grade = crate::transcode::OutputGrade::Sdr;
+        assert_eq!(picked(processed), 2160);
+    }
+
     #[test]
     fn compatible_original_keeps_priority_with_unknown_peak() {
         let mut original = candidate(2160, CandidateRoute::Remux, true, false);

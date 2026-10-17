@@ -1430,6 +1430,7 @@ fn auto_candidate_parser_floor_remote_context_is_retained_but_not_executed() {
         }))
         .expect("retained capabilities"),
         candidate: plurx_core::playback::candidate::QualityCandidate {
+            processed_hdr10: false,
             id: candidate_id,
             recipe_digest,
             route: plurx_core::playback::candidate::CandidateRoute::Encode,

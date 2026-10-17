@@ -368,7 +368,12 @@ class LinuxDolbySdkCase(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         lock = json.loads((root / "scripts/linux-video-ffmpeg-sdk-sources.json").read_text())
         for row in lock["sources"].values():
-            assert not row["url"].endswith(".git")
+            if row.get("archive_acquisition"):
+                assert row["kind"] == "git"
+                assert row["archive_acquisition"] == {"kind": "git-archive", "commit": row["commit"]}
+                assert len(row["commit"]) == 40 and all(c in "0123456789abcdef" for c in row["commit"])
+            else:
+                assert row["url"].endswith((".tar.gz", ".tar.xz", ".tar.bz2", ".tgz")) or "/tar.gz/" in row["url"] or "/legacy.tar.gz/" in row["url"]
             if row.get("historical_archive_equivalence"):
                 assert row["source_tree_sha256"] == row["historical_archive_equivalence"]["normalized_tree_sha256"]
         assert {module["path"] for module in lock["sources"]["freetype"]["submodules"]} == {"subprojects/dlg"}

@@ -266,7 +266,7 @@ function markPlaybackControlSeekExecuted(p,targetSec,v){
   pending.playedSampleMs=0;
   if(!v) try{v=document.getElementById("video");}catch(e){}
   pending.element=v;
-  if(p.wantsPlayback===false&&p.hlsStartup
+  if(p.hlsStartup&&(p.wantsPlayback===false||p.hlsStartup.pausedSeek?.positioned)
     &&['active','paused'].includes(p.hlsStartup.state))
     resumePausedStartupSeek(v,p,pending);
   watchPlaybackSeekTelemetry(p,pending,v);
@@ -491,7 +491,7 @@ function settlePlaybackControlSeek(v,p,presentedMediaTime,presentedFrameSequence
   pending.localVodSeekCleanup?.();
   finishPlaybackSeekTelemetry(p,pending,provenance==="positioned"?"seek_positioned":"seek_resumed");
   p.controlSeek=null;
-  pending.pausedStartupCleanup?.(provenance!=="positioned");
+  pending.pausedStartupCleanup?.(provenance!=="positioned",false,provenance==="positioned");
   notifyPlaybackControl();
   return true;
 }
