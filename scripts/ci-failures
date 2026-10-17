@@ -142,6 +142,9 @@ def main() -> int:
     ):
         time.sleep(min(30, max(1, deadline - time.monotonic())))
         tasks = tasks_for(config, sha, args.pages)
+    pending = [t for t in tasks if t.get("status") in ("running", "waiting", "blocked")]
+    if args.wait and (pending or not tasks):
+        print(f"still running after {args.wait}s: {len(pending)} job(s) not finished")
     if not tasks:
         print(f"no CI jobs found for {sha[:12]} in the newest {args.pages * 50} tasks")
         return 0
@@ -155,7 +158,10 @@ def main() -> int:
     for task in failed:
         print(f"\n══ {task['name']} — task {task['id']} ══")
         print(summarize(read_log(config, task["id"]), args.tail, args.max))
-    return 1 if failed else 0
+    if failed:
+        return 1
+    # A wait that ran out is not a pass: `--wait N && merge` must not merge.
+    return 2 if args.wait and pending else 0
 
 
 if __name__ == "__main__":

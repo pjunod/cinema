@@ -454,9 +454,12 @@ class CatalogCase(unittest.TestCase):
                 "scripts/ci-failures",
                 "swarm/builder.txt",
                 "docs/ci/PAPERWORK.md",
+                "tests/operations/doc-size-allowlist.txt",
             ),
         )
         self.assertFalse(tooling["rust"])
+        # Exempt from the cargo gate, and covered by a point, so no release build either.
+        self.assertFalse(tooling["release_build"])
         # The Makefile and the workflows are routing paths: still forced.
         for routing in ("Makefile", ".github/workflows/main-fast-lane.yml"):
             with self.subTest(path=routing):

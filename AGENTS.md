@@ -14,7 +14,9 @@ decides what a session costs. Every agent working here, Claude or GPT:
   about a dozen candidate signatures with paths and lines (~4 KB);
   `scripts/ripwire body '<file>:<symbol>'` prints one function;
   `callers` / `impact` show who depends on it; `pr-context --base origin/main`
-  maps a diff for review. Add `2>/dev/null` to drop its receipt line.
+  maps a diff for review (it refuses a dirty tree — commit or stash first).
+  Its first stderr line is a JSON receipt; refusals also arrive on stderr with
+  a nonzero exit, so don't discard stderr wholesale.
   `make hooks` installs it (`scripts/ripwire setup` does it alone). Its graph
   is heuristic — an empty answer does not prove absence — so confirm in
   source before you conclude. [docs/ci/RIPWIRE.md](docs/ci/RIPWIRE.md).

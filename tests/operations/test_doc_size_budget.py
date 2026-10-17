@@ -64,9 +64,29 @@ def tracked_docs() -> dict[str, int]:
     return sizes
 
 
+# Docs a tool or a contract test grows as a matter of course. Capping them
+# would turn routine work — a new route, a release cut, moving STATUS.md
+# sections into a folder history, regenerating a contract table, appending a
+# reconciliation row — into a budget failure. Their heads (where required)
+# still apply; their size is governed by the tool that owns them.
+TOOL_MAINTAINED = (
+    "docs/API.md",                                  # test_api_doc_routes: every route documented
+    "docs/clients/APPLE-CLIENT-PARITY.md",          # scripts/release-cut version claims
+    "docs/clients/PLAYER-INPUT-CONTRACT.md",        # scripts/player-contract-table
+    "docs/clients/PLAYBACK-SURFACE-CONTRACT.md",    # scripts/player-contract-table
+    "docs/clients/WEB-SHELL-LAYOUT.md",             # one row per web asset, by test
+    "docs/DECODER_SELECTION_RECOVERY_STATUS.md",    # append-only reconciliation ledger
+)
+
+
 def is_exempt(path: str) -> bool:
     parts = path.split("/")
-    return "evidence" in parts[1:-1] or parts[1:2] == ["archive"]
+    return (
+        "evidence" in parts[1:-1]
+        or parts[1:2] == ["archive"]
+        or parts[-1] == "STATUS-HISTORY.md"         # where STATUS.md sections move, by rule
+        or path in TOOL_MAINTAINED
+    )
 
 
 def read_allowlist() -> dict[str, int]:
@@ -107,8 +127,9 @@ class DocSizeBudget(unittest.TestCase):
         )
         self.assertEqual(
             [], over,
-            "These docs are on the shrink-only list and have grown past their ceiling; "
-            "trim it or split it:\n"
+            "These docs have grown past their ceiling (current size plus room for "
+            "ordinary edits). Trim or split the doc, or move detail to a sibling doc; "
+            "do not raise the ceiling:\n"
             + "\n".join(f"  {path}: {size} bytes, ceiling {ceiling}" for path, size, ceiling in over),
         )
 

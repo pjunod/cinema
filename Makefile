@@ -1878,8 +1878,8 @@ hooks: ## Install the pre-commit (lint) and pre-push (paperwork) hooks, and Ripw
 	  install -m 0755 scripts/pre-commit "$$hooks/pre-commit"; \
 	  install -m 0755 scripts/pre-push "$$hooks/pre-push"; \
 	  echo "Installed $$hooks/pre-commit (make precommit-check) and $$hooks/pre-push (scripts/paperwork)."
-	@if scripts/ripwire setup >/dev/null 2>&1; then echo "Ripwire is installed (scripts/ripwire find '<words>')."; \
-	  else echo "Ripwire setup failed (offline?); run scripts/ripwire setup when online."; fi
+	@if perl -e 'alarm 30; exec @ARGV' scripts/ripwire setup >/dev/null 2>&1; then echo "Ripwire is installed (scripts/ripwire find '<words>')."; \
+	  else echo "Ripwire setup failed or took over 30 s (offline?); run scripts/ripwire setup when online."; fi
 	@echo "Bypass one run with 'git commit --no-verify' or 'git push --no-verify'."
 
 ## ---- apple clients -----------------------------------------------------
