@@ -1,0 +1,28 @@
+#!/bin/bash
+# Continuous-quality campaign against the INSTALLED shipping app (tv.plurx.app).
+# Run inside the logged-in GUI session (codesigning needs the login keychain).
+#   run DEVICE_ID TARGET_ORIGIN PUBLIC_HOST PORT TITLE PHASE OUT_DIR [ios|tvos]
+# PHASE: home (list a library page), probe, campaign (15 manual + Auto), auto (Auto only).
+set -uo pipefail
+DEV=$1 TARGET=$2 PUBLIC=$3 PORT=$4 TITLE=$5 PHASE=$6 OUT=$7 OS=${8:-ios}
+HERE=$(cd "$(dirname "$0")" && pwd)
+: "${PLURX_DEVELOPMENT_TEAM:?set PLURX_DEVELOPMENT_TEAM to your Apple team identifier}"
+SCHEME=CQShippingiOS; DEST=generic/platform=iOS
+[ "$OS" = tvos ] && SCHEME=CQShippingtvOS && DEST=generic/platform=tvOS
+BUILD=$OUT/build; mkdir -p "$OUT"
+LOG=$OUT/$PHASE.log
+cd "$HERE"
+xcodegen generate --spec project.yml --project "$BUILD" >/dev/null
+xcodebuild build-for-testing -project "$BUILD/CQShipping.xcodeproj" -scheme $SCHEME -destination $DEST \
+  -derivedDataPath "$BUILD/dd" -allowProvisioningUpdates > "$OUT/build.log" 2>&1 || { echo "build failed: $OUT/build.log"; exit 1; }
+node "$HERE/proxy.js" "$TARGET" "$PORT" "$PUBLIC" "$OUT" "$LOG" > "$OUT/proxy.log" 2>&1 &
+PROXY=$!
+trap 'kill -TERM $PROXY 2>/dev/null; wait $PROXY 2>/dev/null; mv "$OUT/shaper-evidence.json" "$OUT/$PHASE-shaper-evidence.json" 2>/dev/null' EXIT
+for _ in $(seq 50); do [ -f "$OUT/control.json" ] && break; sleep 0.2; done
+export TEST_RUNNER_CQ_PROXY=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['proxy'])" "$OUT/control.json")
+export TEST_RUNNER_CQ_PHASE=$PHASE TEST_RUNNER_CQ_TITLE=$TITLE
+xcodebuild test-without-building -project "$BUILD/CQShipping.xcodeproj" -scheme $SCHEME -destination id=$DEV \
+  -derivedDataPath "$BUILD/dd" -resultBundlePath "$OUT/$PHASE-$(date +%H%M%S).xcresult" > "$LOG" 2>&1
+STATUS=$?
+echo "EXIT=$STATUS" >> "$LOG"
+exit $STATUS

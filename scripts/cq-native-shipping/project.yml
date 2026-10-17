@@ -1,0 +1,24 @@
+name: CQShipping
+options:
+  bundleIdPrefix: tv.plurx.cqqual
+  deploymentTarget: {iOS: "18.0", tvOS: "18.0"}
+settings:
+  base: {DEVELOPMENT_TEAM: ${PLURX_DEVELOPMENT_TEAM}, CODE_SIGN_STYLE: Automatic, GENERATE_INFOPLIST_FILE: YES, SWIFT_VERSION: "6.0", SWIFT_STRICT_CONCURRENCY: minimal}
+targets:
+  CQShippingiOS:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [Tests]
+    settings: {base: {PRODUCT_BUNDLE_IDENTIFIER: tv.plurx.cqqual.ios}}
+  CQShippingtvOS:
+    type: bundle.ui-testing
+    platform: tvOS
+    sources: [Tests]
+    settings: {base: {PRODUCT_BUNDLE_IDENTIFIER: tv.plurx.cqqual.tvos}}
+schemes:
+  CQShippingiOS:
+    build: {targets: {CQShippingiOS: [test]}}
+    test: {targets: [CQShippingiOS]}
+  CQShippingtvOS:
+    build: {targets: {CQShippingtvOS: [test]}}
+    test: {targets: [CQShippingtvOS]}

@@ -963,6 +963,7 @@ paths = [
   "scripts/continuous-quality-caption-fixture",
   "scripts/continuous-quality-subtitles",
   "scripts/continuous-quality-lab.mjs",
+  "scripts/cq-native-shipping/**",
   "scripts/audio-downmix-qualification/**",
   "tests/fixtures/audio-downmix/**",
   "scripts/playback-startup-lab",
