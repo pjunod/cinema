@@ -1,10 +1,11 @@
 # Apple TV navigation — defects, proposed screens and a lasting release contract
 
-**Status:** repairs built; corrected guide, playback and channel navigation installed
-as build 256. The final explicit transport owner passes forty-move and sustained
-edge-input checks, including the ordered whole-app run's Live journey. All
-1,101 tvOS units and iOS compilation pass. Final source-bound qualification and
-the explicitly remaining physical/dynamic-state acceptance are open.
+**Status (2026-10-17):** repairs built and integrated with current main
+(`89d790d2e`); the final guide/playback task (#1138) landed in the effort
+after a green effort gate. Local proof on `cd01fb9`: 1,101 tvOS units and
+28/28 native journeys with zero failures/skips. Main promotion runs on the
+exact integrated candidate. Final saved-account device repeats and the
+explicitly remaining physical/dynamic-state acceptance are open (§8).
 **Written:** 2026-10-15 · **Baseline:** `9eb7f6738647a7e963b17cfb3a2f77a594863c41`
 
 This is the Apple TV follow-up to the [mobile usability audit](MOBILE-UI-USABILITY-AUDIT.md)
@@ -973,7 +974,7 @@ none of the packages is a qualified release merely because it compiles.
 | T2 · Playback presentation | `LiveTvView`, `LibraryChannels`, `PlayerView`, diagnostics | T1 | **Partly proven:** [PR #1110](http://forge.lan:3000/noirr/plurx/pulls/1110). Native future-programme details/Close and current-programme single-session behavior pass; explicit layout change/reopen/Back passes. Library-channel hidden Play/Pause, first-direction reveal, More → Report → Back and session retention now pass. Reports moved inside More. Ordinary movie and Live TV native journeys also pass: hidden picture → reveal → More → Report → Back retains the playback session and returns to the original item/channel. Shared playback now passes initial Pause focus, hidden-picture reveal, selected Quality entry, exact menu/report return and a single retained session. The Shared title also exposes the same focusable About reading panel as local titles, with a native final-paragraph and exact-return assertion. |
 | T3 · Browsing and details | `LibraryView`, `HomeView`, `SearchView`, `DetailView`, `Components` | T1 | **Partly proven:** bounded tools sidebar, identity restoration, explicit Jump loading, episode details and complete synopsis, fixed Search query and recovery. Native full synopsis/Back and unchanged-query Search Retry/result return pass. Full Grid/Rows journeys now pass at 416 and 5,000 titles, including Jump A/M/Z/M, bounded tools access and exact content return. Empty and single-title libraries pass. Eleven focused browsing unit regressions and iOS simulator compilation pass; the synopsis has a visible focus cue. A foreground Home refresh failure now retains cached titles, exposes a reachable Retry and restores the retained title when Retry disappears; the native lifecycle journey passes. |
 | T4 · Secondary screens and visual consistency | DVR, Settings, diagnostics, remotes, theme, info | T1; serialize shared-file work with T2/T3 | **Partly proven:** native Settings quality selection/Back, Help → phone QR report → Advanced → Done/Back, recording details, safe rule cancellation and named manual channel selection pass. DVR title rows span the content region so Down from a middle category cannot hit a gap. Remote pairing revocation and registration reset now pass safe Cancel entry and exact opener return in an ad hoc signed simulator build. The fixture uses the normal saved-server identity and Keychain registration. DVR title scaling and report instruction wrapping are corrected and visually checked after passing native reruns. Saved-connection recovery now exposes Retry and contextual Help while network discovery continues, rather than hiding all actions behind a spinner. A repeated native run first caught the delayed recovery; the corrected run requires Retry within five seconds and preserves the saved sign-in. Final integrated and physical acceptance remain open. |
-| T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | **Awaiting promotion and remaining physical acceptance:** F29; all 28 source-bound native journeys pass at `0c52e0286` with no failures/skips, as do 1,099 unit tests and iOS compilation. The F33 adversarial-review follow-up passes all 1,101 unit tests, iOS compilation and the expanded Live/channel journeys; its final full native run remains required. The refreshed combined candidate still requires its effort and promotion gates. Saved-account physical checks pass on the 491-title library and all 77 guide channels; corrected build 252 is installed. Gestures, accessibility, couch-distance QR and the listed dynamic-state stress cases remain unaccepted. The installed TV correction does not constitute main promotion or complete physical qualification. |
+| T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | **Integrated; promotion in progress, final device repeat open:** F29; all 28 source-bound native journeys and 1,101 tvOS units pass on `cd01fb9` with no failures/skips. Current main merged into the effort on October 17; #1138 landed as `150713637` after effort gate 5329. Earlier saved-account physical checks pass on the 491-title library (build 239) and all 77 guide channels (build 252). The October 17 repeat on build 258 did not reach the product (see the October 17 entry below), so final-candidate device acceptance is not claimed. Gestures, accessibility, couch-distance QR and the listed dynamic-state stress cases remain unaccepted. |
 
 **Integrated development evidence, October 15:** the full 1,037-test tvOS unit
 suite and iOS simulator compilation pass again after Shared About and connection
@@ -1018,6 +1019,35 @@ automation; gestures/holds, VoiceOver, Reduce Motion and couch-distance QR
 scanning remain unaccepted. UIKit hierarchy and SwiftUI view-update warnings
 were retained in the receipt. The final candidate repeat passed in 49.215 seconds with no failures or skips;
 do not confuse that scope with whole-device qualification.
+
+**October 17 integration and device attempt:** effort gate 5322 on `cd01fb9`
+failed only in `effort Rust compile`. The job ran on a `general, high-cpu`
+runner with one Cargo job, produced no output for 59 minutes after
+`plurx-support`, and hit its 60-minute deadline. Main had already moved that
+job to the larger-memory topology queue (`d1cd7235f`). The re-dispatch was
+refused by `validation/qualification.py` because current main was not an
+ancestor of the effort tip. Current main was therefore merged into the effort
+first (`06fd8e7a7`), then into the task (`6fc7e5c9d`). Conflicts were test
+fixtures and documentation only, and main's refinements were kept. The task's
+duplicate 60-minute compiler pin was dropped in favour of main's queue. Local
+checks on the merged tree: tvOS build-for-testing, 199 focused tvOS tests,
+iOS compilation, and 141 operations/validation tests. Gate 5329 then passed
+every job, and #1138 landed with its 17 regression references. #1131 was
+closed as included.
+
+Build 258 (Debug, team-signed) from that tree was installed on the paired
+AppleTV14,1. Both physical runs failed before reaching the product. The
+older `TVPhysicalInputTests` playback journeys launched without the
+`PLURX_TVOS_ORIGIN` that `PlaybackAcceptanceLaunch` requires, so the app
+showed server choice rather than a player. The journeys then pressed Select
+regardless. Choosing a server deliberately writes the origin without a
+bearer, which signed the device out of its real account, and every later
+journey stopped at sign-in. The owner's fresh sign-in was observed in use
+before the same sequence repeated it. This is the F29 stale-physical-test
+risk. `e80b9574a` makes those journeys require their origin, wait for the
+player before any input, and stop at the first failed expectation. No
+product code changed. The final saved-account guide/library/playback repeat
+is still to be run on a signed-in device and is not claimed here.
 
 The development gate's stale source/commit anchors from task consolidation
 were corrected to current code and actual corrective commits. The local
