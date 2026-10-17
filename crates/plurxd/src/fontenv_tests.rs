@@ -654,39 +654,79 @@ async fn a_capture_whose_frozen_rules_diverge_is_refused() {
     assert_eq!(environments_left(&fixture).await, Vec::<PathBuf>::new());
 }
 
-/// Finding 1, the face half. Fontconfig caches a directory's scan keyed on
-/// the directory alone, so a live cache written under a scan-time rule that
-/// no longer exists still names the renamed family; the frozen environment
-/// has its own cache, rescans, and resolves the file's real family. The
-/// rules are the same files, so only the face parity can refuse it.
+/// Finding 1, the face half: corrupt one owned materialisation after its
+/// links exist and before the real producer/Fontconfig probes. A stale live
+/// cache is not portable: some Fontconfig versions rescan rather than reuse
+/// scan-time edits. Keep the live files unchanged and prove the build itself
+/// refuses a frozen entry whose actual faces differ from the live listing.
 #[tokio::test]
 async fn a_capture_whose_frozen_faces_diverge_is_refused() {
     let fixture = fixture();
-    let config = std::fs::read_to_string(&fixture.config).expect("fixture config");
-    let renaming = fixture.base.path().join("renaming.conf");
-    std::fs::write(
-        &renaming,
-        config.replace(
-            "</fontconfig>\n",
-            "  <match target=\"scan\"><edit name=\"family\" mode=\"assign\" binding=\"strong\">\
-             <string>PlurxRenamed</string></edit></match>\n</fontconfig>\n",
-        ),
-    )
-    .expect("renaming config");
-    fc("fc-cache", &live_fc(&renaming), &[]);
-    assert!(
-        fc(
-            "fc-list",
-            &live_fc(&fixture.config),
-            &["--format=%{family}\n"]
-        )
-        .contains("PlurxRenamed"),
-        "the live listing is served from the stale cache"
+    let original = std::fs::canonicalize(&fixture.installed[0]).expect("live font");
+    let live_bytes = std::fs::read(&original).expect("live font bytes");
+    let replacement = std::fs::read(&fixture.spare).expect("distinct spare font");
+    let live_hash = Sha256::digest(&live_bytes);
+    let replacement_hash = Sha256::digest(&replacement);
+    assert_ne!(live_hash, replacement_hash, "the replacement is distinct");
+    let (reached, resume) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
     );
-    let error = refused(&fixture).await;
+    hooks::install(
+        &fixture.runtime,
+        hooks::Hooks {
+            pause: Some((Arc::clone(&reached), Arc::clone(&resume))),
+            ..Default::default()
+        },
+    );
+    let corrupt = async {
+        reached.notified().await;
+        let environments = std::fs::canonicalize(fixture.runtime.join(FONT_ENVIRONMENT_DIR))
+            .expect("this fixture's environment directory");
+        let entries: Vec<_> = std::fs::read_dir(&environments)
+            .expect("owned environments")
+            .map(|entry| entry.expect("environment entry").path())
+            .collect();
+        assert_eq!(entries.len(), 1, "only this capture's owned environment");
+        let root = std::fs::canonicalize(entries[0].join("root")).expect("owned sysroot");
+        assert!(root.starts_with(&environments), "stay inside this fixture");
+        let frozen = under(&root, &original).expect("font path under owned root");
+        assert!(
+            std::fs::symlink_metadata(&frozen)
+                .expect("materialised font entry")
+                .file_type()
+                .is_symlink(),
+            "unlink only the owned frozen font link"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&frozen).expect("original link target"),
+            original
+        );
+        std::fs::remove_file(&frozen).expect("unlink the frozen entry, not its target");
+        std::fs::write(&frozen, &replacement).expect("replace only the owned snapshot entry");
+        let frozen_hash = Sha256::digest(std::fs::read(&frozen).expect("replacement bytes"));
+        assert_eq!(frozen_hash, replacement_hash);
+        assert_ne!(frozen_hash, live_hash);
+        assert_eq!(
+            std::fs::read(&original).expect("live source remains"),
+            live_bytes
+        );
+        resume.notify_one();
+    };
+    // Both futures belong to this test: timeout drops capture and its owned
+    // directory guard; no spawned task or blocked observer outlives the test.
+    let (error, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(refused(&fixture), corrupt)
+    })
+    .await
+    .expect("capture and owned snapshot corruption finish within the test budget");
     assert!(
         error.contains("the frozen Fontconfig environment resolves"),
         "refused by the face parity: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&original).expect("live source survives"),
+        live_bytes
     );
     assert_eq!(environments_left(&fixture).await, Vec::<PathBuf>::new());
 }

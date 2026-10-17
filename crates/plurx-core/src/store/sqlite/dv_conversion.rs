@@ -1493,7 +1493,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 66] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 67] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1614,6 +1614,9 @@ mod tests {
             "ADD COLUMN last_revision",
             "CREATE TRIGGER invitation_phone_rebind",
             "CREATE TRIGGER invitation_cleanup_guard",
+            // v111: both fixtures call remove_common_queue_schema, which
+            // first rewinds the complete empty managed-subtitle extension.
+            "CREATE TABLE subtitle_managed_schema",
         ];
 
         assert!(

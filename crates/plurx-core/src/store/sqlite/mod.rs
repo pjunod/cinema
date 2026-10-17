@@ -2712,7 +2712,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .expect("marker"),
-            110 // The append-only chain now also includes Cinema v106-v110.
+            SQLITE_SCHEMA_VERSION
         );
         assert!(conn
             .query_row(
@@ -3440,9 +3440,10 @@ mod tests {
         // references, and manual-edit watch revisions; v102 adds quality
         // cancellation and v103 continuous dependencies; v104–v105 add sharing
         // authority and outer-ingress custody; v106-v110 append Cinema receiver
-        // credentials, consent, revision fencing, login rebind and cleanup guards.
+        // credentials, consent, revision fencing, login rebind and cleanup guards;
+        // v111 appends managed subtitle jobs and model reservations.
         assert_eq!(
-            version, 110,
+            version, 111,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

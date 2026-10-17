@@ -7657,8 +7657,8 @@ mod startup_tests {
         }
     }
 
-    #[test]
-    fn the_assembled_state_carries_the_configured_identity_and_directories() {
+    #[tokio::test]
+    async fn the_assembled_state_carries_the_configured_identity_and_directories() {
         let tmp = crate::test_tempdir().expect("tempdir");
         let state = booted_state(tmp.path());
         let root = std::fs::canonicalize(tmp.path()).expect("canonical state root");
@@ -7674,6 +7674,7 @@ mod startup_tests {
             tmp.path().join("cache").join("runtime").is_dir(),
             "the ffmpeg runtime cache must exist before any session starts"
         );
+        crate::telemetry::drain_for_shutdown(&state.store).await;
     }
 
     /// The server answers requests, then stops when it is told to — and the
@@ -7857,7 +7858,7 @@ mod startup_tests {
         }
     }
 
-    /// Every tracing event in a split child names its parent's target.
+    /// Split-child events name their parent or a documented dedicated target.
     ///
     /// The S-14 moves put code from `transcode.rs`, `http/hls.rs` and
     /// `vodserve.rs` into `#[path]` child modules, and an event's default
@@ -7900,8 +7901,19 @@ mod startup_tests {
                 for level in ["trace", "debug", "info", "warn", "error"] {
                     let call = format!("tracing::{level}!(");
                     for (at, _) in source.match_indices(&call) {
+                        let arguments = source[at + call.len()..].trim_start();
+                        // These two files deliberately share the documented,
+                        // hashed retained-output diagnostic channel. It still
+                        // requires an explicit target, never a child default.
+                        let relative = path.strip_prefix(&src).expect("split child under src");
+                        let dedicated_retained = [
+                            std::path::Path::new("transcode/manager/create.rs"),
+                            std::path::Path::new("vod/retained.rs"),
+                        ]
+                        .contains(&relative)
+                            && arguments.starts_with("target: \"plurxd::retained_reuse\",");
                         assert!(
-                            source[at + call.len()..].trim_start().starts_with(&pinned),
+                            arguments.starts_with(&pinned) || dedicated_retained,
                             "{}: the `{call}` at byte {at} logs under its own module path, \
                              not `{target}`",
                             path.display()

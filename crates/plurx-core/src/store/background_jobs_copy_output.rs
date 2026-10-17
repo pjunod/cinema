@@ -113,6 +113,9 @@ mod tests {
         connection
             .execute_batch(super::super::background_jobs::COPY_OUTPUT_SCHEMA)
             .expect("exact predecessor source guards");
+        // The v96 predecessor predates the independently installed managed
+        // extension. Rewind its complete empty layout before replaying v111.
+        crate::queue_fixture::remove_managed_subtitle_schema(&connection);
         crate::queue_fixture::remove_jellyfin_compatibility_schema(&connection);
         connection
             .execute_batch(&format!(

@@ -1,6 +1,6 @@
 # HTTPS/subtitle promotion integration: main220157aba carries the reviewed
 # managed-subtitle deltas; preserve all HTTPS and prior main attributions.
-# Namespaced spawns 960 + 13 = 973; timers 1773 + 11 = 1784;
+# Namespaced spawns 960 + 13 = 973; timers 1773 + 11 + 1 = 1785;
 # launch-shaped methods 760 + 7 = 767. Scope/patterns/equality stay exact.
 # Integrated census: main 5b8f8fe78 plus managed subtitle owners from 75bc459b.
 # Reviewed independent deltas compose: spawn 960, timers 1773, constructors 272,
@@ -4659,7 +4659,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # a short observation that the worker still holds its guard, and completed
 # adoption deadline. All are awaited in the fixture; the bounded blocking
 # channel observer always releases the worker on timeout/disconnection.
-expected_occurrences = 1784
+# HTTPS qualification font fixture: +1 sixty-second timeout around the
+# existing real capture and its snapshot-corruption observer. tokio::join!
+# owns both futures inside this test; timeout drops the capture/owned root
+# guard and observer together. No task, process or production timer is added.
+expected_occurrences = 1785
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
