@@ -5,6 +5,67 @@ import XCTest
 /// No fixture server, launch overrides, preference changes or playback starts.
 @MainActor
 final class TVPhysicalNavigationAcceptanceTests: TVNavigationTestCase {
+    func testPhysicalFullGuideRemainsVisibleAndResponsive() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        defer { app.terminate() }
+        let tab = app.tabBars.buttons["Live TV"]
+        XCTAssertTrue(tab.waitForExistence(timeout: 30),
+                      "Physical acceptance requires the device's existing saved sign-in")
+        reachForSetup(tab, in: app, limit: 8)
+        assertFocus(tab, in: app, context: "Physical Live TV tab")
+        remote.press(.select)
+        let guide = app.buttons["Guide"]
+        reachForSetup(guide, in: app, limit: 16)
+        assertFocus(guide, in: app, context: "Physical Guide opener")
+        remote.press(.select)
+        let grid = app.scrollViews["live-guide-grid"]
+        XCTAssertTrue(grid.waitForExistence(timeout: 15))
+        let summary = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ channels")).firstMatch
+        XCTAssertTrue(summary.exists)
+        let count = try XCTUnwrap(Int(summary.label.split(separator: " ")[0]))
+        XCTAssertGreaterThan(count, 1)
+        var bounds = grid.frame
+        bounds.origin.y += 42
+        bounds.size.height -= 42
+        func focusedCell() -> XCUIElement {
+            app.buttons.matching(NSPredicate(format:
+                "(identifier BEGINSWITH 'live-guide-programme:' OR identifier BEGINSWITH 'live-guide-empty:') AND hasFocus == true"
+            )).firstMatch
+        }
+        let initial = focusedCell()
+        XCTAssertTrue(initial.waitForExistence(timeout: 3))
+        assertFocus(initial, in: app, context: "Physical guide first visible programme")
+        func step(_ direction: XCUIRemote.Button) {
+            let previous = focusedCell().identifier
+            let began = Date()
+            remote.press(direction)
+            let visibleFocus = {
+                let target = focusedCell()
+                return target.exists && target.identifier != previous && bounds.contains(target.frame)
+            }
+            if !visibleFocus() {
+                let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in visibleFocus() }, object: nil)
+                XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 2), .completed,
+                               "Physical guide must move promptly to another fully visible row")
+            }
+            XCTAssertLessThan(Date().timeIntervalSince(began), 3)
+            let identifier = focusedCell().identifier
+            if identifier.hasPrefix("live-guide-programme:"),
+               let start = Int(identifier.split(separator: ":").last ?? "") {
+                XCTAssertLessThanOrEqual(start, Int(Date().timeIntervalSince1970),
+                                         "Vertical browsing from Now must not drift into future programmes")
+            }
+        }
+        for _ in 1..<count { step(.down) }
+        assertFocus(focusedCell(), in: app, context: "Physical guide last channel visible")
+        for _ in 1..<count { step(.up) }
+        assertFocus(focusedCell(), in: app, context: "Physical guide first channel restored")
+        remote.press(.menu)
+        assertFocus(tab, in: app, context: "Physical guide leaves root navigation responsive")
+    }
+
     func testPhysicalLibraryMenusOwnFocusAndRestoreEachOpener() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

@@ -25,6 +25,7 @@ final class TVPlaybackNavigationTests: TVNavigationTestCase {
         waitUntil("Local controls hide", app: app, timeout: 10) { !pause.exists }
         XCTAssertFalse(app.buttons["diagnostics-open"].exists)
         assertFocus(app.buttons["player-reveal"], in: app, context: "Hidden local video owns remote focus")
+        assertHiddenFixtureVideoIsUnobstructed(in: app)
         remote.press(.right)
         assertFocus(pause, in: app, context: "Local first Right reveals Play Pause")
         let decisions = server.requestCount("/api/v1/files/1/decision")
@@ -69,6 +70,7 @@ final class TVPlaybackNavigationTests: TVNavigationTestCase {
 
         let reveal = app.descendants(matching: .any)["channel-player-reveal"]
         assertFocus(reveal, in: app, context: "Hidden channel surface owns the native remote")
+        assertHiddenFixtureVideoIsUnobstructed(in: app)
         remote.press(.playPause)
         XCTAssertTrue(app.buttons["Resume live"].firstMatch.waitForExistence(timeout: 5),
                       "Play/Pause must reach the existing transport owner from native reveal")
@@ -200,8 +202,16 @@ final class TVPlaybackNavigationTests: TVNavigationTestCase {
 
     private func tuneAndOpenFullscreen(in app: XCUIApplication, server: TVNavigationServer) {
         let watch = app.buttons["Watch live"]
-        reachForSetup(watch, in: app, limit: 8)
-        assertFocus(watch, in: app, context: "Watch fixture channel setup")
+        let favourite = app.buttons["channel-favourite:fixture-channel"]
+        // Enter the trailing action from the toolbar above it; steering Right
+        // from the final programme cannot cross the empty part of its row.
+        let layout = app.buttons["channel-layout"]
+        reachForSetup(layout, in: app, limit: 8)
+        assertFocus(layout, in: app, context: "Channel toolbar before Favorite")
+        remote.press(.down)
+        assertFocus(favourite, in: app, context: "Channel Favorite entry")
+        remote.press(.down)
+        assertFocus(watch, in: app, context: "Down from Favorite reaches Watch across a short programme row")
         remote.press(.select)
         let fullscreen = app.buttons["Fullscreen"]
         XCTAssertTrue(fullscreen.waitForExistence(timeout: 15), app.debugDescription)

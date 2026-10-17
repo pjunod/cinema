@@ -12,6 +12,8 @@ final class TVNavigationServer: @unchecked Sendable {
     private let playableShared: Bool
     private var failSearch: Bool
     private let homeTitles: Bool
+    private let activeDvrRecording: Bool
+    private let guideChannelCount: Int
     private var failHome = false
     private var failConnection = false
     func setHomeFailure(_ value: Bool) { queue.sync { failHome = value } }
@@ -23,13 +25,15 @@ final class TVNavigationServer: @unchecked Sendable {
 
     func requestCount(_ path: String) -> Int { queue.sync { requestCounts[path, default: 0] } }
 
-    init(itemCount: Int = 416, includeShows: Bool = false, failSearch: Bool = false, playableTitles: Bool = false, playableShared: Bool = false, homeTitles: Bool = false) throws {
+    init(itemCount: Int = 416, includeShows: Bool = false, failSearch: Bool = false, playableTitles: Bool = false, playableShared: Bool = false, homeTitles: Bool = false, guideChannelCount: Int = 2, activeDvrRecording: Bool = false) throws {
         self.itemCount = itemCount
         self.includeShows = includeShows
         self.failSearch = failSearch
         self.playableTitles = playableTitles
         self.playableShared = playableShared
         self.homeTitles = homeTitles
+        self.guideChannelCount = guideChannelCount
+        self.activeDvrRecording = activeDvrRecording
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters)
@@ -215,7 +219,7 @@ final class TVNavigationServer: @unchecked Sendable {
                      "slots": ["max": 2, "reserve": 0, "recording": 0], "pad_start_s": 0, "pad_end_s": 0, "reminder_lead_s": 30]
         case "/api/v1/dvr/overview":
             value = ["version": 1, "server_now_ms": epoch, "availability": "complete", "runtime_supported": true,
-                     "observation_age_ms": 0, "counts": ["recording": 0, "attention": 0], "active_truncated": false, "active": []]
+                     "observation_age_ms": 0, "counts": ["recording": activeDvrRecording ? 1 : 0, "attention": 0], "active_truncated": false, "active": []]
         case "/api/v1/dvr/schedule":
             value = ["conflicts": 0, "rows": [recording(id: "scheduled", state: "scheduled")]]
         case "/api/v1/dvr/recordings":
@@ -235,6 +239,25 @@ final class TVNavigationServer: @unchecked Sendable {
                      "channel": ["id": "news", "guide_number": "12.1", "guide_name": "Evening News", "favorite": false, "drm": false, "support": "ready"]]
         case "/api/v1/live-tv/sessions/fixture-live/status":
             value = ["state": "active", "owner_node_id": "fixture", "encoder": "copy", "output_height": 360]
+        case "/api/v1/live-tv/guide" where guideChannelCount > 2:
+            // Keep the current programme stable across a wall-clock half-hour boundary.
+            let slot = Int(epoch / 1000) - 60
+            value = ["source": "fixture", "freshness": "fresh", "age_seconds": 0,
+                     "window": ["start": slot - 3600, "end": slot + 21600],
+                     "channels": (0..<guideChannelCount).map { index in
+                         ["id": "guide-\(index)", "guide_number": "\(100 + index)",
+                          "programmes": (-2..<12).map { offset in
+                              ["start": slot + offset * (index % 4 == 0 ? 7200 : 1800),
+                               "end": slot + (offset + 1) * (index % 4 == 0 ? 7200 : 1800),
+                               "title": "Programme \(index) slot \(offset)",
+                               "synopsis": "A representative programme description for the full channel guide."] as [String: Any]
+                          }] as [String: Any]
+                     }]
+        case "/api/v1/live-tv/channels" where guideChannelCount > 2:
+            value = ["channels": (0..<guideChannelCount).map { index in
+                ["id": "guide-\(index)", "guide_number": "\(100 + index)",
+                 "guide_name": "Guide station \(index)", "favorite": false, "drm": false, "support": "ready"] as [String: Any]
+            }, "freshness": "fresh", "age_seconds": 0]
         case "/api/v1/live-tv/guide":
             value = ["source": "fixture", "freshness": "fresh", "age_seconds": 0,
                      "window": ["start": epoch / 1000 - 3600, "end": epoch / 1000 + 7200],

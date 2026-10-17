@@ -181,7 +181,8 @@ final class TVNavigationTests: TVNavigationTestCase {
         for label in ["Search", "Channels", "Recordings", "Live TV", "Libraries", "Home"] {
             remote.press(.left)
             assertFocus(app.tabBars.buttons[label], in: app, context: label + " reverse root tab")
-            XCTAssertTrue(app.descendants(matching: .any)["root-screen-" + label].exists, app.debugDescription)
+            XCTAssertTrue(app.descendants(matching: .any)["root-screen-" + label].waitForExistence(timeout: 5),
+                          label + " must display its route without Select: " + app.debugDescription)
         }
     }
 

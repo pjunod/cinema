@@ -1,8 +1,10 @@
 # Apple TV navigation — defects, proposed screens and a lasting release contract
 
-**Status:** repairs built and native validation passed on `effort/apple-tv-navigation`.
-All 26 required journeys and the effort gate pass; main promotion and the
-explicit remaining physical/dynamic-state acceptance are open.
+**Status:** repairs built; corrected guide, playback and channel navigation installed
+as build 256. The final explicit transport owner passes forty-move and sustained
+edge-input checks, including the ordered whole-app run's Live journey. All
+1,101 tvOS units and iOS compilation pass. Final source-bound qualification and
+the explicitly remaining physical/dynamic-state acceptance are open.
 **Written:** 2026-10-15 · **Baseline:** `9eb7f6738647a7e963b17cfb3a2f77a594863c41`
 
 This is the Apple TV follow-up to the [mobile usability audit](MOBILE-UI-USABILITY-AUDIT.md)
@@ -537,6 +539,221 @@ all enabled tabs in both directions after visiting content, plus detail Back
 restoration and feature-removal fallback. This new finding comes from the
 implementation's whole-app tests, not the original source-only audit.
 
+### F31 · P1 · N — hidden playback paints a white focus box over video
+
+**Evidence:** after build 239 was installed, the owner reported a white rounded
+box centered on playing video which disappeared when controls appeared. The
+retained native hidden-video capture contains the same box. The earlier visual
+review missed it: native focus assertions passed without checking whether the
+focus target painted visible chrome. The new screenshot assertion fails on the
+old implementation with 148 bright pixels in the solid-black fixture's center.
+
+**Fix:** the shared reveal target keeps its native Button and remote routing,
+but uses an explicit label-only ButtonStyle. tvOS PlainButtonStyle paints a
+focused bezel even when its label is clear and focus effects are disabled.
+Movies, Live TV, library channels and Shared playback all use this target.
+
+**Proof:** each of the four existing native playback journeys now checks the
+actual screenshot pixels after asserting native hidden-target focus, then
+continues through reveal, More/report and exact Back/session restoration.
+The black MP4 and HLS fixtures make visible control chrome a measurable
+failure. Earlier 26-journey receipts remain input evidence; they do not prove
+this missing visual assertion. All four corrected journeys pass, and the hidden movie and Live captures were
+visually checked. The corrected build 239 is installed on the paired Apple TV.
+Final promotion stays held until the correction and the updated gate pass.
+
+### F32 · P0 · N — full Live TV guide stalls and loses visible focus
+
+**Evidence:** the owner supplied a physical-TV photograph of the 77-channel
+lineup, reported invisible focus and sluggish navigation, then clarified that
+the guide nearly froze the entire UI. A native shipping-route fixture with 77
+channels reproduces a tens-of-seconds accessibility stall on guide entry. The
+eager grid realizes every channel/programme control, while scroll geometry
+changes update the grid. The two-channel playback fixture did not exercise
+that load. The photograph also shows a large idle preview, clipped bottom rows,
+a selected-segment background extending into the safe area, and a timeline
+still anchored to the time the app opened.
+
+**Implemented repair:** realize guide rows lazily, use a vertical TV
+viewport with explicit time paging, remove per-scroll origin publication on TV,
+keep one focus binding per cell and toolbar control, and route each direction
+from the control receiving it. Toolbar Down/Select records its explicit origin;
+transient native arrivals cannot overwrite that bookmark. Up through programme
+actions and closing a choice sheet restore their respective exact openers. The first lazy-row trial eliminated the long entry stall but
+exposed native focus moving before the outer custom direction handler; that
+failed trial is retained. Use a white focus outline without zoom, a compact
+detail stage with no idle preview, and clock-following until the viewer
+explicitly pages away from Now.
+
+**Validation:** the final isolated native run passes all three Live TV journeys.
+The 77-channel fixture mixes half-hour and two-hour programmes and traverses
+every row down and back without changing the vertical time anchor. Every step
+requires the actual focused programme to fit inside the viewport within two
+seconds, with a three-second bound including the press and native queries. The
+last programme's action sheet restores its cell. Guide time closes to its exact
+opener, and Down into content followed by Up returns to that same toolbar
+control. The full traversal takes 122.63 seconds; all three journeys take
+286.87 seconds. First/last-row and toolbar-return renders were inspected.
+All 1,099 Apple TV unit tests and iOS simulator compilation pass.
+
+The first saved-account physical traversal passed on the real 77-channel
+lineup (126.99 seconds), with visible focus throughout and Back returning to
+the root tab. Later faster-input checks caught a redundant scroll resetting
+the viewport, and mixed-duration checks prompted the stable time anchor. The
+final guide leaves completed native moves alone, reserves an opaque heading
+outside the scroll content, and keeps channel labels inside their own column. Physical screenshots exposed
+clipped diagnostic badges; TV guide rows now show station identity only, with
+technical formats retained in stream information.
+The required suite now includes both full-lineup guide journeys. Failed
+attempts remain retained; neither missing tests nor skipped journeys qualify.
+
+**Physical acceptance:** the final saved-account device repeat passes all
+77 channels down and up, visible focus, a three-second response bound per
+step, no future-programme drift and Back to the root tab (137.94 seconds).
+This final build also removes codec badges clipped inside the channel column;
+its first/last-row captures were inspected on the physical TV. Additional fullscreen-guide open/Back and Up/Close checks caught requests
+being sent to the covered browser instead of the mounted player focus owner.
+The player controls and guide Close now own those requests inside the cover.
+The extended Live playback journey passes both Back and Up/Close, reporting,
+a two-second bound for Back-to-hidden-video (shorter than auto-hide), and
+return to the original channel with exactly one tuner session. Its retained
+native session takes 123.53 seconds. More now explicitly owns its Back; relying
+on native sheet dismissal had left the next playback Back unhandled. The combined 28-journey repeat passes with zero failures and zero skips on
+clean source `0c52e02868687c845da2ff2b0a46095fc42c3e21` (2,249.15 seconds).
+The receipt verifies unchanged source across the run and preserves the native
+result bundle and portable screenshot exports. The refreshed `d2abab249` integration
+candidate retained identical Apple source; its current-main Rust compilation,
+Clippy and focused gate contracts pass. Mandatory promotion remains open,
+as does the remaining physical accessibility/gesture acceptance matrix.
+
+### F33 · P2 · N/S — playback hide countdown outlives a new presentation or failure
+
+The single adversarial review of candidate `d2abab249` found two remaining
+ownership gaps. Live Recording activity did not suspend the four-second hide
+timer or restore its exact opener. A library-channel error arriving while
+controls were already visible did not invalidate that timer; its completion
+could hide the failure and recovery controls.
+
+The shared countdown now rechecks eligibility after waiting and rejects
+cancelled requests. Live activity participates in the same presentation
+ownership and dismissal restoration as the other cover sheets, with Play as
+the fallback when the activity indicator disappears. Channel error changes
+invalidate the current countdown and keep the failure visible.
+
+**Focused evidence:** a deterministic unit injects a real controller failure
+while the countdown is suspended; another exercises a newer presentation,
+cancellation and unchanged idle state. Both pass. The expanded native Live
+journey leaves Recording activity open beyond five seconds, then requires
+actual focus on its opener. It fails on the unchanged production baseline
+and passes on the correction (109.29 seconds), including the existing guide,
+report and Back paths. The channel playback smoke also passes (90.74 seconds).
+The actual activity-return capture was inspected. All 1,101 tvOS unit tests
+pass with zero failures; the iOS simulator target also builds. The earlier 28-journey
+receipt predates this follow-up; final qualification must run the expanded
+journey against the promotion candidate. Build 253 includes these corrections
+and is installed and launched on the paired Apple TV. They are integrated
+with the guide correction in the same task candidate. Gate 5287 passed every
+other job but exhausted its thirty-minute server compile allowance without a
+compiler diagnostic; the effort compiler now has the same sixty-minute
+allowance as the main compiler, with all checks retained.
+
+The first full follow-up repeat exposed a timing failure between activity
+return and the Guide pill; its failed receipt and captures are retained.
+An isolated trace passed and showed the countdown restarting on actual focus
+changes. The harness now checks already-settled native focus immediately,
+rather than spending XCTest's first polling interval on every assertion; it
+retains the same focus predicate, failure timeout, screenshots and deliberate
+idle deadlines. The expanded Live journey passes with that harness (89.37
+seconds). A complete clean-source repeat remains required before promotion.
+
+### F34 · P1 · N/S — playback defaults compete with directional focus
+
+Two full follow-up runs fail intermittently after activity or fullscreen-guide
+return: the requested next pill never retains focus, then the idle timer hides
+the controls. Both failed receipts, logs and captures remain retained. The
+immediate-focus assertion improvement alone does not close this failure.
+
+The instrumented repeat isolates a double movement: one Right press moves from
+Guide to Channels and then Info within 37 milliseconds. Every actual change
+restarts the countdown, which hides four seconds after the final change with
+the same generation. This rules out a stale countdown in that reproduction.
+The shared playback region had a default preference that followed observed
+focus, plus a parent feedback path that could request that focus again.
+[Apple documents the default-focus priority](https://developer.apple.com/documentation/swiftui/view/defaultfocus(_:_:priority:));
+changing its priority to automatic still failed the stronger native repeat.
+
+The candidate removes the changing default preference, requests entry once,
+and ignores explicit requests already equal to the region's actual focus.
+Presentation restoration remains explicit. The native Live journey alternates
+Right/Left four times after guide closure and requires actual Channels/Guide
+focus on every move before proceeding. The first diagnostic run passes this
+sequence and the complete playback journey (99.22 seconds). Temporary tracing
+has been removed. Two uninstrumented Live repeats pass (98.35 and 97.39
+seconds), and the first library-channel repeat passes (73.49 seconds). The
+second channel repeat exposes the separate browser gap below before playback
+opens. The subsequent clean full run at `b40d88e4c` still fails the first Left
+after guide closure. Removing the default preference and ignoring equal writes
+are therefore insufficient. The next candidate removes the observation-to-parent
+callback entirely: only explicit presentation intents may update the requested
+focus key. The strengthened native journey now requires twenty Right/Left pairs.
+Removing that callback alone also fails at the fourth Left in the longer
+repeat. The current candidate therefore assigns explicit neighbours to every
+mounted Live transport control through the existing remote adapter, routing
+from the receiving control rather than a potentially advanced focus binding.
+Each direction invalidates stale remote intent and resets idle, including row
+edges; Activity has explicit Up/Down routes. Two forty-move native repeats
+pass, including subsequent reporting and session retention. The final journey
+also exercises repeated input at both row edges for longer than the idle
+deadline. Complete-candidate validation remains required.
+The failed full receipt, focused trials and cancelled gate 5310 are retained. The explicit-owner
+candidate `101fc89f3` subsequently passes the ordered full run's Live journey
+(146.64 seconds), including forty consecutive moves, five seconds of input at
+each row edge, reporting and retained playback. Its 1,101-unit suite has zero
+failures/skips. A later reverse-root-tab check samples route existence before
+the native transition settles: focus is Libraries while the accessibility tree
+still reports Live TV about a quarter-second after the press. The forward check
+already allows five seconds; the isolated follow-up applies that same bounded
+route check in reverse, preserving actual focus and no-Select assertions. The
+failed run remains retained: 27 of 28 journeys pass, with no skips. The corrected
+root traversal passes twice (54.22 and 53.75 seconds) on unchanged source, with
+actual focus and route checks in both directions. Complete-candidate qualification
+remains open.
+
+### F35 · P1 · N — Favorite has no Down destination in a short channel row
+
+The repeated channel journey exposes a browser failure before fullscreen
+playback: Favorite sits at the far right of the card, while two short programme
+buttons and Watch live end far to its left. Eight Down presses leave actual
+focus on Favorite. The retained hierarchy and capture show the gap; this is
+not a playback hide-timer failure.
+
+Watch live now fills the card width on TV, using the shared readable button
+style. Its focus area gives Down a destination below Favorite even when the
+programme strip is short. Touch layout is unchanged. The native playback
+setup now explicitly focuses Favorite, presses Down once and requires Watch
+live to own actual focus before tuning. Two complete native channel playback
+repeats pass (78.11 and 73.56 seconds), and the full-width Watch focus rendering
+was inspected. iOS compilation and the 1,101-unit suite pass on the combined
+candidate. Complete app qualification remains open.
+
+### F36 · P2 · N — final synopsis focus outline meets the scroll clip
+
+The coordinating visual review of the complete run finds the final paragraph's
+white focus outline clipped at the bottom of the reading viewport. The final
+text is readable and Back restores About, but a passing focus assertion alone
+does not establish a complete visible outline. This view also serves Shared
+About.
+
+The reading stack now reserves eight points inside its scroll viewport. A native
+regression requires every focused paragraph, plus four points of outline
+clearance, to fit within that viewport. The strengthened assertion fails on the
+prior layout (39.23 seconds). With clearance, the local journey passes in 46.99
+seconds and the complete Shared journey in 73.60 seconds. The coordinating
+agent inspected the new final-paragraph capture: all four sides of the focus
+outline are visible, with space above Close. The prior screenshot and negative
+result are retained. This follow-up still needs complete-candidate qualification.
+R03/R11.
+
 ## 6. Proposed renderings — consistent interaction before decoration
 
 The [gallery](apple-tv-navigation/index.html) includes twelve annotated design
@@ -575,12 +792,12 @@ observed behavior and remaining limits, not pixel-for-pixel equivalence.
 | R04 | Failed foreground refresh keeps the shelf, shows Retry and returns focus to the retained title after success. | Native lifecycle journey and actual capture inspected. |
 | R05 | Search retains its query through failure/Retry and restores the selected result after detail. | Native journey and final query, Retry and result-return captures inspected; explicit TV text contrast remains readable on the dark background. |
 | R06 | Movie, Live, channel and Shared players hide chrome, reveal without unintended activation, put reporting inside More and restore the opener. | Native individual journeys pass. Shared keeps a direct Quality shortcut; its choices use the same owned presentation. This is a functional variation from the illustrative More layout. |
-| R07 | Compact Live toolbar; named channel actions; channel layouts use explicit choices; future programmes open information. | Native Live/channel journeys pass individually; Live browse and fullscreen captures inspected. Guide paging and reminder expiry are separate outstanding matrix rows. |
+| R07 | Compact Live toolbar; named channel actions; channel layouts use explicit choices; future programmes open information. | Native Live/channel journeys pass individually; Live browse and fullscreen captures inspected. Full-lineup guide paging, toolbar return and fullscreen-guide exit now pass; reminder expiry remains a separate outstanding matrix row. |
 | R08 | Title-first recording row spans the content width, opens detail and returns exactly; rule confirmation starts on Keep; manual scheduling uses named channels. | Native journey and actual row/confirmation captures inspected. Destructive commit and disappearing-row stress remain separate from safe cancellation. |
 | R09 | Help is a visible category; reporting offers an explicit phone export and Advanced controls. Instructions wrap fully. | Native Settings/report journey and corrected instruction capture inspected. Physical couch-distance QR scanning remains open. |
 | R10 | Retry, different server and Help are in the connection form. Help uses secondary styling. Recovery is visible during discovery, and late discovery cannot override a newer retry/server choice. | Native five-second recovery, direct Down through Retry → server choice → Help, report return and saved-sign-in reuse pass individually. Actual recovery captures inspected. |
 | R11 | Shared Source remains visible; full-screen playback uses the common remote grammar; About exposes every synopsis region and restores its opener. | Native Shared journey and final-paragraph capture inspected. The existing file-specific detail layout is retained; the plate's hero composition is illustrative. Shared authorization and controller ownership remain separate. |
-| R12 | Required native suite rejects missing/skipped tests, records source/app hashes, preserves failures, and blocks the affected Apple promotion paths. | Gate wiring and runner tests pass. No physical qualification or release is claimed by a simulator receipt. |
+| R12 | Required native suite rejects missing/skipped tests, records source/app hashes, preserves failures, and blocks the affected Apple promotion paths. | Gate wiring and runner tests pass. Capture exports sanitize artifact-forbidden filename characters and preserve distinct names; the earlier promotion upload rejected a colon-bearing capture. No physical qualification or release is claimed by a simulator receipt. |
 
 ## 7. Navigation contract — make regressions fail before release
 
@@ -613,6 +830,8 @@ does not turn Up in the middle of a grid into a jump to the top.
    native sheet/fullscreen presentation as appropriate; ensure covered views
    cannot receive focus. Existing authorization, modal source-generation and
    presentation-fencing logic must survive this work.
+   Keep the mounted presentation's focus state local to that presentation;
+   returning a logical key to the covered browser cannot focus player controls.
 2. **One identity per actual control.** Native focus, companion navigation,
    accessibility identifiers and test assertions refer to the same stable
    target. A logical requested key is not proof of actual focus.
@@ -754,7 +973,7 @@ none of the packages is a qualified release merely because it compiles.
 | T2 · Playback presentation | `LiveTvView`, `LibraryChannels`, `PlayerView`, diagnostics | T1 | **Partly proven:** [PR #1110](http://forge.lan:3000/noirr/plurx/pulls/1110). Native future-programme details/Close and current-programme single-session behavior pass; explicit layout change/reopen/Back passes. Library-channel hidden Play/Pause, first-direction reveal, More → Report → Back and session retention now pass. Reports moved inside More. Ordinary movie and Live TV native journeys also pass: hidden picture → reveal → More → Report → Back retains the playback session and returns to the original item/channel. Shared playback now passes initial Pause focus, hidden-picture reveal, selected Quality entry, exact menu/report return and a single retained session. The Shared title also exposes the same focusable About reading panel as local titles, with a native final-paragraph and exact-return assertion. |
 | T3 · Browsing and details | `LibraryView`, `HomeView`, `SearchView`, `DetailView`, `Components` | T1 | **Partly proven:** bounded tools sidebar, identity restoration, explicit Jump loading, episode details and complete synopsis, fixed Search query and recovery. Native full synopsis/Back and unchanged-query Search Retry/result return pass. Full Grid/Rows journeys now pass at 416 and 5,000 titles, including Jump A/M/Z/M, bounded tools access and exact content return. Empty and single-title libraries pass. Eleven focused browsing unit regressions and iOS simulator compilation pass; the synopsis has a visible focus cue. A foreground Home refresh failure now retains cached titles, exposes a reachable Retry and restores the retained title when Retry disappears; the native lifecycle journey passes. |
 | T4 · Secondary screens and visual consistency | DVR, Settings, diagnostics, remotes, theme, info | T1; serialize shared-file work with T2/T3 | **Partly proven:** native Settings quality selection/Back, Help → phone QR report → Advanced → Done/Back, recording details, safe rule cancellation and named manual channel selection pass. DVR title rows span the content region so Down from a middle category cannot hit a gap. Remote pairing revocation and registration reset now pass safe Cancel entry and exact opener return in an ad hoc signed simulator build. The fixture uses the normal saved-server identity and Keychain registration. DVR title scaling and report instruction wrapping are corrected and visually checked after passing native reruns. Saved-connection recovery now exposes Retry and contextual Help while network discovery continues, rather than hiding all actions behind a spinner. A repeated native run first caught the delayed recovery; the corrected run requires Retry within five seconds and preserves the saved sign-in. Final integrated and physical acceptance remain open. |
-| T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | **Awaiting promotion and remaining physical acceptance:** F29; all 26 source-bound native journeys pass, as do 1,037 unit tests, iOS compilation and the effort gate. The final saved-account physical TV library journey passes on 491 titles. Gestures, accessibility, couch-distance QR and the listed dynamic-state stress cases remain unaccepted. No deployment claimed. |
+| T5 · Whole-app qualification | Journeys, receipt, physical devices, release validation | T2–T4 | **Awaiting promotion and remaining physical acceptance:** F29; all 28 source-bound native journeys pass at `0c52e0286` with no failures/skips, as do 1,099 unit tests and iOS compilation. The F33 adversarial-review follow-up passes all 1,101 unit tests, iOS compilation and the expanded Live/channel journeys; its final full native run remains required. The refreshed combined candidate still requires its effort and promotion gates. Saved-account physical checks pass on the 491-title library and all 77 guide channels; corrected build 252 is installed. Gestures, accessibility, couch-distance QR and the listed dynamic-state stress cases remain unaccepted. The installed TV correction does not constitute main promotion or complete physical qualification. |
 
 **Integrated development evidence, October 15:** the full 1,037-test tvOS unit
 suite and iOS simulator compilation pass again after Shared About and connection

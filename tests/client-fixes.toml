@@ -360,7 +360,7 @@ commits = ["90c18453"]
 source = "clients/apple/Sources/LiveTvView.swift"
 # The Info dismissal's deferred write moved into returnFocusToCoverSheetOpener
 # (PR #589), which every cover sheet's onDismiss now calls.
-source_anchor = "let opener = coverSheetOpener ?? .pillPlay"
+source_anchor = "let requestedOpener = coverSheetOpener ?? .pillPlay"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testFullscreenFocusDefaultsToPauseAndReturnsThereFromTheRevealLayer"
 
@@ -3146,7 +3146,7 @@ test_anchor = "func testNativeSeekDeadlineRecoversASeekThatNeverCompletes()"
 id = "apple.live-tv-appletv-navigation"
 commits = ["17ab5f50e"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = "private func moveDetailFocus(_ input: LiveTvContractInput, region: DetailRegion) -> Bool {"
+source_anchor = "private func moveDetailFocus(_ input: LiveTvContractInput, from current: FocusTarget,"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "func testAppleTvLiveNavigationIsReversibleAndReachesEverything() throws"
 
@@ -6926,6 +6926,14 @@ source_anchor = ".tvNavigationFocusSection()"
 test = "clients/apple/UITests/TVNavigationTests.swift"
 test_anchor = "func testRowsViewAllOpensGroupAndBackRestoresHeader()"
 
+[[fixes]]
+id = "apple.tv-hidden-playback-does-not-paint-native-bezel"
+commits = ["035b8e80a985927ab4ea19f4f40c0b261ca31b84"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = ".buttonStyle(PlaybackRevealButtonStyle())"
+test = "clients/apple/UITests/TVPlaybackNavigationTests.swift"
+test_anchor = "func testLocalMovieHiddenRevealReportAndBackRetainPlayback()"
+
 # F5 attached VOD facts: frozen rendition metadata, separate from source/display.
 [[fixes]]
 id = "web.vod-attached-output-facts"
@@ -6968,6 +6976,87 @@ source = "clients/apple/Sources/PlayerAttempt.swift"
 source_anchor = "case autoMissingCostCatalogRefresh"
 test = "clients/apple/Tests/AttemptScopesTests.swift"
 test_anchor = "testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle"
+
+[[fixes]]
+id = "apple.tv-full-guide-lazy-viewport"
+commits = ["18577692c30128a49541d290d43463c2a7eeb11c"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "LazyVStack(alignment: .leading, spacing: 0) {"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testGuide77ChannelsKeepsNativeFocusVisibleAndResponsive()"
+
+[[fixes]]
+id = "apple.tv-guide-explicit-toolbar-origin"
+commits = ["03252a5d77791697f7bb5b94650fbfe08eeae8a5"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "if input == .down { lastToolbarFocus = source }"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testGuideToolsAndTimeReturnKeepNativeFocus()"
+
+[[fixes]]
+id = "apple.tv-guide-mounted-player-focus"
+commits = ["1a1ba1d51aed7db5fbc7dfd8dc87037bdf4dd86e"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private func coverControlInput(from source: FocusTarget,"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testLiveFullscreenRevealMoreReportAndBackRetainSession()"
+
+[[fixes]]
+id = "apple.tv-guide-readable-station-column"
+commits = ["67c0a4d9cb6eb1ab3ef59801ce7dcac0720c60e3"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "#if !os(tvOS)\n                                    LiveTvFormatBadges(channel: row.channel).fixedSize()"
+test = "clients/apple/UITests/TVPhysicalNavigationAcceptanceTests.swift"
+test_anchor = "func testPhysicalFullGuideRemainsVisibleAndResponsive()"
+
+[[fixes]]
+id = "apple.tv-autohide-rechecks-current-ownership"
+commits = ["c8ca674b6453e6353011372f9910338a513845c0"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "return !Task.isCancelled && eligible()"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testAutoHideRechecksChannelFailureAfterCountdown()"
+
+[[fixes]]
+id = "apple.tv-recording-activity-restores-player-opener"
+commits = []
+supplements = "apple.tv-autohide-rechecks-current-ownership"
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "&& !showingLayout && !showingDvrActivity && detail == nil"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testLiveFullscreenRevealMoreReportAndBackRetainSession()"
+
+[[fixes]]
+id = "apple.tv-playback-releases-directional-focus"
+commits = ["fe561010fbcd4617a5962a9a5adadc90ee96bc17"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "if focused != value { focused = value }"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "Guide return Right reaches Channels pass"
+
+[[fixes]]
+id = "apple.tv-channel-watch-spans-favorite-column"
+commits = ["6e608dbfe6f54d751ee6dd74a9abc018a5ab8416"]
+source = "clients/apple/Sources/LibraryChannels.swift"
+source_anchor = 'Text(channel.enabled ? "Watch live" : "Disabled")'
+test = "clients/apple/UITests/TVPlaybackNavigationTests.swift"
+test_anchor = "Down from Favorite reaches Watch across a short programme row"
+
+[[fixes]]
+id = "apple.tv-live-transport-single-direction-owner"
+commits = ["86171c0e21dc9906a54459cd80c6c3fd057d6354"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "LiveTvRemoteAdapter(scope: .controls, state: { liveInputState })"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "Left edge retains Pause during active input"
+
+[[fixes]]
+id = "apple.tv-synopsis-outline-viewport-clearance"
+commits = ["8e964f6d98018fbabf594efa1b781c4b9baea1c0"]
+source = "clients/apple/Sources/Components.swift"
+source_anchor = '.padding(8)'
+test = "clients/apple/UITests/TVSecondaryNavigationTests.swift"
+test_anchor = "Synopsis focus outline fits inside the reading viewport"
 
 [[fixes]]
 id = "android.diagnostics-preserves-shared-transport-order"

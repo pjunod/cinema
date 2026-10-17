@@ -2240,6 +2240,8 @@ assert.equal(context.ACT_TIMER, null);
             ),
             ["make effort-rust-check", "make hiqlite-vendor-clippy"],
         )
+        # The deadline itself is pinned above with the larger-memory queue.
+        self.assertIn('CARGO_BUILD_JOBS: "1"', effort_jobs["rust_compile"])
         self.assertEqual(
             list(fast_rust_steps),
             [

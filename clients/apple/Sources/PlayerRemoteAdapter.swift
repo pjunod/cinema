@@ -66,6 +66,8 @@ struct LiveTvRemoteAdapter: ViewModifier {
     enum Scope {
         case root
         case revealSurface
+        /// A mounted transport row with explicit directional neighbours.
+        case controls
         /// A region whose directions are moved by its own navigator: the
         /// guide grid, and the page's detail region (picture + programme
         /// actions). `onMoveCommand` takes every direction pressed inside it,
@@ -85,6 +87,14 @@ struct LiveTvRemoteAdapter: ViewModifier {
             content
                 .onExitCommand { dispatch(.back) }
                 .onPlayPauseCommand { dispatch(.playPause) }
+        case .controls:
+            content
+                .onExitCommand { dispatch(.back) }
+                .onPlayPauseCommand { dispatch(.playPause) }
+                .onMoveCommand { direction in
+                    guard let input = Self.input(for: direction) else { return }
+                    dispatch(input)
+                }
         case .revealSurface:
             content
                 .onTapGesture { dispatch(.select) }
@@ -330,6 +340,12 @@ struct PlayerRevealSurface: View {
     }
 }
 
+/// tvOS PlainButtonStyle still paints a focused bezel over a clear label.
+/// Keep the native button/input semantics, but render only our clear label.
+private struct PlaybackRevealButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { configuration.label }
+}
+
 private struct NativePlaybackRevealTarget: View {
     let identifier: String
     let enabled: () -> Bool
@@ -341,7 +357,7 @@ private struct NativePlaybackRevealTarget: View {
         Button { if enabled() { reveal() } } label: {
             Color.clear.contentShape(Rectangle()).frame(width: 120, height: 120)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PlaybackRevealButtonStyle())
         .focusEffectDisabled()
         .focused($focused)
         .accessibilityLabel("Show playback controls")
@@ -361,14 +377,19 @@ struct NativePlaybackFocusRegion<Key: Hashable, Content: View>: View {
     let preferred: Key
     let requested: Key?
     let changed: () -> Void
-    var focusChanged: (Key?) -> Void = { _ in }
     @ViewBuilder let content: (FocusState<Key?>.Binding) -> Content
     var body: some View {
         content($focused)
-            .defaultFocus($focused, preferred, priority: .userInitiated)
+            // Request entry once. A defaultFocus preference that follows the
+            // observed control is reapplied during directional movement and
+            // can make one press skip the adjacent control.
             .onAppear { focused = preferred }
-            .onChange(of: requested) { _, value in focused = value }
-            .onChange(of: focused) { _, value in focusChanged(value); changed() }
+            .onChange(of: requested) { _, value in
+                // Requests are presentation intents, never native-focus
+                // observations echoed back by the parent.
+                if focused != value { focused = value }
+            }
+            .onChange(of: focused) { _, _ in changed() }
     }
 }
 #endif
@@ -401,3 +422,19 @@ extension View {
     }
 }
 #endif
+
+/// A countdown never authorizes hiding from the state it saw before waiting.
+/// Presentation ownership, pause and failure may all change during the delay.
+@MainActor
+enum PlaybackControlAutoHide {
+    static func afterDelay(
+        while eligible: () -> Bool,
+        delay: () async throws -> Void = {
+            try await Task.sleep(nanoseconds: LiveTvInputRouting.overlayAutoHideNanoseconds)
+        }
+    ) async -> Bool {
+        guard eligible() else { return false }
+        do { try await delay() } catch { return false }
+        return !Task.isCancelled && eligible()
+    }
+}
