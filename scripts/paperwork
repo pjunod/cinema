@@ -88,6 +88,11 @@ TEST_RULES: tuple[tuple[str, str, str], ...] = (
         "every Python script under scripts/ parses",
         "fix the syntax error the failure names",
     ),
+    (
+        "test_doc_size_budget",
+        "docs stay under 40 KB, and the shrink-only list only shrinks",
+        "split the doc or move detail to a sibling doc; never add to the allowlist",
+    ),
 )
 
 # Node tests for the web shell's registration rules; run only when web files changed.
