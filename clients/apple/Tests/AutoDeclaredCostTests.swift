@@ -184,7 +184,7 @@ final class AutoDeclaredCostTests: XCTestCase {
         let mild = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 13.3, completedAt: 30_000), runway: 60, mildSamples: 2))
         XCTAssertFalse(mild.severe)
         XCTAssertTrue(mild.mild && mild.pressure)
-        XCTAssertEqual(mild.chosen?.height, 720)
+        XCTAssertEqual(mild.chosen?.height, 1_080, "24 Mb/s carries the 12 Mb/s encode of the same geometry")
         XCTAssertNil(pressureVerdict(transfer: body(bodySeconds: 13.3, completedAt: 30_000), runway: 60, mildSamples: 1))
     }
 
@@ -292,6 +292,31 @@ final class AutoDeclaredCostTests: XCTestCase {
         XCTAssertEqual(autoBoundaryOriginalCandidate([encode720, undeclared], current: encode720, link: 9_000_000,
                                                      outputs: nil, rejected: [], blockedUntil: [:], nowMs: 0)?.height, 2_160)
         XCTAssertNil(autoUpgradeCandidate([encode720, undeclared], link: nil, outputs: nil, neededWidth: 1_920, neededHeight: 1_080))
+    }
+
+    // MARK: F4 — the equal-area encode rung is a lower rung from an original
+
+    func testAnOriginalMayRecoverToTheCheaperEncodeOfItsOwnGeometry() {
+        // At 25 Mb/s the 12 Mb/s 1080p encode fits and keeps the picture;
+        // the old lower-rung filter only ever looked below 1080p.
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+                                             linkCeiling: 25_000_000, currentCost: 28_814_703)?.route, "encode")
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+                                             linkCeiling: 25_000_000, currentCost: 28_814_703)?.height, 1_080)
+        // Only when it is costed below the incumbent, and only for a link
+        // cause: an unknown incumbent cost or a decode recovery looks below.
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+                                             linkCeiling: 25_000_000, currentCost: nil)?.height, 720)
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+                                             linkCeiling: 25_000_000, currentCost: 11_000_000)?.height, 720)
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [], decoderRecovery: true)?.height, 720)
+        // An encode incumbent never trades for another encode of its size.
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: ladder[1], rejected: [],
+                                             linkCeiling: 25_000_000, currentCost: 12_000_000)?.height, 720)
+        // And the equal-area encode is not a lower rung the ceiling can
+        // overlook: at 8.69 Mb/s it is 720p, as before.
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
+                                             linkCeiling: 8_690_000, currentCost: 28_814_703)?.height, 720)
     }
 
     // MARK: Fix 4 — a stationary film clock is sampled as not presenting

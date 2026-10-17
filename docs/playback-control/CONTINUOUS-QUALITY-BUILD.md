@@ -12044,6 +12044,27 @@ own site with a test that rejects the old line:
   evidence remains the position delta of surface contract §3.4; no
   transport status is read.
 
+**Review round (PR #1156).** The adversarial review found that the first
+cut costed only the downshift. The voluntary upgrade still admitted any
+unmeasured original on `link > 0` through the bounded trial, and the
+display picker prefers an original, so Auto would have climbed back into
+the 28.8 Mb/s original about a minute after fleeing it, at 25 Mb/s; the
+viewer-boundary re-plan did the same. Every path now costs through
+`autoDeclaredCostBps`: a declared original needs the same 1.8× headroom
+every costed rung needs to be fitting (`autoUpgradeCandidate`,
+`autoBoundaryOriginalCandidate`), the staged successor must prove that
+same headroom before it commits, and the bounded trial remains only for an
+original the server declared no rate for. From an original, the encode
+rung of the same geometry is a lower rung too — it costs less, which is
+what a link cause is about — and `autoRecoveryCandidate` admits it when its
+cost is known to be below the incumbent's, so a 25 Mb/s link keeps 1080p
+on the 12 Mb/s encode rather than dropping to 720p. The pressure and stall
+decisions are now functions of their evidence (`autoLinkPressureVerdict`,
+`autoStallRecoveryVerdict`) and the presenter's clock beat is
+`surfaceClockTick`, so the regressions exercise the decision a completed
+body and a runway produce, and a controller whose film clock stopped,
+rather than the text of the tick.
+
 Not changed here, and recorded: a body still arrives only when it
 completes, so a link that collapses mid-body is seen when that body ends;
 the native protocol's 25 Mb/s "recovery" stage is below this title's rate

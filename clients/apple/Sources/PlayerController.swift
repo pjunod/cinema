@@ -554,13 +554,21 @@ func autoRecoveryCandidate(_ candidates: [QualityCandidate], current: QualityCan
                            currentCost: Double? = nil,
                            minimumAcquisitionCost: Bool = false) -> QualityCandidate? {
     let area = { (candidate: QualityCandidate) in Int64(candidate.width) * Int64(candidate.height) }
-    let lower = candidates.filter { candidate in
+    let admissible = { (candidate: QualityCandidate) in
         candidate.hasValidIdentity && candidate.decoderCompatible && !rejected.contains(candidate.id) &&
-            (decoderRecovery || candidate.route != "encode" || candidate.grade == current.grade) &&
-            area(candidate) < area(current)
+            (decoderRecovery || candidate.route != "encode" || candidate.grade == current.grade)
     }
+    let lower = candidates.filter { admissible($0) && area($0) < area(current) }
     guard let ceiling = linkCeiling else { return lower.max { area($0) < area($1) } }
-    let costed = lower.filter { ($0.peakBps ?? 0) > 0 }
+    // From an original the encode rung of the same geometry is a lower rung
+    // too: it costs less, and that is what a link cause is about. It is
+    // admitted only when its cost is known to be below the incumbent's.
+    let cheaperSameArea = candidates.filter { candidate in
+        current.route != "encode" && candidate.route == "encode" && admissible(candidate) &&
+            area(candidate) == area(current) && candidate.id != current.id &&
+            (candidate.peakBps ?? 0) > 0 && currentCost.map { Double(candidate.peakBps!) < $0 } == true
+    }
+    let costed = (lower + cheaperSameArea).filter { ($0.peakBps ?? 0) > 0 }
     if minimumAcquisitionCost, !decoderRecovery, ceiling.isFinite, ceiling > 0,
        let currentCost, currentCost.isFinite, currentCost > 0 {
         return costed.filter { Double($0.peakBps!) < currentCost }.min {
