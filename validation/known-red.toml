@@ -94,6 +94,13 @@ reason = "Actual selected receiver members and accepted H2 drivers forward prote
 requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
 command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::forwarding_fixture::sharing_receiver_nonowner_signed_http_resource_and_end_require_actual_driver_closure -- --ignored --exact --nocapture"
 
+# A passing operator-run Metal control, not expiring known-red debt.
+[[fixtures]]
+test = "crates/plurxd/src/pipeprobe.rs::pipeprobe::tests::real_neutral_peak_gate_rejects_old_metal_units"
+owner = "hdr-tone-map"
+reason = "requires an Apple Silicon Metal device and pinned Jellyfin FFmpeg"
+requires = "macOS Apple Silicon; pinned Jellyfin FFmpeg with VideoToolbox and Metal"
+command = "cargo test --locked -p plurxd --bin plurxd pipeprobe::tests::real_neutral_peak_gate_rejects_old_metal_units -- --ignored --exact --nocapture"
 # Packaged-engine qualification needs explicit immutable engine/model assets;
 # it is an opt-in fixture, not a temporarily broken product test.
 [[fixtures]]

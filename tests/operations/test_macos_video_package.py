@@ -72,6 +72,54 @@ class MacosVideoPackageCase(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Git checkout"):
             TOOL.attach_source_parser(self.package, self.stage, self.evidence)
 
+    def test_sealed_parser_rejects_build_without_compiled_zlib(self):
+        loader = importlib.machinery.SourceFileLoader("mac_parser_build", str(ROOT / "scripts/build-macos-source-parser"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        builder = importlib.util.module_from_spec(spec)
+        loader.exec_module(builder)
+        config = self.root / "config.h"
+        for text in ["#define CONFIG_ZLIB 0\n", "", "/* #define CONFIG_ZLIB 1 */\n", "#define CONFIG_ZLIB 10\n"]:
+            config.write_text(text)
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "requires pinned zlib"):
+                builder.require_zlib(config)
+        config.write_text("#define CONFIG_ZLIB 1\n")
+        builder.require_zlib(config)
+
+    def test_sealed_parser_refuses_substituted_zlib_before_compilation(self):
+        loader = importlib.machinery.SourceFileLoader("mac_parser_zlib", str(ROOT / "scripts/build-macos-source-parser"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        builder = importlib.util.module_from_spec(spec)
+        loader.exec_module(builder)
+        archive = self.root / "substituted.tar.gz"
+        archive.write_bytes(b"unauthenticated source")
+        with patch.object(builder.subprocess, "run") as compiler:
+            with self.assertRaises(ValueError):
+                builder.build_zlib(self.root, self.evidence, {}, archive, 2)
+            compiler.assert_not_called()
+
+    def test_parser_companion_retains_nested_zlib_source_and_license(self):
+        zlib = self.package / "provenance/zlib"
+        zlib.mkdir()
+        (zlib / "source.tar.gz").write_bytes(b"authenticated pinned source")
+        (zlib / "LICENSE").write_bytes(b"retained Zlib license")
+        facts = TOOL.attach_source_parser(self.package, self.stage, self.evidence)
+        for name in ["source.tar.gz", "LICENSE"]:
+            self.assertIn("zlib/" + name, facts["provenance_sha256"])
+            retained = self.evidence / "source-parser/zlib" / name
+            self.assertEqual(retained.read_bytes(), (zlib / name).read_bytes())
+
+    def test_prepared_hable_white_is_source_bound_and_checks_bounds_and_default(self):
+        with patch.object(TOOL, "run") as query:
+            self.assertFalse(TOOL.verify_prepared_hable_white(Path("ffmpeg"), self.evidence, {}))
+            query.assert_not_called()
+        patches = {"0005-match-metal-hable-reference-white.patch": "source-bound"}
+        valid = "Filter tonemap_videotoolbox\n   reference_white <double> ..FV....... Reference white in nits for Hable (from 1 to 10000) (default 203)\n"
+        with patch.object(TOOL, "run", return_value=valid):
+            self.assertTrue(TOOL.verify_prepared_hable_white(Path("ffmpeg"), self.evidence, patches))
+        for text in ["Filter tonemap_videotoolbox\n", valid.replace("default 203", "default 100"), valid.replace("from 1 to 10000", "from 0 to 10000"), valid.replace("Filter tonemap_videotoolbox", "Filter unrelated")]:
+            with self.subTest(text=text), patch.object(TOOL, "run", return_value=text), self.assertRaisesRegex(ValueError, "Hable reference_white"):
+                TOOL.verify_prepared_hable_white(Path("ffmpeg"), self.evidence, patches)
+
     def test_prepared_subtitle_contract_is_source_bound_and_official_baseline_stays_supported(self):
         with patch.object(TOOL, "run") as query:
             self.assertFalse(TOOL.verify_prepared_subtitle_options(Path("ffmpeg"), self.evidence, {}))

@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import re
 from pathlib import Path, PurePosixPath
 import shutil
+import subprocess
 import tarfile
 import tempfile
-import urllib.request
 
 CRATES = {
     "hiqlite": "8711815c093414290a5fcbc0bf74e1e70e3d6ef37e21735000178d25cee6fcf0",
@@ -27,8 +28,27 @@ def archive_bytes(crate: str, archive_dir: Path | None) -> bytes:
             data = source.read(ARCHIVE_LIMIT + 1)
     else:
         url = f"https://static.crates.io/crates/{crate}/{name}"
-        with urllib.request.urlopen(url, timeout=20) as source:
-            data = source.read(ARCHIVE_LIMIT + 1)
+        # curl races address families; urllib tries each unreachable IPv6
+        # address for its full timeout before reaching a working IPv4 address.
+        # Keep one total download deadline and every existing trust/size check.
+        version = subprocess.run(
+            ["curl", "-q", "--version"], check=True, timeout=5,
+            stdout=subprocess.PIPE, text=True,
+        ).stdout
+        match = re.match(r"curl (\d+)\.(\d+)\.(\d+)\b", version)
+        if match is None or tuple(map(int, match.groups())) < (8, 4, 0):
+            raise ValueError("curl >= 8.4.0 is required for bounded unknown-length downloads")
+        with tempfile.TemporaryDirectory(prefix="hiqlite-download-") as stage:
+            archive = Path(stage) / name
+            subprocess.run(
+                ["curl", "-q", "--fail", "--silent", "--show-error", "--location",
+                 "--proto", "=https", "--proto-redir", "=https",
+                 "--connect-timeout", "5", "--max-time", "20",
+                 "--max-filesize", str(ARCHIVE_LIMIT), "--output", str(archive), url],
+                check=True, timeout=25,
+            )
+            with archive.open("rb") as source:
+                data = source.read(ARCHIVE_LIMIT + 1)
     if len(data) > ARCHIVE_LIMIT:
         raise ValueError(f"{name}: public archive exceeds its bound")
     if hashlib.sha256(data).hexdigest() != CRATES[crate]:

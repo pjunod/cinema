@@ -35,7 +35,7 @@ pub(super) async fn subtitle_source_node_b_looks_up_node_a_publication() -> Resu
         // A sampled source digest is opaque to the replicated store. Its
         // portability and local-file validation are checked by plurxd.
         source_attestation: hex::encode(Sha256::digest(b"source-attestation-fixture")),
-        node_id: "node-1".to_owned(),
+        node_id: super::harness_node_identity(1),
         ordinal: 1,
         kind: "text".to_owned(),
         format: "webvtt".to_owned(),
