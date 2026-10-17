@@ -2210,7 +2210,20 @@ pub(crate) struct RealSourceStartFixture {
     membership_owner: SourceFixtureMembershipOwner,
     replication_owner: SourceFixtureMembershipOwner,
     _directory: tempfile::TempDir,
+    /// Declared last so it is released only after every owner above has
+    /// stopped: the next fixture must not start FFmpeg beside this one.
+    _campaign: tokio::sync::MutexGuard<'static, ()>,
 }
+// Each fixture below owns a fresh `AppState`, and with it its own encoder
+// admission budget, while production Source sessions on one daemon share a
+// single budget. Under libtest's parallel pool, concurrent fixtures launch more
+// real FFmpeg work than one daemon admits. A healthy Source then misses its own
+// fixed deadlines on a loaded runner: a 30 s fragment scan, or a first playlist
+// that answers a retryable 503. Serialize the real-FFmpeg Source fixtures for
+// their whole lifetime. This is the same boundary `vodencode_tests` keeps with
+// `ENCODED_INTEGRATION_CAMPAIGN`, and it changes no product concurrency.
+#[cfg(test)]
+static REAL_SOURCE_MEDIA_CAMPAIGN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[cfg(test)]
 impl RealSourceStartFixture {
     /// Diagnostic count of Source media sessions still holding a slot. Row
@@ -2361,6 +2374,7 @@ async fn build_real_source_start_fixture(
         store::{keys, sharing_catalogue_details::SourceDetailsRead},
     };
     use std::sync::Arc;
+    let campaign = REAL_SOURCE_MEDIA_CAMPAIGN.lock().await;
     let directory = crate::test_tempdir().expect("real Source fixture");
     let mut config = Config::default();
     config.storage.data_dir = directory.path().join("database");
@@ -2848,6 +2862,7 @@ async fn build_real_source_start_fixture(
         membership_owner,
         replication_owner,
         _directory: directory,
+        _campaign: campaign,
     }
 }
 
