@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-15",
+  "source_base": "af212b90ea2fba82b61839d706ba121cb097c8e5",
+  "task_branch": "codex/f5-attached-output-facts",
+  "scope": "Local cached/producing VOD status and web Playback info; recipe facts are labelled planned, not measured output or display proof",
+  "state": "implemented and locally checked; independent review, effort gate, physical reporting acceptance and final main promotion pending",
+  "regressions": {
+    "web_before": "attached cached output reports its frozen frame and Metal renderer: expected1920x1080, actualUnavailable",
+    "server_before": "playback_info_stream_format_is_the_attached_frozen_recipe: expected h264 descriptor, actual null",
+    "server_after": "2 focused tests pass, including frozen CPU plan versus changed operator setting, source-copy geometry without an invented DV output grade and no fictitious HDR peak on SDR/copy",
+    "web_after": "221 web-policy cases pass, including distinct source/stream/display geometry, cache renderer, preparation/refusal/success/reopen/stop, invalid dimensions and stale grade handling"
+  },
+  "checks": {
+    "rustc": "1.97.1 (8bab26f4f 2026-07-14)",
+    "clippy": "cargo clippy --workspace --all-targets -- -D warnings passed",
+    "web": "make web-check unit/static checks pass; two browser fixtures initially skipped for missing dependency and separately rerun successfully",
+    "browser_fixtures": {
+      "dependency": "Python Playwright1.62.0 in an isolated temporary environment",
+      "browser": "HeadlessChrome155.0.0.0",
+      "hls": "1.6.19",
+      "startup": "worker and inline fallback pass; local10s seek stays local; asset reporter passes",
+      "subtitles": "readiness puts cue on screen without changing video session"
+    },
+    "types": "493 existing diagnostics in80 baseline keys; no baseline increase",
+    "input_fence": "passed"
+  },
+  "retained_failures": [
+    "Missing descriptor server regression",
+    "Hardcoded unavailable web regression",
+    "Local compiler caught the test-only VodSessionInfo literal missing the additive optional field; fixed before publication"
+  ],
+  "archive": {
+    "name": "f5-output-facts-controls-20261015.zip",
+    "sha256": "2fa5f00ee5780922a4ab33312f627085cf22e1072a4d00ac99586e83ea5b2630",
+    "bytes": 76916,
+    "members": 16,
+    "destination": "private task PR attachment pending"
+  },
+  "restoration": "No live playback, movie progress, clipboard or hardware preference was changed by these isolated checks."
+}

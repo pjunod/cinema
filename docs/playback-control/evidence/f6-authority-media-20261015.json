@@ -1,0 +1,251 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-15T17:22:39.511915+00:00",
+  "scope": "Controlled source/media qualification; neither historical attribution nor browser presentation",
+  "base": "0fd61fc54f3b78c147172dc3b4f9f9d620f8adbc",
+  "f6": {
+    "test": "crates/plurxd/src/transcode/tests/chunk_06.rs::serving_fence_preserves_real_media_through_2468ms_and_reaps_after_grace",
+    "publisher": "real realtime 160x120 10fps H264 HLS, owned 30-second testsrc2",
+    "consumer": "independent FFmpeg first-frame MD5 from completed segments",
+    "outage_requested_ms": 2468,
+    "first_success_observed_ms": 2470,
+    "production_and_test_grace_ms": 5000,
+    "first_success_segments": [
+      0,
+      2,
+      3
+    ],
+    "first_success_frame_md5": [
+      "1786435e91aacb6deef10c6bc4ed231b",
+      "8aa3f51b5a760dbea43760b59da48b59",
+      "029cf3d96b67f135fd6c02815f9feceb"
+    ],
+    "assertions": [
+      "highest-completed-segment snapshots at loss and recovery prevent pre-transition media from passing",
+      "same child PID retained across brief loss",
+      "fresh admission refuses while fenced then recovers",
+      "pre-loss generation still rejected after recovery",
+      "publisher independently observed live before sustained loss",
+      "sustained loss retires session and reaps child"
+    ],
+    "affected_regression_count": 26,
+    "runtime_policy_change": false,
+    "initial_failure": "Test-only accelerated 2-second grace correctly retired the 2468ms control; retained failure, replaced test shortcut with unchanged production 5-second constant",
+    "historical_disposition": "Original 2468ms incident is not reproduced as a source/media continuity failure. Retained incident logs cannot attribute its slow replicated operation; no unrelated quorum incident is assigned as cause."
+  },
+  "f3": {
+    "focused_controls": [
+      {
+        "test": "an_idle_stopped_encoder_is_reclaimed_after_the_session_ttl",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "plurxd",
+          "--bin",
+          "plurxd",
+          "an_idle_stopped_encoder_is_reclaimed_after_the_session_ttl",
+          "--",
+          "--nocapture"
+        ],
+        "exit": 0,
+        "exactly_one_pass": true,
+        "seconds": 1.7551310829985596
+      },
+      {
+        "test": "idle_reap_and_same_id_resurrection_are_one_reader_transition",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "plurxd",
+          "--bin",
+          "plurxd",
+          "idle_reap_and_same_id_resurrection_are_one_reader_transition",
+          "--",
+          "--nocapture"
+        ],
+        "exit": 0,
+        "exactly_one_pass": true,
+        "seconds": 3.010666832997231
+      },
+      {
+        "test": "cancellation_before_offer_is_exact_and_idempotent",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "plurxd",
+          "--bin",
+          "plurxd",
+          "cancellation_before_offer_is_exact_and_idempotent",
+          "--",
+          "--nocapture"
+        ],
+        "exit": 0,
+        "exactly_one_pass": true,
+        "seconds": 0.3170349169995461
+      },
+      {
+        "test": "late_cancel_does_not_cancel_a_same_selection_retry",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "plurxd",
+          "--bin",
+          "plurxd",
+          "late_cancel_does_not_cancel_a_same_selection_retry",
+          "--",
+          "--nocapture"
+        ],
+        "exit": 0,
+        "exactly_one_pass": true,
+        "seconds": 0.2865583749990037
+      },
+      {
+        "test": "continuous_family_capacity_is_retryable_after_bounded_admission",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "plurxd",
+          "--bin",
+          "plurxd",
+          "continuous_family_capacity_is_retryable_after_bounded_admission",
+          "--",
+          "--nocapture"
+        ],
+        "exit": 0,
+        "exactly_one_pass": true,
+        "seconds": 0.28149862500140443
+      },
+      {
+        "test": "a_second_ask_supersedes_a_preparation_in_the_registration_window",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "plurxd",
+          "--bin",
+          "plurxd",
+          "a_second_ask_supersedes_a_preparation_in_the_registration_window",
+          "--",
+          "--nocapture"
+        ],
+        "exit": 0,
+        "exactly_one_pass": true,
+        "seconds": 1.4296220830001403
+      },
+      {
+        "test": "superseding_the_predecessor_cancels_its_registered_preparation",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "plurxd",
+          "--bin",
+          "plurxd",
+          "superseding_the_predecessor_cancels_its_registered_preparation",
+          "--",
+          "--nocapture"
+        ],
+        "exit": 0,
+        "exactly_one_pass": true,
+        "seconds": 0.6393871669970395
+      },
+      {
+        "test": "restart_private_marker_cleanup_preserves_surviving_hard_links",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "plurxd",
+          "--bin",
+          "plurxd",
+          "restart_private_marker_cleanup_preserves_surviving_hard_links",
+          "--",
+          "--nocapture"
+        ],
+        "exit": 0,
+        "exactly_one_pass": true,
+        "seconds": 0.8085904580002534
+      },
+      {
+        "test": "marked_restart_inventory_defers_count_saturation_and_resumes_after_cleanup",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "plurxd",
+          "--bin",
+          "plurxd",
+          "marked_restart_inventory_defers_count_saturation_and_resumes_after_cleanup",
+          "--",
+          "--nocapture"
+        ],
+        "exit": 0,
+        "exactly_one_pass": true,
+        "seconds": 0.6325305829996068
+      },
+      {
+        "test": "make_room_never_evicts_inside_a_live_readers_window",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "plurxd",
+          "--bin",
+          "plurxd",
+          "make_room_never_evicts_inside_a_live_readers_window",
+          "--",
+          "--nocapture"
+        ],
+        "exit": 0,
+        "exactly_one_pass": true,
+        "seconds": 0.5725222500004747
+      },
+      {
+        "test": "cold_controlled_readers_keep_authority_without_driving_shared_work",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "plurxd",
+          "--bin",
+          "plurxd",
+          "cold_controlled_readers_keep_authority_without_driving_shared_work",
+          "--",
+          "--nocapture"
+        ],
+        "exit": 0,
+        "exactly_one_pass": true,
+        "seconds": 0.9221910410014971
+      },
+      {
+        "test": "a_second_rendition_arriving_takes_the_stopped_producers_permit",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "plurxd",
+          "--bin",
+          "plurxd",
+          "a_second_rendition_arriving_takes_the_stopped_producers_permit",
+          "--",
+          "--nocapture"
+        ],
+        "exit": 0,
+        "exactly_one_pass": true,
+        "seconds": 5.370278499998676
+      }
+    ],
+    "physical_reservation_accounting": "still pending",
+    "historical_disposition": "Retiring the original owned session permitted admission; the record alone does not distinguish legitimate retained ownership from a leak."
+  },
+  "limits": [
+    "No live cluster partition, voter removal, production restart or guard disable",
+    "No browser frame-gap or calibrated-display claim",
+    "Original negative evidence preserved"
+  ]
+}

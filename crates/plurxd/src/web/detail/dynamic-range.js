@@ -123,9 +123,11 @@ function clearEffectiveProcessing(p){
   if(changed&&typeof PLAYER!=='undefined'&&p===PLAYER&&typeof renderPlayerInfo==='function') renderPlayerInfo();
 }
 function playerRangeBadge(f){
-  const badge=dynamicRangeBadge(f, PLAYER.deliveredRange, displayIsHdr(), PLAYER.deliveredDvProfile);
+  const stream=typeof statsStreamFormat==="function"?statsStreamFormat(PLAYER):null;
+  const delivered=stream?.dynamic_range||PLAYER.deliveredRange;
+  const badge=dynamicRangeBadge(f, delivered, displayIsHdr(), PLAYER.deliveredDvProfile);
   const generation=PLAYER.controlReporter?.bootstrap?.generation;
-  const report=effectiveHdrProcessing(PLAYER.effectiveProcessing,generation,PLAYER.deliveredRange);
+  const report=effectiveHdrProcessing(PLAYER.effectiveProcessing,generation,delivered);
   if(!report) return badge;
   const source=sourceDynamicRange(f),same=source==='hdr10';
   const detail=effectiveProcessingDetail(report);

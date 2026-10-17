@@ -1,0 +1,41 @@
+--- a/libavfilter/vf_tonemap_videotoolbox.m
++++ b/libavfilter/vf_tonemap_videotoolbox.m
+@@ -106,6 +106,7 @@
+     double                      target_peak;
+     double                      param;
+     double                      final_param;
++    double                      reference_white;
+     double                      desat_param;
+     double                      scene_threshold;
+     int                         initialised;
+@@ -384,6 +385,11 @@
+     case TONEMAP_MOBIUS:
+         if (isnan(ctx->param))
+             ctx->final_param = 0.3f;
++        break;
++    case TONEMAP_HABLE:
++        // Hable is nonlinear: normalize signal and peak to the caller's
++        // reference white, leaving the 203-nit default unchanged.
++        ctx->final_param = REFERENCE_WHITE_ALT / ctx->reference_white;
+         break;
+     case TONEMAP_BT2390:
+         if (isnan(ctx->param))
+@@ -1204,6 +1210,7 @@
+     { "peak",        "Signal peak override", OFFSET(peak), AV_OPT_TYPE_DOUBLE, { .dbl = 0 }, 0, DBL_MAX, FLAGS },
+     { "param",       "Tonemap parameter",   OFFSET(param), AV_OPT_TYPE_DOUBLE, { .dbl = NAN }, DBL_MIN, DBL_MAX, FLAGS },
+     { "desat",       "Desaturation parameter",   OFFSET(desat_param), AV_OPT_TYPE_DOUBLE, { .dbl = 0 }, 0, DBL_MAX, FLAGS },
++    { "reference_white", "Reference white in nits for Hable", OFFSET(reference_white), AV_OPT_TYPE_DOUBLE, { .dbl = REFERENCE_WHITE_ALT }, 1.0, 10000.0, FLAGS },
+     { "threshold",   "Scene detection threshold",   OFFSET(scene_threshold), AV_OPT_TYPE_DOUBLE, { .dbl = 0.2 }, 0, DBL_MAX, FLAGS },
+     { NULL }
+ };
+--- a/libavfilter/metal/vf_tonemap_videotoolbox.metal
++++ b/libavfilter/metal/vf_tonemap_videotoolbox.metal
+@@ -450,7 +450,7 @@
+ }
+ 
+ float hable(float s, float peak, float target_peak) {
+-    return hable_f(s) / hable_f(peak);
++    return hable_f(s * tone_param) / hable_f(peak * tone_param);
+ }
+ 
+ float mobius(float s, float peak, float target_peak) {
