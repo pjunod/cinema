@@ -1,0 +1,35 @@
+# ripgrep (and every agent's Grep tool, which is ripgrep) reads this file; git
+# does not. It keeps routine searches out of trees that are large, generated,
+# or historical, so a search returns code and live docs instead of megabytes
+# of evidence. Nothing here is hidden from git, the docs index test, or the
+# public-mirror scrub (`scripts/scrub-infra-names` walks with git, not rg).
+#
+# To search everything anyway: `rg --no-ignore-dot <pattern>` (or `rg -uu`).
+
+# Local working directories that are not part of the repository.
+/Claude outputs/
+/swarm/*/
+/_stage_stats/
+/_to_delete/
+
+# Evidence, receipts and archived work: kept for audit, rarely the answer.
+docs/**/evidence/
+benchmarks/evidence/
+docs/archive/
+docs/img/
+docs/mockups/
+**/*.tar.gz
+**/*.tar.zst
+
+# Generated or minified files whose single lines run to hundreds of KB.
+crates/plurxd/src/web/hls.min.js
+tests/ui-structure.golden
+
+# Vendored third-party trees. hiqlite stays searchable: plurx patches it.
+/vendor/*
+!/vendor/hiqlite/
+/tools/dv_quality/backends/
+/fuzz/**/corpus/
+
+# Frozen phase-C regression fragments (validation/merge-errata.toml).
+/validation/regressions.d/

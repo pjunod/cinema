@@ -18,7 +18,11 @@ from test_status_pr_claims import STATUS_PAGES
 
 ROOT = Path(__file__).resolve().parents[2]
 STATUS = ROOT / "STATUS.md"
-MAX_LINES = 400
+# Five recent efforts in full plus one index row per moved section. Lowered
+# from 400 on 2026-10-17 so the page an agent reads at the start of a session
+# stays small; when an append crosses it, move the oldest effort out.
+MAX_LINES = 180
+ANCHOR = "<!-- status: insert new efforts below this line -->"
 
 
 def linked_documents(markdown: str) -> set[str]:
@@ -34,7 +38,7 @@ def linked_documents(markdown: str) -> set[str]:
 
 
 class StatusPageShapeCase(unittest.TestCase):
-    def test_status_md_stays_under_four_hundred_lines(self):
+    def test_status_md_stays_short(self):
         lines = STATUS.read_text(encoding="utf-8").count("\n")
         self.assertLess(
             lines,
@@ -42,6 +46,12 @@ class StatusPageShapeCase(unittest.TestCase):
             "STATUS.md has outgrown its page: move the oldest sections into "
             "their folder's STATUS-HISTORY.md and leave an index row",
         )
+
+    def test_the_append_anchor_sits_above_the_first_effort(self):
+        lines = STATUS.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines.count(ANCHOR), 1, "STATUS.md needs exactly one append anchor")
+        first_section = next(i for i, line in enumerate(lines) if line.startswith("## "))
+        self.assertLess(lines.index(ANCHOR), first_section)
 
     def test_every_document_the_index_rows_link_to_is_a_guarded_status_page(self):
         index = STATUS.read_text(encoding="utf-8").split(

@@ -13,8 +13,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Runs first: the bookkeeping rules, in about a minute, before any compile
+  # job is allocated. docs/ci/PAPERWORK.md lists the rules and their fixes.
+  paperwork:
+    name: paperwork
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 10
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.23.2"
+      - name: Check index rows, release counters, names and Regression-Test reminders
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
+            "+refs/heads/main:refs/remotes/origin/main"
+          python3 scripts/paperwork --merge-target origin/main
+
   scope:
     name: effort validation scope
+    needs: paperwork
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     outputs:
@@ -240,6 +264,7 @@ jobs:
     name: Effort development gate
     if: always()
     needs:
+      - paperwork
       - scope
       - preflight
       - rust_compile
@@ -251,6 +276,7 @@ jobs:
     steps:
       - name: Require policy and every affected compile surface
         env:
+          PAPERWORK_RESULT: ${{ needs.paperwork.result }}
           SCOPE_RESULT: ${{ needs.scope.result }}
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           RUST_RESULT: ${{ needs.rust_compile.result }}
@@ -258,6 +284,9 @@ jobs:
           APPLE_RESULT: ${{ needs.apple_compile.result }}
           ANDROID_RESULT: ${{ needs.android_compile.result }}
         run: |
+          if [ "$PAPERWORK_RESULT" != success ]; then
+            echo "paperwork ended with: $PAPERWORK_RESULT"; exit 1
+          fi
           for result in \
             "$SCOPE_RESULT" "$PREFLIGHT_RESULT" "$RUST_RESULT" \
             "$WEB_RESULT" "$APPLE_RESULT" "$ANDROID_RESULT"; do

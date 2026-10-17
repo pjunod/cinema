@@ -145,6 +145,14 @@ storage-pressure-check: ## Root Linux: prove a real ENOSPC cache/scratch device 
 	PLURX_RUN_STORAGE_PRESSURE_TEST=1 $(CARGO) test --locked -p plurxd \
 	  a_full_cache_or_scratch_device_never_relocates_authoritative_bytes -- --nocapture
 
+# The bookkeeping rules CI enforces — index rows, release counters, infra
+# names, Regression-Test lines, route docs — checked in seconds with the fix
+# printed beside each failure. The pre-push hook and the fast lane's first job
+# run the same script. docs/ci/PAPERWORK.md lists every rule.
+.PHONY: paperwork
+paperwork: ## Fast bookkeeping checks (index rows, counters, names, Regression-Test) with fixes
+	@python3 scripts/paperwork
+
 .PHONY: history-check
 history-check: ## Verify every corrective commit has current regression evidence
 	@scripts/history-audit --report target/validation/history.json
@@ -1865,11 +1873,12 @@ uninstall-docker: ## Bring the Compose stack down; .env, the override file, and 
 	@deploy/install docker --uninstall $(INSTALL_FLAGS)
 
 .PHONY: hooks
-hooks: ## Install the lint-and-syntax pre-commit hook
-	@mkdir -p .git/hooks
-	@install -m 0755 scripts/pre-commit .git/hooks/pre-commit
-	@echo "Installed .git/hooks/pre-commit — it runs make precommit-check."
-	@echo "Bypass one run with 'git commit --no-verify'."
+hooks: ## Install the pre-commit (lint) and pre-push (paperwork) hooks
+	@hooks="$$(git rev-parse --git-path hooks)"; mkdir -p "$$hooks"; \
+	  install -m 0755 scripts/pre-commit "$$hooks/pre-commit"; \
+	  install -m 0755 scripts/pre-push "$$hooks/pre-push"; \
+	  echo "Installed $$hooks/pre-commit (make precommit-check) and $$hooks/pre-push (scripts/paperwork)."
+	@echo "Bypass one run with 'git commit --no-verify' or 'git push --no-verify'."
 
 ## ---- apple clients -----------------------------------------------------
 

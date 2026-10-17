@@ -1,8 +1,19 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-11 · Kept current by the working agent in the same
+**Updated:** 2026-10-17 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+<!-- status: insert new efforts below this line -->
+
+## Agent efficiency: smaller searches, a docs router, paperwork first
+
+**Branch `effort/agent-efficiency`, draft pull request; tooling and docs only, nothing to deploy.** Sessions were spending about 50k tokens before their first useful step and learning bookkeeping rules from 15–40 minute CI failures.
+
+- `docs/README.md` is a 10 KB router to one index per subject folder (was 131 KB); this page keeps five efforts and moved the rest to folder histories.
+- A root `.ignore` keeps evidence, archives, vendored and minified files out of searches; `.gitattributes` keeps large JSON out of diffs.
+- `scripts/paperwork` checks the bookkeeping rules in about ten seconds with the fix printed under each failure. It runs from `make paperwork`, the pre-push hook, and as the first job of every pull request (drafts included), and no other job starts until it passes ([PAPERWORK.md](docs/ci/PAPERWORK.md)).
+- `scripts/outline`, `scripts/quiet` and `scripts/ci-failures` keep file reads, build output and CI logs small; AGENTS.md opens with how to work efficiently.
 
 ## Playback startup path: the per-read stall and the web scrim
 
@@ -88,255 +99,22 @@ RCA: `docs/streaming/BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md` finding 6.
 Still owed: the GPT leader-restart check under live progressive, rolling and
 Live TV playback, before and after deploy.
 
-## 2026-10-04: the architecture effort is on `main`; the close-out is a draft PR
-
-**All four nodes were deployed to `b5e39b8bb` on 2026-10-04; later `main`
-commits are not deployed.**
-
-- **#793 — architecture-review effort (`4cfd1bdd1`)** landed whole, before
-  the planned relevance check. Not device- or fleet-qualified; the
-  [work board](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) has
-  the corrected row states. On by default with it: 90-day sign-in expiry, the
-  Lo/Ro fold and −4 dBFS limiter on typed stereo encodes, the CPU tone-map
-  chain, bounded replica reads, the off-writer Raft snapshot copy, the
-  profile C release build. Rolling back is not a revert: its migrations have
-  run on every node. **#797** (Jellyfin facade, off by default) and **#802**
-  (web long-pause resume) followed.
-- **Close-out PR (`claude/architecture-closeout`, draft).** K-06: learners no
-  longer block the clock guard but a lease owner must be bounded, the removal
-  fence's raw clock read goes through the guard, vendor start has its own
-  bound and admission a fresh 45 s. SDR `CODECS` behind a Developer switch,
-  default off. D6: a link negative is acknowledged from the live receipt with
-  network priors off. S-14, L-02, K-05 and D-01 (Android 146) fixes; the
-  hiqlite fork ledger tied to source; the host-name scrub and its guard;
-  Apple 209. The progressive-remux leader-restart grace is PR #807.
-- **Rulings Paul owes** are listed with recommendations in the 2026-10-04
-  relevance pass (an agent-side project document). K-02's snapshot path was
-  accepted on 2026-10-04.
-## Main-merge defects D1–D7 and the red gates: one batched PR
-
-**[PR #810](http://forge.lan:3000/noirr/plurx/pulls/810), branch `claude/main-merge-defects`; Android 146 source; not yet deployed or merged.**
-Builds `claude/main-merge-defects-rca-and-fix-2026-10-04.md` (rev 3). D1: the
-speculative and content-aware producers resolve audio with the canonical
-stereo-AAC claim, so stereo-route clients hit pre-transcodes again (policy
-generation moves: set `jobs.cache_produce_mins = 0` for the deploy, restore
-after). D4: a rolling start reads its settings in one snapshot. D2/D3:
-complete-output preparation and rolling retention are Developer switches,
-default off, with an executor that does not need the speculative schedule, a
-cancel-only drain, a disk free-space guard, prompt release and Activity rows
-with Stop. D5: a seek during a prepared switch is held, not dropped (Android,
-web; Apple waits on a device check). D6: the Fit Auto card names its
-network-priors prerequisite and priors get a switch (behaviour unchanged). D7
-and gates G1, G3–G6, G8 fixed; G2 (the UI golden) is regenerated separately.
-
-## Jellyfin facade: both pinned clients can now finish a play (J5)
-
-**Branch `claude/jellyfin-facade-gaps`, one draft PR to `main`.** The
-2026-10-04 merge review listed six facade gaps; re-checking them against the
-J0 traces and the upstream sources found that neither Infuse nor Jellyfin for
-Android TV could finish a play on the facade: Infuse's direct request names no
-play and its HLS entry lower-cases query keys, Android TV's media requests
-carry only the URL's `ApiKey`, every returned URL doubled `/jellyfin`, and the
-five-segment subtitle route both request was missing. Fixed on the existing
-seams: Jellyfin's subtitle routes and cue window, per-stream `DeliveryMethod`
-and `DeliveryUrl` from each client's subtitle profile, base-relative URLs with
-the compatibility login as `ApiKey`, the newest-direct-play resolution for
-Infuse (a new Store read on both backends), the nine missing contract routes,
-one switch read per request, and `plurx_jellyfin_requests_total`. The leader
-restart gap was a misreading: `/jellyfin` is fenced like native media and an
-HLS play keeps #798's grace; a regression now proves it. Detail:
-[JELLYFIN-COMPATIBILITY-STATUS.md](docs/clients/JELLYFIN-COMPATIBILITY-STATUS.md) §13.
-Open: the physical check on both clients (a GPT prompt), and the `ApiKey`
-decision for Paul to look over.
-
-## Apple TV: new HEVC WEB-DLs refused with 503 — ffmpeg 8 repeats the sample description
-
-**Branch `fix/ffmpeg8-repeated-hevc-descriptions`.** Paul reported
-2026-10-04 that *Taylor Tomlinson: Prodigal Daughter* (file 91) and
-*Tom Segura: Teacher* (file 106) error out on the Apple TV
-(`NSURLErrorDomain -1008`, underlying HTTP 503). Neither has a VOD index, so
-both play through live-HLS copy, and every attempt ended in `copy segmenter
-rejected the stream shape: … this stsd has 2 HEVC sample entries`; the
-legacy-muxer fallback wrote the same init and `master.m3u8` refused it (503).
-Cause: jellyfin-ffmpeg 8's MOV muxer appends a sample description whenever a
-packet carries new-extradata side data that differs byte-wise from the current
-one, and `extract_extradata` (needed for Matroska sources with a bare 23-byte
-`hvcC`) attaches it on every parameter-set keyframe. Reproduced on six of six
-2160p sources on media1: two descriptions identical outside `hvcC`, the same
-`hvcC` header and the same VPS/SPS/PPS modulo a PPS trailing zero (only SEI
-arrays differ), no `tfhd` sample-description index, `trex` default 1. The fix
-collapses such provably decoder-equivalent descriptions to the first, in
-`fmp4::collapse_equivalent_hevc_sample_entries`, called by both served-init
-builders (`promote_from`, `promote_hevc_parameter_sets`), by the copy
-segmenter on the init, and by VOD's `InitIdentity` before it digests a
-generation's muxer init; descriptions that differ in anything else keep the
-typed `MultipleHevcSampleEntries` refusal. The kept `hvcC` is reduced to its
-VPS/SPS/PPS arrays: ffmpeg 8's extraction copies the leading keyframe's SEI
-(decoded-picture hashes included), so without that every VOD generation
-started at a different keyframe would have refused as muxer drift once these
-titles get an index. Verified on captures: a real 8.1.3 copy pipe publishes a
-one-description init end to end, and four generations of file 91 started at
-0/300/900/1800 s collapse to byte-identical inits (opt-in tests).
-Not addressed here: file 91's fragment index also fails on a separate
-`Non-monotonic DTS` muxer error, and file 6710's `410 Gone` in the same log
-window is unrelated.
-
-## Content analysis stopped: the queue's receipt bound is the next cliff after #608
-
-**Branch `fix/queue-receipt-pressure`, [PR #610](http://forge.lan:3000/noirr/plurx/pulls/610), CI running; the retained-row half is
-already on `main` as [#608](http://forge.lan:3000/noirr/plurx/pulls/608)
-(`29358ce5`), not yet deployed — the GPT deploy/verify prompt is in the
-project doc.** Paul reported 2026-09-28 that Content analysis was not
-advancing with `pipeline version unavailable` on every row. Two things, and
-the one on the page was the smaller. The stall: `background_jobs` held
-exactly 10,000 rows (8,890 finished, 6,219 from Saturday's embedding
-backfill), admission refuses at 10,000 regardless of state, finished rows
-retired only after seven days — every enqueue since 2026-09-27 ~09:00 UTC
-answered `queue_full`; fragment requests bounced as `queue_full_or_busy`
-(fences of 100–250 on the same rows, zero fragment jobs queued or running,
-last `ready` 2026-09-27 05:11 UTC). Two sessions diagnosed it in parallel;
-#608 landed first with enqueue-path eviction plus upkeep from 9,000
-(replicated v63 / SQLite v85), and this session's
-[#605](http://forge.lan:3000/noirr/plurx/pulls/605) was closed as
-superseded. What #608 leaves: `background_job_waiters` stood at 11,947 of
-16,384 with 10,775 succeeded receipts that only expire after seven days, so
-the same refusal was days away one table over. This branch compacts the
-oldest settled *internal* receipts a page per upkeep pass from 15,360
-(never user-scoped, identity-retaining — every fragment interest — or of an
-active job), as replicated **v64** / SQLite **v86**, generated from v63's
-upkeep trigger and pinned to it by test.
-The rows on the page: today's image builds flipped jellyfin-ffmpeg
-8.1.2 → 8.1.3 → 8.1.2 (the Dockerfile installs `jellyfin-ffmpeg8` unpinned),
-which changes the fragment-index engine digest, and each deploy under the
-other digest failed everything queued under the first — 278 rows, 228 of
-them tombstones on media1 until **Retry this page** is pressed after the
-deploy. Filed as [#604](http://forge.lan:3000/noirr/plurx/issues/604).
-
-## Android Live TV fullscreen on tablets: every box gets its own player view
-
-**[PR #606](http://forge.lan:3000/noirr/plurx/pulls/606), merged 2026-09-28 as `cfa61cb3e`; Android 138 installed on the Lenovo TB322FC, Google TV Streamer, Pixel 11 Pro XL, Pixel 10 Pro Fold and razr ultra 2025; VERIFIED on the TB322FC and the Streamer. Still owed: the TCL 9445X and the Xiaomi 25019PNF3C, which were not reachable over wireless adb.**
-Paul reported 2026-09-28 that fullscreen Live TV on the tablets still shows
-the small inline picture in a mostly black screen. #509's relayout + surface
-rebind *is* on `main` (re-landed by #546 after the push-mirror rewind, in
-every build since 129), so this was the fix not working, not a lost commit.
-The one PlayerView was moved between the wide browser's picture box and the
-fullscreen box with `movableContentOf`, and its SurfaceView kept its creation
-geometry. Each host box now composes its own PlayerView on the shared
-ExoPlayer and unbinds on release; phones are unchanged (same slot, just a
-resize). `LiveTvPlayerSurfaceTest` fails against `main` and passes here;
-`testDebugUnitTest` (799/0), `lintDebug` and `assembleDebug` green;
-`history-audit` ok. Open as [PR #606](http://forge.lan:3000/noirr/plurx/pulls/606).
-The adversarial review found no blocker and confirmed the release/bind order
-against Media3 1.10.1 and Compose's apply order; it added PlayerView's API 34
-SurfaceView sync workaround for the boxes that resize in place, an honest
-KDoc (one black frame per swap, no PiP host on the wide layout) and a
-tighter source pin. The fast lane went green (Rust gate included) and the
-merge carries the `Regression-Test:` trailer. Hardware, driven over wireless
-adb from lab3 with screenshots and `uiautomator` bounds: on the TB322FC the
-fullscreen SurfaceView is `[0,97][3040,1807]` and the picture fills it at
-16:9; exit returns it to the inline box `[44,492][1753,1453]`; five
-fullscreen/exit toggles from the watch pane and three from the Guide preview
-kept the tuner (`1 tuner in use`, no stop message); the swap while paused
-shows the held frame in both boxes. The Streamer (API 34) plays, fills and
-returns the same way. The release build also exposed that
-`scripts/sign-android-release` could not read apksigner 37's per-scheme
-signer lines (the pinned image has build-tools 37); that landed in the same
-PR with three unit tests. Android 138 is a release-signed build; 137 was
-never installed anywhere.
-
-## Live TV said "all slots are busy" with every tuner idle
-
-**[PR #585](http://forge.lan:3000/noirr/plurx/pulls/585), merged 2026-09-28 as `2694db665`; not yet deployed — the GPT deploy/verify prompt is in the project doc.**
-Paul reported 2026-09-27 (web and iOS) that channels intermittently refuse
-with *All Live TV slots are busy*; the FLEX 4K had four idle tuners each
-time. The owner's own log named the cause — `tuner_capacity` with
-`cause=transcode capacity is temporarily unavailable: background encoding
-did not yield within 5.0s` — and the RCA
-([LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md](docs/streaming/LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md))
-found four layers: the subtitle backfill held the whole software encoder
-pool while walking candidate jobs; eight zombie `subtitle_extract` rows each
-cost that walk a full 30 s ambiguity wait because the claim trigger's
-definite `no longer claimable` abort was surfaced as an error and nothing
-retired the row; a live start that waited out the 5 s window with only
-background work in the way was **refused, by design**; and the Live TV layer
-labelled an encoder refusal a tuner one. Fixed at each layer: the store
-side landed first on `main` as #588 (claim/candidate precondition, bounded
-reconcile, guarded settled trigger, SQLite v84 / cluster v62) and this
-branch dropped its own copy at the merge; the backfill claims before it
-takes the pool; a `Priority::Live` start is admitted over background
-ownership after the window (hardware within the cap, software forced, one
-WARN + `plurx_transcode_background_overrun_total{pool}`); and the refusal is
-`encoder_capacity` with its own copy on all three clients, pinned by the
-shared start-cases fixture (Android 134, Apple 196).
-One adversarial review round (five findings, all taken): the take over a
-stuck permit is now bounded by live usage, the settled-trigger guard the
-review asked for is the one #588 shipped, the subtitle pre-check is the
-admission's own predicate, and the tests reach the arms they name.
-**Decision for Paul to look over:** admitting a viewer over a stuck
-background permit reverses the ruling OPERATIONS.md carried ("absence after
-five seconds means that worker is stuck rather than permission to start
-beside it"); the RCA §3 argues why. Next (GPT): deploy the three voters then lab3,
-confirm the eight zombie rows retire on the first upkeep pass, tune 6.1
-under backfill load twenty times from web and iPhone, screenshot the
-`encoder_capacity` copy, and install Android 134 / Apple 196.
-commit as the work it describes; a stale entry here is a bug. Newest effort
-first.
-
-## Apple TV Live TV navigation: every press reversible, every control reachable
-
-**[PR #589](http://forge.lan:3000/noirr/plurx/pulls/589) merged to `main`
-2026-09-28 as `f400c0ea2`, Apple build 195; not yet installed on any device.**
-Paul reported 2026-09-27 that Live TV navigation on the Apple TV
-was close to broken: hard to reach anything, and a move often did not reverse.
-Two independent reads of `LiveTvView.swift` agreed on the causes, and one
-was worse than reported: Info and More on the fullscreen pills did nothing at
-all, because their sheets hung off a root that was already presenting the
-cover. Fixed in one Apple PR: the cover owns every sheet it can open; one
-`FocusTarget` key per view (the toolbar and the pills no longer share
-`.guide`/`.channels`/`.more`); Up from the guide's first row goes to the
-stage's Watch / the temporary guide's Close / Over picture's Close, and Down
-from those returns to the cell the grid held; Right past the last programme
-and Left from the header page the window and land on the same row; Up from
-the header column reaches the paging chips, which are never `.disabled`;
-channel rows are not disabled during a tune (focus used to jump to the
-toolbar); the detail region beside the list is moved by name so Left from
-the picture returns to the row you came from; the Guide pill opens on the
-channel playing and closing it restores the browse view and the pill; leaving
-the cover restores page focus from `onDismiss`; a programme sheet returns to
-its cell. The restore coordinator applies from `onChange` against the current
-view instead of the task's stale copy, and no longer cancels on an
-engine-driven arrival.
-[LIVE-TV-APPLE-TV-NAVIGATION.md](docs/features/LIVE-TV-APPLE-TV-NAVIGATION.md)
-has the focus graph and the §1 table that doubles as the device checklist.
-Verified: `make apple-test` (iOS 674 + tvOS 690, 0 failures) and the full
-fast lane, including the promotion gate. Not verified: anything with a remote
-in hand — the device pass is `~/Downloads/kit 2/APPLETV-LIVE-TV-NAVIGATION-PHYSICAL-VERIFICATION-PROMPT.md`.
-
-## Silo comparison: two implementation plans and one device census, no code
-
-**Branch `docs/silo-comparison-plans`, [PR #563](http://forge.lan:3000/noirr/plurx/pulls/563), draft; not merged, nothing deployed.**
-Paul asked 2026-09-26 how plurx compares with Silo (github.com/Silo-Server),
-then for implementation docs on the two things worth taking and a census for
-the third. Both plans went through an adversarial agent review that pulled
-hyper's source and ran ffmpeg to check them; both came back *reject as
-written* and were rewritten — the write-stall guard now ships off by default
-because the web and Android progressive paths do not resume after a mid-body
-close, and the DV probe changed from "broken → transcode" to "broken → strip
-by unit type" once the review showed the failing unit is a malformed SEI,
-not the RPU. Round two: approve with changes, applied.
-[MEDIA-WRITE-STALL-GUARD.md](docs/streaming/MEDIA-WRITE-STALL-GUARD.md) ·
-[DV-STRIP-TRIAL-PROBE.md](docs/streaming/DV-STRIP-TRIAL-PROBE.md) ·
-[ANDROID-DV-LEVEL-CENSUS-PROMPT.md](docs/clients/ANDROID-DV-LEVEL-CENSUS-PROMPT.md).
-Next: Paul's call on the DV plan's Decision 1 and the stall guard's §8; the
-DV plan's M0 evidence step needs the media.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28
-and 2026-10-04 into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28,
+2026-10-04 and 2026-10-17 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-10-05 | Main-merge defects D1–D7 and the red gates: one batched PR | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
+| 2026-10-04 | The architecture effort is on `main`; the close-out is a draft PR | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
+| 2026-10-04 | Jellyfin facade: both pinned clients can now finish a play (J5) | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |
+| 2026-10-04 | Apple TV: new HEVC WEB-DLs refused with 503 — ffmpeg 8 repeats the sample description | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
+| 2026-09-28 | Content analysis stopped: the queue's receipt bound is the next cliff after #608 | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
+| 2026-09-28 | Android Live TV fullscreen on tablets: every box gets its own player view | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
+| 2026-09-28 | Live TV said "all slots are busy" with every tuner idle | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
+| 2026-09-28 | Apple TV Live TV navigation: every press reversible, every control reachable | [docs/features/STATUS-HISTORY.md](docs/features/STATUS-HISTORY.md) |
+| 2026-09-26 | Silo comparison: two implementation plans and one device census, no code | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-24 | Watch view: menus and Playback info escape the picture; the picture goes under the header | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |
 | 2026-09-25 | P-02: four parser fuzz targets, one of which found a way to abort plurxd; the release profile measured | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-25 | P-02 M3: a priority class for every child process | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |

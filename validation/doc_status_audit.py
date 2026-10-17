@@ -1,4 +1,7 @@
-"""Report docs/README.md status rows that disagree with document headers.
+"""Report docs index status rows that disagree with document headers.
+
+The index is the root page docs/README.md plus every folder index
+docs/<area>/README.md; rows are read from all of them.
 
 Free prose cannot be a hard gate: this audit narrows the review queue and
 leaves every disposition to a reader. The JSON form exists so plans can record
@@ -77,6 +80,13 @@ class Finding:
     index_status: str
     document: str
     header: str | None
+    index: str = "README.md"
+
+
+def index_paths(root: Path) -> list[Path]:
+    """The root docs index followed by every subject-folder index."""
+    docs = root / "docs"
+    return [docs / "README.md", *sorted(docs.glob("*/README.md"))]
 
 
 def _status_clause(text: str) -> str | None:
@@ -106,65 +116,72 @@ def _is_impossible_composite(header: str) -> bool:
 
 
 def audit(root: Path = REPO_ROOT) -> dict[str, Any]:
-    index_path = root / "docs" / "README.md"
+    docs = root / "docs"
     contradictions: list[Finding] = []
     missing_headers: list[Finding] = []
     unclear: list[Finding] = []
     rows = 0
 
-    for line_number, line in enumerate(
-        index_path.read_text(encoding="utf-8").splitlines(), 1
-    ):
-        row = _ROW.match(line)
-        if row is None:
-            continue
-        link = _LINK.search(row.group(1))
-        if link is None:
-            continue
-        rows += 1
-        index_status = row.group(3)
-        relative_path = link.group(1)
-        if not relative_path.endswith(".md"):
-            continue
-        document = root / "docs" / relative_path
-        header = _status_clause(document.read_text(encoding="utf-8"))
-        if header is None:
-            missing_headers.append(
-                Finding(line_number, index_status, relative_path, None)
-            )
-            continue
+    for index_path in index_paths(root):
+        index_name = index_path.relative_to(docs).as_posix()
+        for line_number, line in enumerate(
+            index_path.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            row = _ROW.match(line)
+            if row is None:
+                continue
+            link = _LINK.search(row.group(1))
+            if link is None:
+                continue
+            rows += 1
+            index_status = row.group(3)
+            if not link.group(1).endswith(".md"):
+                continue
+            document = (index_path.parent / link.group(1)).resolve()
+            try:
+                relative_path = document.relative_to(docs.resolve()).as_posix()
+            except ValueError:
+                relative_path = link.group(1)
+            header = _status_clause(document.read_text(encoding="utf-8"))
+            if header is None:
+                missing_headers.append(
+                    Finding(line_number, index_status, relative_path, None, index_name)
+                )
+                continue
 
-        terminal = bool(_TERMINAL.search(header))
-        nonterminal = bool(_NONTERMINAL.search(header))
-        contradiction = (
-            index_status == "open"
-            and terminal
-            and not _OPEN_QUALIFIER.search(header)
-        ) or (
-            index_status in {"built", "done", "superseded"}
-            and nonterminal
-            and not terminal
-        ) or (
-            index_status in {"built", "done", "superseded"}
-            and _is_impossible_composite(header)
-        )
-        finding = Finding(line_number, index_status, relative_path, header)
-        if contradiction:
-            contradictions.append(finding)
-            continue
-
-        broadly_terminal = bool(_BROAD_TERMINAL.search(header))
-        broadly_nonterminal = bool(_BROAD_NONTERMINAL.search(header))
-        clear = (
-            index_status == "live"
-            or (index_status == "open" and broadly_nonterminal)
-            or (
+            terminal = bool(_TERMINAL.search(header))
+            nonterminal = bool(_NONTERMINAL.search(header))
+            contradiction = (
+                index_status == "open"
+                and terminal
+                and not _OPEN_QUALIFIER.search(header)
+            ) or (
                 index_status in {"built", "done", "superseded"}
-                and broadly_terminal
+                and nonterminal
+                and not terminal
+            ) or (
+                index_status in {"built", "done", "superseded"}
+                and _is_impossible_composite(header)
             )
-        )
-        if not clear:
-            unclear.append(finding)
+            finding = Finding(
+                line_number, index_status, relative_path, header, index_name
+            )
+            if contradiction:
+                contradictions.append(finding)
+                continue
+
+            broadly_terminal = bool(_BROAD_TERMINAL.search(header))
+            broadly_nonterminal = bool(_BROAD_NONTERMINAL.search(header))
+            clear = (
+                index_status == "live"
+                or (index_status == "open" and broadly_nonterminal)
+                or (
+                    index_status in {"built", "done", "superseded"}
+                    and broadly_terminal
+                )
+            )
+            if not clear:
+                unclear.append(finding)
 
     return {
         "rows": rows,
@@ -179,7 +196,7 @@ def _print_findings(label: str, findings: list[dict[str, Any]]) -> None:
     for finding in findings:
         header = finding["header"] or "<no status header>"
         print(
-            f"  README:{finding['index_line']} {finding['document']}: "
+            f"  {finding['index']}:{finding['index_line']} {finding['document']}: "
             f"row={finding['index_status']}; header={header}"
         )
 

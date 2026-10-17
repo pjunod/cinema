@@ -11,6 +11,109 @@ describes the state on the day it was written, and
 `tests/operations/test_status_pr_claims.py` keeps holding it to the same
 merged-pull-request rule it held in `STATUS.md`.
 
+## 2026-09-28 · Android Live TV fullscreen on tablets: every box gets its own player view
+
+**[PR #606](http://forge.lan:3000/noirr/plurx/pulls/606), merged 2026-09-28 as `cfa61cb3e`; Android 138 installed on the Lenovo TB322FC, Google TV Streamer, Pixel 11 Pro XL, Pixel 10 Pro Fold and razr ultra 2025; VERIFIED on the TB322FC and the Streamer. Still owed: the TCL 9445X and the Xiaomi 25019PNF3C, which were not reachable over wireless adb.**
+Paul reported 2026-09-28 that fullscreen Live TV on the tablets still shows
+the small inline picture in a mostly black screen. #509's relayout + surface
+rebind *is* on `main` (re-landed by #546 after the push-mirror rewind, in
+every build since 129), so this was the fix not working, not a lost commit.
+The one PlayerView was moved between the wide browser's picture box and the
+fullscreen box with `movableContentOf`, and its SurfaceView kept its creation
+geometry. Each host box now composes its own PlayerView on the shared
+ExoPlayer and unbinds on release; phones are unchanged (same slot, just a
+resize). `LiveTvPlayerSurfaceTest` fails against `main` and passes here;
+`testDebugUnitTest` (799/0), `lintDebug` and `assembleDebug` green;
+`history-audit` ok. Open as [PR #606](http://forge.lan:3000/noirr/plurx/pulls/606).
+The adversarial review found no blocker and confirmed the release/bind order
+against Media3 1.10.1 and Compose's apply order; it added PlayerView's API 34
+SurfaceView sync workaround for the boxes that resize in place, an honest
+KDoc (one black frame per swap, no PiP host on the wide layout) and a
+tighter source pin. The fast lane went green (Rust gate included) and the
+merge carries the `Regression-Test:` trailer. Hardware, driven over wireless
+adb from lab3 with screenshots and `uiautomator` bounds: on the TB322FC the
+fullscreen SurfaceView is `[0,97][3040,1807]` and the picture fills it at
+16:9; exit returns it to the inline box `[44,492][1753,1453]`; five
+fullscreen/exit toggles from the watch pane and three from the Guide preview
+kept the tuner (`1 tuner in use`, no stop message); the swap while paused
+shows the held frame in both boxes. The Streamer (API 34) plays, fills and
+returns the same way. The release build also exposed that
+`scripts/sign-android-release` could not read apksigner 37's per-scheme
+signer lines (the pinned image has build-tools 37); that landed in the same
+PR with three unit tests. Android 138 is a release-signed build; 137 was
+never installed anywhere.
+
+
+## 2026-09-28 · Live TV said "all slots are busy" with every tuner idle
+
+**[PR #585](http://forge.lan:3000/noirr/plurx/pulls/585), merged 2026-09-28 as `2694db665`; not yet deployed — the GPT deploy/verify prompt is in the project doc.**
+Paul reported 2026-09-27 (web and iOS) that channels intermittently refuse
+with *All Live TV slots are busy*; the FLEX 4K had four idle tuners each
+time. The owner's own log named the cause — `tuner_capacity` with
+`cause=transcode capacity is temporarily unavailable: background encoding
+did not yield within 5.0s` — and the RCA
+([LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md](../streaming/LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md))
+found four layers: the subtitle backfill held the whole software encoder
+pool while walking candidate jobs; eight zombie `subtitle_extract` rows each
+cost that walk a full 30 s ambiguity wait because the claim trigger's
+definite `no longer claimable` abort was surfaced as an error and nothing
+retired the row; a live start that waited out the 5 s window with only
+background work in the way was **refused, by design**; and the Live TV layer
+labelled an encoder refusal a tuner one. Fixed at each layer: the store
+side landed first on `main` as #588 (claim/candidate precondition, bounded
+reconcile, guarded settled trigger, SQLite v84 / cluster v62) and this
+branch dropped its own copy at the merge; the backfill claims before it
+takes the pool; a `Priority::Live` start is admitted over background
+ownership after the window (hardware within the cap, software forced, one
+WARN + `plurx_transcode_background_overrun_total{pool}`); and the refusal is
+`encoder_capacity` with its own copy on all three clients, pinned by the
+shared start-cases fixture (Android 134, Apple 196).
+One adversarial review round (five findings, all taken): the take over a
+stuck permit is now bounded by live usage, the settled-trigger guard the
+review asked for is the one #588 shipped, the subtitle pre-check is the
+admission's own predicate, and the tests reach the arms they name.
+**Decision for Paul to look over:** admitting a viewer over a stuck
+background permit reverses the ruling OPERATIONS.md carried ("absence after
+five seconds means that worker is stuck rather than permission to start
+beside it"); the RCA §3 argues why. Next (GPT): deploy the three voters then lab3,
+confirm the eight zombie rows retire on the first upkeep pass, tune 6.1
+under backfill load twenty times from web and iPhone, screenshot the
+`encoder_capacity` copy, and install Android 134 / Apple 196.
+commit as the work it describes; a stale entry here is a bug. Newest effort
+first.
+
+
+## 2026-09-28 · Apple TV Live TV navigation: every press reversible, every control reachable
+
+**[PR #589](http://forge.lan:3000/noirr/plurx/pulls/589) merged to `main`
+2026-09-28 as `f400c0ea2`, Apple build 195; not yet installed on any device.**
+Paul reported 2026-09-27 that Live TV navigation on the Apple TV
+was close to broken: hard to reach anything, and a move often did not reverse.
+Two independent reads of `LiveTvView.swift` agreed on the causes, and one
+was worse than reported: Info and More on the fullscreen pills did nothing at
+all, because their sheets hung off a root that was already presenting the
+cover. Fixed in one Apple PR: the cover owns every sheet it can open; one
+`FocusTarget` key per view (the toolbar and the pills no longer share
+`.guide`/`.channels`/`.more`); Up from the guide's first row goes to the
+stage's Watch / the temporary guide's Close / Over picture's Close, and Down
+from those returns to the cell the grid held; Right past the last programme
+and Left from the header page the window and land on the same row; Up from
+the header column reaches the paging chips, which are never `.disabled`;
+channel rows are not disabled during a tune (focus used to jump to the
+toolbar); the detail region beside the list is moved by name so Left from
+the picture returns to the row you came from; the Guide pill opens on the
+channel playing and closing it restores the browse view and the pill; leaving
+the cover restores page focus from `onDismiss`; a programme sheet returns to
+its cell. The restore coordinator applies from `onChange` against the current
+view instead of the task's stale copy, and no longer cancels on an
+engine-driven arrival.
+[LIVE-TV-APPLE-TV-NAVIGATION.md](LIVE-TV-APPLE-TV-NAVIGATION.md)
+has the focus graph and the §1 table that doubles as the device checklist.
+Verified: `make apple-test` (iOS 674 + tvOS 690, 0 failures) and the full
+fast lane, including the promotion gate. Not verified: anything with a remote
+in hand — the device pass is `~/Downloads/kit 2/APPLETV-LIVE-TV-NAVIGATION-PHYSICAL-VERIFICATION-PROMPT.md`.
+
+
 ## 2026-09-13 · Live TV start, stall, and tvOS surface has landed on main
 
 **[#301](http://forge.lan:3000/noirr/plurx/pulls/301), merge
