@@ -2507,7 +2507,7 @@ struct LiveTvView: View {
                 .background(RemoteOwnedPresentationProbe(navigation: remoteNavigation, token: remoteOwner, scope: "live-tv"))
                 .diagnosticReportHost(owner: "live-player")
                 .remoteScope("live-tv")
-                .remoteChoicePresentation(isPresented: Binding(get: { remoteMenu != nil }, set: { if !$0 { remoteMenu = nil } }), scope: "live-tv:" + (remoteMenu ?? "menu")) { liveRemoteMenu }
+                .remoteChoicePresentation(isPresented: Binding(get: { remoteMenu != nil }, set: { if !$0 { remoteMenu = nil } }), scope: "live-tv:" + (remoteMenu ?? "menu"), backdrop: .video) { liveRemoteMenu }
                 .remoteRestricted(showingSearch || showingInfo || showingMore || showingLayout || detail != nil || showingDvrActivity)
                 .onDisappear { remoteNavigation.detachPresentation(remoteOwner); attachLiveRemote() }
                 .sheet(item: $detail, onDismiss: { returnGuideFocusAfterProgrammeSheet() }) {
