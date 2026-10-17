@@ -1386,6 +1386,8 @@ pub fn vod_completed_reconstructed_pipe_args(
         || plan.options().subtitle_burn.is_some()
         || plan.options().video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50
         || grid.frames_per_segment > 64
+        || output.encoder() == super::Encoder::Vaapi
+            && u64::from(grid.numerator) > 30 * u64::from(grid.denominator)
     {
         return Err("unsupported reconstructed VOD recipe");
     }
@@ -1499,23 +1501,37 @@ pub fn vod_completed_reconstructed_pipe_args(
             duration + VOD_AAC_FRAME_SAMPLES as f64 / f64::from(VOD_AUDIO_RATE)
         );
     }
-    let pixel_format = if output.encoder() == super::Encoder::Nvenc {
+    let pixel_format = if matches!(
+        output.encoder(),
+        super::Encoder::Nvenc | super::Encoder::Vaapi
+    ) {
         "p010le"
     } else {
         "yuv420p10le"
     };
-    let filter = format!(
+    let mut filter = format!(
         "zscale=matrixin=gbr:rangein=full:primariesin=bt2020:transferin=smpte2084:matrix=bt2020nc:range=limited:primaries=bt2020:transfer=smpte2084:w={width}:h={height}:dither=none,format={pixel_format},settb=expr=1/{},setpts=N*{}+{origin}",
         grid.numerator, grid.denominator,
     );
+    if output.encoder() == super::Encoder::Vaapi {
+        filter.push_str(",hwupload=extra_hw_frames=4");
+        args.splice(0..0, super::Encoder::Vaapi.init_args());
+    }
     if let Some(index) = args.iter().position(|arg| arg == "-vf") {
         args[index + 1] = filter;
     } else {
         let at = args.len().saturating_sub(1);
         args.splice(at..at, ["-vf".into(), filter]);
     }
-    if output.encoder() == super::Encoder::Nvenc {
-        let mut index = last_input;
+    if matches!(
+        output.encoder(),
+        super::Encoder::Nvenc | super::Encoder::Vaapi
+    ) {
+        let mut index = args
+            .iter()
+            .rposition(|arg| arg == "-i")
+            .ok_or("reconstructed input unavailable")?
+            + 2;
         while index + 1 < args.len() {
             if matches!(
                 args[index].as_str(),
@@ -1533,6 +1549,10 @@ pub fn vod_completed_reconstructed_pipe_args(
                     | "-colorspace"
                     | "-color_range"
                     | "-forced-idr"
+                    | "-pix_fmt"
+                    | "-surfaces"
+                    | "-idr_interval"
+                    | "-bf"
             ) {
                 args.drain(index..index + 2);
             } else {
@@ -2063,6 +2083,111 @@ mod tests {
                 && !filter.contains("fps=")
                 && !filter.contains("tpad=")
         );
+    }
+
+    #[test]
+    fn reconstructed_vaapi_freezes_proved_driver_policy_on_software_source_plan() {
+        use crate::transcode::*;
+        let (source, plan, execution, _, _) = encoded_recipe_fixture(true);
+        assert_eq!(plan.encoder(), Encoder::Software);
+        let mut caps = EncoderCaps {
+            vaapi: true,
+            vaapi_hdr_policy: Some(VaapiHdrPolicy::MesaRadeonsiVbaq),
+            ..Default::default()
+        };
+        let output = plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .expect("completed VAAPI")
+            .with_vaapi_hdr_policy(caps.vaapi_hdr_policy);
+        let recipe = |output: &CompletedReconstructedOutputPlan<'_>| {
+            vod_completed_reconstructed_pipe_args(
+                &source,
+                output,
+                &execution,
+                VodFrameGrid::new(24, 1).expect("grid"),
+                0.25,
+                "/dev/fd/3",
+                "/dev/fd/4",
+                VodSourceClock::ReportedOrigin(0),
+            )
+            .expect("actual graph")
+        };
+        let qualified = recipe(&output);
+        assert_eq!(
+            qualified
+                .windows(2)
+                .filter(|pair| pair[0] == "-compression_level")
+                .map(|pair| pair[1].as_str())
+                .collect::<Vec<_>>(),
+            ["19"]
+        );
+        caps.vaapi_hdr_policy = None;
+        assert_eq!(recipe(&output), qualified, "frozen after caps change");
+        let ordinary = plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .expect("default VAAPI")
+            .with_vaapi_hdr_policy(caps.vaapi_hdr_policy);
+        assert!(!recipe(&ordinary)
+            .iter()
+            .any(|arg| arg == "-compression_level"));
+        assert_ne!(recipe(&ordinary), qualified, "actual argv identity changes");
+        for encoder in [Encoder::Software, Encoder::Nvenc] {
+            let output = plan
+                .completed_reconstructed_output(encoder)
+                .expect("supported encoder")
+                .with_vaapi_hdr_policy(Some(VaapiHdrPolicy::MesaRadeonsiVbaq));
+            assert!(!recipe(&output)
+                .iter()
+                .any(|arg| arg == "-compression_level"));
+        }
+        assert_eq!(
+            plan.output_contract().vaapi_hdr_policy(),
+            None,
+            "ordinary Software source policy remains scoped"
+        );
+    }
+
+    #[test]
+    fn reconstructed_vaapi_keeps_p010_upload_clock_and_level4_cadence_bounds() {
+        use crate::transcode::*;
+        let (source, plan, execution, _, _) = encoded_recipe_fixture(true);
+        let output = plan
+            .completed_reconstructed_output(Encoder::Vaapi)
+            .expect("bounded reconstructed VAAPI output");
+        let recipe = |grid| {
+            vod_completed_reconstructed_pipe_args(
+                &source,
+                &output,
+                &execution,
+                grid,
+                0.25,
+                "/dev/fd/3",
+                "/dev/fd/4",
+                super::VodSourceClock::ReportedOrigin(0),
+            )
+        };
+        let args = recipe(VodFrameGrid::new(24, 1).expect("grid")).expect("VAAPI graph");
+        assert!(args.windows(2).any(|pair| pair == ["-c:v", "hevc_vaapi"]));
+        assert!(args.windows(2).any(|pair| pair == ["-profile:v", "main10"]));
+        assert!(args.windows(2).any(|pair| pair == ["-level:v", "4"]));
+        assert!(args.windows(2).any(|pair| pair == ["-async_depth", "1"]));
+        assert!(args.windows(2).any(|pair| pair == ["-bf", "0"]));
+        assert!(args.iter().any(|arg| arg == "-vaapi_device"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "-x265-params" || arg == "-hwaccel"));
+        let filter = &args[args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("RGB filter")
+            + 1];
+        assert!(
+            filter.contains("format=p010le") && filter.ends_with(",hwupload=extra_hw_frames=4")
+        );
+        assert!(filter.contains("settb=expr=1/24") && filter.contains("setpts=N*1+"));
+        assert!(!filter.contains("fps=") && !filter.contains("tpad="));
+        assert!(recipe(VodFrameGrid::new(60, 1).expect("high rate")).is_err());
+        assert!(recipe(VodFrameGrid::new(30000, 1001).expect("NTSC")).is_ok());
     }
 
     #[test]

@@ -552,6 +552,9 @@ function completeHlsStartup(player){
     ||player.controlSeek?.executed) return false;
   episode.state='presenting';
   clearTimeout(episode.native?.deadlineTimer);
+  if(episode.pausedSeek?.positioned){
+    clearTimeout(episode.pausedSeek.timer); episode.pausedSeek=null;
+  }
   clearTimeout(episode.retry.timer); episode.retry.timer=null;
   clearTimeout(player.stallTimer); player.stallTimer=null;
   reportTtff();
@@ -567,6 +570,7 @@ function configureHlsStartupDeadline(player,graceMs){
   const grace=Number(graceMs)||PlaybackPolicy.HLS_STARTUP.cold_deadline_ms;
   episode.deadlineMs=Math.min(episode.deadlineMs,performance.now()+grace);
   if(episode.transport==='native') armNativeHlsDeadline(player,episode);
+  episode.pausedSeek?.armDeadline?.();
 }
 function diagnoseHlsStartup(player){
   const episode=player&&player.hlsStartup;
@@ -671,6 +675,10 @@ function pauseHlsStartup(player){
     &&episode.transport!=='native'
     &&resumePausedStartupSeek(document.getElementById("video"),player,player.controlSeek)) return true;
   episode.state='paused';
+  const positioned=episode.pausedSeek;
+  if(positioned?.positioned&&positioned.attachment===player.mediaAttachment
+    &&(player.controlIntentGeneration||0)===positioned.intentGeneration+1)
+    positioned.intentGeneration=player.controlIntentGeneration||0;
   clearTimeout(episode.retry.timer); episode.retry.timer=null;
   abortHlsStartupLoaders(episode);
   try{episode.hls.stopLoad()}catch(e){}
@@ -713,7 +721,8 @@ function resumePausedVodSeek(video,player,pending){
 // neither Pause nor a retry grants another startup window.
 function resumePausedStartupSeek(video,player,pending){
   const episode=player&&player.hlsStartup;
-  if(player?.wantsPlayback!==false||!pending?.executed||player.controlSeek!==pending
+  if((player?.wantsPlayback!==false&&!episode?.pausedSeek?.positioned)
+    ||!pending?.executed||player.controlSeek!==pending
     ||pending.element!==video||pending.attachment!==player.mediaAttachment
     ||!hlsStartupCurrent(player,episode)||episode.transport==='native'
     ||!['active','paused'].includes(episode.state)) return null;
@@ -721,12 +730,22 @@ function resumePausedStartupSeek(video,player,pending){
   const previous=episode.pausedSeek;
   if(previous?.pending===pending&&previous.intentGeneration===generation)
     return pending.pausedStartupCleanup;
+  previous?.pending.pausedStartupCleanup?.(false,true);
   pending.pausedStartupCleanup?.(false,true);
+  clearTimeout(previous?.timer);
   const wasPaused=episode.state==='paused';
   episode.state='active'; episode.intentGeneration=generation;
   const lease={pending,attachment:player.mediaAttachment,intentGeneration:generation,timer:null};
   episode.pausedSeek=lease;
-  const cleanup=(presented=false,keepLoading=false)=>{
+  const cleanup=(presented=false,keepLoading=false,positioned=false)=>{
+    if(episode.pausedSeek===lease&&positioned&&player.wantsPlayback===false
+      &&hlsStartupCurrent(player,episode)){
+      // Buffer positioning has no presented-frame authority. Preserve this
+      // loader owner and its original deadline until Play supplies a frame.
+      lease.positioned=true;episode.state='paused';
+      try{episode.hls.stopLoad()}catch(e){}
+      return;
+    }
     clearTimeout(lease.timer);
     if(episode.pausedSeek!==lease) return;
     episode.pausedSeek=null;
@@ -743,10 +762,15 @@ function resumePausedStartupSeek(video,player,pending){
     }
   };
   pending.pausedStartupCleanup=cleanup;
-  lease.timer=setTimeout(()=>{
-    if(episode.pausedSeek===lease&&player.controlSeek===pending
-      &&hlsStartupCurrent(player,episode)) exhaustHlsStartup(player,'paused_seek_deadline');
-  },Math.max(0,episode.deadlineMs-performance.now()));
+  lease.armDeadline=()=>{
+    clearTimeout(lease.timer);
+    lease.timer=setTimeout(()=>{
+      if(episode.pausedSeek===lease&&(player.controlSeek===pending
+        ||lease.positioned&&player.controlSeek===null)&&episode.state!=='presenting'
+        &&hlsStartupCurrent(player,episode)) exhaustHlsStartup(player,'paused_seek_deadline');
+    },Math.max(0,episode.deadlineMs-performance.now()));
+  };
+  lease.armDeadline();
   if(performance.now()>=episode.deadlineMs){
     exhaustHlsStartup(player,'paused_seek_deadline');return cleanup;
   }
@@ -796,6 +820,18 @@ function resumeHlsStartup(video,player){
     }catch(e){ return false; }
   }
   const lease=episode.pausedSeek;
+  if(lease?.positioned){
+    if(episode.state!=='paused'||player.controlSeek!==null
+      ||lease.attachment!==player.mediaAttachment||lease.pending.element!==video
+      ||player.wantsPlayback===false
+      ||(player.controlIntentGeneration||0)!==lease.intentGeneration+1) return false;
+    episode.state='active';
+    if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'paused_past_deadline');
+    lease.intentGeneration=player.controlIntentGeneration||0;
+    episode.intentGeneration=lease.intentGeneration;
+    try{episode.hls.startLoad(Math.max(0,Number(video.currentTime)||0));return true;}
+    catch(e){return exhaustHlsStartup(player,'paused_seek_dispatch_failed');}
+  }
   if(episode.state==='active'&&lease&&lease.pending===player.controlSeek
     &&lease.pending.executed&&lease.attachment===player.mediaAttachment
     &&lease.pending.element===video&&player.wantsPlayback!==false

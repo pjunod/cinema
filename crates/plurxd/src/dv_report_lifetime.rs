@@ -9,6 +9,7 @@ struct Owner {
     physical: Weak<()>,
     generation: Option<String>,
     allowed: bool,
+    report_logged: bool,
 }
 impl PublicationOwners {
     pub(crate) fn published(
@@ -33,6 +34,7 @@ impl PublicationOwners {
                     physical: weak,
                     generation,
                     allowed: true,
+                    report_logged: false,
                 }
             })
             .collect();
@@ -67,11 +69,45 @@ impl PublicationOwners {
             }
         }
     }
+
+    /// Diagnostic deduplication only, after receipt projection succeeded.
+    pub(crate) fn mark_report_logged(&mut self, physical: &Arc<()>, generation: &str) -> bool {
+        let Some(owner) = self.owners.iter_mut().find(|owner| {
+            owner.allowed
+                && owner.generation.as_deref() == Some(generation)
+                && owner
+                    .physical
+                    .upgrade()
+                    .is_some_and(|current| Arc::ptr_eq(&current, physical))
+        }) else {
+            return false;
+        };
+        !std::mem::replace(&mut owner.report_logged, true)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn effective_processing_logging_is_once_per_authorized_published_window() {
+        let physical = Arc::new(());
+        let generation = uuid::Uuid::new_v4().to_string();
+        let mut state = PublicationOwners::default();
+        assert!(!state.mark_report_logged(&physical, &generation));
+        assert!(state.published(std::slice::from_ref(&physical), 0, 0));
+        assert!(!state.mark_report_logged(&physical, &generation));
+        assert_eq!(
+            state.authorize(&physical, &generation),
+            Some(generation.clone())
+        );
+        assert!(state.mark_report_logged(&physical, &generation));
+        assert!(!state.mark_report_logged(&physical, &generation));
+        state.invalidate(&physical);
+        assert!(!state.mark_report_logged(&physical, &generation));
+        assert!(state.published(std::slice::from_ref(&physical), 1, 1));
+        assert!(state.mark_report_logged(&physical, &generation));
+    }
     #[tokio::test]
     async fn seek_during_owner_lookup_is_checked_before_report_projection() {
         let physical = Arc::new(());

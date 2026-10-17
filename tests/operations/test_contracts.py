@@ -547,6 +547,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(len(set(ports)), 4)
         self.assertTrue(all(port > 0 for port in ports))
         self.assertIn("self.port, self.raft_port, self.api_port, self.jellyfin_port = free_ports", script)
+        self.assertIn('jellyfin_port = {self.jellyfin_port}', script)
         self.assertIn('raft_bind = "127.0.0.1:{self.raft_port}"', script)
         self.assertIn('api_bind = "127.0.0.1:{self.api_port}"', script)
 
@@ -1725,6 +1726,9 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("effort/*|integration/*-into-main)", workflow)
         self.assertIn("scope_event=effort_qualification", workflow)
         self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
+        metadata_jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        for name in ("scope", "pr_gate"):
+            self.assertRegex(metadata_jobs[name], r"(?m)^    timeout-minutes: 10$")
         fast_rust = workflow.split("  rust_compile:", 1)[1].split(
             "\n  check:", 1
         )[0]
@@ -1733,7 +1737,6 @@ assert.equal(context.ACT_TIMER, null);
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
         self.assertIn("timeout-minutes: 20", fast_rust)
-        metadata_jobs = workflow_job_blocks(".github/workflows/ci.yml")
         for compiler_job in (
             metadata_jobs["rust_compile"],
             metadata_jobs["cluster_wal"],
@@ -1995,6 +1998,13 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("needs: [scope, preflight]", package)
 
         preflight = workflow_job_blocks(".github/workflows/ci.yml")["preflight"]
+        operations_run = workflow_step_blocks(preflight)["Check CI, deploy, and shipping contracts"]
+        self.assertEqual(workflow_step_literal(operations_run, "run"), [
+            'if [ "$RETAIN_OPERATIONS_UNITS" = true ]; then',
+            '  echo "Adopted authenticated complete operations unit discovery"',
+            "else", "  make operations-check", "fi",
+        ])
+        self.assertIn("RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}", operations_run)
         effort_preflight = workflow_job_blocks(".github/workflows/effort-ci.yml")[
             "preflight"
         ]
@@ -2002,7 +2012,7 @@ assert.equal(context.ACT_TIMER, null);
             "preflight"
         ]
         for workflow, contract_preflight, unit_command in (
-            ("ci", preflight, "run: make operations-check"),
+            ("ci", preflight, "make operations-check"),
             ("effort-ci", effort_preflight, "run: python3 -m validation.python_unit_receipts run"),
             ("main-fast-lane", main_preflight, "run: python3 -m validation.main_unit_receipts run"),
         ):
@@ -2169,6 +2179,31 @@ assert.equal(context.ACT_TIMER, null);
         cleanup = steps["Restore persistent runner workspace ownership"]
         self.assertIn("if: always()", cleanup)
         self.assertIn('chown -R "$owner" "$GITHUB_WORKSPACE"', cleanup)
+
+    def test_effort_compile_only_policy_preserves_required_checks_and_claims_no_units(self):
+        workflow = read(".github/workflows/effort-ci.yml")
+        inputs = workflow.split("    inputs:\n", 1)[1].split("\nenv:\n", 1)[0]
+        self.assertRegex(inputs, r"compile_only:[\s\S]*type: boolean[\s\S]*default: false")
+        jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
+        steps = workflow_step_blocks(jobs["preflight"])
+        for name in (
+            "Restore attributable Python successes",
+            "Publish Python attempt-start marker",
+            "Provision checksummed public K08 oracle sources",
+            "Check CI, deploy, and shipping contracts",
+        ):
+            with self.subTest(unit_step=name):
+                self.assertIn("if: ${{ !inputs.compile_only }}", steps[name])
+        self.assertIn("steps.receipts.outcome == 'success'", steps["Preserve Python success journal even on unit failure"])
+        self.assertNotIn("compile_only", steps["Audit corrective-history evidence"])
+        catalog_step = steps["Check validation catalog and contract unit tests"].split("      - uses:", 1)[0]
+        self.assertIn("make validation-lint", catalog_step)
+        self.assertNotIn("compile_only", catalog_step)
+        for job in ("rust_compile", "web_static", "apple_compile", "android_compile", "effort_gate"):
+            with self.subTest(required_job=job):
+                self.assertNotIn("compile_only", jobs[job])
+        for path in (".github/workflows/ci.yml", ".github/workflows/main-fast-lane.yml"):
+            self.assertNotIn("compile_only", read(path), "main qualification has no task-unit bypass")
 
     def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
@@ -2458,7 +2493,14 @@ assert.equal(context.ACT_TIMER, null);
                 f"cluster-harness-check does not run {test_name}",
             )
             self.assertIn("scripts/require-test-count", command)
-        self.assertIn("run: make cluster-wal-check", workflow)
+        wal_run = workflow_step_blocks(jobs["cluster_wal"])["Run exact Hiqlite and WAL recovery regressions"]
+        self.assertEqual(workflow_step_literal(wal_run, "run"), [
+            'if [ "$RETAIN_WAL_UNITS" = true ]; then',
+            "  python3 -m validation.qualification_unit_continuation --compile-units wal",
+            "else", "  make cluster-wal-check", "fi",
+        ])
+        self.assertIn("RETAIN_WAL_UNITS: ${{ needs.scope.outputs.retain_wal_units }}", wal_run)
+        self.assertIn("PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}", wal_run)
         wal_commands = make_dry_run_commands("cluster-wal-check")
         self.assertTrue(
             all("scripts/require-test-count" in command for command in wal_commands),
@@ -2768,8 +2810,13 @@ assert.equal(context.ACT_TIMER, null);
             [
                 "set -euo pipefail",
                 "mkdir -p target/validation",
-                "make cluster-store-check 2>&1 | tee "
-                "target/validation/cluster-store.log",
+                'if [ "$RETAIN_STORE_UNITS" = true ]; then',
+                '  echo "command=python3 -m validation.qualification_unit_continuation --compile-units store_contract" >> "$GITHUB_OUTPUT"',
+                "  python3 -m validation.qualification_unit_continuation --compile-units store_contract 2>&1 | tee target/validation/cluster-store.log",
+                "else",
+                '  echo "command=make cluster-store-check" >> "$GITHUB_OUTPUT"',
+                "  make cluster-store-check 2>&1 | tee target/validation/cluster-store.log",
+                "fi",
             ],
         )
 
@@ -2779,7 +2826,8 @@ assert.equal(context.ACT_TIMER, null);
             "LANE_RESULT: ${{ steps.store_contracts.outcome }}", store_receipt
         )
         self.assertIn('--result "$LANE_RESULT"', store_receipt)
-        self.assertIn('--command "make cluster-store-check"', store_receipt)
+        self.assertIn('LANE_COMMAND: ${{ steps.store_contracts.outputs.command }}', store_receipt)
+        self.assertIn('--command "$LANE_COMMAND"', store_receipt)
         store_upload = store["Retain the Store lane log and receipt"]
         self.assertEqual(workflow_step_scalar(store_upload, "if"), "always()")
         self.assertIn("target/validation/cluster-store.log", store_upload)
@@ -2807,7 +2855,12 @@ assert.equal(context.ACT_TIMER, null);
                 "{",
                 '  if [ "$RUN_CLUSTER_AUTH" = true ]; then',
                 "    make hiqlite-vendor-clippy",
-                "    make cluster-harness-check",
+                '    if [ "$RETAIN_TOPOLOGY_UNITS" = true ]; then',
+                "      python3 -m validation.qualification_unit_continuation --compile-units topology",
+                "      make cluster-harness-nonunit-check",
+                "    else",
+                "      make cluster-harness-check",
+                "    fi",
                 "  fi",
                 '  if [ "$RUN_HIQLITE_SPIKE" = true ]; then',
                 "    cargo clippy --locked --manifest-path "
@@ -2826,6 +2879,19 @@ assert.equal(context.ACT_TIMER, null);
             topology_receipt,
         )
         self.assertIn('--result "$LANE_RESULT"', topology_receipt)
+        self.assertIn("RETAIN_TOPOLOGY_UNITS: ${{ needs.scope.outputs.retain_topology_units }}", topology_receipt)
+        self.assertIn(
+            '          if [ "$RUN_CLUSTER_AUTH" = true ]; then\n'
+            '            receipt+=(--command "make hiqlite-vendor-clippy")\n'
+            '            if [ "$RETAIN_TOPOLOGY_UNITS" = true ]; then\n'
+            '              receipt+=(--command "python3 -m validation.qualification_unit_continuation --compile-units topology")\n'
+            '              receipt+=(--command "make cluster-harness-nonunit-check")\n'
+            '            else\n'
+            '              receipt+=(--command "make cluster-harness-check")\n'
+            '            fi\n'
+            '          fi\n',
+            topology_receipt,
+        )
         for command in (
             "make hiqlite-vendor-clippy",
             "make cluster-harness-check",
@@ -3172,11 +3238,14 @@ assert.equal(context.ACT_TIMER, null);
         )[0]
         self.assertEqual(
             android_device.count(
-                "uses: https://github.com/reactivecircus/android-emulator-runner@"
-                "4c44018e59b437e86cdfc41da381398f93ed8808"
+                "uses: ./.github/actions/android-emulator-ready"
             ),
             2,
         )
+        self.assertIn('node-version: "24"', android_device)
+        self.assertIn("npm ci --prefix .github/actions/android-emulator-ready --ignore-scripts --omit=dev", android_device)
+        provenance = read(".github/actions/android-emulator-ready/upstream.json")
+        self.assertIn("4c44018e59b437e86cdfc41da381398f93ed8808", provenance)
         android_steps = workflow_step_blocks(android_device)
         first_attempt = android_steps[
             "Run the Compose and TV focus suite on a disposable emulator"
@@ -3288,7 +3357,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("cluster-topology-receipt.json", topology)
         self.assertIn("if: always()", store)
         self.assertIn("if: always()", topology)
-        self.assertIn("run: make cluster-wal-check", wal)
+        wal_run = workflow_step_blocks(wal)["Run exact Hiqlite and WAL recovery regressions"]
+        self.assertEqual(workflow_step_literal(wal_run, "run"), [
+            'if [ "$RETAIN_WAL_UNITS" = true ]; then',
+            "  python3 -m validation.qualification_unit_continuation --compile-units wal",
+            "else", "  make cluster-wal-check", "fi",
+        ])
         self.assertIn("run: make cluster-daemon-check", daemon)
         self.assertIn("name: Verify the cluster fixture generator", daemon)
         self.assertIn("command -v ffmpeg", daemon)
@@ -3309,10 +3383,41 @@ assert.equal(context.ACT_TIMER, null);
         contract_commands = make_dry_run_commands(
             "cluster-transport-recovery-contracts"
         )
+        contract_run = workflow_step_blocks(contracts)["Run recovery schemas, validators, and focused regressions"]
+        self.assertEqual(workflow_step_literal(contract_run, "run"), [
+            "set -euo pipefail", "mkdir -p target/validation", "{",
+            '  test "$(uname -s)" = Linux',
+            '  if [ "$RETAIN_TRANSPORT_UNITS" = true ]; then',
+            "    python3 -m validation.qualification_unit_continuation --compile-units transport",
+            "  else", "    make cluster-transport-recovery-contracts", "  fi",
+            "} 2>&1 | tee target/validation/cluster-transport-recovery-contracts.log",
+        ])
+        self.assertIn("PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}", contract_run)
+        receipt = workflow_step_blocks(recovery)["Record the transport recovery lane result"]
+        self.assertIn("RETAIN_TRANSPORT_UNITS: ${{ needs.scope.outputs.retain_transport_units }}", receipt)
+        self.assertEqual(workflow_step_literal(receipt, "run"), [
+            'set -euo pipefail',
+            'unit_command="make cluster-transport-recovery-contracts"',
+            'if [ "$RETAIN_TRANSPORT_UNITS" = true ]; then',
+            '  unit_command="python3 -m validation.qualification_unit_continuation --compile-units transport"',
+            'fi',
+            'python3 -m validation.ci_lane_receipt \\',
+            '  --output target/validation/cluster-transport-recovery-receipt.json \\',
+            '  --log target/validation/cluster-transport-recovery.log \\',
+            '  --evidence target/validation/cluster-transport-recovery.json \\',
+            '  --evidence-validator "$EVIDENCE_VALIDATOR" \\',
+            '  --lane cluster-transport-recovery \\',
+            '  --result "$LANE_RESULT" \\',
+            '  --command "$unit_command" \\',
+            '  --command "make cluster-transport-recovery-voter-check" \\',
+            '  --command "make cluster-transport-recovery-learner-check" \\',
+            '  --command "transport-recovery-assemble"',
+        ])
 
-        self.assertEqual(len(contract_commands), 14)
+        self.assertEqual(len(contract_commands), 7)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
         self.assertIn("PLURX_EXPECT_TEST_COUNT=72", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_NAMES=", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
         exact_regressions = (
@@ -3329,11 +3434,13 @@ assert.equal(context.ACT_TIMER, null);
             "recovery_series_counts_every_replacement_client_connection_attempt",
             "production_snapshot_executor_worker_is_counted_until_joined",
         )
-        for offset, regression in enumerate(exact_regressions, start=2):
+        for regression in exact_regressions[:7]:
+            self.assertIn("transport_recovery::tests::" + regression, contract_commands[1])
+            self.assertTrue(all(regression not in command for command in contract_commands[2:]))
+        for offset, regression in enumerate(exact_regressions[7:], start=2):
             self.assertIn(regression, contract_commands[offset])
             self.assertIn("scripts/require-test-count", contract_commands[offset])
             self.assertIn("--lib -- --exact", contract_commands[offset])
-        for offset in range(9, 14):
             self.assertIn("vendor/hiqlite/Cargo.toml", contract_commands[offset])
 
         voter_commands = make_dry_run_commands(

@@ -162,6 +162,9 @@ pub(crate) const VOD_REFUSAL_CODES: &[(&str, VodRefusalClass)] = {
         // route, retained artifact or candidate that no longer exists or no
         // longer matches; the client must create again.
         ("vod_reopen_required", Refuse),
+        // A preparation no longer proves custody of the exact parent/root.
+        // Another engine cannot restore that proof; require a new create.
+        ("vod_preparation_changed", Refuse),
         ("vod_session_ended", Refuse),
         ("vod_session_released", Refuse),
         ("live_presentation_removed", Refuse),

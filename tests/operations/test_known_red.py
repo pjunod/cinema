@@ -165,6 +165,12 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/fragindex/tests.rs::fragindex::tests::"
             "real_source_shared_read_differential"
         ] = "reads a whole real source several times; run by hand on the target storage"
+        # DV repair R02 exercises actual source probing, native helper windows,
+        # AAC cadence and VAAPI output; it requires the installed HDR graph.
+        additional_fixture_reasons[
+            "crates/plurxd/src/vodencode_manager_tests.rs::transcode::tests::"
+            "actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_seek"
+        ] = "requires an actual HDR source, reviewed helper bundle and proved VAAPI device"
         # DV Profile 5 completeness uses private, bounded FFmpeg captures;
         # keep these operator-run checks distinct from known-red tests.
         for identity in (
@@ -185,9 +191,9 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 11)
-        # DV completeness adds three private capture checks: 32 -> 35.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 35)
+        self.assertEqual(len(additional_fixtures), 12)
+        # HDR runtime and DV completeness add four private checks: 32 -> 36.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 36)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())

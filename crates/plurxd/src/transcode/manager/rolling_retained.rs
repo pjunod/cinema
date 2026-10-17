@@ -194,6 +194,7 @@ impl TranscodeManager {
         }
         Some(StartInfo {
             processed_dv_profile: None,
+            degraded_processing: None,
             retained_output: None,
             audio_delivery: audio,
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),

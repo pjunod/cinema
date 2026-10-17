@@ -20,7 +20,7 @@ class MetadataAdmission(unittest.TestCase):
         source = Path(__file__).with_name("test_rgb48.c")
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "rgb48-rounding"
-            subprocess.run([os.environ.get("CC", "cc"), "-O2", "-fno-math-errno",
+            subprocess.run([os.environ.get("CC", "cc"), "-O2", "-fno-math-errno", "-frounding-math",
                             "-std=c11", "-Wall", "-Wextra", "-Werror",
                             str(source), "-lm", "-o", str(binary)],
                            check=True, timeout=30)

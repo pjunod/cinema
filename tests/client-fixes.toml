@@ -5,7 +5,7 @@ enforce_after = "e8a910f"
 id = "android.shared-library-fixture-platform-ownership"
 commits = ["937bfc7000269015cde95c18130694a5c862ffe7"]
 source = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
-source_anchor = "Net.authenticatedClient { System.nanoTime() / 1_000_000 }"
+source_anchor = "Dispatchers.setMain(StandardTestDispatcher())"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
 test_anchor = "actualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt"
 
@@ -6180,7 +6180,7 @@ test_anchor = "aContinuousMemberKeepsThePresentedRungOverTheSessionCandidate"
 id = "android.display-upgrade-largest-affordable-rung"
 commits = ["115bf7de65e42a75ea057d810cc32a64f6b298d3"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
-source_anchor = "}.minByOrNull { it.width.toLong() * it.height } ?: candidates.maxByOrNull { it.width.toLong() * it.height }"
+source_anchor = "}.minByOrNull { it.width.toLong() * it.height } ?: preferred.maxByOrNull { it.width.toLong() * it.height }"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "aLadderBelowTheDisplayClimbsToItsLargestAffordableRung"
 
@@ -6232,6 +6232,34 @@ source = "clients/apple/Sources/HLSFragmentCadence.swift"
 source_anchor = "let complete = times.filter { $0 < lastDTS }.sorted()"
 test = "clients/apple/Tests/HLSFragmentCadenceTests.swift"
 test_anchor = "func testTransportStreamSuccessorStopsAtACompletePrefix()"
+
+# Qualified HDR Auto source/test mappings; execution receipts remain separate.
+
+[[fixes]]
+id = "android.processed-hdr10-qualified-auto"
+commits = ["8d6008c903bf644c223c7abcbd7c766d64e736fa"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "val processed = candidates.filter { it.processed_hdr10 && it.hasValidIdentity &&"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "processedHdr10PreferenceRequiresQualifiedProductionAndCodec"
+
+[[fixes]]
+id = "apple.processed-hdr10-qualified-auto"
+commits = []
+supplements = "android.processed-hdr10-qualified-auto"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let processed = candidates.filter { $0.processedHdr10 == true && $0.hasValidIdentity &&"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testProcessedHdr10PreferenceRequiresQualifiedProductionAndCodec"
+
+[[fixes]]
+id = "web.processed-hdr10-qualified-auto"
+commits = []
+supplements = "android.processed-hdr10-qualified-auto"
+source = "crates/plurxd/src/web/playback-policy.js"
+source_anchor = "const processed = eligible.filter(candidate => candidate.processed_hdr10 === true"
+test = "tests/web/continuous-adapter.test.js"
+test_anchor = "processed HDR10 Auto preference requires production proof, decoder and link admission"
 
 # K04 native echo: source/test bindings only; focused execution is recorded
 # separately in PR1049. These rows do not waive any history or landing gate.
@@ -6369,6 +6397,14 @@ source = "clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticR
 source_anchor = "fun share() = perform"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/diagnostics/DiagnosticReportNavigationTest.kt"
 test_anchor = "exportedZipCanBeAttachedWithoutSupportEnrollment"
+
+[[fixes]]
+id = "dv.watched-receipt-jvm-platform-fixture"
+commits = ["a220bf7a0a0be4ee3d6a72a41b28ad599ee772db"]
+source = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+source_anchor = "Net.authenticatedClient { 0L }"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedLibraryTest.kt"
+test_anchor = "actualWatchedWritesAdvanceAndRetireTheCommonAccountReceipt"
 
 [[fixes]]
 id = "diagnostics.android-tv-local-archive"
@@ -6856,6 +6892,24 @@ source = "crates/plurxd/src/web/player/stats.js"
 source_anchor = "const stream=statsStreamFormat(p);"
 test = "tests/playback/web-policy.test.js"
 test_anchor = "attached cached output reports its frozen frame and Metal renderer"
+
+[[fixes]]
+# Both mobile counters must exceed current main; the collision fixture also
+# covers the Android re-bump, with its Apple sibling named in the task PR.
+id = "clients.hdr-promotion-clears-current-mobile-builds"
+commits = ["e9d9e510dcfd7bc3c45188c77803dd5872767976"]
+source = "clients/android/app/build.gradle.kts"
+source_anchor = "versionCode ="
+test = "tests/validation/test_mobile_versions.py"
+test_anchor = "def test_android_counter_the_target_already_ships_fails_against_the_target"
+
+[[fixes]]
+id = "android.transport-options-keep-shared-focus-order"
+commits = ["ceea81356157da9036d5fd297eef2973240dc20d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "fun TransportOptions()"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
+test_anchor = "fun transportOptionsFollowTheSharedContractOrder()"
 
 [[fixes]]
 id = "cluster.relay-proof-positional-parameter-order"
