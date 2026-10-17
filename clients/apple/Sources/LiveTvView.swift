@@ -1678,6 +1678,9 @@ struct LiveTvGuideGrid: View {
                             }
                         }
                     }
+                    #if os(tvOS)
+                    .onAppear { realizeFocusDestination(in: row.channel.id) }
+                    #endif
                     .frame(height: dimensions.rowHeight)
                     .id(row.channel.id)
                 }
@@ -1709,8 +1712,9 @@ struct LiveTvGuideGrid: View {
             if target.paging == nil { scroll.scrollTo(target.channelId, anchor: .center) }
             await Task.yield()
             guard !Task.isCancelled, revision == focusDestinationRevision else { return }
+            // Armed until native focus confirms it (onChange(of: focusedCell)).
+            // A lazy row that is not realized yet takes it on appearance.
             focusedCell = target
-            if focusedCell == target { focusDestination = nil }
         }
         .onChange(of: remoteNavigation.focusRequestRevision) { _, _ in
             guard remoteNavigation.activeScope == "live-tv",
@@ -1887,6 +1891,15 @@ struct LiveTvGuideGrid: View {
         guard onRemoteProgramme != nil else { return }
         remoteNavigation.setOrder(scope: "live-tv", keys: remoteGuideKeys, columns: 1)
     }
+
+    #if os(tvOS)
+    /// A destination in a row the lazy stack had not built is applied when
+    /// that row exists; native focus acknowledgment still clears it.
+    private func realizeFocusDestination(in channelId: String) {
+        guard let target = focusDestination, target.channelId == channelId else { return }
+        focusedCell = target
+    }
+    #endif
 
     private func requestCellFocus(_ target: FocusKey?) {
         focusDestinationRevision &+= 1

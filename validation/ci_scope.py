@@ -111,6 +111,9 @@ SHIPPED_SOURCE_PATHS = (
 # fixture: editing it re-runs both client suites on the PR itself.
 APPLE_PATHS = (
     "clients/apple/**",
+    # The required TV navigation gate's own inputs.
+    "scripts/apple-tv-navigation-test",
+    "tests/operations/test_apple_tv_navigation_runner.py",
     "tests/contracts/native-api.json",
     "tests/playback/player-input-contract.json",
     "tests/playback/playback-info-fields.json",

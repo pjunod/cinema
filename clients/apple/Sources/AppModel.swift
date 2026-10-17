@@ -171,6 +171,9 @@ final class AppModel: ObservableObject {
         guard let savedToken else { phase = .needLogin; return }
         do {
             let me = try await requireAPI().me()
+            // Retry, sign-out or a server change while this was in flight
+            // owns the session now; never adopt the abandoned origin.
+            guard recoveryAttempt == attempt else { return }
             username = me.username
             userId = me.id
             settings.username = me.username
