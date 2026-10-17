@@ -1472,6 +1472,25 @@ func autoNeedsEncodedCostRefresh(_ candidates: [QualityCandidate], outputs: [Mea
     }
 }
 
+/// The cost Auto weighs a rung by. A complete measured output is the exact
+/// cost and replaces the catalog's declared figures; without one, the figures
+/// the server declared stand — an encode rung's VBV ceiling plus its audio
+/// budget, an original's source rate. Discarding them left every rung of a
+/// title that had never been encoded whole uncosted, and an uncosted rung is
+/// never chosen for a link cause, so Auto could not leave a 28.8 Mb/s remux
+/// on a 9 Mb/s link; the web and Android clients already cost by the
+/// declared rate when no measurement exists (#985).
+func autoCostedCatalog(_ offered: [QualityCandidate], outputs: [MeasuredCandidateOutput]?) -> [QualityCandidate] {
+    offered.map { candidate in
+        var costed = candidate
+        if let peak = measuredCandidatePeak(candidate, outputs: outputs) {
+            costed.peakBps = peak
+            costed.averageBps = outputs?.first(where: { $0.matches(candidate) })?.averageBps
+        }
+        return costed
+    }
+}
+
 func validatedAutoCostCatalog(_ candidates: [QualityCandidate]?, outputs: [MeasuredCandidateOutput]?, current: String)
     -> (candidates: [QualityCandidate], outputs: [MeasuredCandidateOutput])? {
     guard let candidates, !candidates.isEmpty, candidates.count <= 64,
@@ -11754,13 +11773,7 @@ extension PlayerController {
     }
 
     private func measuredCostCatalog(_ offered: [QualityCandidate]) -> [QualityCandidate] {
-        offered.map { candidate in
-            var measured = candidate
-            let outputs = decision?.measuredCandidateOutputs
-            measured.peakBps = measuredCandidatePeak(candidate, outputs: outputs)
-            measured.averageBps = measured.peakBps == nil ? nil : outputs?.first(where: { $0.matches(candidate) })?.averageBps
-            return measured
-        }
+        autoCostedCatalog(offered, outputs: decision?.measuredCandidateOutputs)
     }
 
     private func autoBoundaryIsCurrent(_ boundary: AutoBoundaryAttempt) -> Bool {
