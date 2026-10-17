@@ -2234,6 +2234,7 @@ pub(super) async fn successor_owner_captures_output(
         // its advertisement expired. It primes the ordinary attachment, so
         // this prime's output is not captured for reuse.
         tracing::debug!(
+            target: "plurxd::http::hls",
             owner = successor_owner,
             "prepared VOD successor primes without output capture on a peer that does not advertise it"
         );

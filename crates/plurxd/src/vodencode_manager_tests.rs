@@ -1079,6 +1079,14 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         .await
         .expect("read file")
         .expect("seeded file");
+    // Admission compares each frozen role with the node budget, which
+    // otherwise derives from this host's available parallelism: a 3-CPU unit
+    // runner derives 2, under the soundtrack's frozen 3-thread floor. Pin a
+    // budget that admits both roles so the walk proves role resolution only.
+    store
+        .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "8")
+        .await
+        .expect("software budget");
     // Production planning always has a cache identity and the startup-bound
     // FFprobe; normalized continuous geometry is refused without either.
     let decode_probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(

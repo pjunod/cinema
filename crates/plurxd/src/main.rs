@@ -7858,7 +7858,7 @@ mod startup_tests {
         }
     }
 
-    /// Split-child events name their parent or a documented dedicated target.
+    /// Split-child events name their parent or an owned dedicated channel.
     ///
     /// The S-14 moves put code from `transcode.rs`, `http/hls.rs` and
     /// `vodserve.rs` into `#[path]` child modules, and an event's default
@@ -7902,18 +7902,27 @@ mod startup_tests {
                     let call = format!("tracing::{level}!(");
                     for (at, _) in source.match_indices(&call) {
                         let arguments = source[at + call.len()..].trim_start();
-                        // These two files deliberately share the documented,
-                        // hashed retained-output diagnostic channel. It still
-                        // requires an explicit target, never a child default.
+                        // Two diagnostic channels are deliberately separate from
+                        // their parent target so an operator can enable them
+                        // alone: the hashed retained-output reuse facts
+                        // (CONTINUOUS-QUALITY-BUILD) and the typed Auto
+                        // preparation outcomes (2ed23494f). Each is admitted
+                        // only in the files that own it, and still requires an
+                        // explicit target, never a child default.
                         let relative = path.strip_prefix(&src).expect("split child under src");
-                        let dedicated_retained = [
-                            std::path::Path::new("transcode/manager/create.rs"),
-                            std::path::Path::new("vod/retained.rs"),
+                        let dedicated = [
+                            ("plurxd::retained_reuse", "transcode/manager/create.rs"),
+                            ("plurxd::retained_reuse", "vod/retained.rs"),
+                            ("plurxd::auto_prepare", "http/hls/create.rs"),
+                            ("plurxd::auto_prepare", "http/hls/preparation.rs"),
                         ]
-                        .contains(&relative)
-                            && arguments.starts_with("target: \"plurxd::retained_reuse\",");
+                        .iter()
+                        .any(|(channel, owner)| {
+                            relative == std::path::Path::new(owner)
+                                && arguments.starts_with(&format!("target: \"{channel}\","))
+                        });
                         assert!(
-                            arguments.starts_with(&pinned) || dedicated_retained,
+                            arguments.starts_with(&pinned) || dedicated,
                             "{}: the `{call}` at byte {at} logs under its own module path, \
                              not `{target}`",
                             path.display()

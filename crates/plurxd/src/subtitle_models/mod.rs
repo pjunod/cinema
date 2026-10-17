@@ -1302,7 +1302,7 @@ pub(crate) async fn worker_pass(
                     continue;
                 }
                 SourceEligibility::Obsolete => {
-                    let _ = state
+                    state
                         .store
                         .cancel_job(plurx_core::store::background_jobs::CancelJob {
                             job_id: candidate.id.clone(),
