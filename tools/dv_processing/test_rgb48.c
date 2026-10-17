@@ -10,21 +10,90 @@ static uint16_t old_pack(float value) {
 }
 #include "rgb48.h"
 static void check(float v) { assert(isfinite(v)); assert(old_pack(v)==dv_pack_finite_rgb48(v)); }
+static void check_bulk(float value) {
+  float input[13] = {0, value, .25f, .75f, 1, -1, value, 2, -0.0f,
+                    .125f, .875f, value, .5f};
+  uint8_t output[20];
+  memset(output, 0xa5, sizeof(output));
+  assert(dv_pack_rgba_rgb48(input + 1, 3, output + 1, 18));
+  assert(output[0] == 0xa5 && output[19] == 0xa5);
+  for (size_t pixel = 0; pixel < 3; pixel++)
+    for (size_t component = 0; component < 3; component++) {
+      uint16_t code = old_pack(input[1 + 4 * pixel + component]);
+      assert(output[1 + 6 * pixel + 2 * component] == (uint8_t)code);
+      assert(output[2 + 6 * pixel + 2 * component] == (uint8_t)(code >> 8));
+    }
+  memset(output, 0xa5, sizeof(output));
+  assert(!dv_pack_rgba_rgb48(input + 1, 3, output + 1, 17));
+  for (size_t i = 0; i < sizeof(output); i++) assert(output[i] == 0xa5);
+  assert(dv_pack_rgba_rgb48(input + 1, 0, output + 1, 0));
+  assert(dv_pack_rgba_rgb48(input + 1, 1, output + 1, 6));
+}
+static void check_nonfinite(void) {
+  const float invalid[] = {NAN, INFINITY, -INFINITY};
+  for (size_t lane = 0; lane < 4; lane++)
+    for (size_t kind = 0; kind < 3; kind++) {
+      float input[] = {.1f, .2f, .3f, 1};
+      uint8_t output[6];
+      input[lane] = invalid[kind];
+      assert(!dv_pack_rgba_rgb48(input, 1, output, sizeof(output)));
+    }
+}
+static void check_native_plane(void) {
+  uint16_t codes[1032];
+  float actual[1032], expected[1032];
+  for (size_t i = 0; i < 1032; i++) codes[i] = i % 1024;
+  // Unaligned loads/stores, vector body and scalar tail use the same division.
+  for (size_t count = 0; count < 1031; count++) {
+    for (size_t i = 0; i < count; i++) expected[i] = codes[i + 1] / 1023.0f;
+    assert(dv_unpack_10bit_plane(codes + 1, count, actual + 1));
+    assert(memcmp(expected, actual + 1, count * sizeof(float)) == 0);
+  }
+  for (size_t lane = 0; lane < 17; lane++) {
+    uint16_t old = codes[lane];
+    codes[lane] = 1024;
+    assert(!dv_unpack_10bit_plane(codes, 17, actual));
+    codes[lane] = 65535;
+    assert(!dv_unpack_10bit_plane(codes, 17, actual));
+    codes[lane] = old;
+  }
+}
+static void check_rounding_bits(void) {
+  const int modes[] = {FE_UPWARD, FE_TONEAREST, FE_DOWNWARD, FE_UPWARD,
+                       FE_TOWARDZERO, FE_TONEAREST};
+  const uint16_t codes[9] = {1, 1, 1, 1, 1, 1, 1, 1, 1};
+  float actual[9];
+  for (size_t mode = 0; mode < sizeof(modes) / sizeof(modes[0]); mode++) {
+    assert(fesetround(modes[mode]) == 0);
+    assert(dv_unpack_10bit_plane(codes, 9, actual));
+    uint32_t expected = modes[mode] == FE_UPWARD ? 0x3a802009U : 0x3a802008U;
+    for (size_t lane = 0; lane < 9; lane++) {
+      uint32_t bits;
+      memcpy(&bits, &actual[lane], sizeof(bits));
+      assert(bits == expected);
+    }
+  }
+}
 int main(void) {
   const int modes[]={FE_TONEAREST,FE_DOWNWARD,FE_UPWARD,FE_TOWARDZERO};
   unsigned long checked=0;
+  check_rounding_bits();
   for (unsigned mode=0;mode<4;mode++) {
     assert(fesetround(modes[mode])==0);
+    check_native_plane();
     check(-0.0f);check(0.0f);check(-1.0f);check(1.0f);check(2.0f);checked+=5;
+    check_bulk(-0.0f);check_bulk(0);check_bulk(-1);check_bulk(1);check_bulk(2);
+    check_nonfinite();
     for (unsigned i=0;i<65536;i++) {
       float v=((float)i+.5f)/65535;
       check(v);check(nextafterf(v,-INFINITY));check(nextafterf(v,INFINITY));checked+=3;
+      check_bulk(v);check_bulk(nextafterf(v,-INFINITY));check_bulk(nextafterf(v,INFINITY));
     }
     uint32_t state=1;
     for (unsigned i=0;i<262144;i++) {
       state=state*1664525U+1013904223U;
       float v;memcpy(&v,&state,sizeof(v));
-      if(isfinite(v)){check(v);checked++;}
+      if(isfinite(v)){check(v);check_bulk(v);checked++;}
     }
   }
   assert(fesetround(FE_TONEAREST)==0);

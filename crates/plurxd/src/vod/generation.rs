@@ -84,7 +84,21 @@ pub(super) async fn spawn_generation(
             .bind(reservation)
             .try_claim_worker()
         {
-            Some(worker) => Some(worker),
+            Some(worker) => {
+                #[cfg(target_os = "linux")]
+                if let Some(encoding) = recipe
+                    .encoding
+                    .as_ref()
+                    .filter(|encoding| encoding.dv_runtime.is_some())
+                {
+                    encoding.begin_processed_window(
+                        rendition.gen_epoch.load(Relaxed),
+                        at,
+                        &worker.reservation(),
+                    );
+                }
+                Some(worker)
+            }
             None => {
                 record_failure(
                     shared,
@@ -1398,6 +1412,9 @@ pub(super) fn record_failure(
     decision: crate::playback_control::ProducerDecisionReason,
     cause: String,
 ) {
+    if let Some(encoding) = &rendition.recipe.encoding {
+        encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), false);
+    }
     tracing::warn!(
         target: "plurxd::vodserve",
         rendition = %rendition.key,
@@ -2086,22 +2103,24 @@ impl RenditionSink {
             if let Some(preparation) = preparation {
                 preparation.progress.notify_waiters();
             }
+            // Measurement and the forward-only private cursor linearize with
+            // this fresh verified publication, never with a retained replay.
+            if let (Some(encoding), Some(planned)) = (
+                &self.rendition.recipe.encoding,
+                self.rendition.plan.entry(entry),
+            ) {
+                if planned.kind == plurx_core::segplan::PlanEntryKind::Video {
+                    encoding.note_active_segment(
+                        self.epoch,
+                        entry,
+                        ticks_to_ms(planned.end_ticks(), self.rendition.timescale),
+                    );
+                }
+            }
             self.rendition.clear_demand(entry);
         }
         drop(dependency_guard);
         self.rendition.slot.produced(entry).await;
-        if let (Some(encoding), Some(planned)) = (
-            &self.rendition.recipe.encoding,
-            self.rendition.plan.entry(entry),
-        ) {
-            if planned.kind == plurx_core::segplan::PlanEntryKind::Video {
-                encoding.note_active_segment(
-                    self.epoch,
-                    entry,
-                    ticks_to_ms(planned.end_ticks(), self.rendition.timescale),
-                );
-            }
-        }
         self.shared.pool.satisfy(&self.rendition.key, entry);
         self.rendition.kick();
         Ok(true)

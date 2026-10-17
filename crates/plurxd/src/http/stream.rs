@@ -2646,6 +2646,7 @@ async fn decision_for_file(
             Some(
                 accepted
                     .into_iter()
+                    .filter(|entry| !entry.candidate.processed_hdr10 || entry.dispatch_supported)
                     .map(|entry| entry.candidate)
                     .collect::<Vec<_>>(),
             )

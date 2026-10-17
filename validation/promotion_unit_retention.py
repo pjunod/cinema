@@ -14,10 +14,11 @@ import xml.etree.ElementTree as ET
 import urllib.parse
 from validation import python_unit_receipts as r
 
-LANES = {'rust', 'apple', 'android_jvm', 'android_device'}
+LANES = {'rust', 'apple', 'android_jvm', 'android_device', 'web_preflight'}
 COHORTS = {'rust': {'core', 'daemon', 'workspace-contracts'},
            'apple': {'iphone', 'ipad', 'tvos'},
-           'android_jvm': {'jvm'}, 'android_device': {'device'}}
+           'android_jvm': {'jvm'}, 'android_device': {'device'},
+           'web_preflight': {'node-contracts'}}
 PROTOCOL_PATHS = {
     '.github/workflows/ci.yml', 'validation/qualification.py',
     'validation/promotion_unit_retention.py',
@@ -26,6 +27,160 @@ PROTOCOL_PATHS = {
     'validation/main_preflight_adoption.py', 'validation/main_unit_receipts.py',
 }
 DIGEST = re.compile(r'[0-9a-f]{64}')
+RETIRED_DAEMON = {
+    'source': 'e52f1e3603a0d805db0f8acb6edca8eb883b1ea6',
+    'log': 'e89367b0af7ace99368854e141cc9f36e08b546e09fd9da9845ba2a0d983bd96',
+    'id': 'fragindex::ride_along_tests::dropping_the_build_future_mid_pass_removes_the_stage',
+    'successor': 'fragindex::ride_along_tests::standalone_index_yields_to_foreground_and_removes_partial_stage',
+}
+
+# The source is the reviewed representative of the intact incoming PR1091
+# capture; its actual execution commit remains unknown in the attestation.
+# Keep the two still-applicable fragindex outcomes beside the retired copyseg
+# outcome instead of cropping or relabeling that original three-case log.
+RETIRED_DVH1_DAEMON = {
+    'source': '4ec633fb7d024e0470d15b3f24614496bd2faecd',
+    'log': '3819204d8c29836a5917535e27f8b59e39ca8cf109ce53052db1c57c2d5b9ceb',
+    'id': 'copyseg::tests::captured_dvh1_completeness_publishes_and_refuses_retaining_copy',
+    'successor': 'copyseg::tests::captured_dvh1_rolling_options_publish_and_reject_unproven_samples',
+}
+
+
+
+# Finite adoption of the intact successful Android job in promotion 5172.
+# Its summary includes assumption skips: one command passed, not 78 named bodies.
+ANDROID_DEVICE_5172 = {'source': '050b6ececbc9202492eb7e0675dc994f9f65686b',
+ 'log': '4a58a7353d0622a549c7e2eece27609b36a262d5322efc5ad5e57510a6bcadfe',
+ 'identity': 'run:5172/job:51191',
+ 'command': 'PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make '
+            'android-instrumentation-run',
+ 'id': 'make android-instrumentation-run',
+ 'inputs': {'workflow-job-headers': '635c161a430015f6d8e0808fe45dbec305c83ba809db918d81a1a11a13cdd91d',
+            'workflow-header': '6a8689fe27aa6629071f9a14353501ab5f6e1212363594c91261e7217b47bcf7',
+            'workflow-root-lines': '6246338bf154754f6fb8c9701fa87d53ab09ffdaee1823827c3a4dd3407839c7',
+            'make-complete': 'f6580041d6fefc3a6381968d4075a8d0418b82dc55fa6f3235f7768a81ddcff9',
+            'clients/android': '9693191eb6d9ff2ea2ef76223a949c432ffcc38f',
+            '.github/actions/android-emulator-ready': '40a6f5c3a3a2d2ac57336fbe91bd32d05ad6ac1c',
+            'crates/plurxd/src/web/offline-reader.html': '4b1caecca544e437e0a3ae92b3fd030ce8b73d7c433bd5864eee8a31dab1fc35',
+            'crates/plurxd/src/web/offline-reader.js': '88c080b27b7470da9bd37598d64d868355bfa5a84ac15f6949561e5d095bf735',
+            'crates/plurxd/src/web/reader.js': 'bf983e43fc293c8a84e2dbb66d12765c29f9451e6209d8c050c3aa36566d54b8',
+            'workflow-global': '57af3bcff467a05fb7865f2d22b5c759a2833e403f7c922a72590ee38b7d9494',
+            'workflow-device': 'cbd67038eb4e522bac5b9332b1edcdf6d2d2ae3fc2d249c6378d2823dd18387c',
+            'make-android': 'a54c7c30021d36ebb437edb54a09cabc3c72cfd417285d814c6dc2916c58e20d',
+            'make-variables': 'fb1f6e257a0a2b995c756a5d77e242faa38592be9164e21eaf1bb755a574196b'},
+ 'environment': {'platform': 'linux-x64',
+                 'toolchain': {'declared_compile_sdk': 37,
+                               'declared_target_sdk': 37,
+                               'compiler_version': None,
+                               'java_version': None,
+                               'image_sha256': None,
+                               'apk_sha256': None},
+                 'features': [],
+                 'runtime': {'api': 36,
+                             'target': 'android-tv',
+                             'arch': 'x86',
+                             'profile': 'tv_1080p',
+                             'app_version': 173},
+                 'source_scope': {'classes': 34,
+                                  'test_declarations': 78,
+                                  'basis': 'source declarations; named execution outcomes '
+                                           'unknown'}}}
+
+
+# Exact additive subtitle/browser Makefile integration. All twelve other
+# consumed projections remain identical; appended overrides still fail closed.
+ANDROID_DEVICE_5172_CURRENT_MAKE = frozenset({
+    ANDROID_DEVICE_5172['inputs']['make-complete'],
+    '3f7f061dc4791132197659e5723d6ad3ced1095dea2e97f1e9b714532fc6bd5c',
+})
+
+
+def android_device_tree(commit, path):
+    return subprocess.check_output(['git', 'rev-parse', r.sha(commit) + ':' + path],
+                                   text=True).strip()
+
+
+def android_device_inputs(source, commit):
+    paths = ('crates/plurxd/src/web/offline-reader.html',
+             'crates/plurxd/src/web/offline-reader.js', 'crates/plurxd/src/web/reader.js')
+    values = {path: android_device_tree(commit, path)
+              for path in ('clients/android', '.github/actions/android-emulator-ready')}
+    for path in paths:
+        raw = source(commit, path)
+        r.require(raw is not None, 'Missing Android command input')
+        values[path] = digest(raw)
+    workflow = source(commit, '.github/workflows/ci.yml')
+    makefile = source(commit, 'Makefile')
+    r.require(workflow is not None and makefile is not None, 'Missing Android command recipe')
+    workflow, makefile = workflow.decode(), makefile.decode()
+    patterns = {
+        'workflow-global': (workflow, r'^env:\n(.*?)(?=^concurrency:)'),
+        'workflow-device': (workflow, r'^  android_device:\n.*?(?=^  [A-Za-z_]+:|\Z)'),
+        'make-android': (makefile, r'^# CI pre-pulls the image.*?(?=^\.PHONY: android-instrumentation\n)'),
+    }
+    for name, (text, pattern) in patterns.items():
+        matches = list(re.finditer(pattern, text, re.M | re.S))
+        r.require(len(matches) == 1, 'Ambiguous Android command recipe')
+        values[name] = digest(matches[0][0].encode())
+    r.require(workflow.count('\njobs:\n') == 1, 'Ambiguous workflow jobs root')
+    # Pin the complete header and every root-level non-comment line. Quoted
+    # or whitespace-spelled duplicate YAML keys cannot shadow the projection.
+    values['workflow-header'] = digest((workflow.split('\njobs:\n', 1)[0] + '\n').encode())
+    values['workflow-root-lines'] = digest(('\n'.join(re.findall(
+        r'^[^\s#].*$', workflow, re.M)) + '\n').encode())
+    values['workflow-job-headers'] = digest(('\n'.join(re.findall(
+        r'^  [^\s#].*$', workflow.split('\njobs:\n', 1)[1], re.M)) + '\n').encode())
+    values['make-variables'] = digest(('\n'.join(re.findall(
+        r'^ANDROID_\w+ \?=.*$', makefile, re.M)) + '\n').encode())
+    # The full finite Make identity refuses shadow assignments and repeated
+    # targets outside the Android section, including appended overrides.
+    values['make-complete'] = digest(makefile.encode())
+    return values
+
+
+def android_device_command_outcomes(raw):
+    policy = ANDROID_DEVICE_5172
+    r.require(digest(raw.encode()) == policy['log'], 'Unknown complete Android command capture')
+    text = re.sub(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', raw, flags=re.M)
+    execution = '[command]/usr/bin/sh -c ' + policy['command']
+    r.require(text.splitlines().count(execution) == 1
+              and text.splitlines().count('OK (78 tests)') == 1
+              and text.splitlines().count('Time: 133.708') == 1
+              and text.splitlines().count('🏁  Job succeeded') == 1
+              and text.index(execution) < text.index('Time: 133.708')
+              < text.index('OK (78 tests)') < text.index('🏁  Job succeeded'),
+              'Incomplete or ambiguous Android command result')
+    # The complete raw digest binds all 37 native heading rows and the
+    # interleaved probe output. Dot rows cannot establish named outcomes.
+    return {policy['id']: 'pass'}
+
+
+def android_device_record_contract(lane, suite, record, candidate, source):
+    policy = ANDROID_DEVICE_5172
+    r.require(lane == 'android_device' and suite['name'] == 'device'
+              and suite['ids'] == [policy['id']] and len(suite['records']) == 1
+              and 'aggregate' not in suite and 'compatible_environments' not in suite
+              and record['source_commit'] == policy['source'] and record['sequence'] == 1
+              and record['origin'] == {'kind': 'authenticated-ci',
+                  'identity': policy['identity'], 'command': policy['command']}
+              and suite['environment'] == record['environment'] == policy['environment']
+              and record['outcomes'] == {policy['id']: 'pass'},
+              'Android whole-command source, scope or environment differs')
+    original = android_device_inputs(source, policy['source'])
+    current = android_device_inputs(source, candidate)
+    allowed_make = ANDROID_DEVICE_5172_CURRENT_MAKE | {policy['inputs']['make-complete']}
+    r.require(original == policy['inputs']
+              and current['make-complete'] in allowed_make
+              and {**current, 'make-complete': policy['inputs']['make-complete']} == policy['inputs'],
+              'Android whole-command consumed inputs changed')
+
+
+def authenticate_android_device_command(run_id, job_id, job):
+    r.require((run_id, job_id) == (5172, 51191)
+              and job.get('status') == 'success' and job.get('attempt') == 1
+              and type(job.get('attempt')) is int
+              and job.get('name') == 'Android instrumented UI tests',
+              'Android whole-command job identity or success differs')
 
 
 def digest(raw):
@@ -66,9 +221,155 @@ def decoded_log(item):
     return raw.decode('utf-8')
 
 
+def shared_blob(document, item):
+    """Version two may deduplicate embedded evidence, never fetch another source."""
+    if set(item) != {'sha256_ref'}:
+        return item
+    value = item['sha256_ref']
+    r.require(document['version'] == 2 and isinstance(value, str)
+              and DIGEST.fullmatch(value), 'Unknown shared evidence reference')
+    logs = document['command_units']['logs']
+    r.require(isinstance(logs, dict) and value in logs
+              and logs[value].get('sha256') == value, 'Shared evidence unavailable or aliased')
+    decoded_log(logs[value])
+    return logs[value]
+
+
+def expanded_document(document, objects=None):
+    """Authenticate and validate one bounded view of the original signed bytes."""
+    if document.get('version') != 2:
+        return document
+    from validation.unit_evidence_objects import Objects
+    from validation import qualification_unit_continuation as commands
+    lanes = document['lanes']
+    units = document['command_units']
+    r.require(isinstance(lanes, dict) and lanes and set(lanes) <= LANES
+              and all(isinstance(slots, list) for slots in lanes.values())
+              and sum(len(slots) for slots in lanes.values()) <= 8,
+              'Unknown or oversized structural suite slots')
+    r.require(isinstance(units, dict) and isinstance(units.get('commands'), list)
+              and len(units['commands']) <= 512, 'Oversized structural command slots')
+    objects = objects if objects is not None else Objects(units['logs'])
+    if units.get('version') == 2:
+        units = commands.expanded_commands(units, document['source_commit'], objects)
+    else:
+        r.require(not any(isinstance(item, dict) and 'sha256_ref' in item
+                          for item in units['commands']),
+                  'Version-one command objects cannot use references')
+    expanded = {}
+    for lane, slots in lanes.items():
+        suites = [objects.resolve(slot, True) for slot in slots]
+        names = [suite.get('name') for suite in suites]
+        r.require(all(isinstance(name, str) and name in COHORTS[lane] for name in names)
+                  and len(names) == len(set(names)), 'Unknown or repeated expanded suite')
+        expanded[lane] = [objects.expand_records(suite, document['source_commit']) for suite in suites]
+    return {**document, 'lanes': expanded, 'command_units': units}
+
+
+def xctest_result_rows(raw):
+    """Read the native legacy xcresult hierarchy; provenance is checked separately."""
+    try:
+        tree = r.bounded_json(raw.encode())
+    except (ValueError, RecursionError) as error:
+        raise r.ReceiptError('Malformed native XCTest JSON') from error
+    nodes, metadata = 0, set()
+    def kind(value):
+        header = value.get('_type') if isinstance(value, dict) else None
+        return header.get('_name') if isinstance(header, dict) else None
+    def scan(value, depth=0):
+        nonlocal nodes
+        nodes += 1
+        r.require(nodes <= 65536 and depth <= 64, 'Native XCTest traversal limit')
+        if isinstance(value, dict):
+            if kind(value) == 'ActionTestMetadata':
+                metadata.add(id(value))
+            for child in value.values():
+                scan(child, depth + 1)
+        elif isinstance(value, list):
+            for child in value:
+                scan(child, depth + 1)
+    scan(tree)
+    def typed(value, name):
+        r.require(isinstance(value, dict) and isinstance(value.get('_type'), dict)
+                  and value['_type'].get('_name') == name, 'Unexpected native XCTest node type')
+        return value
+    def string(value):
+        typed(value, 'String')
+        r.require(set(value) == {'_type', '_value'} and isinstance(value['_value'], str),
+                  'Invalid native XCTest string')
+        return value['_value']
+    def array(value):
+        typed(value, 'Array')
+        r.require(set(value) <= {'_type', '_values'} and isinstance(value.get('_values', []), list),
+                  'Invalid native XCTest array')
+        return value.get('_values', [])
+    def empty_fields(value):
+        for field in ('expectedFailures', 'failureSummaries'):
+            if field in value:
+                r.require(not array(value[field]), 'Native XCTest expected/failure metadata requires review')
+    rows, visited = [], set()
+    targets = {'plurx-iOSTests': 'plurx_iOSTests', 'plurx-tvOSTests': 'plurx_tvOSTests'}
+    def group(value, target, parents=()):
+        r.require(len(parents) < 16, 'Native XCTest group depth')
+        if kind(value) == 'ActionTestSummaryGroup':
+            empty_fields(value)
+            name = string(value['name'])
+            identifier = string(value['identifier'])
+            expected = ({'All tests', 'Selected tests'} if not parents else
+                        {target + '.xctest'} if len(parents) == 1 else None)
+            r.require(name == identifier and
+                      ((expected is not None and name in expected) or
+                       (len(parents) == 2 and re.fullmatch(r'[A-Za-z_]\w*', name)))
+                      and string(value['identifierURL']) ==
+                      'test://com.apple.xcode/plurx/' + target + '/' + name.replace(' ', '%20'),
+                      'Invalid native XCTest enclosing group')
+            for child in array(value['subtests']):
+                group(child, target, parents + (name,))
+            return
+        typed(value, 'ActionTestMetadata')
+        visited.add(id(value))
+        empty_fields(value)
+        identifier = string(value['identifier'])
+        match = re.fullmatch(r'([A-Za-z_]\w*)/(test\w+)\(\)', identifier)
+        r.require(match is not None and len(parents) == 3 and parents[-1] == match[1]
+                  and string(value['name']) == match[2] + '()'
+                  and string(value['identifierURL']) ==
+                  'test://com.apple.xcode/plurx/' + target + '/' + match[1] + '/' + match[2],
+                  'Native XCTest target, name or URI disagreement')
+        status = string(value['testStatus'])
+        r.require(status in {'Success', 'Failure', 'Skipped'}, 'Unknown native XCTest status')
+        scalar = typed(value['failureSummariesCount'], 'Int')
+        r.require(set(scalar) == {'_type', '_value'}, 'Invalid native XCTest failure scalar')
+        count = scalar.get('_value')
+        r.require(isinstance(count, str) and re.fullmatch(r'0|[1-9]\d{0,6}', count)
+                  and (int(count) > 0) == (status == 'Failure'),
+                  'Native XCTest failure count contradicts status')
+        rows.append((match[1] + '/' + match[2],
+                     {'Success': 'pass', 'Failure': 'fail', 'Skipped': 'ignored'}[status]))
+    typed(tree, 'ActionTestPlanRunSummaries')
+    for summary in array(tree['summaries']):
+        typed(summary, 'ActionTestPlanRunSummary')
+        for testable in array(summary['testableSummaries']):
+            typed(testable, 'ActionTestableSummary')
+            target = string(testable['targetName'])
+            r.require(target in targets and string(testable['name']) == target
+                      and string(testable['identifierURL']) == 'test://com.apple.xcode/plurx/' + target,
+                      'Unknown native XCTest target')
+            empty_fields(testable)
+            for value in array(testable['tests']):
+                group(value, target)
+    r.require(metadata == visited and rows, 'Native XCTest metadata outside declared hierarchy')
+    return rows
+
+
 def log_outcomes(log, format_name):
+    if format_name == 'instrumentation-command-5172':
+        return android_device_command_outcomes(log)
     outcomes = {}
     log = re.sub(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', log, flags=re.M)
+    if format_name == 'node-preflight-4954':
+        from validation import retained_web_preflight as web
+        return web.outcomes(log, git_bytes)
     if format_name == 'rust':
         rows = re.findall(r'^test (.+?) \.\.\. (ok|FAILED|ignored)(?:\s|,|$)', log, re.M)
         rows = [(name, {'ok': 'pass', 'FAILED': 'fail', 'ignored': 'ignored'}[status])
@@ -101,6 +402,28 @@ def log_outcomes(log, format_name):
         rows = re.findall(r"Test Case '-\[([^ ]+) ([^]]+)\]' (passed|failed|skipped)", log)
         rows = [(name + '/' + method, {'passed': 'pass', 'failed': 'fail', 'skipped': 'ignored'}[status])
                 for name, method, status in rows]
+    elif format_name == 'xctest-class':
+        rows = []
+        for line in log.splitlines():
+            # XCTest stdout can share a line with asynchronous stderr output.
+            start = 0 if line.startswith('Test Case ') else line.find("Test Case '-[")
+            if start < 0:
+                continue
+            line = line[start:]
+            native = re.fullmatch(r"Test Case '-\[([^ ]+) ([^]]+)\]' (.+)", line)
+            r.require(native is not None, 'Malformed native XCTest case line')
+            name, method, terminal = native.groups()
+            match = re.fullmatch(r'(ReceiptTests|plurx_iOSTests|plurx_tvOSTests)\.([A-Za-z_]\w*)', name)
+            r.require(match is not None and re.fullmatch(r'test\w+', method),
+                      'Unreviewed native XCTest namespace or selector')
+            if terminal == 'started.':
+                continue
+            status = re.fullmatch(r'(passed|failed|skipped) \([0-9]+(?:\.[0-9]+)? seconds\)\.', terminal)
+            r.require(status is not None, 'Unreviewed native XCTest terminal state')
+            rows.append((match[2] + '/' + method,
+                         {'passed': 'pass', 'failed': 'fail', 'skipped': 'ignored'}[status[1]]))
+    elif format_name == 'xctest-result':
+        rows = xctest_result_rows(log)
     elif format_name in {'gradle-summary', 'instrumentation-summary'}:
         if format_name == 'gradle-summary':
             rows = [(name + '/' + method, 'fail') for name, method in
@@ -148,12 +471,17 @@ def validate(document, candidate, source=git_bytes, differences=changed):
     obtain applicable passing evidence; no unknown path or outcome is adopted.
     Raw logs, environment, inventory and original failures remain in the proof.
     """
-    r.require(set(document) == {'version', 'repository', 'pr', 'branch', 'base_sha',
-        'source_commit', 'lanes', 'windows_waiver'}, 'Unknown retention proof fields')
-    r.require(document['version'] == 1 and isinstance(document['lanes'], dict)
+    keys = {'version', 'repository', 'pr', 'branch', 'base_sha', 'source_commit', 'lanes', 'windows_waiver'}
+    if document.get('version') == 2:
+        keys.add('command_units')
+    r.require(set(document) == keys, 'Unknown retention proof fields')
+    r.require(document['version'] in {1, 2} and isinstance(document['lanes'], dict)
               and document['lanes'] and set(document['lanes']) <= LANES,
               'Invalid retained lane inventory')
     frozen = r.sha(document['source_commit'])
+    if document['version'] == 2:
+        r.require(frozen == candidate, 'Command adoption binds the exact candidate')
+        document = expanded_document(document)
     protocol_paths = set(PROTOCOL_PATHS)
     r.require(differences(frozen, candidate) <= protocol_paths,
               'Candidate changed beyond reviewed retention protocol')
@@ -162,6 +490,7 @@ def validate(document, candidate, source=git_bytes, differences=changed):
         r.require(isinstance(suites, list) and suites, 'Empty retained suite')
         suite_names = set()
         lane_count = 0
+        lane_retired = []
         for suite in suites:
             r.require({'name', 'ids', 'environment', 'inventory', 'records'} <= set(suite)
                       and set(suite) <= {'name', 'ids', 'environment', 'inventory', 'records',
@@ -194,6 +523,9 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                               for key, value in environment.items()) for item in compatible),
                       'Reviewed environments do not share the unit contract')
             results = {}
+            passing_sequences = {}
+            failure_sequences = {}
+            retired_records = []
             failed_ids = set()
             sequences = set()
             records = suite['records']
@@ -215,6 +547,12 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                 r.require(record['environment'] in compatible,
                           'Unit environment applicability mismatch')
                 changes = record['changes']
+                if set(changes) == {'sha256_ref'}:
+                    manifest = r.bounded_json(decoded_log(shared_blob(document, changes)).encode())
+                    r.require(set(manifest) == {'source_commit', 'candidate', 'changes'}
+                              and manifest['source_commit'] == prior and manifest['candidate'] == frozen,
+                              'Shared applicability manifest source or candidate differs')
+                    changes = manifest['changes']
                 paths = differences(prior, frozen) - protocol_paths
                 r.require(isinstance(changes, dict) and set(changes) == paths,
                           'Unclassified changed unit inputs')
@@ -231,14 +569,45 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                               and set(affected) <= set(ids), 'Unknown affected unit identity')
                     invalidated.update(affected)
                 outcomes = record['outcomes']
-                r.require(isinstance(outcomes, dict) and outcomes and set(outcomes) <= set(ids),
-                          'Unknown actual unit outcome')
-                raw_log = decoded_log(record['log'])
+                r.require(isinstance(outcomes, dict) and outcomes, 'Unknown actual unit outcome')
+                r.require(record['format'] not in {'xctest-class', 'xctest-result'} or lane == 'apple',
+                          'Native XCTest format outside Apple lane')
+                raw_log = decoded_log(shared_blob(document, record['log']))
                 if record['format'] == 'rust-serial':
                     r.require(re.search(r'--exact(?:\s|$)|--test-threads(?:=| )1(?:\s|$)',
                                         origin['command']),
                               'Split Rust outcomes require actual serial or exact execution')
+                if lane == 'web_preflight' or record['format'] == 'node-preflight-4954':
+                    from validation import retained_web_preflight as web
+                    web.record_contract(lane, suite, record, frozen, raw_log, git_bytes, digest)
+                if record['format'] == 'instrumentation-command-5172':
+                    r.require(document['version'] == 2, 'Android whole-command adoption requires exact candidate')
+                    android_device_record_contract(lane, suite, record, frozen, source)
                 actual_outcomes = log_outcomes(raw_log, record['format'])
+                extras = set(outcomes) - set(ids)
+                retired = None
+                if extras:
+                    r.require(document['version'] == 2 and lane == 'rust'
+                              and suite['name'] == 'daemon' and record['format'] == 'rust',
+                              'Unknown or failed retired original outcome')
+                    # Resolve these finite policies here so existing controls
+                    # still exercise the policy they patch at validation time.
+                    matches = [policy for policy in (RETIRED_DAEMON, RETIRED_DVH1_DAEMON)
+                               if prior == policy['source']
+                               and digest(raw_log.encode()) == policy['log']
+                               and extras == {policy['id']}
+                               and outcomes[policy['id']] == 'pass'
+                               and policy['successor'] in ids]
+                    r.require(len(matches) == 1, 'Unknown or failed retired original outcome')
+                    policy = matches[0]
+                    r.require(not any(row['source_commit'] == policy['source']
+                                      and row['log_sha256'] == policy['log']
+                                      and row['test_id'] == policy['id'] for row in retired_records),
+                              'Duplicate retired original execution')
+                    retired = policy['id']
+                    retired_records.append({'sequence': sequence, 'source_commit': prior,
+                        'log_sha256': policy['log'], 'test_id': retired,
+                        'outcome': 'pass', 'successor': policy['successor']})
                 if aggregate and sequence == aggregate['baseline_sequence']:
                     r.require(record['format'] in {'gradle-summary', 'instrumentation-summary'},
                               'Unsupported aggregate cohort source')
@@ -256,8 +625,13 @@ def validate(document, candidate, source=git_bytes, differences=changed):
                     r.require(outcome in {'pass', 'fail', 'ignored'}, 'Invalid actual outcome')
                     if outcome == 'fail':
                         failed_ids.add(test_id)
+                        failure_sequences[test_id] = sequence
+                    if test_id == retired:
+                        continue
                     if test_id not in invalidated:
                         results[test_id] = outcome
+                        if outcome == 'pass':
+                            passing_sequences[test_id] = sequence
             if aggregate:
                 r.require(aggregate['baseline_sequence'] in sequences and
                           sum(record['sequence'] == aggregate['baseline_sequence'] for record in records) == 1,
@@ -267,12 +641,25 @@ def validate(document, candidate, source=git_bytes, differences=changed):
             r.require(all(results[test_id] == 'pass' for test_id in failed_ids)
                       and (not aggregate or all(value == 'pass' for value in results.values())),
                       'A failed unit cannot be cleared by ignoring it')
+            r.require(all(results.get(item['successor']) == 'pass'
+                          and passing_sequences.get(item['successor'], 0)
+                          > max(item['sequence'], failure_sequences.get(item['successor'], 0))
+                          for item in retired_records),
+                      'Retired original outcome needs a later applicable successor pass')
+            lane_retired.extend(retired_records)
             lane_count += (aggregate['total'] if aggregate else
                            sum(value == 'pass' for value in results.values()))
         r.require(suite_names == COHORTS[lane], 'Incomplete canonical lane cohort footprint')
         adopted[lane] = {'mode': 'retained-unit-evidence', 'passed': lane_count,
                          'suites': sorted(suite_names),
                          'accounting': 'aggregate-cohort-derived' if any('aggregate' in s for s in suites) else 'literal-per-ID'}
+        if any(record['format'] == 'instrumentation-command-5172'
+               for suite in suites for record in suite['records']):
+            adopted[lane].update(accounting='whole-command-success', commands_passed=1,
+                reported_tests=78, named_body_outcomes=None, passed_body_count=None,
+                ignored_body_count=None)
+        if lane_retired:
+            adopted[lane]['retired_original_passes'] = lane_retired
     waiver = document['windows_waiver']
     r.require(waiver is None or waiver == {
         'scope': 'windows_compile', 'authority': 'human-user',
@@ -280,6 +667,10 @@ def validate(document, candidate, source=git_bytes, differences=changed):
         'Unknown Windows waiver')
     if waiver:
         adopted['windows_compile'] = {'mode': 'explicit-human-waiver', **waiver}
+    if document['version'] == 2:
+        from validation import qualification_unit_continuation as commands
+        adopted_commands = commands.validate(document['command_units'], candidate, existing=document['lanes'])
+        return adopted, adopted_commands
     return adopted
 
 
@@ -352,7 +743,7 @@ def runner_api(environment):
                  environment['GITHUB_TOKEN'])
 
 
-def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid):
+def verify_identity(api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid):
     r.require(DIGEST.fullmatch(expected_digest) and digest(raw) == expected_digest,
               'Retention evidence enrollment digest mismatch')
     document = r.bounded_json(raw)
@@ -382,16 +773,29 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
         r.verify_attestor(api, {'repository': repository}, comment['user'])
         attested.append(r.positive(comment['id']))
     r.require(attested, 'Retained units await authenticated writer hash attestation')
-    for suites in document['lanes'].values():
+    return document, pull, repository, attested
+
+
+def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid,
+           *, objects=None, live_logs=None):
+    document, pull, repository, attested = verify_identity(
+        api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid)
+    document = expanded_document(document) if objects is None else expanded_document(document, objects)
+    from validation import qualification_unit_continuation as commands
+    from validation.unit_evidence_objects import LiveLogs
+    runs, jobs_by_run = {}, {}
+    live_logs = live_logs if live_logs is not None else LiveLogs()
+    for lane, suites in document['lanes'].items():
         for suite in suites:
             for record in suite['records']:
                 origin = record['origin']
                 if origin['kind'] == 'authenticated-ci':
-                    match = re.fullmatch(r'run:(\d+)/job:(\d+)', origin['identity'])
-                    r.require(match is not None, 'Malformed CI execution identity')
-                    run_id, job_id = map(r.positive, match.groups())
-                    actual_run = api.get(f'/actions/runs/{run_id}')
-                    actual_jobs = api.pages(f'/actions/runs/{run_id}/jobs')
+                    run_id, job_id = commands.authenticated_ids(origin['identity'])
+                    if run_id not in runs:
+                        runs[run_id] = api.get(f'/actions/runs/{run_id}')
+                        jobs_by_run[run_id] = api.pages(f'/actions/runs/{run_id}/jobs')
+                    actual_run = runs[run_id]
+                    actual_jobs = jobs_by_run[run_id]
                     jobs = [job for job in actual_jobs if job['id'] == job_id]
                     r.require(actual_run['repository']['id'] == repository
                               and actual_run['commit_sha'] == record['source_commit']
@@ -400,14 +804,37 @@ def verify(api, raw, expected_digest, binding, candidate, attachment_id, attachm
                               and jobs[0]['status'] in {'success', 'failure'}
                               and type(jobs[0]['attempt']) is int and jobs[0]['attempt'] == 1,
                               'Actual CI unit execution identity mismatch')
-                    raw_log = api.bytes(f'/actions/jobs/{job_id}/logs')
-                    r.require(digest(raw_log) == record['log']['sha256'],
+                    if lane == 'web_preflight':
+                        from validation import retained_web_preflight as web
+                        web.authenticate(run_id, job_id, jobs[0], git_bytes)
+                    if record['format'] == 'instrumentation-command-5172':
+                        authenticate_android_device_command(run_id, job_id, jobs[0])
+                    raw_log = live_logs.get(api, run_id, job_id)
+                    r.require(digest(raw_log) == shared_blob(document, record['log'])['sha256'],
                               'Authenticated CI log contradicts retained origin')
-    adopted = validate(document, candidate)
-    return {'version': 1, 'candidate_sha': candidate, 'base_sha': binding['base_sha'],
+    command_units = None
+    if document.get('version') == 2:
+        from validation import qualification_unit_continuation as commands
+        commands.authenticate(api, document['command_units'], document, repository, live_logs=live_logs)
+        adopted, command_units = validate(document, candidate)
+    else:
+        adopted = validate(document, candidate)
+    proof = {'version': 1, 'candidate_sha': candidate, 'base_sha': binding['base_sha'],
             'pull_request': pull['number'], 'sha256': expected_digest,
             'attestation_comments': sorted(attested), 'lanes': adopted,
             'attachment_id': attachment_id, 'attachment_uuid': attachment_uuid}
+    if command_units is not None:
+        proof['command_units'] = command_units
+    return proof
+
+
+def verify_enrollment(api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid):
+    document = r.bounded_json(raw)
+    if document.get('version') == 3:
+        from validation.promotion_unit_bundle import verify_bundle
+        return verify_bundle(api, raw, expected_digest, binding, candidate,
+                             attachment_id, attachment_uuid)
+    return verify(api, raw, expected_digest, binding, candidate, attachment_id, attachment_uuid)
 
 
 def main():
@@ -423,7 +850,7 @@ def main():
     api = runner_api(os.environ)
     raw = attachment_bytes(api, binding['pull_request'], args.attachment_id,
                            args.attachment_uuid, args.digest)
-    proof = verify(api, raw, args.digest, binding, os.environ['GITHUB_SHA'],
+    proof = verify_enrollment(api, raw, args.digest, binding, os.environ['GITHUB_SHA'],
                    args.attachment_id, args.attachment_uuid)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -431,6 +858,8 @@ def main():
     print('retained_units=' + json.dumps(proof, separators=(',', ':')))
     for lane in sorted(LANES):
         print('retain_' + lane + '=' + str(lane in proof['lanes']).lower())
+    for kind in ['validation', 'operations', 'store_contract', 'wal', 'android_jvm','topology','transport']:
+        print('retain_' + kind + '_units=' + str(kind in proof.get('command_units', {})).lower())
 
 
 if __name__ == '__main__':

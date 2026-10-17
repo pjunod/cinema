@@ -454,6 +454,7 @@ impl TranscodeManager {
             .vod
             .prepare_encoded_output(
                 crate::vodserve::VodRecipeRequest {
+                    root_admission: None,
                     soundtrack: None,
                     companion: None,
                     request: &request,
@@ -897,6 +898,7 @@ impl TranscodeManager {
             .await?
             .ok_or(PreparationError::Fail("vod_policy_unavailable"))?;
         let prepared_request = crate::vodserve::VodRecipeRequest {
+            root_admission: None,
             soundtrack: None,
             companion: None,
             request: &request,

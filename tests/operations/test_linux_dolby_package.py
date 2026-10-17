@@ -123,6 +123,209 @@ class LinuxDolbyPackageCase(unittest.TestCase):
             generator.assert_not_called()
             download.assert_not_called()
 
+    def public_git_fixture(self, module, root, commit_hex=None):
+        """A local repository standing in for the public HTTPS Git remote."""
+        import hashlib
+        import time
+        helper = module.load("prepare-linux-dolby-sdk")
+        repository = root / "public-fixture"
+        repository.mkdir()
+        home = root / "git-home"
+        home.mkdir()
+        environment = {"PATH": "/usr/bin:/bin", "HOME": str(home), "LC_ALL": "C",
+                       "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+                       "GIT_TERMINAL_PROMPT": "0"}
+        def git(*args):
+            return subprocess.check_output(["/usr/bin/git", "-C", str(repository),
+                "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", *args],
+                env=environment, stderr=subprocess.DEVNULL).decode().strip()
+        git("init", "-q", "--template=")
+        git("config", "user.name", "Fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        (repository / "source.txt").write_text("pinned source\n")
+        git("add", "source.txt")
+        git("commit", "-qm", "pinned")
+        commit = git("rev-parse", "HEAD")
+        expected = root / "expected.tar.gz"
+        git("archive", "--format=tar.gz", "--output", str(expected), commit)
+        def transport(argv, cwd, environment, log, deadline):
+            request = json.loads(argv[-1])
+            command = request["argv"]
+            if "fetch" in command:
+                request["argv"] = [*command[:-2], str(repository), command[-1]]
+                argv = [*argv[:-1], json.dumps(request)]
+            # The caller's deadline may be on a fake clock; the real runner gets a real one.
+            return helper.bounded_generator(argv, cwd, environment, log, time.monotonic() + 30)
+        return commit, hashlib.sha256(expected.read_bytes()).hexdigest(), transport
+
+    def test_git_source_archive_refuses_a_different_fetched_commit(self):
+        # The pin is the object name that is fetched and archived, so a remote
+        # that does not hold exactly that commit can produce no output at all.
+        import time
+        module = recipe()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inputs = root / "inputs"
+            inputs.mkdir()
+            commit, digest, transport = self.public_git_fixture(module, root)
+            other = ("b" if commit[0] != "b" else "c") * 40
+            target = inputs / "source.tar.gz"
+            with patch.object(module, "load", return_value=SimpleNamespace(bounded_generator=transport)):
+                with self.assertRaises(ValueError):
+                    module.fetch_source_archive(target, "https://example.invalid/public-repository",
+                                                digest, time.monotonic() + 30, "git-archive", other)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob("public-git-source-*")), [])
+
+    def test_git_source_archive_checksum_failure_cannot_publish_output(self):
+        import time
+        module = recipe()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inputs = root / "inputs"
+            inputs.mkdir()
+            commit, digest, transport = self.public_git_fixture(module, root)
+            target = inputs / "source.tar.gz"
+            with patch.object(module, "load", return_value=SimpleNamespace(bounded_generator=transport)):
+                with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                    module.fetch_source_archive(target, "https://example.invalid/public-repository",
+                                                "f" * 64, time.monotonic() + 30, "git-archive", commit)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob("public-git-source-*")), [])
+
+    def test_git_source_acquisition_requires_explicit_matching_public_commit(self):
+        import time
+        module = recipe()
+        commit = "a" * 40
+        with patch.object(module, "load") as generator, patch("urllib.request.urlopen") as download:
+            for url in ["https://user:password@example.invalid/fontconfig",
+                        "https://example.invalid/fontconfig?ref=main",
+                        "https://example.invalid/fontconfig#main", "https://example.invalid"]:
+                with self.subTest(url=url), self.assertRaisesRegex(ValueError, "exact plain public HTTPS"):
+                    module.fetch_source_archive(Path("/unused"), url, "0" * 64, time.monotonic() + 30,
+                                                "git-archive", commit)
+            generator.assert_not_called()
+            download.assert_not_called()
+        # The lock must name the same exact commit twice before anything is fetched.
+        lock = json.loads((Path(__file__).resolve().parents[2] / "scripts/linux-video-ffmpeg-sdk-sources.json").read_text())
+        role = next(role for role in [*lock["sources"].values(), *lock.get("build_tools", {}).values()]
+                    if role.get("archive_provider") == "git-archive")
+        for changed in [{"archive_acquisition": {}},
+                        {"archive_acquisition": {"kind": "git-archive", "commit": "b" * 40}},
+                        {"archive_provider": "https-archive"}]:
+            mutated = json.loads(json.dumps(lock))
+            for group in [mutated["sources"], mutated.get("build_tools", {})]:
+                for name, candidate in group.items():
+                    if candidate.get("archive") == role["archive"]:
+                        candidate.update(changed)
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(module, "host"), patch.object(module.json, "loads", return_value=mutated), \
+                    patch("urllib.request.urlopen") as download, \
+                    self.assertRaisesRegex(ValueError, "exact public pinned commit"):
+                module.package_pipeline(Path(tmp) / "package", 1, 10)
+                download.assert_not_called()
+
+    def test_git_source_deadline_retires_process_group_and_reaps_owner(self):
+        import time
+        module = recipe()
+        helper = module.load("prepare-linux-dolby-sdk")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            descendant = root / "descendant-pid"
+            command = ["/bin/sh", "-c", 'sleep 60 & echo $! > "$1"; wait', "sh", str(descendant)]
+            children = []
+            original = subprocess.Popen
+            def launch(*args, **kwargs):
+                child = original(*args, **kwargs)
+                children.append(child)
+                return child
+            started = time.monotonic()
+            with patch("subprocess.Popen", side_effect=launch):
+                with self.assertRaisesRegex(ValueError, "finite deadline"):
+                    module.bounded_source_command(helper, command, root, {"PATH": "/usr/bin:/bin"},
+                        root / "deadline.log", started + 2, [])
+            self.assertLess(time.monotonic() - started, 8)
+            self.assertEqual(len(children), 1)
+            self.assertIsNotNone(children[0].returncode)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(children[0].pid, 0)
+            state = subprocess.run(["/bin/ps", "-o", "stat=", "-p", descendant.read_text().strip()],
+                                   capture_output=True, text=True, timeout=3)
+            self.assertTrue(state.returncode != 0 or state.stdout.strip().startswith("Z"),
+                            "deadline left a running descendant: " + state.stdout)
+
+    def test_git_scratch_scan_tolerates_only_live_disappearance(self):
+        # The storage guard measures the object database while Git is still
+        # running: a vanished entry is benign, anything unreadable is not.
+        module = recipe()
+        namespace = {}
+        with patch("sys.argv", ["guard", json.dumps({"argv": [], "limits": []})]), \
+                patch("os.getpgrp", return_value=os.getpid()):
+            exec(module.SOURCE_STORAGE_GUARD.split("def enforce")[0], namespace)
+        allocated = namespace["allocated"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(allocated(str(root / "never-existed")), 0)
+            (root / "pack").write_bytes(b"x" * 10)
+            self.assertEqual(allocated(str(root)), 10)
+            def walk_reporting(error):
+                def walk(path, followlinks=False, onerror=None):
+                    onerror(error)
+                    return iter(())
+                return walk
+            with patch("os.walk", walk_reporting(FileNotFoundError())):
+                self.assertEqual(allocated(str(root)), 0)
+            with patch("os.walk", walk_reporting(PermissionError())), self.assertRaises(PermissionError):
+                allocated(str(root))
+            real_lstat = os.lstat
+            def lstat(path, *args, **kwargs):
+                if str(path).endswith("pack"):
+                    raise PermissionError(path)
+                return real_lstat(path, *args, **kwargs)
+            with patch("os.lstat", side_effect=lstat), self.assertRaises(PermissionError):
+                allocated(str(root))
+
+    def test_expired_git_acquisition_cannot_spawn(self):
+        import time
+        module = recipe()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(module, "load") as generator, \
+                patch("subprocess.Popen") as launch:
+            root = Path(tmp)
+            (root / "inputs").mkdir()
+            with self.assertRaisesRegex(ValueError, "deadline exceeded"):
+                module.fetch_source_archive(root / "inputs" / "source.tar.gz", "https://example.invalid/public-repository",
+                                            "0" * 64, time.monotonic() - 1, "git-archive", "a" * 40)
+            launch.assert_not_called()
+            generator.assert_not_called()
+            self.assertFalse((root / "source-fetch-evidence").exists())
+        # The runner itself also refuses an expired deadline before spawning.
+        helper = module.load("prepare-linux-dolby-sdk")
+        with tempfile.TemporaryDirectory() as tmp, patch("subprocess.Popen") as launch:
+            with self.assertRaisesRegex(ValueError, "deadline exceeded"):
+                module.bounded_source_command(helper, ["/usr/bin/git", "fetch"], Path(tmp), {},
+                                              Path(tmp) / "log", time.monotonic() - 1, [])
+            launch.assert_not_called()
+
+    def test_git_archive_expiry_during_verification_removes_output(self):
+        module = recipe()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inputs = root / "inputs"
+            inputs.mkdir()
+            commit, digest, transport = self.public_git_fixture(module, root)
+            target = inputs / "source.tar.gz"
+            clock = [0]
+            def checksum(path):
+                clock[0] = 11  # the deadline passes while the archive is being hashed
+                return digest
+            with patch.object(module, "load", return_value=SimpleNamespace(bounded_generator=transport)), \
+                    patch.object(module, "sha", side_effect=checksum), \
+                    patch.object(module, "time", SimpleNamespace(monotonic=lambda: clock[0])):
+                with self.assertRaisesRegex(ValueError, "during verification"):
+                    module.fetch_source_archive(target, "https://example.invalid/public-repository",
+                                                digest, 10, "git-archive", commit)
+            self.assertFalse(target.exists())
+
     def test_https_archive_default_keeps_pin_and_reports_mismatched_input(self):
         import hashlib
         import io

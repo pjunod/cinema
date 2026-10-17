@@ -15,10 +15,94 @@ import os
 import subprocess
 import shutil
 import tempfile
+from array import array
+import math
 
-FAMILIES = ('p5', 'p5-mmr1', 'p5-mmr3', 'p8-affine', 'p8-piecewise')
+FAMILIES = ('p5', 'p5-bounded', 'p5-mmr1', 'p5-mmr3', 'p8-affine', 'p8-piecewise')
 TIMES = ('42/1000', '83/1000', '125/1000')
 COMPLETION = {'window_complete', 'segment_complete', 'base_processing_complete'}
+
+
+def test_native_rgb_export_matches_independent_bilinear(root=Path('/work')):
+    """Reconstruct first: compare the export with a CPU native-RGB reference."""
+    root = Path(root)
+    arch = os.environ.get('DV_TEST_ARCH_LIB', 'aarch64-linux-gnu')
+    env = os.environ | {
+        'LD_LIBRARY_PATH': str(root / f'prefix/lib/{arch}'),
+        'VK_ICD_FILENAMES': os.environ.get('DV_TEST_VULKAN_ICD',
+                                          '/usr/share/vulkan/icd.d/lvp_icd.aarch64.json'),
+        'XDG_RUNTIME_DIR': str(root / 'runtime'),
+    }
+    results = []
+    for case, mode in [('p5-bounded', 'base-rpu'), ('p5-mmr3', 'base-rpu'),
+                       ('p8-piecewise', 'base-rpu'), ('p7-omit-fel', 'fel')]:
+        outputs = {}
+        for width, height in [(64, 64), (32, 32), (48, 40)]:
+            directory = root / f'{case}-export-{width}-{height}'
+            directory.mkdir()
+            nut = directory / 'out.nut'
+            args = [str(root / 'bin/segment_decode_render'),
+                    str(root / case / 'source.mkv'), str(directory), '0', '64',
+                    '64', '64', '0', '0', '0', 'bt2020-pq-master-clip',
+                    str(nut), '42/1000', '167/1000', '512', mode,
+                    str(width), str(height), 'pq-bilinear-rgb48-v1']
+            process = subprocess.run(args, env=env, capture_output=True, timeout=30)
+            (directory / 'stdout').write_bytes(process.stdout)
+            (directory / 'stderr').write_bytes(process.stderr)
+            assert process.returncode == 0, (case, width, process.stderr)
+            events = [json.loads(line) for line in process.stdout.splitlines()]
+            rendered = [event for event in events if event['kind'] == 'rendered_frame']
+            assert len(rendered) == 3
+            assert all((event['width'], event['height']) == (width, height)
+                       and event['pts'] == TIMES[index]
+                       for index, event in enumerate(rendered))
+            if mode == 'fel':
+                assert all(event['el_bound'] and event['nlq_active'] for event in rendered)
+            raw = subprocess.check_output([
+                'ffmpeg', '-nostdin', '-v', 'error', '-threads', '1', '-i', str(nut),
+                '-map', '0:v:0', '-fps_mode', 'passthrough', '-pix_fmt', 'rgb48le',
+                '-f', 'rawvideo', 'pipe:1'], timeout=30)
+            assert len(raw) == 3 * width * height * 6
+            values = array('H', raw)
+            if os.sys.byteorder != 'little':
+                values.byteswap()
+            outputs[width, height] = values
+        native = outputs[64, 64]
+        if mode == 'fel':
+            omitted = subprocess.check_output([
+                'ffmpeg', '-nostdin', '-v', 'error', '-threads', '1', '-i',
+                str(root / case / 'output/out.nut'), '-map', '0:v:0',
+                '-fps_mode', 'passthrough', '-pix_fmt', 'rgb48le',
+                '-f', 'rawvideo', 'pipe:1'], timeout=30)
+            assert native.tobytes() != omitted, 'the control must carry nonzero FEL contributions'
+        # Half-pixel centres with clamp-to-edge; independently computed four
+        # taps after native reconstruction/clipping. Native RGB48 quantization
+        # contributes <=0.5 code; four codes also bound GPU float rounding.
+        for (width, height), observed in outputs.items():
+            if (width, height) == (64, 64):
+                continue
+            maximum = 0
+            for frame in range(3):
+                for y in range(height):
+                    sy = max(0.0, min(63.0, (y + 0.5) * 64 / height - 0.5))
+                    y0, fy = math.floor(sy), sy - math.floor(sy)
+                    y1 = min(y0 + 1, 63)
+                    for x in range(width):
+                        sx = max(0.0, min(63.0, (x + 0.5) * 64 / width - 0.5))
+                        x0, fx = math.floor(sx), sx - math.floor(sx)
+                        x1 = min(x0 + 1, 63)
+                        for channel in range(3):
+                            def sample(xx, yy):
+                                return native[((frame * 64 + yy) * 64 + xx) * 3 + channel]
+                            expected = round((sample(x0, y0) * (1 - fx) + sample(x1, y0) * fx) * (1 - fy)
+                                             + (sample(x0, y1) * (1 - fx) + sample(x1, y1) * fx) * fy)
+                            actual = observed[((frame * height + y) * width + x) * 3 + channel]
+                            maximum = max(maximum, abs(actual - expected))
+            assert maximum <= 4, (case, width, height, maximum)
+            results.append({'case': case, 'raster': [width, height],
+                            'max_rgb48_difference': maximum})
+    (root / 'export-results.json').write_text(json.dumps(results, indent=2) + '\n')
+    return results
 
 
 
@@ -228,6 +312,7 @@ def test_base_profile_windows(root=Path('/work')):
     render('base-diagnostics', root / 'p8-affine/source.mkv', diagnostic=True)
     test_base_profile_nut_outputs(root)
     test_base_profile_nut_refusals(root)
+    test_native_rgb_export_matches_independent_bilinear(root)
     (root / 'base-results.json').write_text(json.dumps(results, indent=2) + '\n')
     return results
 

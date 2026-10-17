@@ -2104,6 +2104,19 @@ class DisplayAwareAutoEvidenceTest {
             route, height * 16 / 9, height, height, average_bps = 8_000_000L, peak_bps = peak,
             grade = "sdr", decoder_compatible = true, complete_cache = false, sustainable = false)
 
+    @Test fun processedHdr10PreferenceRequiresQualifiedProductionAndCodec() {
+        val original = candidate(2160, route = "remux")
+        val processed = candidate(720).copy(grade = "hdr10", sustainable = true,
+            planned_codec = "hevc", processed_hdr10 = true)
+        fun pick(row: tv.plurx.app.data.QualityCandidate) =
+            autoPreferredDisplayCandidate(listOf(original, row), 3840.0, 2160.0)
+        assertEquals(processed, pick(processed))
+        assertEquals(original, pick(processed.copy(sustainable = false)))
+        assertEquals(original, pick(processed.copy(decoder_compatible = false)))
+        assertEquals(original, pick(processed.copy(planned_codec = "h264")))
+        assertEquals(original, pick(processed.copy(grade = "sdr")))
+    }
+
     @Test fun runtimeDecoderSnapshotUsesStrictServerVocabulary() {
         val caps = tv.plurx.app.data.VideoEntry("hevc", listOf("main10"), 1_440, 2_560,
             tv.plurx.app.data.DecoderFrameRate(30, 1), listOf("pq", "sdr"), listOf(8))

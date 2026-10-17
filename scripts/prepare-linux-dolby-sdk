@@ -566,6 +566,8 @@ def stage_sources(lock, prefix, provenance, flags, upstream_recipe, archive_dire
                          "files": files, "recipe_binding": binding, "generation": records_generation,
                          "generator": row.get("generator"), "submodules": submodules, "python_source_paths": row.get("python_source_paths", []), "patches": patches,
                          "source_append": row.get("source_append", []), "source_replace": row.get("source_replace", []), "output_append": row.get("output_append", {})}
+        if row.get("archive_acquisition"):
+            records[role]["archive_acquisition"] = dict(row["archive_acquisition"])
     needed = {flag for flag in flags if flag.startswith("--enable-lib")}
     needed.update(flag for flag in flags if flag in {"--enable-gmp", "--enable-gnutls",
                   "--enable-chromaprint", "--enable-opencl", "--enable-vulkan",
