@@ -985,7 +985,7 @@ extension SharedPlayerController: PreparedSuccessorHost {
 /// Actual successor cadence, bounded by its caller's existing preparation budget.
 /// Both Local and Shared use the track's sample grid; absence never invents fps.
 @MainActor
-private func preparedDecodedFrameDuration(
+func preparedDecodedFrameDuration(
     of item: AVPlayerItem, boundMs remaining: Int, targetItemSeconds: Double,
     report: (@MainActor (String) -> Void)? = nil
 ) async -> PreparedDecodedCadence? {

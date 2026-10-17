@@ -30,7 +30,7 @@ struct PlayerAccessLogSample {
 
 /// Retains one exact item for a read-only AVFoundation operation on a worker.
 /// The worker never mutates the item or accesses controller/UI state.
-private final class PlayerAccessLogItem: @unchecked Sendable {
+final class PlayerAccessLogItem: @unchecked Sendable {
     let item: AVPlayerItem
     init(_ item: AVPlayerItem) { self.item = item }
     func read() -> PlayerAccessLogValues? {
@@ -385,7 +385,7 @@ struct AutoVODAdvertisedInterval {
     let durationSeconds: Double
 }
 
-private final class AutoVODPlaylistRedirectRefusal: NSObject, URLSessionTaskDelegate {
+final class AutoVODPlaylistRedirectRefusal: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
@@ -674,7 +674,7 @@ struct PreparedIncumbentBufferPreference {
     }
 }
 
-private struct NowPlayingState: Equatable {
+struct NowPlayingState: Equatable {
     let title: String
     let durationMs: Int
     let elapsedMs: Int
@@ -699,7 +699,7 @@ enum PlaybackPreparationError: LocalizedError {
 /// One AVPlayer failure forwarded to the server's bounded client-log endpoint.
 /// Keeping this payload small and token-free makes failures visible in the
 /// ordinary server log without retaining a media capability URL.
-private struct ApplePlaybackFailureLog: Encodable {
+struct ApplePlaybackFailureLog: Encodable {
     let level = "error"
     let event = "avplayer_item_failed"
     let message: String
@@ -718,7 +718,7 @@ private struct ApplePlaybackFailureLog: Encodable {
     }
 }
 
-private struct AppleCandidateLinkLog: Encodable {
+struct AppleCandidateLinkLog: Encodable {
     let event = "candidate_link_sample"
     let message = "Completed candidate body"
     let ua = "Apple AVPlayer"
@@ -743,7 +743,7 @@ private struct AppleCandidateLinkLog: Encodable {
     }
 }
 
-private struct AppleCandidateRecoveryLog: Encodable {
+struct AppleCandidateRecoveryLog: Encodable {
     let event = "candidate_recovery"
     let message = "Candidate recovery evidence"
     let ua = "Apple AVPlayer"
@@ -768,7 +768,7 @@ private struct AppleCandidateRecoveryLog: Encodable {
 /// joins on (contract §3.6). `surface_disagreement` is the one to watch: each
 /// occurrence is a place where something started the player after its owner
 /// stopped it.
-private struct ApplePlaybackSurfaceLog: Encodable {
+struct ApplePlaybackSurfaceLog: Encodable {
     let level: String
     let event: String
     let surfaceClass: String?
@@ -808,7 +808,7 @@ private struct ApplePlaybackSurfaceLog: Encodable {
     }
 }
 
-private struct AppleMarkerPlaybackLog: Encodable {
+struct AppleMarkerPlaybackLog: Encodable {
     let level = "info"
     let event: String
     let message: String
@@ -827,7 +827,7 @@ private struct AppleMarkerPlaybackLog: Encodable {
 /// `attempt_stale`: a migrated continuation fence refused the work it was
 /// about to do because an epoch it depends on moved while it was suspended.
 /// `detail` is `PlayerController.attemptStaleDetail(fence:captured:now:)`.
-private struct AppleAttemptStaleLog: Encodable {
+struct AppleAttemptStaleLog: Encodable {
     let level = "info"
     let event = "attempt_stale"
     let message: String
