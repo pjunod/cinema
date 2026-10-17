@@ -162,7 +162,25 @@ WEB_LAYOUT_PATHS = (
 # Swift diff compiles nothing under crates/. Everything else — scripts,
 # deploy, validation, vendor — keeps the Rust lane, because those trees feed
 # build, packaging, or selection behavior the workspace suite pins.
-RUST_EXEMPT_PATHS = ("clients/**",)
+#
+# Agent tooling is the other exemption: these files are read by people and
+# agents, or by the paperwork job, and nothing under crates/, vendor/ or the
+# cargo workspace reads them. A diff confined to them (plus docs) has nothing
+# for the cargo gate to compile. The
+# Makefile and the CI workflows stay routing paths above and still force it,
+# and the Python suites stay out: some of them guard cargo lanes themselves.
+RUST_EXEMPT_PATHS = (
+    "clients/**",
+    ".ignore",
+    "AGENTS.md",
+    "swarm/*.txt",
+    "scripts/paperwork",
+    "scripts/pre-push",
+    "scripts/outline",
+    "scripts/quiet",
+    "scripts/ci-failures",
+    "scripts/ci-failures.fleet.example.json",
+)
 
 # Device tests prove Android UI, focus, and packaging behavior. Server-only
 # changes can select the Android consumer through the impact graph, but they do
