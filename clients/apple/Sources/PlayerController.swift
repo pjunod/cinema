@@ -562,15 +562,22 @@ func autoDisplayFits(width: Int, height: Int, neededWidth: Double, neededHeight:
     width > 0 && height > 0 && Double(width) * 11 >= neededWidth * 10 && Double(height) * 11 >= neededHeight * 10
 }
 
+/// What the incumbent costs the link. A costed rung is its peak. An original
+/// or remux is the source rate the catalog declared for it — the title's own
+/// sustained cost, which a link below it drains at every moment, whether or
+/// not a body happens to have completed recently. Only when the server
+/// declared no rate does one fresh unpaced body of this session stand in,
+/// costed at its wire rate over the media it carried.
 func autoDownsideCostBps(_ candidate: QualityCandidate, sample: PlayerController.AutoCompletedTransfer?,
                          sessionId: String?, nowMs: Int) -> Double? {
     if let peak = candidate.peakBps, peak > 0 { return Double(peak) }
-    guard candidate.route != "encode", let sample, let sessionId,
+    guard candidate.route != "encode" else { return nil }
+    if let declared = candidate.averageBps, declared > 0 { return Double(declared) }
+    guard let sample, let sessionId,
           sample.segmentId.contains("/\(sessionId)/"), autoCompletedTransferBps(sample, nowMs: nowMs) != nil else { return nil }
-    let measured = sample.mediaDurationSeconds.flatMap { duration -> Double? in
+    return sample.mediaDurationSeconds.flatMap { duration -> Double? in
         duration.isFinite && duration > 0 ? Double(sample.bodyBytes) * 8 / duration : nil
     }
-    return [candidate.averageBps.flatMap { $0 > 0 ? Double($0) : nil }, measured].compactMap { $0 }.max()
 }
 
 /// A fragment cadence proof is valid only inside the inspected interval.
@@ -12078,8 +12085,12 @@ extension PlayerController {
         let producerPressure = autoActiveProductionPressure(status: sessionStatus,
             observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
             sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds())
-        let pressure = ((severe || (mild && autoMildSamples >= 2)) &&
-            (current.peakBps != nil || (bufferedRunwaySeconds() ?? 0) < 10)) || producerPressure
+        // Link pressure on a costed incumbent is pressure, whatever the
+        // runway: an original is costed by its declared source rate, and
+        // a link below it is draining the buffer whether or not it has
+        // reached ten seconds yet. The runway came into this only while an
+        // uncosted original had nothing but a body to be costed by.
+        let pressure = severe || (mild && autoMildSamples >= 2) || producerPressure
         if pressureOnly && !pressure { return }
         let aspect = Double(current.width) / Double(current.height)
         let neededWidth = min(Double(target.widthPx), Double(target.heightPx) * aspect)

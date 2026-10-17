@@ -84,4 +84,43 @@ final class AutoDeclaredCostTests: XCTestCase {
         XCTAssertEqual(autoRecoveryCandidate(ladder, current: original, rejected: [],
                                              linkCeiling: 5_000_000, currentCost: 28_814_703)?.height, 480)
     }
+
+    // MARK: Fix 2 — an original is costed by its declared source rate, and pressure does not wait for the runway
+
+    func testAnOriginalIsCostedByItsDeclaredSourceRateWithoutAFreshBody() {
+        let original = candidate(1_080, route: "remux", peak: nil, average: 28_814_703)
+        // No body at all, a stale body, a body of another session: the
+        // declared rate is the cost every time. The old rule answered nil to
+        // all three and left the incumbent uncosted between bodies.
+        XCTAssertEqual(autoDownsideCostBps(original, sample: nil, sessionId: "s", nowMs: 0), 28_814_703)
+        XCTAssertEqual(autoDownsideCostBps(original, sample: body(bodySeconds: 1), sessionId: "s", nowMs: 60_000), 28_814_703)
+        XCTAssertEqual(autoDownsideCostBps(original, sample: body(bodySeconds: 1), sessionId: "other", nowMs: 500), 28_814_703)
+        // A fresh body does not raise the declared rate: one object's wire
+        // rate is a peak, the catalog's figure is the title's sustained cost.
+        XCTAssertEqual(autoDownsideCostBps(original, sample: body(bodySeconds: 1, mediaSeconds: 1), sessionId: "s", nowMs: 500), 28_814_703)
+        // Only a title the server declared no rate for is costed by a body,
+        // and then only a fresh unpaced one of its own session.
+        let undeclared = candidate(1_080, route: "remux", peak: nil, average: nil)
+        XCTAssertEqual(autoDownsideCostBps(undeclared, sample: body(bodySeconds: 1, bytes: 1_000_000, mediaSeconds: 1),
+                                           sessionId: "s", nowMs: 500), 8_000_000)
+        XCTAssertNil(autoDownsideCostBps(undeclared, sample: body(bodySeconds: 1), sessionId: "s", nowMs: 60_000))
+        XCTAssertNil(autoDownsideCostBps(undeclared, sample: body(bodySeconds: 1), sessionId: "other", nowMs: 500))
+        XCTAssertNil(autoDownsideCostBps(undeclared, sample: nil, sessionId: "s", nowMs: 0))
+        // An encode rung is costed by its peak alone.
+        XCTAssertEqual(autoDownsideCostBps(candidate(720, peak: 7_500_000), sample: nil, sessionId: "s", nowMs: 0), 7_500_000)
+        XCTAssertNil(autoDownsideCostBps(candidate(720, peak: nil), sample: body(bodySeconds: 1), sessionId: "s", nowMs: 500))
+    }
+
+    func testLinkPressureOnACostedIncumbentDoesNotWaitForTheRunwayToDrain() throws {
+        let tick = try functionBody(try playerControllerSource(),
+                                    "private func tickDisplayAwareAuto(pressureOnly: Bool = false) {")
+        XCTAssertTrue(
+            tick.contains("let pressure = severe || (mild && autoMildSamples >= 2) || producerPressure"),
+            "a severe link, or two mild bodies, is pressure on its own"
+        )
+        XCTAssertFalse(
+            tick.contains("(current.peakBps != nil || (bufferedRunwaySeconds() ?? 0) < 10))"),
+            "the runway gate held a 28.8 Mb/s remux on a 9 Mb/s link until the buffer was one body from empty"
+        )
+    }
 }

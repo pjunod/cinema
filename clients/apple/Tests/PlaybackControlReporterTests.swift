@@ -1970,13 +1970,17 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertEqual(autoRecoveryCandidate([lower], current: hdrOriginal, rejected: [], decoderRecovery: true)?.height, 1_080)
     }
 
-    func testOriginalAverageIsDownsideOnlyAndNeedsFreshUnpacedSessionEvidence() {
+    func testOriginalDeclaredRateIsItsDownsideCostWhateverTheBodyEvidence() {
+        // The declared source rate is the title's sustained cost; a body of
+        // another session, a paced body or a stale one changes nothing, and
+        // it is downside-only: the peak stays unknown.
         let original = candidate(2_160, route: "remux", peak: nil)
         XCTAssertEqual(autoDownsideCostBps(original, sample: sample(), sessionId: "staged", nowMs: 2_000), 8_000_000)
         XCTAssertNil(original.peakBps)
-        XCTAssertNil(autoDownsideCostBps(original, sample: sample(), sessionId: "other", nowMs: 2_000))
-        XCTAssertNil(autoDownsideCostBps(original, sample: sample(paced: true), sessionId: "staged", nowMs: 2_000))
-        XCTAssertNil(autoDownsideCostBps(original, sample: sample(), sessionId: "staged", nowMs: 12_000))
+        XCTAssertEqual(autoDownsideCostBps(original, sample: sample(), sessionId: "other", nowMs: 2_000), 8_000_000)
+        XCTAssertEqual(autoDownsideCostBps(original, sample: sample(paced: true), sessionId: "staged", nowMs: 2_000), 8_000_000)
+        XCTAssertEqual(autoDownsideCostBps(original, sample: sample(), sessionId: "staged", nowMs: 12_000), 8_000_000)
+        XCTAssertEqual(autoDownsideCostBps(original, sample: nil, sessionId: "staged", nowMs: 2_000), 8_000_000)
     }
 
     private func sample(_ segment: String = "a", bodySeconds: Double = 0.5,
