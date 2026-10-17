@@ -605,6 +605,101 @@ func autoDownsideCostBps(_ candidate: QualityCandidate, sample: PlayerController
     }
 }
 
+/// The pressure half of an Auto evaluation, decided from evidence alone so a
+/// test can feed it a completed body and a runway and read the rung it moves
+/// to. `nil` is a pressure-only evaluation that found no pressure: nothing to
+/// act on, and nothing else decided. A severe link, or two mild bodies, or a
+/// producer that cannot keep up, is pressure on a costed incumbent whatever
+/// the runway; the runway bounds only how cheaply the rescue must acquire.
+struct AutoLinkPressureVerdict {
+    let link: Double?
+    let downsideCost: Double?
+    let severe: Bool
+    let mild: Bool
+    let pressure: Bool
+    /// The rung pressure moves to; `nil` when nothing costed lies below.
+    let chosen: QualityCandidate?
+}
+
+func autoLinkPressureVerdict(current: QualityCandidate, eligible: [QualityCandidate],
+                             transfer: PlayerController.AutoCompletedTransfer?, transferCurrent: Bool,
+                             sessionId: String?, candidateId: String?, mildSamples: Int,
+                             producerPressure: Bool, runwaySeconds: Double?, playbackRate: Double,
+                             rejected: Set<String>, pressureOnly: Bool, nowMs: Int) -> AutoLinkPressureVerdict? {
+    let link = transferCurrent
+        ? transfer.flatMap { autoIncumbentLinkBps($0, sessionId: sessionId, candidateId: candidateId, nowMs: nowMs) }
+        : nil
+    let downsideCost = autoDownsideCostBps(current, sample: transfer, sessionId: sessionId, nowMs: nowMs)
+    let severe = link.map { bps in downsideCost.map { bps < $0 * 0.7 } ?? false } ?? false
+    let mild = link.map { bps in downsideCost.map { bps < $0 * (current.peakBps == nil ? 1.0 : 1.3) } ?? false } ?? false
+    let pressure = severe || (mild && mildSamples >= 2) || producerPressure
+    if pressureOnly && !pressure { return nil }
+    let chosen = pressure
+        ? autoRecoveryCandidate(eligible, current: current, rejected: rejected,
+                                linkCeiling: severe || mildSamples >= 2 ? link : nil, currentCost: downsideCost,
+                                minimumAcquisitionCost: autoPressureNeedsMinimumAcquisitionCost(
+                                    severe: severe, runwaySeconds: runwaySeconds, playbackRate: playbackRate))
+        : nil
+    return AutoLinkPressureVerdict(link: link, downsideCost: downsideCost, severe: severe, mild: mild,
+                                   pressure: pressure, chosen: chosen)
+}
+
+/// The upgrade an Auto evaluation may propose: among the rungs the measured
+/// link carries with 1.8× headroom over a costed peak, and the bounded trial
+/// of an unmeasured original, the one the display prefers.
+func autoUpgradeCandidate(_ eligible: [QualityCandidate], link: Double?, outputs: [MeasuredCandidateOutput]?,
+                          neededWidth: Double, neededHeight: Double) -> QualityCandidate? {
+    guard let link, link > 0 else { return nil }
+    let fitting = eligible.filter { candidate in
+        candidate.peakBps.map { link >= Double($0) * 1.8 }
+            ?? autoUnknownOriginalTrial(candidate, outputs: outputs)
+    }
+    return autoPreferredDisplayCandidate(fitting, neededWidth: neededWidth, neededHeight: neededHeight)
+}
+
+/// The original a viewer boundary re-plans to: the largest other original the
+/// measured link carries with 1.8× headroom over a measured peak, or an
+/// unmeasured one under the bounded trial.
+func autoBoundaryOriginalCandidate(_ offered: [QualityCandidate], current: QualityCandidate, link: Double,
+                                   outputs: [MeasuredCandidateOutput]?, rejected: Set<String>,
+                                   blockedUntil: [String: Int], nowMs: Int) -> QualityCandidate? {
+    let originals = offered.filter {
+        $0.id != current.id && $0.hasValidIdentity && $0.decoderCompatible && $0.route == "remux" &&
+            !rejected.contains($0.id) && (blockedUntil[$0.id] ?? 0) <= nowMs &&
+            (measuredCandidatePeak($0, outputs: outputs).map { link >= Double($0) * 1.8 }
+                ?? autoUnknownOriginalTrial($0, outputs: outputs))
+    }
+    return originals.max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) })
+}
+
+/// What a stalled incumbent recovers to, decided from the same evidence the
+/// tick weighs: a severe link, two mild bodies or producer pressure names a
+/// cause; without one there is no verdict and the same delivery is reopened.
+struct AutoStallRecoveryVerdict {
+    let severe: Bool
+    let mild: Bool
+    let producer: Bool
+    let next: QualityCandidate?
+}
+
+func autoStallRecoveryVerdict(current: QualityCandidate, candidates: [QualityCandidate],
+                              transfer: PlayerController.AutoCompletedTransfer?, transferCurrent: Bool,
+                              sessionId: String?, candidateId: String?, mildSamples: Int,
+                              producerPressure: Bool, rejected: Set<String>, switchBudgetOpen: Bool,
+                              nowMs: Int) -> AutoStallRecoveryVerdict? {
+    let link = transferCurrent
+        ? transfer.flatMap { autoIncumbentLinkBps($0, sessionId: sessionId, candidateId: candidateId, nowMs: nowMs) }
+        : nil
+    let downsideCost = autoDownsideCostBps(current, sample: transfer, sessionId: sessionId, nowMs: nowMs)
+    let severe = link.map { bps in downsideCost.map { bps < $0 * 0.7 } ?? false } ?? false
+    let mild = mildSamples >= 2 && link.map { bps in downsideCost.map { bps < $0 * (current.peakBps == nil ? 1.0 : 1.3) } ?? false } == true
+    guard severe || producerPressure || mild else { return nil }
+    guard severe || switchBudgetOpen else { return nil }
+    let next = autoRecoveryCandidate(candidates, current: current, rejected: rejected,
+                                     linkCeiling: severe || mild ? link : nil, currentCost: downsideCost)
+    return AutoStallRecoveryVerdict(severe: severe, mild: mild, producer: producerPressure, next: next)
+}
+
 /// A fragment cadence proof is valid only inside the inspected interval.
 /// Cap the loaded planner there before freezing a target; never move a frozen
 /// anchor or borrow timing from a different media fragment.
@@ -8741,34 +8836,32 @@ final class PlayerController: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(Self.surfaceClockIntervalMs))
                 guard !Task.isCancelled, let self, self.started else { return }
-                self.refreshWaitDetail()
-                // AVPlayer's periodic observer is the evidence sampler while
-                // the film clock runs, and it stops firing the moment the
-                // clock stops — which is exactly when the model needs to hear
-                // that the picture is no longer moving. Its last sample was
-                // taken over a still-moving clock, so the model kept saying
-                // `presenting`, and every `media_waiting` raised below was
-                // retired in the same step by that stale evidence: twelve
-                // seconds of frozen picture, thirty raise/clear pairs a
-                // millisecond apart, and no spinner. Once the observer has
-                // been silent for one clock interval this clock takes the
-                // same sample through the same sampler: the position delta
-                // over a stationary clock is "not presenting", which is the
-                // evidence the contract asks for (§3.4) and no transport
-                // status.
-                if Self.surfaceClockSamplesPresentation(
-                    lastSampleAtMs: self.lastSurfaceSampleAtMs,
-                    nowMs: PlaybackControlSession.monotonicMs()
-                ), !self.isChangingStream, self.player.currentItem != nil {
-                    self.sampleSurfacePresentation(
-                        at: self.realPositionMs(),
-                        evidence: self.currentLocalVideoEvidence()
-                    )
-                }
-                self.noteMediaWaiting()
-                self.present(.tick)
+                self.surfaceClockTick(nowMs: PlaybackControlSession.monotonicMs())
             }
         }
+    }
+
+    /// One beat of the presenter's clock. AVPlayer's periodic observer is
+    /// the evidence sampler while the film clock runs, and it stops firing
+    /// the moment the clock stops — which is exactly when the model needs to
+    /// hear that the picture is no longer moving. Its last sample was taken
+    /// over a still-moving clock, so the model kept saying `presenting`, and
+    /// every `media_waiting` raised below was retired in the same step by
+    /// that stale evidence: twelve seconds of frozen picture, thirty
+    /// raise/clear pairs a millisecond apart, and no spinner. Once the
+    /// observer has been silent for one clock interval this clock takes the
+    /// same sample through the same sampler: the position delta over a
+    /// stationary clock is "not presenting", which is the evidence the
+    /// contract asks for (§3.4) and no transport status. Evidence first,
+    /// then the wait, so the raise is weighed against the stopped clock.
+    func surfaceClockTick(nowMs: Int) {
+        refreshWaitDetail()
+        if Self.surfaceClockSamplesPresentation(lastSampleAtMs: lastSurfaceSampleAtMs, nowMs: nowMs),
+           !isChangingStream, player.currentItem != nil {
+            sampleSurfacePresentation(at: realPositionMs(), evidence: currentLocalVideoEvidence())
+        }
+        noteMediaWaiting()
+        present(.tick)
     }
 
     nonisolated static let surfaceClockIntervalMs = 500
@@ -8863,6 +8956,29 @@ final class PlayerController: ObservableObject {
         present(.presenting(presenting, attached: attached))
         endSystemHoldIfPlaying()
     }
+
+    #if DEBUG
+    /// Test seam, Debug-only: an attached playback with a surface model to
+    /// sample into, so the presenter's clock can be driven on a controller
+    /// without a server. It sets the three facts the clock reads — started,
+    /// an attached generation and a current item — and decides nothing.
+    func attachSurfaceForTesting(_ item: AVPlayerItem, generation: Int) {
+        started = true
+        player.replaceCurrentItem(with: item)
+        _ = present(.attach(generation))
+    }
+
+    /// Test seam, Debug-only: the periodic observer's sample, taken through
+    /// the real sampler at a position and rate the test names, so a test can
+    /// stand where AVPlayer's observer last stood before the film clock
+    /// stopped. `atMs` is when the observer ran on the controller's clock.
+    func sampleObserverPresentationForTesting(positionMs: Int, atMs: Int, evidence: LocalVideoEvidence) {
+        sampleSurfacePresentation(at: positionMs, evidence: evidence)
+        lastSurfaceSampleAtMs = atMs
+    }
+
+    var surfaceLastSampleAtMsForTesting: Int? { lastSurfaceSampleAtMs }
+    #endif
 
     /// Film actually playing is the system's hold over, whether or not iOS
     /// ever says so: retire the banner and give the stall monitor back. Kept
@@ -11877,13 +11993,9 @@ extension PlayerController {
         if let cost = autoDownsideCostBps(current, sample: sample, sessionId: sessionId, nowMs: now), link < cost {
             return nil
         }
-        let originals = offered.filter {
-            $0.id != current.id && $0.hasValidIdentity && $0.decoderCompatible && $0.route == "remux" &&
-                !autoDecoderRejected.contains($0.id) && (autoBlockedUntil[$0.id] ?? 0) <= now &&
-                (measuredCandidatePeak($0, outputs: decision?.measuredCandidateOutputs).map { link >= Double($0) * 1.8 }
-                    ?? autoUnknownOriginalTrial($0, outputs: decision?.measuredCandidateOutputs))
-        }
-        return originals.max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) })
+        return autoBoundaryOriginalCandidate(offered, current: current, link: link,
+            outputs: decision?.measuredCandidateOutputs, rejected: autoDecoderRejected,
+            blockedUntil: autoBlockedUntil, nowMs: now)
     }
 
     /// Ask for the boundary's original candidate through the same accepted
@@ -11935,26 +12047,26 @@ extension PlayerController {
         else { return }
         let now = PlaybackControlSession.monotonicMs()
         autoUpgradeEvidence.bind(attachment: player.currentItem.map(ObjectIdentifier.init), attempt: playbackAttemptId, nowMs: now)
-        let link: Double? = {
-            guard autoTransferPressureOwnerCurrent, let transfer = latestAutoCompletedTransfer,
-                  autoTransferOriginCurrent(transfer) else { return nil }
-            return autoIncumbentLinkBps(transfer, sessionId: sessionId, candidateId: autoActiveCandidateId, nowMs: now)
-        }()
-        let downsideCost = autoDownsideCostBps(current, sample: latestAutoCompletedTransfer, sessionId: sessionId, nowMs: now)
-        let severe = link.map { bps in downsideCost.map { bps < $0 * 0.7 } ?? false } ?? false
-        if severe, let transfer = latestAutoCompletedTransfer {
+        autoSwitchTimes.removeAll { now - $0 >= 3_600_000 }
+        let transfer = latestAutoCompletedTransfer
+        guard let verdict = autoStallRecoveryVerdict(current: current, candidates: candidates,
+            transfer: transfer,
+            transferCurrent: autoTransferPressureOwnerCurrent && transfer.map(autoTransferOriginCurrent) == true,
+            sessionId: sessionId, candidateId: autoActiveCandidateId,
+            mildSamples: autoTransferPressure.mildSamples(nowMs: now),
+            producerPressure: autoActiveProductionPressure(status: sessionStatus,
+                observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
+                sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds()),
+            rejected: autoDecoderRejected,
+            switchBudgetOpen: autoSwitchTimes.count < 6 && (autoLastSwitchMs.map { now - $0 >= 60_000 } ?? true),
+            nowMs: now)
+        else { return }
+        let severe = verdict.severe
+        let producer = verdict.producer
+        if severe, let transfer {
             autoUpgradeEvidence.cliff(completedAtMs: transfer.completedAtMs, nowMs: now)
         }
-        let mild = autoTransferPressure.mildSamples(nowMs: now) >= 2 && link.map { bps in downsideCost.map { bps < $0 * (current.peakBps == nil ? 1.0 : 1.3) } ?? false } == true
-        let producer = autoActiveProductionPressure(status: sessionStatus,
-            observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
-            sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds())
-        guard severe || producer || mild else { return }
-        autoSwitchTimes.removeAll { now - $0 >= 3_600_000 }
-        guard severe || (autoSwitchTimes.count < 6 && (autoLastSwitchMs.map { now - $0 >= 60_000 } ?? true)) else { return }
-        let next = autoRecoveryCandidate(candidates, current: current, rejected: autoDecoderRejected,
-            linkCeiling: severe || mild ? link : nil, currentCost: downsideCost)
-        if let next {
+        if let next = verdict.next {
             if !producer {
                 guard let deadline, let sample = latestAutoCompletedTransfer,
                       let receipt = sample.receipt, let incumbent = player.currentItem,
@@ -12117,11 +12229,6 @@ extension PlayerController {
            beginAutoBoundaryPreparation(chosen, target: target) {
             return
         }
-        let link: Double? = {
-            guard autoTransferPressureOwnerCurrent, let transfer = latestAutoCompletedTransfer,
-                  autoTransferOriginCurrent(transfer) else { return nil }
-            return autoIncumbentLinkBps(transfer, sessionId: sessionId, candidateId: autoActiveCandidateId, nowMs: now)
-        }()
         autoSwitchTimes.removeAll { now - $0 >= 3_600_000 }
         let eligible = candidates.filter {
             $0.hasValidIdentity && !autoDecoderRejected.contains($0.id) &&
@@ -12129,44 +12236,40 @@ extension PlayerController {
             ($0.route != "encode" || $0.grade == current.grade) &&
             (autoBlockedUntil[$0.id] ?? 0) <= now
         }
-        let downsideCost = autoDownsideCostBps(current, sample: latestAutoCompletedTransfer, sessionId: sessionId, nowMs: now)
-        let severe = link.map { bps in downsideCost.map { bps < $0 * 0.7 } ?? false } ?? false
-        if severe, let transfer = latestAutoCompletedTransfer {
+        autoMildSamples = autoTransferPressure.mildSamples(nowMs: now)
+        let transfer = latestAutoCompletedTransfer
+        // The whole pressure decision — link, cost, severity and the rung a
+        // link cause moves to — is `autoLinkPressureVerdict`, decided from
+        // evidence alone. Link pressure on a costed incumbent is pressure
+        // whatever the runway: an original is costed by its declared source
+        // rate, and a link below it is draining the buffer whether or not it
+        // has reached ten seconds yet.
+        guard let verdict = autoLinkPressureVerdict(current: current, eligible: eligible,
+            transfer: transfer,
+            transferCurrent: autoTransferPressureOwnerCurrent && transfer.map(autoTransferOriginCurrent) == true,
+            sessionId: sessionId, candidateId: autoActiveCandidateId, mildSamples: autoMildSamples,
+            producerPressure: autoActiveProductionPressure(status: sessionStatus,
+                observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
+                sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds()),
+            runwaySeconds: bufferedRunwaySeconds(), playbackRate: Double(player.rate),
+            rejected: autoDecoderRejected, pressureOnly: pressureOnly, nowMs: now)
+        else { return }
+        let severe = verdict.severe
+        let pressure = verdict.pressure
+        if severe, let transfer {
             autoUpgradeEvidence.cliff(completedAtMs: transfer.completedAtMs, nowMs: now)
         }
         let currentArea = Int64(current.width) * Int64(current.height)
-        let mild = link.map { bps in downsideCost.map { bps < $0 * (current.peakBps == nil ? 1.0 : 1.3) } ?? false } ?? false
-        autoMildSamples = autoTransferPressure.mildSamples(nowMs: now)
-        let producerPressure = autoActiveProductionPressure(status: sessionStatus,
-            observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
-            sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds())
-        // Link pressure on a costed incumbent is pressure, whatever the
-        // runway: an original is costed by its declared source rate, and
-        // a link below it is draining the buffer whether or not it has
-        // reached ten seconds yet. The runway came into this only while an
-        // uncosted original had nothing but a body to be costed by.
-        let pressure = severe || (mild && autoMildSamples >= 2) || producerPressure
-        if pressureOnly && !pressure { return }
         let aspect = Double(current.width) / Double(current.height)
         let neededWidth = min(Double(target.widthPx), Double(target.heightPx) * aspect)
         let neededHeight = min(Double(target.heightPx), Double(target.widthPx) / aspect)
         let chosen: QualityCandidate?
         if pressure {
-            chosen = autoRecoveryCandidate(eligible, current: current, rejected: autoDecoderRejected,
-                linkCeiling: severe || autoMildSamples >= 2 ? link : nil, currentCost: downsideCost,
-                minimumAcquisitionCost: autoPressureNeedsMinimumAcquisitionCost(
-                    severe: severe, runwaySeconds: bufferedRunwaySeconds(),
-                    playbackRate: Double(player.rate)))
+            chosen = verdict.chosen
             autoUpgradeSinceMs = nil
         } else {
-            let fitting = eligible.filter { candidate in
-                link.map { bps in
-                    candidate.peakBps.map { bps >= Double($0) * 1.8 } ??
-                        offered.first(where: { $0.id == candidate.id && $0.recipeDigest == candidate.recipeDigest })
-                            .map { autoUnknownOriginalTrial($0, outputs: decision?.measuredCandidateOutputs) && bps > 0 } ?? false
-                } == true
-            }
-            chosen = autoPreferredDisplayCandidate(fitting, neededWidth: neededWidth, neededHeight: neededHeight)
+            chosen = autoUpgradeCandidate(eligible, link: verdict.link, outputs: decision?.measuredCandidateOutputs,
+                                          neededWidth: neededWidth, neededHeight: neededHeight)
             guard let chosen,
                   Int64(chosen.width) * Int64(chosen.height) > currentArea ||
                     (current.route == "encode" && chosen.route != "encode"),

@@ -1,17 +1,30 @@
+import AVFoundation
+import CryptoKit
 import XCTest
 @testable import plurx
 
 /// Auto on an original or remux incumbent whose title has never been encoded
-/// whole. Each test pins one decision point of the 2026-10-17 Agent Zero
-/// finding (shipping build 252, 28.8 Mb/s H.264 remux, 10 / 25 Mb/s links):
-/// the catalog's declared costs were discarded, the original was costed only
-/// by a body less than ten seconds old, that body's verdict expired long
-/// before the next 40 MB body could arrive, and the surface presenter kept
-/// reading a stationary clock as presenting.
+/// whole. Each test pins one decision point of the 2026-10-17 finding on the
+/// shipping build 252 — a 1080p H.264 library title delivered as a 28.8 Mb/s
+/// original, behind 10 / 25 Mb/s links: the catalog's declared costs were
+/// discarded, the original was costed only by a body less than ten seconds
+/// old, that body's verdict expired long before the next 40 MB body could
+/// arrive, and the surface presenter kept reading a stationary clock as
+/// presenting. The decisions are exercised on the functions the player
+/// decides with, fed the evidence the player would feed them.
 final class AutoDeclaredCostTests: XCTestCase {
+    /// A distinct valid candidate identity per recipe byte.
+    private func identity(_ byte: UInt8) -> (id: String, digest: [UInt8]) {
+        let digest = Array(repeating: byte, count: 32)
+        var bytes = Data("plurx:auto-quality-candidate:v1\0".utf8)
+        bytes.append(contentsOf: digest)
+        return (SHA256.hash(data: bytes).prefix(16).map { String(format: "%02x", $0) }.joined(), digest)
+    }
+
     private func candidate(_ height: Int, route: String = "encode", peak: UInt64? = 3_000_000,
-                           average: UInt64? = 2_000_000, grade: String = "sdr") -> QualityCandidate {
-        QualityCandidate(id: "0a7ba9bab6fbdd31bab5e5e362a3fac7", recipeDigest: Array(repeating: 0, count: 32),
+                           average: UInt64? = 2_000_000, grade: String = "sdr", recipe: UInt8 = 0) -> QualityCandidate {
+        let who = identity(recipe)
+        return QualityCandidate(id: who.id, recipeDigest: who.digest,
             route: route, width: height * 16 / 9, height: height, targetHeight: height,
             averageBps: average, peakBps: peak, grade: grade, decoderCompatible: true,
             completeCache: false, sustainable: false)
@@ -34,24 +47,34 @@ final class AutoDeclaredCostTests: XCTestCase {
             receipt: receipt, etag: "object-17", installedSessionId: session, installedCandidateId: candidate)
     }
 
-    private func playerControllerSource() throws -> String {
-        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appendingPathComponent("../Sources/PlayerController.swift").standardizedFileURL
-        return try String(contentsOf: url, encoding: .utf8)
+    /// The ladder the server declared for the title: a 28.8 Mb/s original
+    /// and encode rungs costed by VBV cap plus audio, none encoded whole.
+    private var original: QualityCandidate { candidate(1_080, route: "remux", peak: nil, average: 28_814_703, recipe: 1) }
+    private var ladder: [QualityCandidate] {
+        autoCostedCatalog([
+            original,
+            candidate(1_080, peak: 12_000_000, average: 8_000_000, recipe: 2),
+            candidate(720, peak: 7_500_000, average: 5_000_000, recipe: 3),
+            candidate(480, peak: 3_500_000, average: 2_300_000, recipe: 4),
+            candidate(360, peak: 2_000_000, average: 1_300_000, recipe: 5),
+        ], outputs: nil)
     }
+    private var current: QualityCandidate { ladder[0] }
 
-    private func functionBody(_ source: String, _ signature: String) throws -> String {
-        let start = try XCTUnwrap(source.range(of: signature), signature)
-        let end = try XCTUnwrap(source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex))
-        return String(source[start.upperBound..<end.lowerBound])
+    private func pressureVerdict(transfer: PlayerController.AutoCompletedTransfer?, runway: Double?,
+                                 mildSamples: Int = 0, producer: Bool = false, pressureOnly: Bool = true,
+                                 nowMs: Int = 30_000) -> AutoLinkPressureVerdict? {
+        autoLinkPressureVerdict(current: current, eligible: ladder, transfer: transfer, transferCurrent: true,
+            sessionId: "s", candidateId: current.id, mildSamples: mildSamples, producerPressure: producer,
+            runwaySeconds: runway, playbackRate: 1, rejected: [], pressureOnly: pressureOnly, nowMs: nowMs)
     }
 
     // MARK: Fix 1 — declared catalog costs stand until a measured output replaces them
 
     func testDeclaredCatalogCostsStandUntilAMeasuredOutputReplacesThem() {
         let rung = candidate(720, peak: 7_500_000, average: 5_000_000)
-        // No complete full-mux measurement: the declared VBV ceiling plus
-        // audio is the rung's cost. The old catalog overwrote it with nil.
+        // No complete full-mux measurement: the declared VBV cap plus audio
+        // is the rung's cost. The old catalog overwrote it with nil.
         let declared = autoCostedCatalog([rung], outputs: nil)
         XCTAssertEqual(declared.first?.peakBps, 7_500_000)
         XCTAssertEqual(declared.first?.averageBps, 5_000_000)
@@ -64,31 +87,22 @@ final class AutoDeclaredCostTests: XCTestCase {
         let conflicting = [measured(rung, average: 1, peak: 2), measured(rung, average: 3, peak: 4)]
         XCTAssertEqual(autoCostedCatalog([rung], outputs: conflicting).first?.peakBps, 7_500_000)
         // An original keeps its declared source rate and no peak.
-        let original = candidate(1_080, route: "remux", peak: nil, average: 28_814_703)
         let costed = autoCostedCatalog([original], outputs: nil).first
         XCTAssertNil(costed?.peakBps)
         XCTAssertEqual(costed?.averageBps, 28_814_703)
     }
 
     func testARemuxUnderLinkPressureNowHasACostedLowerRungToRecoverTo() {
-        // The Agent Zero ladder as the server declared it: a 28.8 Mb/s remux
-        // incumbent and encode rungs costed by VBV ceiling plus audio, none
-        // of them ever encoded whole. The link measured 8.69 Mb/s.
-        let original = candidate(1_080, route: "remux", peak: nil, average: 28_814_703)
-        let ladder = autoCostedCatalog([
-            original, candidate(720, peak: 7_500_000), candidate(480, peak: 3_500_000),
-            candidate(360, peak: 2_000_000),
-        ], outputs: nil)
-        XCTAssertEqual(autoRecoveryCandidate(ladder, current: original, rejected: [],
+        // The link measured 8.69 Mb/s in the 10 Mb/s stage.
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
                                              linkCeiling: 8_690_000, currentCost: 28_814_703)?.height, 720)
-        XCTAssertEqual(autoRecoveryCandidate(ladder, current: original, rejected: [],
+        XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
                                              linkCeiling: 5_000_000, currentCost: 28_814_703)?.height, 480)
     }
 
     // MARK: Fix 2 — an original is costed by its declared source rate, and pressure does not wait for the runway
 
     func testAnOriginalIsCostedByItsDeclaredSourceRateWithoutAFreshBody() {
-        let original = candidate(1_080, route: "remux", peak: nil, average: 28_814_703)
         // No body at all, a stale body, a body of another session: the
         // declared rate is the cost every time. The old rule answered nil to
         // all three and left the incumbent uncosted between bodies.
@@ -111,17 +125,37 @@ final class AutoDeclaredCostTests: XCTestCase {
         XCTAssertNil(autoDownsideCostBps(candidate(720, peak: nil), sample: body(bodySeconds: 1), sessionId: "s", nowMs: 500))
     }
 
-    func testLinkPressureOnACostedIncumbentDoesNotWaitForTheRunwayToDrain() throws {
-        let tick = try functionBody(try playerControllerSource(),
-                                    "private func tickDisplayAwareAuto(pressureOnly: Bool = false) {")
-        XCTAssertTrue(
-            tick.contains("let pressure = severe || (mild && autoMildSamples >= 2) || producerPressure"),
-            "a severe link, or two mild bodies, is pressure on its own"
-        )
-        XCTAssertFalse(
-            tick.contains("(current.peakBps != nil || (bufferedRunwaySeconds() ?? 0) < 10))"),
-            "the runway gate held a 28.8 Mb/s remux on a 9 Mb/s link until the buffer was one body from empty"
-        )
+    func testLinkPressureOnACostedOriginalDoesNotWaitForTheRunwayToDrain() throws {
+        // The 10 Mb/s stage as the player saw it: a 40 MB body that took
+        // 37 s (8.65 Mb/s) against a 28.8 Mb/s original, with a minute of
+        // runway still loaded. A pressure-only evaluation — the one a
+        // completed body triggers at arrival — must move, not wait for the
+        // runway to reach ten seconds.
+        let arrival = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 37, completedAt: 30_000), runway: 60))
+        XCTAssertTrue(arrival.severe)
+        XCTAssertTrue(arrival.pressure)
+        XCTAssertEqual(arrival.chosen?.height, 720)
+        XCTAssertEqual(arrival.downsideCost, 28_814_703)
+        // The same evidence on the five-second tick decides the same.
+        let tick = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 37, completedAt: 30_000), runway: 60, pressureOnly: false))
+        XCTAssertEqual(tick.chosen?.height, 720)
+        // With under four seconds of runway the rescue minimises acquisition
+        // cost instead: the cheapest costed rung, not the largest that fits.
+        let starved = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 37, completedAt: 30_000), runway: 3))
+        XCTAssertEqual(starved.chosen?.height, 360)
+        // Healthy headroom is not pressure, and a pressure-only evaluation
+        // then has no verdict at all.
+        XCTAssertNil(pressureVerdict(transfer: body(bodySeconds: 5, completedAt: 30_000, bytes: 40_000_000), runway: 60))
+        let healthy = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 5, completedAt: 30_000), runway: 60, pressureOnly: false))
+        XCTAssertFalse(healthy.pressure)
+        XCTAssertNil(healthy.chosen)
+        // Two mild bodies are pressure too, whatever the runway: 40 MB in
+        // 13.3 s is 24 Mb/s, the 25 Mb/s stage against the 28.8 Mb/s title.
+        let mild = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 13.3, completedAt: 30_000), runway: 60, mildSamples: 2))
+        XCTAssertFalse(mild.severe)
+        XCTAssertTrue(mild.mild && mild.pressure)
+        XCTAssertEqual(mild.chosen?.height, 720)
+        XCTAssertNil(pressureVerdict(transfer: body(bodySeconds: 13.3, completedAt: 30_000), runway: 60, mildSamples: 1))
     }
 
     // MARK: Fix 3 — a completed body is evidence for as long as it took to arrive
@@ -140,7 +174,7 @@ final class AutoDeclaredCostTests: XCTestCase {
         XCTAssertNil(autoCompletedTransferBps(body(bodySeconds: 0.5), nowMs: 10_001))
     }
 
-    func testTheIncumbentLinkReadsTheSameBodyInTheTickAndInTheStallPath() {
+    func testTheIncumbentLinkReadsTheSameBodyInTheTickAndInTheStallPath() throws {
         let transfer = body(bodySeconds: 37)
         XCTAssertEqual(autoIncumbentLinkBps(transfer, sessionId: "s", candidateId: "c", nowMs: 30_000),
                        Double(40_000_000) * 8 / 37)
@@ -151,22 +185,25 @@ final class AutoDeclaredCostTests: XCTestCase {
         XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: "s", candidateId: "other", nowMs: 1_000))
         XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: nil, candidateId: "c", nowMs: 1_000))
         XCTAssertNil(autoIncumbentLinkBps(body(bodySeconds: 37, receipt: nil), sessionId: "s", candidateId: "c", nowMs: 1_000))
-    }
-
-    func testTheTickAndTheStallPathReadTheIncumbentLinkThroughTheOneValidityRule() throws {
-        let source = try playerControllerSource()
-        for signature in ["private func tickDisplayAwareAuto(pressureOnly: Bool = false) {",
-                          "private func selectAutoStallRecoveryCandidate(attempt: Attempt, deadline: Double?) async {"] {
-            let body = try functionBody(source, signature)
-            XCTAssertTrue(
-                body.contains("autoIncumbentLinkBps(transfer, sessionId: sessionId, candidateId: autoActiveCandidateId, nowMs: now)"),
-                "\(signature) reads the incumbent's link through the helper that applies the body's validity"
-            )
-            XCTAssertFalse(
-                body.contains("ageMs(nowMs: now) <= 10_000"),
-                "\(signature) must not expire a body at ten seconds on its own"
-            )
-        }
+        // The tick, thirty seconds after a 37 s body: still the link.
+        let tick = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 37, completedAt: 0), runway: 60, pressureOnly: false))
+        XCTAssertEqual(tick.link, Double(40_000_000) * 8 / 37)
+        XCTAssertEqual(tick.chosen?.height, 720)
+        // The stall path, thirty seconds after the same body: a cause and a
+        // rung, rather than reopening the delivery the link cannot carry.
+        let stalled = try XCTUnwrap(autoStallRecoveryVerdict(current: current, candidates: ladder,
+            transfer: body(bodySeconds: 37, completedAt: 0), transferCurrent: true, sessionId: "s", candidateId: current.id,
+            mildSamples: 0, producerPressure: false, rejected: [], switchBudgetOpen: false, nowMs: 30_000))
+        XCTAssertTrue(stalled.severe)
+        XCTAssertEqual(stalled.next?.height, 720)
+        // Forty seconds on, that body is spent and the stall has no cause.
+        XCTAssertNil(autoStallRecoveryVerdict(current: current, candidates: ladder,
+            transfer: body(bodySeconds: 37, completedAt: 0), transferCurrent: true, sessionId: "s", candidateId: current.id,
+            mildSamples: 0, producerPressure: false, rejected: [], switchBudgetOpen: true, nowMs: 40_000))
+        // A body that is not the incumbent's is no link, in either path.
+        XCTAssertNil(autoLinkPressureVerdict(current: current, eligible: ladder, transfer: body(bodySeconds: 37, completedAt: 0),
+            transferCurrent: false, sessionId: "s", candidateId: current.id, mildSamples: 0, producerPressure: false,
+            runwaySeconds: 60, playbackRate: 1, rejected: [], pressureOnly: true, nowMs: 30_000))
     }
 
     func testTwoMildBodiesStayUrgentForAsLongAsTheLastOneTookToArrive() {
@@ -194,23 +231,6 @@ final class AutoDeclaredCostTests: XCTestCase {
 
     // MARK: Fix 4 — a stationary film clock is sampled as not presenting
 
-    func testThePresenterSamplesAStoppedFilmClockOnItsOwnClock() throws {
-        let source = try playerControllerSource()
-        let clock = try functionBody(source, "private func startSurfaceClock() {")
-        let sample = try XCTUnwrap(clock.range(of: "self.sampleSurfacePresentation("),
-                                   "the presenter's clock takes the evidence sample once the observer is silent")
-        let wait = try XCTUnwrap(clock.range(of: "self.noteMediaWaiting()"))
-        XCTAssertLessThan(sample.lowerBound, wait.lowerBound,
-                          "evidence first, then the wait, so the raise is weighed against the stopped clock")
-        XCTAssertTrue(clock.contains("Self.surfaceClockSamplesPresentation("))
-        // The contract's evidence stays the position delta; no transport status.
-        XCTAssertFalse(clock.contains("timeControlStatus"))
-        let sampler = try functionBody(source,
-            "private func sampleSurfacePresentation(at observedPosition: Int, evidence: LocalVideoEvidence) {")
-        XCTAssertTrue(sampler.contains("lastSurfaceSampleAtMs = PlaybackControlSession.monotonicMs()"),
-                      "the sampler records when it ran, so the clock knows when the observer went quiet")
-    }
-
     func testThePresenterClockSamplesOnlyOnceTheObserverHasBeenSilentForAnInterval() {
         XCTAssertTrue(PlayerController.surfaceClockSamplesPresentation(lastSampleAtMs: nil, nowMs: 0))
         XCTAssertFalse(PlayerController.surfaceClockSamplesPresentation(lastSampleAtMs: 10_000, nowMs: 10_499))
@@ -218,11 +238,36 @@ final class AutoDeclaredCostTests: XCTestCase {
         XCTAssertTrue(PlayerController.surfaceClockSamplesPresentation(lastSampleAtMs: 10_000, nowMs: 22_000))
     }
 
+    @MainActor
+    func testThePresenterClockRecordsAStoppedFilmClockAsNotPresenting() {
+        // The observer's last sample, over a clock that still moved: the
+        // model says presenting. Then the clock stops and the observer goes
+        // quiet. The presenter's clock, one interval later, must take the
+        // sample the observer no longer can and tell the model the picture
+        // stopped — or every wait raised after it is retired in the same
+        // step by that stale sample, which is what shipped.
+        let controller = PlayerController()
+        controller.attachSurfaceForTesting(AVPlayerItem(url: URL(fileURLWithPath: "/nonexistent/title.m3u8")), generation: 1)
+        controller.player.rate = 1
+        let picture = LocalVideoEvidence(bindingMatches: true, targetVisible: true, readyForDisplay: true)
+        controller.localVideoEvidenceForTesting = { _, _ in picture }
+        controller.sampleObserverPresentationForTesting(positionMs: 0, atMs: 1_000, evidence: picture)
+        XCTAssertTrue(controller.surface.presenting, "a moving clock with a picture at rate 1 is presenting")
+        // Within an interval of the observer's sample the clock adds nothing.
+        controller.surfaceClockTick(nowMs: 1_400)
+        XCTAssertTrue(controller.surface.presenting)
+        XCTAssertEqual(controller.surfaceLastSampleAtMsForTesting, 1_000)
+        // One interval of silence: the clock samples the stationary
+        // position, and the model learns the picture is not presenting.
+        controller.surfaceClockTick(nowMs: 1_500)
+        XCTAssertFalse(controller.surface.presenting, "a position that has not moved is not presentation")
+        XCTAssertNotEqual(controller.surfaceLastSampleAtMsForTesting, 1_000, "the clock's sample is the sampler's sample")
+    }
+
     func testAWaitRaisedOverAStationaryClockIsKeptAndOneOverAStaleSampleIsNot() {
-        // The model half of the defect, for the record: the observer's last
-        // sample over a still-moving clock says presenting, and a wait
-        // raised against it is retired in the same step. Once the stopped
-        // clock has been sampled, the same raise stands.
+        // The model half, for the record: a wait raised against a presenting
+        // sample is retired in the same step; once the stopped clock has been
+        // sampled, the same raise stands.
         var model = PlaybackSurfaceModel()
         let origin = ContinuousClock.now
         _ = model.apply(.attach(1), now: origin)
