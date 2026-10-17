@@ -21,6 +21,6 @@ If this PR returns to draft, remove `fast-lane` first.
 - Native remote regression and source-bound screenshot/result receipt:
 - Confirm shared modal/chrome styles are reused and reporting stays inside its owning controls.
 
-The [TV navigation contract](../docs/clients/APPLE-TV-NAVIGATION-AUDIT.md#7-navigation-contract--make-regressions-fail-before-release)
+The [TV navigation contract](../docs/clients/APPLE-TV-NAVIGATION-CONTRACT.md#7-navigation-contract--make-regressions-fail-before-release)
 owns these rules. Compilation and logical focus requests do not prove actual
 native focus. Keep untested device cases explicit.
