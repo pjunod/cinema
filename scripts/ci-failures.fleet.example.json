@@ -1,0 +1,10 @@
+{
+  "forge_url": "http://forge.lan:3000",
+  "repo": "noirr/plurx",
+  "token_file": "~/forgejo_token",
+  "log_host": "lab3",
+  "ssh_user": "operator",
+  "ssh_key": "~/.ssh/id_ed25519",
+  "known_hosts": "~/.ssh/known_hosts",
+  "log_root": "/opt/noirr/forgejo/data/gitea/actions_log"
+}

@@ -308,8 +308,14 @@ class RegressionFieldCase(unittest.TestCase):
         lane = (REPO_ROOT / ".github" / "workflows" / "main-fast-lane.yml").read_text(
             encoding="utf-8"
         )
-        step = lane.split("- name: Check the pull request's Regression-Test fields", 1)[1]
+        # The field is checked by the lane's first job, `paperwork`, which
+        # runs `scripts/paperwork --body-env` (docs/ci/PAPERWORK.md).
+        step = lane.split(
+            "- name: Check index rows, release counters, names and Regression-Test fields", 1
+        )[1]
         step = step.split("\n      - ", 1)[0]
+        self.assertIn("scripts/paperwork", step)
+        self.assertIn("--body-env", step, "the paperwork job must read the PR description")
         advisory = "continue-on-error: true" in step
         boundary = load_merge_ledger(
             REPO_ROOT / "validation" / "merge-errata.toml"

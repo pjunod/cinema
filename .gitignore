@@ -56,3 +56,9 @@ scripts/*.fleet.json
 # The pinned TypeScript that scripts/web-types installs with `npm ci`. Dev-only;
 # the lockfile beside it is what is committed (THIRD-PARTY-NOTICES §7).
 /tools/web-types/node_modules/
+
+# Local working directories beside the checkout. They hold session output and
+# scratch state, never source, and an unignored 10 GB directory is walked by
+# every `git status` and every search.
+/Claude outputs/
+/_stage_stats/

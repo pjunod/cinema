@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Print only the failing part of a pull request's or commit's CI jobs.
+
+Forgejo's job-log API answers 200 with a "404 page not found" body, so the
+real logs are read from the forge host's disk, where each job's log is
+`<task id>.log.zst`. This script finds the failed jobs for a commit through the
+API, reads each log over SSH, and prints the failure-looking lines with
+context and the log's tail — a few KB instead of a few MB.
+
+    scripts/ci-failures                 # the checkout's HEAD commit
+    scripts/ci-failures 045d92f04       # any commit (prefix ok)
+    scripts/ci-failures --pr 1145       # a pull request's head
+    scripts/ci-failures --task 20565    # one job by task id, failed or not
+
+Configuration comes from the git-ignored `scripts/ci-failures.fleet.json`,
+shaped like the committed `scripts/ci-failures.fleet.example.json`, and the
+API token from $FORGEJO_TOKEN or the file named by `token_file`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+CONFIG = ROOT / "scripts" / "ci-failures.fleet.json"
+# Case-sensitive on purpose: "error" inside a branch name or a path is not a failure.
+SIGNAL = re.compile(
+    r"(\berror(\[E\d+\])?:|\b\w*Error:|\bERROR\b|\bFAILED\b|\bFAIL\b|panicked at|Traceback|"
+    r"^not ok\b|\bfatal:|[Aa]ssertion.*failed|test result: FAILED|::error|exit status [1-9]|"
+    r"exit code [1-9])"
+)
+
+
+def load_config() -> dict:
+    if not CONFIG.is_file():
+        sys.exit(f"ci-failures: create {CONFIG.relative_to(ROOT)} from the .example.json beside it")
+    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+    token = os.environ.get("FORGEJO_TOKEN")
+    if not token and config.get("token_file"):
+        token = Path(os.path.expanduser(config["token_file"])).read_text(encoding="utf-8").strip()
+    if not token:
+        sys.exit("ci-failures: set $FORGEJO_TOKEN or token_file in the config")
+    config["token"] = token
+    return config
+
+
+def api(config: dict, path: str) -> object:
+    request = urllib.request.Request(
+        f"{config['forge_url'].rstrip('/')}/api/v1/repos/{config['repo']}/{path}",
+        headers={"Authorization": f"token {config['token']}"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.load(response)
+
+
+def tasks_for(config: dict, sha: str, pages: int) -> list[dict]:
+    found: list[dict] = []
+    for page in range(1, pages + 1):
+        rows = api(config, f"actions/tasks?limit=50&page={page}").get("workflow_runs", [])
+        found += [row for row in rows if row.get("head_sha", "").startswith(sha)]
+        if not rows or (found and not any(r.get("head_sha", "").startswith(sha) for r in rows)):
+            break
+    return found
+
+
+def read_log(config: dict, task_id: int) -> str:
+    target = f"{config['ssh_user']}@{config['log_host']}"
+    remote = (
+        f"f=$(sudo -n find {config['log_root']} -name '{task_id}.log.zst' -print -quit); "
+        'test -n "$f" && sudo -n zstd -dc "$f"'
+    )
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"]
+    if config.get("known_hosts"):
+        cmd += ["-o", f"UserKnownHostsFile={os.path.expanduser(config['known_hosts'])}"]
+    if config.get("ssh_key"):
+        cmd += ["-i", os.path.expanduser(config["ssh_key"]), "-o", "IdentitiesOnly=yes"]
+    proc = subprocess.run([*cmd, target, remote], capture_output=True, text=True, errors="replace")
+    if proc.returncode != 0 and not proc.stdout:
+        return f"(no log for task {task_id}: still running, or {proc.stderr.strip()[:200]})"
+    return proc.stdout
+
+
+def summarize(text: str, tail_n: int, max_rows: int) -> str:
+    lines = [re.sub(r"^\S+Z\s", "", line) for line in text.splitlines()]
+    hits = [i for i, line in enumerate(lines) if SIGNAL.search(line)]
+    keep: list[int] = []
+    for i in hits:
+        keep += [j for j in range(max(0, i - 2), min(len(lines), i + 4)) if j not in keep]
+    tail_from = max(0, len(lines) - tail_n)
+    out, previous = [], None
+    for j in [j for j in keep if j < tail_from][:max_rows]:
+        if previous is not None and j != previous + 1:
+            out.append("   …")
+        out.append(f"{j + 1:>7}: {lines[j][:300]}")
+        previous = j
+    out.append(f"── last {len(lines) - tail_from} of {len(lines)} lines ──")
+    out += [line[:300] for line in lines[tail_from:]]
+    return "\n".join(out)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("commit", nargs="?", help="commit sha or prefix (default HEAD)")
+    parser.add_argument("--pr", type=int, help="pull request number")
+    parser.add_argument("--task", type=int, help="one task id")
+    parser.add_argument("--tail", type=int, default=25)
+    parser.add_argument("--max", type=int, default=80, help="most failure-context lines per job")
+    parser.add_argument("--pages", type=int, default=6, help="task pages of 50 to scan")
+    parser.add_argument("--all", action="store_true", help="list every job, not only failures")
+    args = parser.parse_args()
+    config = load_config()
+
+    if args.task:
+        print(summarize(read_log(config, args.task), args.tail, args.max))
+        return 0
+    if args.pr:
+        sha = api(config, f"pulls/{args.pr}")["head"]["sha"]
+    else:
+        sha = subprocess.run(
+            ["git", "rev-parse", args.commit or "HEAD"], cwd=ROOT, capture_output=True, text=True
+        ).stdout.strip() or (args.commit or "")
+    tasks = tasks_for(config, sha, args.pages)
+    if not tasks:
+        print(f"no CI jobs found for {sha[:12]} in the newest {args.pages * 50} tasks")
+        return 0
+    failed = [t for t in tasks if t.get("status") == "failure"]
+    counts: dict[str, int] = {}
+    for task in tasks:
+        counts[task.get("status", "?")] = counts.get(task.get("status", "?"), 0) + 1
+    print(f"{sha[:12]}: " + ", ".join(f"{n} {status}" for status, n in sorted(counts.items())))
+    for task in tasks if args.all else failed:
+        print(f"{task['status']:>9}  task {task['id']:<6} {task['name']}  ({task.get('workflow_id', '')})")
+    for task in failed:
+        print(f"\n══ {task['name']} — task {task['id']} ══")
+        print(summarize(read_log(config, task["id"]), args.tail, args.max))
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
