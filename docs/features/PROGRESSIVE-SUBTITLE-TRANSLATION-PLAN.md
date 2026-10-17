@@ -1,10 +1,13 @@
 # Progressive subtitle translation — build English captions during playback
 
-**Status:** structural P1 frozen; P2–P5 implementation in progress; selected runtime profile remains acceptance-gated ·
-**Requested:** 2026-10-15 · **Execution base:** main `220157aba` (generation
-merged), tree `20589a21` · **Effort:** `effort/progressive-subtitle-translation`.
-Parent and independent engine reviewed R1–R9 design. Implementation is already
-authorized; structural P1 is frozen, while selected-profile runtime activation remains subject to actual user-path acceptance.
+**Status:** first route built and accepted (web direct playback, one audio
+stream, explicit spoken language); native, multi-audio, encoded, fleet,
+long-film and broader human-quality qualification remain open ·
+**Requested:** 2026-10-15 · **Execution base:** main `89d790d2` (frozen candidate
+`01d8911f` on `b2d83ae8`, see §9) · **Effort:** `effort/progressive-subtitle-translation`.
+Parent and independent engine reviewed R1–R9 design. Settings → Playback
+holds the permanent enable and model setup; it left Developer after the
+packaged acceptance in §9.
 
 Companion to [offline generation](SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md):
 that effort installs a model and publishes complete same-language captions.
@@ -729,3 +732,75 @@ normal hook passed. Post-merge workflow attempts refused closed-PR eligibility,
 so they are not recorded as compile passes. The user authorizes merge after
 basic local checks with remaining CI watched afterwards; this does not fabricate
 missing user-path evidence or authorize publication/deployment.
+
+## 9. Completion — 2026-10-17
+
+**Source.** The reviewed integration candidate was staged as tree
+`01d8911f` on `b2d83ae8` and then lost with its temporary checkout before it
+was committed. It was rebuilt byte-exactly from the agents' recorded tool
+calls: two independent replays agreed on the application code, the P0
+fixtures were re-fetched from the pinned FLEURS revision (the regenerated
+catalog matches its recorded digest), and the rebuilt tree hashes to
+`01d8911f` again. It was then composed onto main `89d790d2`; the only conflict
+was the rolling-producer ownership census, resolved by adding the two
+independent deltas (spawn 964, timers 1794, constructors 279). The normal
+commit hook, which had not run on the frozen tree, required clippy fixes in
+the new daemon modules (test unwraps, four redundant conversions, two idioms).
+
+**Packaged acceptance.** One isolated daemon on the macOS arm64 runner, laid
+out as `package-macos` lays it out: `bin/plurxd` (commit `43eff2ca`, test
+profile), the verified whisper.cpp 1.9.2 CPU engine in `bin/subtitle-engine/`,
+and sibling FFmpeg/FFprobe (Homebrew, sufficient for H.264/AAC direct play; not
+the custom HDR FFmpeg package and not signed). Fresh data, fresh HOME, empty
+model store, cleared environment. Headless Google Chrome drove the shipped web
+app with no API interception, fake player, cue injection or time setter.
+The movie is 61.14 s of controlled German read speech from five FLEURS
+sentences (one AAC audio stream, synthetic H.264 picture, publisher German
+captions as mov_text).
+
+| Check | Observation |
+|---|---|
+| Settings install and test | Enable saved before install; Install fetched and verified the pinned Small model and passed the automatic English self-test; explicit Test passed |
+| Original/Off preserved while partial | Off stayed selected until the explicit Use |
+| First useful cue during playback | 20.4 s after Translate, playback unpaused at 20.4 s, cue 15.02–22.22 s: "According to the police, the driver of the vehicle, who drove the photographers, has probably not been complained about." |
+| Stop | With core 1 reported `translating`, Stop latched the operation (epoch 1→2) and the owned whisper-cli process group was gone 244 ms later; no demand renewal in the next 11 s |
+| Resume | Fresh epoch 3 |
+| Seek | Forward to 35 s: a later range became live (cue 48–54 s at playhead 50.1 s); back to 8 s: cached cue 6.52–12.02 s immediately |
+| Original, Off, Use | Original German caption selectable; Off disabled the translated track; Use restored cached English cues |
+| Picture never reopened | Same video element, player, media attachment and source URL throughout; no translation-driven playback decision |
+
+The harness's blanket "no failed request" assertion tripped on two `503`s
+from `/api/remote/v1/receivers` and `/grants`, which the Settings page
+requests on a server without companion remotes; they are unrelated to
+translation and recorded here rather than filtered out.
+
+**Defects the acceptance found, fixed at their cause.**
+
+- The operation read built `active_job` in a scalar subquery; SQLite drops the
+  JSON subtype across that boundary, so the job reached the daemon as a string
+  and every read reported `active_job: null`. Wrapped in `json()`; the SQLite
+  contract now asserts the queued preparation is projected as an object.
+- A signal-bearing core whose recognizer cues all lay in its left/right
+  context failed terminally with `output_invalid`. The 1.14 s last core of the
+  acceptance movie always did: the recognizer dated the closing sentence
+  inside the left context, which the previous core already published. An
+  empty recognizer result over speech remains a failure; speech the recognizer
+  attributed entirely to neighbouring cores now leaves this core validly
+  empty. Residual risk: if two adjacent cores each attribute the same
+  straddling speech to the other's core, that speech is published by neither.
+  That joins boundary repetition as a known seam limitation of W30/L5/R5.
+
+**Checks on the composed source.** SQLite translation contracts 12/12; the
+replicated Hiqlite source-bind/publication/Stop/read-lease case; daemon
+`subtitle_translation::` and `subtitle_models::` 58/58; web Node suites
+(translation, Settings sections) 34/34; ownership census 7/7; web types, shape,
+jsconfig and JS syntax. Three `subtitle_models::artifacts` tests fail under a
+group-writable umask (0002) because their fixtures inherit it and trip the
+service-ownership check; they pass under 022. That predates translation and is
+recorded in the backlog rather than changed here.
+
+**Still open.** Native clients, multiple audio streams, remux/encoded routes,
+fleet placement, long-film completion and speed, and genuinely bilingual
+human quality review. The P0 timing figures do not prove realtime on other
+hardware.
+
