@@ -11,6 +11,7 @@ context and the log's tail — a few KB instead of a few MB.
     scripts/ci-failures 045d92f04       # any commit (prefix ok)
     scripts/ci-failures --pr 1145       # a pull request's head
     scripts/ci-failures --task 20565    # one job by task id, failed or not
+    scripts/ci-failures --pr 1145 --wait 900   # wait quietly, then report
 
 Configuration comes from the git-ignored `scripts/ci-failures.fleet.json`,
 shaped like the committed `scripts/ci-failures.fleet.example.json`, and the
@@ -25,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -114,6 +116,13 @@ def main() -> int:
     parser.add_argument("--max", type=int, default=80, help="most failure-context lines per job")
     parser.add_argument("--pages", type=int, default=6, help="task pages of 50 to scan")
     parser.add_argument("--all", action="store_true", help="list every job, not only failures")
+    parser.add_argument(
+        "--wait",
+        type=int,
+        default=0,
+        metavar="SECONDS",
+        help="poll quietly until no job is running or waiting (at most SECONDS), then report",
+    )
     args = parser.parse_args()
     config = load_config()
 
@@ -127,6 +136,15 @@ def main() -> int:
             ["git", "rev-parse", args.commit or "HEAD"], cwd=ROOT, capture_output=True, text=True
         ).stdout.strip() or (args.commit or "")
     tasks = tasks_for(config, sha, args.pages)
+    deadline = time.monotonic() + args.wait
+    while args.wait and time.monotonic() < deadline and (
+        not tasks or any(t.get("status") in ("running", "waiting", "blocked") for t in tasks)
+    ):
+        time.sleep(min(30, max(1, deadline - time.monotonic())))
+        tasks = tasks_for(config, sha, args.pages)
+    pending = [t for t in tasks if t.get("status") in ("running", "waiting", "blocked")]
+    if args.wait and (pending or not tasks):
+        print(f"still running after {args.wait}s: {len(pending)} job(s) not finished")
     if not tasks:
         print(f"no CI jobs found for {sha[:12]} in the newest {args.pages * 50} tasks")
         return 0
@@ -140,7 +158,10 @@ def main() -> int:
     for task in failed:
         print(f"\n══ {task['name']} — task {task['id']} ══")
         print(summarize(read_log(config, task["id"]), args.tail, args.max))
-    return 1 if failed else 0
+    if failed:
+        return 1
+    # A wait that ran out is not a pass: `--wait N && merge` must not merge.
+    return 2 if args.wait and pending else 0
 
 
 if __name__ == "__main__":

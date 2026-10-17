@@ -5752,84 +5752,10 @@ fn session_store_error(operation: &'static str, error: plurx_core::error::StoreE
 }
 
 #[cfg(test)]
-mod processed_delivery_projection_tests {
-    use super::session_delivered_processing_shape;
-    use crate::transcode::SessionKind;
-    use plurx_core::transcode::OutputGrade;
-
-    #[test]
-    fn prepared_p81_marker_projects_dv_without_changing_physical_transcode() {
-        let kind = SessionKind::Transcode { height: 1080 };
-        assert_eq!(
-            session_delivered_processing_shape(None, &kind, OutputGrade::Hdr10, Some(8)),
-            (Some("dolby_vision"), Some(8))
-        );
-        assert_eq!(
-            session_delivered_processing_shape(None, &kind, OutputGrade::Hdr10, None),
-            (None, None)
-        );
-        assert_eq!(
-            session_delivered_processing_shape(None, &kind, OutputGrade::Sdr, Some(8)),
-            (None, None)
-        );
-        assert_eq!(
-            session_delivered_processing_shape(None, &kind, OutputGrade::Hdr10, Some(7)),
-            (None, None)
-        );
-    }
-}
+mod processed_delivery_projection_tests;
 
 #[cfg(test)]
-mod quorum_candidate_tests {
-    use super::candidate_refusal_reason;
-    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
-    #[test]
-    fn candidate_refusals_distinguish_authority_identity_decoder_and_route() {
-        let requested = CandidateId([1; 16]);
-        assert_eq!(
-            candidate_refusal_reason(&[], Some(requested), Some(1080), true),
-            "catalogue_authority_unavailable"
-        );
-        assert_eq!(
-            candidate_refusal_reason(&[], Some(requested), Some(1080), false),
-            "identity_absent"
-        );
-        assert_eq!(
-            candidate_refusal_reason(&[], None, Some(1080), false),
-            "encode_route_unavailable"
-        );
-        let row = QualityCandidate {
-            processed_hdr10: false,
-            id: requested,
-            recipe_digest: [0; 32],
-            route: CandidateRoute::Encode,
-            planned_codec: None,
-            normalized_geometry: true,
-            width: 1920,
-            height: 1080,
-            target_height: 1080,
-            average_bps: None,
-            peak_bps: None,
-            grade: Default::default(),
-            decoder_compatible: false,
-            complete_cache: false,
-            sustainable: true,
-        };
-        assert_eq!(
-            candidate_refusal_reason(
-                std::slice::from_ref(&row),
-                Some(requested),
-                Some(1080),
-                true
-            ),
-            "decoder_incompatible"
-        );
-        assert_eq!(
-            candidate_refusal_reason(&[row], Some(CandidateId([2; 16])), Some(1080), true),
-            "catalogue_authority_unavailable"
-        );
-    }
-}
+mod quorum_candidate_tests;
 
 /// Full expected Source file identity. Construction does not authorize a read.
 #[allow(dead_code)]
@@ -6236,85 +6162,7 @@ fn source_playback_fingerprint(base: &str, native: bool, selected: Option<i64>) 
 }
 
 #[cfg(test)]
-mod source_fingerprint_tests {
-    use super::source_playback_fingerprint;
-    #[test]
-    fn source_fingerprint_freezes_native_choice_and_normalizes_disabled_choice() {
-        let base = "a".repeat(64);
-        let copy = source_playback_fingerprint(&base, false, None);
-        assert_eq!(copy, source_playback_fingerprint(&base, false, Some(0)));
-        let native = source_playback_fingerprint(&base, true, None);
-        let first = source_playback_fingerprint(&base, true, Some(0));
-        let second = source_playback_fingerprint(&base, true, Some(1));
-        assert_ne!(copy, native);
-        assert_ne!(native, first);
-        assert_ne!(first, second);
-        assert!(first.len() == 64 && first.bytes().all(|b| b.is_ascii_hexdigit()));
-    }
-}
+mod source_fingerprint_tests;
 
 #[cfg(test)]
-mod compatibility_service_policy_tests {
-    use super::*;
-    #[test]
-    fn compatibility_bitrate_policy_is_server_owned_and_changes_exact_claim_identity() {
-        let body: CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"compatibility-player", "request_id":"compatibility-request", "finite_bitrate_limit_bps":750000})).expect("native create body");
-        let mut request = body.into_request(1, 720);
-        assert_eq!(
-            request.finite_bitrate_limit_bps, None,
-            "ordinary HTTP cannot set the trusted policy"
-        );
-        let first =
-            bind_compatibility_vod_policy(&mut request, "native-intent".into(), Some(750_000))
-                .expect("service policy");
-        assert_eq!(request.finite_bitrate_limit_bps, Some(750_000));
-        assert_eq!(
-            first,
-            bind_compatibility_vod_policy(&mut request, "native-intent".into(), Some(750_000))
-                .expect("same attempt")
-        );
-        assert_ne!(
-            first,
-            bind_compatibility_vod_policy(&mut request, "native-intent".into(), Some(500_000))
-                .expect("changed ceiling")
-        );
-        assert!(bind_compatibility_vod_policy(&mut request, "intent".into(), Some(0)).is_err());
-    }
-    #[test]
-    fn compatibility_service_policy_binds_vod_only_and_passive_flags_before_native_claim() {
-        let body: CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"compatibility-player", "request_id":"compatibility-request"})).expect("create");
-        let mut request = body.into_request(1, 1080);
-        let native = ServiceCreatePurpose::Native
-            .bind_policy(&mut request, "native-intent".into())
-            .expect("native");
-        assert_eq!(native, "native-intent");
-        assert!(!request.vod_only);
-        assert!(!request.passive_vod);
-        let expected_fingerprint =
-            bind_compatibility_vod_policy(&mut request, native.clone(), None)
-                .expect("negotiated policy");
-        let policy = ServiceCreatePurpose::PassiveCompatibility {
-            bitrate_limit_bps: None,
-            expected_fingerprint,
-        };
-        let first = policy
-            .bind_policy(&mut request, native.clone())
-            .expect("compatibility");
-        assert_ne!(first, native);
-        assert_eq!(
-            first,
-            policy
-                .bind_policy(&mut request, native)
-                .expect("stable retry")
-        );
-        assert!(
-            policy
-                .bind_policy(&mut request, "changed-native-intent".into())
-                .is_err(),
-            "changed normalized body is refused before a claim"
-        );
-        assert!(request.vod_only && request.passive_vod);
-        request.request_id = None;
-        assert!(policy.bind_policy(&mut request, "intent".into()).is_err());
-    }
-}
+mod compatibility_service_policy_tests;

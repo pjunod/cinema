@@ -1,6 +1,11 @@
 # Ripwire — bounded navigation in one agent checkout
 
-**Status:** implemented; opt-in only · **Owner:** validation.framework
+**Status:** implemented; the default navigator · **Owner:** validation.framework
+
+Paul made Ripwire the first navigation step for every agent on 2026-10-17
+(AGENTS.md, "Working efficiently"), and `make hooks` now runs
+`scripts/ripwire setup`. The pilot's opt-in verdict below is its record of the
+trial, not the current rule; source verification still applies.
 
 Companion to [the measured pilot](RIPWIRE-PILOT.md),
 [the implementation status](RIPWIRE-STATUS.md), and

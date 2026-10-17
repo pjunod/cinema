@@ -520,6 +520,7 @@ pub(crate) fn create_advisory_deadline(maximum: Duration) -> tokio::time::Instan
 /// Deliberately not the memoized [`create_advisory_deadline`], which the same
 /// create's advisory-evidence reads share. One `maximum` window outside a
 /// create.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn create_enhancement_deadline(maximum: Duration) -> tokio::time::Instant {
     CREATE_STARTUP_BUDGET
         .try_with(|budget| advisory_share(budget.deadline, maximum))
