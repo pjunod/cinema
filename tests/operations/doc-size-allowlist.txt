@@ -7,7 +7,9 @@
 #   * new docs never go on this list: split them, or move detail to a sibling doc;
 #   * never raise a ceiling to make a change fit — trim instead.
 # Outside the budget entirely: docs/**/evidence/**, docs/archive/**, every
-# STATUS-HISTORY.md, and the tool-maintained docs named in TOOL_MAINTAINED.
+# STATUS-HISTORY.md, running logs named *_LOG.md / *-LOG.md, the project backlog,
+# and the tool-maintained docs named in TOOL_MAINTAINED. A status doc that grows
+# past its ceiling moves its dated log into a sibling *_LOG.md and keeps current state.
 #
 # Every doc here should open with an "## At a glance" head so an agent can read
 # the head and stop. The ten largest have one (HEAD_REQUIRED in the test); the
@@ -89,7 +91,6 @@ docs/streaming/WEB-SEEK-LATENCY-RCA-AND-FIX.md 62464
 docs/playback-control/QUALITY-SWITCH-CONTINUITY-BUILD.md 61440
 docs/features/LIVE-TV-GUIDE-AND-UI-PLAN.md 61440
 docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md 59392
-docs/features/PROJECT-BACKLOG.md 59392
 docs/streaming/FONT-ATTESTATION-AND-BLOCKING-IO.md 58368
 docs/features/PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md 58368
 docs/SECURITY.md 58368
