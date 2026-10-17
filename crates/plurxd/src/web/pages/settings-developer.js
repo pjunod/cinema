@@ -348,7 +348,7 @@ function developerPanel(settings,readiness){
     ${clustered?`<a href="#/settings/cluster"><strong>Cluster <span aria-hidden="true">↗</span></strong><span>Health, placement, clocks and backups</span></a>`:""}
   </nav>`;
   return `${setHead("Developer","Features still waiting on qualification. Each card says what it waits on; none of them is gated by it.")}
-      ${destinations}${diagnosticDeveloperCard()}
+      ${destinations}${diagnosticDeveloperCard()}${subtitleTranslationCard()}
       <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection"><h2>Shared libraries and remotes</h2><p>Private sharing between separate Cinemas, and companion remotes.</p></div>${cinemaSharingCard(settings,readiness)}${cinemaRemoteCard(settings,readiness)}${cinemaRemoteInvitationsCard(settings,readiness)}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
@@ -687,4 +687,11 @@ async function saveSdrMasterCodecs(btn){
     const card=document.getElementById("sdr-codecs-card");if(card)card.outerHTML=sdrMasterCodecsCard(saved,DEVELOPER_READINESS);
     toast("SDR master CODECS preference saved");
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}
+
+function subtitleTranslationCard(){
+  return setCard(`${cardHead("Progressive English translation","Translate foreign speech while the movie keeps playing.",'<span class="pill">Qualification pending</span>')}
+    <p>Install a compatible multilingual model, then choose Translate to English in the player. Partial captions may lag or be wrong; original captions and Off remain available.</p>
+    ${devGraduation("the measured profile has installed-model, partial-caption, seek, Stop, accessibility and foreground-playback receipts on its supported route.","the permanent enable preference moves to Settings → Playback; unsupported clients remain explicit.")}
+    <button type="button" class="sm" onclick="openTranslationSettings()">Configure English translation</button><div id="subtitle-translation-form"></div>`,{id:"enable-subtitle-translation"});
 }

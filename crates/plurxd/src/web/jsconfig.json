@@ -64,6 +64,7 @@
     "player/autoplay-next.js",
     "player/menus.js",
     "player/audio-sync.js",
+    "player/subtitle-translation.js",
     "player/stats.js",
     "player/watch-presentation.js",
     "detail/watch-browser.js",

@@ -1,17 +1,29 @@
 # Subtitle generation — finish setup and make background captions usable
 
-**Status:** implementation claimed; contracts reviewed; acceptance open ·
-**Written:** 2026-10-15 · **Source:** `9eb7f6738` ·
+**Status:** merged to main through PR #1136 as `220157aba`; remaining
+qualification explicit below · **Written:** 2026-10-15 ·
+**Reviewed implementation tree:** `20589a21` ·
 **Executes:** P14 usability follow-up · **Implementation owner:** GPT-6.1 Sol build sessions
+
+The user authorized merging after passed basic checks and monitoring remaining
+checks after merge. The exact d440/tree `20589a21` isolated macOS package passed
+the primary Settings installation/generation/web playback flow 13/13 with no
+browser, console or HTTP errors. Prior f8c72 cache/restart/Test/Stop/retry
+lifecycle evidence remains separately retained, not relabeled as a new-base
+run. Normal hooks, focused Rust/storage and full Python/web checks passed.
+Full post-merge CI and Linux package lifecycle remain pending. Android direct
+acquired/generated caption attachment, broader cluster/native/long-form
+quality and deployed-fleet qualification remain open. Four hours is an
+admission ceiling, not a measured completion promise.
 
 Read the [subtitle completion ledger](../clients/SUBTITLE-RELIABILITY-COMPLETION.md)
 for the engine's previous acceptance and [Operations](../OPERATIONS.md#generate-subtitles-offline)
-for today's manual setup. This document owns the new setup, worker-selection
+for the current managed setup. This document owns the new setup, worker-selection
 and usability work. Build the milestones in order; preserve the existing
 queue, cancellation and atomic caption publication. If a milestone appears
 to require replacing those systems, revisit this contract before proceeding.
 
-## 1. Finding — the engine exists; installation is left to the operator
+## 1. Original finding — installation was left to the operator
 
 The field is an **absolute path to an existing model file on the server**,
 not an AI service's model name. The implementation invokes the local

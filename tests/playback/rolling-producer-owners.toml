@@ -8,6 +8,19 @@
 # +1 lifecycle observation is try_wait, proving the negative control starts
 # with a live publisher rather than one that naturally reached its30s EOF.
 # All additions are test-only in transcode/tests/chunk_06.rs.
+# Progressive translation census, reviewed against main b2d83ae8, composed onto main 89d790d2:
+# +3 directly awaited spawn_blocking owners in runtime.rs: cancellation-aware
+# held-source SHA, bounded PCM inspection and compiled-fixture staging. No
+# detached hash/inference survives manager cancellation or admission release.
+# +16 timers: installer1 phase bound, manager5 metadata/demand watcher bounds,
+# module3 source/readiness bounds, runtime4 production phase/source/fence bounds
+# and3 finite regression waits. All retain the existing owner and deadline.
+# +5 constructors: held ffprobe, bounded window decode and qualified recognizer;
+# test-only shell and ps prove timeout/cancel process-group retirement. No new
+# direct spawn/wait/kill alias, unowned producer, or relaxed pattern/scope.
+# Exact integrated totals with the F6 main additions: spawn964 / timers1794 / constructors279. Others
+# retain their prior exact counts and independently reviewed attributions.
+
 # Integrated census: main 5b8f8fe78 plus managed subtitle owners from 75bc459b.
 # Reviewed independent deltas compose: spawn 960, timers 1773, constructors 272,
 # launch-shaped methods 760, UFCS lifecycle 67 and kill-on-drop 104.
@@ -3007,7 +3020,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # closes the channel, then the test awaits the JoinHandle and checks every
 # byte received. The two burst regressions share this one spawn site. No
 # production task, timer, process or detached owner is introduced.
-expected_occurrences = 961
+expected_occurrences = 964
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4634,7 +4647,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # leaves. Timeout fails that assertion; it is not a completion receipt.
 # The single adversarial review covered these paths and found no ownership
 # defect. This inventory records the two constructors already in that review.
-expected_occurrences = 1778
+expected_occurrences = 1794
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5078,7 +5091,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # production-copy fixture collection. Each runs finite owned media to
 # completion synchronously before its fixture is released. No task or timer
 # constructor is added; existing probe collector bounds remain unchanged.
-expected_occurrences = 274
+expected_occurrences = 279
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

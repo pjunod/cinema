@@ -617,7 +617,7 @@ impl Pipeline<'_> {
         Ok(())
     }
 }
-fn private_attempt(root: &Path) -> std::io::Result<tempfile::TempDir> {
+pub(crate) fn private_attempt(root: &Path) -> std::io::Result<tempfile::TempDir> {
     let mut builder = tempfile::Builder::new();
     builder.prefix("attempt-");
     #[cfg(unix)]
@@ -628,8 +628,8 @@ fn private_attempt(root: &Path) -> std::io::Result<tempfile::TempDir> {
     builder.tempdir_in(root)
 }
 
-struct EngineInvocation {
-    program: PathBuf,
+pub(crate) struct EngineInvocation {
+    pub(crate) program: PathBuf,
     staged: Option<(std::fs::File, plurx_core::fs_secure::FileIdentity)>,
 }
 
@@ -756,7 +756,7 @@ async fn decoded_pcm(path: &Path, cancel: &CancellationToken) -> Result<(bool, u
         .map_err(|_| "decode_failed")?
 }
 impl EngineInvocation {
-    fn unchanged(&self) -> bool {
+    pub(crate) fn unchanged(&self) -> bool {
         self.staged.as_ref().is_none_or(|(file, identity)| {
             plurx_core::fs_secure::std_file_identity(file).ok() == Some(*identity)
         })
@@ -766,7 +766,7 @@ impl EngineInvocation {
 /// Darwin refuses executable `/dev/fd/N` handoffs. Execute a verified private
 /// copy there, retaining both handles until the owned child has been reaped.
 /// Linux executes the original held descriptor directly.
-async fn engine_invocation(
+pub(crate) async fn engine_invocation(
     engine: &crate::subtitle_models::artifacts::Engine,
     scratch: &Path,
     cancel: &CancellationToken,
@@ -1323,7 +1323,7 @@ async fn managed_pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
     }
 }
 
-fn managed_artifacts_unchanged(
+pub(crate) fn managed_artifacts_unchanged(
     engine: &crate::subtitle_models::artifacts::Engine,
     model: &crate::subtitle_models::artifacts::ManagedModel,
 ) -> Result<(), StoreError> {
@@ -1662,13 +1662,16 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         if shutdown.is_cancelled() {
             return;
         }
+        if let Err(error) = crate::subtitle_translation::worker_pass(&state, &shutdown).await {
+            tracing::debug!(%error,"translation worker pass stopped");
+        }
         if let Err(error) = crate::subtitle_models::worker_pass(&state, &shutdown).await {
             tracing::debug!(%error, "managed subtitle worker pass stopped");
         }
         if let Err(error) = pass(&state, &boot, &shutdown, &mut model_cache).await {
             tracing::debug!(%error,"offline subtitle transcription pass stopped");
         }
-        tokio::select! { ()=shutdown.cancelled()=>return, ()=tokio::time::sleep(Duration::from_secs(15))=>{} }
+        tokio::select! { ()=shutdown.cancelled()=>return, ()=tokio::time::sleep(Duration::from_secs(1))=>{}, ()=state.subtitle_models.translation.wake.notified()=>{} }
     }
 }
 async fn pass(
@@ -1926,7 +1929,7 @@ async fn await_claimed_inference<T>(
         () = watch_capacity(transcode, admission) => { cancel.cancel(); operation.await },
     }
 }
-async fn watch_capacity(
+pub(crate) async fn watch_capacity(
     transcode: &crate::transcode::TranscodeManager,
     admission: &crate::transcode::FragmentAdmission,
 ) {
@@ -3207,6 +3210,7 @@ mod tests {
             sha256: hex::encode(Sha256::digest(b"model")),
         };
         let payload = JobPayload::SubtitleModelOperation {
+            translation_profile: None,
             action: ModelAction::Verify,
             model_id: "base.en".into(),
             catalog_revision: crate::subtitle_models::catalog().revision.clone(),

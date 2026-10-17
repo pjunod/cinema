@@ -47,6 +47,16 @@ class MacosDaemonPackageCase(unittest.TestCase):
         self.daemon.write_bytes(b"original daemon")
         self.output = self.root / "candidate"
 
+    def test_runtime_self_test_attribution_is_distributed_with_native_package(self):
+        stage = self.root / "legal-stage"
+        facts = TOOL.copy_legal_notices(stage)
+        self.assertEqual(facts["path"], "share/doc/plurx")
+        for name in ["LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md", "licenses/CC-BY-4.0.txt"]:
+            target = stage / facts["path"] / name
+            self.assertEqual(target.read_bytes(), (ROOT / name).read_bytes())
+            self.assertEqual(facts["files"][name], hashlib.sha256(target.read_bytes()).hexdigest())
+        self.assertIn("runtime", (stage / facts["path"] / "THIRD-PARTY-NOTICES.md").read_text())
+
     def test_companion_is_unique_and_bound_to_the_native_package_receipt(self):
         self.assertEqual(TOOL.validate_native_package(self.package), self.manifest)
         duplicate = self.package / "other/plurx-source-parser.wasm"

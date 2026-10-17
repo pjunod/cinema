@@ -59,6 +59,8 @@
  * @property {number|null} [burnedSub]     the subtitle burned into the picture, if any
  * @property {any} [preplay]               this playback's pre-play track choice, carried across reopens
  * @property {number} [aoffset]            the viewer's audio offset for this session, ms
+ * @property {{kind:"off"}|{kind:"source",index:number}|{kind:"translation",asset_id:string}} [captionIntent] explicit caption owner, independent of numeric source tracks
+ * @property {number} [captionIntentSerial] fences every source and translation caption selection
  * @property {any} [_subOff]               the subtitle-offset control's state
  * @property {number} [_subtitleUnavailableIntent] caption failure notice's selection/seek intent
  * @property {number} [_subtitleUnavailableIndex] caption failure notice's track ordinal

@@ -2041,6 +2041,7 @@ impl HiqliteAuthStore {
         store.install_remote_schema(None).await?;
         store.install_invitation_schema(None).await?;
         store.install_subtitle_managed_schema(None).await?;
+        store.install_subtitle_translation_schema(None).await?;
         Ok(store)
     }
 
@@ -2224,7 +2225,8 @@ impl HiqliteAuthStore {
                 SchemaMigrationAction::Current => {
                     self.install_remote_schema(admission).await?;
                     self.install_invitation_schema(admission).await?;
-                    return self.install_subtitle_managed_schema(admission).await;
+                    self.install_subtitle_managed_schema(admission).await?;
+                    return self.install_subtitle_translation_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -3980,6 +3982,52 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "managed subtitle schema install did not settle".into(),
+        ))
+    }
+
+    async fn subtitle_translation_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::subtitle_translation_schema::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::subtitle_translation_schema::version(&shape)?;
+        if version == Some(1) {
+            let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM subtitle_translation_schema WHERE singleton=1 AND version=1",params!()).await?;
+            if !matches!(rows.as_slice(),[row] if row.count==1) {
+                return Err(StoreError::Migration(
+                    "progressive translation subtitle schema marker missing".into(),
+                ));
+            }
+        }
+        Ok(version)
+    }
+    async fn install_subtitle_translation_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.subtitle_translation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::subtitle_translation_schema::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.subtitle_translation_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "progressive translation subtitle schema install did not settle".into(),
         ))
     }
 

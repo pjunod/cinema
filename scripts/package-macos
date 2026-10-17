@@ -93,6 +93,26 @@ def validate_native_package(package):
     return manifest
 
 
+def copy_legal_notices(stage):
+    """Redistribute runtime-data attribution with the installed native package."""
+    root = Path(__file__).resolve().parent.parent
+    destination = stage / "share/doc/plurx"
+    destination.mkdir(parents=True)
+    sources = [root / name for name in ["LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md"]]
+    sources += sorted((root / "licenses").glob("*"))
+    facts = {}
+    for source in sources:
+        if source.is_symlink() or not source.is_file():
+            raise ValueError("legal notice must be a regular repository file")
+        relative = source.relative_to(root)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        target.chmod(0o444)
+        facts[str(relative)] = hashlib.sha256(target.read_bytes()).hexdigest()
+    return {"path": "share/doc/plurx", "files": facts}
+
+
 def symbol_entries(symbols):
     if not symbols.is_absolute() or symbols.is_symlink() or not symbols.is_dir():
         raise ValueError("debug symbols must be an explicit regular dSYM directory")
@@ -208,7 +228,8 @@ def assemble(daemon, package, output, signing_identity, debug_symbols=None, engi
         provenance = stage / "provenance"
         provenance.mkdir()
         shutil.copyfile(entitlements, provenance / entitlements.name)
-        facts = {"schema_version": 1, "platform": "macos", "layout": "bin siblings",
+        legal_notices = copy_legal_notices(stage)
+        facts = {"legal_notices": legal_notices, "schema_version": 1, "platform": "macos", "layout": "bin siblings",
                  "signing": "ad-hoc candidate" if signing_identity == "-" else "Developer ID signature; notarization not established",
                  "parser_abi": manifest["parser_abi"], "parser_sha256": manifest["module_sha256"],
                  "artifacts": {name: tool.digest(stage / "bin" / name)

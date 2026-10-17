@@ -1307,6 +1307,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::invitations::MIGRATION_V4,
     // v111: managed subtitle jobs and media-independent model reservations.
     super::subtitle_managed_schema::SCHEMA,
+    // v112: independently recognized progressive translation operations and cues.
+    super::subtitle_translation_schema::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1843,6 +1845,7 @@ impl SqliteStore {
         }
 
         super::subtitle_managed_schema::verify_sqlite(conn)?;
+        super::subtitle_translation_schema::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

@@ -632,6 +632,7 @@ function developerPanels(){
       // preparation and rolling retention arrived with their Developer cards.
       shippedSource("outputPreparationCard"), shippedSource("rollingRetentionCard"),
       shippedSource("subtitleTranscriptionCard"),
+      shippedSource("subtitleTranslationCard"),
       shippedSource("clusterClockCard"),
       shippedSource("pgsOverlayCard"),
       shippedSource("subtitleStoredSourcesCard"),

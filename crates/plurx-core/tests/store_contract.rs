@@ -575,6 +575,15 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    // Progressive translation's actual source-bind/publication/Stop/read-lease
+    // contract below exercises these on every backend, including three voters.
+    "maintain_translation_cache",
+    "write_translation_settings",
+    "read_subtitle_translation",
+    "acquire_translation_lease",
+    "mutate_subtitle_translation",
+    "bind_translation_source",
+    "publish_translation_segment",
     // Managed configuration CAS and node-bounded model publication/observation
     // run on both backends in the managed_subtitle_configuration_* and
     // managed_subtitle_model_operations_* contracts in background_jobs.rs.
@@ -20247,7 +20256,10 @@ fn contract_inventory_matches_every_store_method() {
     // +4: managed subtitle configuration CAS, fenced phase observation,
     // model receipt publication and receipt reads, covered on both backends
     // by the managed configuration/model-operation contracts named above.
-    assert_eq!(declared.len(), 490, "review the Store method count");
+    // +7: bounded progressive translation settings, mutation, source binding,
+    // immutable publication, lease/read observations and cache maintenance.
+    // All are exercised by progressive_translation_source_bind_publication_* .
+    assert_eq!(declared.len(), 497, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

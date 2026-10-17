@@ -41,13 +41,13 @@ function setupTrackMenus(){
   // Subtitles are offered in every playback mode. A stream that starts at an
   // offset (transcode, copy-HLS, a resumed remux) shifts the cues to match —
   // see setSub() — so the track lines up wherever playback actually began.
-  const has=!!(PLAYER.subs&&PLAYER.subs.length);
+  const has=!!(PLAYER.subs&&PLAYER.subs.length)||(typeof translationMenuChoice==="function"&&!!translationMenuChoice());
   const cc=document.getElementById("pbsubs"); if(cc) cc.style.display=has?"":"none";
   pbSyncSubIcon();
 }
 // Project subtitle selection immediately, including while the picture is paused.
 function pbSyncSubIcon(){ const cc=document.getElementById("pbsubs");
-  if(cc) cc.classList.toggle("on", !!(PLAYER&&PLAYER.curSub>=0));
+  if(cc) cc.classList.toggle("on", !!(PLAYER&&(PLAYER.curSub>=0||(typeof translationSelected==="function"&&translationSelected(PLAYER)))));
   if(typeof watchRenderLedger==="function") watchRenderLedger();
 }
 // `low` = opened from the bottom transport, so the menu anchors above that
@@ -137,7 +137,8 @@ function toggleMenu(kind,low){
       <button onclick="retryQualityChange()">Retry quality change</button>
       <button onclick="applyQualityWithRestart()">Apply with restart</button>`:"");
   } else {
-    m.innerHTML=`<button class="${PLAYER.curSub<0?'sel':''}" data-remote-track="-1" onclick="setSub(-1)">Off</button>`+
+    m.innerHTML=`<button class="${PLAYER.curSub<0&&!(typeof translationSelected==="function"&&translationSelected(PLAYER))?'sel':''}" data-remote-track="-1" onclick="setSub(-1)">Off</button>`+
+      (typeof translationMenuChoice==="function"?translationMenuChoice():"")+
       PLAYER.subs.map(s=>`<button class="${PLAYER.curSub===s.index?'sel':''}" data-remote-track="${s.index}" onclick="setSub(${s.index})">${esc(subLabelMenu(s))}</button>`).join("");
   }
   m.querySelectorAll("button").forEach(button=>{

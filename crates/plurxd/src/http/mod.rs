@@ -1695,6 +1695,64 @@ pub fn router(state: AppState) -> Router {
             put(crate::subtitle_transcription::update_settings),
         )
         .route(
+            "/subtitle-translation",
+            get(crate::subtitle_translation::api::settings)
+                .put(crate::subtitle_translation::api::update_settings),
+        )
+        .route(
+            "/subtitle-translation/models",
+            get(crate::subtitle_translation::api::models),
+        )
+        .route(
+            "/files/{id}/subtitle-translation/options",
+            get(crate::subtitle_translation::api::options),
+        )
+        .route(
+            "/files/{id}/subtitle-translation",
+            post(crate::subtitle_translation::api::create),
+        )
+        .route(
+            "/files/{id}/subtitle-translation/assets",
+            get(crate::subtitle_translation::api::assets),
+        )
+        .route(
+            "/subtitle-translation/operations/{id}",
+            get(crate::subtitle_translation::api::operation),
+        )
+        .route(
+            "/subtitle-translation/operations/{id}/demands/{demand}",
+            put(crate::subtitle_translation::api::demand)
+                .delete(crate::subtitle_translation::api::release),
+        )
+        .route(
+            "/subtitle-translation/operations/{id}/stop",
+            post(crate::subtitle_translation::api::stop),
+        )
+        .route(
+            "/subtitle-translation/operations/{id}/retry",
+            post(crate::subtitle_translation::api::retry),
+        )
+        .route(
+            "/subtitle-translation/operations/{id}/failed-ranges",
+            get(crate::subtitle_translation::api::failed_ranges),
+        )
+        .route(
+            "/subtitle-translation/assets/{id}/manifest",
+            get(crate::subtitle_translation::api::manifest),
+        )
+        .route(
+            "/subtitle-translation/assets/{id}/segments",
+            get(crate::subtitle_translation::api::segments),
+        )
+        .route(
+            "/subtitle-translation/assets/{id}/coverage",
+            get(crate::subtitle_translation::api::coverage),
+        )
+        .route(
+            "/subtitle-translation/assets/{id}/segments/{segment}",
+            get(crate::subtitle_translation::api::segment),
+        )
+        .route(
             "/subtitle-transcription/managed",
             get(crate::subtitle_models::api::settings)
                 .put(crate::subtitle_models::api::update_settings),
