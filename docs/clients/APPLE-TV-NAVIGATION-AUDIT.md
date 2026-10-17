@@ -13,7 +13,7 @@ and [native layout work](NATIVE-LAYOUT-FOLLOWUP.md). It covers navigation,
 focus, control placement, legibility and recovery across the television app.
 The [rendering gallery](apple-tv-navigation/index.html) shows the proposed
 screens. This document is the canonical project ledger until implementation
-has its own ledger; its queue entry is in the [backlog](../features/PROJECT-BACKLOG.md).
+has its own ledger. It is not listed in the [backlog](../features/PROJECT-BACKLOG.md): that file is on the docs size budget, and this ledger carries the state.
 
 The immediate diagnosis is concrete: the app can draw a menu in front of the
 library without moving physical focus into it. Subsequent remote presses
