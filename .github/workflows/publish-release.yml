@@ -76,7 +76,9 @@ jobs:
           # outgrows the pipe buffer the SIGPIPE it leaves `git show` with fails
           # this pipeline under pipefail, refusing a heading that is there
           # (v0.7.0, a 222 KB changelog, 2026-10-17).
-          git show "$commit_sha:CHANGELOG.md" | grep -F "## [$release_version]" >/dev/null || {
+          # Anchored: `### [X.Y.Z]` or a mention mid-line is not the heading.
+          git show "$commit_sha:CHANGELOG.md" \
+            | grep -E "^## \[${release_version//./\\.}\]( |$)" >/dev/null || {
             echo "::error::CHANGELOG.md has no $release_version release heading"
             exit 1
           }

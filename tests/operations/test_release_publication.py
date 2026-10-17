@@ -73,15 +73,30 @@ class ReleaseTagValidationCase(unittest.TestCase):
 
     @staticmethod
     def validation_script() -> str:
-        import yaml
+        """The `run: |` block of the step whose id is `release`, dedented."""
 
-        workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-        steps = workflow["jobs"]["resolve"]["steps"]
-        (step,) = [step for step in steps if step.get("id") == "release"]
-        return step["run"]
+        lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+        (start,) = [n for n, line in enumerate(lines) if line.strip() == "id: release"]
+        run = next(n for n in range(start, len(lines)) if lines[n].strip() == "run: |")
+        indent = len(lines[run]) - len(lines[run].lstrip())
+        body = []
+        for line in lines[run + 1 :]:
+            if line.strip() and len(line) - len(line.lstrip()) <= indent:
+                break
+            body.append(line)
+        width = min(len(line) - len(line.lstrip()) for line in body if line.strip())
+        script = "\n".join(line[width:] for line in body) + "\n"
+        assert script.startswith("set -euo pipefail\n"), script[:80]
+        return script
 
     def run_validation(self, changelog: str) -> tuple[subprocess.CompletedProcess, str]:
-        environment = own_repository_environment()
+        # No user or system config: a signing or hooks setting must not decide
+        # whether the fixture commits.
+        environment = {
+            **own_repository_environment(),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
         with tempfile.TemporaryDirectory() as raw_directory:
             repository = Path(raw_directory) / "repo"
             repository.mkdir()
@@ -114,7 +129,7 @@ class ReleaseTagValidationCase(unittest.TestCase):
                 env={
                     **environment,
                     "RELEASE_TAG": "v9.9.9",
-                    "EVENT_NAME": "workflow_call",
+                    "EVENT_NAME": "push",
                     "EVENT_REF": "refs/tags/v9.9.9",
                     "GITHUB_OUTPUT": str(outputs),
                 },
@@ -136,10 +151,19 @@ class ReleaseTagValidationCase(unittest.TestCase):
         self.assertIn("release_version=9.9.9\n", outputs)
 
     def test_a_changelog_without_the_release_heading_is_refused(self):
-        result, _ = self.run_validation("# Changelog\n\n## [9.9.8] — 2026-10-01\n")
+        near_misses = {
+            "older release only": "## [9.9.8] — 2026-10-01\n",
+            "subheading": "### [9.9.9]\n",
+            "mid-line mention": "See ## [9.9.9] below.\n",
+            "longer version": "## [9.9.90] — 2026-10-01\n",
+            "dot as wildcard": "## [9x9x9] — 2026-10-01\n",
+        }
+        for name, body in near_misses.items():
+            with self.subTest(name):
+                result, _ = self.run_validation("# Changelog\n\n" + body)
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("CHANGELOG.md has no 9.9.9 release heading", result.stdout)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("CHANGELOG.md has no 9.9.9 release heading", result.stdout)
 
 
 class ReleasePublicationContractCase(unittest.TestCase):
