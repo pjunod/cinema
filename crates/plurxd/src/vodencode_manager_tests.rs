@@ -99,6 +99,12 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         .as_ref()
         .expect("owned processing runtime");
     assert_eq!(runtime.encoder, Encoder::Vaapi);
+    // The plan is resolved with the software source decoder; the windows
+    // are encoded by the graph's admitted encoder, and every report says so.
+    assert_eq!(encoding.plan.output_contract().output_encoder(), "libx265");
+    assert_eq!(encoding.processed_window_encoder(), Some(Encoder::Vaapi));
+    assert_eq!(encoding.delivered_output_encoder(), "hevc_vaapi");
+    assert_eq!(encoding.delivered_encoder_label(), Encoder::Vaapi.label());
     let (index, verified) = runtime
         .prepared
         .lock()

@@ -357,6 +357,10 @@ async fn playback_info_stream_format_is_the_attached_frozen_recipe() {
     assert_eq!(json["stream_format"]["height"], 144);
     assert_eq!(json["stream_format"]["dimensions_basis"], "recipe");
     assert_eq!(json["stream_format"]["video_action"], "encode");
+    // An ordinary encoding delivers its plan's encoder; only an admitted
+    // processing graph reports a different one.
+    assert_eq!(encoding.processed_window_encoder(), None);
+    assert_eq!(encoding.delivered_output_encoder(), "libx264");
     assert_eq!(json["stream_format"]["encoder"], "libx264");
     assert_eq!(json["stream_format"]["pipeline"], "cpu");
     assert_eq!(json["stream_format"]["dynamic_range"], "sdr");

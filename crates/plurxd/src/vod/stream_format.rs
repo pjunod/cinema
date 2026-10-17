@@ -60,7 +60,10 @@ impl StreamFormat {
                         denominator: geometry.sample_aspect_ratio.denominator(),
                     }
                 }),
-                encoder: Some(contract.output_encoder().to_owned()),
+                // The encoder that makes the bytes. A processing graph's plan
+                // is resolved with the software source decoder; its windows
+                // are encoded by the graph's admitted encoder.
+                encoder: Some(encoding.delivered_output_encoder()),
                 pipeline: Some(pipeline.name()),
                 pipeline_label: Some(pipeline_label),
                 dynamic_range: Some(contract.output_dynamic_range().to_owned()),

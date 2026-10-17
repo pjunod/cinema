@@ -1549,22 +1549,45 @@ impl Encoding {
         }
     }
 
-    /// The encoder of the admitted, prepared processing graph, rather than
-    /// the software source-decode plan used to build its input contract.
-    pub(crate) fn delivered_encoder_label(&self) -> &'static str {
+    /// The encoder that produces this encoding's bytes when it is an admitted,
+    /// permitted processing graph: the graph's window encoder, never the
+    /// software source-decode plan that only built its input contract. `None`
+    /// for every ordinary encoding, whose plan encoder is the delivered one.
+    /// The one place that distinction is made; every report derives from it.
+    pub(crate) fn processed_window_encoder(&self) -> Option<plurx_core::transcode::Encoder> {
         #[cfg(target_os = "linux")]
         if let Some(runtime) = &self.dv_runtime {
             if matches!(&self.dv_processing,
                 plurx_core::transcode::dv_processing::DvSelection::Selected(plan)
                     if plurx_core::transcode::dv_processing::DvProductionRegistry.permits(plan))
             {
-                return match runtime.encoder {
-                    plurx_core::transcode::Encoder::Software => "software (x265)",
-                    encoder => encoder.label(),
-                };
+                return Some(runtime.encoder);
             }
         }
-        self.plan.encoder().label()
+        None
+    }
+
+    /// Human label of the delivered encoder, for `StartInfo::encoder`.
+    pub(crate) fn delivered_encoder_label(&self) -> &'static str {
+        match self.processed_window_encoder() {
+            Some(plurx_core::transcode::Encoder::Software) => "software (x265)",
+            Some(encoder) => encoder.label(),
+            None => self.plan.encoder().label(),
+        }
+    }
+
+    /// FFmpeg name of the delivered video encoder, for the stream format a
+    /// session publishes: the processing graph's completed-window encoder
+    /// (`hevc_vaapi`, `hevc_nvenc`, `libx265`) when one is admitted, otherwise
+    /// the frozen plan's output encoder.
+    pub(crate) fn delivered_output_encoder(&self) -> String {
+        self.processed_window_encoder()
+            .and_then(|encoder| {
+                self.plan
+                    .completed_reconstructed_output(encoder)
+                    .map(|output| output.encoder_name().to_owned())
+            })
+            .unwrap_or_else(|| self.plan.output_contract().output_encoder().to_owned())
     }
 
     pub(crate) fn preserves_processed_dv(&self) -> bool {
