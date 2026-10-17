@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""Paperwork: the repository's bookkeeping rules, checked in seconds.
+
+Every rule here is one an agent or contributor meets by failing CI half an
+hour after pushing: a corrective commit without its `Regression-Test:` line,
+a client change without a release-counter bump, a doc missing from its index,
+a real host name, a route missing from docs/API.md. Each check below runs the
+same validator or test the CI lane runs, and prints the fix beside the
+failure, so the rule is learned at push time instead of after a fan-out.
+
+    scripts/paperwork                      # against the merge base with origin/main
+    scripts/paperwork --body-file pr.md    # also check the PR description's fields
+    scripts/paperwork --list               # what is checked, and how each is fixed
+
+`make paperwork` runs it; the tracked pre-push hook (`make hooks`) runs it on
+every push; the `paperwork` job runs it first in the fast lane and the effort
+lane, and every other job waits on it. docs/ci/PAPERWORK.md is the reference.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+# (unittest module under tests/operations, what it guards, how to fix it)
+TEST_RULES: tuple[tuple[str, str, str], ...] = (
+    (
+        "test_docs_index",
+        "every doc under docs/ has an index row, and no reference names a missing docs/ path",
+        "add the doc's row to the index for its folder (docs/README.md routes to them) in the "
+        "same commit; after a move, update every reference the failure lists",
+    ),
+    (
+        "test_infra_names",
+        "the tree names no real host, LAN address, home directory or SSH user",
+        "run `scripts/scrub-infra-names --write`; a literal that must stay goes in "
+        "scripts/scrub-infra-names.allow.toml with its reason",
+    ),
+    (
+        "test_api_doc_routes",
+        "docs/API.md names every registered route and invents none",
+        "add (or delete) the route's entry in docs/API.md",
+    ),
+    (
+        "test_apple_build_claims",
+        "the Apple build number has one owner and generated copies",
+        "run `make apple-build-bump` (never hand-edit the generated surfaces); a user-visible "
+        "change also gets a docs/apple-builds/ fragment",
+    ),
+    (
+        "test_mobile_build_claims",
+        "the Apple and Android README/status build claims match the build files",
+        "run `make apple-build-bump`; for Android edit versionCode in "
+        "clients/android/app/build.gradle.kts and the status line in clients/android/README.md",
+    ),
+    (
+        "test_status_page_shape",
+        "STATUS.md stays short and indexes the sections moved out of it",
+        "move the oldest STATUS.md sections verbatim into their subject folder's status history "
+        "and leave one index row each (docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.4)",
+    ),
+    (
+        "test_status_pr_claims",
+        "no status page calls a merged pull request open",
+        "update the prose the failure quotes to say the pull request merged",
+    ),
+    (
+        "test_doc_status_audit",
+        "doc **Status:** headers make only possible lifecycle claims",
+        "correct the doc's Status header as the failure describes",
+    ),
+    (
+        "test_web_test_inventory",
+        "every Node web test is run by a lane",
+        "add the new tests/web/*.test.js file to `make web-unit-check`",
+    ),
+    (
+        "test_script_syntax",
+        "every Python script under scripts/ parses",
+        "fix the syntax error the failure names",
+    ),
+)
+
+# Node tests for the web shell's registration rules; run only when web files changed.
+WEB_TESTS: tuple[str, ...] = (
+    "tests/web/asset-layout.test.js",
+    "tests/web/asset-order.test.js",
+    "tests/web/asset-load.test.js",
+    "tests/web/settings-sections.test.js",
+)
+WEB_HINT = (
+    "a new web file needs its file, a WEB_ASSETS row, a tag in index.html and a row in "
+    "docs/clients/WEB-SHELL-LAYOUT.md, all in one commit; a Developer card needs its "
+    "devGraduation entry"
+)
+
+DETAIL_LINES = 25
+
+
+@dataclass
+class Result:
+    name: str
+    ok: bool
+    seconds: float
+    detail: str = ""
+    hint: str = ""
+    warn: bool = False
+
+
+def git(*args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=ROOT, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def run(cmd: list[str], env: dict[str, str] | None = None) -> tuple[int, str]:
+    proc = subprocess.run(
+        cmd,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **(env or {})},
+    )
+    return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+def tail(text: str, lines: int = DETAIL_LINES) -> str:
+    rows = text.splitlines()
+    if len(rows) <= lines:
+        return text
+    return "\n".join([f"… ({len(rows) - lines} earlier lines omitted)", *rows[-lines:]])
+
+
+def resolve_base(requested: str | None, merge_target: str) -> str:
+    if requested:
+        return git("rev-parse", "--verify", f"{requested}^{{commit}}")
+    return git("merge-base", "HEAD", merge_target)
+
+
+def changed_paths(base: str) -> list[str]:
+    out = git("diff", "--name-only", f"{base}...HEAD")
+    tracked = [line for line in out.splitlines() if line]
+    dirty = git("diff", "--name-only", "HEAD")
+    return sorted(set(tracked) | {line for line in dirty.splitlines() if line})
+
+
+def check_catalog() -> Result:
+    start = time.monotonic()
+    code, out = run([sys.executable, "scripts/validate", "lint"])
+    return Result(
+        "catalog: every governed file maps to a functionality point",
+        code == 0,
+        time.monotonic() - start,
+        "" if code == 0 else tail(out),
+        "map the file in validation/points.toml as the failure says (docs/VALIDATION.md)",
+    )
+
+
+def corrective_commits(base: str) -> list[str]:
+    sys.path.insert(0, str(ROOT))
+    from validation.history import CORRECTIVE_RE  # noqa: PLC0415
+
+    rows = git("log", "--no-merges", "--format=%h %s", f"{base}..HEAD").splitlines()
+    return [row for row in rows if row and CORRECTIVE_RE.search(row.split(" ", 1)[1])]
+
+
+def check_regression_fields(base: str, body: str | None, title: str) -> Result:
+    start = time.monotonic()
+    hint = (
+        "put one `Regression-Test: <path>::<test name>` line per fixed behavior in the pull "
+        "request description; whoever merges copies them into the landing commit "
+        "(`python3 -m validation.regression_field --body-file <description> --landing-lines`)"
+    )
+    name = "Regression-Test fields for fix(/perf( commits"
+    if body is None:
+        commits = corrective_commits(base)
+        if not commits:
+            return Result(name, True, time.monotonic() - start)
+        listing = "\n".join(f"  {row[:100]}" for row in commits)
+        return Result(
+            name,
+            True,
+            time.monotonic() - start,
+            "the pull request description must carry Regression-Test lines for:\n"
+            + listing
+            + "\n(pass --body-file <description> to check them now)",
+            hint,
+            warn=True,
+        )
+    head = os.environ.get("PR_HEAD_SHA") or git("rev-parse", "HEAD")
+    code, out = run(
+        [
+            sys.executable,
+            "-m",
+            "validation.regression_field",
+            "--body",
+            body,
+            "--title",
+            title,
+            "--base",
+            base,
+            "--head",
+            head,
+        ]
+    )
+    return Result(name, code == 0, time.monotonic() - start, "" if code == 0 else tail(out), hint)
+
+
+def check_mobile_versions(base: str, merge_target: str) -> Result:
+    start = time.monotonic()
+    code, out = run(
+        [sys.executable, "-m", "validation.mobile_versions"],
+        env={
+            "PLURX_VALIDATION_MODE": "changed-from",
+            "PLURX_VALIDATION_BASE": base,
+            "PLURX_VALIDATION_MERGE_TARGET": merge_target,
+        },
+    )
+    return Result(
+        "mobile release counters rise with client changes",
+        code == 0,
+        time.monotonic() - start,
+        "" if code == 0 else tail(out),
+        "Apple: `make apple-build-bump`; Android: raise versionCode in "
+        "clients/android/app/build.gradle.kts and the clients/android/README.md status line",
+    )
+
+
+def check_tests() -> list[Result]:
+    start = time.monotonic()
+    names = [module for module, _, _ in TEST_RULES]
+    code, out = run(
+        [sys.executable, "-m", "unittest", "-q", *names],
+        env={"PYTHONPATH": os.pathsep.join(filter(None, [str(ROOT / "tests" / "operations"), str(ROOT), os.environ.get("PYTHONPATH", "")]))},
+    )
+    elapsed = time.monotonic() - start
+    if code == 0:
+        return [Result(f"{guard}", True, elapsed / len(names)) for _, guard, _ in TEST_RULES]
+    results = []
+    for module, guard, hint in TEST_RULES:
+        failed = f"({module}." in out or f" {module}." in out or f"'{module}'" in out
+        detail = ""
+        if failed:
+            blocks = [
+                block
+                for block in out.split("=" * 70)
+                if f"{module}." in block.split("\n", 2)[1 if block.startswith("\n") else 0]
+                or f"({module}." in block[:300]
+            ]
+            detail = tail("\n".join(b.strip() for b in blocks) or out, 18)
+        results.append(Result(guard, not failed, elapsed / len(names), detail, hint))
+    if all(result.ok for result in results):
+        # The run failed but no module claimed it (an import error, say): report it whole.
+        results.append(Result("paperwork test run", False, elapsed, tail(out), "see the output"))
+    return results
+
+
+def check_web(paths: list[str]) -> Result | None:
+    if not any(p.startswith(("crates/plurxd/src/web/", "tests/web/")) or p == "docs/clients/WEB-SHELL-LAYOUT.md" for p in paths):
+        return None
+    start = time.monotonic()
+    code, out = run(["node", "--test", *WEB_TESTS])
+    if code == 127 or "No such file" in out[:200] and code != 0 and "node" in out[:200]:
+        return Result("web shell registration (node)", True, 0.0, "node is not installed here; CI runs it", WEB_HINT, warn=True)
+    failing = "\n".join(line for line in out.splitlines() if "not ok" in line or "Error" in line)
+    return Result(
+        "web shell registration and Developer graduation",
+        code == 0,
+        time.monotonic() - start,
+        "" if code == 0 else tail(failing or out, 18),
+        WEB_HINT,
+    )
+
+
+def print_list() -> None:
+    print("paperwork checks — what each guards, and the fix:\n")
+    print("  catalog            every governed file maps to a functionality point")
+    print("  Regression-Test    fix(/perf( commits need `Regression-Test:` lines in the PR description")
+    print("  mobile counters    Apple/Android build numbers rise when client code changes")
+    for module, guard, hint in TEST_RULES:
+        print(f"  {module:<26} {guard}\n  {'':<26} fix: {hint}")
+    print(f"  web (node)                 {WEB_HINT}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("--base", help="base revision (default: merge base with --merge-target)")
+    parser.add_argument("--merge-target", default="origin/main", help="branch the work merges into")
+    parser.add_argument("--body-file", type=Path, help="pull request description to check")
+    parser.add_argument("--body-env", action="store_true", help="read the description from $PR_BODY")
+    parser.add_argument("--hook", action="store_true", help="pre-push mode: environment problems warn instead of failing")
+    parser.add_argument("--list", action="store_true", help="list the checks and their fixes")
+    args = parser.parse_args(argv)
+
+    if args.list:
+        print_list()
+        return 0
+    if sys.version_info < (3, 11):
+        message = f"paperwork needs Python 3.11+ (this is {sys.version.split()[0]})"
+        if args.hook:
+            print(f"pre-push: {message}; skipping — CI's paperwork job will run it.", file=sys.stderr)
+            return 0
+        print(message, file=sys.stderr)
+        return 2
+    try:
+        base = resolve_base(args.base, args.merge_target)
+    except subprocess.CalledProcessError:
+        message = f"cannot find the merge base with {args.merge_target}; run `git fetch origin` first"
+        if args.hook:
+            print(f"pre-push: {message}; skipping.", file=sys.stderr)
+            return 0
+        print(message, file=sys.stderr)
+        return 2
+
+    body: str | None = None
+    if args.body_file:
+        body = args.body_file.read_text(encoding="utf-8")
+    elif args.body_env:
+        body = os.environ.get("PR_BODY", "")
+    title = os.environ.get("PR_TITLE", "")
+
+    started = time.monotonic()
+    paths = changed_paths(base)
+    results: list[Result] = [
+        check_catalog(),
+        check_regression_fields(base, body, title),
+        check_mobile_versions(base, args.merge_target),
+        *check_tests(),
+    ]
+    web = check_web(paths)
+    if web is not None:
+        results.append(web)
+
+    failed = [r for r in results if not r.ok]
+    for result in results:
+        mark = "FAIL" if not result.ok else ("note" if result.warn else " ok ")
+        print(f"[{mark}] {result.name}")
+        if result.detail and (not result.ok or result.warn):
+            for line in result.detail.splitlines():
+                print(f"       {line}")
+        if result.hint and (not result.ok or result.warn):
+            print(f"       fix: {result.hint}")
+    elapsed = time.monotonic() - started
+    print(
+        f"paperwork: {len(results) - len(failed)}/{len(results)} ok in {elapsed:.1f}s "
+        f"(base {base[:10]}, {len(paths)} changed paths)"
+    )
+    if failed:
+        print("paperwork failed — the fix is printed under each FAIL; `scripts/paperwork --list` lists every rule.")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
