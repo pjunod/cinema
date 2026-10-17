@@ -3805,6 +3805,22 @@ assert.equal(context.ACT_TIMER, null);
         self.assertGreaterEqual(seen, 20)
         self.assertIn(".invalid", FLEET_REGISTRY_EXPR)
 
+    def test_no_workflow_pipes_git_show_into_an_early_exiting_grep(self):
+        # `git show <big file> | grep -q` under `set -o pipefail` fails when
+        # grep exits at its first match and git show is killed by SIGPIPE:
+        # the v0.7.0 publication reported a present changelog heading as
+        # missing. Read the blob into a file, then grep the file.
+        early_exit = re.compile(r"git show[^|\n]*\|\s*grep\s+-[A-Za-z]*q")
+        for path in sorted((ROOT / ".github").rglob("*.yml")):
+            text = path.read_text(encoding="utf-8")
+            self.assertEqual(
+                early_exit.findall(text), [],
+                f"{path.relative_to(ROOT)} pipes git show into grep -q",
+            )
+        publisher = read(".github/workflows/publish-release.yml")
+        self.assertIn('git show "$commit_sha:CHANGELOG.md" > "$RUNNER_TEMP/release-changelog.md"', publisher)
+        self.assertIn('grep -Fq "## [$release_version]" "$RUNNER_TEMP/release-changelog.md"', publisher)
+
     def test_release_registry_and_weekly_readiness_match_ci(self):
         ci = read(".github/workflows/ci.yml")
         publisher = read(".github/workflows/publish-release.yml")
