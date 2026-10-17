@@ -1,0 +1,166 @@
+{
+  "auto_tick_correction_private_proof": {
+    "bytes": 713810,
+    "id": 110,
+    "independent_download_verified": true,
+    "pull": 1143,
+    "sha256": "879b3763683a5e653d2a3bf16bb1d25dfb078fd8be8e377b684f65750e8966f5",
+    "source_head": "1c27a22ea1fbbf2feb5360f7c7cd5a83a06e790e",
+    "uuid": "f491e0bc-d95b-48c4-866f-52aac2622c28"
+  },
+  "earlier_observation_receipts": [
+    "air-hdr-paused-20261013.json",
+    "f2-decoded-alignment-20261013.json",
+    "f3-real-lifecycle-20261015.json",
+    "f4-compressed-matroska-parser-20261015.json",
+    "f5-output-facts-20261015.json",
+    "f6-authority-media-20261015.json",
+    "f7-neutral-peak-20261015.json",
+    "f7-reference-white-20261015.json",
+    "hdr-physical-playback-20261015.json"
+  ],
+  "earlier_private_source_proofs_sha256": [
+    "4a895adef072c41535557bce8b437e345df708831bb3a5318d0e992907e3bd9b",
+    "7f36d61ba4c96622e4b0e45729ac5ff4366ce0af74aa08719edf362afdf348bf",
+    "6556e3872539aee6e1135f26705343927a9475a1a1b137f0e4d5ed1103e45376"
+  ],
+  "final_private_evidence_archive": {
+    "bytes": 1026866,
+    "id": 114,
+    "independent_download_verified": true,
+    "landing_commit": "89d790d2e74d3e516aad462d19067bbcfc2cd93c",
+    "members": 30,
+    "name": "hdr-followups-final-promotion-20261017.zip",
+    "run": 5325,
+    "sha256": "3d0f9399e0ff25de6286fa131d18dcc35833f96027b6a0aeb504633ae27f2307",
+    "uuid": "becb55ab-bb11-40c4-808e-61e8da76cb73"
+  },
+  "fragment_prune_correction_private_proof": {
+    "bytes": 1449777,
+    "id": 111,
+    "independent_download_verified": true,
+    "pull": 1146,
+    "sha256": "029843b6ee3c9e11ff95e9e6b00cb20434ecd2720367d15b5150794242544c97",
+    "source_head": "a709f0520849863f7545c7e4011b066386e851b5",
+    "uuid": "9612da48-88ed-4434-a543-802dc3dd923f"
+  },
+  "landing": {
+    "base": "b2d83ae8d061d9314eae051df100ad7054c3774a",
+    "head": "6c280ab4ab62c404e7bace35ebdf803187b169c8",
+    "landing_tree_verified": true,
+    "merge": "89d790d2e74d3e516aad462d19067bbcfc2cd93c",
+    "merge_path": "forge merge outside the prepared receipt-checking helper",
+    "merged_at": "2026-10-17T16:19:53Z",
+    "parents": [
+      "b2d83ae8d061d9314eae051df100ad7054c3774a",
+      "6c280ab4ab62c404e7bace35ebdf803187b169c8"
+    ],
+    "pull_request": 1125,
+    "regression_trailers": 95,
+    "tree": "5eb32f1d9a1e11cded682d02a9253609f13aa5ab"
+  },
+  "limits": [
+    "No exact-tree qualification receipt exists for the landing.",
+    "No calibrated optical or artistic-grade equivalence claim.",
+    "No independent physical audio continuity measurement.",
+    "Original F3 leak and F6 lag attribution remain inconclusive.",
+    "Broader native HLS, device/source/codec/caption and continuous-quality matrices remain in their existing workstreams.",
+    "The landing does not claim that a new main binary was deployed or physically retested."
+  ],
+  "local_complete_core": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "plurx-core",
+      "--features",
+      "hiqlite-store",
+      "--lib"
+    ],
+    "elapsed_seconds": 1170.81,
+    "returncode": 0,
+    "source": "740d6ac4bed63b0e5c0d5986a4e4eb87463ec983"
+  },
+  "local_store_failed_baseline": {
+    "result": "368 passed; 1 failed; 3 ignored",
+    "returncode": 2
+  },
+  "local_store_followup": {
+    "corrected_exact_control_returncode": 0,
+    "separate_original_source_lineage_returncode": 0
+  },
+  "promotion_run": {
+    "attempt": 1,
+    "failure_characterization": {
+      "52734 Rust unit and SQLite contracts": "Runner 'context deadline exceeded' killed the job while the plurxd http test binary was running. plurx-core lib had passed 1900/0/5 earlier in the same job. Eight http::shared_source_playback::tests::sharing_source_http_* tests were reported FAILED before the kill; their failure bodies were never printed because the job ended before libtest's summary. Cause of those eight failures: not established.",
+      "52744 replicated WAL recovery contracts": "Runner 'context deadline exceeded'; no test assertion failure observed in the log.",
+      "52746 web layout and accessibility": "Playwright TargetClosedError (page/context/browser closed); not investigated.",
+      "52750 Android instrumented UI tests": "Emulator booted then went offline/not found ('adb: device offline', exit 255) before any instrumented test ran.",
+      "52751 package and smoke (amd64)": "Runner 'context deadline exceeded' during the image build (log shows build progressing past ~386s).",
+      "52753 publish image (local registry)": "Failed downstream of package_smoke; log is near-empty.",
+      "52755 Main promotion gate": "Failed: 'Job package_smoke failed' (aggregate of the above)."
+    },
+    "jobs": {
+      "Android JVM tests and lint": "success",
+      "Android instrumented UI tests": "failure",
+      "Apple iOS + tvOS tests": "success",
+      "Main promotion gate": "failure",
+      "Rust unit and SQLite contracts": "failure",
+      "attach verified release aliases": "skipped",
+      "build, package, and smoke (amd64)": "skipped",
+      "build, package, and smoke (arm64)": "skipped",
+      "cluster daemon contracts": "success",
+      "cluster transport recovery campaign": "success",
+      "cluster transport recovery contracts": "success",
+      "cluster transport recovery learner role": "success",
+      "cluster transport recovery voter role": "success",
+      "fast Rust gate": "success",
+      "fast policy and contract preflight": "success",
+      "film-addressed VOD browser acceptance": "skipped",
+      "mobile release version": "success",
+      "non-blocking replicated Store shard shadow": "success",
+      "package and smoke (amd64)": "failure",
+      "package and smoke (arm64)": "success",
+      "publish CI badge": "success",
+      "publish image (local registry)": "failure",
+      "publish merged image (Forgejo registry)": "skipped",
+      "replicated Store contracts": "success",
+      "replicated Store contracts (legacy)": "success",
+      "replicated Store shard 0": "skipped",
+      "replicated Store shard 0-1": "skipped",
+      "replicated Store shard 1": "skipped",
+      "replicated Store shard 1-1": "skipped",
+      "replicated Store shard 2": "skipped",
+      "replicated Store shard 2-1": "skipped",
+      "replicated Store shard union": "skipped",
+      "replicated Store shard union-1": "skipped",
+      "replicated WAL recovery contracts": "failure",
+      "replicated topology contracts": "success",
+      "required replicated Store shard graph": "success",
+      "resolve immutable release source": "skipped",
+      "validation scope": "success",
+      "verify existing release (amd64)": "skipped",
+      "verify existing release (arm64)": "skipped",
+      "web layout and accessibility": "failure"
+    },
+    "qualification_receipt": null,
+    "retried": false,
+    "run_id": 5325,
+    "status": "failure",
+    "workflow": "ci.yml"
+  },
+  "recorded_at": "2026-10-17T19:15:38.445514+00:00",
+  "retained_failed_runs": [
+    5228,
+    5293,
+    5306,
+    5308,
+    5313,
+    5320,
+    5325
+  ],
+  "schema_version": 1,
+  "scope": "Bounded F1-F7 Mac HDR follow-up repairs and retained physical observations, landed on main without a passing complete promotion run; broader optical/audio/device matrices remain separate",
+  "state": "landed without complete qualification"
+}

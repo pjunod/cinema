@@ -1,10 +1,10 @@
 # Mac HDR acceptance — playback follow-ups
 
-**Status:** open — ordinary F1 and bounded F2 are on main; bounded F3 current-owner controls, F4 parser/startup, F5 reporting, F6 media fence and F7 reference-white/package/Air evidence are complete on the effort; final current-tree promotion pending · **Recorded:** 2026-10-12; updated 2026-10-15.
+**Status:** built — bounded F1–F7 repairs and recorded acceptance landed on main in #1125 (`89d790d2e`); its complete run 5325 failed on six jobs and no exact-tree qualification receipt exists; broader device, optical and audio scopes remain separate · **Recorded:** 2026-10-12; updated 2026-10-17
 
 The [full acceptance report](../streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 closes the ordinary HDR10 Metal/CPU comparison. This document specifies the
-seven remaining playback and fidelity follow-ups, including what happened,
+seven recorded playback and fidelity follow-ups, including what happened,
 what the evidence establishes, what remains unknown, and how to close each.
 It is the detailed follow-up plan for backlog A02, A04 and A06, rather than a
 new implementation project duplicating their existing work.
@@ -1393,3 +1393,72 @@ rewind before constructing the historical workload. The production upgrade
 and both fresh/upgraded query-plan, retained-source and VM-step assertions
 remain unchanged. Preserve the original complete run and isolated failure;
 corrected focused evidence and a new exact-tree qualification remain required.
+
+### Landing on main — bounded F1–F7 closure
+
+PR #1125 landed on main on 2026-10-17 as merge `89d790d2e74d3e516aad462d19067bbcfc2cd93c`, with parents
+`b2d83ae8d061d9314eae051df100ad7054c3774a` (the frozen base) and `6c280ab4ab62c404e7bace35ebdf803187b169c8` (the frozen head).
+Its Git tree `5eb32f1d9a1e11cded682d02a9253609f13aa5ab` equals the frozen candidate tree, and the merge
+message carries all 95 unique `Regression-Test:` trailers. The merge was made
+directly from the forge account, outside the prepared receipt-checking merge
+helper.
+
+**The complete promotion run did not pass.** Run 5325 (attempt 1, never retried)
+ended in failure, so this landing has **no exact-tree qualification receipt**. The
+[landing record](evidence/macos-hdr-followups-20261017.json) lists every job. Six jobs failed, plus the
+local-registry image publish that depended on them:
+
+| Job | Observed failure |
+|---|---|
+| Rust unit and SQLite contracts | The runner deadline killed the job while the `plurxd` HTTP test binary was running. Earlier in the same job, the core library passed 1900, failed 0 and ignored 5. Before the kill, eight `http::shared_source_playback` `sharing_source_http_*` tests reported FAILED. Their failure bodies were never printed, and the cause is not established. |
+| replicated WAL recovery contracts | The runner deadline expired. The log shows no assertion failure. |
+| web layout and accessibility | Playwright `TargetClosedError`. Not investigated. |
+| Android instrumented UI tests | The emulator went offline before any instrumented test ran. |
+| package and smoke (amd64) | The runner deadline expired during the image build. |
+| Main promotion gate | Failed as an aggregate of the above. |
+
+These jobs passed: scope, release version, policy preflight, fast Rust, legacy and
+current replicated Store contracts, the shard graph, topology, all four transport
+recovery jobs, daemon contracts, Android JVM/lint, Apple iOS + tvOS and arm64
+package. Film-addressed VOD browser acceptance was skipped. None of these partial
+results is presented as complete qualification. Repair of the failures above is
+tracked on the claim board in issue #1148. They are not reclassified here.
+
+| Follow-up | Bounded result landed | Scope retained separately |
+|---|---|---|
+| F1 | The paused unbuffered seek, reopened startup and reopened paused-surface repairs are already on main. The ordinary Air decoded-frame and extended CPU controls passed. | Other clients and native HLS need their own observations. |
+| F2 | The installed correction commits a decoded H.264/BT.709 1080p SDR successor on the Air. | Independent physical audio, boundary frame loss and the broader continuous-quality matrix remain separate. |
+| F3 | Current-owner reuse, admission pressure, cancellation, supersession, idle reaping, restart and ordinary rolling browser teardown controls passed with zero occupancy at the end. | The original leak's cause is inconclusive. An abrupt browser-process quit and a decoder failure after allocation were not isolated individually. |
+| F4 | The sealed parser includes pinned static zlib. The selected native and WASM facts agree. Matched genuine AV1 HDR10 cold and warm 1080p SDR starts stayed inside the declared budget. | Deleted Heretic is not reused. This is not every source, codec or client startup route. |
+| F5 | Attached output provenance and dimensions/range/renderer reporting passed unit tests and actual uncached, cached and refused-change observations. | Attached output facts do not measure the physical display. |
+| F6 | Real-media brief and sustained authority-loss controls preserved the declared grace period and reaped after it. | The cause of the original incident's lag remains unknown. |
+| F7 | These passed: the 100-nit Hable reference-white correction, the independent neutral-PQ guard, held-film software controls, the native package and the five-minute Air Metal/CPU comparison. | No claim is made for calibrated optical equivalence, artistic-grade equivalence, independent physical audio or broader HDR/device matrices. |
+
+The original complete local Store run keeps its result: 368 passed, one historical
+fragment-prune fixture failed and three were ignored. The reviewed fixture
+correction passes its exact focused control (#1146), and the separately recorded
+schema-lineage suite passes. In run 5325, the replicated Store contract jobs
+passed on the landed tree. The failed local full run is never adopted or
+relabelled as passing.
+
+All of the following keep their actual verdicts: original failed probes, failed
+starts, refused transitions, the CPU supply stall, fixture failures, failed or
+canceled runs (5228, 5293, 5306, 5308, 5313, 5320 and now 5325) and review
+corrections. The [final private evidence archive](http://forge.lan:3000/attachments/becb55ab-bb11-40c4-808e-61e8da76cb73)
+holds every scheduled job log of run 5325 with its SHA-256, the run and job
+records, and the landing commit proof. Its SHA-256 is `3d0f9399e0ff25de6286fa131d18dcc35833f96027b6a0aeb504633ae27f2307`. The
+indexed JSON binds the same identity.
+
+The Air/native/parser campaign's cleanup receipt records its final Air API
+observation at 2026-10-15T19:34:43.513332Z. At that point there were zero sessions,
+zero deliveries and no active hardware or software occupancy, and both tested Air
+movie resumes were zero/unwatched. The same campaign separately records that its
+owned server stopped, normal quality and Mac-processing preferences were restored,
+shared clipboard was OFF and the temporary Metal SDK was removed. Those
+observations are not all tied to the API timestamp. The later F3 lifecycle cleanup
+independently records, at 2026-10-15T19:55:33.526114Z: zero sessions, deliveries
+and active occupancy, its tested movie resume zero/unwatched, and its owned server
+stopped. It does not remeasure clipboard, SDK removal or the earlier campaign's
+preferences. These are preserved historical observations, not resets of later user
+activity. The landing does not claim that a new main binary was deployed or that
+another hardware campaign ran.
