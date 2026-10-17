@@ -8,7 +8,7 @@ first.
 
 ## Agent efficiency: smaller searches, a docs router, paperwork first
 
-**Branch `effort/agent-efficiency`, draft pull request; tooling and docs only, nothing to deploy.** Sessions were spending about 50k tokens before their first useful step and learning bookkeeping rules from 15–40 minute CI failures.
+**Merged to `main` as #1147 (`9de49f37`), 2026-10-17; tooling and docs only, nothing to deploy.** Sessions that push should run `make hooks` once per clone. Sessions were spending about 50k tokens before their first useful step and learning bookkeeping rules from 15–40 minute CI failures.
 
 - `docs/README.md` is a 10 KB router to one index per subject folder (was 131 KB); this page keeps five efforts and moved the rest to folder histories.
 - A root `.ignore` keeps evidence, archives, vendored and minified files out of searches; `.gitattributes` keeps large JSON out of diffs.
