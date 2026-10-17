@@ -1,0 +1,41 @@
+name: paperwork
+
+# The fast lane runs its own paperwork job for pull requests into main. Task
+# pull requests into an effort branch otherwise allocate no jobs at all, so
+# this is the one check they get: the bookkeeping rules, in about a minute,
+# drafts included. docs/ci/PAPERWORK.md lists the rules and their fixes.
+on:
+  pull_request:
+    branches-ignore: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+
+concurrency:
+  group: paperwork-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  paperwork:
+    name: paperwork
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 5
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.23.2"
+      - name: Check index rows, release counters, names and Regression-Test fields
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
+            "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --body-env
