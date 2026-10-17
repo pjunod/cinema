@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Run a noisy command, keep its whole log on disk, print only what matters.
+
+    scripts/quiet cargo test -p plurxd --locked
+    scripts/quiet --tail 60 make operations-check
+    scripts/quiet ansible-playbook -i media/inventory.yml media/deploy.yml
+
+The full output goes to target/quiet/<command>-<time>.log. The terminal gets
+the lines that look like failures (error, FAILED, panicked, Traceback,
+`not ok`, fatal, …) with a little context, the last --tail lines, the exit
+status and the log's path. The exit status is the command's own, so it
+composes with `&&` and with CI. Read the log with offset/limit or grep when the
+summary is not enough — never print the whole of it back into a session.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SIGNAL = re.compile(
+    r"(\berror(\[E\d+\])?\b|\bFAILED\b|\bFAIL\b|panicked at|Traceback|^not ok\b|\bfatal:|"
+    r"\bERROR\b|assertion .*failed|test result: FAILED|failures:|UNREACHABLE!|fatal: \[)",
+    re.IGNORECASE,
+)
+NOISE = re.compile(r"(\b0 failed\b|\bfailed: 0\b|warning: unused|error_chain|errors\.rs|on_error)")
+
+
+def main(argv: list[str]) -> int:
+    tail_n, max_signal = 30, 60
+    while argv and argv[0].startswith("--"):
+        flag = argv.pop(0)
+        if flag == "--tail":
+            tail_n = int(argv.pop(0))
+        elif flag == "--max":
+            max_signal = int(argv.pop(0))
+        elif flag == "--":
+            break
+        else:
+            sys.exit(f"quiet: unknown flag {flag}")
+    if not argv:
+        sys.exit(__doc__)
+    logs = ROOT / "target" / "quiet"
+    logs.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", "-".join(argv[:3]))[:60].strip("-")
+    log = logs / f"{slug}-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    started = time.monotonic()
+    with log.open("w", encoding="utf-8", errors="replace") as sink:
+        proc = subprocess.run(argv, stdout=sink, stderr=subprocess.STDOUT)
+    elapsed = time.monotonic() - started
+    lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+    hits = [i for i, line in enumerate(lines) if SIGNAL.search(line) and not NOISE.search(line)]
+    shown: list[int] = []
+    for i in hits:
+        for j in range(max(0, i - 1), min(len(lines), i + 3)):
+            if j not in shown:
+                shown.append(j)
+    tail_from = max(0, len(lines) - tail_n)
+    signal_rows = [j for j in shown if j < tail_from][:max_signal]
+    if signal_rows:
+        print(f"── {len(hits)} failure-looking lines (first {len(signal_rows)} shown with context) ──")
+        previous = None
+        for j in signal_rows:
+            if previous is not None and j != previous + 1:
+                print("   …")
+            print(f"{j + 1:>7}: {lines[j][:300]}")
+            previous = j
+    print(f"── last {min(tail_n, len(lines))} of {len(lines)} lines ──")
+    for j in range(tail_from, len(lines)):
+        print(lines[j][:300])
+    status = "ok" if proc.returncode == 0 else f"exit {proc.returncode}"
+    print(f"── {status} in {elapsed:.0f}s · full log: {log.relative_to(ROOT)} ──")
+    return proc.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Print a source file's outline — its declarations with line numbers.
+
+Read the outline, then read only the lines you need (`Read` with offset and
+limit, or `sed -n 'A,Bp'`). Several files here run past 10,000 lines; reading
+one whole costs more context than the task it is for.
+
+    scripts/outline crates/plurxd/src/playback_control.rs
+    scripts/outline --tests crates/plurxd/src/state.rs   # include #[cfg(test)] items
+    scripts/outline --top crates/plurxd/src/http/mod.rs  # top-level items only
+    scripts/outline clients/apple/Sources/PlayerController.swift
+"""
+
+from __future__ import annotations
+
+import re
+import signal
+import sys
+from pathlib import Path
+
+PATTERNS = {
+    ".rs": re.compile(
+        r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|const|unsafe|extern \"C\")\s+)*"
+        r"(fn|struct|enum|trait|impl|mod|type|macro_rules!)\b"
+    ),
+    ".swift": re.compile(
+        r"^\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|fileprivate|internal|open|final|static|"
+        r"override|nonisolated|mutating|class)\s+)*(func|class|struct|enum|protocol|extension|actor|init)\b"
+    ),
+    ".kt": re.compile(
+        r"^\s*(?:(?:public|private|internal|protected|override|suspend|inline|data|sealed|abstract|"
+        r"open|enum|annotation|companion|inner)\s+)*(fun|class|object|interface)\b"
+    ),
+    ".js": re.compile(r"^\s*(?:export\s+)?(?:async\s+)?(function\b|class\b|const \w+ = (?:async )?\()"),
+    ".py": re.compile(r"^\s*(?:async\s+)?(def|class)\b"),
+}
+
+
+def outline(path: Path, include_tests: bool, top: bool) -> None:
+    pattern = PATTERNS.get(path.suffix)
+    if pattern is None:
+        sys.exit(f"outline: no pattern for {path.suffix or 'files without a suffix'}")
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    print(f"{path} — {len(lines)} lines")
+    test_depth: int | None = None
+    depth = 0
+    pending_cfg_test = False
+    for number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if path.suffix == ".rs":
+            if stripped.startswith("#[cfg(test)]"):
+                pending_cfg_test = True
+            elif pending_cfg_test and pattern.match(line):
+                if test_depth is None:
+                    test_depth = depth
+                pending_cfg_test = False
+            elif stripped and not stripped.startswith("#["):
+                pending_cfg_test = False
+            in_tests = test_depth is not None
+            depth += line.count("{") - line.count("}")
+            if in_tests and depth <= test_depth and "}" in line:
+                if not include_tests:
+                    print(f"{number:>7}  (end of #[cfg(test)] block)")
+                test_depth = None
+                continue
+            if in_tests and not include_tests:
+                if pattern.match(line) and depth - (line.count("{") - line.count("}")) == test_depth:
+                    print(f"{number:>7}  #[cfg(test)] {stripped[:100]}")
+                continue
+        if pattern.match(line) and not (top and line[:1].isspace()):
+            print(f"{number:>7}  {line.rstrip()[:140]}")
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    include_tests = "--tests" in args
+    top = "--top" in args
+    paths = [Path(a) for a in args if a not in ("--tests", "--top")]
+    if not paths:
+        sys.exit(__doc__)
+    for path in paths:
+        if not path.is_file():
+            sys.exit(f"outline: {path}: no such file")
+        outline(path, include_tests, top)
+
+
+if __name__ == "__main__":
+    main()

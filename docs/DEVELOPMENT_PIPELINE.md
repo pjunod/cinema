@@ -157,6 +157,14 @@ JavaScript syntax. It does not replace the focused regression or compile checks
 required before an effort push, and ordinary changes still need their affected
 validation before a pull request.
 
+`make hooks` also installs a pre-push hook that runs `scripts/paperwork`: the
+bookkeeping rules — doc index rows, release counters, infra names, API route
+docs, status-page shape, `Regression-Test:` lines — in seconds, with the fix
+printed beside each failure. The fast lane, the effort lane and every pull
+request into an effort branch run the same script as their first job, and no
+compile job starts until it passes. [ci/PAPERWORK.md](ci/PAPERWORK.md) lists the
+rules.
+
 ## 4. Compile before CI: send source to the compiler, never credentials
 
 The device VM that owns the private clone may not have a usable Rust toolchain.

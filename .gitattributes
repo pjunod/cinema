@@ -1,0 +1,8 @@
+# Large generated or recorded files. `-diff` keeps a change to one of these
+# from printing hundreds of KB of one-line JSON into `git diff`, `git show`,
+# a pull request review, or an agent's context; `git diff --text` still shows
+# it. `linguist-generated` collapses the file in Forgejo's pull request view.
+crates/plurxd/src/web/hls.min.js -diff linguist-generated
+docs/**/evidence/**/*.json -diff linguist-generated
+benchmarks/evidence/** linguist-generated
+tests/ui-structure.golden linguist-generated

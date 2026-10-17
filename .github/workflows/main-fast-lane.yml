@@ -18,10 +18,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Runs first, on drafts too, in about a minute: the bookkeeping rules that
+  # otherwise fail a lane after its compile fan-out has already been spent.
+  # Every other job waits on it. Same script as `make paperwork` and the
+  # pre-push hook; docs/ci/PAPERWORK.md lists the rules and their fixes.
+  paperwork:
+    name: paperwork
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 10
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.23.2"
+      - name: Check index rows, release counters, names and Regression-Test fields
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
+            "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --body-env
+
   scope:
     name: fast-lane validation scope
-    # Draft is the whole gate. A draft allocates no jobs, so a PR opened early
-    # still costs nothing; anything else runs. It was `draft == false` AND the
+    needs: paperwork
+    # Draft is the whole gate. A draft allocates only the paperwork job, so a
+    # PR opened early costs about a minute of one runner; anything else runs. It was `draft == false` AND the
     # `fast-lane` label, and the label is what let three lanes merge in one day
     # without this workflow ever running - one of them carrying a fix for the
     # regression the lane before it had shipped to the fleet.
@@ -48,33 +79,6 @@ jobs:
         run: >-
           python3 -m validation.ci_scope
           --event pull_request --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"
-
-  mobile_version:
-    name: fast-lane mobile release version
-    needs: scope
-    if: needs.scope.outputs.mobile_version == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general]
-    # Full-history auditing plus the static contract suites can cross three
-    # minutes on a busy self-hosted runner even when every check is healthy.
-    timeout-minutes: 5
-    steps:
-      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Compare release counters with the current merge target
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
-          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
-            "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          PLURX_VALIDATION_MODE=changed-from \
-            PLURX_VALIDATION_BASE="$VALIDATION_BASE" \
-            PLURX_VALIDATION_MERGE_TARGET="origin/$BASE_REF" \
-            python3 -m validation.mobile_versions
 
   preflight:
     name: fast policy and contract preflight
@@ -143,13 +147,6 @@ jobs:
       # A); the change that sets the boundary removes `continue-on-error` in
       # the same diff, and tests/validation/test_regression_field.py refuses
       # one without the other.
-      - name: Check the pull request's Regression-Test fields
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 -m validation.regression_field
       - name: Check validation catalog and static contracts
         run: |
           make validation-lint
@@ -399,8 +396,8 @@ jobs:
       always() &&
       github.event.pull_request.draft == false
     needs:
+      - paperwork
       - scope
-      - mobile_version
       - preflight
       - rust_compile
       - web_compile
@@ -411,16 +408,21 @@ jobs:
     steps:
       - name: Require policy and every affected compile surface
         env:
+          PAPERWORK_RESULT: ${{ needs.paperwork.result }}
           SCOPE_RESULT: ${{ needs.scope.result }}
-          MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           RUST_RESULT: ${{ needs.rust_compile.result }}
           WEB_RESULT: ${{ needs.web_compile.result }}
           APPLE_RESULT: ${{ needs.apple_compile.result }}
           ANDROID_RESULT: ${{ needs.android_compile.result }}
         run: |
+          # Paperwork must pass outright: when it fails, every job below it is
+          # skipped, and a skipped job is otherwise accepted here.
+          if [ "$PAPERWORK_RESULT" != success ]; then
+            echo "paperwork ended with: $PAPERWORK_RESULT"; exit 1
+          fi
           for result in \
-            "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" "$PREFLIGHT_RESULT" \
+            "$SCOPE_RESULT" "$PREFLIGHT_RESULT" \
             "$RUST_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
             "$ANDROID_RESULT"; do
             case "$result" in

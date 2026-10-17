@@ -50,7 +50,8 @@ make validate-full # browser + client + packaging checks where tools exist
 make test       # just the tests
 make effort-rust-check # compile every Rust target; execute no Rust tests
 make coverage   # line coverage via cargo-llvm-cov → lcov.info
-make hooks      # validate points selected by each staged commit
+make hooks      # pre-commit lint + pre-push paperwork
+make paperwork  # index rows, release counters, names, Regression-Test — seconds
 make docker     # build the container image
 ```
 
@@ -58,7 +59,8 @@ make docker     # build the container image
 `make hooks` wires `make precommit-check` into pre-commit. It runs catalog and
 Rust lint plus embedded JavaScript syntax, but no tests; run
 `make validate-staged` explicitly for affected behavior evidence. Bypass one
-hook run with `git commit --no-verify`. [VALIDATION.md](VALIDATION.md) explains
+hook run with `git commit --no-verify`. The pre-push hook runs `scripts/paperwork`
+(see [PAPERWORK.md](ci/PAPERWORK.md)); the fast lane runs the same script first. [VALIDATION.md](VALIDATION.md) explains
 point selection, evidence, and why the UI “golden” is a reviewed structural
 answer key rather than a screenshot. Pushing a version tag
 (`git tag v0.1.0 && git push --tags`) builds and publishes a multi-arch image
