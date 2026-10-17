@@ -306,7 +306,7 @@ test_anchor = "testApplePlayerFallsBackFromDolbyVisionToHDRBeforeSDR"
 
 [[decisions]]
 id = "apple.buffering-recovery"
-source = "clients/apple/Sources/PlayerController.swift"
+source = "clients/apple/Sources/PlayerControllerSupport.swift"
 source_anchor = "struct PlaybackRecoveryMonitor: Equatable"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testBufferingWaitHasABoundedRecoveryTimer"
