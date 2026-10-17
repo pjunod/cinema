@@ -22,6 +22,7 @@ a document to this folder.
 | [APPLE-RUNNER-FAILOVER.md](APPLE-RUNNER-FAILOVER.md) | The M4 Apple primary, M3 Max standby, outage detection and installation. | live |
 | [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md) · [review](CI_EXECUTION_ACCELERATION_REVIEW.md) | Persistent caches, native packaging, exact sharding. | open |
 | [AGENT-COMPILE-LOOP.md](AGENT-COMPILE-LOOP.md) | A compiler for a checkout that has none. | live |
+| [PAPERWORK.md](PAPERWORK.md) | Which bookkeeping rules run first — on push and as every pull request's first job — and the fix for each. | live |
 | [AI-HARNESS-ASSESSMENT.md](AI-HARNESS-ASSESSMENT.md) | Why agent navigation and dependable feedback should precede new orchestration, and where Ripwire fits. | open |
 | [AI-HARNESS-FABLE-ASSESSMENT.md](AI-HARNESS-FABLE-ASSESSMENT.md) | Fable's assessment: fix the compile loop, test evidence, and prompt drift before navigation tooling; positions on Gemini's and Codex's proposals. | open |
 | [AI-HARNESS-IMPLEMENTATION-PLAN.md](AI-HARNESS-IMPLEMENTATION-PLAN.md) | Ten milestones, in that order, with exact contracts and acceptance checks: agent-check, tests out of the hotspots, prove-fix, fences, guides, swarm/ alignment, status fragments, PR ledger, Ripwire pilot, first extraction. | open |

@@ -6,6 +6,15 @@ first.
 
 <!-- status: insert new efforts below this line -->
 
+## Agent efficiency: smaller searches, a docs router, paperwork first
+
+**Branch `effort/agent-efficiency`, draft pull request; tooling and docs only, nothing to deploy.** Sessions were spending about 50k tokens before their first useful step and learning bookkeeping rules from 15–40 minute CI failures.
+
+- `docs/README.md` is a 10 KB router to one index per subject folder (was 131 KB); this page keeps five efforts and moved the rest to folder histories.
+- A root `.ignore` keeps evidence, archives, vendored and minified files out of searches; `.gitattributes` keeps large JSON out of diffs.
+- `scripts/paperwork` checks the bookkeeping rules in about ten seconds with the fix printed under each failure. It runs from `make paperwork`, the pre-push hook, and as the first job of every pull request (drafts included), and no other job starts until it passes ([PAPERWORK.md](docs/ci/PAPERWORK.md)).
+- `scripts/outline`, `scripts/quiet` and `scripts/ci-failures` keep file reads, build output and CI logs small; AGENTS.md opens with how to work efficiently.
+
 ## Playback startup path: the per-read stall and the web scrim
 
 **Branch `effort/startup-read-path`, in a draft pull request; not deployed.** Two fixes: consistent reads on a cluster no longer wait 40 ms each on a delayed ACK (44.0 ms to 1.7 ms per read on three-voter TLS loopback; a start makes about forty), and the web scrim clears about two frames after playback starts instead of 500 to 1000 ms later. Fleet effect unmeasured. The remaining waits, ranked with owners, are in [PLAYBACK-STARTUP-PATH-FINDINGS.md](docs/streaming/PLAYBACK-STARTUP-PATH-FINDINGS.md); its §5 client waits are unowned.

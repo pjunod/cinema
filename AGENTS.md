@@ -16,7 +16,9 @@ decides what a session costs. Every agent working here, Claude or GPT:
   `--no-ignore-dot` only when you need them.
 - **Outline before you open.** `scripts/outline <file>` (or `--top`) lists
   declarations with line numbers; then read only the range you need. Several
-  source files exceed 10,000 lines — never read one whole.
+  source files exceed 10,000 lines — never read one whole. For symbols,
+  callers and impact, `scripts/ripwire` ([docs/ci/RIPWIRE.md](docs/ci/RIPWIRE.md))
+  is the opt-in navigator.
 - **Docs: read the head, not the body.** A plan or status document's opening
   section says where it stands; read past it only for the part you need.
 - **Keep command output small.** `git diff --stat` before `git diff`,
