@@ -158,6 +158,15 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
+    // Compare the configured root set, delete only admitted files and prune
+    // emptied items within the same authority boundary.
+    SqliteTransactionSite {
+        module: "media.rs",
+        method: "remove_files_outside_library_roots",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
     // Receiver and all grants revoke in the same boundary.
     SqliteTransactionSite {
         module: "remote.rs",

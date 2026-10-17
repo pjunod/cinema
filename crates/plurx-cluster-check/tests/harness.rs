@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use plurx_cluster_check::{
-    allocate_nodes, fixture_node_id, free_port, harness_executable, install_crypto_provider,
+    allocate_nodes, free_port, harness_executable, harness_node_identity, install_crypto_provider,
     is_port_collision, node_config, prove_local_fts_rebuild, prove_local_telemetry_sidecars,
     require_dump_setting, require_quorum_error, run, run_incompatible_preflight,
     start_cluster_with_port_retry, start_cluster_with_port_retry_using, unix_now,
@@ -78,13 +78,27 @@ async fn a_one_voter_bootstrap_and_reopen_retain_local_membership_admission() {
                 .expect("real membership setup"),
             "membership manager must retain the startup admission",
         );
-        assert!(matches!(
+        require_ok(
             cluster
-                .request(1, Request::MembershipStatus)
+                .request(1, Request::ForceHeartbeat)
                 .await
-                .expect("real membership status"),
-            Response::MembershipStatus { .. }
-        ));
+                .expect("target heartbeat"),
+            "publish actual voter storage readiness",
+        );
+        let Response::MembershipStatus { status } = cluster
+            .request(1, Request::MembershipStatus)
+            .await
+            .expect("real membership status")
+        else {
+            panic!("membership status must expose the actual local voter");
+        };
+        assert!(
+            status
+                .nodes
+                .iter()
+                .any(|node| node.raft_id == 1 && node.voter_storage_ready),
+            "the production snapshot preflight must inspect the real harness database: {status:?}"
+        );
     }
     cluster
         .shutdown_all()
@@ -323,7 +337,7 @@ async fn artwork_claims_use_the_installed_owner_and_preserve_rejected_rosters() 
         "INSERT INTO cluster_nodes(node_id,raft_id,raft_address,api_address,last_seen_at,removed_at,role) \
          SELECT 'artwork-peer',99,'127.0.0.1:1','127.0.0.1:2',last_seen_at,NULL,'voter' \
          FROM cluster_nodes WHERE node_id=$1",
-        hiqlite::macros::params!(fixture_node_id(1)),
+        hiqlite::macros::params!(harness_node_identity(1)),
     ).await.expect("seed live namespace claimant without another startup owner");
     let claimed = "http://127.0.0.1:33999".to_owned();
     require_ok(
@@ -633,8 +647,8 @@ async fn a_one_voter_cluster_proves_the_whole_request_protocol() {
         .await
         .expect("no voter exited during the run");
 
-    // A candidate below the ordinary-open baseline is refused; the optional
-    // higher Source marker is not that baseline. Refusal must not touch membership.
+    // A candidate below the supported bootstrap baseline is refused, and
+    // refusing it must not touch raft membership.
     let voters_before = metrics_voters(&mut cluster).await;
     let refused = run_incompatible_preflight(&harness_binary(), &specs)
         .await
@@ -1408,7 +1422,7 @@ fn a_voter_config_lands_in_its_own_data_directory() {
     );
     assert_eq!(config.filename_db, "plurx.db");
 
-    let data_dir = root.path().join("node-2/hiqlite");
+    let data_dir = root.path().join("node-2").join("hiqlite");
     assert!(
         data_dir.is_dir(),
         "the voter's data directory must exist after configuration"

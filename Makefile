@@ -982,12 +982,12 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --lib \
 	  store::sqlite::users::tests::failed_combined_promotion_never_authorizes_the_old_session \
 	  -- --exact
-	$(CARGO) test --locked -p plurx-core \
+	RUST_MIN_STACK=8388608 $(CARGO) test --locked -p plurx-core \
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test store_contract \
 	  clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure \
 	  -- --exact --test-threads=1
-	$(CARGO) test --locked -p plurx-core \
+	RUST_MIN_STACK=8388608 $(CARGO) test --locked -p plurx-core \
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test store_contract \
 	  login_token_insert_requires_the_verified_password_version \
@@ -1063,7 +1063,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --manifest-path "$$OPENRAFT_MANIFEST" --features generic-snapshot-data \
 	  network::snapshot_transport::tests::test_chunked_reset_offset_if_snapshot_id_mismatch \
 	  --lib -- --exact
-	PLURX_EXPECT_TEST_COUNT=10 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	PLURX_EXPECT_TEST_COUNT=13 $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  snapshot_metrics --lib -- --test-threads=1
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -1161,7 +1161,7 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-contracts
 cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=74 scripts/require-test-count $(CARGO) test --locked \
+	PLURX_EXPECT_TEST_COUNT=76 scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery --lib
 	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
 	  transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly \
@@ -1296,7 +1296,7 @@ cluster-daemon-check: ## Run real-daemon activation and activity contracts
 	$(CARGO) test --locked -p plurxd --features cluster-integration-tests \
 	  --test cluster_activation -- --nocapture
 	$(CARGO) test --locked -p plurxd --features cluster-integration-tests \
-	  --test cluster_activity -- --nocapture
+	  --test cluster_activity -- --nocapture --test-threads=1
 
 .PHONY: live-tv-hardware-check
 live-tv-hardware-check: ## Accept Live TV against a real HDHomeRun (set DEVICE=<tuner ipv4>, optional TUNERS=n)

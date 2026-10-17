@@ -7231,24 +7231,23 @@ impl MembershipManager {
         &self,
         original: Option<&StartupActivationAdmission>,
     ) -> Result<(), MembershipError> {
-        let inner = self.replicated_inner()?;
-        self.publish_http_url_claim_admitted(&inner.artwork_http, original)
+        let artwork_http = self.replicated_inner()?.artwork_http.clone();
+        self.publish_http_url_value_admitted(&artwork_http, original)
             .await
     }
 
-    /// Exercise real URL ownership with the installed manager, without
-    /// constructing another removal owner. Absent from production builds.
+    /// Exercise the production URL claim with this manager's admitted identity.
     #[cfg(feature = "cluster-validation")]
     #[doc(hidden)]
-    pub async fn validation_publish_http_url(
+    pub async fn validation_publish_artwork_url(
         &self,
         artwork_http: &str,
     ) -> Result<(), MembershipError> {
-        self.publish_http_url_claim_admitted(artwork_http, None)
+        self.publish_http_url_value_admitted(artwork_http, None)
             .await
     }
 
-    async fn publish_http_url_claim_admitted(
+    async fn publish_http_url_value_admitted(
         &self,
         artwork_http: &str,
         original: Option<&StartupActivationAdmission>,

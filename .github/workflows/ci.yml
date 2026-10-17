@@ -266,7 +266,7 @@ jobs:
     # The full unit and SQLite suite continues below; contributors may merge
     # after this compile gate and policy pass, then watch that suite on main.
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     # Full run 5274 exhausted twenty minutes during all-target checking.
     # Match the current bounded effort allowance; keep the same command and
     # one Cargo job. A fresh complete run must prove this margin sufficient.
@@ -317,6 +317,8 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    # Run 5228 exhausted 30m after compilation and 1917 unit result rows,
+    # before the full unit/SQLite receipt. Keep the entire suite and a finite cap.
     timeout-minutes: 90
     env:
       CARGO_BUILD_JOBS: "1"
@@ -415,6 +417,8 @@ jobs:
       needs.scope.outputs.cluster_auth == 'true' &&
       needs.scope.outputs.execution_mode != 'accelerated'
     runs-on: [self-hosted, Linux, X64, lab, ci-store]
+    # Run 5228 completed 188 of 367 serial controls before the 40m cutoff.
+    # Preserve the full inventory with a finite budget for its measured runtime.
     timeout-minutes: 120
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -938,8 +942,10 @@ jobs:
     name: replicated WAL recovery contracts
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "1"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

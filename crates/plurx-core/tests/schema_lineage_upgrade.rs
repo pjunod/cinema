@@ -4,7 +4,7 @@
 use futures_util::FutureExt;
 use hiqlite::{params, Client, Node, NodeConfig, Row};
 use plurx_core::store::{
-    HiqliteAuthStore, SqliteStore, AUTH_SCHEMA_VERSION, SQLITE_SCHEMA_VERSION,
+    HiqliteAuthStore, SqliteStore, AUTH_SCHEMA_BASELINE_VERSION, SQLITE_SCHEMA_VERSION,
 };
 use rusqlite::Connection;
 use std::{
@@ -115,7 +115,14 @@ async fn coherent_advance(
         .validation_coherent_lineage_snapshot()
         .await
         .expect("recognized coherent successor");
-    assert_eq!(successor.0, if private { AUTH_SCHEMA_VERSION } else { 70 });
+    assert_eq!(
+        successor.0,
+        if private {
+            AUTH_SCHEMA_BASELINE_VERSION
+        } else {
+            70
+        }
+    );
     assert_ne!(
         successor.1, predecessor.1,
         "committed schema actually advanced"
@@ -278,6 +285,68 @@ fn sqlite_cases(root: &Path) {
     }
 }
 
+/// Remove only empty later sharing objects from a disposable Local baseline.
+/// Source activation or real sharing data cannot be reinterpreted as an old
+/// DV lineage. Production's ambiguous-lineage refusal remains unchanged.
+async fn rewind_empty_baseline_sharing(client: &Client) {
+    assert_eq!(
+        value(
+            client,
+            "SELECT CAST(schema_version AS TEXT) AS value FROM cluster_meta"
+        )
+        .await,
+        AUTH_SCHEMA_BASELINE_VERSION.to_string()
+    );
+    assert_unactivated_source(client).await;
+    let tables = [
+        include_str!("../src/store/sharing_schema.sql"),
+        include_str!("../src/store/sharing_ingress_custody_schema.sql"),
+    ]
+    .into_iter()
+    .flat_map(str::lines)
+    .filter_map(|line| line.strip_prefix("CREATE TABLE "))
+    .map(|line| {
+        line.split_whitespace()
+            .next()
+            .expect("declared sharing table")
+    })
+    .collect::<Vec<_>>();
+    assert!(!tables.is_empty());
+    for table in &tables {
+        assert!(table.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+        let rows = client
+            .query_consistent_map::<Value, _>(
+                format!("SELECT CAST(count(*) AS TEXT) AS value FROM {table}"),
+                params!(),
+            )
+            .await
+            .expect("disposable sharing rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].0, "0",
+            "populated sharing table {table} cannot be rewound"
+        );
+    }
+    client
+        .txn(
+            tables
+                .into_iter()
+                .rev()
+                .map(|table| (format!("DROP TABLE {table}"), params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("atomic empty sharing rewind")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all sharing rewind statements");
+}
+async fn assert_unactivated_source(client: &Client) {
+    assert_eq!(value(client,
+        "SELECT CAST((SELECT count(*) FROM sqlite_master WHERE name='sharing_source_schema_installation') + (SELECT count(*) FROM pragma_table_info('media_sessions') WHERE name='principal_kind') AS TEXT) AS value"
+    ).await, "0", "ordinary lineage migration does not install Source");
+}
+
 async fn hiqlite_case(
     root: &Path,
     marker: i64,
@@ -317,6 +386,7 @@ async fn hiqlite_case(
         tokio::time::timeout(Duration::from_secs(60), Box::pin(async {
         let telemetry = root.join("telemetry.db");
         let store = Box::pin(HiqliteAuthStore::bootstrap(client.clone(), "11111111-1111-4111-8111-111111111073", &telemetry)).await.expect("new synthetic source bootstrap");
+        rewind_empty_baseline_sharing(&client).await;
         store.validation_set_schema_lineage(marker, private, omission).await.expect("explicit old source shape");
         write(&client, SENTINEL).await;
         write(&client, USER).await;
@@ -343,7 +413,8 @@ async fn hiqlite_case(
         }
         drop(store);
         let store = Box::pin(HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)).await.expect("actual replicated lineage upgrade");
-        assert_eq!(value(&client, "SELECT CAST(schema_version AS TEXT) AS value FROM cluster_meta").await, AUTH_SCHEMA_VERSION.to_string());
+        assert_eq!(value(&client, "SELECT CAST(schema_version AS TEXT) AS value FROM cluster_meta").await, AUTH_SCHEMA_BASELINE_VERSION.to_string());
+        assert_unactivated_source(&client).await;
         assert_eq!(value(&client, PAYLOAD).await, "synthetic opaque payload");
         assert_eq!(value(&client, JOB_VALUE).await, expected_job);
         if let Some(expected) = expected_package { assert_eq!(value(&client, PACKAGE_VALUE).await, expected); }

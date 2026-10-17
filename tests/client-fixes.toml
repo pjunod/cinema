@@ -6848,6 +6848,14 @@ source_anchor = 'Section("Recent safe events")'
 test = "clients/apple/UITests/DiagnosticReportingTests.swift"
 test_anchor = "testTVZIPDownloadsSelectedIncidentAndCloseRevokesNewLink"
 
+# F5 attached VOD facts: frozen rendition metadata, separate from source/display.
+[[fixes]]
+id = "web.vod-attached-output-facts"
+commits = ["be22abfc847809fb017b1ce3744c3cee474f6d6a"]
+source = "crates/plurxd/src/web/player/stats.js"
+source_anchor = "const stream=statsStreamFormat(p);"
+test = "tests/playback/web-policy.test.js"
+test_anchor = "attached cached output reports its frozen frame and Metal renderer"
 
 [[fixes]]
 id = "cluster.relay-proof-positional-parameter-order"
@@ -6928,7 +6936,7 @@ id = "https.apple-subtitle-failure-fixture-holds-complete-readiness-batch"
 commits = []
 supplements = "https.qualification-client-corrections"
 source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
-source_anchor = "let staleCallbacks = callbacks.takeAll()"
+source_anchor = "while let callback = callbacks.take() { queued.append(callback) }"
 test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
 test_anchor = "testQueuedSubtitleFailureIsDeliveredOnlyToItsCurrentIntent"
 
@@ -6937,6 +6945,31 @@ id = "https.apple-subtitle-ready-fixture-holds-complete-readiness-batch"
 commits = []
 supplements = "https.qualification-client-corrections"
 source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
-source_anchor = "let staleCallbacks = callbacks.takeAll()"
+source_anchor = "while let callback = callbacks.take() { queued.append(callback) }"
 test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
 test_anchor = "testQueuedSubtitleReadinessIsDeliveredForItsCurrentSession"
+[[fixes]]
+id = "android.diagnostics-preserves-shared-transport-order"
+commits = ["5a918f7192a95cbbd958ad764717a901ebf2435b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
+source_anchor = "reporting follows them without intercepting D-pad steps."
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlayerControlsFocusTest.kt"
+test_anchor = "fun transportOptionsFollowTheSharedContractOrder()"
+
+# HDR qualification source identities; existing release contracts validate both counters.
+[[fixes]]
+id = "mobile.hdr-qualification-release-counters"
+commits = ["740d6ac4bed63b0e5c0d5986a4e4eb87463ec983"]
+source = "clients/apple/project.yml"
+source_anchor = "CURRENT_PROJECT_VERSION:"
+test = "tests/validation/test_mobile_versions.py"
+test_anchor = "test_apple_counter_the_target_already_ships_fails_against_the_target"
+
+[[fixes]]
+id = "android.hdr-qualification-release-counter"
+commits = []
+supplements = "mobile.hdr-qualification-release-counters"
+source = "clients/android/app/build.gradle.kts"
+source_anchor = "versionCode ="
+test = "tests/validation/test_mobile_versions.py"
+test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"

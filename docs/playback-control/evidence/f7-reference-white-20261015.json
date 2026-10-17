@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-15",
+  "scope": "F7 Hable reference-white repair; neither artist-grade nor physical-display closure",
+  "state": "source implementation and limited native proof; integrated qualification, shipping package and Air acceptance pending",
+  "source_base": "8d1e4ea7f926098f4cee2d2ed05347649ae525dc",
+  "pinned_jellyfin_commit": "253db2a7b0a8045c54ce68ce33d7f601229b1822",
+  "root_cause": "CPU Hable normalizes PQ nits by100; pinned Metal normalizes by203. Hable is nonlinear, so matching peak units alone leaves darker output. Normalize BOTH signal and peak by203/reference_white inside Hable.",
+  "production_contract": {
+    "CPU": "unchanged100-nit reference",
+    "Metal_PQ": "reference_white=100; explicitpeak still nits/10",
+    "Metal_HLG": "unchangedBT2390/ITP; no new option requested",
+    "other_GPU": "unchanged",
+    "default_native_option": "203 nits, preserving prior behavior",
+    "native_option_bounds_nits": [
+      1,
+      10000
+    ],
+    "old_package": "required option absent -> explicitly unavailable, no Metal parity; CPU fallback remains controlled by existing resolver"
+  },
+  "independent_prototype_review": {
+    "reviewer": "Astra",
+    "result": "approve bounded prototype; no shipping/integration approval",
+    "build_or_media_execution_by_reviewer": false
+  },
+  "raw_neutral": {
+    "baseline_mae_y": 10.229507446289062,
+    "corrected_mae_y": 0.3560638427734375,
+    "default203_byte_identical": true,
+    "invalid_options_refused": [
+      0,
+      10001
+    ]
+  },
+  "encoded_neutral": {
+    "cpu100": {
+      "frames": 8,
+      "mean_yuv": [
+        117.03067398071289,
+        128.0,
+        128.0
+      ],
+      "max_channel_mean_delta": null,
+      "sha256": "3c66b9c3777c1aae02553d90579437f4c22bc078d2bea30a49069c1350d2490e",
+      "tags": "BT709 transfer/primaries/matrix verified"
+    },
+    "metal203": {
+      "frames": 8,
+      "mean_yuv": [
+        106.78165435791016,
+        128.1636962890625,
+        128.30670166015625
+      ],
+      "max_channel_mean_delta": 10.249019622802734,
+      "sha256": "731f06aa406ffe555870bb4815325b4ef697a0b6848af79177785e6dd028ca3c",
+      "tags": "BT709 transfer/primaries/matrix verified"
+    },
+    "metal100": {
+      "frames": 8,
+      "mean_yuv": [
+        116.90002250671387,
+        128.20263671875,
+        128.32269287109375
+      ],
+      "max_channel_mean_delta": 0.32269287109375,
+      "sha256": "a09237e31dfecb76b4402b3043323edd07a364b9721814a38fa60485f31ea048",
+      "tags": "BT709 transfer/primaries/matrix verified"
+    }
+  },
+  "probe_limits": {
+    "broad_motion_mean_channel_levels": 24,
+    "separate_neutral_peak_and_white_mean_channel_levels": 2,
+    "timing": "neutral correctness never contributes to4K motion encode speed"
+  },
+  "nine_held_film_frames": {
+    "design": "common lossless1080pPQ frame held across CPU100/CPU203/Metal203/Metal100; neither production scale-order nor artistic grade qualification",
+    "timestamps_seconds": [
+      300,
+      900,
+      1800
+    ],
+    "original_cpu100_vs_metal203_pooled_mae_y": 5.079936396176269,
+    "corrected_cpu100_vs_metal100_pooled_mae_y": 0.19134768304183813,
+    "improved_cases": 9,
+    "cases": [
+      {
+        "source_id": 158,
+        "seconds": 300,
+        "captured_source_sha256": "7e47c982e77ae63e723cab06971f75f62b420984947bb044fa3be5491529c302",
+        "old_mae_y": 4.79471981095679,
+        "corrected_mae_y": 0.16315055941358025,
+        "max_y_delta": 22
+      },
+      {
+        "source_id": 158,
+        "seconds": 900,
+        "captured_source_sha256": "69b272af464e1f56ef1e6f21c59b1cd59702f86bcba0b520735c8df6dbb52615",
+        "old_mae_y": 8.840136477623457,
+        "corrected_mae_y": 0.16447675540123458,
+        "max_y_delta": 18
+      },
+      {
+        "source_id": 158,
+        "seconds": 1800,
+        "captured_source_sha256": "12e213c9959fefd2a0bc3f8e38a98fd3280feeb4552fc186a851a013e1761ba3",
+        "old_mae_y": 6.3031876929012345,
+        "corrected_mae_y": 0.20597077546296297,
+        "max_y_delta": 35
+      },
+      {
+        "source_id": 327,
+        "seconds": 300,
+        "captured_source_sha256": "a31685555062b7ac05057d55ef343f4281352e12a3b1a14216c6c918e78087ca",
+        "old_mae_y": 3.1692920524691357,
+        "corrected_mae_y": 0.18088252314814815,
+        "max_y_delta": 40
+      },
+      {
+        "source_id": 327,
+        "seconds": 900,
+        "captured_source_sha256": "adf90bb930891238189f31e9dd69ea19c5ea402a3809727832143985fd3f2822",
+        "old_mae_y": 4.144244309413581,
+        "corrected_mae_y": 0.2531028163580247,
+        "max_y_delta": 36
+      },
+      {
+        "source_id": 327,
+        "seconds": 1800,
+        "captured_source_sha256": "28a24ab89081a6aec498612c109e71710716b8d13b659900d206ec01fb38a298",
+        "old_mae_y": 3.2413826195987654,
+        "corrected_mae_y": 0.1676340663580247,
+        "max_y_delta": 11
+      },
+      {
+        "source_id": 15,
+        "seconds": 300,
+        "captured_source_sha256": "c3faca0fa601408cee2a009fc119ae82e7c57f602d5bcef8e99614da7687b621",
+        "old_mae_y": 5.158719618055556,
+        "corrected_mae_y": 0.19315731095679012,
+        "max_y_delta": 2
+      },
+      {
+        "source_id": 15,
+        "seconds": 900,
+        "captured_source_sha256": "b6ff336330283565932f2860f5178f3f14b7e0c84efd98ddbb861ab80fd2b250",
+        "old_mae_y": 3.963550347222222,
+        "corrected_mae_y": 0.1915750385802469,
+        "max_y_delta": 1
+      },
+      {
+        "source_id": 15,
+        "seconds": 1800,
+        "captured_source_sha256": "0e0d88918fcab35f70b8a19f34c3869353649a8ac71a206b18ca568b3e553200",
+        "old_mae_y": 6.104194637345679,
+        "corrected_mae_y": 0.20217930169753087,
+        "max_y_delta": 9
+      }
+    ]
+  },
+  "HLG_control": {
+    "input": "authored10bitHLGneutralcode-ramp, decoded arib-std-b67 metadata verified; not a relabeledPQsource",
+    "operator": "BT2390/ITP",
+    "baseline_default_candidate_default_candidate100": "byteidentical"
+  },
+  "private_archive": {
+    "name": "f7-reference-white-proof-20261015.zip",
+    "id": 93,
+    "uuid": "90ca71eb-0a06-4949-8295-8730c56b8b3a",
+    "bytes": 73201433,
+    "sha256": "e67aedbc93c9fe24e11e9bc3281c381ecbc0d3d72fec24afd0b43a758d6c28e4",
+    "independent_download_verified": true,
+    "attachment_role": "F7reference-whitefollow-up on original neutral-guard effort; limited proof not shipping"
+  },
+  "limits": [
+    "Limited private native executables were never installed and are not shipping packages",
+    "No independently calibrated display or independent artistic SDR grade was available",
+    "Low aggregate error does not promise pixel identity; retain every raw frame and local maximum",
+    "Full-featured corresponding-source package, matching parser, current-tree gates and physical Air playback remain required"
+  ],
+  "restoration": "No live package/preferences/clipboard changed for these controls; isolated movie trials restored resume0 and their daemon stopped; temporary Metal toolchain removed."
+}

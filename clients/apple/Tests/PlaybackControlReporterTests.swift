@@ -1737,8 +1737,9 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
             .deletingLastPathComponent().appendingPathComponent("Sources/PlayerController.swift")
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
         func body(_ start: String, until end: String) throws -> String {
-            let lower = try XCTUnwrap(source.range(of: start))
-            let upper = try XCTUnwrap(source.range(of: end, range: lower.upperBound..<source.endIndex))
+            let lower = try XCTUnwrap(source.range(of: start), "Missing source boundary: \(start)")
+            let upper = try XCTUnwrap(source.range(of: end, range: lower.upperBound..<source.endIndex),
+                                      "Missing source boundary after \(start): \(end)")
             return String(source[lower.upperBound..<upper.lowerBound])
         }
         // Every stall recovery (hold, downgrade, reopen) ends the armed re-plan
@@ -1754,7 +1755,10 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertTrue(candidate.contains("(autoBlockedUntil[$0.id] ?? 0) <= now"))
         // The tick asks for the candidate inside take, so only a produced
         // candidate spends the boundary.
+        // The tick accepts pressure-only evaluations as well as ordinary ticks;
+        // locate the function independently of its parameter spelling.
         let tick = try body("private func tickDisplayAwareAuto(", until: "let link: Double? = {")
+        XCTAssertTrue(tick.contains("if !pressureOnly, let chosen = autoBoundaryReplan.take("))
         XCTAssertTrue(tick.contains("produce: { autoOriginalBoundaryCandidate(now: now) }"))
         // A viewer quality change bumps the viewer action the re-plan fence reads.
         let quality = try body("func selectQuality(_ height: Int?) {", until: "selectedHeight = height")

@@ -1614,8 +1614,8 @@ mod tests {
             "ADD COLUMN last_revision",
             "CREATE TRIGGER invitation_phone_rebind",
             "CREATE TRIGGER invitation_cleanup_guard",
-            // v111: both fixtures call remove_common_queue_schema, which
-            // first rewinds the complete empty managed-subtitle extension.
+            // v111: the shared guarded rewind removes the exact empty managed
+            // extension and restores its predecessor resource view before replay.
             "CREATE TABLE subtitle_managed_schema",
         ];
 

@@ -786,7 +786,8 @@ final class LiveTvTests: XCTestCase {
     func testEveryDeveloperCardThatStaysSaysWhatItWaitsOn() throws {
         let developer = try Self.appleSource("LiveTvDeveloperView.swift")
         XCTAssertEqual(LiveTvSettingsPlacement.developer,
-                       ["Remote diagnostics · advisory readiness", "Cinema remotes · advisory enablement", "Screen invitations · advisory readiness"])
+                       ["Remote diagnostics · advisory readiness", "Cinema remotes · advisory enablement",
+                        "Screen invitations · advisory readiness"])
         for title in LiveTvSettingsPlacement.developer {
             XCTAssertTrue(developer.contains("Section(\"\(title)\")"), title)
         }

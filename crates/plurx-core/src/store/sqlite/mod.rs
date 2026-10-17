@@ -3440,8 +3440,8 @@ mod tests {
         // references, and manual-edit watch revisions; v102 adds quality
         // cancellation and v103 continuous dependencies; v104–v105 add sharing
         // authority and outer-ingress custody; v106-v110 append Cinema receiver
-        // credentials, consent, revision fencing, login rebind and cleanup guards;
-        // v111 appends managed subtitle jobs and model reservations.
+        // credentials, consent, revision fencing, login rebind and cleanup guards.
+        // v111 appends the independently versioned managed subtitle extension.
         assert_eq!(
             version, 111,
             "a new migration must be a deliberate bump, not a surprise — \

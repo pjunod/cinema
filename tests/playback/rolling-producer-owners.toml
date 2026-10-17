@@ -2,6 +2,22 @@
 # managed-subtitle deltas; preserve all HTTPS and prior main attributions.
 # Namespaced spawns 960 + 13 = 973; timers 1773 + 11 + 1 = 1785;
 # launch-shaped methods 760 + 7 = 767. Scope/patterns/equality stay exact.
+# Merge of main 89d790d2e (HDR playback follow-ups, PR #1125) into the HTTPS
+# effort: the F5/F6 deltas below compose with the HTTPS deltas above.
+# Namespaced spawns 973 + 1 = 974; timers 1785 + 5 = 1790; launch-shaped
+# methods 767 + 4 = 771; method-spawn 70 + 1 = 71 (HTTPS JoinSet owner plus
+# the F6 fence-loop task); UFCS lifecycle 327 + 1 = 328 (HTTPS Barrier::wait
+# plus the F6 try_wait observation). Scope/patterns/equality stay exact.
+# F6 controlled real-media qualification: +1 awaited fence-loop task;
+# +3 awaited sleeps (bounded segment polling, 2468ms loss, stable grace);
+# +2 bounded timeouts for segment observation and independent decode.
+# +2 Command/kill-on-drop/launch sites are the 30s realtime publisher and
+# deadline-bound independent decoder. The publisher is AttemptChild-owned,
+# retired and reaped by the actual manager after sustained authority loss;
+# the decoder output is awaited and kill-on-drop covers its deadline.
+# +1 lifecycle observation is try_wait, proving the negative control starts
+# with a live publisher rather than one that naturally reached its30s EOF.
+# All additions are test-only in transcode/tests/chunk_06.rs.
 # Integrated census: main 5b8f8fe78 plus managed subtitle owners from 75bc459b.
 # Reviewed independent deltas compose: spawn 960, timers 1773, constructors 272,
 # launch-shaped methods 760, UFCS lifecycle 67 and kill-on-drop 104.
@@ -500,7 +516,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # kill_on_drop and registered through output_job_owned. A panic is caught and
 # answers Inconclusive; the verdict and the flight-slot removal are one locked
 # step, so the task always ends its flight and settles every waiter.
-expected_occurrences = 115
+expected_occurrences = 116
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
@@ -637,7 +653,7 @@ also_in = ["crates/plurxd/src/transcode"]
 # branch polls every 50 ms, inside a 30 s `tokio::time::timeout`, for the
 # session's first served snapshot before its playlist request. Test-only; it
 # owns no producer and decides nothing.
-expected_occurrences = 77
+expected_occurrences = 80
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
@@ -3020,7 +3036,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # process launch. +1 cancellation regression waiter is aborted and awaited;
 # the test then acquires the worker-held guard to observe completed file work
 # and adoption before temporary directory teardown.
-expected_occurrences = 973
+expected_occurrences = 974
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3254,7 +3270,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # completion cancels daemon shutdown and returns Err; normal stop joins the
 # task before progress/census flush. Dropping the owner aborts the JoinSet.
 # Handshakes are owned futures in a capped queue, never detached tasks.
-expected_occurrences = 70
+# F6 (main #1125): +1 awaited fence-loop task in transcode/tests/chunk_06.rs.
+# Both deltas compose: 69 + 1 + 1 = 71.
+expected_occurrences = 71
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4663,7 +4681,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # existing real capture and its snapshot-corruption observer. tokio::join!
 # owns both futures inside this test; timeout drops the capture/owned root
 # guard and observer together. No task, process or production timer is added.
-expected_occurrences = 1785
+expected_occurrences = 1790
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5107,7 +5125,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # production-copy fixture collection. Each runs finite owned media to
 # completion synchronously before its fixture is released. No task or timer
 # constructor is added; existing probe collector bounds remain unchanged.
-expected_occurrences = 272
+expected_occurrences = 274
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5735,7 +5753,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # HTTPS H3: +3 status reads, not launches: sanitized JsonRejection's body
 # limit classification and two HTTP certificate/fenced-response assertions.
 # No OS process, producer or child-reaping obligation is added.
-expected_occurrences = 767
+# F5: +2 `VodServe::status()` calls in the frozen-output reporting tests.
+# Both read the attached rendition in process; neither starts an OS child,
+# spawns a task, or acquires a producer lease.
+expected_occurrences = 771
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6017,7 +6038,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # HTTPS H1 adds one Barrier::wait site coordinating the six joined test
 # threads racing managed identity creation. This is in-process synchronization,
 # not an OS child wait; no process start, kill, or reap ownership is added.
-expected_occurrences = 327
+# F6 (main #1125): +1 test-only try_wait observation in transcode/tests/chunk_06.rs
+# proving the negative control starts with a live publisher.
+# Both deltas compose: 326 + 1 + 1 = 328.
+expected_occurrences = 328
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6225,7 +6249,7 @@ pattern = "kill_on_drop\\s*\\("
 # No repair delta; preserve current main's already reconciled fixture owners.
 # Acceptance root-cause batch: +2 unwind guards on the same two test-only
 # sleep producers; normal settlement is Step::Terminate's confirmed reap.
-expected_occurrences = 104
+expected_occurrences = 106
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

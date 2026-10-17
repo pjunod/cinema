@@ -435,6 +435,83 @@ mod tests {
         assert!(evaluate(&conn, &predecessor_guard(1)));
     }
     #[test]
+    fn sharing_source_schema_accepts_published_session_upgrades_and_refuses_substitution() {
+        fn upgraded(published: &str, add_drain: bool, substitute: bool) -> Connection {
+            let conn = database();
+            conn.execute_batch("DROP TRIGGER jellyfin_watch_own_insert; DROP TRIGGER jellyfin_watch_own_update; DROP TABLE media_sessions")
+                .expect("replace empty session family");
+            let ddl = if substitute {
+                published.replace("CHECK (owner_epoch > 0)", "CHECK (owner_epoch >= 0)")
+            } else {
+                published.to_owned()
+            };
+            conn.execute_batch(&ddl)
+                .expect("published fresh declaration");
+            if add_drain {
+                conn.execute_batch(super::super::MEDIA_SESSION_DRAIN_DEADLINE_COLUMN)
+                    .expect("actual additive drain deadline migration");
+            }
+            conn.execute_batch("INSERT INTO media_sessions(incarnation_id,session_id,user_id,playback_id,request_fingerprint,owner_node_id,owner_epoch,lease_expires_at_ms,state,terminal_reason,publication_ready_at_ms,recipe_json,response_json,updated_at_ms,drain_deadline_ms) VALUES('historical-session','historical-physical-id',7,'historical-playback','historical-fingerprint','historical-node',1,0,'ended','admin_stop',0,'{}','{}',42,123)")
+                .expect("real predecessor row");
+            conn.execute_batch(super::super::MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA)
+                .expect("actual additive recovery epoch migration");
+            let row: (String, String, i64, i64, i64) = conn.query_row(
+                "SELECT recovery_epoch,terminal_reason,publication_ready_at_ms,updated_at_ms,drain_deadline_ms FROM media_sessions WHERE incarnation_id='historical-session'",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            ).expect("additive default and unchanged historical fields");
+            assert_eq!(row, ("".into(), "admin_stop".into(), 0, 42, 123));
+            type Object = (String, String, String, Vec<Option<String>>);
+            let objects: Vec<Object> =
+                serde_json::from_str(include_str!("sharing_source_legacy_schema.json"))
+                    .expect("closed predecessor inventory");
+            for (kind, _, table, variants) in objects {
+                if table == "media_sessions" && kind != "table" {
+                    if let Some(sql) = variants.first().and_then(Option::as_ref) {
+                        conn.execute_batch(sql)
+                            .expect("restore exact index and trigger");
+                    }
+                }
+            }
+            for (_, sql) in super::super::jellyfin_watch::session_dependency_triggers() {
+                conn.execute_batch(sql)
+                    .expect("restore exact external dependency");
+            }
+            conn
+        }
+        let guard = predecessor_layout_guard();
+        for (published, add_drain) in [
+            (
+                include_str!("../../tests/fixtures/media-sessions-v31.sql"),
+                false,
+            ),
+            (
+                include_str!("../../tests/fixtures/media-sessions-v18.sql"),
+                true,
+            ),
+        ] {
+            let conn = upgraded(published, add_drain, false);
+            assert!(
+                evaluate(&conn, &guard),
+                "published upgrade layout is recognized exactly"
+            );
+            assert!(
+                evaluate(&conn, &predecessor_guard(1)),
+                "ended historical ownership is drained"
+            );
+            conn.execute_batch("CREATE INDEX unmodeled_v31_index ON media_sessions(playback_id)")
+                .expect("unknown historical index");
+            assert!(
+                !evaluate(&conn, &guard),
+                "additional objects remain refused"
+            );
+            let conn = upgraded(published, add_drain, true);
+            assert!(
+                !evaluate(&conn, &guard),
+                "altered owner constraint remains refused"
+            );
+        }
+    }
+    #[test]
     fn sharing_source_schema_accepts_replicated_pointer_additive_upgrade() {
         let conn = database();
         conn.execute_batch("DROP TABLE media_playback_pointers")

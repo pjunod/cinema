@@ -220,19 +220,23 @@ fn with_synthetic_watch_dispatch() -> Vec<(&'static str, String)> {
 
 // Exercise unexplained growth against the measured fixture baseline even
 // when production removals leave headroom under the historical ceiling.
-fn fixture_unannotated_ceiling() -> usize {
-    STORE_SOURCES
-        .iter()
-        .flat_map(|(_, source)| sites(source))
-        .filter(|annotated| !annotated)
-        .count()
-}
-
 fn raised(name: &str) -> Vec<(&'static str, usize)> {
     CONSISTENT_READ_SITES
         .iter()
         .map(|(entry, count)| (*entry, count + usize::from(*entry == name)))
         .collect()
+}
+
+// Synthetic controls need a saturated test ceiling even when production gains
+// justified reads or removes old sites. The historical production ceiling stays
+// unchanged; the fixture cannot silently borrow its unused headroom.
+fn saturated_fixture_ceiling() -> usize {
+    let current = STORE_SOURCES
+        .iter()
+        .map(|(_, source)| sites(source).into_iter().filter(|reason| !reason).count())
+        .sum();
+    assert!(current <= UNANNOTATED_CEILING);
+    current
 }
 
 #[test]
@@ -241,7 +245,7 @@ fn consistent_read_census_refuses_a_synthetic_extra_read_in_a_fixture_copy() {
     let failure = census(
         &borrowed(&fixture),
         CONSISTENT_READ_SITES,
-        fixture_unannotated_ceiling(),
+        saturated_fixture_ceiling(),
     )
     .expect_err("an unpinned extra consistent read must fail the census");
     assert!(failure.contains("hiqlite_reading.rs: 3 consistent-read sites, table pins 2"));
@@ -251,7 +255,7 @@ fn consistent_read_census_refuses_a_synthetic_extra_read_in_a_fixture_copy() {
     let failure = census(
         &borrowed(&fixture),
         &raised("hiqlite_reading.rs"),
-        fixture_unannotated_ceiling(),
+        saturated_fixture_ceiling(),
     )
     .expect_err("an unexplained new consistent read must fail the census");
     assert!(failure.contains("carry no `// authority: <reason>` comment"));
@@ -277,7 +281,7 @@ fn consistent_read_census_refuses_a_new_authority_read_through_a_dispatch_helper
     let failure = census(
         &borrowed(&fixture),
         CONSISTENT_READ_SITES,
-        fixture_unannotated_ceiling(),
+        saturated_fixture_ceiling(),
     )
     .expect_err("a new Authority watch read must fail the census");
     assert!(
@@ -307,7 +311,7 @@ fn consistent_read_census_admits_a_raised_entry_with_an_authority_reason() {
     census(
         &borrowed(&fixture),
         &raised("hiqlite_reading.rs"),
-        fixture_unannotated_ceiling(),
+        saturated_fixture_ceiling(),
     )
     .unwrap_or_else(|failures| panic!("an explained, pinned read is admitted:\n{failures}"));
 
@@ -316,7 +320,7 @@ fn consistent_read_census_admits_a_raised_entry_with_an_authority_reason() {
     census(
         &borrowed(&fixture),
         &raised("hiqlite_reading.rs"),
-        fixture_unannotated_ceiling(),
+        saturated_fixture_ceiling(),
     )
     .expect_err("an empty authority reason must not admit the read");
 }

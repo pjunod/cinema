@@ -2587,13 +2587,14 @@
     },
     "fc": {
       "kind": "git",
-      "url": "https://codeload.github.com/fontconfig/fontconfig/legacy.tar.gz/6d0a98982ec351c165c9224c8b7dbdfca3010e47",
+      "archive_provider": "git-archive",
+      "url": "https://chromium.googlesource.com/external/fontconfig",
       "ref": "2.17.1",
       "commit": "6d0a98982ec351c165c9224c8b7dbdfca3010e47",
-      "archive": "fc-canonical-6d0a98982ec351c165c9224c8b7dbdfca3010e47.tar.gz",
-      "archive_sha256": "e677cb8c8062e1b51878b491edaba35aa00566634099eb66fc18e2ecafd8d650",
+      "archive": "fc-6d0a98982ec351c165c9224c8b7dbdfca3010e47.tar.gz",
+      "archive_sha256": "00a589ef0a455d9cf3db55a13e1aa15090a96e65b18a3fe89c182b7be277576d",
       "license_members": [
-        "fontconfig-fontconfig-6d0a989/COPYING"
+        "COPYING"
       ],
       "configure_flags": [
         "--enable-libfontconfig"
@@ -2604,7 +2605,7 @@
       },
       "files": {},
       "generator": {
-        "source_root": "fontconfig-fontconfig-6d0a989",
+        "source_root": ".",
         "commands": [
           {
             "cwd": "build",
@@ -2645,14 +2646,7 @@
           "iconv"
         ]
       },
-      "archive_origin": "observed public upstream mirror archive at identical pinned commit; complete normalized source-tree equivalence verified",
-      "source_tree_sha256": "6edd985143c1d5a8b8800bc0096522e925a11eb819e92f74f64348194a33bf5b",
-      "historical_archive_equivalence": {
-        "archive_sha256": "00a589ef0a455d9cf3db55a13e1aa15090a96e65b18a3fe89c182b7be277576d",
-        "normalized_tree_sha256": "6edd985143c1d5a8b8800bc0096522e925a11eb819e92f74f64348194a33bf5b",
-        "comparison": "regularbytes+executablebit and symlinktarget; striprootprefix; ignore compression/order/mtime/uid/groupwrite metadata",
-        "files": 618
-      }
+      "archive_origin": "accepted exact upstream Git source offer"
     },
     "fribidi": {
       "kind": "git",

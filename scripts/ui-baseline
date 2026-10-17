@@ -545,7 +545,7 @@ def free_ports(preferred, count):
 
     Holding every socket until the set is complete prevents a concurrent
     Forgejo job (or the kernel's ephemeral allocator) from handing the same
-    port back for the daemon's HTTP, Raft, cluster API, and Jellyfin listeners.
+    port back for the daemon's HTTP, Raft, cluster API and Jellyfin listeners.
     """
     reservations = []
     try:
@@ -693,7 +693,8 @@ class SelfHost:
             # operator who exported it in their own shell would otherwise abort
             # every boot here — including the capture boot, which must activate.
             env={**os.environ, "PLURX_LOG": "info", "TZ": "UTC",
-                 ACTIVATION_FAILPOINT_ENV: ""},
+                 ACTIVATION_FAILPOINT_ENV: "",
+                 "PLURX_JELLYFIN_PORT": str(self.jellyfin_port)},
         )
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -752,6 +753,7 @@ class SelfHost:
         probe_log_offset = self.log.stat().st_size
         self.spawn()
         self.wait_for_caption_probe(probe_log_offset)
+        self.require_jellyfin_listener()
         self.discover()
 
     def wait_for_caption_probe(self, log_offset):
@@ -784,6 +786,17 @@ class SelfHost:
                     return
             time.sleep(0.2)
         raise Fail(f"fixture caption probe did not settle within 120s; see {self.log}")
+
+    def require_jellyfin_listener(self):
+        """The fixture reserved a Jellyfin port; readiness must show it bound."""
+        readiness = api(self.base_url, "/developer/readiness", self.token, timeout=5)
+        ports = [requirement for item in readiness.get("items", [])
+                 if item.get("id") == "jellyfin_compatibility"
+                 for requirement in item.get("requirements", [])
+                 if requirement.get("id") == "standard_port"]
+        if len(ports) != 1 or ports[0].get("status") != "met":
+            raise Fail("capture fixture Jellyfin listener did not bind its reserved port: "
+                       + json.dumps(ports, sort_keys=True))
 
     def spend_activation_recovery_boot(self):
         """Abort one activation attempt so the next boot stays on SQLite.
