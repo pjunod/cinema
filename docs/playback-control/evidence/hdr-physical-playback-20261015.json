@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-15T19:39:20.411259+00:00",
+  "scope": "Bounded F4 route/startup, F5 attached-output reporting and F7 corrected Air Metal/CPU observations. Lifecycle F3 and final promotion are tracked separately.",
+  "runtime": {
+    "source": "5c6fa8ab835705fc266c9c9e0f11c27210b0edf1; integrated F5/F7 behavior, source-bound F4 parser package",
+    "backend_sha256": "4d1876880975f76a1cd97cd4cff46cecbae564df5d927bec646c29758bfda5fd",
+    "ffmpeg_sha256": "6551e2b2c0683b8b0307ec2bb7b261f9afa35f66d1a0fab97ff4dae7f9b1a5b6",
+    "parser_sha256": "f45be8688acd51d552ece66769643aaa4a3e2eca6a8da360eea32d828e27b522",
+    "deployment": "isolated owned backend namespaces; production service unchanged; no branch mobile app installation"
+  },
+  "archives": [
+    {
+      "name": "hdr-physical-playback-20261015.zip",
+      "members": 78,
+      "bytes": 5122650,
+      "sha256": "fcb9efcced09d880385e95f3e63dec475f7e3f260f2747e42c9eada9c4476e03",
+      "pull_request": 1117,
+      "attachment": "2dfb0dc7-1c97-4d7e-a645-cda3cd196e38",
+      "download_sha_verified": true
+    },
+    {
+      "name": "f5-actual-reporting-20261015.zip",
+      "members": 93,
+      "bytes": 1346397,
+      "sha256": "3ec5491194cd17a75e19419d27befb265a9645cca6cc31e9eb85e983ac80cb6c",
+      "pull_request": 1105,
+      "attachment": "f8fd3482-9954-4fe2-b30e-a864c1786d2d",
+      "download_sha_verified": true
+    },
+    {
+      "name": "f7-full-native-package-20261015.zip",
+      "members": 403,
+      "bytes": 448836852,
+      "sha256": "31ab56fa4ed7ba4dc59798a6688b02ec340dee9bb984c92ee86189dbe1d481c2",
+      "pull_request": 1108,
+      "attachment": "3d63eca3-a4e6-4d65-9813-6bbf1d01c830",
+      "download_sha_verified": true
+    },
+    {
+      "name": "hdr-final-cleanup-20261015.zip",
+      "members": 4,
+      "bytes": 437425,
+      "sha256": "1f2f38236660b313a586d19a305c9bc217f354caa3018f59b5c76b2be65d99c7",
+      "pull_request": 1117,
+      "attachment": "cda35bcd-53b5-4f7f-9c8e-0f1c0eca347d",
+      "download_sha_verified": true
+    },
+    {
+      "name": "f4-compressed-matroska-repair-20261015.zip",
+      "members": 37,
+      "bytes": 27680525,
+      "sha256": "9fd24a5476d5826da42f476dd17710b9b83e87373271f885ecd2066ca83b4e17",
+      "pull_request": 1117,
+      "attachment": "0288b584-bdee-4f8b-b1e0-2306e4d5ec03",
+      "download_sha_verified": true,
+      "role": "corrected f45be868 sealed parser, native parity, provenance and original refusal; full-native archive retains original36f7 parser"
+    }
+  ],
+  "F4": {
+    "source": "Equivalent genuine AV1 HDR10 film, 3840x1600 PQ/BT2020, MaxCLL1000; deleted Heretic not used",
+    "trial_contract": "three fresh namespaces for cold starts, immediately repeated warm start in each namespace,40-second first-frame budget; no cache clearing between a pair",
+    "original_quality": {
+      "cold_ttff_ms": [
+        8280,
+        10356,
+        6012
+      ],
+      "warm_ttff_ms": [
+        2698,
+        6768,
+        4601
+      ],
+      "limitation": "predates parser correction; source/runtime identities retained per trial"
+    },
+    "corrected_1080_sdr": {
+      "cold_ttff_ms": [
+        3336,
+        4264,
+        4246
+      ],
+      "warm_ttff_ms": [
+        761,
+        1380,
+        817
+      ],
+      "intrinsic_frame": "2592x1080, H264 SDR, source2.4:1 geometry",
+      "buffering_interruptions": 0,
+      "sampled_drops_and_frames": {
+        "cold1": [
+          0,
+          2266
+        ],
+        "warm1": [
+          0,
+          4345
+        ],
+        "cold2": [
+          70,
+          3479
+        ],
+        "warm2": [
+          2,
+          1402
+        ],
+        "cold3": [
+          2,
+          699
+        ],
+        "warm3": [
+          60,
+          5095
+        ]
+      }
+    },
+    "preserved_failure": "initial forced SDR refused before producer admission with vod_source_rescan_required: native PGS15-18 geometry missing from old sealed parser. Fixed by pinned static WASI zlib, all19 native stream dictionaries then equal. Source guard unchanged.",
+    "limitation": "background default-file indexing retained; not a quiescent or zero-drop benchmark"
+  },
+  "F5": {
+    "cases": [
+      "fresh CPU1080",
+      "fresh Metal720",
+      "completed CPU output reused after live Metal switch",
+      "completed Metal output reused after CPU switch",
+      "refused720 candidate preserves incumbent1080 facts"
+    ],
+    "evidence": "UI screenshots/DOM and session/activity API; closed-session410 preserved",
+    "limitation": "60-second repetition of a12-second genuine film excerpt is a reporting control, not independent film or fidelity evidence"
+  },
+  "F7": {
+    "full_native_package": "All pinned Jellyfin features and five local patches; native build and font tools pass. Initial missing-gsed failure preserved. Corrected parser packaged separately without changing native FFmpeg.",
+    "boot_probe": {
+      "metal_accepted": true,
+      "speedup": 2.28470649896,
+      "vulkan": "not available on this platform \u2014 this FFmpeg build has no vulkan support",
+      "system_ui": "GPU tone-map (Metal) and expanded unavailable Vulkan detail captured"
+    },
+    "metal": {
+      "sample_seconds": 328,
+      "frames": 7854,
+      "dropped_frames": 5,
+      "interruptions": 0,
+      "ttff_ms": 2473,
+      "presenting_ms": 930,
+      "graph": "VideoToolbox decode,scale_vt1920x1080,tonemap_videotoolbox Hable/max/desat0/reference_white100/peak117.9;BT709nv12,H264VT"
+    },
+    "cpu": {
+      "sample_seconds": 401,
+      "frames": 9596,
+      "dropped_frames": 30,
+      "interruptions": 1,
+      "early_supply_stall_ms": 1019,
+      "ttff_ms": 12497,
+      "graph": "CPU zscale linear npl100,Hable/max/desat0/peak11.79,BT709yuv420p,H264VT"
+    },
+    "preserved_initial_auto_failures": [
+      "rolling remux below realtime0.765x, index pending and clock retirement",
+      "retry received media but presented no picture; unknown decoder signal"
+    ],
+    "limitations": [
+      "CPU has an early supply stall; no zero-stall claim",
+      "screenshots use standard SDR Screen Sharing; no optical HDR grade or independent physical audio claim",
+      "active local-VOD status endpoint returned404; activity and exact child graph retained instead"
+    ]
+  },
+  "cleanup": {
+    "air_final_api_at": "2026-10-15T19:34:43.513332+00:00",
+    "air_mac_processing": true,
+    "air_quality": "Auto selected through normal menu; logged quality switch; no checked-menu capture",
+    "air_items_resume_ms": [
+      0,
+      0
+    ],
+    "air_items_watched": [
+      false,
+      false
+    ],
+    "air_sessions": 0,
+    "air_deliveries": 0,
+    "air_hardware_used": 0,
+    "air_software_used": 0,
+    "air_owned_server_stopped": true,
+    "pro_quality": "Auto toast observed",
+    "pro_trial_items_resume_ms": 0,
+    "pro_trial_items_watched": false,
+    "shared_clipboard": "OFF; unchecked native menu captured as accessibility text",
+    "temporary_metal_sdk": "removed27A266a; component status uninstalled",
+    "production_service": "unchanged"
+  }
+}

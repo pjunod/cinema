@@ -11,6 +11,7 @@ import tempfile
 import textwrap
 import tomllib
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -177,6 +178,61 @@ def workflow_step_literal(step: str, key: str) -> list[str]:
 
 
 class OperationsContractCase(unittest.TestCase):
+    def test_public_oracle_fetch_keeps_deadline_checksum_and_size_bounds(self):
+        import hashlib
+        provision = runpy.run_path(str(ROOT / "scripts/provision-hiqlite-upstream"))
+        payload = b"a pinned public archive fixture"
+        provision["CRATES"]["hiqlite"] = hashlib.sha256(payload).hexdigest()
+
+        def fetched(command, **options):
+            if command == ["curl", "-q", "--version"]:
+                return subprocess.CompletedProcess(command, 0, "curl 8.4.0 test fixture")
+            self.assertEqual(command[:2], ["curl", "-q"])
+            self.assertEqual(options, {"check": True, "timeout": 25})
+            self.assertNotIn("--insecure", command)
+            for flag, value in (("--max-time", "20"), ("--connect-timeout", "5"),
+                                ("--max-filesize", str(provision["ARCHIVE_LIMIT"])),
+                                ("--proto", "=https"), ("--proto-redir", "=https")):
+                self.assertEqual(command[command.index(flag) + 1], value)
+            self.assertEqual(command[-1],
+                             "https://static.crates.io/crates/hiqlite/hiqlite-0.14.0.crate")
+            Path(command[command.index("--output") + 1]).write_bytes(payload)
+
+        with mock.patch("subprocess.run", side_effect=fetched):
+            self.assertEqual(provision["archive_bytes"]("hiqlite", None), payload)
+        payload = b"substituted archive"
+        with mock.patch("subprocess.run", side_effect=fetched):
+            with self.assertRaisesRegex(ValueError, "registry checksum mismatch"):
+                provision["archive_bytes"]("hiqlite", None)
+        payload = b"x" * (provision["ARCHIVE_LIMIT"] + 1)
+        with mock.patch("subprocess.run", side_effect=fetched):
+            with self.assertRaisesRegex(ValueError, "exceeds its bound"):
+                provision["archive_bytes"]("hiqlite", None)
+
+    def test_public_oracle_refuses_curl_without_unknown_length_size_enforcement(self):
+        provision = runpy.run_path(str(ROOT / "scripts/provision-hiqlite-upstream"))
+        for version in ("curl 8.3.0 test fixture", "unrecognized curl"):
+            with self.subTest(version=version), mock.patch(
+                    "subprocess.run", return_value=subprocess.CompletedProcess([], 0, version)) as run:
+                with self.assertRaisesRegex(ValueError, "curl >= 8.4.0"):
+                    provision["archive_bytes"]("hiqlite", None)
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_args.args[0], ["curl", "-q", "--version"])
+
+    def test_public_oracle_download_failure_cannot_publish_a_fixture(self):
+        provision = runpy.run_path(str(ROOT / "scripts/provision-hiqlite-upstream"))
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "fixture"
+            with mock.patch.object(sys, "argv", ["provision", str(destination)]), \
+                    mock.patch("subprocess.run", side_effect=[
+                        subprocess.CompletedProcess([], 0, "curl 8.4.0 test fixture"),
+                        subprocess.TimeoutExpired("curl", 25),
+                    ]):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    provision["main"]()
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
     def test_decoder_artifact_hash_opens_once_and_enforces_the_stream_ceiling(self):
         source = read("crates/plurxd/src/decoder_health.rs")
         digest = source.split("async fn file_digest", 1)[1].split(
@@ -485,12 +541,12 @@ assert.equal(context.ACT_TIMER, null);
         contract = runpy.run_path(
             str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_port_contract"
         )
-        ports = contract["free_ports"](0, 3)
+        ports = contract["free_ports"](0, 4)
 
-        self.assertEqual(len(ports), 3)
-        self.assertEqual(len(set(ports)), 3)
+        self.assertEqual(len(ports), 4)
+        self.assertEqual(len(set(ports)), 4)
         self.assertTrue(all(port > 0 for port in ports))
-        self.assertIn("self.port, self.raft_port, self.api_port = free_ports", script)
+        self.assertIn("self.port, self.raft_port, self.api_port, self.jellyfin_port = free_ports", script)
         self.assertIn('raft_bind = "127.0.0.1:{self.raft_port}"', script)
         self.assertIn('api_bind = "127.0.0.1:{self.api_port}"', script)
 
@@ -1676,6 +1732,22 @@ assert.equal(context.ACT_TIMER, null);
             "\n  cluster_store_legacy:", 1
         )[0]
         self.assertIn("name: fast Rust gate", fast_rust)
+        self.assertIn("timeout-minutes: 20", fast_rust)
+        metadata_jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        for compiler_job in (
+            metadata_jobs["rust_compile"],
+            metadata_jobs["cluster_wal"],
+            workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
+        ):
+            compiler_header = compiler_job.split("    steps:", 1)[0]
+            self.assertIn(
+                "runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]",
+                compiler_header,
+            )
+            self.assertRegex(
+                compiler_header,
+                r'(?m)^      CARGO_BUILD_JOBS: "1"$',
+            )
         self.assertIn("run: make effort-rust-check", fast_rust)
         self.assertNotIn("cargo test", fast_rust)
         fast_finalize = fast_rust.split(
@@ -2105,11 +2177,11 @@ assert.equal(context.ACT_TIMER, null);
         effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
-        # PR #962 raised the main fast lane's preflight to fifteen minutes so
-        # its receipt publications finish; the effort gate keeps ten.
+        # Both receipt-producing preflights retain a finite fifteen-minute
+        # budget so the full history/contracts can publish their evidence.
         self.assertIn("timeout-minutes: 15", fast_jobs["preflight"])
-        self.assertIn("timeout-minutes: 10", effort_jobs["preflight"])
-        self.assertIn("timeout-minutes: 60", effort_jobs["rust_compile"])
+        self.assertIn("timeout-minutes: 15", effort_jobs["preflight"])
+        self.assertIn("timeout-minutes: 30", effort_jobs["rust_compile"])
         effort_rust_header = effort_jobs["rust_compile"].split("\n    steps:", 1)[0]
         self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"', effort_rust_header)
         self.assertEqual(
@@ -2168,7 +2240,7 @@ assert.equal(context.ACT_TIMER, null);
             ),
             ["make effort-rust-check", "make hiqlite-vendor-clippy"],
         )
-        self.assertIn("timeout-minutes: 60", effort_jobs["rust_compile"])
+        # The deadline itself is pinned above with the larger-memory queue.
         self.assertIn('CARGO_BUILD_JOBS: "1"', effort_jobs["rust_compile"])
         self.assertEqual(
             list(fast_rust_steps),
@@ -2634,6 +2706,7 @@ assert.equal(context.ACT_TIMER, null);
 
         clustered_store_tests = (
             "clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure",
+            "login_token_insert_requires_the_verified_password_version",
         )
         for test_name in clustered_store_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -2644,6 +2717,7 @@ assert.equal(context.ACT_TIMER, null);
                 command,
             )
             self.assertIn("--test store_contract", command)
+            self.assertIn("RUST_MIN_STACK=8388608", command)
             self.assertIn("-- --exact --test-threads=1", command)
 
         proxy_writer_test = (
@@ -2677,7 +2751,7 @@ assert.equal(context.ACT_TIMER, null);
             if " snapshot_metrics --lib -- --test-threads=1" in command
         ]
         self.assertEqual(len(snapshot_metrics), 1)
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=10", snapshot_metrics[0])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=13", snapshot_metrics[0])
         self.assertIn("run: make cluster-daemon-check", workflow)
 
     def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):
@@ -3240,7 +3314,7 @@ assert.equal(context.ACT_TIMER, null);
 
         self.assertEqual(len(contract_commands), 14)
         self.assertEqual(contract_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=67", contract_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=72", contract_commands[1])
         self.assertIn("scripts/require-test-count", contract_commands[1])
         self.assertIn("transport_recovery --lib", contract_commands[1])
         exact_regressions = (
@@ -3667,7 +3741,7 @@ assert.equal(context.ACT_TIMER, null);
                 preflight = workflow_job_blocks(
                     f".github/workflows/{workflow}.yml"
                 )["preflight"]
-                budget = 15 if workflow == "main-fast-lane" else 10
+                budget = 10 if workflow == "ci" else 15
                 self.assertIn(f"timeout-minutes: {budget}", preflight)
                 for command in (
                     "make history-check",
@@ -3873,7 +3947,7 @@ assert.equal(context.ACT_TIMER, null);
                 }:
                     expected = ci_topology
                 elif path == ".github/workflows/ci.yml" and name == "cluster_wal":
-                    expected = high_cpu
+                    expected = local("Linux", "X64", "lab", "baremetal", "ci-topology")
                 elif (
                     path in {
                         ".github/workflows/ci.yml",
@@ -3881,7 +3955,7 @@ assert.equal(context.ACT_TIMER, null);
                     }
                     and name == "rust_compile"
                 ):
-                    expected = high_cpu
+                    expected = local("Linux", "X64", "lab", "baremetal", "ci-topology")
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
                     "android_device",

@@ -58,6 +58,9 @@ mod sharing_receiver_sessions;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/sharing_source_sessions.rs"]
 mod sharing_source_sessions;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/source_contract.rs"]
+mod source_contract;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
@@ -12501,8 +12504,72 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 /// in its v22 shape before v27's column can be dropped. v41 and v35-v39 are
 /// `IF NOT EXISTS`, so their objects are left in place and replay cleanly.
 /// One list, so the next non-idempotent migration is reversed in one place.
+/// Historical baseline fixtures have no sharing rows or Source activation.
+/// Rewind only the later empty sharing objects before lowering their marker;
+/// production correctly refuses an old marker that still carries this lineage.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn drop_baseline_sharing_schema(client: &Client) {
+    assert_eq!(
+        replicated_schema_marker(client).await,
+        AUTH_SCHEMA_BASELINE_VERSION,
+        "only a disposable unactivated baseline may be rewound"
+    );
+    let source_objects: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT (SELECT COUNT(*) FROM sqlite_master WHERE name = 'sharing_source_schema_installation') + (SELECT COUNT(*) FROM pragma_table_info('media_sessions') WHERE name = 'principal_kind') AS value",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("read fixture Source activation shape");
+    assert_eq!(
+        source_objects[0].value, 0,
+        "Source activation cannot be rewound"
+    );
+    let tables = [
+        include_str!("../src/store/sharing_schema.sql"),
+        include_str!("../src/store/sharing_ingress_custody_schema.sql"),
+    ]
+    .into_iter()
+    .flat_map(str::lines)
+    .filter_map(|line| line.strip_prefix("CREATE TABLE "))
+    .map(|line| line.split_whitespace().next().expect("declared table name"))
+    .collect::<Vec<_>>();
+    assert!(
+        !tables.is_empty(),
+        "baseline sharing schema must be inventoried"
+    );
+    for table in &tables {
+        assert!(table.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(
+                format!("SELECT COUNT(*) AS value FROM {table}"),
+                hiqlite::params!(),
+            )
+            .await
+            .expect("read disposable sharing fixture rows");
+        assert_eq!(
+            rows[0].value, 0,
+            "populated sharing table {table} cannot be rewound"
+        );
+    }
+    client
+        .txn(
+            tables
+                .into_iter()
+                .rev()
+                .map(|table| (format!("DROP TABLE {table}"), hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("rewind empty baseline sharing objects")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit baseline sharing rewind");
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn downgrade_dv_request_provenance(client: &Client) {
+    drop_baseline_sharing_schema(client).await;
     client
         .txn([
             (
@@ -12525,25 +12592,111 @@ async fn downgrade_dv_request_provenance(client: &Client) {
         .expect("commit provenance rewind");
 }
 
+/// Ordinary migration settles the Local baseline. Optional Source admission
+/// owns its later marker and principal-table installation independently.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn assert_unactivated_contract_baseline(client: &Client) {
+    assert_eq!(
+        replicated_schema_marker(client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
+    let rows: Vec<I64Value> = client.query_consistent_map(
+        "SELECT (SELECT count(*) FROM sqlite_master WHERE name='sharing_source_schema_installation') + (SELECT count(*) FROM pragma_table_info('media_sessions') WHERE name='principal_kind') AS value",
+        hiqlite::params!(),
+    ).await.expect("read migrated Local layout");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].value, 0,
+        "ordinary migration cannot claim Source installation"
+    );
+}
+
 // Background job objects (v49+) and sharing (v70) did not exist in v27/v31.
 // Keeping them blocks old column removal/table rebuilds and leaves extension
 // columns/tables that forward migration would add a second time. These fixtures
 // seed no extension rows; remove the later schema and retain the full background
 // trigger inventory as proof that actual migration restores it.
+/// A historical queue fixture cannot retain half of the independent managed
+/// extension after removing its background objects. Rewind only an empty,
+/// unactivated current extension, then let ordinary open reinstall it.
 #[cfg(feature = "hiqlite-contract-tests")]
-async fn drop_post_v39_extension_schema(client: &Client) -> Vec<String> {
+async fn rewind_empty_managed_subtitle_extension(client: &Client) {
+    assert_unactivated_contract_baseline(client).await;
+    let rows: Vec<I64Value> = client.query_consistent_map(
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=1) AS value",
+        hiqlite::params!(),
+    ).await.expect("current managed fixture marker");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].value, 1,
+        "only the current managed fixture may be rewound"
+    );
+    let rows: Vec<I64Value> = client.query_consistent_map(
+        "SELECT (SELECT count(*) FROM subtitle_model_receipts) + (SELECT count(*) FROM background_jobs WHERE kind IN ('subtitle_model_operation','subtitle_transcribe_managed')) AS value",
+        hiqlite::params!(),
+    ).await.expect("managed fixture data inventory");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].value, 0,
+        "managed receipts or accepted work cannot be rewound"
+    );
+    let rows: Vec<I64Value> = client.query_consistent_map(
+        "SELECT count(*) AS value FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources')",
+        hiqlite::params!(),
+    ).await.expect("complete managed fixture objects");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].value, 6,
+        "partial managed fixtures cannot be rewound"
+    );
+    let old_view = include_str!("../src/store/background_jobs_probe.sql")
+        .split("-- next statement")
+        .find(|sql| {
+            sql.trim_start()
+                .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
+        })
+        .expect("published predecessor resource view");
+    let mut statements = [
+        "DROP TRIGGER subtitle_managed_config_write",
+        "DROP TRIGGER subtitle_managed_source_deleted",
+        "DROP TRIGGER subtitle_managed_source_changed",
+        "DROP VIEW background_job_required_resources",
+        "DROP TABLE subtitle_model_receipts",
+        "DROP TABLE subtitle_managed_schema",
+    ]
+    .into_iter()
+    .map(|sql| (sql.to_owned(), hiqlite::params!()))
+    .collect::<Vec<_>>();
+    statements.push((old_view.to_owned(), hiqlite::params!()));
+    client
+        .txn(statements)
+        .await
+        .expect("atomic managed fixture rewind")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all managed rewind statements");
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn drop_post_v39_extension_schema(client: &Client) -> Vec<(String, String)> {
+    // Capture the current oracle before removing managed triggers: ordinary
+    // reopen must restore those exact definitions along with the old queue.
+    let mut trigger_rows = client
+        .query_consistent("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0)",hiqlite::params!())
+        .await.expect("read complete current background trigger oracle");
+    let mut triggers = trigger_rows
+        .iter_mut()
+        .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+        .collect::<Vec<_>>();
+    rewind_empty_managed_subtitle_extension(client).await;
     let mut rows = client
-        .query_consistent("SELECT type,name FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
+        .query_consistent("SELECT type,name,sql FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
         .await.expect("read later background schema inventory");
-    let mut triggers = Vec::new();
     let statements = rows
         .iter_mut()
         .map(|row| {
             let kind = row.get::<String>("type");
             let name = row.get::<String>("name");
-            if kind == "trigger" {
-                triggers.push(name.clone());
-            }
             (
                 format!("DROP {} \"{}\"", kind, name.replace('"', "\"\"")),
                 hiqlite::params!(),
@@ -12561,6 +12714,7 @@ async fn drop_post_v39_extension_schema(client: &Client) -> Vec<String> {
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("commit later schema removal");
+    triggers.sort();
     triggers
 }
 
@@ -12679,7 +12833,9 @@ async fn downgrade_current_schema_after_request_identity(client: &Client) {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-async fn downgrade_current_schema_after_producer_recovery(client: &Client) -> Vec<String> {
+async fn downgrade_current_schema_after_producer_recovery(
+    client: &Client,
+) -> Vec<(String, String)> {
     let triggers = drop_post_v39_extension_schema(client).await;
     let mut statements = post_v39_downgrade_statements();
     statements.extend([
@@ -12912,6 +13068,7 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v5 through v11 migration");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .get_setting("migration.proof")
@@ -12924,7 +13081,7 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('reading_state')",
@@ -13581,6 +13738,10 @@ fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
             plurx_core::store::FRAGMENT_PRUNE_CANDIDATES,
             plurx_core::store::FRAGMENT_PRUNE_TERMINAL_JOBS,
         );
+        // Keep the fresh-chain budget check above on the complete current
+        // schema, then remove only the exact empty managed extension before
+        // constructing a genuine v87 predecessor for the production upgrade.
+        queue_fixture::rewind_empty_managed_subtitle_schema(&conn);
         conn.execute_batch(include_str!("fixtures/fragment-prune-worst.sql"))
             .expect("populated upgrade workload");
         drop_composed_v92_v93_columns(&conn);
@@ -13910,6 +14071,7 @@ async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v26 through v27 request-identity migration");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .get_setting("migration.v27.proof")
@@ -13921,7 +14083,7 @@ async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('analysis_requests')
@@ -13953,6 +14115,10 @@ async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
     // `settle_migration_attempt` should forgive: no other voter finished the
     // step, so the tree is inconsistent and the daemon must refuse rather
     // than carry on against a schema it cannot account for.
+    // Keep the target column present, but remove every later schema family
+    // before lowering the marker. Refusal must reach this exact duplicate
+    // column, rather than an unrelated private-sharing lineage guard.
+    downgrade_current_schema_after_request_identity(&client).await;
     client
         .execute(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
@@ -14045,9 +14211,48 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
         .collect::<Result<Vec<_>, _>>()
         .expect("commit v31 fixture");
 
+    // DROP COLUMN removes the intervening drain comment as well as recovery_epoch.
+    // Rebuild only this empty fixture from the actual published v31 declaration,
+    // preserving every named index and trigger instead of admitting synthetic SQL.
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT count(*) AS value FROM media_sessions",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("empty historical session fixture");
+    assert_eq!(rows[0].value, 0, "populated sessions cannot be rewound");
+    let mut objects = client.query_consistent(
+        "SELECT sql FROM sqlite_master WHERE tbl_name='media_sessions' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name",
+        hiqlite::params!(),
+    ).await.expect("preserve exact named session objects");
+    let mut historical = vec![
+        ("DROP TABLE media_sessions".to_owned(), hiqlite::params!()),
+        (
+            include_str!("fixtures/media-sessions-v31.sql")
+                .trim()
+                .trim_end_matches(';')
+                .to_owned(),
+            hiqlite::params!(),
+        ),
+    ];
+    historical.extend(
+        objects
+            .iter_mut()
+            .map(|row| (row.get::<String>("sql"), hiqlite::params!())),
+    );
+    client
+        .txn(historical)
+        .await
+        .expect("submit published v31 session fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("restore published v31 with exact session objects");
+
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v31 through v32 producer-recovery migration");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .get_setting("migration.v32.proof")
@@ -14060,7 +14265,7 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master
@@ -14084,15 +14289,15 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
     }
 
     let mut trigger_rows = client.query_consistent(
-        "SELECT name FROM sqlite_master WHERE type='trigger' AND (name GLOB 'background_*' OR instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0) ORDER BY name",
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND (name GLOB 'background_*' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0) ORDER BY name",
         hiqlite::params!()).await.expect("read restored background trigger inventory");
     let restored_triggers = trigger_rows
         .iter_mut()
-        .map(|row| row.get::<String>("name"))
+        .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
         .collect::<Vec<_>>();
     assert_eq!(
         restored_triggers, expected_background_triggers,
-        "historical migration must restore every current background trigger"
+        "historical migration must restore every removed background and Jellyfin trigger definition"
     );
 
     // The migrated store is the working store, not merely a shaped one.
@@ -14135,7 +14340,7 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
         .await
         .expect("inspect the marker after the repeated attempt");
     assert_eq!(
-        rows[0].value, AUTH_SCHEMA_VERSION,
+        rows[0].value, AUTH_SCHEMA_BASELINE_VERSION,
         "the repeated attempt moves the marker rather than refusing"
     );
     assert_eq!(
@@ -14217,6 +14422,7 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v25 through v26 attempt-history migration");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .get_setting("migration.v26.proof")
@@ -14228,7 +14434,7 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('cluster_fragment_index_jobs')
@@ -14260,6 +14466,17 @@ async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
     // `settle_migration_attempt` should forgive: no other voter finished the
     // step, so the tree is inconsistent and the daemon must refuse rather
     // than carry on against a schema it cannot account for.
+    // Keep the target column present, but remove every later schema family
+    // before lowering the marker. Refusal must reach this exact duplicate
+    // column, rather than an unrelated private-sharing lineage guard.
+    downgrade_current_schema_after_request_identity(&client).await;
+    client
+        .execute(
+            "ALTER TABLE analysis_requests DROP COLUMN video_identity",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("rewind later request identity while retaining attempt history");
     client
         .execute(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
@@ -14464,6 +14681,7 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v24 through v25 recovery-guard migration");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .get_setting("migration.v24.proof")
@@ -14475,7 +14693,7 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('dv_conversions')",
@@ -14865,6 +15083,7 @@ async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v6 to v11 migration");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .get_setting("migration.v6.proof")
@@ -14877,7 +15096,7 @@ async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('items') \
@@ -15066,6 +15285,7 @@ async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v7 to v11 migration");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .get_setting("migration.v7.proof")
@@ -15077,7 +15297,7 @@ async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('job_leases')",
@@ -15254,6 +15474,7 @@ async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v8 to v11 migration");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .get_setting("migration.v8.proof")
@@ -15265,7 +15486,7 @@ async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('pretranscode_jobs')",
@@ -15446,6 +15667,7 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v9 to v11 migration");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .get_setting("migration.v9.proof")
@@ -15457,7 +15679,7 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
@@ -15695,6 +15917,7 @@ async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v10 through current migration");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .get_setting("migration.v10.proof")
@@ -15706,7 +15929,7 @@ async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('transcode_cache_locations') \
@@ -15918,6 +16141,7 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v12 to v13 migration");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .get_setting("migration.v12.proof")
@@ -15929,7 +16153,7 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
@@ -16252,6 +16476,7 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon resumes v12 to v13 migration");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .get_setting("migration.v12.proof")
@@ -16263,7 +16488,7 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
@@ -16331,6 +16556,17 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
         CONTRACT_INSTANCE_ID
     );
     drop(first);
+    client.txn([
+        ("INSERT INTO subtitle_model_receipts VALUES('bootstrap-node','bootstrap-model','{}')", hiqlite::params!()),
+        ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('bootstrap-managed-job','subtitle_model_operation',1,'{}','bootstrap-managed-job',0,'queued',0,0,0,'bootstrap-node')", hiqlite::params!()),
+    ]).await.expect("seed managed retry obligations").into_iter().collect::<Result<Vec<_>,_>>().expect("commit managed retry witnesses");
+    let before_view: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT sql AS value FROM sqlite_master WHERE name='background_job_required_resources'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("managed resource view before retry");
 
     // A lost acknowledgement can make the same coordinator retry the entire
     // bootstrap. The current-shape predicate must skip non-idempotent v22 DDL.
@@ -16347,6 +16583,30 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
         CONTRACT_INSTANCE_ID
     );
     drop(retried);
+    let after_view: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT sql AS value FROM sqlite_master WHERE name='background_job_required_resources'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("managed resource view after retry");
+    assert_eq!(before_view.len(), 1);
+    assert_eq!(after_view.len(), 1);
+    assert_eq!(
+        after_view[0].value, before_view[0].value,
+        "retry preserves exact installed managed view"
+    );
+    let retained: Vec<I64Value> = client.query_consistent_map("SELECT (SELECT count(*) FROM subtitle_model_receipts WHERE node_id='bootstrap-node' AND model_id='bootstrap-model' AND receipt_json='{}') + (SELECT count(*) FROM background_jobs WHERE id='bootstrap-managed-job' AND state='queued') + (SELECT count(*) FROM background_job_required_resources WHERE job_id='bootstrap-managed-job' AND resource_key='subtitle_model:bootstrap-node') AS value", hiqlite::params!()).await.expect("managed retry witnesses survive");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        retained[0].value, 3,
+        "receipt, accepted work and model resource obligation survive bootstrap"
+    );
+    // Retire only these two owned witnesses before the empty historical rewind.
+    client.txn([
+        ("DELETE FROM background_jobs WHERE id='bootstrap-managed-job'", hiqlite::params!()),
+        ("DELETE FROM subtitle_model_receipts WHERE node_id='bootstrap-node' AND model_id='bootstrap-model'", hiqlite::params!()),
+    ]).await.expect("retire owned retry witnesses").into_iter().collect::<Result<Vec<_>,_>>().expect("commit witness cleanup");
 
     // Model a committed v22 shape whose marker acknowledgement was lost. The
     // daemon must advance only the marker instead of replaying ALTER/rename
@@ -16393,6 +16653,7 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &migrated_telemetry)
         .await
         .expect("settle current v22 shape from a stale v21 marker");
+    assert_unactivated_contract_baseline(&client).await;
     assert_eq!(
         migrated
             .instance_id()
@@ -16404,7 +16665,7 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
     for (sql, expected) in [
         (
             "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
-            AUTH_SCHEMA_VERSION,
+            AUTH_SCHEMA_BASELINE_VERSION,
         ),
         (
             "SELECT
@@ -16784,19 +17045,96 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
     assert_eq!(force_submitted.state, "submitted");
     assert!(force_submitted.owner_node_id.is_empty());
 
-    client
-        .execute(
-            "UPDATE cluster_fragment_index_jobs
-                SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
-                    updated_at_ms = 42 WHERE cache_key = $1",
-            hiqlite::params!(&forced_job.cache_key),
+    let completed_worker = store
+        .fixture_claim_cluster_fragment_index("node-a", &[], 42, 1_042)
+        .await
+        .expect("claim actual common forced worker")
+        .expect("forced worker claim");
+    assert_eq!(completed_worker.cache_key, forced_job.cache_key);
+    let completed_artifact = ClusterFragmentIndexArtifact {
+        cache_key: forced_job.cache_key.clone(),
+        file_id: forced_job.file_id,
+        source_size: forced_job.source_size,
+        source_mtime: forced_job.source_mtime,
+        source_sha256: forced_job.source_sha256.clone(),
+        pipeline_sha256: forced_job.pipeline_sha256.clone(),
+        blob_sha256: "d".repeat(64),
+        bytes: 10,
+        built_by_node_id: "node-a".into(),
+        built_at_ms: 42,
+    };
+    let completed_location = ClusterFragmentIndexLocation {
+        cache_key: forced_job.cache_key.clone(),
+        node_id: "node-a".into(),
+        bytes: 10,
+        verified_at_ms: 42,
+        last_seen_at_ms: 42,
+    };
+    assert!(store
+        .fixture_complete_cluster_fragment_index(
+            &completed_worker,
+            &completed_artifact,
+            &completed_location,
+            42,
         )
         .await
-        .expect("finish forced worker before stale replay");
-    assert!(!store
+        .expect("publish actual common forced worker before stale replay"));
+    let receipt_snapshot = || async {
+        let mut snapshot = Vec::new();
+        for table in [
+            "background_jobs",
+            "background_job_waiters",
+            "analysis_requests",
+        ] {
+            let columns = client
+                .query_consistent_map::<SchemaText, _>(
+                    "SELECT name AS value FROM pragma_table_info($1) ORDER BY cid",
+                    hiqlite::params!(table),
+                )
+                .await
+                .expect("actual receipt schema columns");
+            assert!(!columns.is_empty());
+            let fields = columns
+                .into_iter()
+                .map(|column| {
+                    assert!(column
+                        .value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_'));
+                    format!("'{}', \"{}\"", column.value, column.value)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let rows = client
+                .query_consistent_map::<SchemaText, _>(
+                    format!("SELECT json_object({fields}) AS value FROM {table} ORDER BY value"),
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("complete durable receipt rows")
+                .into_iter()
+                .map(|row| row.value)
+                .collect::<Vec<_>>();
+            snapshot.push((table, rows));
+        }
+        snapshot
+    };
+    let before_replay = receipt_snapshot().await;
+    assert!(
+        before_replay
+            .iter()
+            .any(|(table, rows)| *table == "background_jobs" && !rows.is_empty()),
+        "forced handoff has an actual common job"
+    );
+    assert!(store
         .submit_fragment_index_analysis(&force_claim, &forced_job, 41)
         .await
-        .expect("replay accepted forced handoff"));
+        .expect("return the previously accepted forced handoff receipt"));
+    assert_eq!(
+        receipt_snapshot().await,
+        before_replay,
+        "retained receipt cannot create or mutate common jobs, waiters or the submitted request"
+    );
     let after_replay = store
         .cluster_fragment_index_job(&forced_job.cache_key, &forced_job.target_node_id)
         .await
@@ -17816,7 +18154,121 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     // wire identities, compatibility logins and bounded negotiations
     // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
     // v102–v103).
-    assert_eq!(report.tables.len(), 77);
+    let mut imported_tables = report
+        .tables
+        .iter()
+        .map(|digest| digest.table.as_str())
+        .collect::<Vec<_>>();
+    imported_tables.sort_unstable();
+    assert_eq!(
+        imported_tables,
+        [
+            "analysis_attempts",
+            "analysis_lifecycle_counters",
+            "analysis_requests",
+            "api_keys",
+            "background_artifact_repairs",
+            "background_artwork_locations",
+            "background_embeddings",
+            "background_fragment_targets",
+            "background_job_attempts",
+            "background_job_domain_leases",
+            "background_job_legacy",
+            "background_job_migration",
+            "background_job_reservations",
+            "background_job_waiters",
+            "background_jobs",
+            "background_library_requests",
+            "background_predictions",
+            "background_provider_budgets",
+            "background_storage_domains",
+            "background_transcode_artifacts",
+            "cache_consumer_pins",
+            "cache_storage_members",
+            "candidate_recovery",
+            "cluster_fragment_index_artifacts",
+            "cluster_fragment_index_heads",
+            "cluster_fragment_index_jobs",
+            "cluster_fragment_index_locations",
+            "cluster_fragment_index_sources",
+            "continuous_quality_ledgers",
+            "dv_conversions",
+            "dv_recovery_guards",
+            "dvr_recordings",
+            "dvr_reminders",
+            "dvr_rules",
+            "file_grants",
+            "files",
+            "items",
+            "jellyfin_entity_ids",
+            "jellyfin_login_tokens",
+            "jellyfin_plays",
+            "job_leases",
+            "libraries",
+            "library_channel_entries",
+            "library_channel_favourites",
+            "library_channel_generations",
+            "library_channel_requests",
+            "library_channel_session_recipes",
+            "library_channel_subject_decisions",
+            "library_channel_subject_jobs",
+            "library_channels",
+            "library_roots",
+            "live_tv_resource_records",
+            "media_classifications",
+            "media_playback_desired",
+            "media_playback_pointers",
+            "media_session_preparations",
+            "media_session_requests",
+            "media_session_terminal_acks",
+            "media_sessions",
+            "offline_package_leases",
+            "offline_packages",
+            "pretranscode_jobs",
+            "quality_cancellation_receipts",
+            "quality_preparation_owners",
+            "reading_state",
+            "scan_reconcile_guards",
+            "scan_reconcile_items",
+            "settings",
+            "sharing_assignments",
+            "sharing_catalogue_revisions",
+            "sharing_delivery_grants",
+            "sharing_endpoint_manifest",
+            "sharing_export_libraries",
+            "sharing_exports",
+            "sharing_identity",
+            "sharing_import_rotations",
+            "sharing_imports",
+            "sharing_ingress_custody",
+            "sharing_invitations",
+            "sharing_relay_upstream",
+            "sharing_rotations",
+            "sharing_viewers",
+            "sharing_watch",
+            "timeline_annotation_sets",
+            "timeline_manual_overrides",
+            "tokens",
+            "trakt_auth",
+            "transcode_cache_locations",
+            "transcode_cache_recipes",
+            "users",
+            "watch_state",
+            "watched_outbox",
+        ],
+        "complete current import-plan names, including empty later families"
+    );
+    for digest in report
+        .tables
+        .iter()
+        .filter(|digest| digest.table.starts_with("sharing_"))
+    {
+        assert_eq!(
+            digest.row_count, 0,
+            "v14 predates imported sharing table {}",
+            digest.table
+        );
+    }
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -17969,15 +18421,111 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
             .expect("empty common queue fixture"),
         0
     );
+    let source_objects: i64 = connection.query_row(
+        "SELECT (SELECT count(*) FROM sqlite_master WHERE name='sharing_source_schema_installation') + (SELECT count(*) FROM pragma_table_info('media_sessions') WHERE name='principal_kind')",
+        [], |row| row.get(0),
+    ).expect("prove unactivated SQLite fixture");
+    assert_eq!(source_objects, 0, "installed Source cannot be rewound");
+    for table in [
+        include_str!("../src/store/sharing_schema.sql"),
+        include_str!("../src/store/sharing_ingress_custody_schema.sql"),
+    ]
+    .into_iter()
+    .flat_map(str::lines)
+    .filter_map(|line| line.strip_prefix("CREATE TABLE "))
+    .map(|line| {
+        line.split_whitespace()
+            .next()
+            .expect("declared sharing table")
+    }) {
+        assert!(table.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+        let rows: i64 = connection
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("read actual sharing fixture rows");
+        assert_eq!(rows, 0, "populated sharing table {table} cannot be rewound");
+    }
+    queue_fixture::remove_sharing_schema(&connection);
+    // These later durable settings did not exist in the prequeue schema.
+    // Preserve their complete typed rows, then restore them after the actual
+    // upgrade; deleting them would defeat this import regression.
+    let storage_rows = connection.prepare("SELECT library_id,root_path,domain_id FROM background_storage_domains ORDER BY library_id,root_path")
+        .expect("durable storage fixture").query_map([], |row|
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+        .expect("storage rows").collect::<Result<Vec<_>, _>>().expect("all storage rows");
+    let budget_rows = connection.prepare("SELECT provider,next_dispatch_ms,interval_ms FROM background_provider_budgets ORDER BY provider")
+        .expect("durable budget fixture").query_map([], |row|
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))
+        .expect("budget rows").collect::<Result<Vec<_>, _>>().expect("all budget rows");
+    assert_eq!(
+        storage_rows,
+        vec![(9, "/fixture/shows".into(), "fixture-nas".into())]
+    );
+    assert_eq!(
+        budget_rows,
+        vec![
+            ("ani_list".into(), 63_000, 2_100),
+            ("tmdb".into(), 42_000, 100)
+        ]
+    );
+    // Replaying v71 also replays later additive queue columns. Remove the
+    // common queue objects, retaining the seeded legacy domain jobs.
+    // The v70 fixture must also lack later non-idempotent additive columns.
+    // Refuse to erase any actual values from the populated import witness.
+    let later_values: i64 = connection.query_row(
+        "SELECT (SELECT count(*) FROM offline_packages WHERE audio_recipe IS NOT NULL) + (SELECT count(*) FROM network_priors WHERE link_worst_rung_height IS NOT NULL OR link_starved_at_ms IS NOT NULL) + (SELECT count(*) FROM watch_state WHERE manual_revision!=0 OR manual_origin IS NOT NULL)",
+        [], |row| row.get(0),
+    ).expect("later additive fixture values");
+    assert_eq!(later_values, 0, "populated later fields cannot be rewound");
+    for table in [
+        "jellyfin_plays",
+        "jellyfin_login_tokens",
+        "jellyfin_entity_ids",
+        "invitation_events",
+        "invitation_cooldowns",
+        "invitation_consents",
+        "invitation_broker_revocations",
+        "invitation_phones",
+        "remote_grants",
+        "remote_receivers",
+        "remote_claim_budget",
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("later compatibility fixture rows");
+        assert_eq!(count, 0, "populated later table {table} cannot be rewound");
+    }
+    drop_composed_v92_v93_columns(&connection);
+    queue_fixture::remove_common_queue_schema(&connection);
     connection
-        .execute_batch(
-            "DELETE FROM background_job_migration;
-            ALTER TABLE dv_conversions DROP COLUMN requested_manually;
-            PRAGMA user_version = 70;",
-        )
+        .execute_batch("PRAGMA user_version = 70;")
         .expect("stage pre-queue fixture");
     drop(connection);
     let upgraded = SqliteStore::open(&source_path).expect("apply common queue migration");
+    let connection = rusqlite::Connection::open(&source_path)
+        .expect("restore postqueue durable fixture settings");
+    for (library, root, domain) in &storage_rows {
+        connection.execute("INSERT INTO background_storage_domains(library_id,root_path,domain_id) VALUES(?1,?2,?3)",
+            rusqlite::params![library, root, domain]).expect("restore exact storage fixture row");
+    }
+    for (provider, next, interval) in &budget_rows {
+        connection.execute("INSERT INTO background_provider_budgets(provider,next_dispatch_ms,interval_ms) VALUES(?1,?2,?3)",
+            rusqlite::params![provider, next, interval]).expect("restore exact budget fixture row");
+    }
+    let restored_storage = connection.prepare("SELECT library_id,root_path,domain_id FROM background_storage_domains ORDER BY library_id,root_path")
+        .expect("restored storage witness").query_map([], |row|
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+        .expect("restored storage").collect::<Result<Vec<_>, _>>().expect("all restored storage");
+    let restored_budgets = connection.prepare("SELECT provider,next_dispatch_ms,interval_ms FROM background_provider_budgets ORDER BY provider")
+        .expect("restored budget witness").query_map([], |row|
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))
+        .expect("restored budgets").collect::<Result<Vec<_>, _>>().expect("all restored budgets");
+    assert_eq!(restored_storage, storage_rows);
+    assert_eq!(restored_budgets, budget_rows);
+    drop(connection);
     assert!(upgraded
         .import_legacy_jobs(1_000)
         .await
@@ -22168,6 +22716,7 @@ async fn fragment_prune_worst_case_keeps_three_voter_proofs_and_playback_mutatio
     {
         result.expect("workload statement");
     }
+    drop_baseline_sharing_schema(&client).await;
     client
         .txn(vec![
             (
@@ -33028,7 +33577,10 @@ async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixt
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("offline audio contract operation");
-    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_schema_marker(&client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
     let stored = migrated
         .offline_package_for_user(&legacy.id, user_id)
         .await
@@ -33055,7 +33607,10 @@ async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixt
     HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("additive column replay");
-    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_schema_marker(&client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
 }
 
 #[tokio::test]
@@ -35718,9 +36273,13 @@ fn assert_watch_read_path(store: &HiqliteAuthStore, local: bool, label: &str) {
             counts.consistent_query_calls,
             counts.non_consistent_query_calls
         ),
-        if local { (0, 1) } else { (1, 0) },
-        "{label}: expected {} watch read",
-        if local { "one local" } else { "one Authority" }
+        if local { (0, 2) } else { (1, 0) },
+        "{label}: expected {}",
+        if local {
+            "one local preference query and one local watch query"
+        } else {
+            "one Authority watch query"
+        }
     );
 }
 
@@ -36120,7 +36679,11 @@ async fn watch_summary_and_progress_rails_are_one_read_matching_the_separate_rea
         .await
         .expect("local summary");
     check_summary(summary, "local");
-    assert_watch_read_path(&store, true, "local summary is one local read");
+    assert_watch_read_path(
+        &store,
+        true,
+        "local summary checks its preference before one local watch query",
+    );
 
     store.validation_reset_operation_counts();
     let rails = watch_fence_reader(&store, commit)
@@ -36132,7 +36695,11 @@ async fn watch_summary_and_progress_rails_are_one_read_matching_the_separate_rea
         expected_rails,
         "local rails"
     );
-    assert_watch_read_path(&store, true, "local rails are one local read");
+    assert_watch_read_path(
+        &store,
+        true,
+        "local rails check their preference before one local watch query",
+    );
 
     // Empty inputs issue no statement at all, exactly like the methods they
     // replace.
@@ -37581,6 +38148,7 @@ async fn replicated_schema_marker(client: &Client) -> i64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     async fn rewind_non_idempotent_columns(client: &Client) {
+        rewind_empty_managed_subtitle_extension(client).await;
         downgrade_dv_request_provenance(client).await;
         // v60 also adds a column. Remove its dependent triggers before replaying
         // that step, including when the v48 index migration itself is a no-op.
@@ -37667,7 +38235,10 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("daemon v47 through v48 read-index migration");
-    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_schema_marker(&client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
     assert_eq!(
         replicated_read_index_count(&client).await,
         3,
@@ -37689,7 +38260,10 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     let reopened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("an idempotent step forgives a repeated attempt");
-    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
+    assert_eq!(
+        replicated_schema_marker(&client).await,
+        AUTH_SCHEMA_BASELINE_VERSION
+    );
     assert_eq!(replicated_read_index_count(&client).await, 3);
     assert_read_index_movie(&reopened, "hiqlite replayed v48", library_id, movie).await;
 }

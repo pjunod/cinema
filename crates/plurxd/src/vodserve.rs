@@ -531,6 +531,9 @@ impl<T> VodPublication<T> {
 /// numbers would make the player diagnose the wrong system.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VodSessionInfo {
+    /// Optional facts from this attached rendition's immutable recipe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_format: Option<StreamFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_encode_milli_realtime: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -545,8 +548,8 @@ pub struct VodSessionInfo {
     pub file_id: i64,
     pub target_height: i64,
     pub encoder: &'static str,
-    /// Explicit CPU tone-map peak and its source, absent for copy and GPU
-    /// renditions. `default` is policy provenance, not source metadata.
+    /// Explicit tone-map peak and its source, absent when this graph has no
+    /// explicit peak option. `default` is policy provenance, not source metadata.
     pub tone_map_peak_nits: Option<u32>,
     pub tone_map_peak_source: Option<&'static str>,
     pub playlist_shape: &'static str,
@@ -1375,6 +1378,10 @@ use marker_dispatch::*;
 #[path = "vod/generation.rs"]
 mod generation;
 use generation::*;
+#[path = "vod/stream_format.rs"]
+mod stream_format;
+pub use stream_format::StreamFormat;
+
 #[path = "vod/output_measurement.rs"]
 mod output_measurement;
 use output_measurement::PublishedOutputMeasurement;

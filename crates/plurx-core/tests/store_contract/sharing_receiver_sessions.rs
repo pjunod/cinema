@@ -6,29 +6,59 @@ use plurx_core::{
     sharing_catalogue::SharedReference,
     sharing_catalogue_details::FileRevision,
     sharing_receiver_sessions::{ReceiverProducerKind, ReceiverSessionIntent, RemoteSourceRecipe},
-    store::{
-        media_session_principal_rebuild_schema, sharing_catalogue::ReceiverCatalogueScope,
-        SharingReceiverSessionStore,
-    },
+    store::{sharing_catalogue::ReceiverCatalogueScope, SharingReceiverSessionStore},
 };
 use sha2::Digest;
 use uuid::Uuid;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention() {
-    let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("actual voter observer");
+/// Metadata-only empty ingress fence; this fixture starts no Source worker
+/// and does not claim a physical Source End receipt.
+async fn seal_metadata_receiver_ingress(store: &HiqliteAuthStore, incarnation: &str) {
+    use plurx_core::store::SharingReceiverIngressStore;
+    let route = store
+        .media_session_route_by_incarnation(incarnation)
+        .await
+        .expect("current model receiver route")
+        .expect("model route retained");
+    assert!(store
+        .receiver_ingress_snapshot(&route)
+        .await
+        .expect("initial model ingress custody")
+        .is_none());
+    let identity = plurx_core::auth::hash_token(&format!(
+        "plurx.metadata-only.receiver.fence\0{incarnation}"
+    ));
+    let sealed = store
+        .seal_receiver_ingress_route(&route, &identity)
+        .await
+        .expect("seal empty metadata ingress")
+        .expect("sealed current route");
+    assert!(sealed.state.is_sealed());
+    assert!(sealed.state.settled(), "no physical ingress was registered");
+    let stored = store
+        .receiver_ingress_snapshot(&route)
+        .await
+        .expect("read sealed model ingress")
+        .expect("durable sealed fence");
+    assert!(stored.state.settled());
+}
+
+#[test]
+fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention() {
+    startup_observer::run_full_hiqlite_fixture(
+        "sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention",
+        || async {
+            let _case = HIQLITE_CASE.lock().await;
+            source_contract::with_cluster(|cluster| Box::pin(sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention_scenario(cluster))).await;
+        },
+    );
+}
+
+async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention_scenario(
+    cluster: &source_contract::SourceContractCluster,
+) {
+    let store = cluster.open_store().await;
+    let client = cluster.client();
     assert_eq!(
         client
             .metrics_db()
@@ -39,22 +69,15 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
             .count(),
         3
     );
-    for statement in media_session_principal_rebuild_schema().split("-- next statement\n") {
-        client
-            .execute(
-                statement.trim().trim_end_matches(';').to_owned(),
-                hiqlite::params!(),
-            )
+    cluster.install_source().await;
+    assert_eq!(
+        store
+            .get_setting("sharing_enabled")
             .await
-            .expect("frozen principal fixture before first session query");
-    }
-    client
-        .execute(
-            "INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1000)",
-            hiqlite::params!(),
-        )
-        .await
-        .expect("saved choice");
+            .expect("saved Source choice")
+            .as_deref(),
+        Some("true")
+    );
     for refusal in ["assignment", "login", "policy", "epoch", "none"] {
         let user = store
             .create_user(&format!("B-{refusal}"), "fixture-password-hash", false)
@@ -1013,6 +1036,14 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                 attachment: attachment.clone(),
                 confirmation: "a".repeat(64),
             };
+            assert_eq!(
+                store
+                    .retire_receiver_session(&witness)
+                    .await
+                    .expect("absent ingress custody stays refused"),
+                ReceiverRetirementOutcome::Refused
+            );
+            seal_metadata_receiver_ingress(&store, &activation.incarnation_id).await;
             client.execute("UPDATE sharing_delivery_grants SET state='active' WHERE token_hash=? AND incarnation_id=?",hiqlite::params![delivery.token_hash.clone(),attachment.owner.incarnation_id]).await.expect("retained grant corruption fixture");
             client.execute("CREATE TRIGGER retirement_ignore_grant BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignored grant revocation");
             assert_eq!(
@@ -1151,26 +1182,27 @@ impl plurx_core::sharing_receiver_retirement::ReceiverPendingRetirementWitness
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sharing_receiver_pending_retirement_three_voters_refuses_takeover_and_ignored_writes() {
+#[test]
+fn sharing_receiver_pending_retirement_three_voters_refuses_takeover_and_ignored_writes() {
+    startup_observer::run_full_hiqlite_fixture(
+        "sharing_receiver_pending_retirement_three_voters_refuses_takeover_and_ignored_writes",
+        || async {
+            let _case = HIQLITE_CASE.lock().await;
+            source_contract::with_cluster(|cluster| Box::pin(sharing_receiver_pending_retirement_three_voters_refuses_takeover_and_ignored_writes_scenario(cluster))).await;
+        },
+    );
+}
+
+async fn sharing_receiver_pending_retirement_three_voters_refuses_takeover_and_ignored_writes_scenario(
+    cluster: &source_contract::SourceContractCluster,
+) {
     use plurx_core::{
         domain::MediaSessionRequestClaim,
         sharing_receiver_retirement::{ReceiverPendingOwner, ReceiverRetirementOutcome},
         store::SharingReceiverRetirementStore,
     };
-    let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("actual voter observer");
+    let store = cluster.open_store().await;
+    let client = cluster.client();
     assert_eq!(
         client
             .metrics_db()
@@ -1181,15 +1213,7 @@ async fn sharing_receiver_pending_retirement_three_voters_refuses_takeover_and_i
             .count(),
         3
     );
-    for s in media_session_principal_rebuild_schema().split("-- next statement\n") {
-        client
-            .execute(
-                s.trim().trim_end_matches(';').to_owned(),
-                hiqlite::params!(),
-            )
-            .await
-            .expect("exact principal layout");
-    }
+    cluster.install_source().await;
     for assigned in [false, true] {
         let user = store
             .create_user(&format!("pending-{assigned}"), "hash", false)
@@ -1380,8 +1404,20 @@ impl plurx_core::sharing_receiver_retirement::ReceiverRetirementWitness for Orph
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirmed_retire() {
+#[test]
+fn sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirmed_retire() {
+    startup_observer::run_full_hiqlite_fixture(
+        "sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirmed_retire",
+        || async {
+            let _case = HIQLITE_CASE.lock().await;
+            source_contract::with_cluster(|cluster| Box::pin(sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirmed_retire_scenario(cluster))).await;
+        },
+    );
+}
+
+async fn sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirmed_retire_scenario(
+    cluster: &source_contract::SourceContractCluster,
+) {
     use plurx_core::{
         domain::MediaSessionRequestClaim,
         sharing_receiver_retirement::{ReceiverOrphanClaimOutcome, ReceiverRetirementOutcome},
@@ -1392,19 +1428,8 @@ async fn sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirme
             sharing_receiver_orphans::RECEIVER_ORPHAN_GRACE_MS, SharingReceiverRetirementStore,
         },
     };
-    let _case = HIQLITE_CASE.lock().await;
-    let cluster = ContractCluster::start().await;
-    let store = open_contract_hiqlite_store(&cluster).await;
-    let client = Client::remote(
-        cluster.addresses.clone(),
-        true,
-        true,
-        CONTRACT_API_SECRET.to_owned(),
-        false,
-        None,
-    )
-    .await
-    .expect("actual voter observer");
+    let store = cluster.open_store().await;
+    let client = cluster.client();
     assert_eq!(
         client
             .metrics_db()
@@ -1415,22 +1440,15 @@ async fn sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirme
             .count(),
         3
     );
-    for statement in media_session_principal_rebuild_schema().split("-- next statement\n") {
-        client
-            .execute(
-                statement.trim().trim_end_matches(';').to_owned(),
-                hiqlite::params!(),
-            )
+    cluster.install_source().await;
+    assert_eq!(
+        store
+            .get_setting("sharing_enabled")
             .await
-            .expect("principal layout");
-    }
-    client
-        .execute(
-            "INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1000)",
-            hiqlite::params!(),
-        )
-        .await
-        .expect("saved choice");
+            .expect("saved Source choice")
+            .as_deref(),
+        Some("true")
+    );
     let user = store
         .create_user("B-orphan", "fixture-password-hash", false)
         .await
@@ -1660,6 +1678,18 @@ async fn sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirme
             .expect("record"),
         ReceiverSourceWrite::Refused
     );
+    let unsealed_witness = OrphanNeverDispatched {
+        intent: won.intent().clone(),
+        owner: won.owner().clone(),
+    };
+    assert_eq!(
+        store
+            .retire_receiver_session(&unsealed_witness)
+            .await
+            .expect("absent ingress cannot authorize orphan retirement"),
+        ReceiverRetirementOutcome::Refused
+    );
+    seal_metadata_receiver_ingress(&store, &inc).await;
     let mut old_owner = won.owner().clone();
     old_owner.owner_node_id = "B-dead".into();
     old_owner.owner_epoch = route.owner_epoch;

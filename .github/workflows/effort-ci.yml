@@ -58,9 +58,10 @@ jobs:
       group: python-unit-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: false
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # Match the main lane: history and contract checks exceeded three minutes
-    # in effort runs 3594 and 3643. Keep every check; allow it to finish.
-    timeout-minutes: 10
+    # History plus the full contract/receipt sweep reached ten minutes in
+    # effort run5234 before publication. Match the fast lane's finite budget;
+    # retain every check and allow the success receipt to be published.
+    timeout-minutes: 15
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -118,13 +119,11 @@ jobs:
     name: effort Rust compile
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    # The job includes every-target compilation and vendored Clippy with a
-    # runner-local cache. Run 5287 exceeded thirty minutes on the daemon
-    # target; match the main compiler budget without dropping any checks.
-    timeout-minutes: 60
-    # Host-executed runners do not necessarily export the documented Cargo
-    # budget. Bound this job before parallel compiler working sets hit its cap.
+    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
+    # Preserve the larger-memory compiler lane and current main's finite
+    # cold-cache budget for every-target compilation and vendored Clippy.
+    timeout-minutes: 30
+    # Keep compilation within the runner's existing memory allocation.
     env:
       CARGO_BUILD_JOBS: "1"
     steps:

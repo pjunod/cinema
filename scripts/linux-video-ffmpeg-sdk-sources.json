@@ -2587,6 +2587,7 @@
     },
     "fc": {
       "kind": "git",
+      "archive_provider": "git-archive",
       "url": "https://chromium.googlesource.com/external/fontconfig",
       "ref": "2.17.1",
       "commit": "6d0a98982ec351c165c9224c8b7dbdfca3010e47",

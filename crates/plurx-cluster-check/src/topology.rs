@@ -25,6 +25,8 @@ pub const TOPOLOGY_CATALOGUE_ROWS: u64 = 32;
 pub const TOPOLOGY_CATALOGUE_READ_OPERATIONS: u64 = 256;
 pub const TOPOLOGY_CATALOGUE_READ_CONCURRENCY: u64 = 32;
 pub(crate) const TOPOLOGY_CATALOGUE_TITLE_PREFIX: &str = "Topology Catalogue Read";
+// Each bounded catalogue read first checks its local preference, then reads the item.
+const LOCAL_QUERIES_PER_CATALOGUE_READ: u64 = 2;
 const TOPOLOGY_VALUE_BYTES: usize = 64;
 /// The background class labels a topology write window tolerates - the
 /// membership heartbeat only. Topology nodes hold no cluster-job lease, so
@@ -168,6 +170,13 @@ impl TopologyWorkload {
     pub(super) fn sha256(&self) -> Result<String> {
         Ok(hex::encode(Sha256::digest(serde_json::to_vec(self)?)))
     }
+}
+
+fn expected_catalogue_local_query_calls(workload: &TopologyWorkload) -> Result<u64> {
+    workload
+        .catalogue_read_operations
+        .checked_mul(LOCAL_QUERIES_PER_CATALOGUE_READ)
+        .context("topology catalogue local query count overflowed")
 }
 
 pub fn parse_topology_order(value: Option<&str>) -> Result<[u64; 2]> {
@@ -486,14 +495,15 @@ pub(super) async fn exercise_topology(
         ),
         response => bail!("topology catalogue read workload returned {response:?}"),
     };
+    let expected_local_query_calls = expected_catalogue_local_query_calls(workload)?;
     if catalogue_read_errors != 0
         || catalogue_read_consistent_query_calls != 0
-        || catalogue_read_non_consistent_query_calls != workload.catalogue_read_operations
+        || catalogue_read_non_consistent_query_calls != expected_local_query_calls
     {
         bail!(
             "topology catalogue workload did not stay local: errors={catalogue_read_errors}, \
              consistent={catalogue_read_consistent_query_calls}, \
-             local={catalogue_read_non_consistent_query_calls}"
+             local={catalogue_read_non_consistent_query_calls}, expected_local={expected_local_query_calls}"
         );
     }
     let final_leader_term = confirmed_leader_term(cluster, leader).await?;
@@ -1064,7 +1074,7 @@ pub fn validate_topology_artifact(artifact: &ClusterTopologyArtifact) -> Result<
             || run.catalogue_read_errors != 0
             || run.catalogue_read_consistent_query_calls != 0
             || run.catalogue_read_non_consistent_query_calls
-                != artifact.workload.catalogue_read_operations
+                != expected_catalogue_local_query_calls(&artifact.workload)?
         {
             bail!("topology catalogue samples do not prove the pinned local-read workload");
         }
@@ -1307,7 +1317,8 @@ mod tests {
             catalogue_read_target: 2,
             catalogue_read_errors: 0,
             catalogue_read_consistent_query_calls: 0,
-            catalogue_read_non_consistent_query_calls: TOPOLOGY_CATALOGUE_READ_OPERATIONS,
+            catalogue_read_non_consistent_query_calls: TOPOLOGY_CATALOGUE_READ_OPERATIONS
+                * LOCAL_QUERIES_PER_CATALOGUE_READ,
             local_catalogue_read_p50_us: percentile_type7(&raw_local_catalogue_read_us, 0.50)
                 .expect("fixture read p50"),
             local_catalogue_read_p95_us: percentile_type7(&raw_local_catalogue_read_us, 0.95)
@@ -1526,6 +1537,10 @@ mod tests {
             ),
             ("/$defs/workload/properties/catalogue_rows/const", 32),
             (
+                "/$defs/run/properties/catalogue_read_non_consistent_query_calls/const",
+                512,
+            ),
+            (
                 "/$defs/workload/properties/catalogue_read_operations/const",
                 256,
             ),
@@ -1580,9 +1595,19 @@ mod tests {
         let mut fallback_read = artifact.clone();
         fallback_read["runs"][0]["catalogue_read_consistent_query_calls"] = serde_json::json!(1);
         fallback_read["runs"][0]["catalogue_read_non_consistent_query_calls"] =
-            serde_json::json!(255);
+            serde_json::json!(511);
         assert!(!schema_validator.is_valid(&fallback_read));
         assert!(validate_json_artifact(&fallback_read).is_err());
+
+        // With no Authority fallback, neither omitting the preference lookup
+        // nor losing or adding one local query satisfies the pinned workload.
+        for wrong_local_count in [256, 511, 513] {
+            let mut wrong_local_reads = artifact.clone();
+            wrong_local_reads["runs"][0]["catalogue_read_non_consistent_query_calls"] =
+                serde_json::json!(wrong_local_count);
+            assert!(!schema_validator.is_valid(&wrong_local_reads));
+            assert!(validate_json_artifact(&wrong_local_reads).is_err());
+        }
 
         let mut inconsistent_pool = artifact.clone();
         inconsistent_pool["runs"][1]["read_pool_size"] = serde_json::json!(8);

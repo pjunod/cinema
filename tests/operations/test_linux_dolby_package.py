@@ -21,6 +21,131 @@ def recipe():
 
 
 class LinuxDolbyPackageCase(unittest.TestCase):
+    def test_git_source_offer_fetches_pinned_commit_instead_of_repository_html(self):
+        import hashlib
+        import time
+        module = recipe()
+        helper = module.load("prepare-linux-dolby-sdk")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repository = root / "public-fixture"
+            repository.mkdir()
+            home = root / "git-home"
+            home.mkdir()
+            git_environment = {"PATH": "/usr/bin:/bin", "HOME": str(home), "LC_ALL": "C",
+                               "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+                               "GIT_TERMINAL_PROMPT": "0"}
+            def git(*args):
+                return subprocess.check_output(["/usr/bin/git", "-C", str(repository),
+                    "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", *args],
+                    env=git_environment, stderr=subprocess.DEVNULL).decode().strip()
+            git("init", "-q", "--template=")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            (repository / "source.txt").write_text("pinned source\n")
+            git("add", "source.txt")
+            git("commit", "-qm", "pinned")
+            commit = git("rev-parse", "HEAD")
+            expected = root / "expected.tar.gz"
+            git("archive", "--format=tar.gz", "--output", str(expected), commit)
+            (repository / "source.txt").write_text("later branch content must not ship\n")
+            git("commit", "-qam", "later")
+            inputs = root / "inputs"
+            inputs.mkdir()
+            target = inputs / "source.tar.gz"
+            invoked = []
+            def transport(argv, cwd, environment, log, deadline):
+                request = json.loads(argv[-1])
+                command = request["argv"]
+                invoked.append((list(command), dict(environment)))
+                if "fetch" in command:
+                    self.assertEqual(command[-1], commit)
+                    self.assertEqual(command[-2], "https://example.invalid/public-repository")
+                    request["argv"] = [*command[:-2], str(repository), command[-1]]
+                    argv = [*argv[:-1], json.dumps(request)]
+                return helper.bounded_generator(argv, cwd, environment, log, deadline)
+            with patch.object(module, "load", return_value=SimpleNamespace(bounded_generator=transport)), \
+                    patch("urllib.request.urlopen", side_effect=AssertionError("repository HTML must never be downloaded")):
+                module.fetch_source_archive(target, "https://example.invalid/public-repository",
+                    hashlib.sha256(expected.read_bytes()).hexdigest(), time.monotonic() + 30, "git-archive", commit)
+            self.assertEqual(target.read_bytes(), expected.read_bytes())
+            self.assertEqual(len(invoked), 3)
+            self.assertTrue(all(env["GIT_TERMINAL_PROMPT"] == "0" and env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+                                and env["GIT_CONFIG_NOSYSTEM"] == "1" for _, env in invoked))
+            self.assertEqual(list(root.glob("public-git-source-*")), [])
+            evidence = json.loads((root / "source-fetch-evidence/source.tar.gz/receipt.json").read_text())
+            self.assertEqual(evidence["commit"], commit)
+
+    def test_git_source_storage_overflow_terminates_the_owned_process_group(self):
+        import sys
+        import time
+        module = recipe()
+        helper = module.load("prepare-linux-dolby-sdk")
+        for kind in ["git-object-database", "source-archive"]:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                storage = root / "bounded-storage"
+                if kind == "git-object-database":
+                    storage.mkdir()
+                    output = storage / "pack"
+                else:
+                    output = storage
+                descendants = root / "descendant-pid"
+                command = [sys.executable, "-c",
+                    "import subprocess,sys,time; from pathlib import Path; "
+                    "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+                    "Path(sys.argv[1]).write_text(str(child.pid)); "
+                    "Path(sys.argv[2]).write_bytes(b'x'*16384); time.sleep(30)",
+                    str(descendants), str(output)]
+                log = root / "overflow.log"
+                started = time.monotonic()
+                with self.assertRaises(ValueError):
+                    module.bounded_source_command(helper, command, root, {"PATH": "/usr/bin:/bin"}, log,
+                        started + 10, [{"kind": kind, "path": str(storage), "bytes": 4096}])
+                self.assertLess(time.monotonic() - started, 5)
+                self.assertIn("source storage limit exceeded: kind=" + kind, log.read_text())
+                self.assertIn("limit=4096", log.read_text())
+                pid = int(descendants.read_text())
+                state = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(pid)],
+                                       capture_output=True, text=True, timeout=3)
+                self.assertTrue(state.returncode != 0 or state.stdout.strip().startswith("Z"),
+                                "overflow left a running descendant: " + state.stdout)
+
+    def test_archive_provider_and_commit_are_rejected_before_fetch(self):
+        import time
+        module = recipe()
+        with patch.object(module, "load") as generator, patch("urllib.request.urlopen") as download:
+            for provider, commit in [("unknown", None), ("git-archive", "main"),
+                                     ("git-archive", "a" * 39), ("git-archive", "--upload-pack=other")]:
+                with self.subTest(provider=provider, commit=commit), self.assertRaisesRegex(ValueError, "provider"):
+                    module.fetch_source_archive(Path("/unused"), "https://example.invalid/source", "0" * 64,
+                                                time.monotonic() + 30, provider, commit)
+            generator.assert_not_called()
+            download.assert_not_called()
+
+    def test_https_archive_default_keeps_pin_and_reports_mismatched_input(self):
+        import hashlib
+        import io
+        import time
+        module = recipe()
+        good = b"pinned archive transport bytes"
+        expected = hashlib.sha256(good).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(module, "load", side_effect=AssertionError("HTTPS must not invoke Git")), \
+                    patch("urllib.request.urlopen", return_value=io.BytesIO(good)):
+                self.assertEqual(module.fetch_source_archive(root / "good", "https://example.invalid/archive", expected,
+                                  time.monotonic() + 30), len(good))
+            bad = b"<!DOCTYPE html>repository landing page"
+            with patch("urllib.request.urlopen", return_value=io.BytesIO(bad)):
+                with self.assertRaises(ValueError) as error:
+                    module.fetch_source_archive(root / "refused", "https://example.invalid/archive", expected,
+                                                time.monotonic() + 30)
+            self.assertIn(str(root / "refused"), str(error.exception))
+            self.assertIn("expected=" + expected, str(error.exception))
+            self.assertIn("actual=" + hashlib.sha256(bad).hexdigest(), str(error.exception))
+            self.assertEqual((root / "refused").read_bytes(), bad)
+
     def test_provenance_links_are_metadata_and_never_dereferenced(self):
         module = recipe()
         with tempfile.TemporaryDirectory() as tmp:

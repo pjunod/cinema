@@ -105,6 +105,29 @@ impl Drop for MeasuredPeers {
 }
 
 impl MeasuredPeers {
+    /// Drain every test-owned listener/prober, including a partially selected
+    /// startup whose owner never reached the fixture's successful member list.
+    #[allow(
+        dead_code,
+        reason = "the Store integration fixture uses this drain; the shared core test module does not"
+    )]
+    pub async fn drain_all(&self) -> Vec<String> {
+        let tasks = std::mem::take(&mut *self.tasks.lock().expect("test task ownership"));
+        self.managers.lock().expect("test managers").clear();
+        for (_, task) in &tasks {
+            task.abort();
+        }
+        let mut failures = Vec::new();
+        for (_, task) in tasks {
+            if let Err(error) = task.await {
+                if !error.is_cancelled() {
+                    failures.push(format!("owned measured task failed: {error}"));
+                }
+            }
+        }
+        failures
+    }
+
     pub async fn stop_node(&self, node: &str) {
         let mut stopped = Vec::new();
         {
