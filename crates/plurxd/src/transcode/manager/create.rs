@@ -969,7 +969,43 @@ impl TranscodeManager {
         takeover: Option<SessionTakeoverStart>,
         priority: Priority,
     ) -> Result<StartInfo, String> {
-        let started = match req.kind {
+        // The rolling engine has no processing graph: a processed candidate
+        // can only be served by the prepared VOD root it was qualified with.
+        // An Auto enhancement degrades to the ordinary request it enhanced,
+        // with the reason; a client-named processed candidate is refused
+        // (`rolling_start_inputs` refuses it again, whatever the caller).
+        let degraded_request;
+        let (req, degraded_processing) = match req
+            .candidate_context
+            .as_ref()
+            .filter(|context| context.selected_candidate.processed_hdr10)
+        {
+            Some(context) => match context.ordinary_request.as_deref() {
+                Some(ordinary) if ordinary.file_id == req.file_id => {
+                    let reason = "the rolling engine cannot serve a processed candidate";
+                    tracing::warn!(
+                        target: "plurxd::transcode",
+                        file_id = req.file_id,
+                        reason,
+                        "processed candidate degraded for live-HLS recovery"
+                    );
+                    // The same dispatch, under the same incarnation.
+                    degraded_request = SessionRequest {
+                        request_id: req.request_id.clone(),
+                        ..ordinary.clone()
+                    };
+                    (&degraded_request, Some(reason.to_owned()))
+                }
+                _ => {
+                    return Err(vod_refusal_error(
+                        "candidate_recipe_unavailable",
+                        "a processed candidate cannot be served by the rolling engine",
+                    ));
+                }
+            },
+            None => (req, None),
+        };
+        let mut started = match req.kind {
             SessionKind::Transcode { height } => {
                 self.start_with_audio_offset(
                     req.file_id,
@@ -1030,6 +1066,7 @@ impl TranscodeManager {
                 .await
                 .bind_startup_transport(req.transport.as_deref());
         }
+        started.degraded_processing = degraded_processing;
         Ok(started)
     }
 

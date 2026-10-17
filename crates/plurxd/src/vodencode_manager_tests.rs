@@ -1883,6 +1883,204 @@ async fn a_candidate_rolling_fallback_refuses_a_source_replaced_after_the_vod_at
     );
 }
 
+/// A processed Auto candidate is an enhancement of the ordinary request the
+/// create already resolved. Dispatched without its prepared graph (here: none
+/// was carried, as after an expired or consumed `PreparedCandidateOnce`), it
+/// serves that ordinary request and says why, on both engines the create may
+/// end on; only a processed candidate the client named itself is refused, and
+/// the rolling engine refuses one whatever path hands it over.
+#[tokio::test]
+async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordinary_request() {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    use plurx_core::store::{keys, SqliteStore};
+    let base = crate::test_tempdir().expect("degrade fixture");
+    let path = base.path().join("ordinary.mkv");
+    std::fs::copy(plurx_core::testfixtures::source("h264"), &path).expect("source copy");
+    let path_text = path.to_str().expect("path").to_owned();
+    let probe = plurx_core::scan::probe::probe(&path).await.expect("probe");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id = seed_file_with_probe_at(&store, &path_text, probe).await;
+    store
+        .put_setting(keys::VOD_LIVE_RECOVERY, "true")
+        .await
+        .expect("recovery on");
+    let manager = Arc::new(TranscodeManager::new(
+        Arc::clone(&store),
+        base.path().join("manager"),
+        EncoderCaps::default(),
+        Pipeline::Cpu,
+    ));
+    let planning = store
+        .playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await
+        .expect("planning")
+        .expect("seeded");
+    let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+        "v": 2,
+        "video": [{"codec": "h264", "decode": true, "present": ["sdr"]}],
+        "audio": ["aac"],
+        "transports": ["hls"]
+    }))
+    .expect("caps");
+    let rows = manager
+        .quality_candidates_from_snapshot_progress(
+            &planning,
+            &caps,
+            None,
+            0,
+            None,
+            Presentation::Vod,
+            Some((false, false, false)),
+            None,
+            None,
+        )
+        .await;
+    let copy = rows
+        .iter()
+        .find(|row| {
+            matches!(
+                row.route,
+                CandidateRoute::Remux | CandidateRoute::Original
+            )
+        })
+        .unwrap_or_else(|| panic!("a copy candidate: {rows:?}"));
+    // The ordinary request: the bound copy candidate, exactly as the
+    // candidate fallback test above dispatches it.
+    let mut ordinary_context = TranscodeManager::candidate_context(copy);
+    let source = crate::fragment_index_cluster::open_source_fence(&planning.file, None)
+        .await
+        .expect("source fence");
+    let executable = crate::ffmpeg::EncodedExecutable::capture()
+        .await
+        .expect("executable");
+    let engine = crate::ffmpeg::EncodedEngine::capture(None)
+        .await
+        .expect("engine");
+    let raster = (
+        u32::try_from(planning.file.width.expect("width")).expect("width"),
+        u32::try_from(planning.file.height.expect("height")).expect("height"),
+    );
+    ordinary_context.recipe_digest = super::manager_candidates::copy_candidate_recipe_digest(
+        &planning.file,
+        None,
+        0,
+        None,
+        (false, false, false),
+        Some(source.object_version()),
+        Some(&executable.digest),
+        Some(&engine.digest),
+        raster,
+    );
+    ordinary_context.candidate_id =
+        CandidateId::for_recipe_digest(ordinary_context.recipe_digest);
+    ordinary_context.canonical_caps = Some(caps.clone());
+    ordinary_context.planning_binding =
+        Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
+    ordinary_context.planning_snapshot = Some(Arc::new(planning.clone()));
+    let mut ordinary = reopen_request(file_id, "processed-degrade", "unused", "unused");
+    ordinary.request_id = Some("processed-degrade".into());
+    ordinary.previous_session_id = None;
+    ordinary.reopen_reason = None;
+    ordinary.start_seconds = 0.0;
+    ordinary.automatic = true;
+    ordinary.presentation = Presentation::Vod;
+    ordinary.kind = SessionKind::Copy {
+        aac: false,
+        preserve_dolby_vision: false,
+        convert_dolby_vision: false,
+    };
+    ordinary.candidate_context = Some(Box::new(ordinary_context));
+    // The processed trial qualification would hand on: a Transcode HDR10
+    // request bound to a processed candidate, carrying the ordinary request
+    // it enhances but no prepared graph to consume.
+    let processed_candidate = QualityCandidate {
+        id: CandidateId::for_recipe_digest([7; 32]),
+        recipe_digest: [7; 32],
+        route: CandidateRoute::Encode,
+        planned_codec: Some("hevc".into()),
+        processed_hdr10: true,
+        normalized_geometry: false,
+        width: raster.0,
+        height: raster.1,
+        target_height: raster.1,
+        average_bps: Some(4_000_000),
+        peak_bps: Some(6_000_000),
+        grade: OutputGrade::Hdr10,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: true,
+    };
+    let mut processed_context = TranscodeManager::candidate_context(&processed_candidate);
+    processed_context.canonical_caps = Some(caps);
+    processed_context.planning_binding =
+        Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
+    processed_context.planning_snapshot = Some(Arc::new(planning.clone()));
+    processed_context.owner_node_id = manager.cache_location().map(|(_, node)| node.to_owned());
+    processed_context.ordinary_request = Some(Box::new(ordinary.clone()));
+    let mut processed = ordinary.clone();
+    processed.kind = SessionKind::Transcode {
+        height: i64::from(raster.1),
+    };
+    processed.hdr10 = true;
+    processed.candidate_context = Some(Box::new(processed_context.clone()));
+
+    // The rolling engine never serves a processed candidate, whoever hands
+    // it one: the same refusal the catalog restore path gives.
+    let refused = manager
+        .rolling_start_inputs(file_id, Some(&processed_context))
+        .await
+        .err()
+        .expect("the rolling engine refuses a processed candidate context");
+    assert_eq!(
+        vod_refusal(&refused).map(|(code, _)| code),
+        Some("candidate_recipe_unavailable"),
+        "{refused}"
+    );
+
+    // Dispatch: the VOD attempt cannot consume the processed graph and
+    // degrades to the ordinary copy, which has no index and falls back to
+    // the rolling engine; that engine degrades the same way. The viewer gets
+    // the ordinary start, with the reason, instead of a terminal refusal.
+    let started = create_local_vod(&manager, &processed, "test")
+        .await
+        .expect("the ordinary request the processed candidate enhanced is served");
+    assert!(!started.vod, "the copy has no VOD index; the rolling engine served it");
+    assert!(
+        matches!(started.kind, SessionKind::Copy { .. }),
+        "the ordinary copy, not the processed transcode: {:?}",
+        started.kind
+    );
+    assert_eq!(started.grade, OutputGrade::Sdr);
+    assert_eq!(
+        started.degraded_processing.as_deref(),
+        Some("the rolling engine cannot serve a processed candidate")
+    );
+    assert!(manager.stop_session(&started.session_id, "test").await);
+
+    // A client that named the processed candidate itself has no ordinary
+    // request to fall back to and is refused, as before.
+    let mut named = processed.clone();
+    named.request_id = Some("processed-named".into());
+    named
+        .candidate_context
+        .as_mut()
+        .expect("processed context")
+        .ordinary_request = None;
+    let error = create_local_vod(&manager, &named, "test")
+        .await
+        .err()
+        .expect("a client-named processed candidate without its graph is refused");
+    assert_eq!(
+        vod_refusal(&error).map(|(code, _)| code),
+        Some("candidate_recipe_unavailable"),
+        "{error}"
+    );
+    assert!(
+        manager.active_session_ids().await.is_empty(),
+        "no engine served the refused processed candidate"
+    );
+}
+
 #[tokio::test]
 async fn finite_vod_bitrate_ceiling_is_shared_by_native_recipe_and_worker_identity() {
     let store: Arc<dyn Store> =
