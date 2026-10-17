@@ -184,6 +184,12 @@ pub(crate) fn try_admit_frozen_bundle(
 /// A first processed window is foreground preparation. Register its demand
 /// before waiting so background producers actually yield their owned permits.
 /// Never discount a still-running producer or extend the caller's deadline.
+///
+/// Waiting is only for capacity that was asked to yield: while background
+/// work owns a permit, it is told to and the wait is for its release. When
+/// nothing background holds capacity, what blocks is foreground work that
+/// yields to nobody, and the answer is the immediate refusal it always was,
+/// so the ordinary start this preparation would enhance keeps its budget.
 #[cfg(any(target_os = "linux", test))]
 pub(crate) async fn admit_frozen_preparation(
     admissions: &Admissions,
@@ -214,6 +220,7 @@ pub(crate) async fn admit_frozen_preparation(
             Ok(_) => return Err(false),
             Err(true) => return Err(true),
             Err(false) if Instant::now() >= deadline => return Err(false),
+            Err(false) if !admissions.background_is_active() => return Err(false),
             Err(false) => {
                 waiting.mark_capacity_blocked();
                 tokio::time::sleep_until(
@@ -2074,6 +2081,42 @@ mod source_copy_admission_tests {
         .is_err());
         assert_eq!(admissions.snapshot().live_waiting, 0);
         assert!(!admissions.live_capacity_is_waiting());
+        // Foreground work holds the capacity and nothing background can
+        // yield: the preparation is refused at once, however long its
+        // deadline, and registers no capacity demand.
+        let started = Instant::now();
+        assert!(admit_frozen_preparation(
+            &admissions,
+            2,
+            5,
+            &resources,
+            Some(1),
+            Instant::now() + Duration::from_secs(60),
+        )
+        .await
+        .is_err());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(admissions.snapshot().live_waiting, 0);
+        assert!(!admissions.live_capacity_is_waiting());
+        assert_eq!(admissions.software_in_use(), 5);
+        drop(held);
+    }
+
+    /// The one case the wait exists for: background work owns the capacity,
+    /// so the preparation registers its foreground demand (which tells that
+    /// work to yield) and waits for the release, inside its deadline.
+    #[tokio::test]
+    async fn processed_preparation_waits_only_for_background_work_that_can_yield() {
+        let admissions = Admissions::new();
+        let resources = TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: 5,
+            decoder_threads: Some(1),
+        };
+        let background = admissions
+            .try_admit_bundle(2, 5, &resources, Priority::Background)
+            .expect("background owner");
+        assert!(admissions.background_is_active());
         let cancelled = tokio::time::timeout(
             Duration::from_millis(20),
             admit_frozen_preparation(
@@ -2086,11 +2129,28 @@ mod source_copy_admission_tests {
             ),
         )
         .await;
-        assert!(cancelled.is_err());
+        assert!(cancelled.is_err(), "held background capacity is waited for");
         assert_eq!(admissions.snapshot().live_waiting, 0);
         assert!(!admissions.live_capacity_is_waiting());
+        let releasing = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            drop(background);
+        });
+        let admitted = admit_frozen_preparation(
+            &admissions,
+            2,
+            5,
+            &resources,
+            Some(1),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("the yielded capacity admits the preparation");
+        releasing.await.expect("release task");
         assert_eq!(admissions.software_in_use(), 5);
-        drop(held);
+        drop(admitted);
+        assert_eq!(admissions.software_in_use(), 0);
+        assert!(!admissions.live_capacity_is_waiting());
     }
 
     /// The handoff gap `admit_live` closes. A copy start waiting for CPU must
