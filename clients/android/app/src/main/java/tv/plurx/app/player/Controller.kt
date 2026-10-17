@@ -5964,10 +5964,14 @@ internal fun autoRecoveryCandidate(candidates: List<tv.plurx.app.data.QualityCan
  * display unable to climb back from 480p after any downgrade.
  */
 internal fun autoPreferredDisplayCandidate(candidates: List<tv.plurx.app.data.QualityCandidate>,
-    neededWidth: Double, neededHeight: Double): tv.plurx.app.data.QualityCandidate? =
-    candidates.firstOrNull { it.route != "encode" } ?: candidates.filter {
+    neededWidth: Double, neededHeight: Double): tv.plurx.app.data.QualityCandidate? {
+    val processed = candidates.filter { it.processed_hdr10 && it.hasValidIdentity &&
+        it.decoder_compatible && (it.sustainable || it.complete_cache) }
+    val preferred = processed.ifEmpty { candidates }
+    return preferred.firstOrNull { it.route != "encode" } ?: preferred.filter {
         autoDisplayFits(it.width, it.height, neededWidth, neededHeight)
-    }.minByOrNull { it.width.toLong() * it.height } ?: candidates.maxByOrNull { it.width.toLong() * it.height }
+    }.minByOrNull { it.width.toLong() * it.height } ?: preferred.maxByOrNull { it.width.toLong() * it.height }
+}
 
 internal fun autoDisplayFits(width: Int, height: Int, neededWidth: Double, neededHeight: Double): Boolean =
     width > 0 && height > 0 && width.toDouble() * 11 >= neededWidth * 10 &&

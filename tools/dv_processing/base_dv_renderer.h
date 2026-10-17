@@ -7,7 +7,7 @@ struct base_gpu {
   pl_log log;
   pl_vulkan vk;
   pl_renderer renderer;
-  pl_tex textures[4], output_texture;
+  pl_tex textures[4], output_texture, native_texture;
   float *rgba;
   int width, height;
 };
@@ -117,9 +117,9 @@ static void base_metadata(const AVFrame *frame, const uint8_t *nal, size_t size,
   for (int c = 0; c < 3; c++) {
     const AVDOVIReshapingCurve *curve = &m->curves[c];
     require(curve->num_pivots >= 2 && curve->num_pivots <= 9 &&
-                curve->pivots[0] == 0 &&
-                curve->pivots[curve->num_pivots - 1] == 1023,
-            "bounded complete base curve");
+                curve->pivots[0] <= 1023 &&
+                curve->pivots[curve->num_pivots - 1] <= 1023,
+            "bounded base curve extent");
     for (int i = 0; i < curve->num_pivots - 1; i++) {
       require(curve->pivots[i] < curve->pivots[i + 1],
               "strict base curve pivots");
@@ -136,7 +136,9 @@ static void base_metadata(const AVFrame *frame, const uint8_t *nal, size_t size,
     }
   }
   // This public mapper carries arbitrary signalled polynomial/MMR/color
-  // coefficients. No identity-curve or fixed-matrix substitution occurs.
+  // coefficients, including its signalled lower/upper output clamp. Real
+  // profiles need not span the entire ten-bit range. Preserve those endpoints;
+  // do not widen them to an identity curve or substitute a fixed matrix.
   pl_map_dovi_metadata(&out->dovi, data);
   out->dovi.nlq_active = false; // Explicitly omitted EL: never compose residuals.
   dovi_rpu_free_vdr_dm_data(dm);
@@ -147,6 +149,13 @@ static void base_metadata(const AVFrame *frame, const uint8_t *nal, size_t size,
 static void base_gpu_init(int width, int height) {
   base_context.width = width;
   base_context.height = height;
+  if (!EXPORT_WIDTH && !EXPORT_HEIGHT) {
+    EXPORT_WIDTH = width;
+    EXPORT_HEIGHT = height;
+  }
+  require(EXPORT_WIDTH > 0 && EXPORT_HEIGHT > 0 &&
+              EXPORT_WIDTH <= width && EXPORT_HEIGHT <= height,
+          "bounded explicit base export raster");
   base_context.log = pl_log_create(PL_API_VER,
       pl_log_params(.log_cb = probe_log, .log_level = PL_LOG_WARN));
   require(base_context.log != NULL, "base GPU log");
@@ -157,14 +166,22 @@ static void base_gpu_init(int width, int height) {
   pl_gpu gpu = base_context.vk->gpu;
   base_context.renderer = pl_renderer_create(base_context.log, gpu);
   pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
-                           PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE);
+                           PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE |
+                           ((EXPORT_WIDTH != width || EXPORT_HEIGHT != height) ?
+                            PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR : 0));
   require(base_context.renderer && fmt && fmt->texel_size == 16,
           "base renderer/output format");
   base_context.output_texture = pl_tex_create(gpu,
-      pl_tex_params(.w = width, .h = height, .format = fmt,
+      pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = fmt,
                     .renderable = true, .host_readable = true));
-  base_context.rgba = malloc((size_t)width * height * 16);
+  base_context.rgba = malloc(EXPORT_FLOAT_COUNT * sizeof(float));
   require(base_context.output_texture && base_context.rgba, "base output buffer");
+  if (EXPORT_WIDTH != width || EXPORT_HEIGHT != height) {
+    base_context.native_texture = pl_tex_create(gpu,
+        pl_tex_params(.w = width, .h = height, .format = fmt,
+                      .renderable = true, .sampleable = true));
+    require(base_context.native_texture != NULL, "native base float texture");
+  }
   printf("{\"kind\":\"gpu_context_created\",\"width\":%d,\"height\":%d,"
          "\"processing_mode\":\"base-rpu\"}\n", width, height);
 }
@@ -183,7 +200,7 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
           "actual Dolby Vision base representation");
   // The same explicit master policy as the FEL path, never a display trim pass.
   struct pl_frame destination = {.num_planes = 1,
-      .planes = {{.texture = base_context.output_texture, .components = 3,
+      .planes = {{.texture = base_context.native_texture ? base_context.native_texture : base_context.output_texture, .components = 3,
                   .component_mapping = {0, 1, 2}}},
       .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL,
                .bits = {.color_depth = 32}}, .color = pl_color_space_hdr10};
@@ -204,6 +221,8 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   pl_renderer_reset_errors(base_context.renderer, NULL);
   require(pl_render_image(base_context.renderer, &source, &destination, &params),
           "base DV render");
+  if (base_context.native_texture)
+    export_native_rgb(base_context.renderer, destination, base_context.output_texture);
   struct pl_render_errors errors = pl_renderer_get_errors(base_context.renderer);
   require(errors.errors == 0 && errors.num_disabled_hooks == 0,
           "base renderer errors");
@@ -211,18 +230,11 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
               .tex = base_context.output_texture, .ptr = base_context.rgba)),
           "base RGB download");
   pl_unmap_avframe(gpu, &source);
-  size_t pixels = (size_t)frame->width * frame->height;
+  size_t pixels = EXPORT_FLOAT_COUNT / 4;
   uint8_t *packed = malloc(pixels * 6);
   require(packed != NULL, "base packed RGB buffer");
-  for (size_t i = 0; i < pixels; i++) {
-    for (int c = 0; c < 4; c++)
-      require(isfinite(base_context.rgba[4 * i + c]), "finite base RGBA");
-    for (int c = 0; c < 3; c++) {
-      uint16_t code = dv_pack_finite_rgb48(base_context.rgba[4 * i + c]);
-      packed[6 * i + 2 * c] = (uint8_t)code;
-      packed[6 * i + 2 * c + 1] = (uint8_t)(code >> 8);
-    }
-  }
+  require(dv_pack_rgba_rgb48(base_context.rgba, pixels, packed, pixels * 6),
+          "finite base RGBA");
   sink(packed, pixels * 6, NULL);
   char rgb_hash[65];
   if (diagnostic_hashes) {
@@ -239,7 +251,7 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
          "\"pts\":\"%s\",\"duration\":\"%s\",\"el_bound\":false,\"nlq_active\":false,"
          "\"fel_contributed\":false,\"profile\":%d,\"polynomial_segments\":%d,"
          "\"mmr_segments\":%d",
-         index, frame->width, frame->height, pts, duration, mapping->profile,
+         index, EXPORT_WIDTH, EXPORT_HEIGHT, pts, duration, mapping->profile,
          mapping->polynomial_segments, mapping->mmr_segments);
   printf(",\"applied_operations\":[\"RepresentationNormalization\"");
   if (mapping->polynomial_segments) printf(",\"PolynomialReshape\"");
@@ -253,6 +265,7 @@ static void base_gpu_close(void) {
   pl_gpu gpu = base_context.vk->gpu;
   for (int i = 0; i < 4; i++) pl_tex_destroy(gpu, &base_context.textures[i]);
   pl_tex_destroy(gpu, &base_context.output_texture);
+  pl_tex_destroy(gpu, &base_context.native_texture);
   pl_renderer_destroy(&base_context.renderer);
   pl_vulkan_destroy(&base_context.vk);
   pl_log_destroy(&base_context.log);

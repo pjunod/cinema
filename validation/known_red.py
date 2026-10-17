@@ -476,9 +476,13 @@ def _scan_context(
                         raise KnownRedError(
                             f"{relative}:{tokens[item].line}: missing Rust module {name}"
                         )
+                    # A file loaded through `#[path]` resolves its own child
+                    # modules like a mod.rs file: beside itself, not in a
+                    # directory named after it.
+                    path_loaded = any(a.path == ("path",) for a in attributes)
                     next_dir = (
                         child.parent
-                        if child.name == "mod.rs"
+                        if child.name == "mod.rs" or path_loaded
                         else child.parent / child.stem
                     )
                     queue.append((child, (*modules, name), next_dir))

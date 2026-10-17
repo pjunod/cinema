@@ -58,7 +58,7 @@ RUN sed -i \
       /etc/apt/sources.list.d/debian.sources \
     && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
     && apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl build-essential pkg-config ninja-build nasm python3-venv \
+      ca-certificates curl build-essential patch pkg-config ninja-build nasm python3-venv \
       libvulkan-dev glslang-dev libxxhash-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY tools/dv_processing/build-requirements.txt /build-inputs/build-requirements.txt
@@ -70,6 +70,7 @@ COPY rust-toolchain.toml .
 COPY tools/dv_quality/backends/parsed-rpu/fetch_parser.py tools/dv_quality/backends/parsed-rpu/resolved-Cargo.lock parsed-rpu/
 COPY tools/dv_quality/backends/libplacebo/fetch_sources.py libplacebo/
 COPY tools/dv_processing/build-dependencies.sh .
+COPY tools/dv_processing/*.patch .
 RUN --mount=type=cache,id=plurx-dv-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     sh /build-inputs/build-dependencies.sh /opt/dv-dependencies
 
@@ -275,7 +276,12 @@ RUN sed -i \
     && chown plurx:plurx /var/lib/plurx
 
 # Private libplacebo affects only renderer subprocesses through their manifest.
-# No Vulkan ICD override: the worker retains normal host/device discovery.
+# The pinned Jellyfin package also supplies the Intel Vulkan driver that newer
+# GPUs need. Register it with ordinary discovery; do not bake a GPU/ICD override.
+COPY tools/dv_processing/register-vulkan-driver.sh /tmp/register-vulkan-driver.sh
+RUN if [ "$TARGETARCH" = amd64 ]; then \
+      sh /tmp/register-vulkan-driver.sh /usr/lib/jellyfin-ffmpeg /usr/share/vulkan/icd.d; \
+    fi && rm /tmp/register-vulkan-driver.sh
 COPY --from=dv-processing-helpers /opt/dv-bundle /usr/lib/plurx/dv-processing
 COPY --from=subtitle-engine-build /opt/subtitle-engine/ /usr/local/bin/subtitle-engine/
 # The recognizer must load as the same non-root service account, with no
