@@ -23,6 +23,8 @@ decides what a session costs. Every agent working here, Claude or GPT:
   `git log --oneline -n 20`, `| head -c 4000` on anything unfamiliar, and
   `scripts/quiet <command>` for builds, test suites, ansible and gradle — it
   keeps the full log under `target/quiet/` and prints only failures and the tail.
+  For a red CI run, `scripts/ci-failures [<sha> | --pr N]` prints just the
+  failing jobs' failure lines instead of whole job logs.
 - **Append without reading.** `STATUS.md`, `CHANGELOG.md` and the project
   backlog carry an `<!-- … insert … -->` anchor line; add new entries just
   below it with an edit instead of reading the whole file first.
