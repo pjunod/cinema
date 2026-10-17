@@ -2,6 +2,21 @@
 
 **Status:** open · **Reconciled:** 2026-09-20
 
+## Workstream state at a glance
+
+<!-- agent head: read this section first; the body below is reference. Keep it current when the status changes. -->
+
+- **What this is:** Historical status ledger for the playback-control rewrite (typed control plane, actor, prepared handoff, cutover).
+- **Where it stands:**
+  - Status: open, reconciled 2026-09-20. The doc says it holds conflicting status snapshots: trust the roadmap table over the merged-evidence tables, and git log --merges over all three.
+  - PLAYBACK-REWRITE-REMAINDER.md is the source-verified remainder; the later `## Workstream state at a glance` table gives per-milestone state.
+- **Read further only for:**
+  - the ten roadmap items: `## Roadmap — the ten items of the handoff §6`
+  - PRs in the current push: `## Slice ledger — every PR in the current push`
+  - per-workstream state table: `## Workstream state at a glance`
+  - open decisions and remaining order: `## Open decisions`; `## Remaining delivery order`
+  - what finished means: `## Definition of finished`
+
 **Reconciliation, 2026-09-12:** this historical ledger contains conflicting
 status snapshots. Read [PLAYBACK-REWRITE-REMAINDER.md](PLAYBACK-REWRITE-REMAINDER.md)
 for the source-verified remainder at `10f2afe6`: M6 priming and VOD marker

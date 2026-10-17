@@ -10,6 +10,22 @@ S8 live validation open · **Revised:** 2026-10-06 ·
 **Implementation lane:** `effort/shared-libraries`, created from current main
 `9a719fcb73da195676a6dea5378871d64547bb8b`; isolated implementation checkout.
 
+## At a glance
+
+<!-- agent head: read this section first; the body below is reference. Keep it current when the status changes. -->
+
+- **What this is:** Build contract for one household watching another's selected libraries between independent Cinema servers over private Tailscale: authority, state, wire shapes, code seams, work packages and validation.
+- **Where it stands:**
+  - Status (revised 2026-10-06, source rechecked d4d2ec8e4): implementation in progress; S1 integrated; S2 topology qualification pending; S3-S7 implemented in part; S8 live validation open.
+  - This file is the contract, not the ledger: the build and acceptance ledger is SHARED-LIBRARIES-STATUS.md, section 16 owns current dispositions, and no runtime qualification is implied.
+- **Read further only for:**
+  - confirmed decisions and defaults: `## 1. Product contract — one household watches another's selected libraries`
+  - pairing, trust and the private API: `## 3. Trust and pairing — two authorizations, no account delegation`; `## 5. API — separate administration, local viewers, and private peers`
+  - playback through a peer: `## 7. Playback — reuse the engine without impersonating a source user`
+  - milestones S0-S8 and their acceptance: `## 12. Build sequence — reviewable milestones on one effort`
+  - what to test: `## 13. Validation — prove the trust boundary and the watching experience`
+  - review findings and dispositions: `## 16. Opus S0 dispositions — corrections are not runtime evidence`
+
 Read the decision record first. This document is the proposed implementation
 contract: authority, state, wire shapes, code seams, work packages, and the
 observations that make the feature complete. Opus reviews it before Sol

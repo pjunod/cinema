@@ -8,6 +8,20 @@ separates integrated implementation from remaining acceptance ·
 [ARCHITECTURE-REVIEW-2026-09-20.md](ARCHITECTURE-REVIEW-2026-09-20.md)
 (revision 3) · **Written:** 2026-09-20
 
+## At a glance
+
+<!-- agent head: read this section first; the body below is reference. Keep it current when the status changes. -->
+
+- **What this is:** The single shared status board for every plan that executes the 2026-09-20 architecture review, whichever vendor or session is working it.
+- **Where it stands:**
+  - Live. The effort landed on main as #793 (4cfd1bdd1) on 2026-10-04; #814 landed close-out repairs on 2026-10-05; the 2026-10-07 close-out separates integrated implementation from remaining acceptance.
+  - The 2026-10-11 acceptance-pass note counts four closed rows (K-02, K-07, P-01, P-04) and 45 acceptance-open. Later dated notes (to 2026-10-15) are in the intro and in row Notes.
+  - Roughly the first 450 lines are dated notes; the board table starts at the heading below.
+- **Read further only for:**
+  - claiming, working and finishing a plan: `## How to claim, work and finish a plan`
+  - one row's current Status and Notes: `## The board`
+  - dated per-plan continuation entries: `## Reading the board`
+
 The plans below were implemented by sessions on different vendors — Claude,
 GPT (Astra), and models reached through OpenRouter. This
 file is the **only** shared status. Nothing else (chat, a vendor's memory, a

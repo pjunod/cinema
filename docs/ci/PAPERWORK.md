@@ -40,6 +40,7 @@ opening its pull request, before any compiler job is allocated.
 | Doc `**Status:**` headers make possible claims | `test_doc_status_audit` | correct the header |
 | Every Node web test is in a lane | `test_web_test_inventory` | add the file to `make web-unit-check` |
 | Every `scripts/` Python file parses | `test_script_syntax` | fix the syntax error |
+| Docs stay under 40 KB; the shrink-only list only shrinks | `test_doc_size_budget` | split the doc or move detail to a sibling doc; never add to the allowlist |
 | A new web file is registered everywhere; Developer cards graduate | `tests/web/asset-*.test.js`, `settings-sections.test.js` (only when web files changed) | file + `WEB_ASSETS` row + shell tag + [WEB-SHELL-LAYOUT.md](../clients/WEB-SHELL-LAYOUT.md) row, one commit |
 
 The full corrective-history audit (`make history-check`, ~80 s) and the
