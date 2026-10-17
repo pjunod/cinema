@@ -11969,3 +11969,70 @@ budget now allows128MiB for coexistence. Ordinary completed caching remains zero
 and the zero-output-budget refusal control is unchanged. These are test-only
 repairs; production admission and authority stay unchanged. Retain35 passed Rust
 cases and61 Apple passes; rerun only the four failed cases before final fast lane.
+
+### 10.330 — Apple Auto on an original the title has never been encoded from (2026-10-17)
+
+The shipping Apple build 252 (`89d790d2e`) ran the native 100/10/25/10/25/3/25
+Mb/s link protocol on a real library title rather than the qualification
+fixture: Agent Zero, a 1080p H.264 remux the server costs at 28.8 Mb/s, on an
+iPhone 17 Pro Max and an iPad Pro behind the shaping proxy. Both devices
+passed 15 of 15 manual 720p/480p changes with no interruption. Auto on both
+held the remux through the whole 10 Mb/s stage (8.69 Mb/s delivered, no
+offer, no `auto_quality_recovery`), kept draining through the 25 Mb/s stage
+(24.1 Mb/s delivered, below the title), stalled for 12.3 s, reopened the
+same delivery at 1080p and failed with "The video took too long to prepare"
+after the 15-second item readiness bound. Server placement, relay and the
+one `control_rate_limited` 429 per device were not on the failing path.
+
+Four Apple decision points were wrong, and issue #1153 corrects each at its
+own site with a test that rejects the old line:
+
+- **Declared rung costs were discarded.** `measuredCostCatalog` replaced
+  every candidate's peak and average with a complete full-mux measurement
+  or nothing. The qualified campaigns in §10.291 and §10.322 passed because
+  they measured four whole-title outputs first; a library title has none,
+  so every encode rung was uncosted and `autoRecoveryCandidate` had nothing
+  it may choose for a link cause (§10.305). The catalog the server sends
+  already declares the VBV ceiling plus audio for every encode rung and the
+  source rate for an original, which is the rate the web and Android
+  clients cost by when no measurement exists (#985). `autoCostedCatalog`
+  keeps the declared figures and lets a unique complete measurement replace
+  them. The thirty-second cost refresh the client ran for the whole session
+  was the symptom: at least one rung never acquired a measured cost.
+- **The original was costed only by a fresh body, and pressure on it waited
+  for the runway.** `autoDownsideCostBps` costed a remux or original from a
+  body of its own session less than ten seconds old, and the tick admitted
+  pressure on an uncosted incumbent only under ten seconds of runway. The
+  declared source rate is the title's sustained cost whether or not a body
+  has just completed, a body stands in only when the server declared no
+  rate, and a severe link or two mild bodies is pressure whatever the
+  runway. §10.321's "missing catalog costs authorize no urgent pressure
+  action" described the unmeasured catalog this closes.
+- **Completed-body evidence expired at ten seconds.** A 40 MB remux object
+  takes 37 s to cross a 9 Mb/s link, so the link was proven for ten seconds
+  in every thirty-seven, and at the stall there was no link evidence at
+  all: the recovery found no cause and `retrySameDeliveryAfterStall`
+  reopened the rung the link had just proved it could not carry — §10.305's
+  held failing rung, in the Apple stall path. A body now stays evidence
+  for max(10 s, the time it took to arrive) or until a newer body on the
+  same item supersedes it, in the pressure classifier, the Auto tick and
+  the stall path, which read the incumbent's link through one helper.
+- **A stopped film clock was never sampled.** The surface presenter's
+  evidence sampler is AVPlayer's periodic observer, which stops firing with
+  the film clock; its last sample over a still-moving clock said
+  `presenting`, and every `media_waiting` the 500 ms presenter clock raised
+  was retired in the same reduce by that stale evidence — thirty-one
+  raise/clear pairs a millisecond apart and no Buffering surface for twelve
+  seconds. Once the observer has been silent for one interval the
+  presenter's clock takes the same sample through the same sampler, so the
+  stationary position reads as not presenting and the wait is kept. The
+  evidence remains the position delta of surface contract §3.4; no
+  transport status is read.
+
+Not changed here, and recorded: a body still arrives only when it
+completes, so a link that collapses mid-body is seen when that body ends;
+the native protocol's 25 Mb/s "recovery" stage is below this title's rate
+and cannot recover a remux, which the fixture's 1080p encode rung never
+exposed; and after the failure view the harness's centre taps pressed Try
+Again, which explains the later evidence rows on the iPad and nothing
+before the failure.

@@ -3674,6 +3674,9 @@ final class PlayerController: ObservableObject {
     /// The last position the surface's evidence sampler saw, so "the clock
     /// moved" is a delta rather than a guess.
     private var lastSurfaceSampleMs: Int?
+    /// When the sampler last ran, on the controller's monotonic clock, so the
+    /// presenter's clock knows whether AVPlayer's observer has gone quiet.
+    private var lastSurfaceSampleAtMs: Int?
     /// The create-retry sequence in flight (M5). `createRetryEpoch` names it;
     /// `createRetryExpiredEpoch` is the epoch whose absolute deadline has
     /// passed, rather than a shared flag two sequences could write.
@@ -8378,6 +8381,7 @@ final class PlayerController: ObservableObject {
         surfaceHistory = PlaybackSurfaceHistory()
         surfaceEpoch = ContinuousClock.now
         lastSurfaceSampleMs = nil
+        lastSurfaceSampleAtMs = nil
         surfaceHasPresented = false
         streamChangePreparingIntent = nil
         surfaceLogOnlyReasons.removeAll()
@@ -8738,13 +8742,50 @@ final class PlayerController: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(Self.surfaceClockIntervalMs))
                 guard !Task.isCancelled, let self, self.started else { return }
                 self.refreshWaitDetail()
+                // AVPlayer's periodic observer is the evidence sampler while
+                // the film clock runs, and it stops firing the moment the
+                // clock stops — which is exactly when the model needs to hear
+                // that the picture is no longer moving. Its last sample was
+                // taken over a still-moving clock, so the model kept saying
+                // `presenting`, and every `media_waiting` raised below was
+                // retired in the same step by that stale evidence: twelve
+                // seconds of frozen picture, thirty raise/clear pairs a
+                // millisecond apart, and no spinner. Once the observer has
+                // been silent for one clock interval this clock takes the
+                // same sample through the same sampler: the position delta
+                // over a stationary clock is "not presenting", which is the
+                // evidence the contract asks for (§3.4) and no transport
+                // status.
+                if Self.surfaceClockSamplesPresentation(
+                    lastSampleAtMs: self.lastSurfaceSampleAtMs,
+                    nowMs: PlaybackControlSession.monotonicMs()
+                ), !self.isChangingStream, self.player.currentItem != nil {
+                    self.sampleSurfacePresentation(
+                        at: self.realPositionMs(),
+                        evidence: self.currentLocalVideoEvidence()
+                    )
+                }
                 self.noteMediaWaiting()
                 self.present(.tick)
             }
         }
     }
 
-    static let surfaceClockIntervalMs = 500
+    nonisolated static let surfaceClockIntervalMs = 500
+
+    /// Whether the presenter's clock owes the model a presentation sample:
+    /// only once the periodic observer has been silent for a whole clock
+    /// interval. While the film clock runs the observer samples on its own
+    /// cadence and this clock adds nothing, so a healthy picture is never
+    /// sampled twice in one turn and never reads as stationary by accident.
+    nonisolated static func surfaceClockSamplesPresentation(
+        lastSampleAtMs: Int?,
+        nowMs: Int,
+        intervalMs: Int = surfaceClockIntervalMs
+    ) -> Bool {
+        guard let lastSampleAtMs else { return true }
+        return nowMs - lastSampleAtMs >= intervalMs
+    }
 
     /// Resample the wait sentence. Published only on change, so a steady
     /// reading does not redraw the player twice a second.
@@ -8817,6 +8858,7 @@ final class PlayerController: ObservableObject {
             picture: picture
         )
         lastSurfaceSampleMs = observedPosition
+        lastSurfaceSampleAtMs = PlaybackControlSession.monotonicMs()
         if presenting { surfaceHasPresented = true }
         present(.presenting(presenting, attached: attached))
         endSystemHoldIfPlaying()

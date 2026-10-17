@@ -191,4 +191,54 @@ final class AutoDeclaredCostTests: XCTestCase {
         XCTAssertEqual(evidence.mildSamples(nowMs: 20_000), 2)
         XCTAssertEqual(evidence.mildSamples(nowMs: 20_001), 0)
     }
+
+    // MARK: Fix 4 — a stationary film clock is sampled as not presenting
+
+    func testThePresenterSamplesAStoppedFilmClockOnItsOwnClock() throws {
+        let source = try playerControllerSource()
+        let clock = try functionBody(source, "private func startSurfaceClock() {")
+        let sample = try XCTUnwrap(clock.range(of: "self.sampleSurfacePresentation("),
+                                   "the presenter's clock takes the evidence sample once the observer is silent")
+        let wait = try XCTUnwrap(clock.range(of: "self.noteMediaWaiting()"))
+        XCTAssertLessThan(sample.lowerBound, wait.lowerBound,
+                          "evidence first, then the wait, so the raise is weighed against the stopped clock")
+        XCTAssertTrue(clock.contains("Self.surfaceClockSamplesPresentation("))
+        // The contract's evidence stays the position delta; no transport status.
+        XCTAssertFalse(clock.contains("timeControlStatus"))
+        let sampler = try functionBody(source,
+            "private func sampleSurfacePresentation(at observedPosition: Int, evidence: LocalVideoEvidence) {")
+        XCTAssertTrue(sampler.contains("lastSurfaceSampleAtMs = PlaybackControlSession.monotonicMs()"),
+                      "the sampler records when it ran, so the clock knows when the observer went quiet")
+    }
+
+    func testThePresenterClockSamplesOnlyOnceTheObserverHasBeenSilentForAnInterval() {
+        XCTAssertTrue(PlayerController.surfaceClockSamplesPresentation(lastSampleAtMs: nil, nowMs: 0))
+        XCTAssertFalse(PlayerController.surfaceClockSamplesPresentation(lastSampleAtMs: 10_000, nowMs: 10_499))
+        XCTAssertTrue(PlayerController.surfaceClockSamplesPresentation(lastSampleAtMs: 10_000, nowMs: 10_500))
+        XCTAssertTrue(PlayerController.surfaceClockSamplesPresentation(lastSampleAtMs: 10_000, nowMs: 22_000))
+    }
+
+    func testAWaitRaisedOverAStationaryClockIsKeptAndOneOverAStaleSampleIsNot() {
+        // The model half of the defect, for the record: the observer's last
+        // sample over a still-moving clock says presenting, and a wait
+        // raised against it is retired in the same step. Once the stopped
+        // clock has been sampled, the same raise stands.
+        var model = PlaybackSurfaceModel()
+        let origin = ContinuousClock.now
+        _ = model.apply(.attach(1), now: origin)
+        _ = model.apply(.presenting(true, attached: 1), now: origin.advanced(by: .milliseconds(500)))
+        let retired = model.apply(
+            PlaybackSurfaceModel.raise(source: "media_waiting", context: .attached, attached: 1,
+                                       playerStopped: false, title: "Buffering…", detail: nil),
+            now: origin.advanced(by: .milliseconds(1_000)))
+        XCTAssertTrue(retired.contains { $0.event == .cleared && $0.source == "media_waiting" })
+        XCTAssertFalse(model.faults.contains { $0.source == "media_waiting" })
+        _ = model.apply(.presenting(false, attached: 1), now: origin.advanced(by: .milliseconds(1_500)))
+        let kept = model.apply(
+            PlaybackSurfaceModel.raise(source: "media_waiting", context: .attached, attached: 1,
+                                       playerStopped: false, title: "Buffering…", detail: nil),
+            now: origin.advanced(by: .milliseconds(1_500)))
+        XCTAssertFalse(kept.contains { $0.event == .cleared })
+        XCTAssertTrue(model.faults.contains { $0.source == "media_waiting" })
+    }
 }
