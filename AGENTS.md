@@ -10,15 +10,20 @@ below.
 The tree is over a million lines and the docs run to 19 MB, so how you look
 decides what a session costs. Every agent working here, Claude or GPT:
 
-- **Search before you read.** `rg -l <pattern>` to find files, then
-  `rg -n -m 5 --max-columns 200 <pattern> <file>`. The root `.ignore` keeps
-  evidence, archives, vendored trees and minified files out of searches; add
-  `--no-ignore-dot` only when you need them.
-- **Outline before you open.** `scripts/outline <file>` (or `--top`) lists
-  declarations with line numbers; then read only the range you need. Several
-  source files exceed 10,000 lines — never read one whole. For symbols,
-  callers and impact, `scripts/ripwire` ([docs/ci/RIPWIRE.md](docs/ci/RIPWIRE.md))
-  is the opt-in navigator.
+- **Navigate with Ripwire first.** `scripts/ripwire find '<words>'` returns
+  about a dozen candidate signatures with paths and lines (~4 KB);
+  `scripts/ripwire body '<file>:<symbol>'` prints one function;
+  `callers` / `impact` show who depends on it; `pr-context --base origin/main`
+  maps a diff for review. Add `2>/dev/null` to drop its receipt line.
+  `make hooks` installs it (`scripts/ripwire setup` does it alone). Its graph
+  is heuristic — an empty answer does not prove absence — so confirm in
+  source before you conclude. [docs/ci/RIPWIRE.md](docs/ci/RIPWIRE.md).
+- **Then search, then outline, then read.** `rg -l <pattern>`, then
+  `rg -n -m 5 --max-columns 200 <pattern> <file>`; the root `.ignore` keeps
+  evidence, archives, vendored and minified files out (`--no-ignore-dot` to
+  include them). `scripts/outline <file>` (or `--top`) lists declarations with
+  line numbers; read only the range you need. Several source files exceed
+  10,000 lines — never read one whole.
 - **Docs: read the head, not the body.** A plan or status document's opening
   section says where it stands; read past it only for the part you need.
 - **Keep command output small.** `git diff --stat` before `git diff`,
@@ -26,7 +31,8 @@ decides what a session costs. Every agent working here, Claude or GPT:
   `scripts/quiet <command>` for builds, test suites, ansible and gradle — it
   keeps the full log under `target/quiet/` and prints only failures and the tail.
   For a red CI run, `scripts/ci-failures [<sha> | --pr N]` prints just the
-  failing jobs' failure lines instead of whole job logs.
+  failing jobs' failure lines instead of whole job logs; `--wait SECONDS`
+  waits quietly for running jobs and prints only the final state.
 - **Append without reading.** `STATUS.md` and the project backlog carry an
   `<!-- … insert … -->` anchor line; add new entries just below it with an
   edit instead of reading the whole file first. In `CHANGELOG.md` read only the
@@ -35,7 +41,9 @@ decides what a session costs. Every agent working here, Claude or GPT:
   released.
 - **Delegate exploration** that spans many files to a sub-agent that returns a
   conclusion, and start a fresh session per pull request rather than carrying
-  one long context through several.
+  one long context through several. Claude sessions run exploration and
+  mechanical sub-agents on Sonnet or Haiku and keep Opus or Fable for design
+  and adversarial review.
 - **Review the diff, not the repo.** An adversarial review gets the diff, the
   touched files' outlines and the relevant plan's head.
 
