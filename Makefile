@@ -1617,6 +1617,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/playback/current-main-effort-quality.test.js
 	@node --test tests/playback/frame-diagnostics.test.js
 	@node tests/playback/network-shaping.test.js
+	@node --test tests/playback/cq-native-shipping-evidence.test.js
 	@node --test tests/playback/preparation-measurement.test.js
 	@node --test tests/playback/frame-clock.test.js
 	@node --test tests/playback/quality-cancellation.test.js

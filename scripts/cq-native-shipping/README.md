@@ -27,6 +27,25 @@ over SSH, bootstrap it as a `gui/<uid>` launchd job). The Mac must allow
 Automation Mode (`automationmodetool`), and each device needs
 Settings → Developer → Enable UI Automation.
 
+`run` exits non-zero, and writes `UNSHAPED=1` to the phase log, unless the
+shaper evidence shows media bytes delivered through the proxy in stage 0 and
+in every stage the test requested (`check-evidence.js`); an unshaped run can
+never read as a pass, whatever the UI test reported.
+
+**Caveats.** Three things about the shipping app behind a proxy that the
+harness cannot change:
+
+- A `401`/`403` answered through the proxy makes the Release app's bootstrap
+  clear the Keychain login. Point the proxy only at the server the app is
+  logged in to, and do not shape the first requests of a cold launch.
+- A failure that is not an authentication one can make the app rediscover
+  the real server and persist that origin, after which the rest of the run
+  goes around the proxy. `check-evidence.js` is what catches this: a stage
+  with no media through the proxy fails the run.
+- Peer origins for media failover are not rewritten. A session the server
+  relays or places on another node may be fetched from that node directly;
+  the shaper sees nothing of it and the run fails the same check.
+
 **Limits.** This measures the shipping binary's own reports and visible wait
 surfaces, not optical, audio or menu continuity; "Not measured" switch rows
 are reported as such. The 25 Mb/s recovery stage assumes a 1080p encode rung;
