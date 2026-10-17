@@ -12,6 +12,117 @@ describes the state on the day it was written, and
 merged-pull-request rule it held in `STATUS.md`.
 
 
+## 2026-10-04 · The architecture effort is on `main`; the close-out is a draft PR
+
+**All four nodes were deployed to `b5e39b8bb` on 2026-10-04; later `main`
+commits are not deployed.**
+
+- **#793 — architecture-review effort (`4cfd1bdd1`)** landed whole, before
+  the planned relevance check. Not device- or fleet-qualified; the
+  [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) has
+  the corrected row states. On by default with it: 90-day sign-in expiry, the
+  Lo/Ro fold and −4 dBFS limiter on typed stereo encodes, the CPU tone-map
+  chain, bounded replica reads, the off-writer Raft snapshot copy, the
+  profile C release build. Rolling back is not a revert: its migrations have
+  run on every node. **#797** (Jellyfin facade, off by default) and **#802**
+  (web long-pause resume) followed.
+- **Close-out PR (`claude/architecture-closeout`, draft).** K-06: learners no
+  longer block the clock guard but a lease owner must be bounded, the removal
+  fence's raw clock read goes through the guard, vendor start has its own
+  bound and admission a fresh 45 s. SDR `CODECS` behind a Developer switch,
+  default off. D6: a link negative is acknowledged from the live receipt with
+  network priors off. S-14, L-02, K-05 and D-01 (Android 146) fixes; the
+  hiqlite fork ledger tied to source; the host-name scrub and its guard;
+  Apple 209. The progressive-remux leader-restart grace is PR #807.
+- **Rulings Paul owes** are listed with recommendations in the 2026-10-04
+  relevance pass (an agent-side project document). K-02's snapshot path was
+  accepted on 2026-10-04.
+
+
+## 2026-10-04 · Apple TV: new HEVC WEB-DLs refused with 503 — ffmpeg 8 repeats the sample description
+
+**Branch `fix/ffmpeg8-repeated-hevc-descriptions`.** Paul reported
+2026-10-04 that *Taylor Tomlinson: Prodigal Daughter* (file 91) and
+*Tom Segura: Teacher* (file 106) error out on the Apple TV
+(`NSURLErrorDomain -1008`, underlying HTTP 503). Neither has a VOD index, so
+both play through live-HLS copy, and every attempt ended in `copy segmenter
+rejected the stream shape: … this stsd has 2 HEVC sample entries`; the
+legacy-muxer fallback wrote the same init and `master.m3u8` refused it (503).
+Cause: jellyfin-ffmpeg 8's MOV muxer appends a sample description whenever a
+packet carries new-extradata side data that differs byte-wise from the current
+one, and `extract_extradata` (needed for Matroska sources with a bare 23-byte
+`hvcC`) attaches it on every parameter-set keyframe. Reproduced on six of six
+2160p sources on media1: two descriptions identical outside `hvcC`, the same
+`hvcC` header and the same VPS/SPS/PPS modulo a PPS trailing zero (only SEI
+arrays differ), no `tfhd` sample-description index, `trex` default 1. The fix
+collapses such provably decoder-equivalent descriptions to the first, in
+`fmp4::collapse_equivalent_hevc_sample_entries`, called by both served-init
+builders (`promote_from`, `promote_hevc_parameter_sets`), by the copy
+segmenter on the init, and by VOD's `InitIdentity` before it digests a
+generation's muxer init; descriptions that differ in anything else keep the
+typed `MultipleHevcSampleEntries` refusal. The kept `hvcC` is reduced to its
+VPS/SPS/PPS arrays: ffmpeg 8's extraction copies the leading keyframe's SEI
+(decoded-picture hashes included), so without that every VOD generation
+started at a different keyframe would have refused as muxer drift once these
+titles get an index. Verified on captures: a real 8.1.3 copy pipe publishes a
+one-description init end to end, and four generations of file 91 started at
+0/300/900/1800 s collapse to byte-identical inits (opt-in tests).
+Not addressed here: file 91's fragment index also fails on a separate
+`Non-monotonic DTS` muxer error, and file 6710's `410 Gone` in the same log
+window is unrelated.
+
+
+## 2026-09-28 · Content analysis stopped: the queue's receipt bound is the next cliff after #608
+
+**Branch `fix/queue-receipt-pressure`, [PR #610](http://forge.lan:3000/noirr/plurx/pulls/610), CI running; the retained-row half is
+already on `main` as [#608](http://forge.lan:3000/noirr/plurx/pulls/608)
+(`29358ce5`), not yet deployed — the GPT deploy/verify prompt is in the
+project doc.** Paul reported 2026-09-28 that Content analysis was not
+advancing with `pipeline version unavailable` on every row. Two things, and
+the one on the page was the smaller. The stall: `background_jobs` held
+exactly 10,000 rows (8,890 finished, 6,219 from Saturday's embedding
+backfill), admission refuses at 10,000 regardless of state, finished rows
+retired only after seven days — every enqueue since 2026-09-27 ~09:00 UTC
+answered `queue_full`; fragment requests bounced as `queue_full_or_busy`
+(fences of 100–250 on the same rows, zero fragment jobs queued or running,
+last `ready` 2026-09-27 05:11 UTC). Two sessions diagnosed it in parallel;
+#608 landed first with enqueue-path eviction plus upkeep from 9,000
+(replicated v63 / SQLite v85), and this session's
+[#605](http://forge.lan:3000/noirr/plurx/pulls/605) was closed as
+superseded. What #608 leaves: `background_job_waiters` stood at 11,947 of
+16,384 with 10,775 succeeded receipts that only expire after seven days, so
+the same refusal was days away one table over. This branch compacts the
+oldest settled *internal* receipts a page per upkeep pass from 15,360
+(never user-scoped, identity-retaining — every fragment interest — or of an
+active job), as replicated **v64** / SQLite **v86**, generated from v63's
+upkeep trigger and pinned to it by test.
+The rows on the page: today's image builds flipped jellyfin-ffmpeg
+8.1.2 → 8.1.3 → 8.1.2 (the Dockerfile installs `jellyfin-ffmpeg8` unpinned),
+which changes the fragment-index engine digest, and each deploy under the
+other digest failed everything queued under the first — 278 rows, 228 of
+them tombstones on media1 until **Retry this page** is pressed after the
+deploy. Filed as [#604](http://forge.lan:3000/noirr/plurx/issues/604).
+
+
+## 2026-09-26 · Silo comparison: two implementation plans and one device census, no code
+
+**Branch `docs/silo-comparison-plans`, [PR #563](http://forge.lan:3000/noirr/plurx/pulls/563), draft; not merged, nothing deployed.**
+Paul asked 2026-09-26 how plurx compares with Silo (github.com/Silo-Server),
+then for implementation docs on the two things worth taking and a census for
+the third. Both plans went through an adversarial agent review that pulled
+hyper's source and ran ffmpeg to check them; both came back *reject as
+written* and were rewritten — the write-stall guard now ships off by default
+because the web and Android progressive paths do not resume after a mid-body
+close, and the DV probe changed from "broken → transcode" to "broken → strip
+by unit type" once the review showed the failing unit is a malformed SEI,
+not the RPU. Round two: approve with changes, applied.
+[MEDIA-WRITE-STALL-GUARD.md](MEDIA-WRITE-STALL-GUARD.md) ·
+[DV-STRIP-TRIAL-PROBE.md](DV-STRIP-TRIAL-PROBE.md) ·
+[ANDROID-DV-LEVEL-CENSUS-PROMPT.md](../clients/ANDROID-DV-LEVEL-CENSUS-PROMPT.md).
+Next: Paul's call on the DV plan's Decision 1 and the stall guard's §8; the
+DV plan's M0 evidence step needs the media.
+
+
 ## 2026-09-24 · Live TV: direct play first, 5.1 stays 5.1
 
 **Branch `fix/live-tv-direct-play`, draft pull request; not merged, nothing
