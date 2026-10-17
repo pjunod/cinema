@@ -122,12 +122,15 @@ private final class ControlGate: @unchecked Sendable {
         armed = true
     }
 
-    func waitIfArmed() {
+    func waitIfArmed(onHold: () -> Void = {}) {
         lock.lock()
         let holding = armed
         if holding { armed = false }
         lock.unlock()
-        if holding { _ = semaphore.wait(timeout: .now() + 5) }
+        if holding {
+            onHold()
+            _ = semaphore.wait(timeout: .now() + 5)
+        }
     }
 
     func release() { semaphore.signal() }
@@ -565,10 +568,6 @@ final class PlaybackControlSessionTests: XCTestCase {
         }
         session.begin(bootstrap: sessionBootstrap(), transport: transport,
                       observe: { player.observation() })
-        _ = try await waitForExchange { $0.sequence == 2 }
-        controlAnswer.set(ControlAction(type: "terminal", code: "unsupported", message: "late"))
-        controlAnswer.setReadiness("ready")
-        session.reportEvidence()
         let deadline = Date().addingTimeInterval(5)
         var held = false
         while !held, Date() < deadline {

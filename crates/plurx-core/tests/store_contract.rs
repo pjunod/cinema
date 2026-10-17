@@ -12616,35 +12616,87 @@ async fn assert_unactivated_contract_baseline(client: &Client) {
 // columns/tables that forward migration would add a second time. These fixtures
 // seed no extension rows; remove the later schema and retain the full background
 // trigger inventory as proof that actual migration restores it.
+/// A historical queue fixture cannot retain half of the independent managed
+/// extension after removing its background objects. Rewind only an empty,
+/// unactivated current extension, then let ordinary open reinstall it.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn rewind_empty_managed_subtitle_extension(client: &Client) {
+    assert_unactivated_contract_baseline(client).await;
+    let rows: Vec<I64Value> = client.query_consistent_map(
+        "SELECT (SELECT count(*) FROM subtitle_managed_schema WHERE singleton=1 AND version=1) AS value",
+        hiqlite::params!(),
+    ).await.expect("current managed fixture marker");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].value, 1,
+        "only the current managed fixture may be rewound"
+    );
+    let rows: Vec<I64Value> = client.query_consistent_map(
+        "SELECT (SELECT count(*) FROM subtitle_model_receipts) + (SELECT count(*) FROM background_jobs WHERE kind IN ('subtitle_model_operation','subtitle_transcribe_managed')) AS value",
+        hiqlite::params!(),
+    ).await.expect("managed fixture data inventory");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].value, 0,
+        "managed receipts or accepted work cannot be rewound"
+    );
+    let rows: Vec<I64Value> = client.query_consistent_map(
+        "SELECT count(*) AS value FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources')",
+        hiqlite::params!(),
+    ).await.expect("complete managed fixture objects");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].value, 6,
+        "partial managed fixtures cannot be rewound"
+    );
+    let old_view = include_str!("../src/store/background_jobs_probe.sql")
+        .split("-- next statement")
+        .find(|sql| {
+            sql.trim_start()
+                .starts_with("CREATE VIEW IF NOT EXISTS background_job_required_resources")
+        })
+        .expect("published predecessor resource view");
+    let mut statements = [
+        "DROP TRIGGER subtitle_managed_config_write",
+        "DROP TRIGGER subtitle_managed_source_deleted",
+        "DROP TRIGGER subtitle_managed_source_changed",
+        "DROP VIEW background_job_required_resources",
+        "DROP TABLE subtitle_model_receipts",
+        "DROP TABLE subtitle_managed_schema",
+    ]
+    .into_iter()
+    .map(|sql| (sql.to_owned(), hiqlite::params!()))
+    .collect::<Vec<_>>();
+    statements.push((old_view.to_owned(), hiqlite::params!()));
+    client
+        .txn(statements)
+        .await
+        .expect("atomic managed fixture rewind")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all managed rewind statements");
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn drop_post_v39_extension_schema(client: &Client) -> Vec<(String, String)> {
-    // The independently versioned managed subtitle extension is newer too.
-    // Refuse populated model receipts before removing any schema: keeping its
-    // tables while dropping the resource view would create a partial extension.
-    let receipts: Vec<I64Value> = client
-        .query_consistent_map(
-            "SELECT COUNT(*) AS value FROM subtitle_model_receipts",
-            hiqlite::params!(),
-        )
-        .await
-        .expect("inspect managed model receipts before historical fixture rewind");
-    assert_eq!(receipts.len(), 1);
-    assert_eq!(
-        receipts[0].value, 0,
-        "cannot rewind populated managed model receipts"
-    );
+    // Capture the current oracle before removing managed triggers: ordinary
+    // reopen must restore those exact definitions along with the old queue.
+    let mut trigger_rows = client
+        .query_consistent("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0)",hiqlite::params!())
+        .await.expect("read complete current background trigger oracle");
+    let mut triggers = trigger_rows
+        .iter_mut()
+        .map(|row| (row.get::<String>("name"), row.get::<String>("sql")))
+        .collect::<Vec<_>>();
+    rewind_empty_managed_subtitle_extension(client).await;
     let mut rows = client
-        .query_consistent("SELECT type,name,sql FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update','subtitle_managed_schema','subtitle_model_receipts') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
+        .query_consistent("SELECT type,name,sql FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR name IN ('jellyfin_watch_own_insert','jellyfin_watch_own_update') OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
         .await.expect("read later background schema inventory");
-    let mut triggers = Vec::new();
     let statements = rows
         .iter_mut()
         .map(|row| {
             let kind = row.get::<String>("type");
             let name = row.get::<String>("name");
-            if kind == "trigger" {
-                triggers.push((name.clone(), row.get::<String>("sql")));
-            }
             (
                 format!("DROP {} \"{}\"", kind, name.replace('"', "\"\"")),
                 hiqlite::params!(),
@@ -13686,6 +13738,10 @@ fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
             plurx_core::store::FRAGMENT_PRUNE_CANDIDATES,
             plurx_core::store::FRAGMENT_PRUNE_TERMINAL_JOBS,
         );
+        // Keep the fresh-chain budget check above on the complete current
+        // schema, then remove only the exact empty managed extension before
+        // constructing a genuine v87 predecessor for the production upgrade.
+        queue_fixture::rewind_empty_managed_subtitle_schema(&conn);
         conn.execute_batch(include_str!("fixtures/fragment-prune-worst.sql"))
             .expect("populated upgrade workload");
         drop_composed_v92_v93_columns(&conn);
@@ -16500,6 +16556,17 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
         CONTRACT_INSTANCE_ID
     );
     drop(first);
+    client.txn([
+        ("INSERT INTO subtitle_model_receipts VALUES('bootstrap-node','bootstrap-model','{}')", hiqlite::params!()),
+        ("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('bootstrap-managed-job','subtitle_model_operation',1,'{}','bootstrap-managed-job',0,'queued',0,0,0,'bootstrap-node')", hiqlite::params!()),
+    ]).await.expect("seed managed retry obligations").into_iter().collect::<Result<Vec<_>,_>>().expect("commit managed retry witnesses");
+    let before_view: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT sql AS value FROM sqlite_master WHERE name='background_job_required_resources'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("managed resource view before retry");
 
     // A lost acknowledgement can make the same coordinator retry the entire
     // bootstrap. The current-shape predicate must skip non-idempotent v22 DDL.
@@ -16516,6 +16583,30 @@ async fn replicated_analysis_schema_bootstrap_and_stale_marker_retries_are_idemp
         CONTRACT_INSTANCE_ID
     );
     drop(retried);
+    let after_view: Vec<SchemaText> = client
+        .query_consistent_map(
+            "SELECT sql AS value FROM sqlite_master WHERE name='background_job_required_resources'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("managed resource view after retry");
+    assert_eq!(before_view.len(), 1);
+    assert_eq!(after_view.len(), 1);
+    assert_eq!(
+        after_view[0].value, before_view[0].value,
+        "retry preserves exact installed managed view"
+    );
+    let retained: Vec<I64Value> = client.query_consistent_map("SELECT (SELECT count(*) FROM subtitle_model_receipts WHERE node_id='bootstrap-node' AND model_id='bootstrap-model' AND receipt_json='{}') + (SELECT count(*) FROM background_jobs WHERE id='bootstrap-managed-job' AND state='queued') + (SELECT count(*) FROM background_job_required_resources WHERE job_id='bootstrap-managed-job' AND resource_key='subtitle_model:bootstrap-node') AS value", hiqlite::params!()).await.expect("managed retry witnesses survive");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(
+        retained[0].value, 3,
+        "receipt, accepted work and model resource obligation survive bootstrap"
+    );
+    // Retire only these two owned witnesses before the empty historical rewind.
+    client.txn([
+        ("DELETE FROM background_jobs WHERE id='bootstrap-managed-job'", hiqlite::params!()),
+        ("DELETE FROM subtitle_model_receipts WHERE node_id='bootstrap-node' AND model_id='bootstrap-model'", hiqlite::params!()),
+    ]).await.expect("retire owned retry witnesses").into_iter().collect::<Result<Vec<_>,_>>().expect("commit witness cleanup");
 
     // Model a committed v22 shape whose marker acknowledgement was lost. The
     // daemon must advance only the marker instead of replaying ALTER/rename
@@ -38057,6 +38148,7 @@ async fn replicated_schema_marker(client: &Client) -> i64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     async fn rewind_non_idempotent_columns(client: &Client) {
+        rewind_empty_managed_subtitle_extension(client).await;
         downgrade_dv_request_provenance(client).await;
         // v60 also adds a column. Remove its dependent triggers before replaying
         // that step, including when the v48 index migration itself is a no-op.

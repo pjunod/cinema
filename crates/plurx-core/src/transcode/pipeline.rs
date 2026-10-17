@@ -160,6 +160,10 @@ pub enum Pipeline {
 /// The CPU chain's operator in the Jellyfin GPU filters' terms: Hable on the
 /// brightest channel with no desaturation. See [`Pipeline::tone_map_terms`].
 const CPU_MATCHED_TONE_MAP_TERMS: &str = "tonemap=hable:tonemap_mode=max:desat=0";
+// Jellyfin linearizes PQ at 203 nits; Hable must normalize both operands
+// to the CPU chain's 100-nit white. Other GPU filters retain their terms.
+const METAL_CPU_WHITE_TONE_MAP_TERMS: &str =
+    "tonemap=hable:tonemap_mode=max:desat=0:reference_white=100";
 
 /// Every pipeline the probe may consider, best first.
 ///
@@ -574,12 +578,8 @@ impl Pipeline {
     ) -> Option<String> {
         let hdr = hdr_format.is_some();
         let mapping = self.tone_map_terms(hdr_format).map(|terms| {
-            match peak_nits.filter(|_| terms == CPU_MATCHED_TONE_MAP_TERMS) {
-                Some(nits) => format!(
-                    "{terms}:peak={}",
-                    self.tone_map_peak_option(hdr_format, nits)
-                        .expect("CPU-matched terms have an explicit peak unit")
-                ),
+            match peak_nits.and_then(|nits| self.tone_map_peak_option(hdr_format, nits)) {
+                Some(peak) => format!("{terms}:peak={peak}"),
                 None => terms.to_owned(),
             }
         });
@@ -757,7 +757,7 @@ impl Pipeline {
             Pipeline::VtToneMapMetal if hdr_format == Some("hlg") => {
                 Some("tonemap=bt2390:tonemap_mode=itp")
             }
-            Pipeline::VtToneMapMetal => Some(CPU_MATCHED),
+            Pipeline::VtToneMapMetal => Some(METAL_CPU_WHITE_TONE_MAP_TERMS),
             Pipeline::TonemapCuda | Pipeline::TonemapOpencl if hdr_format.is_some() => {
                 Some(CPU_MATCHED)
             }
@@ -771,7 +771,10 @@ impl Pipeline {
     /// therefore loses a factor of ten. Its <=100-nit fallback masks this at
     /// exactly 1,000 nits, but not at the 1,179-nit real-title control.
     pub fn tone_map_peak_option(self, hdr_format: Option<&str>, nits: u32) -> Option<f64> {
-        if self.tone_map_terms(hdr_format) != Some(CPU_MATCHED_TONE_MAP_TERMS) {
+        if !matches!(
+            self.tone_map_terms(hdr_format),
+            Some(CPU_MATCHED_TONE_MAP_TERMS | METAL_CPU_WHITE_TONE_MAP_TERMS)
+        ) {
             return None;
         }
         let divisor = if self == Pipeline::VtToneMapMetal {
@@ -1098,7 +1101,12 @@ mod tests {
             for hdr in ["hdr10", "hdr10plus"] {
                 let terms = pipeline.tone_map_terms(Some(hdr)).expect("maps PQ");
                 assert_eq!(
-                    terms, "tonemap=hable:tonemap_mode=max:desat=0",
+                    terms,
+                    if pipeline == Pipeline::VtToneMapMetal {
+                        "tonemap=hable:tonemap_mode=max:desat=0:reference_white=100"
+                    } else {
+                        "tonemap=hable:tonemap_mode=max:desat=0"
+                    },
                     "{pipeline:?}"
                 );
                 let graph = pipeline
@@ -1121,7 +1129,7 @@ mod tests {
                 .expect("graph");
             assert!(
                 graph.contains(if pipeline == Pipeline::VtToneMapMetal {
-                    "=tonemap=hable:tonemap_mode=max:desat=0:peak=400:"
+                    "=tonemap=hable:tonemap_mode=max:desat=0:reference_white=100:peak=400:"
                 } else {
                     "=tonemap=hable:tonemap_mode=max:desat=0:peak=40:"
                 }),
@@ -1132,7 +1140,7 @@ mod tests {
             .filters_at_peak(Some(1920), 1080, Some("hlg"), Some(4_000))
             .expect("graph");
         assert!(
-            !hlg_at_peak.contains("peak="),
+            !hlg_at_peak.contains("peak=") && !hlg_at_peak.contains("reference_white="),
             "HLG keeps its pinned treatment: {hlg_at_peak}"
         );
         let hlg = Pipeline::VtToneMapMetal.tone_map_terms(Some("hlg"));

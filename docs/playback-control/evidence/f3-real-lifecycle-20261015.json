@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-15",
+  "scope": "F3 bounded current-owner lifecycle accounting; historical attribution remains inconclusive, no new leak reproduced",
+  "state": "current owner controls pass; broad failure/abrupt-quit matrix not claimed",
+  "runtime": {
+    "source": "5c6fa8ab835705fc266c9c9e0f11c27210b0edf1 with full native reference-white correction and sealed zlib parser",
+    "backend_sha256": "4d1876880975f76a1cd97cd4cff46cecbae564df5d927bec646c29758bfda5fd",
+    "source_kind": "genuine full-film AV1 HDR10, 3840x1600; controlled720/480 SDR family with shared AAC; actual browser exit separately uses rolling original-quality AV1",
+    "environment": "owned isolated local backend namespace; production and unrelated viewers unchanged"
+  },
+  "evidence": {
+    "archive": "f3-real-lifecycle-20261015.zip",
+    "members": 114,
+    "bytes": 1332960,
+    "sha256": "210e78b48e74922a02f61079d1ab904d4ad3a9c4b7680ef0857c1ca65ff5da00",
+    "pull_request": 1116,
+    "attachment": "921f6e4a-cd8d-4d73-a4fc-cabb437ac496",
+    "independent_download_verified": true,
+    "review": "Astra independently verified all113 manifest members and approved bounded closure"
+  },
+  "cases": {
+    "family_admission": "200; initial observed hardware2/software8",
+    "second_viewer_same_family": "200, same immutable family; no additional hardware/software charge",
+    "different_family_pressure": "503 transcode_capacity_pending, retry condition explained; incumbent charges preserved, no internal500",
+    "client_release": "second viewer DELETE204; first viewer's real media still200",
+    "prepared_cancel": "ready successor cancels to retained_current and clears ready intervals",
+    "prepared_supersession": "new intent supersedes prior ready transaction; old ready/reserved lists empty",
+    "scheduled_pin_accounting": "two video intervals reserve940101 bytes; Cancel preserves potentially scheduled reservations, exact Disposed facts reduce video reservations to0",
+    "shared_audio": "two intervals82852 bytes remain in the serialized terminal historical ledger; they are not claimed to disappear from stored JSON",
+    "abandoned_reader": "no client requests; daemon idle-reaped at19:40:09.965 UTC, about305.6 seconds after attach19:35:04.384, consistent with300-second TTL plus maintenance tick",
+    "active_reader": "18 successful hold heartbeats every20 seconds over340 seconds; remained active when abandoned reader had ended by300-second campaign observation",
+    "all_client_release": "final DELETE204, zero sessions/deliveries/hardware/software occupancy; private retained namespace contains only owner lock",
+    "new_admission_after_cleanup": "a different family admits200 without operator Activity Stop",
+    "restart": "exact owned server restarted while another family existed; startup accounting hardware/software0, new family admits200 then releases to0",
+    "actual_browser": "ordinary Chrome AV1 rolling playback advanced beyond2 minutes; paused seek to0, zero resume API verification, exact owned tab closed; sessions/deliveries/hardware/software0, resume0 and unwatched verified afterward"
+  },
+  "preserved_driver_failures": [
+    "first control omitted required capabilities and correctly refused400; corrected driver and failure retained",
+    "one driver guessed a nonexistent segment path and received404; exact playlist-derived media path then returned200",
+    "browser focus race closed an unrelated PR tab; immediately restored, not used as lifecycle evidence"
+  ],
+  "limits": [
+    "Original three-minute retention is inside the documented300-second idle policy; its original ownership was not retrospectively reconstructed",
+    "Successful ready cancellation and supersession are covered; actual decoder/preparation failure after allocation is not separately isolated",
+    "Actual browser close is rolling; it does not qualify controlled-family prepared transition browser teardown or abrupt browser-process quit",
+    "Terminal serialized ledger retains historical audio rows; measured active admission and private artifact ownership return to baseline",
+    "No memory-leak or calibrated optical/audio claim"
+  ],
+  "cleanup": {
+    "at": "2026-10-15T19:55:33.526114+00:00",
+    "sessions": 0,
+    "deliveries": 0,
+    "hardware_used": 0,
+    "software_used": 0,
+    "resume_ms": 0,
+    "watched": false,
+    "owned_server_stopped": true,
+    "operator_stop_used_to_get_admission": false
+  }
+}

@@ -2712,7 +2712,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .expect("marker"),
-            111 // Cinema v106-v110 plus the managed subtitle adjunct v111.
+            111 // Cinema v106-v110 is followed by the managed subtitle extension.
         );
         assert!(conn
             .query_row(
@@ -3441,7 +3441,7 @@ mod tests {
         // cancellation and v103 continuous dependencies; v104–v105 add sharing
         // authority and outer-ingress custody; v106-v110 append Cinema receiver
         // credentials, consent, revision fencing, login rebind and cleanup guards.
-        // v111 adds managed subtitle model receipts, guards and resource routing.
+        // v111 appends the independently versioned managed subtitle extension.
         assert_eq!(
             version, 111,
             "a new migration must be a deliberate bump, not a surprise — \

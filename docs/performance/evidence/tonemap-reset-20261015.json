@@ -1,0 +1,238 @@
+{
+  "schema_version": 1,
+  "scope": "within-backend raw filter reset consistency only",
+  "rows": [
+    {
+      "name": "segment-cpu-official-8-vfr",
+      "result": "passed",
+      "receipt_sha256": "836aa6b6672b97d124f74adb118f9abe6e8a420693119d5f390177ebe5d80e56",
+      "commands": 13,
+      "source_sha256": "b48922a333fd915e1551061eab7a79c4f9a0047f95c5f1608bb33d7c5c363033",
+      "canonical_sha256": "63de7d964a66f63d3c745af5eb4da66ae9a27898368b2e4c5addef73761e6266",
+      "source_pts_step_values": [
+        "21/250",
+        "21/500",
+        "41/1000"
+      ],
+      "cases": [
+        {
+          "case": "cpu-fixed-1179",
+          "result": "passed",
+          "windows": 3,
+          "frames_compared": 8,
+          "changed_frames": 0,
+          "maximum_channel_difference": 0
+        },
+        {
+          "case": "cpu-nooverride",
+          "result": "passed",
+          "windows": 3,
+          "frames_compared": 8,
+          "changed_frames": 0,
+          "maximum_channel_difference": 0
+        }
+      ]
+    },
+    {
+      "name": "segment-candidate-1179-cfr",
+      "result": "passed",
+      "receipt_sha256": "c0ecf10a7c617febbced72b23045523658a25a47b0168e8d693a7c0fffd63e8a",
+      "commands": 15,
+      "source_sha256": "e7e69b32708200cad85ca1dc2b928b8f3e6c06ddc9610c4f2bfbc33d99b50776",
+      "canonical_sha256": "83c873f44b4efee67c1f33bb3b585438a5ef6990153f2fa28c11fd37ac9f46bb",
+      "source_pts_step_values": [
+        "21/500",
+        "41/1000"
+      ],
+      "cases": [
+        {
+          "case": "cpu-fixed-1179",
+          "result": "passed",
+          "windows": 4,
+          "frames_compared": 48,
+          "changed_frames": 0,
+          "maximum_channel_difference": 0
+        },
+        {
+          "case": "metal-fixed-1179",
+          "result": "passed",
+          "windows": 4,
+          "frames_compared": 48,
+          "changed_frames": 0,
+          "maximum_channel_difference": 0
+        }
+      ]
+    },
+    {
+      "name": "segment-candidate-1179-vfr",
+      "result": "passed",
+      "receipt_sha256": "4af9aa042395e67f3e25cdf9469df5e56fec012701d67a491dbd8025a7577885",
+      "commands": 15,
+      "source_sha256": "f9c5c38e5f3018344bc6785d38ef9068918750a496b35f89e8fb8d68a7e1efd3",
+      "canonical_sha256": "07a6dd87422d729349c6b6ab27557096bb5220c09d5e5a06396af8844289bae9",
+      "source_pts_step_values": [
+        "21/250",
+        "21/500",
+        "41/1000",
+        "83/1000"
+      ],
+      "cases": [
+        {
+          "case": "cpu-fixed-1179",
+          "result": "passed",
+          "windows": 4,
+          "frames_compared": 48,
+          "changed_frames": 0,
+          "maximum_channel_difference": 0
+        },
+        {
+          "case": "metal-fixed-1179",
+          "result": "passed",
+          "windows": 4,
+          "frames_compared": 48,
+          "changed_frames": 0,
+          "maximum_channel_difference": 0
+        }
+      ]
+    },
+    {
+      "name": "segment-candidate-2713-cfr",
+      "result": "passed",
+      "receipt_sha256": "200b016046bd1437146f64d17e32deab501380f087ff2fe2b8adb7e215d9ffc8",
+      "commands": 15,
+      "source_sha256": "e77f20dc0bfe353691c5dd0dfe92525659ccfab60ad5b0095d2d21ec92c27baa",
+      "canonical_sha256": "a6993781af8fac969abbe30c54f6b6ec1ee397f3f42eedb29761858e1cbde61f",
+      "source_pts_step_values": [
+        "21/500",
+        "41/1000"
+      ],
+      "cases": [
+        {
+          "case": "cpu-fixed-2713",
+          "result": "passed",
+          "windows": 4,
+          "frames_compared": 48,
+          "changed_frames": 0,
+          "maximum_channel_difference": 0
+        },
+        {
+          "case": "metal-fixed-2713",
+          "result": "passed",
+          "windows": 4,
+          "frames_compared": 48,
+          "changed_frames": 0,
+          "maximum_channel_difference": 0
+        }
+      ]
+    },
+    {
+      "name": "segment-candidate-2713-vfr",
+      "result": "passed",
+      "receipt_sha256": "002a659adaf5aae1f68150e1009320355da2714cb9d6cced80658a70f9608953",
+      "commands": 15,
+      "source_sha256": "91c601b31eeb3ea6965e66f1c6a4b6f0c0a79c41235f0d85c6ceea1d8b4b835c",
+      "canonical_sha256": "67d64bae8c69f9664e1fa2c5e5df35032d0e86e3ceac8879f47ac3e5e4d3cd70",
+      "source_pts_step_values": [
+        "21/250",
+        "21/500",
+        "41/1000",
+        "83/1000"
+      ],
+      "cases": [
+        {
+          "case": "cpu-fixed-2713",
+          "result": "passed",
+          "windows": 4,
+          "frames_compared": 48,
+          "changed_frames": 0,
+          "maximum_channel_difference": 0
+        },
+        {
+          "case": "metal-fixed-2713",
+          "result": "passed",
+          "windows": 4,
+          "frames_compared": 48,
+          "changed_frames": 0,
+          "maximum_channel_difference": 0
+        }
+      ]
+    }
+  ],
+  "candidate_frames_compared": 384,
+  "timing_note": "CFR labels denote nominal 24000/1001 authorship; Matroska source PTS are quantized to milliseconds. All comparison PTS are exact rational captured ticks, not an assumed CFR grid. VFR additionally inserts one nominal-frame interval every third authored frame.",
+  "unit_evidence": {
+    "first_batch": "segment-focused-units.log: 7 tests, 6 pass and 1 negative fixture failure",
+    "failed_test_rerun": "segment-focused-failed-test-rerun.log: corrected mistaken unchanged tick; only failed test reran and passed",
+    "retained_passes": 6,
+    "test_source_sha256": "648588685750c7f04ead181d4e2192de3b54cfb4943957abea0c08b7287f8fa6"
+  },
+  "limits": [
+    "No compressed-source seek or encoder restart evidence",
+    "No CPU-vs-Metal grade or calibrated physical display qualification",
+    "No override control uses canonical fallback without original HDR side metadata"
+  ],
+  "harness_version_delta": {
+    "old_harness_sha256": "c99f6e767c84f11bb211f17d70fc66388891ad02b24aaa5767d388d828cb4b24",
+    "new_harness_sha256": "4c81ff4a7351e7df55fb38b5ebdbde85018508cb4bd1f52297114c7854087679",
+    "change": "x265 MaxFALL metadata changes from arbitrary100 to0(unknown); graph,frames,raster,rawauthoring and comparison unchanged",
+    "original_captured_input_hashes": [
+      {
+        "run": "segment-candidate-1179-cfr",
+        "authored_raw_sha256": "f44c51d0b0d815172edc85288184a69a9ab1c2b28550928bf60d26efa5eebb13",
+        "captured_raw_sha256": "f44c51d0b0d815172edc85288184a69a9ab1c2b28550928bf60d26efa5eebb13"
+      },
+      {
+        "run": "segment-candidate-1179-vfr",
+        "authored_raw_sha256": "f44c51d0b0d815172edc85288184a69a9ab1c2b28550928bf60d26efa5eebb13",
+        "captured_raw_sha256": "f44c51d0b0d815172edc85288184a69a9ab1c2b28550928bf60d26efa5eebb13"
+      },
+      {
+        "run": "segment-candidate-2713-cfr",
+        "authored_raw_sha256": "d56eefe53258426cbe0b6285b5ad30df87e04bca307c795c221c207ffccb7224",
+        "captured_raw_sha256": "d56eefe53258426cbe0b6285b5ad30df87e04bca307c795c221c207ffccb7224"
+      },
+      {
+        "run": "segment-candidate-2713-vfr",
+        "authored_raw_sha256": "d56eefe53258426cbe0b6285b5ad30df87e04bca307c795c221c207ffccb7224",
+        "captured_raw_sha256": "d56eefe53258426cbe0b6285b5ad30df87e04bca307c795c221c207ffccb7224"
+      }
+    ],
+    "original_receipts_preserved": true,
+    "original_run_limit": "MaxFALL100 was authored but not derived from frame-average luminance. Canonical rawvideo discarded it; all graphs used fixed explicitpeak/white. Original results qualify raw reset consistency only.",
+    "timing_note": "CFR labels are nominal24000/1001 authorship with original MatroskaPTS quantized to1ms; exact captured rationalPTS used in everycomparison."
+  },
+  "tool_identity": {
+    "ffmpeg_sha256": "6551e2b2c0683b8b0307ec2bb7b261f9afa35f66d1a0fab97ff4dae7f9b1a5b6",
+    "ffprobe_sha256": "1274244c7af564865629f27a23ada56f5f78756d1bc7ab956fed39aacb16a87e"
+  },
+  "host": {
+    "os": "macOS 27.0.1",
+    "os_build": "26A434",
+    "architecture": "arm64"
+  },
+  "metadata_correction_proof": {
+    "result": "passed",
+    "scope": "one CPU-only synthetic fixture metadata/raw invariance proof; no mapping/GPU rerun",
+    "harness_sha256": "4c81ff4a7351e7df55fb38b5ebdbde85018508cb4bd1f52297114c7854087679",
+    "metadata": {
+      "MaxCLL": 1179,
+      "MaxFALL": 0,
+      "meaning": "unknown MaxFALL, not a measured frame average"
+    },
+    "raw_sha256": {
+      "new_authored_raw": "f44c51d0b0d815172edc85288184a69a9ab1c2b28550928bf60d26efa5eebb13",
+      "new_decoded_raw": "f44c51d0b0d815172edc85288184a69a9ab1c2b28550928bf60d26efa5eebb13",
+      "original_authored_raw": "f44c51d0b0d815172edc85288184a69a9ab1c2b28550928bf60d26efa5eebb13"
+    },
+    "decoded_frame_count": 48,
+    "source_sha256": "74e133f344f8edba2da7b504c6ebbb52840c0e70c48d80b45a03791bd7d77706",
+    "private_receipt_sha256": "591dabd8a68d6b7900747cc3406ea90cca530b127ccaea6526d3ef4eb3668c3a"
+  },
+  "review": {
+    "verdict": "approved",
+    "finding": "P1 hidden FFmpeg option overrides",
+    "resolution": "Normalize names/aliases and reject positional mapping options plus all quoted/escaped graph syntax.",
+    "tests_during_review": false
+  },
+  "date": "2026-10-15"
+}

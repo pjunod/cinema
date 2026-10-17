@@ -1,0 +1,649 @@
+#!/usr/bin/env python3
+"""Compare a declared tone-map graph continuously and after frame-window resets.
+
+This isolates filter consistency on identical decoded PQ frames. It does not
+qualify compressed-source seeks, lossy encoder restarts, an SDR artistic grade,
+or a calibrated display. A case JSON supplies id, mode (explicit/nooverride),
+graph, input_adapter, output_adapter, device_args, and output width/height.
+Explicit cases also supply peak_nits, peak_divisor, reference_white_nits; their
+numeric graph options must agree. Only simple linear unquoted/unescaped fixed
+graphs are accepted: no single/double quotes or backslashes anywhere. Known
+tone-map/zscale options must be named; nominal_peak_luminance normalizes to npl.
+Nooverride cases omit those overrides.
+
+Example CPU case (512 x 128 output):
+{"id":"cpu-fixed","mode":"explicit","peak_nits":1179,
+ "peak_divisor":100,"reference_white_nits":100,
+ "graph":"zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:p=bt709:npl=100,format=gbrpf32le,tonemap=tonemap=hable:desat=0:peak=11.79,zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion",
+ "output":{"width":512,"height":128}}
+
+Use absolute --ffmpeg/--ffprobe paths, --case JSON (repeatable), --input MEDIA
+(repeatable) or --synthetic, and a new --output directory. --cuts are source
+frame indices, e.g. 12,24,36 for --frames 48; windows partition [0, frames).
+Source decode is captured once into rawvideo NUT and SHA-256 framehash. Each
+fresh filter process receives the same canonical frames, selected by index.
+PTS comparisons use integer ticks and rational time bases, including VFR.
+Canonical rawvideo carries no HDR side data: original MaxCLL/DV metadata is
+not being replayed. Nooverride runs therefore test canonical fallback behavior
+only. The fixed peak/reference-white run is the production-relevant isolation.
+Every subprocess has a deadline and bounded retained logs. Failure receipts
+and partial outputs remain in the new output directory. Nothing is installed.
+"""
+
+import argparse
+from array import array
+from fractions import Fraction
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import time
+
+SCHEMA_VERSION = 1
+LOG_LIMIT = 16 * 1024 * 1024
+SOURCE_COLOR = {"color_range": "tv", "color_space": "bt2020nc",
+                "color_primaries": "bt2020", "color_trc": "smpte2084"}
+OUTPUT_COLOR = {"color_range": "tv", "color_space": "bt709",
+                "color_primaries": "bt709", "color_trc": "bt709"}
+LIMITATIONS = [
+    "Raw filter consistency only; no compressed-source seek or encoder-reset qualification",
+    "No calibrated display, artistic SDR reference, or perceptual fidelity claim",
+    "Canonical rawvideo input has no HDR/Dolby side data; nooverride tests fallback only",
+    "Software canonical decode plus a declared upload adapter does not qualify production hardware decode",
+]
+
+
+def sha256(path):
+    with Path(path).open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def write_json(path, value):
+    temporary = path.with_suffix(path.suffix + ".pending")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
+def rational(value):
+    if not isinstance(value, str) or not re.fullmatch(r"-?\d+(?:/[1-9]\d*)?", value):
+        raise ValueError("rational values must be integer or integer/positive-integer strings")
+    return Fraction(value)
+
+
+def positive_integer(value, name):
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def geometry(width, height, ten_bit=False):
+    positive_integer(width, "width")
+    positive_integer(height, "height")
+    if width % 2 or height % 2:
+        raise ValueError("planar 4:2:0 geometry must be even")
+    return width * height * 3 // 2 * (2 if ten_bit else 1)
+
+
+def executable(value):
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError("tool paths must be absolute")
+    path = path.resolve(strict=True)
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError("tool must be an executable file")
+    return str(path)
+
+
+def split_filter_tokens(text, separator):
+    """Accept only simple fixed graphs; FFmpeg's nested escape syntax is out."""
+    if any(char in text for char in ("'", '"', "\\")):
+        raise ValueError("quoted or escaped filter syntax is unsupported; supply a simple fixed graph")
+    tokens = text.split(separator)
+    if any(not token.strip() for token in tokens):
+        raise ValueError("empty filter or option declaration")
+    return tokens
+
+
+def declared_peak_options(terms):
+    options = {}
+    named_filters = {"zscale", "tonemap", "tonemap_videotoolbox", "tonemapx",
+                     "tonemap_opencl", "tonemap_cuda"}
+    aliases = {"nominal_peak_luminance": "npl"}
+    for node in split_filter_tokens(terms, ","):
+        name, equal, arguments = node.strip().partition("=")
+        name = name.strip()
+        # The accepted subset has plain identifiers and named mapping options.
+        # No attempt is made to emulate FFmpeg's two levels of unescaping.
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*(?:@[A-Za-z_0-9-]+)?", name):
+            raise ValueError("filter names must be plain unquoted, unescaped identifiers")
+        name = name.split("@", 1)[0]
+        if not equal:
+            continue
+        # Inspect the argument portion of unrelated adapters too, so a named
+        # override there is recorded rather than hidden behind its node name.
+        for term in split_filter_tokens(arguments, ":"):
+            match = re.fullmatch(r"([a-zA-Z_][a-zA-Z_0-9]*)=(.+)", term)
+            if name in named_filters and not match:
+                raise ValueError("tone-map and zscale filters require named, unambiguous options")
+            if not match:
+                continue
+            key, value = match.groups()
+            key = aliases.get(key, key)
+            if key not in ("peak", "npl", "reference_white"):
+                continue
+            try:
+                number = Fraction(value)
+            except (ValueError, ZeroDivisionError) as error:
+                raise ValueError(f"{key} must be a fixed numeric value") from error
+            options.setdefault(key, []).append(number)
+    return options
+
+
+def load_case(path):
+    payload = json.loads(path.read_text())
+    if not isinstance(payload, dict):
+        raise ValueError("case must be a JSON object")
+    name = payload.get("id", "")
+    if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", name):
+        raise ValueError("case id must be a short filename-safe identifier")
+    mode = payload.get("mode")
+    if mode not in ("explicit", "nooverride"):
+        raise ValueError("case mode must be explicit or nooverride")
+    graph = payload.get("graph")
+    if not isinstance(graph, str) or not graph.strip() or any(c in graph for c in "\r\n;[]"):
+        raise ValueError("case graph must be one nonempty linear filter chain")
+    for key in ("input_adapter", "output_adapter"):
+        adapter = payload.setdefault(key, "")
+        if not isinstance(adapter, str) or any(c in adapter for c in "\r\n;[]"):
+            raise ValueError("adapters must be linear filter chains")
+    args = payload.setdefault("device_args", [])
+    if not isinstance(args, list) or len(args) % 2:
+        raise ValueError("device_args must contain option/value pairs")
+    for index in range(0, len(args), 2):
+        if args[index] not in ("-init_hw_device", "-filter_hw_device") or not isinstance(args[index + 1], str):
+            raise ValueError("only explicit hardware device initialization is supported")
+    output = payload.get("output", {})
+    geometry(output.get("width"), output.get("height"))
+    # Inspect all graph terms, including adapters: a hidden override must not
+    # turn a nooverride control into an explicit run or contradict its receipt.
+    terms = ",".join(payload[key] for key in ("input_adapter", "graph", "output_adapter") if payload[key])
+    options = declared_peak_options(terms)
+    if mode == "nooverride":
+        if options or any(payload.get(key) is not None for key in
+                          ("peak_nits", "peak_divisor", "reference_white_nits")):
+            raise ValueError("nooverride controls must omit peak and reference-white overrides")
+    else:
+        peak = positive_integer(payload.get("peak_nits"), "peak_nits")
+        divisor = positive_integer(payload.get("peak_divisor"), "peak_divisor")
+        white = positive_integer(payload.get("reference_white_nits"), "reference_white_nits")
+        if peak > 10000 or white > 10000:
+            raise ValueError("PQ peak and reference white must not exceed 10000 nits")
+        if options.get("peak") != [Fraction(peak, divisor)]:
+            raise ValueError("graph must contain exactly its declared fixed peak option")
+        whites = options.get("npl", []) + options.get("reference_white", [])
+        if not whites or any(value != white for value in whites):
+            raise ValueError("graph reference white differs from its explicit declaration")
+    payload["manifest_sha256"] = sha256(path)
+    payload["graph_sha256"] = hashlib.sha256(graph.encode()).hexdigest()
+    return payload
+
+
+class Runner:
+    def __init__(self, root, receipt, timeout, max_bytes):
+        self.root, self.receipt = root, receipt
+        self.timeout, self.max_bytes = timeout, max_bytes
+
+    def save(self):
+        write_json(self.root / "receipt.json", self.receipt)
+
+    @staticmethod
+    def stop(child):
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+
+    def run(self, argv, label, outputs=()):
+        number = len(self.receipt["commands"])
+        logroot = self.root / "logs"
+        logroot.mkdir(exist_ok=True)
+        stdout = logroot / f"{number:03d}-{label}.stdout"
+        stderr = logroot / f"{number:03d}-{label}.stderr"
+        command = {"argv": list(argv), "label": label, "stdout": str(stdout.relative_to(self.root)),
+                   "stderr": str(stderr.relative_to(self.root)), "result": "running"}
+        self.receipt["commands"].append(command)
+        self.save()
+        start, child, failure = time.monotonic(), None, None
+        cancelled = False
+        try:
+            with stdout.open("wb") as out, stderr.open("wb") as err:
+                child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                         shell=False, start_new_session=True)
+                while child.poll() is None:
+                    if time.monotonic() - start > self.timeout:
+                        failure = "deadline exceeded"
+                        break
+                    if stdout.stat().st_size + stderr.stat().st_size > LOG_LIMIT:
+                        failure = "log byte limit exceeded"
+                        break
+                    if any(path.exists() and path.stat().st_size > self.max_bytes for path in outputs):
+                        failure = "output byte limit exceeded"
+                        break
+                    time.sleep(0.05)
+                if failure:
+                    self.stop(child)
+                else:
+                    child.wait()
+                # A successful direct child cannot leave descendants running.
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if child.returncode and not failure:
+                    failure = f"exit {child.returncode}"
+        except (OSError, KeyboardInterrupt) as error:
+            failure = f"{type(error).__name__}: {error}"
+            cancelled = isinstance(error, KeyboardInterrupt)
+            if child:
+                self.stop(child)
+        finally:
+            if child and child.poll() is None:
+                self.stop(child)
+            # An exited fast writer is checked too; retain only bounded logs.
+            if sum(path.stat().st_size for path in (stdout, stderr) if path.exists()) > LOG_LIMIT:
+                failure = failure or "log byte limit exceeded"
+            for path in (stdout, stderr):
+                if path.exists() and path.stat().st_size > LOG_LIMIT:
+                    failure = failure or "log byte limit exceeded"
+                    with path.open("r+b") as log:
+                        log.truncate(LOG_LIMIT)
+            if any(path.exists() and path.stat().st_size > self.max_bytes for path in outputs):
+                failure = failure or "output byte limit exceeded"
+            command.update(result="failed" if failure else "passed", failure=failure,
+                           returncode=child.returncode if child else None,
+                           elapsed_seconds=time.monotonic() - start)
+            self.save()
+        if cancelled:
+            raise KeyboardInterrupt
+        if failure:
+            raise RuntimeError(f"{label}: {failure}; see {stderr.name}")
+        return stdout, stderr
+
+
+def parse_framehash(path):
+    """Decode FFmpeg framehash v2 ticks; never use rounded *_time decimals."""
+    time_base, dimensions, rows, declared_sha256 = None, None, [], False
+    for line in path.read_text().splitlines():
+        if line.startswith("#tb "):
+            match = re.fullmatch(r"#tb 0:\s*(\d+/\d+)", line)
+            if not match or time_base is not None:
+                raise ValueError("one video framehash time base required")
+            time_base = rational(match[1])
+            if time_base <= 0:
+                raise ValueError("time base must be positive")
+        elif line.startswith("#dimensions "):
+            match = re.fullmatch(r"#dimensions 0:\s*(\d+)x(\d+)", line)
+            if not match:
+                raise ValueError("one video framehash geometry required")
+            dimensions = [int(match[1]), int(match[2])]
+        elif line.startswith("#hash:"):
+            if line != "#hash: SHA256" or declared_sha256:
+                raise ValueError("one SHA256 framehash declaration required")
+            declared_sha256 = True
+        elif line and not line.startswith("#"):
+            fields = [value.strip() for value in line.split(",")]
+            if len(fields) != 6 or fields[0] != "0" or not re.fullmatch(r"[0-9a-fA-F]{64}", fields[5]):
+                raise ValueError("unexpected framehash record")
+            dts, pts, duration, size = map(int, fields[1:5])
+            if dts != pts or size <= 0 or duration < 0 or time_base is None:
+                raise ValueError("raw frames need complete ordered PTS and size")
+            timestamp = pts * time_base
+            if rows and timestamp <= rational(rows[-1]["pts"]):
+                raise ValueError("duplicate or non-monotonic frame PTS")
+            rows.append({"pts": str(timestamp), "pts_ticks": pts, "time_base": str(time_base),
+                         "duration_ticks": duration, "bytes": size, "sha256": fields[5].lower()})
+    if time_base is None or dimensions is None or not rows or not declared_sha256:
+        raise ValueError("incomplete framehash")
+    return {"time_base": str(time_base), "dimensions": dimensions, "frames": rows}
+
+
+def validate_raw(raw_path, hashes, frame_bytes, count):
+    if len(hashes["frames"]) != count or raw_path.stat().st_size != count * frame_bytes:
+        raise ValueError("missing, extra, or truncated raw frames")
+    with raw_path.open("rb") as raw:
+        for index, frame in enumerate(hashes["frames"]):
+            data = raw.read(frame_bytes)
+            if frame["bytes"] != frame_bytes or hashlib.sha256(data).hexdigest() != frame["sha256"]:
+                raise ValueError(f"raw bytes do not match framehash at frame {index}")
+
+
+def validate_color_log(path, label, count, width, height, colors, pixel_format):
+    records = []
+    for line in path.read_text(errors="replace").splitlines():
+        if f"showinfo@{label} " not in line:
+            continue
+        match = re.search(r"\bn:\s*(\d+)\s+pts:\s*(-?\d+).*?\bfmt:(\S+).*?\bs:(\d+)x(\d+)", line)
+        if match:
+            records.append({"index": int(match[1]), "pix_fmt": match[3],
+                            "width": int(match[4]), "height": int(match[5])})
+        if "color_range:" in line:
+            if not records:
+                raise ValueError("color facts without a decoded frame")
+            records[-1].update(dict(re.findall(r"(color_range|color_space|color_primaries|color_trc):(\S+)", line)))
+    if len(records) != count:
+        raise ValueError("missing decoded-frame color or geometry evidence")
+    for index, record in enumerate(records):
+        expected = {"index": index, "width": width, "height": height, "pix_fmt": pixel_format, **colors}
+        if record != expected:
+            raise ValueError(f"decoded-frame properties differ at frame {index}: {record}")
+
+
+def windows(frame_count, cuts):
+    marks = [0, *cuts, frame_count]
+    if marks != sorted(set(marks)) or any(mark < 0 or mark > frame_count for mark in marks):
+        raise ValueError("cuts must be unique increasing interior frame indices")
+    return list(zip(marks, marks[1:]))
+
+
+def compare_window(source, continuous, reset_input, reset_output, continuous_raw, reset_raw, start, end):
+    """Refuse association errors before measuring pixels; return every frame."""
+    expected = source["frames"][start:end]
+    if len(expected) != end - start or len(reset_input["frames"]) != len(expected) or len(reset_output["frames"]) != len(expected):
+        raise ValueError("reset window dropped or added frames")
+    if len(continuous["frames"]) != len(source["frames"]):
+        raise ValueError("continuous run dropped or added frames")
+    if reset_input["dimensions"] != source["dimensions"]:
+        raise ValueError("reset input geometry differs from captured source")
+    if reset_output["dimensions"] != continuous["dimensions"]:
+        raise ValueError("reset output geometry differs")
+    for index, (identity, input_frame, output_frame) in enumerate(zip(expected, reset_input["frames"], reset_output["frames"])):
+        if any(input_frame[key] != identity[key] for key in ("pts", "sha256", "bytes")):
+            raise ValueError(f"reset input identity/PTS mismatch at source frame {start + index}")
+        if output_frame["pts"] != identity["pts"] or continuous["frames"][start + index]["pts"] != identity["pts"]:
+            raise ValueError(f"mapped output PTS mismatch at source frame {start + index}")
+    width, height = continuous["dimensions"]
+    size = geometry(width, height)
+    if reset_raw.stat().st_size != (end - start) * size or continuous_raw.stat().st_size != len(source["frames"]) * size:
+        raise ValueError("raw output does not contain the complete declared frame grid")
+    readings = []
+    with continuous_raw.open("rb") as baseline, reset_raw.open("rb") as reset:
+        baseline.seek(start * size)
+        for offset, identity in enumerate(expected):
+            left, right = baseline.read(size), reset.read(size)
+            left_hash, right_hash = hashlib.sha256(left).hexdigest(), hashlib.sha256(right).hexdigest()
+            if left_hash != continuous["frames"][start + offset]["sha256"] or right_hash != reset_output["frames"][offset]["sha256"]:
+                raise ValueError("raw output hash differs from runtime frame evidence")
+            delta = [abs(a - b) for a, b in zip(left, right)]
+            planes, cursor = {}, 0
+            for name, length in (("y", width * height), ("u", width * height // 4), ("v", width * height // 4)):
+                values = delta[cursor:cursor + length]
+                planes[name] = {"max_absolute_difference": max(values),
+                                "mean_absolute_difference": sum(values) / length}
+                cursor += length
+            readings.append({"source_frame": start + offset, "source_pts": identity["pts"],
+                             "source_sha256": identity["sha256"], "continuous_sha256": left_hash,
+                             "reset_sha256": right_hash, "identical": left == right, "planes": planes})
+    boundary = sorted(set(range(min(3, len(readings)))) | set(range(max(0, len(readings) - 3), len(readings))))
+    return {"start_frame": start, "end_frame_exclusive": end,
+            "result": "passed" if all(row["identical"] for row in readings) else "failed",
+            "changed_frames": sum(not row["identical"] for row in readings),
+            "boundary_frames": [readings[index] for index in boundary], "frames": readings}
+
+
+def base_args(ffmpeg):
+    return [ffmpeg, "-hide_banner", "-loglevel", "info", "-nostdin", "-y", "-threads", "1",
+            "-filter_complex_threads", "1", "-copyts", "-noautorotate"]
+
+
+def output_args(label, path, pixel_format, muxer):
+    args = ["-map", label, "-an", "-c:v", "rawvideo", "-threads:v", "1", "-pix_fmt", pixel_format,
+            "-fps_mode", "passthrough", "-enc_time_base", "filter", "-avoid_negative_ts", "disabled", "-f", muxer]
+    if muxer == "framehash":
+        args += ["-hash", "sha256"]
+    return [*args, str(path)]
+
+
+def capture_source(runner, ffmpeg, source, directory, count, width, height):
+    canonical, raw, hashed = (directory / name for name in ("canonical.nut", "source.yuv", "source.framehash"))
+    chain = (f"[0:v:0]trim=end_frame={count},format=yuv420p10le,showinfo@capture,"
+             "split=3[cache][bytes][hash]")
+    args = [*base_args(ffmpeg), "-i", str(source), "-filter_complex", chain]
+    for label, path, muxer in (("[cache]", canonical, "nut"), ("[bytes]", raw, "rawvideo"), ("[hash]", hashed, "framehash")):
+        args += output_args(label, path, "yuv420p10le", muxer)
+    _, log = runner.run(args, "source-capture", (canonical, raw, hashed))
+    frames = parse_framehash(hashed)
+    if frames["dimensions"] != [width, height]:
+        raise ValueError("source decode geometry changed")
+    validate_raw(raw, frames, geometry(width, height, True), count)
+    validate_color_log(log, "capture", count, width, height, SOURCE_COLOR, "yuv420p10le")
+    for index, frame in enumerate(frames["frames"]):
+        frame["source_frame"] = index
+    return canonical, frames
+
+
+def run_window(runner, ffmpeg, canonical, case, directory, start, end):
+    input_hash, output_hash, raw = (directory / name for name in ("input.framehash", "output.framehash", "output.yuv"))
+    select = f"select=gte(n\\,{start})*lt(n\\,{end})"
+    # NUT rawvideo does not serialize HDR side data or all color tags. Restore
+    # only the PQ color tuple proved on every captured source frame. No HDR
+    # metadata or Dolby intent is invented by this adapter.
+    params = "setparams=range=limited:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc"
+    graph = ",".join(value for value in (case["input_adapter"], case["graph"], case["output_adapter"],
+                                        "format=yuv420p", "showinfo@mapped") if value)
+    chain = (f"[0:v:0]{select},{params},split=2[inputhash][mapping];"
+             f"[mapping]{graph},split=2[bytes][outputhash]")
+    args = [*base_args(ffmpeg), *case["device_args"], "-i", str(canonical), "-filter_complex", chain]
+    for label, path, fmt, muxer in (("[inputhash]", input_hash, "yuv420p10le", "framehash"),
+                                   ("[bytes]", raw, "yuv420p", "rawvideo"),
+                                   ("[outputhash]", output_hash, "yuv420p", "framehash")):
+        args += output_args(label, path, fmt, muxer)
+    _, log = runner.run(args, "graph-window", (input_hash, output_hash, raw))
+    source_frames, frames = parse_framehash(input_hash), parse_framehash(output_hash)
+    width, height = case["output"]["width"], case["output"]["height"]
+    if frames["dimensions"] != [width, height]:
+        raise ValueError("mapped output geometry differs from declaration")
+    validate_raw(raw, frames, geometry(width, height), end - start)
+    validate_color_log(log, "mapped", end - start, width, height, OUTPUT_COLOR, "yuv420p")
+    return source_frames, frames, raw
+
+
+def pq_code(nits):
+    power = (nits / 10000) ** (2610 / 16384)
+    return round(64 + 876 * ((3424 / 4096 + 2413 / 128 * power) /
+                            (1 + 2392 / 128 * power)) ** (2523 / 32))
+
+
+def synthesize(runner, ffmpeg, root, count, peak, vfr):
+    width, height = 512, 128
+    if geometry(width, height, True) * count > runner.max_bytes:
+        raise ValueError("synthetic raw signal exceeds per-file byte allowance")
+    raw, source = root / "authored-pq.yuv", root / "authored-pq.mkv"
+    with raw.open("wb") as output:
+        for frame in range(count):
+            # Abrupt levels at every fourth frame and a moving bright stripe
+            # give boundary frames distinct content without relabelled SDR.
+            level = (0.05, 0.25, 0.6, 1.0)[(frame // 4) % 4]
+            row = [pq_code(peak * level * x / (width - 1)) for x in range(width)]
+            dark = [pq_code(10 * x / (width - 1)) for x in range(width)]
+            values = []
+            for y in range(height):
+                pixels = list(row if y < 96 else dark)
+                pixels[(frame * 7) % width] = pq_code(peak)
+                values.extend(pixels)
+            data = array("H", values + [512] * (width * height // 2))
+            if sys.byteorder != "little":
+                data.byteswap()
+            output.write(data.tobytes())
+    graph = "settb=1/24000,setpts=N*1001"
+    if vfr:
+        graph += "+floor(N/3)*1001"
+    params = (f"lossless=1:pools=none:frame-threads=1:log-level=error:colorprim=bt2020:"
+              f"transfer=smpte2084:colormatrix=bt2020nc:range=limited:max-cll={peak},0")
+    args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "rawvideo",
+            "-pixel_format", "yuv420p10le", "-video_size", f"{width}x{height}", "-framerate", "24000/1001",
+            "-i", str(raw), "-vf", graph, "-fps_mode", "passthrough", "-enc_time_base", "1/24000",
+            "-c:v", "libx265", "-x265-params", params, "-pix_fmt", "yuv420p10le", "-color_range", "tv",
+            "-colorspace", "bt2020nc", "-color_primaries", "bt2020", "-color_trc", "smpte2084", str(source)]
+    runner.run(args, "author-pq", (source,))
+    return source
+
+
+def qualify(args):
+    root = Path(args.output).resolve()
+    if root.exists():
+        raise ValueError("output directory must be new; failures are never overwritten")
+    ffmpeg, ffprobe = executable(args.ffmpeg), executable(args.ffprobe)
+    runtime_files = [Path(path).resolve(strict=True) for path in args.runtime_file]
+    if any(not path.is_file() for path in runtime_files):
+        raise ValueError("runtime-file inputs must be regular files")
+    cases = [load_case(Path(path).resolve(strict=True)) for path in args.case]
+    if len({case["id"] for case in cases}) != len(cases):
+        raise ValueError("case identifiers must be unique")
+    partitions = windows(args.frames, [int(value) for value in args.cuts.split(",") if value])
+    if len(partitions) < 2:
+        raise ValueError("at least one reset boundary is required")
+    sources = [Path(path).resolve(strict=True) for path in args.input]
+    if args.synthetic_vfr and not args.synthetic:
+        raise ValueError("synthetic-vfr requires synthetic input")
+    if bool(sources) == args.synthetic:
+        raise ValueError("choose input corpus or synthetic, exclusively")
+    root.mkdir(parents=True)
+    receipt = {"schema_version": SCHEMA_VERSION, "result": "running", "scope": "raw filter reset consistency",
+               "limitations": LIMITATIONS, "commands": [], "cases": cases, "sources": [],
+               "frames_per_source": args.frames, "windows": partitions,
+               "tools": {"ffmpeg": {"path": ffmpeg, "sha256": sha256(ffmpeg)},
+                         "ffprobe": {"path": ffprobe, "sha256": sha256(ffprobe)}},
+               "runtime_files": [{"path": str(path), "sha256": sha256(path)} for path in runtime_files],
+               "runtime_identity_scope": "explicit supplied runtime files; external dependencies are not inferred",
+               "harness_sha256": sha256(Path(__file__).resolve()),
+               "deadline_per_command_seconds": args.timeout, "max_output_bytes_per_file": args.max_bytes}
+    runner = Runner(root, receipt, args.timeout, args.max_bytes)
+    runner.save()
+    try:
+        for tool in (ffmpeg, ffprobe):
+            runner.run([tool, "-version"], "tool-version")
+        if args.synthetic:
+            sources = [synthesize(runner, ffmpeg, root, args.frames, args.signal_peak, args.synthetic_vfr)]
+        for index, source in enumerate(sources):
+            directory = root / f"source-{index:03d}"
+            directory.mkdir()
+            row = {"path": str(source), "sha256": sha256(source), "result": "running", "cases": []}
+            receipt["sources"].append(row)
+            runner.save()
+            try:
+                stdout, _ = runner.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_streams",
+                                        "-of", "json", str(source)], "source-stream")
+                streams = json.loads(stdout.read_text())["streams"]
+                if len(streams) != 1:
+                    raise ValueError("one selected source video stream required")
+                if any(any(word in side.get("side_data_type", "").lower() for word in ("dovi", "dolby"))
+                       for side in streams[0].get("side_data_list", [])):
+                    raise ValueError("Dolby Vision requires its own reference domain; use plain HDR10/PQ")
+                width, height = streams[0]["width"], streams[0]["height"]
+                if streams[0].get("pix_fmt") not in ("yuv420p10le", "p010le"):
+                    raise ValueError("source must be 10-bit 4:2:0 PQ, not an upconverted SDR signal")
+                frame_size = geometry(width, height, True)
+                if frame_size * args.frames > args.max_bytes:
+                    raise ValueError("declared source frames exceed per-file byte allowance")
+                row["stream"] = streams[0]
+                canonical, source_frames = capture_source(runner, ffmpeg, source, directory, args.frames, width, height)
+                if sha256(source) != row["sha256"]:
+                    raise ValueError("source file changed during its capture")
+                row["canonical_sha256"] = sha256(canonical)
+                row["frame_identity"] = source_frames
+                for case in cases:
+                    case_dir = directory / case["id"]
+                    case_dir.mkdir()
+                    result = {"case": case["id"], "mode": case["mode"], "result": "running", "windows": []}
+                    row["cases"].append(result)
+                    runner.save()
+                    try:
+                        continuous_dir = case_dir / "continuous"
+                        continuous_dir.mkdir()
+                        input_frames, continuous, continuous_raw = run_window(
+                            runner, ffmpeg, canonical, case, continuous_dir, 0, args.frames)
+                        # The continuous input must also match every captured
+                        # source byte and timestamp before reset evidence counts.
+                        if input_frames["dimensions"] != source_frames["dimensions"]:
+                            raise ValueError("continuous input geometry differs from captured source")
+                        if input_frames["frames"] != source_frames["frames"]:
+                            keys = ("pts", "sha256", "bytes")
+                            if len(input_frames["frames"]) != args.frames or any(
+                                    any(a[key] != b[key] for key in keys)
+                                    for a, b in zip(input_frames["frames"], source_frames["frames"])):
+                                raise ValueError("continuous input differs from captured source identities")
+                        for start, end in partitions:
+                            window_dir = case_dir / f"reset-{start:06d}-{end:06d}"
+                            window_dir.mkdir()
+                            reset_input, reset_output, reset_raw = run_window(
+                                runner, ffmpeg, canonical, case, window_dir, start, end)
+                            comparison = compare_window(source_frames, continuous, reset_input, reset_output,
+                                                        continuous_raw, reset_raw, start, end)
+                            comparison["continuous_raw_sha256"] = sha256(continuous_raw)
+                            comparison["reset_raw_sha256"] = sha256(reset_raw)
+                            result["windows"].append(comparison)
+                            runner.save()
+                        result["result"] = "passed" if all(window["result"] == "passed" for window in result["windows"]) else "failed"
+                    except (OSError, ValueError, RuntimeError, KeyError) as error:
+                        result.update(result="failed", failure=str(error))
+                    runner.save()
+                row["result"] = "passed" if all(case["result"] == "passed" for case in row["cases"]) else "failed"
+            except (OSError, ValueError, RuntimeError, KeyError) as error:
+                row.update(result="failed", failure=str(error))
+            runner.save()
+        frozen = [*receipt["tools"].values(), *receipt["runtime_files"], *receipt["sources"]]
+        if any(sha256(Path(item["path"])) != item["sha256"] for item in frozen):
+            raise ValueError("a frozen tool, runtime dependency or source changed during qualification")
+        receipt["result"] = "passed" if receipt["sources"] and all(row["result"] == "passed" for row in receipt["sources"]) else "failed"
+    except (OSError, ValueError, RuntimeError, KeyError, KeyboardInterrupt) as error:
+        receipt.update(result="failed", failure=f"{type(error).__name__}: {error}")
+    finally:
+        runner.save()
+    return receipt
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--ffmpeg", required=True)
+    parser.add_argument("--ffprobe", required=True)
+    parser.add_argument("--runtime-file", action="append", default=[], help="audited runtime dependency/provenance file to freeze; repeatable")
+    parser.add_argument("--case", action="append", required=True, help="JSON case manifest; repeat for separate controls")
+    parser.add_argument("--input", action="append", default=[], help="supplied local PQ corpus item")
+    parser.add_argument("--synthetic", action="store_true", help="author one lossless neutral PQ motion signal")
+    parser.add_argument("--synthetic-vfr", action="store_true")
+    parser.add_argument("--signal-peak", type=int, default=1179)
+    parser.add_argument("--frames", type=int, default=48)
+    parser.add_argument("--cuts", default="12,24,36", help="increasing interior source frame indices")
+    parser.add_argument("--timeout", type=float, default=90)
+    parser.add_argument("--max-bytes", type=int, default=512 * 1024 * 1024, help="per output file allowance")
+    parser.add_argument("--output", required=True, help="new durable evidence directory")
+    args = parser.parse_args(argv)
+    try:
+        positive_integer(args.frames, "frames")
+        positive_integer(args.max_bytes, "max-bytes")
+        positive_integer(args.signal_peak, "signal-peak")
+        if args.signal_peak > 10000 or not math.isfinite(args.timeout) or args.timeout <= 0:
+            raise ValueError("peak must be <=10000; deadline must be finite and positive")
+        receipt = qualify(args)
+    except (OSError, ValueError, KeyError) as error:
+        parser.exit(2, f"{error}\n")
+    print(json.dumps({"result": receipt["result"], "receipt": str(Path(args.output).resolve() / "receipt.json")}))
+    return 0 if receipt["result"] == "passed" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

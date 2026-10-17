@@ -786,7 +786,8 @@ final class LiveTvTests: XCTestCase {
     func testEveryDeveloperCardThatStaysSaysWhatItWaitsOn() throws {
         let developer = try Self.appleSource("LiveTvDeveloperView.swift")
         XCTAssertEqual(LiveTvSettingsPlacement.developer,
-                       ["Cinema remotes · advisory enablement", "Screen invitations · advisory readiness"])
+                       ["Remote diagnostics · advisory readiness", "Cinema remotes · advisory enablement",
+                        "Screen invitations · advisory readiness"])
         for title in LiveTvSettingsPlacement.developer {
             XCTAssertTrue(developer.contains("Section(\"\(title)\")"), title)
         }
@@ -797,7 +798,7 @@ final class LiveTvTests: XCTestCase {
             let card = try XCTUnwrap(developer.components(separatedBy: "Section(\"\(title)\")").last, title)
                 .components(separatedBy: "Section(\"")[0]
             XCTAssertTrue(card.contains("Awaiting "), title)
-            XCTAssertTrue(card.contains("graduates "), title)
+            XCTAssertTrue(card.contains("graduates ") || card.contains("leaves Developer"), title)
         }
         for graduated in ["Enable Live TV", "Bounded pause/resume", "Prepared quality handoff"] {
             XCTAssertFalse(developer.contains("Section(\"\(graduated)"), "\(graduated) graduated out of Developer")

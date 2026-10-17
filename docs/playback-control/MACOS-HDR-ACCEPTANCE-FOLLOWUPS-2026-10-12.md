@@ -1,6 +1,6 @@
 # Mac HDR acceptance — playback follow-ups
 
-**Status:** open — observed failures and bounded investigations; F1 hls.js repairs merged; ordinary Air hls.js F1 acceptance and restoration complete; F2 repairs qualified and merged; bounded installed Air HDR-to-SDR transition and restoration complete; F3–F7 remain open · **Recorded:** 2026-10-12.
+**Status:** open — ordinary F1 and bounded F2 are on main; bounded F3 current-owner controls, F4 parser/startup, F5 reporting, F6 media fence and F7 reference-white/package/Air evidence are complete on the effort; final current-tree promotion pending · **Recorded:** 2026-10-12; updated 2026-10-15.
 
 The [full acceptance report](../streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md)
 closes the ordinary HDR10 Metal/CPU comparison. This document specifies the
@@ -97,6 +97,31 @@ Reconcile against the [lifecycle status](PLAYBACK-LIFECYCLE-STATUS.md),
 [quality matrix](CONTINUOUS-QUALITY-MATRIX.md) before selecting code changes.
 Prepared transitions, cancellation, generation fences and recovery ownership
 already exist. A reproduction should identify the failing rule in that code.
+
+### 2.1 Remaining execution claimed — 2026-10-15
+
+Remaining F3–F7 work is claimed on `effort/hdr-playback-followups`, starting
+from main `9eb7f6738647a7e963b17cfb3a2f77a594863c41`. Task branches target
+that integration branch and require the Effort development gate; final
+promotion requires a current-tree qualification receipt. Original evidence
+and completed F1/F2 receipts remain authoritative for their bounded scopes.
+
+| Task | Implementation and evidence ownership | Closure boundary |
+|---|---|---|
+| F7 neutral peak guard | `crates/plurxd/src/pipeprobe.rs`, this ledger, bounded evidence | Reject old explicit Metal peak units on real neutral PQ frames while retaining the 4K motion/speed probe. |
+| F5 attached output facts | Frozen VOD status and web Playback info, associated regressions | Report attached output provenance without deriving an old rendition from current settings. |
+| F3 lifecycle/accounting | Existing preparation/admission/maintenance paths and regression evidence; repair only a demonstrated gap | Distinguish the documented 300-second idle policy from a resource leak; protect unrelated viewers. |
+| F4 cold Heretic | Isolated Mac playback namespace and source/stage evidence; repair the demonstrated failing stage | Repeated declared cold/warm starts, truthful delivery and bounded startup. |
+| F6 authority recovery | Isolated serving-fence controls and retained stage evidence | Never inject faults into the shared fleet; preserve stale-owner refusal and distinguish process survival from actual continuity. |
+| F7 visual fidelity | Pinned software reference, named source windows and display observations | Keep algorithmic differences separate from physical display measurements and artistic-grade equivalence. |
+
+The operator has a Studio Display and Studio Display XDR but no measurement
+instrument. Their factory calibration and Apple video reference presets can
+support a documented visual comparison; no instrument purchase is required
+for the software repairs. That comparison will be labelled as factory-reference
+visual evidence, with no independent measurement of display calibration.
+The original calibrated-fidelity criterion remains a distinct, unmeasured
+boundary rather than being silently marked passed.
 
 ## 3. F1 — paused seek outside the local buffer stalls
 
@@ -629,6 +654,20 @@ terminal release in a regression at the owning state transition and record
 before/after accounting in the physical receipt. Never stop another viewer
 to make the capacity test pass.
 
+### October 15 current owner controls
+
+Twelve focused current-source regressions pass for exact cancellation,
+late cancellation, supersession, idle expiry, restart cleanup, compound
+capacity refusal, stopped-producer permit transfer and active-reader
+protection. Their exact commands and individual results are retained in the
+[controlled receipt](evidence/f6-authority-media-20261015.json). The idle
+producer fixture uses the real driver and admission ledger with a finite
+sleep child. The later [real lifecycle receipt](evidence/f3-real-lifecycle-20261015.json)
+adds actual owned media, admission accounting, scheduled pins, idle expiry,
+restart and ordinary rolling browser teardown. The original three-minute
+retention observation alone does not prove an ownership leak; historical
+attribution remains inconclusive.
+
 ## 6. F4 — laptop cold/remux Heretic startup remains unreliable
 
 ### Observation and evidence
@@ -680,6 +719,31 @@ then repeat the original cold route and forced-SDR control. Publish latency
 per stage, failure rate, route and source identity. Keep unsupported-source
 refusal separate from supported playback reliability.
 
+### Compressed Matroska startup repair — 2026-10-15
+
+The equivalent AV1 HDR10 control completed three original-quality cold/warm
+pairs within the predeclared 40-second startup budget. Its first forced-1080p
+SDR cold start instead refused before producer admission with
+`vod_source_rescan_required`. The retained native and sealed probe documents
+isolated the difference to four PGS subtitle streams: native FFprobe reported
+1920×1080 geometry, while the sealed parser omitted both dimensions and logged
+`Unsupported encoding type`. The movie bytes had not changed.
+
+The sealed parser disabled dependency autodetection without supplying zlib.
+The repair builds the same pinned zlib commit as the native package for WASI,
+requires compiled zlib support, and retains its authenticated source and license.
+It preserves the source-comparison guard, parser ABI and capabilities. Relative
+include/library paths avoid embedding temporary build directories in the module.
+
+The [parser receipt](evidence/f4-compressed-matroska-parser-20261015.json)
+records the final module digest and actual held-file proof: all nineteen complete
+stream dictionaries equal native FFprobe, including the four PGS geometries,
+with empty stderr. Thirteen package regressions pass, including missing compiled
+support, substituted-source refusal before compilation, and recursive source/license
+retention. Astra approved the correction. The later [physical playback receipt](evidence/hdr-physical-playback-20261015.json)
+records the completed forced-SDR startup matrix and bounded Air captures.
+This parser receipt by itself proves source-fact parity, not playback.
+
 ## 7. F5 — playback information does not fully describe delivery
 
 ### Observation and evidence
@@ -723,6 +787,33 @@ and presentation regressions at the discovered seam, including stale replies
 and artifact reuse across preference changes. An actual graph receipt and
 client delivery facts must remain independently inspectable.
 
+### Built repair — local checks passed, qualification pending
+
+The F5 task reuses the existing optional `stream_format` wire contract for
+VOD status. It reads codec, effective dimensions, encoder, renderer, grade
+and tool build from the attached immutable encoding plan. Copy dimensions
+are labelled as an unchanged video selection; source DV labels never stand
+in for its delivered grade. No media probe or strict control-protocol change
+is added. A saved Developer preference cannot relabel an older cached plan.
+
+The web adapter binds the descriptor to the attached status/session, keeps
+source, planned stream and browser intrinsic dimensions separate, and follows
+quality success, refusal, reopen and stop. Planned SAR remains distinct from
+a measurement. Encoder notes name the frozen renderer. The badge follows
+the attached output grade and continues to state that display output is
+unverified. SDR/copy sessions no longer report a fictitious HDR peak; explicit
+GPU peaks use the same frozen-plan provenance as CPU peaks.
+
+The missing server descriptor and hardcoded web `Unavailable` are reproduced
+before the fix. Two focused server tests, 221 web-policy cases, full web
+unit/static checks, Clippy and the input fence pass locally. The two browser
+fixtures initially skipped for a missing Python dependency; isolated reruns
+then prove both startup paths/local seek and subtitle-readiness presentation.
+The [bounded receipt](evidence/f5-output-facts-20261015.json) pins the retained
+failures and controls. Independent review, task gates and actual fresh/cached
+CPU/Metal reporting acceptance are still pending. This is not completion of
+the broader native/direct/rolling output-facts handoff.
+
 ## 8. F6 — serving authority briefly self-fences and startup returns 503
 
 ### Observation and evidence
@@ -764,6 +855,27 @@ frame evidence. Exceeding grace needs a separate bounded terminal outcome.
 Use an isolated fault-injection environment for deterministic regression.
 This document does not request a live cluster partition, voter removal or
 restart campaign. Disabling the guard to hide 503s does not qualify a repair.
+
+### October 15 controlled media qualification
+
+The [controlled receipt](evidence/f6-authority-media-20261015.json) preserves
+an actual realtime H.264 HLS publisher, registered with the existing session
+manager, and an independent frame decoder. A 2,468 ms authority loss keeps
+the same child and registered session. Completed media advances beyond the
+highest segment observed at the loss boundary, and again beyond the recovery
+boundary; independent decoded pictures differ across those observations.
+New admission stays fenced during the loss, fresh admission recovers, and the
+old generation remains invalid. After stable recovery, a separate sustained
+loss retires the still-live producer and completes child cleanup.
+
+The original test used a two-second accelerated grace and correctly failed
+this positive control. Tests now share production's unchanged five-second
+constant. The actual-media control and 25 affected fence regressions pass;
+the initial failure and review's repaired sampling-boundary gap remain
+retained. This is source/media continuity, not a browser frame-gap measure.
+No live cluster fault was injected. The old replicated-operation delay is not
+reproduced here and cannot be attributed from the retained incident excerpt;
+no unrelated quorum incident is substituted as its cause.
 
 ## 9. F7 — residual grade difference and weak synthetic parity evidence
 
@@ -826,6 +938,63 @@ production curve to match one film frame or report SDR VMAF as HDR VMAF.
 A parity-probe improvement and a calibrated grade qualification are separate
 closure receipts.
 
+### Narrow neutral guard — built locally, qualification pending
+
+The F7 task adds a separate 512×128, eight-frame neutral PQ correctness
+check for Metal, with MaxCLL 1179 and lossless 10-bit HEVC input. It keeps
+the existing 4K colored-motion speed measurement and the unchanged 24-level
+channel tolerance. The corrected production curve and its peak units are
+unchanged. A failure to generate, encode, tag or measure the neutral control
+refuses Metal parity with its specific reason.
+
+The actual Mac control reproduces the former blind spot: old units pass the
+motion image check at 8.2315 levels but fail the new neutral gate at 26.35.
+Corrected units pass both; the eight-frame encoded neutral diagnostic differs
+from CPU by 10.24 levels. The focused regression fails before the repair;
+48 ordinary probe tests and the explicit real-Metal negative/control test
+pass locally. The first hardware test incorrectly required Matroska container
+transfer/primaries, which were omitted; decoded frames prove PQ, BT.2020,
+10-bit geometry and MaxCLL. That failed assertion and the corrected run are
+preserved together. These controls do not close broader film/display fidelity.
+
+The [bounded receipt](evidence/f7-neutral-peak-20261015.json) pins the source,
+tools, commands, old/corrected measurements and retained archive hash.
+Astra approved the narrow guard and its seven-job effort gate passed; PR1101
+landed in the effort as `3c757c5e8`. Final main qualification and broader
+physical display acceptance remain open.
+
+### Hable reference white — bounded repair, shipping acceptance pending
+
+The remaining darkness has a separate identified cause: the accepted CPU chain
+linearizes PQ relative to 100 nits, while pinned Jellyfin Metal uses 203 nits.
+Matching the explicit peak unit does not make nonlinear Hable identical.
+A separate native patch adds a bounded `reference_white` option, default 203,
+and normalizes both signal and peak inside Hable. Plurx requests 100 for its
+PQ Metal graph. CPU, CUDA/OpenCL and Metal HLG BT.2390/ITP remain unchanged;
+Metal peak serialization remains nits/10. Old packages without the required
+option report the graph unavailable through the existing parity/resolver path.
+
+Before running the corrected variant, a separate neutral limit of two levels
+was declared. The broad motion limit remains 24 and its encode clock remains
+the throughput measurement. Actual eight-frame VT-encoded neutral controls
+measure a maximum mean-channel delta of 10.2490 for old 203-nit Metal and
+0.3227 for corrected 100-nit Metal; all outputs have verified BT.709 tags.
+The raw neutral luma MAE falls from 10.2295 to 0.3561. Nine held real-film
+frames all improve, with pooled luma MAE falling from 5.07994 to 0.19135.
+Default 203-nit output is byte-identical, invalid bounds refuse, and authored
+HLG BT.2390 controls are byte-identical with and without the new option.
+
+Astra independently approved the bounded native prototype and verified its
+source and retained bytes. That review is not production-integration approval.
+The [reference-white receipt](evidence/f7-reference-white-20261015.json) links
+all controls and the independently downloaded private archive. The limited
+proof executable was never installed. Full shipping-package/source/parser
+qualification, integrated regression/review gates and physical Air acceptance
+remain required. Available Apple factory reference presets need no new
+calibrator purchase; independent instrumented calibration and an artistic SDR
+grade remain unclaimed. Individual pixel differences persist despite low
+aggregate error, so these controls do not close general film/display fidelity.
+
 ## 10. Shared execution and closure contract
 
 ### 10.1 Minimum receipt for each reproduction
@@ -864,3 +1033,363 @@ no playback rerun, code change, hardware action or new qualification was
 performed to publish it. Update [the backlog](../features/PROJECT-BACKLOG.md),
 the owning canonical ledger and this document together as F1–F7 progress.
 The accepted HDR10 slice remains closed while those broader packages are open.
+
+## October 15 physical playback and restoration
+
+The [physical receipt](evidence/hdr-physical-playback-20261015.json) binds
+the complete native package, corrected sealed parser, actual reporting UI
+and cold/warm route controls to their immutable private attachments. The
+original failures remain in those archives. These are isolated backend
+acceptance namespaces; no branch mobile application was installed.
+
+Three genuine AV1 HDR10 original-quality cold/warm pairs presented within
+the declared 40-second budget. Three corrected manual-1080 SDR pairs also
+presented: cold 3,336/4,264/4,246 ms, warm 761/1,380/817 ms. Every sampled
+SDR run reported zero buffering interruptions. Frame drops, background
+indexing and the older original-quality runtime are disclosed in the receipt.
+The initial compressed-PGS source-rescan refusal is retained alongside the
+parser correction; the held-source guard was never relaxed.
+
+On the Air, the complete corrected native package admitted Metal at 2.285×
+the CPU boot fixture. The System page shows Metal and explains that Vulkan
+is unavailable. Actual full-film 1920×1080 SDR Metal playback reached 5:28
+with 7,854 frames, five drops and zero interruptions; TTFF was 2,473 ms.
+The CPU control reached 6:41 with 9,596 frames and 30 drops, and retained
+one early 1,019 ms supply stall; TTFF was 12,497 ms. Exact child graphs
+prove Metal reference-white 100 and CPU reference-white 100. The initial
+Auto/remux failures are retained and are not attributed to either forced
+SDR graph. Screen Sharing carries SDR, so this proves neither an optical
+HDR grade nor independent physical audio.
+
+Fresh and cached CPU/Metal reporting controls preserve attached-output
+facts across live settings changes and candidate refusal. Their separate
+archive records that the 60-second media control repeats a 12-second film
+excerpt. It is a reporting check, not another independent film test.
+
+The final Air API read verifies zero sessions/deliveries, zero hardware and
+software occupancy, Mac processing on, and both movie positions zero and
+unwatched. The owned Air server is stopped, shared clipboard is off and
+the temporary Metal SDK is removed. The working NAS mount is retained.
+The later F3 receipt adds bounded current-owner accounting. Final current-tree
+qualification/promotion remains tracked work; this receipt does not turn a
+pending gate into a pass.
+
+## October 15 lifecycle finding and finite closeout scope
+
+The [real lifecycle receipt](evidence/f3-real-lifecycle-20261015.json) closes
+F3's observed obstruction as **current-owner controls pass; historical
+attribution inconclusive**. It does not invent a new leak repair. The private
+archive retains all original driver failures and 113 manifest members; its
+downloaded bytes match the recorded digest. Astra independently checked them.
+
+A genuine AV1 HDR10 source creates a two-video SDR family with shared AAC.
+A second viewer reuses the same family without increasing the observed
+hardware/software charge. A different family receives retryable HTTP 503
+`transcode_capacity_pending`. Releasing one viewer preserves the other's
+actual media. Ready cancellation and supersession clear the old ready facts.
+Two scheduled video intervals reserve 940,101 bytes; cancellation keeps the
+conservative reservation until exact disposal facts release it to zero.
+The serialized terminal ledger retains 82,852 bytes of historical shared-audio
+interval rows; those rows are not asserted to disappear.
+
+The abandoned reader attaches at 19:35:04.384 UTC and idle-reaps at
+19:40:09.965, about 306 seconds later: the 300-second sliding TTL plus its
+maintenance tick. By the campaign's 300-second observation it is ended while
+the other reader's 20-second hold heartbeats continue successfully. Final
+client release returns sessions, deliveries and hardware/software occupancy
+to zero, and another family admits without Activity Stop. An exact owned
+server restart reconciles to zero occupancy and admits a fresh family.
+Ordinary Chrome rolling AV1 playback advances beyond two minutes; paused
+seek-to-zero, exact tab close and final API reads verify ordinary browser
+teardown and zero/unwatched restoration. The owned backend is then stopped.
+
+This is a finite current-owner result. A decoder/preparation failure after
+allocation, abrupt browser-process quit and controlled-family prepared-change
+browser teardown are not separately isolated here. The original three-minute
+retention was inside the documented idle interval and does not establish a
+leak. These limits remain in the broader A04 matrix; they do not erase the
+measured current-owner result.
+
+| Follow-up | Bounded result retained for promotion | Separate limits |
+|---|---|---|
+| F1 | Existing main repairs and ordinary Air paused seek/reopen acceptance complete. | Other devices/native HLS remain in their platform matrix. |
+| F2 | Existing main repairs and decoded Air SDR transition acceptance complete. | Independent physical audio and broader transition matrix remain separate. |
+| F3 | Current owner controls pass; natural expiry, cancellation, supersession, reservations, restart and ordinary rolling browser teardown recorded. | Historical attribution inconclusive; post-allocation failure and abrupt quit not isolated. |
+| F4 | Sealed compressed-Matroska parser repaired; three genuine original-quality and three corrected SDR cold/warm pairs present within the declared budget. | Original-quality pairs predate parser repair; drops/background indexing disclosed. |
+| F5 | Attached-output facts remain stable across CPU/Metal settings changes, cached reuse and refused candidates. | Reporting media repeats a 12-second source excerpt. |
+| F6 | Real producer preserves distinct encoded media through a 2.47-second authority loss; sustained loss reaps after the shipping grace. | Original lag attribution is not retrospectively proved. |
+| F7 | Neutral guard, corrected Hable reference white, held-film/HLG/default controls, full native package and five-minute Air Metal/CPU comparison recorded. | CPU has one early supply stall; initial Auto/remux failures, optical calibration and independent audio are not hidden. |
+
+Task qualification records are exact-head receipts. The final frozen effort
+still requires its full main promotion gate and qualification receipt. Windows
+compilation is absent by the maintainer's October 11 pipeline amendment; no
+Windows success is claimed. Production deployment and the broader codec,
+caption, optical and device matrices are not inferred from these records.
+
+## October 15 inherited Android navigation prerequisite
+
+Promotion run 5228's Android instrumented suite completes 78 tests with one
+failure: the shared transport-order control expects Right from Playback
+settings to reach Playback info, but the new Report a problem button
+intercepts it. An isolated owned Android TV emulator reproduces the same
+failure in the eight-test focus class. Moving reporting after the contiguous
+standard options restores Settings → Info → Picture in picture. The same
+control now also proves Right reaches reporting afterward and Left returns
+to Picture in picture; no focus assertion is removed. All eight focus tests
+then pass on the owned API36 emulator. Failed baseline/build/test output is
+retained, and no branch app is installed on a physical device. Independent
+review, task qualification and fresh full promotion remain required.
+## October 15 inherited Apple qualification prerequisite
+
+Full promotion run 5228 passes policy/preflight and the fast Rust compiler,
+but its Apple suite exposes four inherited failing cases in files unchanged
+by the HDR effort. An isolated iOS simulator reproduces all four (five
+assertion failures): the Developer inventory omits the existing Remote
+diagnostics advisory; two subtitle controls dequeue a processing-status
+notification instead of their subtitle callback; and the terminal-publication
+control blocks the first shared callback before its pending warm-up can reach
+the requested second exchange. The failed CI and local logs remain retained.
+The failed local wrapper is stopped only after all assertions finish, while
+Xcode is collecting simulator diagnostics; it is not recorded as a passing run.
+
+The bounded test repair includes diagnostics in the placement inventory and
+accepts its existing explicit "leaves Developer" graduation wording. Subtitle
+controls hold all callbacks until a later request proves the ready response
+was fully consumed, then execute them across the original owner/intent fence.
+The terminal control starts with a terminal response, blocks exactly one
+callback and joins reporter finalization before asserting no late verdict.
+Production callback scheduling and playback fences are unchanged. Both entire
+affected classes pass locally: 137 tests, zero failures, on Xcode 27.0 and an
+owned iOS 26.5 simulator. No branch app is installed on a physical device.
+Independent review, the task gate and fresh full promotion remain required.
+
+Apple task gate 5234 reaches its ten-minute preflight deadline during the
+full operations sweep, after all 359 validation tests pass. Its partial
+operations output is not a completed suite or retained success. Preserve
+the failed log and raise only the effort preflight to the existing fast
+lane's finite 15-minute receipt-publication budget. Every history, policy,
+validation and operations check remains required; the full main preflight
+keeps its existing budget. The exact-head task gate must run again.
+## October 15 inherited qualification prerequisites
+
+Full promotion run 5228 preserves failures in the existing validation fixtures
+and inventories as well as the Apple and Android controls recorded separately.
+The prerequisite port takes the reviewed census, canonical cluster identity,
+production storage layout, one-voter readiness, asynchronous snapshot and
+real HLS browser fixtures from `d326ed2d648096b932b1e1bffc048b20e8d514f0`.
+It retains the production consistent-read ceiling of 237, exact transaction
+inventories, failure controls and original Makefile commands. The topology
+performs two local queries per bounded operation, so its 256 operations require
+exactly 512 local queries and zero Authority queries.
+
+The reviewed Linux UI structure comes from
+`d0433b54b98312996045913acbe0b7e12d546ff7`, SHA-256
+`5fcd0589e40ee70ca25240345256b63e239442f5d9a653d79464c2df17de3419`.
+The fixture waits for the current boot's caption probe and a stable empty child
+inventory before captures, reserves four distinct listeners and supplies real
+HLS structure. The earlier macOS capture's readiness and first-activity
+differences remain preserved; importing the Linux golden does not claim a new
+matching capture.
+
+Pinned Rust 1.97.1 workspace/all-target checking and all 84 operation contracts
+pass on the port. Focused consistent-read census, placeholder census, named
+transaction inventory, topology schema and actual one-voter bootstrap/reopen
+checks pass. All 70 macOS transport controls pass with no failures or ignored
+cases, including both new delayed-snapshot controls. The attempted Linux count
+wrapper correctly refuses 70 against 72; that failure is retained. Two cleanup
+controls are Linux-only, so the shipping Linux requirement remains exactly 72.
+Run 5228 also completes all 13 WAL snapshot-metric tests successfully before
+its stale count of ten refuses them; the guard now requires all 13. Daemon
+activity cases execute serially against the actual production storage layout.
+
+Astra approves the frozen 17-file source delta, SHA-256
+`70fad91d01c1f78b7823e4fd57c04723fa2716b2b10d25a89662cd9a007bb22b`.
+Its review leaves integration and exact-candidate task/full gates required.
+All three failed legacy Store controls reproduce the same mixed-sharing-lineage
+refusal locally. Their historical downgrade fixtures still contain later empty
+sharing tables. The port adds the existing guarded fixture rewind: it requires
+the actual baseline marker, no Source activation and zero rows in every
+inventoried sharing table before removing those disposable tables. Each of the
+three real controls then passes, including the populated three-voter fragment
+prune and playback-mutation case. Production lineage refusal is unchanged.
+The first local baseline compiler log was reused accidentally during rerun; its
+exact panic/result is retained as a labelled terminal excerpt. Both other full
+local baseline logs, all baseline result metadata and the original CI log are
+preserved. The full Rust/Store job deadlines still require a new complete run.
+
+The repaired browser fixture subsequently captures all 78 views with no page
+or console errors; all 10,597 structural facts match the reviewed golden on
+macOS as well. This uses the unchanged web/backend source surface from the
+previous local build and the corrected fixture, rather than claiming a new
+exact-candidate package build. Astra's Store caller review requests the four
+companion baseline assertions for offline-audio and read-index replay. Those
+exact assertions are ported without relaxing any guard, and both complete
+replay callers pass locally. The initial 17-file approval and this addressed
+caller finding remain separately identified.
+
+The legacy Store job in run 5228 completes only 188 of 367 serial controls
+before its 40-minute deadline, including three now-reproduced fixture failures.
+Its measured throughput projects roughly 75 minutes including compilation.
+The complete job therefore receives a finite 95-minute budget; no case,
+assertion, failure status or required receipt is removed. The full Rust job has a separate incomplete-suite deadline, recorded below.
+
+The complete local core run also exposes a macOS-only stale cached-subtitle
+expectation: the QSV graph correctly includes the explicit Fontconfig provider,
+while the test expects the platform-neutral string. Its repaired control checks
+the exact `-vf` value with the required platform provider, retains the single
+hardware download/upload and no-zscale assertions, and changes no production
+graph. The original full-suite failure and isolated panic are preserved.
+Run 5228's full Rust job likewise exhausts 30 minutes after compilation and
+1,917 unit-result rows, before the unit/SQLite receipt; its finite budget is
+60 minutes, retaining the entire suite and all required receipts.
+
+The complete core suite on the prerequisite Rust snapshot finishes in
+1,266.50 seconds: 1,880 pass, one cached-subtitle expectation fails and five
+opt-in cases are ignored. All eight earlier core failures pass in that run.
+The platform-corrected subtitle control then passes separately on the
+current-main integration (one pass, zero failures). These are separate results,
+not a claim of a fully green rerun. The new complete promotion remains required.
+
+Rechecking the current-main integration finds two additional authoritative
+managed-subtitle schema reads in `hiqlite.rs`: current shape decides whether
+replicated DDL may run, and the installed marker must agree with that shape.
+Both carry explicit authority reasons and the exact slice count becomes 48.
+The overall unannotated ceiling stays 237 and both injected-read refusal
+controls remain required. The initial integrated four-case census failure
+(two pass, two fail) is preserved alongside the corrected rerun.
+
+Task gate 5235 refuses the missing client-fix history anchor before compilation;
+its failed receipt is preserved. The exact reviewed runtime commit and its
+existing instrumented regression are now named in the client-fix catalog.
+This catalog repair adds no runtime change or new device claim.
+
+### Combined remaining qualification candidate
+
+Task 5283 refuses a malformed client catalog after the Android/main merge
+resolution loses one table separator. Reconstruct the catalog from qualified
+effort `876162e2f` plus the exact independently reviewed Android row: every
+existing entry is byte-for-value unchanged, all IDs remain unique, and the
+repository loader and source/test anchors validate locally. The reviewed
+Android source commits and original eight-test emulator proof join the
+prerequisite candidate in #1137; #1129 is superseded only after that source
+lands through the combined required gate. No failed gate is relabelled green.
+
+Complete the existing reviewed historical and actual-Source fixture imports
+from `d326ed2d648096b932b1e1bffc048b20e8d514f0`; upstream commits
+`5f4c82f38` and `9887e4d19` record their Astra review. Preserve current main's
+managed-subtitle tests and the corrected HDR reference-white assertion.
+The current-main rerun passes four of five historical controls; read-index
+replay correctly refuses the partial managed-subtitle extension left after
+its historical queue rewind. Its fixture now requires baseline/no Source,
+the current marker and complete six-object inventory, zero model receipts
+and no managed accepted work before atomically restoring the published
+predecessor resource view. Production schema guards and migrations stay
+unchanged; the recorded failed run remains evidence for the corrected rerun.
+
+
+The independent combined review requests two caller/oracle corrections: invoke
+that managed rewind for both read-index opens, and capture the full trigger
+name/SQL inventory before removing the three managed triggers. Both corrections
+retain the exact restored-definition comparison; the revised source is approved.
+The corrected complete read-index case passes locally in 10.13 seconds.
+
+The complete v32 case then reaches its retained runtime reservation assertion and
+exposes a separate production compatibility omission: the closed predecessor
+inventory lacks the exact published v18/v31 session declarations after their
+real additive migrations. Import the two pinned SQL variants and their existing
+regression from `a06e00e10`, without admitting arbitrary layouts. The test keeps
+historical row values and additive defaults, and refuses a substituted owner
+constraint or extra index. Independent review verifies published provenance and
+approves this narrow compatibility delta. Its focused execution and the fresh
+exact-candidate gates remain separate requirements; the failed reservation log
+is preserved.
+
+
+The wider affected-case run preserves six additional failures: repeated
+bootstrap replaces an installed managed resource view, two SQLite downgrade
+fixtures retain the newer managed extension, and concurrent lineage migration
+can reject a genuine custody-migration winner. All ten actual selected Source
+runtime cases pass in that run. No complete-suite success is claimed.
+
+Main #1140 lands while task gate 5293 starts, invalidating that gate's
+main-to-effort ancestry. Its simpler non-destructive bootstrap creates the
+probe-era view before the older resource installer and omits the migration-only
+DROP. Adopt that exact main implementation: IF NOT EXISTS preserves an existing
+managed view across retries and concurrent bootstraps, while final strict shape
+verification remains required. The full retry scenario retains its model
+receipt, accepted job, resource obligation and exact-view assertions. The earlier
+reviewed guarded candidate and its two superseded helper tests remain preserved
+in private evidence archive 106; they do not describe the final implementation.
+The extra bootstrap shape read is removed, restoring that census slice to two;
+the overall unannotated ceiling stays 237.
+SQLite queue rewinds require current version 111, no Source installation,
+exact managed objects/marker and no accepted managed work or receipts before
+atomically restoring the published predecessor. Custody settlement reads its
+marker, protocol and exact schema together: only absent predecessor 80 may
+migrate, and only exact supported 81/82 may settle a concurrent winner. The
+same-write predecessor and post-DDL shape assertions remain required. These
+repairs require new independent review and focused qualification.
+
+
+### Full current-base qualification retains additional fixture failures
+
+Promotion 5306 rejects the unchanged Apple/Android build counters against
+current main. Increase the source counters to Apple 252 and Android 172 for
+the already integrated release-input changes; no branch app installation or
+new physical acceptance is implied.
+
+The parallel complete core run exposes three more historical-fixture failures.
+The encoded-output and historical-ready-subtitle cases rewind below the managed
+subtitle extension while leaving that extension installed, so reopen correctly
+refuses duplicate schema creation. Both now use the existing exact-shape,
+current-version, no-Source, empty-managed-work fixture rewind before changing
+older objects or the version. The Dolby Vision migration inventory gains the
+v111 entry whose actual removal both shared downgrade callers already perform.
+The production migration and all data/history assertions remain unchanged.
+Original isolated failures and the complete run retain their actual verdicts;
+these corrections require independent review, focused runs and a fresh complete
+promotion candidate.
+
+Two further complete-core failures pin the old SQLite schema version 110 in
+the sharing-upgrade and populated v6-rebuild controls. Explicitly advance both
+pins to 111, naming the appended managed-subtitle migration, while retaining
+all private-lineage refusal and preserved-library/data checks. The first Apple
+build-reference suite also catches the Android README's old live counter; its
+current claim moves to 172 while historical status entries remain intact.
+
+Task gate 5308 refuses a missing client-fix history anchor for the combined
+release-counter commit. Record that exact commit with the existing Apple and
+Android current-target counter regressions; source anchors name the counter
+fields, preserving the catalog across later monotonic bumps. This is catalog
+bookkeeping, with no runtime source change. Preserve the refused gate and both
+Python receipt artifacts, then rerun history locally before a fresh task gate.
+
+### Complete promotion retains a stale Apple source-contract boundary
+
+Promotion 5313's shared iPhone suite runs 1089 tests and retains one failure in
+`testArmedBoundaryReplanEndsWithStallRecoveryAndSkipsBlockedCandidates`. The
+current Auto evaluator accepts a `pressureOnly` parameter; the contract still
+looks for its former zero-argument signature and fails before checking its
+body. A local native run reproduces that same failure. Locate the function
+without coupling the boundary to its parameters, retain every stall-recovery,
+blocked-candidate, ownership and viewer-action assertion, and explicitly check
+that pressure-only evaluations cannot spend the optional boundary re-plan.
+Missing source boundaries now identify themselves in XCTest diagnostics.
+Production playback source, build counters and historical physical receipts
+are unchanged. The failing run stays failed; the reviewed test correction
+requires its focused native run, task gate and a new exact-tree promotion.
+
+### Complete Store qualification retains a fragment-prune fixture failure
+
+The complete local Store suite retains a failure in
+`sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded`; its
+isolated execution reproduces the v111 managed-subtitle table collision.
+The test stamps its populated fixture as v87 while leaving that later
+extension installed. Production correctly refuses to create it twice.
+
+After checking query plans and bounded work on the complete fresh chain,
+invoke the existing exact-shape, current-version, no-Source, empty-managed-work
+rewind before constructing the historical workload. The production upgrade
+and both fresh/upgraded query-plan, retained-source and VM-step assertions
+remain unchanged. Preserve the original complete run and isolated failure;
+corrected focused evidence and a new exact-tree qualification remain required.

@@ -316,7 +316,10 @@ fn the_metal_pq_plan_is_keyed_by_the_curve_it_runs() {
     let terms = Pipeline::VtToneMapMetal
         .tone_map_terms(plan.input_hdr_format())
         .expect("the Metal graph maps PQ");
-    assert_eq!(terms, "tonemap=hable:tonemap_mode=max:desat=0");
+    assert_eq!(
+        terms,
+        "tonemap=hable:tonemap_mode=max:desat=0:reference_white=100"
+    );
     assert_ne!(plan.plan_digest(), BEFORE_CURVE_IN_IDENTITY);
     assert_ne!(plan.plan_digest(), BEFORE_METAL_PEAK_UNIT_IN_IDENTITY);
     let execution = TranscodeExecution::from_options(
