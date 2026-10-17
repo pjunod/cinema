@@ -17,7 +17,7 @@ jobs:
   paperwork:
     name: paperwork
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -37,5 +37,9 @@ jobs:
         run: |
           auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
           git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
-            "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-          python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" --body-env
+            "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF" \
+            "+refs/heads/main:refs/remotes/origin/main"
+          # Release counters are judged against main: an effort that already
+          # claimed its bump does not owe another one per task pull request.
+          python3 scripts/paperwork --base "$PR_BASE_SHA" --merge-target "origin/$BASE_REF" \
+            --counter-target origin/main --body-env

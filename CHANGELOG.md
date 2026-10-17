@@ -6,7 +6,6 @@ All notable changes to plurx are recorded here. The format follows
 [docs/RELEASING.md](docs/RELEASING.md): while the major number is 0, a **minor**
 bump may break compatibility and a **patch** bump never does.
 
-<!-- changelog: insert new entries below this line, at the top of the matching ### Added / ### Fixed / ### Changed list under [Unreleased] -->
 ## [Unreleased]
 
 ### Added

@@ -27,9 +27,12 @@ decides what a session costs. Every agent working here, Claude or GPT:
   keeps the full log under `target/quiet/` and prints only failures and the tail.
   For a red CI run, `scripts/ci-failures [<sha> | --pr N]` prints just the
   failing jobs' failure lines instead of whole job logs.
-- **Append without reading.** `STATUS.md`, `CHANGELOG.md` and the project
-  backlog carry an `<!-- … insert … -->` anchor line; add new entries just
-  below it with an edit instead of reading the whole file first.
+- **Append without reading.** `STATUS.md` and the project backlog carry an
+  `<!-- … insert … -->` anchor line; add new entries just below it with an
+  edit instead of reading the whole file first. In `CHANGELOG.md` read only the
+  `## [Unreleased]` section (`sed -n '/^## \[Unreleased\]/,/^## \[[0-9]/p'`)
+  and add to its matching `###` list — an entry outside that section is never
+  released.
 - **Delegate exploration** that spans many files to a sub-agent that returns a
   conclusion, and start a fresh session per pull request rather than carrying
   one long context through several.

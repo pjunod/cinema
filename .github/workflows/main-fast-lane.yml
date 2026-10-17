@@ -25,7 +25,7 @@ jobs:
   paperwork:
     name: paperwork
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -50,8 +50,9 @@ jobs:
 
   scope:
     name: fast-lane validation scope
-    # Draft is the whole gate. A draft allocates no jobs, so a PR opened early
-    # still costs nothing; anything else runs. It was `draft == false` AND the
+    needs: paperwork
+    # Draft is the whole gate. A draft allocates only the paperwork job, so a
+    # PR opened early costs about a minute of one runner; anything else runs. It was `draft == false` AND the
     # `fast-lane` label, and the label is what let three lanes merge in one day
     # without this workflow ever running - one of them carrying a fix for the
     # regression the lane before it had shipped to the fleet.
