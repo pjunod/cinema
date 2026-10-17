@@ -539,7 +539,11 @@ def allocated(path):
     if not stat.S_ISDIR(info.st_mode):
         return info.st_size
     total = 0
-    for directory, dirs, files in os.walk(path, followlinks=False):
+    def tolerate(error):
+        # Only a live disappearance may be ignored; unreadable storage must not undercount.
+        if not isinstance(error, FileNotFoundError):
+            raise error
+    for directory, dirs, files in os.walk(path, followlinks=False, onerror=tolerate):
         for name in files:
             try:
                 total += os.lstat(os.path.join(directory, name)).st_size
@@ -579,7 +583,20 @@ def bounded_source_command(helper, argv, cwd, environment, log, deadline, limits
 
 
 def fetch_source_archive(path, url, expected, deadline, provider="https-archive", commit=None, remaining_bytes=2 * 1024**3):
-    """Fetch an explicitly declared archive transport without changing its pin."""
+    """Fetch an explicitly declared archive transport without changing its pin.
+
+    A failed Git acquisition (fetch, size, checksum or deadline) never leaves
+    an unverified output file for a later stage to consume.
+    """
+    try:
+        return fetch_declared_source_archive(path, url, expected, deadline, provider, commit, remaining_bytes)
+    except BaseException:
+        if provider == "git-archive":
+            path.unlink(missing_ok=True)
+        raise
+
+
+def fetch_declared_source_archive(path, url, expected, deadline, provider, commit, remaining_bytes):
     import tempfile
     import urllib.request
     if provider not in ("https-archive", "git-archive"):
@@ -641,6 +658,8 @@ def fetch_source_archive(path, url, expected, deadline, provider="https-archive"
     if actual != expected:
         raise ValueError("immutable source download checksum mismatch: " + str(path)
                          + "; url=" + url + "; expected=" + expected + "; actual=" + actual)
+    if time.monotonic() >= deadline:
+        raise ValueError("immutable source download deadline exceeded during verification")
     return path.stat().st_size
 
 
