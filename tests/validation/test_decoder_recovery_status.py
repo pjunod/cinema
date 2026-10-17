@@ -24,6 +24,8 @@ DAEMON_TRANSCODE = ROOT / "crates/plurxd/src/transcode.rs"
 LIVE_TV = ROOT / "crates/plurxd/src/live_tv.rs"
 DECODER_HEALTH = ROOT / "crates/plurxd/src/decoder_health.rs"
 PLAYBACK_CONTROL = ROOT / "crates/plurxd/src/playback_control.rs"
+# The module's unit tests live in their own file; the contract reads both.
+PLAYBACK_CONTROL_TESTS = ROOT / "crates/plurxd/src/playback_control/tests.rs"
 CORE_HEALTH = ROOT / "crates/plurx-core/src/transcode/health.rs"
 CORE_MANIFEST = ROOT / "crates/plurx-core/src/transcode/manifest.rs"
 FORGEJO_MAIN_LINEAGE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
@@ -1544,7 +1546,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         it has no business naming: a retry the client can see, a producer that
         demonstrably decoded, or an outage on this node.
         """
-        control = PLAYBACK_CONTROL.read_text(encoding="utf-8")
+        control = PLAYBACK_CONTROL.read_text(
+            encoding="utf-8"
+        ) + PLAYBACK_CONTROL_TESTS.read_text(encoding="utf-8")
         health = DECODER_HEALTH.read_text(encoding="utf-8")
 
         # The reason exists, is permanent, and says so in prose rather than
