@@ -6,6 +6,14 @@ import XCTest
 final class TVPhysicalInputTests: XCTestCase {
     private let remote = XCUIRemote.shared
 
+    /// These journeys drive a real, signed-in Apple TV. A failed expectation
+    /// means the screen is not the one the next press was written for, and
+    /// continuing would steer the saved account's own UI blindly.
+    override func setUp() {
+        super.setUp()
+        continueAfterFailure = false
+    }
+
     func testSettingsChoicesOpenAsMenusOnAppleTV() throws {
         let app = XCUIApplication()
         wakeDevice()
@@ -39,6 +47,7 @@ final class TVPhysicalInputTests: XCTestCase {
     func testPlaybackRemoteControls() throws {
         let app = try playbackApp()
         let playPause = app.buttons["player-play-pause"]
+        try awaitPlayer(app)
         remote.press(.select) // Reveal chrome if playback has hidden it.
         XCTAssertTrue(playPause.waitForExistence(timeout: 20), app.debugDescription)
 
@@ -60,6 +69,7 @@ final class TVPhysicalInputTests: XCTestCase {
         let app = try playbackApp(startMs: 5_100_000)
         let position = app.staticTexts["player-position"]
         let back = app.buttons["player-skip-back"]
+        try awaitPlayer(app)
         remote.press(.select)
         XCTAssertTrue(position.waitForExistence(timeout: 45), app.debugDescription)
         XCTAssertTrue(back.waitForExistence(timeout: 5))
@@ -106,6 +116,7 @@ final class TVPhysicalInputTests: XCTestCase {
     func testCaptionSelectionWithRemote() throws {
         let trackLabel = try requiredEnvironment("PLURX_TVOS_CAPTION_LABEL")
         let app = try playbackApp()
+        try awaitPlayer(app)
         remote.press(.select)
         // SwiftUI's tvOS Menu may be a PopUpButton in the modern accessibility
         // tree even when the legacy Button query reports its identifier.
@@ -221,9 +232,10 @@ final class TVPhysicalInputTests: XCTestCase {
             "-plurx.acceptance.fileId", fileID,
             "-plurx.acceptance.title", "Physical remote acceptance",
         ]
-        if let origin = ProcessInfo.processInfo.environment["PLURX_TVOS_ORIGIN"] {
-            app.launchArguments += ["-plurx.origin", origin]
-        }
+        // PlaybackAcceptanceLaunch refuses a launch without an explicit
+        // origin, so a missing value can only produce a non-player screen.
+        let origin = try requiredEnvironment("PLURX_TVOS_ORIGIN")
+        app.launchArguments += ["-plurx.origin", origin]
         app.launchArguments += [
             "-plurx.acceptance.startMs", String(startMs),
             "-plurx.acceptance.probe", "YES",
@@ -231,6 +243,22 @@ final class TVPhysicalInputTests: XCTestCase {
         wakeDevice()
         app.launch()
         return app
+    }
+
+    /// Remote input is only meaningful once the player owns the screen. A
+    /// launch that lands on server choice, sign-in or recovery instead must
+    /// stop here: Select on those screens changes the saved connection and
+    /// signs the device out of its real account.
+    private func awaitPlayer(_ app: XCUIApplication) throws {
+        let player = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier IN %@", ["player-reveal", "player-play-pause"])
+        ).firstMatch
+        guard player.waitForExistence(timeout: 45) else {
+            attachScreen(app, name: "playback-not-presented")
+            struct PlayerNotPresented: Error {}
+            XCTFail("Acceptance launch did not present the player; no remote input was sent")
+            throw PlayerNotPresented()
+        }
     }
 
     private func wakeDevice() {
