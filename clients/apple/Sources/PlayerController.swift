@@ -397,9 +397,12 @@ struct AutoTransferPressureEvidence {
 }
 
 /// Catalog exposure permits a bounded observation, not a positive cost verdict.
+/// Only an original the server declared no rate for is tried this way; a
+/// declared original is costed, and is reached only with the same headroom
+/// every costed rung needs (`autoDeclaredCostBps`).
 func autoUnknownOriginalTrial(_ candidate: QualityCandidate, outputs: [MeasuredCandidateOutput]?) -> Bool {
     candidate.hasValidIdentity && candidate.decoderCompatible && candidate.route == "remux" &&
-        candidate.peakBps == nil && (outputs?.count ?? 0) <= 64 &&
+        candidate.peakBps == nil && candidate.averageBps == nil && (outputs?.count ?? 0) <= 64 &&
         !(outputs ?? []).contains { $0.candidateId == candidate.id &&
             $0.recipeDigest == candidate.recipeDigest && $0.route == candidate.route }
 }
@@ -587,18 +590,34 @@ func autoDisplayFits(width: Int, height: Int, neededWidth: Double, neededHeight:
     width > 0 && height > 0 && Double(width) * 11 >= neededWidth * 10 && Double(height) * 11 >= neededHeight * 10
 }
 
-/// What the incumbent costs the link. A costed rung is its peak. An original
-/// or remux is the source rate the catalog declared for it — the title's own
-/// sustained cost, which a link below it drains at every moment, whether or
-/// not a body happens to have completed recently. Only when the server
-/// declared no rate does one fresh unpaced body of this session stand in,
-/// costed at its wire rate over the media it carried.
+/// The one cost every Auto path weighs a candidate by — the downshift under
+/// pressure, the voluntary upgrade and the viewer-boundary re-plan alike,
+/// so that no path can reach a rung another path has just fled. A costed
+/// rung is its peak: the complete measured output when one exists, otherwise
+/// the rate the catalog declared. For an encode rung that declared rate is
+/// the encoder's VBV cap plus the soundtrack (`vbv_maxrate_bps` + audio,
+/// `transcode/manager/candidates.rs`), the very figure the continuous family
+/// publishes as `sustained_bps` (`vodencode.rs`, `continuous_sustained_bps`)
+/// and the web and Android clients cost a rung by; the catalog's
+/// `average_bps` is the encoder's nominal target below it and is not a link
+/// cost. An original or remux is the source rate the catalog declared. A
+/// rung the server declared no rate for has no cost here.
+func autoDeclaredCostBps(_ candidate: QualityCandidate) -> Double? {
+    if let peak = candidate.peakBps, peak > 0 { return Double(peak) }
+    guard candidate.route != "encode", let declared = candidate.averageBps, declared > 0 else { return nil }
+    return Double(declared)
+}
+
+/// What the incumbent costs the link: its declared cost, which for an
+/// original is the title's own sustained rate — a link below it drains the
+/// buffer at every moment, whether or not a body happens to have completed
+/// recently. Only when the server declared no rate does one fresh unpaced
+/// body of this session stand in, costed at its wire rate over the media it
+/// carried.
 func autoDownsideCostBps(_ candidate: QualityCandidate, sample: PlayerController.AutoCompletedTransfer?,
                          sessionId: String?, nowMs: Int) -> Double? {
-    if let peak = candidate.peakBps, peak > 0 { return Double(peak) }
-    guard candidate.route != "encode" else { return nil }
-    if let declared = candidate.averageBps, declared > 0 { return Double(declared) }
-    guard let sample, let sessionId,
+    if let cost = autoDeclaredCostBps(candidate) { return cost }
+    guard candidate.route != "encode", let sample, let sessionId,
           sample.segmentId.contains("/\(sessionId)/"), autoCompletedTransferBps(sample, nowMs: nowMs) != nil else { return nil }
     return sample.mediaDurationSeconds.flatMap { duration -> Double? in
         duration.isFinite && duration > 0 ? Double(sample.bodyBytes) * 8 / duration : nil
@@ -645,29 +664,31 @@ func autoLinkPressureVerdict(current: QualityCandidate, eligible: [QualityCandid
 }
 
 /// The upgrade an Auto evaluation may propose: among the rungs the measured
-/// link carries with 1.8× headroom over a costed peak, and the bounded trial
-/// of an unmeasured original, the one the display prefers.
+/// link carries with headroom — 1.8× a candidate's declared or measured cost,
+/// a declared original included — and the bounded trial of an original the
+/// server declared no rate for, the one the display prefers. An original
+/// above the link's headroom is not fitting, so Auto cannot climb back into
+/// the rung it fled a minute earlier.
 func autoUpgradeCandidate(_ eligible: [QualityCandidate], link: Double?, outputs: [MeasuredCandidateOutput]?,
                           neededWidth: Double, neededHeight: Double) -> QualityCandidate? {
     guard let link, link > 0 else { return nil }
     let fitting = eligible.filter { candidate in
-        candidate.peakBps.map { link >= Double($0) * 1.8 }
+        autoDeclaredCostBps(candidate).map { link >= $0 * 1.8 }
             ?? autoUnknownOriginalTrial(candidate, outputs: outputs)
     }
     return autoPreferredDisplayCandidate(fitting, neededWidth: neededWidth, neededHeight: neededHeight)
 }
 
 /// The original a viewer boundary re-plans to: the largest other original the
-/// measured link carries with 1.8× headroom over a measured peak, or an
-/// unmeasured one under the bounded trial.
-func autoBoundaryOriginalCandidate(_ offered: [QualityCandidate], current: QualityCandidate, link: Double,
+/// measured link carries with the same 1.8× headroom, or one the server
+/// declared no rate for, under the bounded trial.
+func autoBoundaryOriginalCandidate(_ costed: [QualityCandidate], current: QualityCandidate, link: Double,
                                    outputs: [MeasuredCandidateOutput]?, rejected: Set<String>,
                                    blockedUntil: [String: Int], nowMs: Int) -> QualityCandidate? {
-    let originals = offered.filter {
+    let originals = costed.filter {
         $0.id != current.id && $0.hasValidIdentity && $0.decoderCompatible && $0.route == "remux" &&
             !rejected.contains($0.id) && (blockedUntil[$0.id] ?? 0) <= nowMs &&
-            (measuredCandidatePeak($0, outputs: outputs).map { link >= Double($0) * 1.8 }
-                ?? autoUnknownOriginalTrial($0, outputs: outputs))
+            (autoDeclaredCostBps($0).map { link >= $0 * 1.8 } ?? autoUnknownOriginalTrial($0, outputs: outputs))
     }
     return originals.max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) })
 }
@@ -11993,7 +12014,7 @@ extension PlayerController {
         if let cost = autoDownsideCostBps(current, sample: sample, sessionId: sessionId, nowMs: now), link < cost {
             return nil
         }
-        return autoBoundaryOriginalCandidate(offered, current: current, link: link,
+        return autoBoundaryOriginalCandidate(measuredCostCatalog(offered), current: current, link: link,
             outputs: decision?.measuredCandidateOutputs, rejected: autoDecoderRejected,
             blockedUntil: autoBlockedUntil, nowMs: now)
     }
@@ -12167,15 +12188,18 @@ extension PlayerController {
                 && sample.producerPaced == false && sample.ageMs(nowMs: now) <= 15_000
                 && (sample.bodyDurationSeconds ?? 0) > 0 && sample.bodyBytes > 0
         }
-        if let offered = decision?.qualityCandidates?.first(where: { $0.id == desired.id && $0.recipeDigest == desired.recipeDigest }),
-           autoUnknownOriginalTrial(offered, outputs: decision?.measuredCandidateOutputs) {
+        let costed = measuredCostCatalog(decision?.qualityCandidates ?? [])
+            .first(where: { $0.id == desired.id && $0.recipeDigest == desired.recipeDigest }) ?? desired
+        if autoUnknownOriginalTrial(costed, outputs: decision?.measuredCandidateOutputs) {
             guard let intervals = observation.intervals else { return false }
             return autoVODEmpiricalMargin(samples, intervals: intervals, scope: observation.scope,
                 sessionId: observation.sessionId, candidateId: observation.candidateId,
                 nowMs: now, deadlineMs: observation.deadlineMs)
         }
-        guard let peak = measuredCandidatePeak(desired, outputs: decision?.measuredCandidateOutputs) else { return false }
-        return samples.contains { Double($0.bodyBytes) * 8 / ($0.bodyDurationSeconds ?? 1) >= Double(peak) * 1.8 }
+        // The staged successor must itself prove the headroom its cost needs
+        // — measured or declared, the same figure that admitted it.
+        guard let cost = autoDeclaredCostBps(costed) else { return false }
+        return samples.contains { Double($0.bodyBytes) * 8 / ($0.bodyDurationSeconds ?? 1) >= cost * 1.8 }
     }
 
     private func autoStagedProductionAllowsCommit(_ action: PreparedReplacementAction) -> Bool {

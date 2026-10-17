@@ -92,6 +92,36 @@ final class AutoDeclaredCostTests: XCTestCase {
         XCTAssertEqual(costed?.averageBps, 28_814_703)
     }
 
+    func testOneCostHelperCostsEveryRungAndNothingElse() {
+        // The one figure every path weighs by: a measured or declared peak,
+        // an original's declared source rate, nothing for a rung the server
+        // declared no rate for.
+        XCTAssertEqual(autoDeclaredCostBps(candidate(720, peak: 7_500_000, average: 5_000_000)), 7_500_000)
+        XCTAssertEqual(autoDeclaredCostBps(original), 28_814_703)
+        XCTAssertNil(autoDeclaredCostBps(candidate(720, peak: nil, average: 5_000_000)),
+                     "an encode rung's nominal target is not a link cost")
+        XCTAssertNil(autoDeclaredCostBps(candidate(1_080, route: "remux", peak: nil, average: nil)))
+        XCTAssertNil(autoDeclaredCostBps(candidate(720, peak: 0, average: 0)))
+    }
+
+    func testAnUnmeasuredEncodeRungIsCostedByTheServersSustainedFigureNotItsNominalTarget() {
+        // The catalog's `peak_bps` for an encode rung is `vbv_maxrate_bps`
+        // plus the soundtrack — the figure the continuous family publishes
+        // as `sustained_bps` and the web and Android clients cost a rung by.
+        // Its `average_bps` is the encoder's nominal target below that, and
+        // costing by it would admit a rung the link cannot carry: at a
+        // measured 6 Mb/s this 720p rung (7.5 Mb/s sustained, 5 Mb/s nominal)
+        // must not fit.
+        let rung = autoCostedCatalog([candidate(720, peak: 7_500_000, average: 5_000_000, recipe: 3)], outputs: nil)[0]
+        XCTAssertEqual(autoDeclaredCostBps(rung), 7_500_000)
+        XCTAssertEqual(autoDownsideCostBps(rung, sample: nil, sessionId: "s", nowMs: 0), 7_500_000)
+        XCTAssertEqual(autoRecoveryCandidate([original, rung, candidate(480, peak: 3_500_000, recipe: 4)], current: original,
+                                             rejected: [], linkCeiling: 6_000_000, currentCost: 28_814_703)?.height, 480)
+        XCTAssertNil(autoUpgradeCandidate([rung], link: 13_000_000, outputs: nil, neededWidth: 1_920, neededHeight: 1_080),
+                     "13 Mb/s is 1.8× the nominal target but not 1.8× the sustained cost")
+        XCTAssertEqual(autoUpgradeCandidate([rung], link: 13_500_000, outputs: nil, neededWidth: 1_920, neededHeight: 1_080)?.height, 720)
+    }
+
     func testARemuxUnderLinkPressureNowHasACostedLowerRungToRecoverTo() {
         // The link measured 8.69 Mb/s in the 10 Mb/s stage.
         XCTAssertEqual(autoRecoveryCandidate(ladder, current: current, rejected: [],
@@ -227,6 +257,41 @@ final class AutoDeclaredCostTests: XCTestCase {
         XCTAssertEqual(evidence.mildSamples(nowMs: 19_000), 2)
         XCTAssertEqual(evidence.mildSamples(nowMs: 20_000), 2)
         XCTAssertEqual(evidence.mildSamples(nowMs: 20_001), 0)
+    }
+
+    // MARK: F1 — Auto cannot climb back into a declared original the link cannot carry
+
+    func testAutoDoesNotClimbBackIntoADeclaredOriginalWithoutHeadroom() {
+        let encode720 = ladder[2]
+        let others = ladder.filter { $0.id != encode720.id }
+        // Playing 720p after fleeing the original: at 25 Mb/s the 28.8 Mb/s
+        // original is nowhere near its 1.8× headroom and is not fitting.
+        // The old upgrade admitted any unmeasured original on `link > 0`
+        // and the display picker took the first non-encode rung.
+        XCTAssertNil(autoUpgradeCandidate(others, link: 25_000_000, outputs: nil, neededWidth: 1_920, neededHeight: 1_080)
+            .flatMap { $0.route == "remux" ? $0 : nil })
+        XCTAssertEqual(autoUpgradeCandidate(others, link: 25_000_000, outputs: nil, neededWidth: 1_920, neededHeight: 1_080)?.height,
+                       1_080, "the 12 Mb/s 1080p encode fits 25 Mb/s with headroom")
+        XCTAssertEqual(autoUpgradeCandidate(others, link: 51_866_466, outputs: nil, neededWidth: 1_920, neededHeight: 1_080)?.route,
+                       "remux", "1.8× the declared source rate reaches the original again")
+        XCTAssertNil(autoUpgradeCandidate(others, link: 51_866_464, outputs: nil, neededWidth: 1_920, neededHeight: 1_080)
+            .flatMap { $0.route == "remux" ? $0 : nil })
+        // The viewer-boundary re-plan applies the same headroom to the same
+        // original, where it used to take the unmeasured trial.
+        XCTAssertNil(autoBoundaryOriginalCandidate(ladder, current: encode720, link: 25_000_000, outputs: nil,
+                                                   rejected: [], blockedUntil: [:], nowMs: 0))
+        XCTAssertEqual(autoBoundaryOriginalCandidate(ladder, current: encode720, link: 52_000_000, outputs: nil,
+                                                     rejected: [], blockedUntil: [:], nowMs: 0)?.route, "remux")
+        // Only an original the server declared no rate for is still tried
+        // on the strength of a body, in both paths.
+        let undeclared = candidate(2_160, route: "remux", peak: nil, average: nil, recipe: 9)
+        XCTAssertTrue(autoUnknownOriginalTrial(undeclared, outputs: nil))
+        XCTAssertFalse(autoUnknownOriginalTrial(original, outputs: nil))
+        XCTAssertEqual(autoUpgradeCandidate([encode720, undeclared], link: 9_000_000, outputs: nil,
+                                            neededWidth: 1_920, neededHeight: 1_080)?.height, 2_160)
+        XCTAssertEqual(autoBoundaryOriginalCandidate([encode720, undeclared], current: encode720, link: 9_000_000,
+                                                     outputs: nil, rejected: [], blockedUntil: [:], nowMs: 0)?.height, 2_160)
+        XCTAssertNil(autoUpgradeCandidate([encode720, undeclared], link: nil, outputs: nil, neededWidth: 1_920, neededHeight: 1_080))
     }
 
     // MARK: Fix 4 — a stationary film clock is sampled as not presenting

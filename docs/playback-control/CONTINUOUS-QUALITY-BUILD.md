@@ -11974,8 +11974,9 @@ cases and61 Apple passes; rerun only the four failed cases before final fast lan
 
 The shipping Apple build 252 (`89d790d2e`) ran the native 100/10/25/10/25/3/25
 Mb/s link protocol on a real library title rather than the qualification
-fixture: Agent Zero, a 1080p H.264 remux the server costs at 28.8 Mb/s, on an
-iPhone 17 Pro Max and an iPad Pro behind the shaping proxy. Both devices
+fixture: a 1080p H.264 library title delivered as an original the server
+costs at 28.8 Mb/s, on an iPhone 17 Pro Max and an iPad Pro behind the
+shaping proxy. Both devices
 passed 15 of 15 manual 720p/480p changes with no interruption. Auto on both
 held the remux through the whole 10 Mb/s stage (8.69 Mb/s delivered, no
 offer, no `auto_quality_recovery`), kept draining through the 25 Mb/s stage
@@ -11993,12 +11994,26 @@ own site with a test that rejects the old line:
   they measured four whole-title outputs first; a library title has none,
   so every encode rung was uncosted and `autoRecoveryCandidate` had nothing
   it may choose for a link cause (§10.305). The catalog the server sends
-  already declares the VBV ceiling plus audio for every encode rung and the
-  source rate for an original, which is the rate the web and Android
-  clients cost by when no measurement exists (#985). `autoCostedCatalog`
-  keeps the declared figures and lets a unique complete measurement replace
-  them. The thirty-second cost refresh the client ran for the whole session
-  was the symptom: at least one rung never acquired a measured cost.
+  already declares a cost for every encode rung: `peak_bps` is
+  `vbv_maxrate_bps` plus the audio budget
+  (`crates/plurxd/src/transcode/manager/candidates.rs`, the encode
+  candidate), and that is exactly the figure the continuous family
+  publishes as `sustained_bps` — `continuous_sustained_bps` in
+  `crates/plurxd/src/vodencode.rs` returns `vbv_maxrate_bps` for video and
+  the configured rate for the soundtrack, "the same figure the candidate
+  catalog advertises for the encode route" — which the web
+  (`continuous-quality.js`, `sustained_bps ?? peak_bps`) and Android
+  (`ContinuousEnrollment.kt`, `continuousLinkRate`) cost a rung by when no
+  measurement exists (#985). The catalog's `average_bps` is the encoder's
+  nominal target below it and is not a link cost on any client. For an
+  original the catalog declares the source rate as `average_bps` and no
+  peak. `autoCostedCatalog` keeps the declared figures and lets a unique
+  complete measurement replace them, and `autoDeclaredCostBps` is the one
+  cost every Auto path weighs a candidate by. The thirty-second cost
+  refresh the client ran for the whole session was the symptom: at least
+  one rung never acquired a measured cost. The refresh stays: a complete
+  measurement is the exact cost and replaces the declared one, so the
+  bounded fetch keeps looking for it while a rung is unmeasured.
 - **The original was costed only by a fresh body, and pressure on it waited
   for the runway.** `autoDownsideCostBps` costed a remux or original from a
   body of its own session less than ten seconds old, and the tick admitted
