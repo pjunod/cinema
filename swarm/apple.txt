@@ -12,9 +12,10 @@ READ FOR THE TASK
 - Add docs/PLAYBACK.md and docs/PLAYBACK-TESTING.md for playback; relevant
   APPLE handoff/plan documents for active initiatives; docs/PUBLISHING.md only
   for signing, TestFlight, or App Store work.
-- docs/README.md indexes every document by the question it answers; use it
-  rather than listing the directory. A new Apple document belongs in
-  docs/clients/ with a row added to that index in the same commit.
+- docs/README.md routes to one index per subject folder
+  (docs/<area>/README.md); read the router and the folder you need rather
+  than listing the directory. A new Apple document belongs in
+  docs/clients/ with a row added to that folder's index in the same commit.
 
 TERRITORY
 

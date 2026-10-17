@@ -13,6 +13,22 @@ F-core-10, F-sc-12, F-hist-13, F-build-ops-codehealth-3 and -14 from
 (§5.3 "this quarter", size L) · **Written:** 2026-09-20 against `main` @
 `88a3957a`
 
+## At a glance
+
+<!-- agent head: read this section first; the body below is reference. Keep it current when the status changes. -->
+
+- **What this is:** Plan to split the transcode, HLS and VOD source files with behaviour-preserving moves first and redesign later (milestones M0-M8).
+- **Where it stands:**
+  - Status: built; M0-M8 source milestones are on main through #793 and #814 completes all three removal consumers.
+  - D-M7/D-M8 decisions stand under delegated authority, subject to owner reversal; S-05 physical spawn acceptance remains open; registry evaluation is deferred (2026-10-08 continuation).
+- **Read further only for:**
+  - the objective: `## 1. Objective`
+  - how the files look today: `## 2. Contract today`
+  - the moves and the three rules each obeys: `## 3. Change`; `## 4. Guardrails (non-goals)`
+  - milestone M0-M8 scope and acceptance: `## 5. Milestones`
+  - verification, rollout and open questions: `## 6. Verification and rollout`; `## 7. Open questions`
+  - dated per-session history: `## Execution log`
+
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
 Companion to [WEB-SHELL-LAYOUT.md](../clients/WEB-SHELL-LAYOUT.md) and

@@ -12,6 +12,27 @@ describes the state on the day it was written, and
 merged-pull-request rule it held in `STATUS.md`.
 
 
+## 2026-10-04 · Jellyfin facade: both pinned clients can now finish a play (J5)
+
+**Branch `claude/jellyfin-facade-gaps`, one draft PR to `main`.** The
+2026-10-04 merge review listed six facade gaps; re-checking them against the
+J0 traces and the upstream sources found that neither Infuse nor Jellyfin for
+Android TV could finish a play on the facade: Infuse's direct request names no
+play and its HLS entry lower-cases query keys, Android TV's media requests
+carry only the URL's `ApiKey`, every returned URL doubled `/jellyfin`, and the
+five-segment subtitle route both request was missing. Fixed on the existing
+seams: Jellyfin's subtitle routes and cue window, per-stream `DeliveryMethod`
+and `DeliveryUrl` from each client's subtitle profile, base-relative URLs with
+the compatibility login as `ApiKey`, the newest-direct-play resolution for
+Infuse (a new Store read on both backends), the nine missing contract routes,
+one switch read per request, and `plurx_jellyfin_requests_total`. The leader
+restart gap was a misreading: `/jellyfin` is fenced like native media and an
+HLS play keeps #798's grace; a regression now proves it. Detail:
+[JELLYFIN-COMPATIBILITY-STATUS.md](JELLYFIN-COMPATIBILITY-STATUS.md) §13.
+Open: the physical check on both clients (a GPT prompt), and the `ApiKey`
+decision for Paul to look over.
+
+
 ## 2026-09-24 · Watch view: menus and Playback info escape the picture; the picture goes under the header
 
 **Branch `fix/watch-popovers-escape-picture`, pull request open as a draft;

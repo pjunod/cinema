@@ -444,6 +444,30 @@ class CatalogCase(unittest.TestCase):
 
         self.assertTrue(needs_rust_gate(()))
 
+    def test_agent_tooling_diffs_skip_the_cargo_lane(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        tooling = scope_for_paths(
+            catalog,
+            (
+                "AGENTS.md",
+                "scripts/paperwork",
+                "scripts/ci-failures",
+                "swarm/builder.txt",
+                "docs/ci/PAPERWORK.md",
+                "tests/operations/doc-size-allowlist.txt",
+            ),
+        )
+        self.assertFalse(tooling["rust"])
+        # Exempt from the cargo gate, and covered by a point, so no release build either.
+        self.assertFalse(tooling["release_build"])
+        # The Makefile and the workflows are routing paths: still forced.
+        for routing in ("Makefile", ".github/workflows/main-fast-lane.yml"):
+            with self.subTest(path=routing):
+                self.assertTrue(scope_for_paths(catalog, ("scripts/paperwork", routing))["rust"])
+        # The Python suites are not exempt: some guard cargo lanes themselves.
+        self.assertTrue(needs_rust_gate(("tests/operations/test_docs_index.py",)))
+        self.assertTrue(needs_rust_gate(("scripts/ci-require-disk",)))
+
     def test_qualification_and_release_events_fail_open_into_the_full_fan_out(self):
         for event in ("effort_qualification", "merge_group", "push"):
             with self.subTest(event=event):
