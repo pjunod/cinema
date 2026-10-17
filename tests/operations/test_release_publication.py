@@ -68,6 +68,104 @@ def write_elf(path: Path, target: str, payload: bytes = b"fixture") -> None:
     path.chmod(0o755)
 
 
+class ReleaseTagValidationCase(unittest.TestCase):
+    """Run the publisher's own tag-validation step against a real tagged repo."""
+
+    @staticmethod
+    def validation_script() -> str:
+        """The `run: |` block of the step whose id is `release`, dedented."""
+
+        lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+        (start,) = [n for n, line in enumerate(lines) if line.strip() == "id: release"]
+        run = next(n for n in range(start, len(lines)) if lines[n].strip() == "run: |")
+        indent = len(lines[run]) - len(lines[run].lstrip())
+        body = []
+        for line in lines[run + 1 :]:
+            if line.strip() and len(line) - len(line.lstrip()) <= indent:
+                break
+            body.append(line)
+        width = min(len(line) - len(line.lstrip()) for line in body if line.strip())
+        script = "\n".join(line[width:] for line in body) + "\n"
+        assert script.startswith("set -euo pipefail\n"), script[:80]
+        return script
+
+    def run_validation(self, changelog: str) -> tuple[subprocess.CompletedProcess, str]:
+        # No user or system config: a signing or hooks setting must not decide
+        # whether the fixture commits.
+        environment = {
+            **own_repository_environment(),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        with tempfile.TemporaryDirectory() as raw_directory:
+            repository = Path(raw_directory) / "repo"
+            repository.mkdir()
+
+            def git(*arguments: str) -> None:
+                subprocess.run(
+                    ["git", *arguments],
+                    cwd=repository,
+                    env=environment,
+                    check=True,
+                    capture_output=True,
+                )
+
+            git("init", "-q")
+            git("config", "user.name", "fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            (repository / "Cargo.toml").write_text(
+                '[workspace]\nmembers = []\n\n[workspace.package]\nversion = "9.9.9"\n',
+                encoding="utf-8",
+            )
+            (repository / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-q", "-m", "release: v9.9.9")
+            git("tag", "-a", "v9.9.9", "-m", "v9.9.9")
+            outputs = Path(raw_directory) / "outputs"
+            outputs.touch()
+            result = subprocess.run(
+                ["bash", "-c", self.validation_script()],
+                cwd=repository,
+                env={
+                    **environment,
+                    "RELEASE_TAG": "v9.9.9",
+                    "EVENT_NAME": "push",
+                    "EVENT_REF": "refs/tags/v9.9.9",
+                    "GITHUB_OUTPUT": str(outputs),
+                },
+                capture_output=True,
+                text=True,
+            )
+            return result, outputs.read_text(encoding="utf-8")
+
+    def test_a_changelog_larger_than_the_pipe_buffer_still_validates(self):
+        # The heading sits near the top, as release-cut puts it; the filler
+        # stands for every earlier release. v0.7.0's real changelog was 222 KB.
+        filler = "".join(f"- entry {n} " + "x" * 60 + "\n" for n in range(4000))
+        changelog = "# Changelog\n\n## [Unreleased]\n\n## [9.9.9] — 2026-10-17\n\n" + filler
+        self.assertGreater(len(changelog.encode()), 256 * 1024)
+
+        result, outputs = self.run_validation(changelog)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("release_version=9.9.9\n", outputs)
+
+    def test_a_changelog_without_the_release_heading_is_refused(self):
+        near_misses = {
+            "older release only": "## [9.9.8] — 2026-10-01\n",
+            "subheading": "### [9.9.9]\n",
+            "mid-line mention": "See ## [9.9.9] below.\n",
+            "longer version": "## [9.9.90] — 2026-10-01\n",
+            "dot as wildcard": "## [9x9x9] — 2026-10-01\n",
+        }
+        for name, body in near_misses.items():
+            with self.subTest(name):
+                result, _ = self.run_validation("# Changelog\n\n" + body)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("CHANGELOG.md has no 9.9.9 release heading", result.stdout)
+
+
 class ReleasePublicationContractCase(unittest.TestCase):
     def test_release_label_templates_are_valid_docker_go_templates(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")

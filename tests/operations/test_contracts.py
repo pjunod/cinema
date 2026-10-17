@@ -3817,9 +3817,6 @@ assert.equal(context.ACT_TIMER, null);
                 early_exit.findall(text), [],
                 f"{path.relative_to(ROOT)} pipes git show into grep -q",
             )
-        publisher = read(".github/workflows/publish-release.yml")
-        self.assertIn('git show "$commit_sha:CHANGELOG.md" > "$RUNNER_TEMP/release-changelog.md"', publisher)
-        self.assertIn('grep -Fq "## [$release_version]" "$RUNNER_TEMP/release-changelog.md"', publisher)
 
     def test_release_registry_and_weekly_readiness_match_ci(self):
         ci = read(".github/workflows/ci.yml")

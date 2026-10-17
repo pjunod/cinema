@@ -72,11 +72,13 @@ jobs:
             echo "::error::$RELEASE_TAG does not match workspace version $cargo_ver"
             exit 1
           }
-          # Not piped into an early-exiting grep: grep -q stops at the first match;
-          # once the changelog outgrows the pipe buffer git show then dies of
-          # SIGPIPE, which pipefail reports as a missing heading (v0.7.0).
-          git show "$commit_sha:CHANGELOG.md" > "$RUNNER_TEMP/release-changelog.md"
-          grep -Fq "## [$release_version]" "$RUNNER_TEMP/release-changelog.md" || {
+          # No `grep -q`: it exits at the first match, and once CHANGELOG.md
+          # outgrows the pipe buffer the SIGPIPE it leaves `git show` with fails
+          # this pipeline under pipefail, refusing a heading that is there
+          # (v0.7.0, a 222 KB changelog, 2026-10-17).
+          # Anchored: `### [X.Y.Z]` or a mention mid-line is not the heading.
+          git show "$commit_sha:CHANGELOG.md" \
+            | grep -E "^## \[${release_version//./\\.}\]( |$)" >/dev/null || {
             echo "::error::CHANGELOG.md has no $release_version release heading"
             exit 1
           }
