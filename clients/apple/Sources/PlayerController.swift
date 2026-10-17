@@ -285,12 +285,35 @@ func autoActiveProductionPressure(status: PlaybackSessionStatus?, observedAtMs: 
         runwaySeconds.map { $0 >= 0 && $0 < 10 } == true
 }
 
+/// How long one completed body stays the link's current evidence. A body
+/// measured the link for as long as it took to arrive, so its verdict stands
+/// for at least that long — a 40 MB remux object that took 37 s to cross a
+/// 9 Mb/s link is 37 s of evidence, not ten — and until a newer body on the
+/// same item supersedes it. The floor is the ordinary ten seconds a short
+/// body earns.
+func autoCompletedTransferValidityMs(_ sample: PlayerController.AutoCompletedTransfer, maximumAgeMs: Int = 10_000) -> Int {
+    guard let duration = sample.bodyDurationSeconds, duration.isFinite, duration > 0 else { return maximumAgeMs }
+    return max(maximumAgeMs, Int((duration * 1_000).rounded(.up)))
+}
+
 func autoCompletedTransferBps(_ sample: PlayerController.AutoCompletedTransfer, nowMs: Int, maximumAgeMs: Int = 10_000) -> Double? {
     guard sample.networkLoad, !sample.fromLocalCache, sample.producerPaced == false,
-          sample.ageMs(nowMs: nowMs) <= maximumAgeMs, sample.bodyBytes > 0,
+          sample.ageMs(nowMs: nowMs) <= autoCompletedTransferValidityMs(sample, maximumAgeMs: maximumAgeMs), sample.bodyBytes > 0,
           let duration = sample.bodyDurationSeconds, duration.isFinite, duration > 0 else { return nil }
     let bps = Double(sample.bodyBytes) * 8 / duration
     return bps.isFinite && bps > 0 ? bps : nil
+}
+
+/// The installed incumbent's link, read from its latest completed body:
+/// an actual 200 with a receipt and an ETag, bound to this session and
+/// candidate, and still current by `autoCompletedTransferValidityMs`. The
+/// origin check stays with the caller, which owns the session's origin.
+func autoIncumbentLinkBps(_ transfer: PlayerController.AutoCompletedTransfer, sessionId: String?,
+                          candidateId: String?, nowMs: Int) -> Double? {
+    guard transfer.statusCode == 200, transfer.receipt != nil, transfer.etag != nil,
+          let sessionId, transfer.installedSessionId == sessionId,
+          let candidateId, transfer.installedCandidateId == candidateId else { return nil }
+    return autoCompletedTransferBps(transfer, nowMs: nowMs)
 }
 
 /// Completed link observations belong to one installed viewer lifetime.
@@ -316,6 +339,7 @@ struct AutoTransferPressureEvidence {
     private var receipts: [String: Int] = [:]
     private var latestCompletedAtMs: Int?
     private var lastClassifiedAtMs: Int?
+    private var lastClassifiedValidityMs = 10_000
     private var mildCount = 0
     private var notBeforeMs = 0
 
@@ -336,7 +360,7 @@ struct AutoTransferPressureEvidence {
 
     func mildSamples(nowMs: Int) -> Int {
         guard let lastClassifiedAtMs, nowMs >= lastClassifiedAtMs,
-              nowMs - lastClassifiedAtMs <= 10_000 else { return 0 }
+              nowMs - lastClassifiedAtMs <= lastClassifiedValidityMs else { return 0 }
         return mildCount
     }
 
@@ -367,6 +391,7 @@ struct AutoTransferPressureEvidence {
         let mild = link < cost * (knownPeak ? 1.3 : 1.0)
         mildCount = mild ? min(2, mildCount + 1) : 0
         lastClassifiedAtMs = sample.completedAtMs
+        lastClassifiedValidityMs = autoCompletedTransferValidityMs(sample)
         return AutoTransferPressureObservation(severe: severe, mildSamples: mildCount)
     }
 }
@@ -11869,14 +11894,9 @@ extension PlayerController {
         let now = PlaybackControlSession.monotonicMs()
         autoUpgradeEvidence.bind(attachment: player.currentItem.map(ObjectIdentifier.init), attempt: playbackAttemptId, nowMs: now)
         let link: Double? = {
-            guard autoTransferPressureOwnerCurrent, let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
-                  !transfer.fromLocalCache, transfer.producerPaced == false,
-                  transfer.statusCode == 200, transfer.receipt != nil, transfer.etag != nil,
-                  autoTransferOriginCurrent(transfer),
-                  transfer.installedSessionId == sessionId, transfer.installedCandidateId == autoActiveCandidateId,
-                  transfer.ageMs(nowMs: now) <= 10_000, let duration = transfer.bodyDurationSeconds,
-                  duration > 0, transfer.bodyBytes > 0 else { return nil }
-            return Double(transfer.bodyBytes) * 8 / duration
+            guard autoTransferPressureOwnerCurrent, let transfer = latestAutoCompletedTransfer,
+                  autoTransferOriginCurrent(transfer) else { return nil }
+            return autoIncumbentLinkBps(transfer, sessionId: sessionId, candidateId: autoActiveCandidateId, nowMs: now)
         }()
         let downsideCost = autoDownsideCostBps(current, sample: latestAutoCompletedTransfer, sessionId: sessionId, nowMs: now)
         let severe = link.map { bps in downsideCost.map { bps < $0 * 0.7 } ?? false } ?? false
@@ -12056,16 +12076,9 @@ extension PlayerController {
             return
         }
         let link: Double? = {
-            guard autoTransferPressureOwnerCurrent, let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
-                  !transfer.fromLocalCache, transfer.producerPaced == false,
-                  transfer.statusCode == 200, transfer.receipt != nil, transfer.etag != nil,
-                  autoTransferOriginCurrent(transfer),
-                  transfer.installedSessionId == sessionId, transfer.installedCandidateId == autoActiveCandidateId,
-                  transfer.ageMs(nowMs: now) <= 10_000,
-                  let duration = transfer.bodyDurationSeconds, duration > 0,
-                  transfer.bodyBytes > 0 else { return nil }
-            let bps = Double(transfer.bodyBytes) * 8 / duration
-            return bps.isFinite && bps > 0 ? bps : nil
+            guard autoTransferPressureOwnerCurrent, let transfer = latestAutoCompletedTransfer,
+                  autoTransferOriginCurrent(transfer) else { return nil }
+            return autoIncumbentLinkBps(transfer, sessionId: sessionId, candidateId: autoActiveCandidateId, nowMs: now)
         }()
         autoSwitchTimes.removeAll { now - $0 >= 3_600_000 }
         let eligible = candidates.filter {

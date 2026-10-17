@@ -123,4 +123,72 @@ final class AutoDeclaredCostTests: XCTestCase {
             "the runway gate held a 28.8 Mb/s remux on a 9 Mb/s link until the buffer was one body from empty"
         )
     }
+
+    // MARK: Fix 3 — a completed body is evidence for as long as it took to arrive
+
+    func testACompletedBodyStaysLinkEvidenceForAsLongAsItTookToArrive() {
+        XCTAssertEqual(autoCompletedTransferValidityMs(body(bodySeconds: 37)), 37_000)
+        XCTAssertEqual(autoCompletedTransferValidityMs(body(bodySeconds: 0.5)), 10_000)
+        XCTAssertEqual(autoCompletedTransferValidityMs(body(bodySeconds: 12), maximumAgeMs: 15_000), 15_000)
+        // A 40 MB object that took 37 s to cross the link is 37 s of
+        // evidence; the old ten-second expiry discarded it at ten.
+        XCTAssertNotNil(autoCompletedTransferBps(body(bodySeconds: 37), nowMs: 30_000))
+        XCTAssertNotNil(autoCompletedTransferBps(body(bodySeconds: 37), nowMs: 37_000))
+        XCTAssertNil(autoCompletedTransferBps(body(bodySeconds: 37), nowMs: 37_001))
+        // A short body still earns the ordinary ten seconds and no more.
+        XCTAssertNotNil(autoCompletedTransferBps(body(bodySeconds: 0.5), nowMs: 10_000))
+        XCTAssertNil(autoCompletedTransferBps(body(bodySeconds: 0.5), nowMs: 10_001))
+    }
+
+    func testTheIncumbentLinkReadsTheSameBodyInTheTickAndInTheStallPath() {
+        let transfer = body(bodySeconds: 37)
+        XCTAssertEqual(autoIncumbentLinkBps(transfer, sessionId: "s", candidateId: "c", nowMs: 30_000),
+                       Double(40_000_000) * 8 / 37)
+        XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: "s", candidateId: "c", nowMs: 37_001))
+        // Bound to the installed session and candidate, an actual 200 with
+        // a receipt; nothing else is the incumbent's link.
+        XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: "other", candidateId: "c", nowMs: 1_000))
+        XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: "s", candidateId: "other", nowMs: 1_000))
+        XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: nil, candidateId: "c", nowMs: 1_000))
+        XCTAssertNil(autoIncumbentLinkBps(body(bodySeconds: 37, receipt: nil), sessionId: "s", candidateId: "c", nowMs: 1_000))
+    }
+
+    func testTheTickAndTheStallPathReadTheIncumbentLinkThroughTheOneValidityRule() throws {
+        let source = try playerControllerSource()
+        for signature in ["private func tickDisplayAwareAuto(pressureOnly: Bool = false) {",
+                          "private func selectAutoStallRecoveryCandidate(attempt: Attempt, deadline: Double?) async {"] {
+            let body = try functionBody(source, signature)
+            XCTAssertTrue(
+                body.contains("autoIncumbentLinkBps(transfer, sessionId: sessionId, candidateId: autoActiveCandidateId, nowMs: now)"),
+                "\(signature) reads the incumbent's link through the helper that applies the body's validity"
+            )
+            XCTAssertFalse(
+                body.contains("ageMs(nowMs: now) <= 10_000"),
+                "\(signature) must not expire a body at ten seconds on its own"
+            )
+        }
+    }
+
+    func testTwoMildBodiesStayUrgentForAsLongAsTheLastOneTookToArrive() {
+        let item = NSObject()
+        let owner = AutoTransferPressureOwner(item: ObjectIdentifier(item), attempt: "attempt", viewerEpoch: 1,
+                                              session: "s", candidate: "c", origin: "https://node")
+        var evidence = AutoTransferPressureEvidence(); evidence.bind(owner)
+        func mild(_ receipt: Int, completed: Int) -> PlayerController.AutoCompletedTransfer {
+            body(bodySeconds: 13, completedAt: completed,
+                 receipt: String(format: "00000000-0000-0000-0000-%012d", receipt))
+        }
+        // 40 MB in 13 s is 24.6 Mb/s against a 28.8 Mb/s title: mild twice.
+        let first = evidence.observe(mild(1, completed: 1_000), owner: owner, canonicalOrigin: "https://node",
+                                     downsideCost: 28_814_703, knownPeak: false, nowMs: 1_000)
+        XCTAssertEqual(first?.urgent, false)
+        let second = evidence.observe(mild(2, completed: 7_000), owner: owner, canonicalOrigin: "https://node",
+                                      downsideCost: 28_814_703, knownPeak: false, nowMs: 7_000)
+        XCTAssertEqual(second?.urgent, true)
+        // Twelve seconds on, the second body is still the link's evidence;
+        // the old ten-second window had already forgotten both.
+        XCTAssertEqual(evidence.mildSamples(nowMs: 19_000), 2)
+        XCTAssertEqual(evidence.mildSamples(nowMs: 20_000), 2)
+        XCTAssertEqual(evidence.mildSamples(nowMs: 20_001), 0)
+    }
 }
