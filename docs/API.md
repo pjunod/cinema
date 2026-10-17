@@ -1,5 +1,20 @@
 # API — every endpoint plurxd serves, and what authorizes it
 
+## At a glance
+
+<!-- agent head: read this section first; the body below is reference. Keep it current when the status changes. -->
+
+- **What this is:** Every endpoint plurxd serves and which credential authorizes it; the specification is this file (no OpenAPI document exists), written from the routers and handlers on 2026-09-07.
+- **Where it stands:**
+  - Live reference; maintained with behavior changes. The intro states the route inventory as of 2026-10-15.
+- **Read further only for:**
+  - the five surfaces and credentials: `## 1. Surfaces — five things on one port`; `## 2. Authentication — two bearer kinds and five capabilities`
+  - error envelopes: `## 3. Errors — three envelopes, and the gates that answer first`
+  - playback decision, HLS and control protocol: `## 7. Playback — the decision`; `## 9. Playback — HLS sessions`; `## 10. Playback — the control protocol`
+  - libraries, subtitles and offline: `## 6. Libraries, scanning and browsing`; `## 11. Subtitles and overlays`; `## 12. Offline packages`
+  - Live TV, cluster admin and sharing: `## 17. Live TV`; `## 19. Cluster administration`; `## 24. Sharing administration — local owners manage private peer authority`
+  - what has no spec or is not implemented: `## 23. What has no spec, what is not implemented, and what older docs say`
+
 Companion to [ARCHITECTURE.md](ARCHITECTURE.md) (why there are two façades)
 and [PLAYBACK.md](PLAYBACK.md) (how a file becomes a stream) — this is *what
 you can call, which credential it takes, and what comes back*. Read

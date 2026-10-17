@@ -15,8 +15,8 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     SWIFT_STRICT_CONCURRENCY: targeted
-    MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "259"
+    MARKETING_VERSION: "0.7.0"
+    CURRENT_PROJECT_VERSION: "253"
     CODE_SIGN_STYLE: Automatic
 
 targets:
@@ -245,25 +245,6 @@ schemes:
       targets:
         - plurx-tvOSTests
 
-  plurx-tvOS-navigation:
-    build:
-      targets:
-        plurx-tvOS: all
-        plurx-tvOSUITests: [test]
-    test:
-      targets:
-        - name: plurx-tvOSUITests
-          selectedTests:
-            - TVNavigationTests
-            - TVSecondaryNavigationTests
-            - TVPlaybackNavigationTests
-            - TVLiveNavigationTests
-            - TVDvrNavigationTests
-            - TVRemoteManagementNavigationTests
-            - TVSharedPlaybackNavigationTests
-            - TVHomeNavigationTests
-            - TVConnectionNavigationTests
-
   plurx-tvOS-physical:
     build:
       targets:
@@ -271,17 +252,7 @@ schemes:
         plurx-tvOSUITests: [test]
     test:
       targets:
-        - name: plurx-tvOSUITests
-          skippedTests:
-            - TVNavigationTests
-            - TVSecondaryNavigationTests
-            - TVPlaybackNavigationTests
-            - TVLiveNavigationTests
-            - TVDvrNavigationTests
-            - TVRemoteManagementNavigationTests
-            - TVSharedPlaybackNavigationTests
-            - TVHomeNavigationTests
-            - TVConnectionNavigationTests
+        - plurx-tvOSUITests
 
   plurx-iOS-library-ui:
     build:

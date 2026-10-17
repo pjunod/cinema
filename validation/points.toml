@@ -1347,6 +1347,7 @@ paths = [
   "scripts/quiet",
   "scripts/ci-failures",
   "scripts/ci-failures.fleet.example.json",
+  "swarm/*.txt",
   "scripts/ci-flake-report",
   "scripts/publish-badge",
   "scripts/ripwire",

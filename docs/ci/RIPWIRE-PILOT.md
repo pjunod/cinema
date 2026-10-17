@@ -1,6 +1,6 @@
 # Ripwire pilot — measured speed, graph omissions, and opt-in verdict
 
-**Status:** open — trial complete with measurement limits · **Verdict:** opt-in only ·
+**Status:** done — trial complete with measurement limits · **Verdict:** opt-in only (superseded 2026-10-17: Paul made Ripwire the default navigator; see [RIPWIRE.md](RIPWIRE.md)) ·
 **Measured:** 2026-09-10 · **Owner:** validation.framework
 
 Companion to [the usage guide](RIPWIRE.md) and
