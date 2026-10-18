@@ -112,8 +112,10 @@ internal fun MeridianChrome(
     if (expanded) {
         // A real modal window transfers native focus and blocks the covered route.
         // Owned semantic controls are confined to the rail; restricted content stays restricted.
+        val menuScope = remember { navigation?.scope ?: scope }
+        CompositionLocalProvider(LocalRemoteScope provides menuScope) {
         androidx.compose.ui.window.Dialog(onDismissRequest = { expanded = false }, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = !television)) {
-            val token = remember(scope) { "meridian-menu:$scope" }
+            val token = remember(menuScope) { "meridian-menu:$menuScope" }
             val initialFocus = remember { FocusRequester() }
             RequestInitialFocus(initialFocus, token = token)
             val keys = destinations.map { "meridian:${it.id}" } + libraries.map { "meridian:source:${it.id}" }
@@ -134,6 +136,7 @@ internal fun MeridianChrome(
             }
             }
             BackHandler { expanded = false }
+        }
         }
     }
 }

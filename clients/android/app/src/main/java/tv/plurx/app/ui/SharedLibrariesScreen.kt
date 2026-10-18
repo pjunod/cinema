@@ -176,6 +176,7 @@ private fun SharedSourceGroup(assignments: List<SharedLibraryAssignment>, histor
 private fun SharedLibraryItems(route: SharedBrowseRoute.Library, onItem: (SharedPlaybackReference) -> Boolean) {
     var q by rememberEntryPresentation("shared:q", route) { mutableStateOf("") }
     var browse by rememberEntryPresentation("shared:browse", route) { mutableStateOf(SharedBrowseAccumulator()) }
+    var loadedQuery by rememberEntryPresentation("shared:loaded-query", route) { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
     var error by rememberEntryPresentation("shared:error", route) { mutableStateOf<String?>(null) }
     var generation by remember { mutableLongStateOf(0) }
@@ -189,19 +190,21 @@ private fun SharedLibraryItems(route: SharedBrowseRoute.Library, onItem: (Shared
         onDispose { remoteNavigation?.clearSearch(remoteScope, searchNonce) }
     }
     suspend fun load(reset: Boolean) {
-        if (reset) { generation++; browse = SharedBrowseAccumulator() }
+        val requestedQuery = q
+        val resetQuery = reset || loadedQuery != requestedQuery
+        if (resetQuery) { generation++; browse = SharedBrowseAccumulator(); loadedQuery = requestedQuery }
         val expected = generation
-        val cursor = if (reset) null else browse.nextCursor
+        val cursor = if (resetQuery) null else browse.nextCursor
         loading = true
         try {
             val client = SharedLibraryClient.create()
-            val page = client.page(route.row.identity, route.parent, q, cursor)
+            val page = client.page(route.row.identity, route.parent, requestedQuery, cursor)
             client.requireCurrent()
-            if (generation == expected) { browse = browse.append(page, cursor, route.row.identity); error = null }
+            if (generation == expected && q == requestedQuery) { browse = browse.append(page, cursor, route.row.identity); error = null }
         } catch (failure: Exception) { if (failure is kotlinx.coroutines.CancellationException) throw failure; if (generation == expected) error = failure.message ?: "Shared titles unavailable" }
         finally { if (generation == expected) loading = false }
     }
-    LaunchedEffect(q) { if (browse.items.isEmpty()) load(true) }
+    LaunchedEffect(q) { if (loadedQuery != q || browse.items.isEmpty()) load(true) }
     val grid = androidx.compose.foundation.lazy.rememberLazyListState()
     val currentItems by rememberUpdatedState(browse.items)
     val itemOffset = 2 + if (error != null) 1 else 0

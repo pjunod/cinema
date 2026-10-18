@@ -23,6 +23,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
+import androidx.navigation.compose.navigation
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -263,6 +264,10 @@ internal fun MainNav(
     val entryScope = currentEntry?.id ?: "restricted"
     val route = currentEntry?.destination?.route.orEmpty()
     val category = tv.plurx.app.remote.RemoteRoutes.category(route)
+    val selectHome by androidx.compose.runtime.rememberUpdatedState({
+        if (meridian) selectPrimary(MeridianDestination("home", "Home", "home"))
+        else nav.navigate("home") { popUpTo("home") { inclusive = true }; launchSingleTop = true }
+    })
     val profileIdentity = Triple(vm.origin, vm.currentUserId, vm.serverInstanceId)
     var previousProfile by remember { mutableStateOf(profileIdentity) }
     LaunchedEffect(profileIdentity) {
@@ -272,6 +277,7 @@ internal fun MainNav(
             nav.navigate("home") { popUpTo(nav.graph.id) { inclusive = true }; launchSingleTop = true }
             selectedPrimary = "home"; selectedSource = null; sourceNotice = null
             remoteNavigation.resetIdentity()
+            remoteNavigation.onHome = { selectHome() }
             previousProfile = profileIdentity
         }
     }
@@ -283,16 +289,14 @@ internal fun MainNav(
         remoteNavigation.enter(entryScope, category) { entry != null && nav.popBackStackFrom(entry) }
         onDispose { remoteNavigation.releaseScope(entryScope) }
     }
-    val selectHome by androidx.compose.runtime.rememberUpdatedState({
-        if (meridian) selectPrimary(MeridianDestination("home", "Home", "home"))
-        else nav.navigate("home") { popUpTo("home") { inclusive = true }; launchSingleTop = true }
-    })
     DisposableEffect(remoteNavigation) {
         remoteNavigation.onHome = { selectHome() }
         onDispose { remote.suspendNavigation(); remoteNavigation.resetIdentity() }
     }
     LaunchedEffect(vm.origin, vm.currentUserId, vm.serverInstanceId, remote.enabled, remote.sceneEligible) {
         remote.configure(vm, remoteNavigation, tv.plurx.app.player.isTelevision(context))
+        // configure may retire the former authenticated remote identity as well.
+        remoteNavigation.onHome = { selectHome() }
     }
     val dvrScope = rememberCoroutineScope()
     val token = Session.token.orEmpty()
@@ -320,11 +324,14 @@ internal fun MainNav(
     Box(Modifier.fillMaxSize().onGloballyPositioned { remoteNavigation.viewport = it.boundsInWindow() }) {
     CompositionLocalProvider(LocalRemoteClient provides remote, LocalRemoteNavigation provides remoteNavigation, LocalRemoteScope provides entryScope) {
     val chromeVisible = meridian && !(route == "shared-libraries" && remoteNavigation.route in setOf("playback", "tracks")) && !route.startsWith("player/") && !route.startsWith("offline/") && !route.startsWith("reader/") && !route.startsWith("pdf-reader/") && !route.startsWith("offline-book/") && !route.startsWith("photo/")
-    NavHost(navController = nav, startDestination = "home", modifier = Modifier.padding(
+    NavHost(navController = nav, startDestination = "viewer", modifier = Modifier.padding(
         start = if (chromeVisible && formFactor != FormFactor.Compact) (if (formFactor == FormFactor.Television) 88.dp else 208.dp) else 0.dp,
         top = if (chromeVisible) 88.dp else 0.dp,
         bottom = if (chromeVisible && formFactor == FormFactor.Compact) 88.dp else 0.dp,
     )) {
+        // A retained graph parent gives every primary root its own saved-state key.
+        // Retaining Home itself would alias a popped foreign branch to Home.
+        navigation(startDestination = "home", route = "viewer") {
         composable("libraries") { MeridianLibraries(home.libraries, sourceNotice) { selectSource(it.id.toString(), it.name) } }
         composable("home") { entry ->
             CompositionLocalProvider(LocalRemoteScope provides entry.id) {
@@ -639,6 +646,7 @@ internal fun MainNav(
             )
             }
         }
+    }
     }
     MeridianChrome(chromeVisible, formFactor, selectedPrimary, destinations, home.libraries,
         onSelect = ::selectPrimary, onLibrary = { selectSource(it.id.toString(), it.name) })
