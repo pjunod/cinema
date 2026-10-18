@@ -302,7 +302,7 @@ pub(super) async fn read<T: QueueSql>(
             }
             body["node_id"] = node_id.into();
             body["after"] = json!(after);
-            "SELECT json_object('operation_id',id,'operation_epoch',operation_epoch,'preparation_job_id',preparation_job_id,'asset_id',asset_id,'state',state,'source',json(source_json),'profile',json(profile_json),'audio_index',audio_index,'spoken_language',spoken_language,'duration_ms',duration_ms) AS result_json FROM subtitle_translation_operations WHERE target_node_id=json_extract($1,'$.node_id') AND stopped=0 AND state NOT IN ('failed','complete') AND (json_extract($1,'$.after') IS NULL OR id>json_extract($1,'$.after')) ORDER BY id LIMIT 33".into()
+            "SELECT json_object('operation_id',id,'operation_epoch',operation_epoch,'preparation_job_id',preparation_job_id,'asset_id',asset_id,'state',state,'source',json(source_json),'profile',json(profile_json),'audio_index',audio_index,'spoken_language',spoken_language,'duration_ms',duration_ms) AS result_json FROM subtitle_translation_operations o WHERE o.target_node_id=json_extract($1,'$.node_id') AND o.stopped=0 AND o.state NOT IN ('failed','complete') AND EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id WHERE d.operation_id=o.id AND d.operation_epoch=o.operation_epoch AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND u.is_admin=1) AND (json_extract($1,'$.after') IS NULL OR o.id>json_extract($1,'$.after')) ORDER BY o.id LIMIT 33".into()
         }
     };
     let rows = store.queue_sql(sql, encode(&body)?, false, true).await?;

@@ -1658,20 +1658,35 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         }
     }
     let mut model_cache = None;
+    let mut slow_due = tokio::time::Instant::now();
     loop {
         if shutdown.is_cancelled() {
             return;
         }
-        if let Err(error) = crate::subtitle_translation::worker_pass(&state, &shutdown).await {
-            tracing::debug!(%error,"translation worker pass stopped");
+        let translating = match crate::subtitle_translation::worker_pass(&state, &shutdown).await {
+            Ok(active) => active,
+            Err(error) => {
+                tracing::debug!(%error,"translation worker pass stopped");
+                false
+            }
+        };
+        if tokio::time::Instant::now() >= slow_due {
+            if let Err(error) = crate::subtitle_models::worker_pass(&state, &shutdown).await {
+                tracing::debug!(%error, "managed subtitle worker pass stopped");
+            }
+            if let Err(error) = pass(&state, &boot, &shutdown, &mut model_cache).await {
+                tracing::debug!(%error,"offline subtitle transcription pass stopped");
+            }
+            slow_due = tokio::time::Instant::now() + Duration::from_secs(15);
         }
-        if let Err(error) = crate::subtitle_models::worker_pass(&state, &shutdown).await {
-            tracing::debug!(%error, "managed subtitle worker pass stopped");
-        }
-        if let Err(error) = pass(&state, &boot, &shutdown, &mut model_cache).await {
-            tracing::debug!(%error,"offline subtitle transcription pass stopped");
-        }
-        tokio::select! { ()=shutdown.cancelled()=>return, ()=tokio::time::sleep(Duration::from_secs(1))=>{}, ()=state.subtitle_models.translation.wake.notified()=>{} }
+        // Live translation demand is served each second; otherwise the loop
+        // sleeps until the 15 s passes are due or a translation mutation wakes it.
+        let idle = if translating {
+            Duration::from_secs(1)
+        } else {
+            slow_due.saturating_duration_since(tokio::time::Instant::now())
+        };
+        tokio::select! { ()=shutdown.cancelled()=>return, ()=tokio::time::sleep(idle)=>{}, ()=state.subtitle_models.translation.wake.notified()=>{} }
     }
 }
 async fn pass(

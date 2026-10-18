@@ -177,9 +177,7 @@ pub(super) async fn publish<T: QueueSql>(
  WHERE b.operation_id=op.id AND b.operation_epoch=op.operation_epoch AND b.node_id=json_extract($1,'$.token.node_id')
  AND b.boot_id=json_extract($1,'$.token.boot_id') AND b.source_sha256=json_extract($1,'$.recipe.source_sha256'))
  AND EXISTS(SELECT 1 FROM subtitle_translation_demands d JOIN users u ON u.id=d.user_id WHERE d.operation_id=op.id AND d.operation_epoch=op.operation_epoch
- AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND u.is_admin=1
- AND json_extract($1,'$.recipe.core_index') BETWEEN CAST(d.position_ms/json_extract($1,'$.recipe.profile.core_ms') AS INTEGER)
- AND CAST(d.position_ms/json_extract($1,'$.recipe.profile.core_ms') AS INTEGER)+min(2,CAST(d.playback_rate AS INTEGER)+1)))"#
+ AND d.released=0 AND d.expires_at_ms>json_extract($1,'$.now_ms') AND u.is_admin=1))"#
     );
     store.queue_transaction(vec![
  (format!(r#"INSERT INTO subtitle_translation_segments(asset_id,core_index,segment_id,publication_id,digest,body,start_ms,end_ms,accepted_revision,created_at_ms)

@@ -458,9 +458,13 @@ pub(crate) async fn verify_source(
         interrupted(&cancel)?;
         check_revision(state, file, expected, &cancel).await?;
         phase(fence, SubtitlePhase::CheckingSource, &cancel).await?;
-        let source = open_source_playback_fence(file, None)
-            .await
-            .map_err(|_| failure("worker_source_unavailable"))?;
+        let source = tokio::select! {
+            () = cancel.cancelled() => return Err(failure("worker_interrupted")),
+            opened = tokio::time::timeout(Duration::from_secs(2), open_source_playback_fence(file, None)) => {
+                opened.map_err(|_| failure("worker_source_unavailable"))?
+                    .map_err(|_| failure("worker_source_unavailable"))?
+            }
+        };
         let identity =
             std_file_identity(&source.handle).map_err(|_| failure("worker_source_unavailable"))?;
         if u64::try_from(expected.source_size).ok() != Some(identity.size) {
@@ -615,12 +619,15 @@ fn owned_cues(
         {
             return Err(failure("output_invalid"));
         }
-        recognized += 1;
         let absolute = |ms: i64| {
             ms.checked_mul(RATE / 1_000)
                 .and_then(|sample| anchor_sample.checked_add(sample))
                 .ok_or_else(|| failure("output_invalid"))
         };
+        // A cue past the decoded audio is not speech any core can own.
+        if absolute(from)? < decoded_end {
+            recognized += 1;
+        }
         let start = absolute(from)?.max(begin);
         let stop = absolute(to)?.min(end).min(decoded_end);
         if stop <= start {
@@ -1290,6 +1297,12 @@ mod tests {
             .expect("well-formed empty output");
         assert_eq!(silent.recognized, 0);
         assert!(signal_core_cues(silent).is_err());
+        // A cue dated past the decoded audio is no neighbour's speech either.
+        let past = "WEBVTT\n\n00:00:07.000 --> 00:00:08.000\n invented\n\n";
+        let owned = owned_cues(past, &asset, 2, 55 * RATE, 98_240, 60_000, 61_140)
+            .expect("valid recognizer output");
+        assert_eq!(owned.recognized, 0);
+        assert!(signal_core_cues(owned).is_err());
     }
 
     fn wav(samples: &[i16]) -> std::fs::File {

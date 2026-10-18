@@ -166,10 +166,41 @@ pub(crate) async fn workers_public(state: &AppState) -> Result<Vec<Value>, ApiEr
         json!({"node_id":state.node_id,"label":state.server_name,"current":true,"eligible":eligible,"observed_at_ms":now,"expires_at_ms":now+30000,"engine":engine.as_ref().ok().map(|e|json!({"adapter_contract":e.adapter_contract,"binary_sha256":e.binary_sha256,"platform":e.platform})),"capabilities":[{"model_id":spec.id,"profile_id":profile_id,"status":status,"reason":reason,"verified_at_ms":if status=="verified"{verified}else{None},"model_sha256":spec.sha256,"engine_sha256":engine.as_ref().ok().map(|e|e.binary_sha256.clone())}]}),
     ])
 }
+/// Seconds as ffprobe prints them, or a Matroska `HH:MM:SS.fffffffff` tag.
+fn probe_duration_ms(stream: &Value) -> Option<i64> {
+    if let Some(seconds) = stream["duration"]
+        .as_str()
+        .and_then(|s| s.parse::<f64>().ok())
+    {
+        return (seconds.is_finite() && seconds > 0.0).then_some((seconds * 1000.0) as i64);
+    }
+    let tags = stream["tags"].as_object()?;
+    let tag = tags
+        .iter()
+        .find(|(key, _)| {
+            key.eq_ignore_ascii_case("duration")
+                || key.to_ascii_lowercase().starts_with("duration-")
+        })?
+        .1
+        .as_str()?;
+    let mut parts = tag.split(':');
+    let (h, m, s) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let seconds =
+        h.parse::<f64>().ok()? * 3600.0 + m.parse::<f64>().ok()? * 60.0 + s.parse::<f64>().ok()?;
+    (seconds.is_finite() && seconds > 0.0).then_some((seconds * 1000.0) as i64)
+}
+
+/// The translation route's capability and its timeline. The timeline is the
+/// one audio stream's duration when the probe records one (bounded by the
+/// container's), because cores past the end of the audio have nothing to
+/// decode; the container duration stands in only when the stream has none.
 pub(crate) async fn file_capability(
     state: &AppState,
     file: &MediaFile,
-) -> Result<(), &'static str> {
+) -> Result<i64, &'static str> {
     if file.audio_streams.len() != 1 || file.audio_streams[0].index != 0 {
         return Err("direct_audio_selection_unverified");
     }
@@ -198,14 +229,19 @@ pub(crate) async fn file_capability(
     let streams = value["streams"]
         .as_array()
         .ok_or("source_clock_unsupported")?;
+    let mut audio = None;
     for kind in ["video", "audio"] {
         let mut matched = streams.iter().filter(|s| s["codec_type"] == kind);
         let first = matched.next().ok_or("source_clock_unsupported")?;
         if matched.next().is_some() || !zero(&first["start_time"]) {
             return Err("source_clock_unsupported");
         }
+        if kind == "audio" {
+            audio = probe_duration_ms(first);
+        }
     }
-    Ok(())
+    let container = file.duration_ms.ok_or("delivery_unsupported")?;
+    Ok(audio.map_or(container, |audio| audio.min(container)))
 }
 pub(crate) async fn eligible_worker(
     state: &AppState,
@@ -477,6 +513,26 @@ fn source_proof_matches(proof: &Value, boot: &str, identity: &str, content: &Val
         && proof["local_identity"].as_str() == Some(identity)
         && proof["source_sha256"] == *content
 }
+#[cfg(test)]
+mod duration_tests {
+    use super::probe_duration_ms;
+    use serde_json::json;
+
+    #[test]
+    fn audio_timeline_reads_stream_seconds_or_matroska_tag() {
+        assert_eq!(
+            probe_duration_ms(&json!({"duration":"5400.000000"})),
+            Some(5_400_000)
+        );
+        assert_eq!(
+            probe_duration_ms(&json!({"tags":{"DURATION-eng":"01:30:00.200000000"}})),
+            Some(5_400_200)
+        );
+        assert_eq!(probe_duration_ms(&json!({"tags":{"title":"x"}})), None);
+        assert_eq!(probe_duration_ms(&json!({"duration":"N/A"})), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

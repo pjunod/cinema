@@ -582,6 +582,8 @@ async fn mutate(
         Some(outcome) => return Err(mutation_error(outcome, now)),
         None => return Err(observation_error()),
     }
+    // Create, demand, Stop and Retry change what the worker should do now.
+    state.subtitle_models.translation.wake.notify_one();
     response(mutation_receipt(&value, wire_outcome)?)
 }
 fn nullable_digest(value: &Value, key: &str) -> Result<Value, ApiError> {
@@ -708,13 +710,9 @@ pub async fn create(
             crate::state::clock_ms(),
         ));
     }
-    super::file_capability(&state, &file)
+    let duration = super::file_capability(&state, &file)
         .await
         .map_err(|code| config::failure(StatusCode::CONFLICT, code, crate::state::clock_ms()))?;
-    let duration = file
-        .duration_ms
-        .filter(|n| *n > 0 && *n <= 14_400_000)
-        .ok_or_else(invalid)?;
     let target = super::eligible_worker(&state, &file, &profile).await?;
     mutate(
         &state,

@@ -60,7 +60,33 @@ async fn interested(state: &AppState, source: &JobPayload) -> Result<bool, Store
         .any(|d| core.is_none_or(|(index, width)| demand_wants(d, index, width))))
 }
 
-async fn schedule(state: &AppState) -> Result<(), StoreError> {
+/// Whether this node's current boot holds the source binding the store
+/// requires before it accepts this operation's published cues.
+async fn bound_this_boot(
+    state: &AppState,
+    asset_id: &str,
+    operation_id: &str,
+    epoch: i64,
+) -> Result<bool, StoreError> {
+    Ok(read(
+        state,
+        TranslationQuery::SourceBinding {
+            asset_id: asset_id.into(),
+            node_id: state.node_id.clone(),
+        },
+    )
+    .await?
+    .iter()
+    .any(|b| {
+        b["operation_id"] == operation_id
+            && number(&b["operation_epoch"]) == Some(epoch)
+            && b["boot_id"] == state.subtitle_models.boot_id.as_str()
+    }))
+}
+
+/// Enqueue at most one missing core for operations a viewer currently wants.
+/// Returns whether any operation had live demand.
+async fn schedule(state: &AppState) -> Result<bool, StoreError> {
     let after = state
         .subtitle_models
         .translation
@@ -89,6 +115,7 @@ async fn schedule(state: &AppState) -> Result<(), StoreError> {
         .write()
         .await = next;
     ops.truncate(32);
+    let demanded = !ops.is_empty();
     if !ops.is_empty() {
         let turn = state
             .subtitle_models
@@ -126,6 +153,9 @@ async fn schedule(state: &AppState) -> Result<(), StoreError> {
         let Some(held) = state.subtitle_models.translation.cached(&file).await else {
             continue;
         };
+        if !bound_this_boot(state, asset, &operation_id, epoch).await? {
+            continue;
+        }
         let duration = number(&op["duration_ms"]).unwrap_or(0);
         let demands = read(
             state,
@@ -219,11 +249,11 @@ async fn schedule(state: &AppState) -> Result<(), StoreError> {
                     })
                     .await?;
                 // Bound scheduling and prioritize the first absent core.
-                return Ok(());
+                return Ok(true);
             }
         }
     }
-    Ok(())
+    Ok(demanded)
 }
 
 async fn execute(
@@ -289,6 +319,12 @@ async fn execute(
         .map_err(|e| StoreError::Task(e.into()))?;
     let held = match state.subtitle_models.translation.cached(&file).await {
         Some(held) => held,
+        // Preparation alone verifies the source and records this boot's
+        // binding. A range never re-verifies on its own: its publication
+        // would be refused without that binding.
+        None if matches!(source, JobPayload::SubtitleTranslationRange { .. }) => {
+            return Err(StoreError::Task("source_unverified".into()));
+        }
         None => {
             let verified = Arc::new(
                 runtime::verify_source(state, &file, &revision, fence, admission, cancel).await?,
@@ -317,6 +353,16 @@ async fn execute(
         JobPayload::SubtitleTranslationRange { recipe, .. } => {
             if recipe.source_sha256 != held.sha256() {
                 return Err(StoreError::Task("source_changed".into()));
+            }
+            if !bound_this_boot(
+                state,
+                &recipe.asset_id,
+                &recipe.operation_id,
+                recipe.operation_epoch,
+            )
+            .await?
+            {
+                return Err(StoreError::Task("source_unverified".into()));
             }
             let engine = artifacts::inspect_engine()
                 .await
@@ -351,7 +397,7 @@ async fn execute(
                 state, &file, &held, recipe, &engine, &model, fence, admission, cancel,
             )
             .await?;
-            if cancel.is_cancelled() || !interested(state, source).await? {
+            if cancel.is_cancelled() {
                 return Err(StoreError::Task("demand_expired".into()));
             }
             if state
@@ -497,10 +543,12 @@ async fn automatic_verification(state: &AppState) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// One translation pass. Returns whether translation has live work (a
+/// demanded operation or a runnable job), which keeps the loop responsive.
 pub(crate) async fn worker_pass(
     state: &AppState,
     shutdown: &CancellationToken,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     let now = crate::state::clock_ms();
     let previous = state
         .subtitle_models
@@ -516,7 +564,7 @@ pub(crate) async fn worker_pass(
             .store(now, std::sync::atomic::Ordering::Relaxed);
     }
     automatic_verification(state).await?;
-    schedule(state).await?;
+    let demanded = schedule(state).await?;
     let authority = state.jobs.execution_authority();
     let after = state
         .subtitle_models
@@ -742,6 +790,14 @@ pub(crate) async fn worker_pass(
                             error_code: "demand_expired".into(),
                         })
                         .await;
+                } else if message.contains("source_unverified") {
+                    // Not a range failure: this boot has no source proof for
+                    // the operation. A fresh translation request prepares it.
+                    let _ = fence
+                        .settle(JobSettlement::Stop {
+                            error_code: "source_unverified".into(),
+                        })
+                        .await;
                 } else if cancel.is_cancelled()
                     || shutdown.is_cancelled()
                     || message.contains("playback_capacity")
@@ -781,9 +837,9 @@ pub(crate) async fn worker_pass(
             }
         }
         active.finish().await;
-        return Ok(());
+        return Ok(true);
     }
-    Ok(())
+    Ok(demanded)
 }
 fn safe_reason(message: &str) -> &'static str {
     if message.contains("engine") {

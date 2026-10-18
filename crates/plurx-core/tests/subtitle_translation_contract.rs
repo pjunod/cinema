@@ -99,6 +99,28 @@ async fn durable_preparation_stop_and_exact_replay_never_resurrect_work() {
         observed[0]["active_job"]["kind"],
         "subtitle_translation_prepare"
     );
+    // The worker reads only operations a viewer currently wants.
+    let worker = |now_ms| TranslationRead {
+        user_id: 0,
+        now_ms,
+        query: TranslationQuery::WorkerOperations {
+            node_id: "worker".into(),
+            after: None,
+        },
+    };
+    let live = store
+        .read_subtitle_translation(worker(1050))
+        .await
+        .expect("worker read");
+    assert_eq!(live.len(), 1);
+    let idle = store
+        .read_subtitle_translation(worker(601_000))
+        .await
+        .expect("worker read");
+    assert!(
+        idle.is_empty(),
+        "an expired demand leaves nothing to schedule"
+    );
     let stopped = store
         .mutate_subtitle_translation(mutate(
             TranslationAction::Stop {
