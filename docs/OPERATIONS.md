@@ -1,5 +1,20 @@
 # Operations — running plurx and reading what it tells you
 
+## At a glance
+
+<!-- agent head: read this section first; the body below is reference. Keep it current when the status changes. -->
+
+- **What this is:** How to run plurx day to day and what every status, pill and log line means; paths and hardware are as the server process sees them.
+- **Where it stands:**
+  - Live reference; maintained with behavior changes. No overall status line.
+- **Read further only for:**
+  - install and run (Docker, service, bare metal): `## Running it`
+  - settings, ports and listeners: `## Configuration surface`; `## Ports`
+  - what a pill, scan state, storage number or the stats overlay means: `## Reading the activity pill`; `## Reading library scan status`; `## Reading playback (and the stats overlay)`
+  - runbooks: sharing addresses, Curator, channels, Jellyfin, Live TV: `## Sharing Cinema addresses — set up before creating invitations`; `## Pairing another application (Curator) — the runbook`; `## Library channels — the runbook`; `## Jellyfin client compatibility`; `## Live TV (HDHomeRun) — the runbook`
+  - logs, health and metrics: `## Logs`; `## Health & metrics`
+  - symptom to cause: `## Common problems → cause`
+
 Companion to [FEATURES.md](FEATURES.md) (what it does) and
 [ARCHITECTURE.md](ARCHITECTURE.md) (how it's built) — this is *how to run it day
 to day, and what every status, pill, and log line actually means*. For a

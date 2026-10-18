@@ -9,6 +9,7 @@ use std::{fs, path::Path};
 pub fn generate(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     for name in [
         "p5",
+        "p5-bounded",
         "p5-mmr1",
         "p5-mmr3",
         "p8-affine",
@@ -92,6 +93,11 @@ pub fn generate(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     curve.mmr = Some(mmr);
                 }
+            }
+            if name == "p5-bounded" {
+                // Legitimate signalled output clamps, as on real P5 RPUs.
+                // The library writes deltas; FFmpeg exposes cumulative pivots.
+                rpu.rpu_data_mapping.as_mut().unwrap().curves[0].pivots = vec![2, 1019];
             }
             if name == "p8-affine" || name == "p8-piecewise" {
                 let curve = &mut rpu.rpu_data_mapping.as_mut().unwrap().curves[0];

@@ -328,7 +328,9 @@ if [[ $DO_ANDROID -eq 1 ]]; then
 
   if [[ $DRY_RUN -eq 0 ]]; then
     log "applying and verifying the debug-to-release signing lineage"
-    run python3 "$WORKTREE/scripts/sign-android-release"
+    # The signer finds apksigner/zipalign under ANDROID_HOME; hand it the SDK
+    # this script resolved, not whatever the caller's shell happens to export.
+    run env ANDROID_HOME="$ANDROID_HOME_DIR" python3 "$WORKTREE/scripts/sign-android-release"
   fi
 
   if [[ $DRY_RUN -eq 0 ]]; then

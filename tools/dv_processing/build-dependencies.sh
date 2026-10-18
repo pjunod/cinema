@@ -17,6 +17,9 @@ curl --proto '=https' --tlsv1.2 --fail --location --retry 2 \
     "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/$ffmpeg_revision" -o "$archive"
 printf '%s  %s\n' fb1931fd4eb29297ee1c1017a24f800c4d8fbea35b4f2aaeb28308a48a9149b4 "$archive" | sha256sum -c -
 tar -xzf "$archive" -C "$root/sources"
+# Only the helper's pinned static decoder needs this multi-slice CRA seek fix.
+# Strict decoding and the helper's complete requested-picture checks remain.
+patch --fuzz=0 --directory="$root/sources/FFmpeg-$ffmpeg_revision" -p1 < "$source_dir/hevc-rasl-frame-thread.patch"
 dovi="$root/sources/dovi_tool-83e1fdad6dcd5995556235946e7c5c0f9010d5a1"
 cargo rustc --locked --release --jobs "$jobs" --manifest-path "$dovi/Cargo.toml" \
     -p dolby_vision --features dolby_vision/capi --crate-type staticlib

@@ -676,6 +676,16 @@ class ShipPhysicalReleaseVariantCase(unittest.TestCase):
         self.assertNotIn("assembleDebug", self.script)
         self.assertNotIn("app-debug.apk", self.script)
 
+    def test_the_signer_gets_the_sdk_this_script_resolved(self) -> None:
+        """ship-physical defaults ANDROID_HOME_DIR to the Mac SDK, but the
+        signer looks for apksigner under ANDROID_HOME. Run from a shell that
+        exports no ANDROID_HOME, signing failed with "apksigner not found"
+        after a complete build."""
+        self.assertIn(
+            'run env ANDROID_HOME="$ANDROID_HOME_DIR" python3 "$WORKTREE/scripts/sign-android-release"',
+            self.script,
+        )
+
     def test_it_refuses_to_start_without_each_signing_input(self) -> None:
         """No debug fallback: a missing input stops the run before any work."""
         with tempfile.TemporaryDirectory() as raw:

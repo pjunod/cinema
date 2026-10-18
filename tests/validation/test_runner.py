@@ -444,6 +444,30 @@ class CatalogCase(unittest.TestCase):
 
         self.assertTrue(needs_rust_gate(()))
 
+    def test_agent_tooling_diffs_skip_the_cargo_lane(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        tooling = scope_for_paths(
+            catalog,
+            (
+                "AGENTS.md",
+                "scripts/paperwork",
+                "scripts/ci-failures",
+                "swarm/builder.txt",
+                "docs/ci/PAPERWORK.md",
+                "tests/operations/doc-size-allowlist.txt",
+            ),
+        )
+        self.assertFalse(tooling["rust"])
+        # Exempt from the cargo gate, and covered by a point, so no release build either.
+        self.assertFalse(tooling["release_build"])
+        # The Makefile and the workflows are routing paths: still forced.
+        for routing in ("Makefile", ".github/workflows/main-fast-lane.yml"):
+            with self.subTest(path=routing):
+                self.assertTrue(scope_for_paths(catalog, ("scripts/paperwork", routing))["rust"])
+        # The Python suites are not exempt: some guard cargo lanes themselves.
+        self.assertTrue(needs_rust_gate(("tests/operations/test_docs_index.py",)))
+        self.assertTrue(needs_rust_gate(("scripts/ci-require-disk",)))
+
     def test_qualification_and_release_events_fail_open_into_the_full_fan_out(self):
         for event in ("effort_qualification", "merge_group", "push"):
             with self.subTest(event=event):
@@ -2223,6 +2247,35 @@ class CatalogRoutingScopeCase(unittest.TestCase):
             catalog.point_map["cluster.auth"].checks,
         )
         self.assertTrue(scope_for_paths(catalog, ("Makefile",))["cluster_auth"])
+
+
+class NamedRustOutcomeGuardCase(unittest.TestCase):
+    def run_guard(self, lines):
+        environment = dict(os.environ)
+        environment["PLURX_EXPECT_TEST_COUNT"] = "1"
+        environment["PLURX_EXPECT_TEST_NAMES"] = "contract::required_regression"
+        environment.pop("PLURX_EXPECT_TEST_COUNT_AT_LEAST", None)
+        return subprocess.run(
+            [str(ROOT / "scripts/require-test-count"), sys.executable, "-c", "print(" + repr(lines) + ")"],
+            env=environment, text=True, capture_output=True,
+        )
+
+    def test_matching_total_cannot_substitute_another_named_regression(self):
+        summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        matching = self.run_guard("test contract::required_regression ... ok\n" + summary)
+        self.assertEqual(matching.returncode, 0, matching.stderr)
+        substituted = self.run_guard("test contract::another_regression ... ok\n" + summary)
+        self.assertNotEqual(substituted.returncode, 0)
+        self.assertIn("required_regression", substituted.stderr)
+
+    def test_named_regression_cannot_be_counted_twice(self):
+        result = self.run_guard(
+            "test contract::required_regression ... ok\n"
+            "test contract::required_regression ... ok\n"
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("observed 2", result.stderr)
 
 
 if __name__ == "__main__":

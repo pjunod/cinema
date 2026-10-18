@@ -638,7 +638,10 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertNotIn("error.code() == 401 || error.code() == 403", logout)
 
     def test_library_channel_collection_urls_match_router_and_fail_truthfully(self) -> None:
-        http = self.read("crates/plurxd/src/http/mod.rs")
+        # The router's tests moved into http/tests.rs on 2026-10-17.
+        http = self.read("crates/plurxd/src/http/mod.rs") + self.read(
+            "crates/plurxd/src/http/tests.rs"
+        )
         routes = self.read("crates/plurxd/src/http/library_channels.rs")
         web = self.read("crates/plurxd/src/web/pages/library-channels-page.js")
         web_errors = self.read("crates/plurxd/src/web/library-channels.js")

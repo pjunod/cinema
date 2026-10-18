@@ -44,6 +44,7 @@ cp "$deps/include/libdovi/rpu_parser.h" "$out/sources/rpu_parser.h"
 cp "$deps/sources/dovi_tool-83e1fdad6dcd5995556235946e7c5c0f9010d5a1/Cargo.lock" "$out/sources/resolved-Cargo.lock"
 cp -R "$deps/ffmpeg/lib" "$out/sources/ffmpeg-static-libraries"
 cp "$source_dir"/*.c "$source_dir"/*.h "$source_dir"/*.sh "$source_dir"/bundle-manifest.py "$out/sources/"
+cp "$source_dir"/*.patch "$out/sources/"
 cp "$source_dir/build-requirements.txt" "$out/sources/build-requirements.txt"
 inputs=${PLURX_DV_BUILD_INPUTS:-"$source_dir/../dv_quality/backends"}
 mkdir -p "$out/sources/build-inputs/parsed-rpu" "$out/sources/build-inputs/libplacebo"

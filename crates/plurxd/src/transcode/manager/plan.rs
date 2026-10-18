@@ -1135,10 +1135,11 @@ impl TranscodeManager {
         // fall back to software x265 — measured at 11 fps for 1080p on two
         // cores, under realtime, against the 20.3 fps the SDR chain it
         // replaced runs at. Losing the grade is a worse picture; losing
-        // realtime is a stall, and the viewer notices that one.
+        // realtime is a stall, and the viewer notices that one. VAAPI can take
+        // the same software Dolby renderer's ten-bit frames through its
+        // independently proved P010/Main10 upload at the bounded 1080p point.
         if !matches!(preferred, Encoder::Software | Encoder::Qsv)
-            && !(preferred == Encoder::Vaapi
-                && route == plurx_core::playback::HdrRoute::Passthrough)
+            && !(preferred == Encoder::Vaapi && encoder == Encoder::Vaapi)
         {
             tracing::info!(
                 target: "plurxd::transcode",
@@ -1191,6 +1192,12 @@ impl TranscodeManager {
                 file = file.id,
                 "this node did not prove the Dolby Vision HDR10 QSV encode graph; using the measured software/SDR route"
             );
+            return Ok(OutputGrade::Sdr);
+        }
+        if encoder == Encoder::Vaapi
+            && (!self.hdr10_passthrough_vaapi
+                || !self.vaapi_hdr10_source_fits(file, target_height).await)
+        {
             return Ok(OutputGrade::Sdr);
         }
         if !self.dovi_passthrough {
@@ -1392,8 +1399,6 @@ impl TranscodeManager {
                 Encoder::Qsv
             } else if preferred == Encoder::Vaapi
                 && self.hdr10_passthrough_vaapi
-                && plurx_core::playback::hdr_route(file)
-                    == Some(plurx_core::playback::HdrRoute::Passthrough)
                 && target_height == HDR10_HEIGHT
             {
                 Encoder::Vaapi

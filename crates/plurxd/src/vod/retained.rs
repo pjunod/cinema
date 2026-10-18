@@ -851,6 +851,9 @@ impl RetainedArtifactRegistry {
     /// next maintenance tick offers it again. Only a reservation that cannot
     /// ever fit this rendition's own completed output fails its preparation.
     pub(super) fn offer(shared: &Arc<Shared>, rendition: &Arc<Rendition>) -> bool {
+        if rendition.ephemeral_processing {
+            return false;
+        }
         if rendition.private_storage.is_some() && rendition.preparation().is_none() {
             return false;
         }
@@ -1174,8 +1177,8 @@ impl RetainedArtifactRegistry {
         incoming_file: &MediaFile,
         request: &SessionRequest,
     ) -> Option<Arc<RetainedVodArtifact>> {
-        if tracing::enabled!(target: "plurxd::retained_reuse", tracing::Level::DEBUG) {
-            tracing::debug!(target: "plurxd::retained_reuse",
+        if tracing::enabled!(target: "plurxd::vodserve", tracing::Level::DEBUG) {
+            tracing::debug!(target: "plurxd::vodserve",
                 context_present = request.candidate_context.is_some(),
                 binding_present = rendition.recipe.measured_candidate.is_some(),
                 incoming_logical_present = incoming_logical.is_some(),
@@ -1214,7 +1217,7 @@ impl RetainedArtifactRegistry {
                     "binding_incoming_audio_offset": binding.audio_offset_ms == incoming_file.audio_offset_ms,
                     "binding_subtitle": binding.subtitle_burn == request.subtitle_burn,
                 });
-                tracing::debug!(target: "plurxd::retained_reuse", request_binding_fields = %matches,
+                tracing::debug!(target: "plurxd::vodserve", request_binding_fields = %matches,
                     "Prepared candidate acquisition request comparisons");
             }
         }
@@ -1276,7 +1279,7 @@ impl RetainedArtifactRegistry {
         candidate: Option<&RetainedCandidateBinding>,
     ) -> Option<Arc<RetainedVodArtifact>> {
         if incoming_logical.is_none() {
-            tracing::debug!(target: "plurxd::retained_reuse",
+            tracing::debug!(target: "plurxd::vodserve",
                 incoming_logical_present = false,
                 "Prepared retained output acquisition unavailable");
             return None;
@@ -1284,7 +1287,7 @@ impl RetainedArtifactRegistry {
         let (executable_digest, engine_digest) = match &rendition.recipe.encoding {
             Some(encoding) => {
                 if !recipe_engine_is_current(&rendition.recipe).await {
-                    tracing::debug!(target: "plurxd::retained_reuse",
+                    tracing::debug!(target: "plurxd::vodserve",
                         recipe_engine_current = false,
                         "Prepared retained output acquisition unavailable");
                     return None;
@@ -1301,7 +1304,7 @@ impl RetainedArtifactRegistry {
             }
         };
         let Some(source_metadata) = manual_source_metadata(incoming_file) else {
-            tracing::debug!(target: "plurxd::retained_reuse",
+            tracing::debug!(target: "plurxd::vodserve",
                 source_metadata_available = false,
                 "Prepared retained output acquisition unavailable");
             return None;
@@ -1313,7 +1316,7 @@ impl RetainedArtifactRegistry {
                 let artifact = &entry.artifact;
                 // Emit only bounded equality facts for a relevant retained
                 // candidate. The authoritative predicate below stays separate.
-                if tracing::enabled!(target: "plurxd::retained_reuse", tracing::Level::DEBUG)
+                if tracing::enabled!(target: "plurxd::vodserve", tracing::Level::DEBUG)
                     && artifact.candidate.as_ref().zip(candidate).is_some_and(|(actual, requested)| {
                         actual.candidate_id == requested.candidate_id
                     })
@@ -1336,7 +1339,7 @@ impl RetainedArtifactRegistry {
                     });
                     let logical = artifact.logical.as_ref().zip(incoming_logical.as_ref())
                         .map(|(actual, requested)| actual.comparison(requested));
-                    tracing::debug!(target: "plurxd::retained_reuse",
+                    tracing::debug!(target: "plurxd::vodserve",
                         origin_present = origin.is_some(),
                         origin_artifact_matches = origin.is_some_and(|o| o.artifact_id == artifact.id),
                         executable_matches = origin.is_some_and(|o| o.executable == executable_digest),
@@ -2174,6 +2177,7 @@ mod tests {
             use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
             let digest = [42; 32];
             let candidate = QualityCandidate {
+                processed_hdr10: false,
                 id: CandidateId::for_recipe_digest(digest),
                 recipe_digest: digest,
                 route: CandidateRoute::Encode,
@@ -2456,7 +2460,12 @@ mod tests {
         let mut fresh =
             crate::vodserve::tests::synthetic_rendition(&temp.path().join("incoming")).await;
         let incoming = Arc::get_mut(&mut fresh).expect("new incoming rendition");
-        incoming.key = "b".repeat(64);
+        incoming.key = if request.is_some() {
+            "b".repeat(64)
+        } else {
+            // An ordinary non-durable attachment has no cross-recipe proof.
+            completed.key.clone()
+        };
         incoming.recipe.file = completed.recipe.file.clone();
         incoming.recipe.retained_logical = completed.recipe.retained_logical.clone();
         incoming.recipe.audio_delivery = completed.recipe.audio_delivery.clone();
@@ -2518,6 +2527,9 @@ mod tests {
         };
         let session = Session {
             children: Vec::new(),
+            root_admission: None,
+            processed_reuse_scope: None,
+            processed_probes: Vec::new(),
             preferred_start_ms: None,
             passive_grant: None,
             rendition: Some(Arc::clone(&fresh)),
@@ -3440,6 +3452,7 @@ mod tests {
             .expect("init");
         serve.shared.retained_artifacts.collect(temp.path()).await;
         let candidate = QualityCandidate {
+            processed_hdr10: false,
             id: candidate_id,
             recipe_digest: digest,
             route: CandidateRoute::Remux,

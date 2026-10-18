@@ -26,6 +26,9 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 
 RUST = ROOT / "crates/plurxd/src/playback_control.rs"
+# The module's unit tests live in their own file; the regression names
+# asserted below are read from there.
+RUST_TESTS = ROOT / "crates/plurxd/src/playback_control/tests.rs"
 WEB = ROOT / "crates/plurxd/src/web/playback-control.js"
 APPLE = ROOT / "clients/apple/Sources/PlaybackControlReporter.swift"
 ANDROID = ROOT / (
@@ -173,7 +176,9 @@ class ControlRequestWireCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.rust = RUST.read_text(encoding="utf-8")
+        cls.rust = RUST.read_text(encoding="utf-8") + RUST_TESTS.read_text(
+            encoding="utf-8"
+        )
         cls.web = WEB.read_text(encoding="utf-8")
         cls.apple = APPLE.read_text(encoding="utf-8")
         cls.android = ANDROID.read_text(encoding="utf-8")

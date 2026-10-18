@@ -2,6 +2,20 @@
 
 **Status:** open · **Reconciled:** 2026-09-20
 
+## At a glance
+
+<!-- agent head: read this section first; the body below is reference. Keep it current when the status changes. -->
+
+- **What this is:** The nine reviewers' area reports behind the 2026-09-20 architecture review, unedited except heading depth; finding ids are F-<area>-<n>.
+- **Where it stands:**
+  - Status: open, reconciled 2026-09-20. Raw material against main at a1414368, not revised: several remedies were withdrawn or corrected by the assessment.
+  - Build from the consolidated review (ARCHITECTURE-REVIEW-2026-09-20.md, section 0) and the per-finding verdicts in ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md, not from these reports alone.
+- **Read further only for:**
+  - history, process and build/ops findings: `## Change-history review — what 3,860 commits did to plurx (2026-08-20 → 2026-09-20)`; `## plurx review — build / ops / code health (2026-09-20, main = a1414368)`
+  - server pipeline, core and store findings: `## plurx architecture review — streaming-pipeline (server side)`; `## plurx architecture review — server-core (2026-09-20)`; `## Review: store-and-cluster (2026-09-20, main @ a1414368)`
+  - Live TV findings: `## Review — live-tv-and-channels (2026-09-20, main = a1414368)`
+  - web, Apple and Android client findings: `## plurx architecture review — web-client (2026-09-20, main = a1414368)`; `## plurx architecture review — apple-client (clients/apple, iOS + tvOS)`; `## Android client review — clients/android (Kotlin / Media3) — 2026-09-20`
+
 Companion to ARCHITECTURE-REVIEW-2026-09-20.md (the consolidated, ranked verdict, now at revision 2). Each section below is one reviewer's full report against `main` @ a1414368, unedited except for heading depth. Finding ids (F-<area>-<n>) are the ones the main document and ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md cite. **This appendix is raw material and was not revised**: several remedies in it were withdrawn or corrected by the assessment (B-frames via negative CTS, the auth cache, heartbeat-derived skew, the `NOT EXISTS` search predicate, the `-hls_start_time_offset` option, the frame-rate parser claim, among others). Build from the main document's §0 and the assessment's per-finding verdicts, not from these reports alone.
 
 

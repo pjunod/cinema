@@ -22,13 +22,33 @@
 #include <libplacebo/vulkan.h>
 
 static int WIDTH, HEIGHT, ELWIDTH, ELHEIGHT;
+static int EXPORT_WIDTH, EXPORT_HEIGHT;
 #define FLOAT_COUNT ((size_t)WIDTH * (size_t)HEIGHT * 4)
+#define EXPORT_FLOAT_COUNT ((size_t)EXPORT_WIDTH * (size_t)EXPORT_HEIGHT * 4)
 
 static void require(bool condition, const char *message) {
   if (!condition) {
     fprintf(stderr, "Probe failed: %s\n", message);
     exit(EXIT_FAILURE);
   }
+}
+
+// Resample only the already reconstructed and master-clipped native RGB/PQ
+// texture. This separate pass cannot resize BL/EL before their DV operations.
+static void export_native_rgb(pl_renderer renderer, struct pl_frame native,
+                              pl_tex output) {
+  struct pl_frame destination = native;
+  destination.planes[0].texture = output;
+  struct pl_render_params params = pl_render_fast_params;
+  params.upscaler = params.downscaler = &pl_filter_bilinear;
+  params.skip_anti_aliasing = true; // four-tap bilinear on native RGB, not DV
+  params.disable_linear_scaling = true;
+  params.dither_params = NULL;
+  params.peak_detect_params = NULL;
+  params.color_adjustment = NULL;
+  params.sigmoid_params = NULL;
+  require(pl_render_image(renderer, &native, &destination, &params),
+          "native RGB/PQ bilinear export");
 }
 
 static void save(const char *name, const void *data, size_t length) {
@@ -270,7 +290,8 @@ struct segment_gpu {
   pl_gpu gpu;
   pl_fmt format, plane_format;
   pl_renderer renderer;
-  float *output;
+  pl_tex textures[2][3], output_texture, native_texture;
+  float *output, *staging;
 };
 static struct segment_gpu context;
 static void gpu_init(int width, int height, int el_width, int el_height) {
@@ -284,6 +305,13 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
           "unsupported declared enhancement layer ratio");
   WIDTH = width;
   HEIGHT = height;
+  if (!EXPORT_WIDTH && !EXPORT_HEIGHT) {
+    EXPORT_WIDTH = width;
+    EXPORT_HEIGHT = height;
+  }
+  require(EXPORT_WIDTH > 0 && EXPORT_HEIGHT > 0 &&
+              EXPORT_WIDTH <= width && EXPORT_HEIGHT <= height,
+          "bounded explicit export raster");
   ELWIDTH = el_width;
   ELHEIGHT = el_height;
   pl_log log =
@@ -297,7 +325,9 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
   pl_gpu gpu = vk->gpu;
   pl_fmt format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
                               PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE |
-                                  PL_FMT_CAP_HOST_READABLE);
+                                  PL_FMT_CAP_HOST_READABLE |
+                                  ((EXPORT_WIDTH != width || EXPORT_HEIGHT != height) ?
+                                   PL_FMT_CAP_LINEAR : 0));
   require(format != NULL, "RGBA32F format");
   require(format->type == PL_FMT_FLOAT && !format->opaque &&
               format->num_components == 4 && format->texel_size == 16,
@@ -323,8 +353,30 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
       pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, PL_FMT_CAP_SAMPLEABLE);
   require(context.plane_format && context.plane_format->texel_size == 4,
           "native float plane format");
-  context.output = malloc((size_t)FLOAT_COUNT * sizeof(float));
+  context.output = malloc(EXPORT_FLOAT_COUNT * sizeof(float));
   require(context.output, "bounded raster output buffer");
+  context.staging = malloc((size_t)WIDTH * HEIGHT * sizeof(float));
+  require(context.staging != NULL, "bounded reusable native plane staging");
+  for (int layer = 0; layer < 2; layer++) {
+    for (int c = 0; c < 3; c++) {
+      int w = layer ? ELWIDTH : WIDTH, h = layer ? ELHEIGHT : HEIGHT;
+      if (c) { w /= 2; h /= 2; }
+      context.textures[layer][c] = pl_tex_create(gpu,
+          pl_tex_params(.w = w, .h = h, .format = context.plane_format,
+                        .sampleable = true, .host_writable = true));
+      require(context.textures[layer][c] != NULL, "persistent native plane texture");
+    }
+  }
+  context.output_texture = pl_tex_create(gpu,
+      pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = format,
+                    .renderable = true, .host_readable = true));
+  require(context.output_texture != NULL, "persistent export float texture");
+  if (EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT) {
+    context.native_texture = pl_tex_create(gpu,
+        pl_tex_params(.w = WIDTH, .h = HEIGHT, .format = format,
+                      .renderable = true, .sampleable = true));
+    require(context.native_texture != NULL, "persistent native reconstructed float texture");
+  }
   printf("{\"kind\":\"gpu_context_created\",\"width\":%d,\"height\":%d}\n",
          WIDTH, HEIGHT);
 }
@@ -337,7 +389,6 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
   struct pl_dovi_metadata parsed;
   map_parsed_rpu(rpu, rpu_size, &parsed, true, WIDTH, HEIGHT);
   pl_gpu gpu = context.gpu;
-  pl_fmt format = context.format;
   pl_renderer renderer = context.renderer;
   float *output = context.output;
   char frame_name[32];
@@ -356,7 +407,6 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
                .bits = {.sample_depth = 10, .color_depth = 10}},
       .color = pl_color_space_hdr10,
       .enhancement_layer = &enhancement_frame};
-  pl_tex textures[2][3] = {{0}};
   for (int layer = 0; layer < 2; layer++) {
     int width = layer ? ELWIDTH : WIDTH, height = layer ? ELHEIGHT : HEIGHT;
     size_t offset = 0;
@@ -364,20 +414,13 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
     for (int c = 0; c < 3; c++) {
       int w = c ? width / 2 : width, h = c ? height / 2 : height;
       size_t count = (size_t)w * h;
-      float *plane = malloc(count * sizeof(float));
-      require(plane != NULL, "native plane staging buffer");
-      for (size_t i = 0; i < count; i++) {
-        require(decoded[layer][offset + i] <= 1023,
-                "native10-bit sample range");
-        plane[i] = decoded[layer][offset + i] / 1023.0f;
-      }
-      textures[layer][c] = pl_tex_create(
-          gpu, pl_tex_params(.w = w, .h = h, .format = context.plane_format,
-                             .sampleable = true, .initial_data = plane));
-      free(plane);
-      require(textures[layer][c] != NULL, "native plane texture");
+      float *plane = context.staging;
+      require(dv_unpack_10bit_plane(decoded[layer] + offset, count, plane),
+              "native10-bit sample range");
+      require(pl_tex_upload(gpu, pl_tex_transfer_params(
+          .tex = context.textures[layer][c], .ptr = plane)), "native plane upload");
       frame->planes[c] = (struct pl_plane){
-          .texture = textures[layer][c],
+          .texture = context.textures[layer][c],
           .components = 1,
           .component_mapping = {c, PL_CHANNEL_NONE, PL_CHANNEL_NONE,
                                 PL_CHANNEL_NONE}};
@@ -400,12 +443,11 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
     enhancement_frame.planes[c].shift_y -= 1.0f / 64;
   }
 
-  pl_tex output_texture = pl_tex_create(
-      gpu, pl_tex_params(.w = WIDTH, .h = HEIGHT, .format = format,
-                         .renderable = true, .host_readable = true));
-  require(output_texture != NULL, "output float texture");
+  pl_tex output_texture = context.output_texture;
+  bool resized = EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT;
+  pl_tex native_texture = resized ? context.native_texture : output_texture;
   struct pl_frame destination = {.num_planes = 1,
-                                 .planes = {{.texture = output_texture,
+                                 .planes = {{.texture = native_texture,
                                              .components = 3,
                                              .component_mapping = {0, 1, 2}}},
                                  .repr = {.sys = PL_COLOR_SYSTEM_RGB,
@@ -429,6 +471,7 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
   pl_renderer_reset_errors(renderer, NULL);
   require(pl_render_image(renderer, &source, &destination, &parameters),
           "full renderer export");
+  if (resized) export_native_rgb(renderer, destination, output_texture);
   struct pl_render_errors errors = pl_renderer_get_errors(renderer);
   require(errors.errors == 0 && errors.num_disabled_hooks == 0,
           "renderer error-free export");
@@ -436,28 +479,23 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
                                                       .ptr = output, )),
           "full renderer frame download");
   if (debug) {
-    require(WIDTH == 64 && HEIGHT == 64, "debug evidence restricted to64x64");
+    require(WIDTH == 64 && HEIGHT == 64 && EXPORT_WIDTH == WIDTH &&
+                EXPORT_HEIGHT == HEIGHT, "debug evidence restricted to64x64");
     save_frame(frame_name, "rendered", output);
   }
-  uint8_t *packed = malloc((size_t)WIDTH * HEIGHT * 6);
+  uint8_t *packed = malloc(EXPORT_FLOAT_COUNT / 4 * 6);
   require(packed != NULL, "RGB output allocation");
-  for (size_t pixel = 0; pixel < (size_t)WIDTH * HEIGHT; pixel++) {
-    for (int c = 0; c < 4; c++)
-      require(isfinite(output[4 * pixel + c]), "finite rendered RGBA");
-    for (int c = 0; c < 3; c++) {
-      uint16_t code = dv_pack_finite_rgb48(output[4 * pixel + c]);
-      packed[6 * pixel + 2 * c] = (uint8_t)code;
-      packed[6 * pixel + 2 * c + 1] = (uint8_t)(code >> 8);
-    }
-  }
-  write_rgb(packed, (size_t)WIDTH * HEIGHT * 6, rgb_output);
+  require(dv_pack_rgba_rgb48(output, EXPORT_FLOAT_COUNT / 4, packed,
+                            EXPORT_FLOAT_COUNT / 4 * 6),
+          "finite rendered RGBA");
+  write_rgb(packed, EXPORT_FLOAT_COUNT / 4 * 6, rgb_output);
   char rgb_field[84] = "";
   if (debug || dv_frame_hashes()) {
     struct AVSHA *sha = av_sha_alloc();
     uint8_t digest[32];
     char rgb_hash[65];
     require(sha && av_sha_init(sha, 256) == 0, "rendered RGB SHA256");
-    av_sha_update(sha, packed, (size_t)WIDTH * HEIGHT * 6);
+    av_sha_update(sha, packed, EXPORT_FLOAT_COUNT / 4 * 6);
     av_sha_final(sha, digest);
     av_free(sha);
     for (int i = 0; i < 32; i++)
@@ -468,15 +506,17 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
   printf("{\"kind\":\"rendered_frame\",\"frame\":%d,\"width\":%d,\"height\":%d,"
          "\"pts\":\"%s\",\"duration\":\"%s\",\"el_bound\":true,\"nlq_active\":"
          "true%s,\"render_errors\":%u,\"production_qualified\":false}\n",
-         frame_index, WIDTH, HEIGHT, pts, duration, rgb_field, errors.errors);
-  for (int layer = 0; layer < 2; layer++)
-    for (int c = 0; c < 3; c++)
-      pl_tex_destroy(gpu, &textures[layer][c]);
-  pl_tex_destroy(gpu, &output_texture);
+         frame_index, EXPORT_WIDTH, EXPORT_HEIGHT, pts, duration, rgb_field, errors.errors);
 }
 static void gpu_close(void) {
+  for (int layer = 0; layer < 2; layer++)
+    for (int c = 0; c < 3; c++)
+      pl_tex_destroy(context.gpu, &context.textures[layer][c]);
+  pl_tex_destroy(context.gpu, &context.output_texture);
+  pl_tex_destroy(context.gpu, &context.native_texture);
   pl_renderer_destroy(&context.renderer);
   pl_vulkan_destroy(&context.vk);
   pl_log_destroy(&context.log);
   free(context.output);
+  free(context.staging);
 }

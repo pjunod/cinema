@@ -52,10 +52,11 @@ final class PreparedCommitRendezvousTests: XCTestCase {
             .deletingLastPathComponent()
             .appendingPathComponent("../Sources", isDirectory: true)
             .standardizedFileURL
-        return try String(
-            contentsOf: sources.appendingPathComponent("PlayerController.swift"),
-            encoding: .utf8
-        )
+        // PlayerController.swift was split into the controller, its support
+        // types and the shared controller (2026-10-17); read all three.
+        return try ["PlayerController.swift", "PlayerControllerSupport.swift", "SharedPlayerController.swift"]
+            .map { try String(contentsOf: sources.appendingPathComponent($0), encoding: .utf8) }
+            .joined(separator: "\n")
     }
 
     private func commitBody() throws -> Substring {
