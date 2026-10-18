@@ -42,30 +42,39 @@ final class MeridianTests: XCTestCase {
         window.makeKeyAndVisible()
         defer { window.isHidden = true }
         controller.select(.settings)
-        settle()
+        settle(0.6)
         let host = try XCTUnwrap(controller.hosts[.settings])
         let navigation = try XCTUnwrap(findNavigation(host))
         state.push = true
-        settle()
+        settle(0.6)
         XCTAssertEqual(navigation.viewControllers.count, 2, "Fixture must create an actual implicit native push")
         let detail = try XCTUnwrap(navigation.topViewController)
+        let disappearances = state.disappearances
         for width in [390, 1200, 700, 390] {
             host.rootView = AnyView(ImplicitNavigationFixture(driver: state, title: "Settings"))
             controller.layout = controller.layout == .standard ? .meridian : .standard
             window.frame.size.width = CGFloat(width)
             controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
-            settle()
+            settle(0.6)
             XCTAssertTrue(controller.hosts[.settings] === host)
             XCTAssertTrue(navigation.topViewController === detail)
             XCTAssertEqual(navigation.viewControllers.count, 2)
+            XCTAssertEqual(state.disappearances, disappearances, "Changing chrome must not trigger playback-owner disappearance")
         }
-        controller.select(.home); settle()
-        XCTAssertNil(host.view.superview, "Inactive roots cannot participate in focus, hit testing or accessibility")
-        controller.select(.settings); settle()
+        controller.select(.home); settle(0.6)
+        var ancestor: UIView? = host.view
+        var hidden = host.view.window == nil
+        while let view = ancestor {
+            hidden = hidden || view.isHidden || view.alpha == 0
+            ancestor = view.superview
+        }
+        XCTAssertTrue(hidden, "Inactive roots must be detached or hidden by their native container")
+        XCTAssertEqual(state.disappearances, disappearances + 1, "Leaving a root must notify its playback owners")
+        controller.select(.settings); settle(0.6)
         XCTAssertTrue(controller.hosts[.settings] === host)
         XCTAssertTrue(navigation.topViewController === detail)
         navigation.popViewController(animated: false)
-        settle()
+        settle(0.6)
         XCTAssertEqual(navigation.viewControllers.count, 1, "Back returns to the original implicit root")
     }
 
@@ -141,7 +150,8 @@ final class MeridianTests: XCTestCase {
         XCTAssertNil(findAttentionBadge(hosting.view), "A hidden destination cannot leave a stale More badge")
     }
 
-    func testStandardWideSidebarKeepsDirectDestinationsAndSettingsHost() throws {
+    func testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLayouts() throws {
+        guard #available(iOS 18.0, *) else { throw XCTSkip("Adaptive iPad tabs require iOS 18") }
         let model = AppModel(startServices: false)
         model.phase = .ready
         model.homeLoading = false
@@ -158,18 +168,26 @@ final class MeridianTests: XCTestCase {
         settle(1)
         let destination = try XCTUnwrap(findDestination(hosting))
         let settings = try XCTUnwrap(destination.hosts[.settings])
-        let chrome = try XCTUnwrap(destination.chrome)
-        let sidebar = try XCTUnwrap(findCollection(chrome.view), "Standard wide chrome must contain a native sidebar List")
-        let rows = (0..<sidebar.numberOfSections).reduce(0) { $0 + sidebar.numberOfItems(inSection: $1) }
-        XCTAssertEqual(rows, HomeTab.viewerTabs.count, "Every enabled root remains a direct native sidebar destination")
-        XCTAssertEqual(settings.view.frame.minX, 288, accuracy: 1)
+        let tabs = try XCTUnwrap(destination.nativeTabs)
+        XCTAssertEqual(tabs.mode, .tabSidebar)
+        XCTAssertFalse(tabs.isTabBarHidden)
+        XCTAssertTrue(tabs.sidebar.isHidden, "Standard starts with the original floating top tabs")
+        XCTAssertEqual(tabs.tabs.map(\.title), HomeTab.viewerTabs.map(\.title))
+        XCTAssertEqual(tabs.view.frame, destination.view.bounds, "Standard must not reserve Meridian's sidebar width")
+        XCTAssertTrue(try XCTUnwrap(destination.chrome).view.isHidden)
+        let theme = model.theme
         let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
         let attachment = XCTAttachment(image: image)
-        attachment.name = "Standard native iPad sidebar — all direct destinations"
+        attachment.name = "Restored Standard iPad — native adaptive tabs"
         attachment.lifetime = .keepAlways
         add(attachment)
+        tabs.sidebar.isHidden = false
+        settle()
         model.layout = .meridian
         settle()
+        XCTAssertTrue(tabs.isTabBarHidden)
+        XCTAssertTrue(tabs.sidebar.isHidden)
+        XCTAssertEqual(model.theme, theme)
         XCTAssertTrue(destination.hosts[.settings] === settings)
         window.frame.size.width = 390
         hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
@@ -180,20 +198,54 @@ final class MeridianTests: XCTestCase {
         hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
         settle()
         XCTAssertTrue(destination.hosts[.settings] === settings)
-        XCTAssertNotNil(findCollection(try XCTUnwrap(destination.chrome).view))
+        XCTAssertTrue(destination.nativeTabs === tabs)
+        XCTAssertEqual(tabs.mode, .tabSidebar)
+        XCTAssertFalse(tabs.isTabBarHidden)
+        XCTAssertFalse(tabs.sidebar.isHidden, "Returning to Standard restores the viewer's native sidebar choice")
+        XCTAssertEqual(model.theme, theme)
+        tabs.sidebar.isHidden = true
+        model.features.recordings = false
+        settle()
+        XCTAssertFalse(tabs.tabs.contains { $0.identifier == HomeTab.recordings.title })
+        XCTAssertEqual(tabs.selectedTab?.identifier, HomeTab.settings.title)
     }
 
     private func findAttentionBadge(_ view: UIView) -> UILabel? {
         if let label = view as? UILabel, label.accessibilityIdentifier == "viewer-recording-attention-badge" { return label }
         return view.subviews.compactMap(findAttentionBadge).first
     }
-    private func findCollection(_ view: UIView) -> UICollectionView? {
-        if let collection = view as? UICollectionView { return collection }
-        return view.subviews.compactMap(findCollection).first
-    }
     #endif
 
     func testProductionShellRendersMeridianWithAllEnvironmentOwners() throws { try renderFixture() }
+
+    #if os(iOS)
+    func testStandardHomeRendersWithOriginalTheme() throws { try renderFixture(layout: .standard) }
+
+    func testMeridianCompactSettingsDoesNotAddMoreNavigation() throws {
+        guard #available(iOS 18.0, *) else { throw XCTSkip("Native retained tabs require iOS 18") }
+        let controller = ViewerDestinationController()
+        let state = NavigationDriver()
+        controller.layout = .meridian
+        controller.makeRoot = { tab in AnyView(ImplicitNavigationFixture(driver: state, title: tab.title)) }
+        let window = try makeWindow()
+        window.frame.size.width = 390
+        window.rootViewController = controller
+        controller.select(.settings)
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        settle()
+        let tabs = try XCTUnwrap(controller.nativeTabs)
+        let settings = try XCTUnwrap(controller.hosts[.settings])
+        XCTAssertTrue(tabs.isTabBarHidden)
+        XCTAssertFalse(settings.parent is UINavigationController, "Meridian must not acquire UIKit's overflow More navigation")
+        XCTAssertEqual(findNavigation(settings)?.viewControllers.count, 1)
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "Meridian compact Settings — retained native destination"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+    #endif
 
     func testNarrowPhoneAccessibilityNavigationRendersWithoutOverflow() throws {
         #if os(iOS)
@@ -201,14 +253,14 @@ final class MeridianTests: XCTestCase {
         #endif
     }
 
-    private func renderFixture(width: CGFloat? = nil, dynamicTypeSize: DynamicTypeSize = .large) throws {
+    private func renderFixture(width: CGFloat? = nil, dynamicTypeSize: DynamicTypeSize = .large, layout: ViewerLayout = .meridian) throws {
         let model = AppModel(startServices: false)
         model.phase = .ready
         model.homeLoading = false
-        model.layout = .meridian
+        model.layout = layout
         let previousTheme = model.theme
         defer { model.setTheme(previousTheme) }
-        model.setTheme(.meridian)
+        model.setTheme(layout == .standard ? .noirr : .meridian)
         model.appearance = .dark
         model.libraries = [Library(id: 1, name: "Fixture Movies", kind: "movie"), Library(id: 2, name: "Fixture Series", kind: "show")]
         model.hubs = Hubs(
@@ -236,7 +288,7 @@ final class MeridianTests: XCTestCase {
             window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
         }
         let attachment = XCTAttachment(image: image)
-        attachment.name = "Meridian native production shell — fixture titles — \(Int(window.bounds.width))x\(Int(window.bounds.height))"
+        attachment.name = "\(layout.rawValue) native production shell — fixture titles — \(Int(window.bounds.width))x\(Int(window.bounds.height))"
         attachment.lifetime = .keepAlways
         add(attachment)
         // A bounded window permits an independent simctl framebuffer capture.
@@ -264,7 +316,10 @@ final class MeridianTests: XCTestCase {
 }
 
 @MainActor
-private final class NavigationDriver: ObservableObject { @Published var push = false }
+private final class NavigationDriver: ObservableObject {
+    @Published var push = false
+    var disappearances = 0
+}
 private struct ImplicitNavigationFixture: View {
     @ObservedObject var driver: NavigationDriver
     let title: String
@@ -273,5 +328,6 @@ private struct ImplicitNavigationFixture: View {
             NavigationLink(destination: Text("Retained nested editor"), isActive: $driver.push) { Text(title) }
                 .navigationTitle(title)
         }
+        .onDisappear { driver.disappearances += 1 }
     }
 }

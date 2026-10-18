@@ -8,6 +8,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore Standard's native adaptive iPad tabs and sidebar on iOS 18 and later after Meridian replaced them with a fixed custom sidebar. Existing themes and open navigation state remain independent of the layout choice.
+
 ### Added
 
 - Web Meridian layout and independent theme, with collapsible source navigation, responsive phone destinations and cinematic Home/detail presentation. Layout changes retain the current page, library controls and playback session.

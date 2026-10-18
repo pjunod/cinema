@@ -98,6 +98,9 @@ struct HomeView: View {
         ViewerDestinationHost(
             selection: selectedTab, layout: model.layout, expanded: navigationExpanded,
             accessibilityNavigation: dynamicTypeSize.isAccessibilitySize,
+            visibleTabs: HomeTab.viewerTabs.filter { $0.isVisible(model.features) },
+            recordingsAttention: model.features.recordings ? (dvr.overview?.counts.attention ?? 0) : 0,
+            selectionChanged: select,
             panelDismissed: { [identity = navigationPanelIdentity] in remoteNavigation.modalPresentationDismissed(scope: RemoteNavigationCoordinator.viewerNavigationScope, identity: identity) },
             root: { tab in AnyView(destinationRoot(tab)
                 .environmentObject(model).environmentObject(remoteNavigation)
