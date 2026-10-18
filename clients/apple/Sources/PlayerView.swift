@@ -78,6 +78,9 @@ struct PlayerMetadataBadge: Equatable, Identifiable {
     enum Kind: String, Equatable {
         case resolution
         case dynamicRange
+        /// One server-computed Dolby Vision enhancement (FEL, RPU, DYN):
+        /// a text-only pill, so several can sit side by side.
+        case enhancement
         case audio
     }
 
@@ -89,6 +92,8 @@ struct PlayerMetadataBadge: Equatable, Identifiable {
         case resolution
         case hdr
         case dolbyVision
+        /// Active Dolby Vision enhancement pills — one tone for all of them.
+        case enhancement
         case audio
     }
 
@@ -116,11 +121,15 @@ struct PlayerMetadataBadge: Equatable, Identifiable {
         switch kind {
         case .resolution: return "tv.fill"
         case .dynamicRange: return "sparkles"
+        case .enhancement: return "plus.circle"
         case .audio: return "waveform"
         }
     }
 
-    var id: String { kind.rawValue }
+    /// Enhancement pills repeat the kind, so their mark keeps them distinct.
+    var id: String {
+        kind == .enhancement ? "\(kind.rawValue).\(mark ?? "")" : kind.rawValue
+    }
 }
 
 enum PlayerMetadataBadgeMetrics {
@@ -149,6 +158,7 @@ private extension PlayerMetadataBadge.Tone {
         case .resolution: return Palette.accent
         case .hdr: return Color(red: 0x12 / 255, green: 0xB3 / 255, blue: 0xA6 / 255)
         case .dolbyVision: return Color(red: 0xC9 / 255, green: 0x9A / 255, blue: 0x2B / 255)
+        case .enhancement: return Color(red: 0x22 / 255, green: 0xB8 / 255, blue: 0xC4 / 255)
         case .audio: return Color(red: 0x7F / 255, green: 0x8F / 255, blue: 0xE0 / 255)
         }
     }
@@ -158,6 +168,7 @@ private extension PlayerMetadataBadge.Tone {
         case .resolution: return 0.13
         case .hdr: return 0.14
         case .dolbyVision: return 0.15
+        case .enhancement: return 0.14
         case .audio: return 0.14
         }
     }
@@ -167,6 +178,7 @@ private extension PlayerMetadataBadge.Tone {
         case .resolution: return 0.42
         case .hdr: return 0.48
         case .dolbyVision: return 0.52
+        case .enhancement: return 0.48
         case .audio: return 0.46
         }
     }
@@ -236,6 +248,9 @@ private struct PlayerMetadataBadgeIcon: Shape {
             path.addRect(CGRect(x: 11, y: 2, width: 2, height: 20))
             path.addRect(CGRect(x: 15, y: 6, width: 2, height: 12))
             path.addRect(CGRect(x: 19, y: 10, width: 2, height: 4))
+        case .enhancement:
+            // Text-only pill: `PlayerMetadataBadgeView` draws no icon for it.
+            break
         }
 
         return path.applying(CGAffineTransform(
@@ -267,12 +282,14 @@ private struct PlayerMetadataBadgeView: View {
     var body: some View {
         HStack(spacing: PlayerMetadataBadgeMetrics.contentSpacing) {
             HStack(spacing: PlayerMetadataBadgeMetrics.contentSpacing) {
-                PlayerMetadataBadgeIcon(kind: badge.kind)
-                    .fill(badge.tone.color, style: FillStyle(eoFill: true))
-                    .frame(
-                        width: PlayerMetadataBadgeMetrics.iconSize,
-                        height: PlayerMetadataBadgeMetrics.iconSize
-                    )
+                if badge.kind != .enhancement {
+                    PlayerMetadataBadgeIcon(kind: badge.kind)
+                        .fill(badge.tone.color, style: FillStyle(eoFill: true))
+                        .frame(
+                            width: PlayerMetadataBadgeMetrics.iconSize,
+                            height: PlayerMetadataBadgeMetrics.iconSize
+                        )
+                }
                 if let mark = badge.mark {
                     Text(mark)
                 }
@@ -1926,7 +1943,8 @@ struct PlayerView: View {
             displayHDR: Caps.displayIsHDR,
             deliveredDolbyVisionProfile: controller.deliveredDolbyVisionProfile,
             effectiveProcessing: controller.effectiveProcessing,
-            activeGeneration: controller.effectiveProcessingGeneration
+            activeGeneration: controller.effectiveProcessingGeneration,
+            enhancement: controller.playbackEnhancement
         )
         return HStack(spacing: PlayerMetadataBadgeMetrics.rowSpacing) {
             ForEach(badges) { badge in
@@ -1956,7 +1974,8 @@ struct PlayerView: View {
         displayHDR: Bool = true,
         deliveredDolbyVisionProfile: Int? = nil,
         effectiveProcessing: EffectiveProcessingReport? = nil,
-        activeGeneration: String? = nil
+        activeGeneration: String? = nil,
+        enhancement: PlaybackEnhancement? = nil
     ) -> [PlayerMetadataBadge] {
         var badges: [PlayerMetadataBadge] = []
         if let label = playbackResolutionLabel(width: source?.width, height: source?.height) {
@@ -1978,6 +1997,12 @@ struct PlayerView: View {
         ) {
             badges.append(range)
         }
+        badges += enhancementBadges(
+            enhancement,
+            effectiveProcessing: effectiveProcessing,
+            activeGeneration: activeGeneration,
+            delivered: delivered
+        )
         if let audio, let sound = soundLabel(audio) {
             badges.append(PlayerMetadataBadge(
                 kind: .audio,
@@ -1987,6 +2012,50 @@ struct PlayerView: View {
             ))
         }
         return badges
+    }
+
+    /// One teal pill per *active* enhancement, labelled exactly `FEL`, `RPU`,
+    /// `DYN`, right after the dynamic-range badge. Inactive enhancements get
+    /// nothing here — their reason is an info-panel line, not row text — and
+    /// a report-gated answer shows nothing without a current report.
+    static func enhancementBadges(
+        _ enhancement: PlaybackEnhancement?,
+        effectiveProcessing: EffectiveProcessingReport?,
+        activeGeneration: String?,
+        delivered: String?
+    ) -> [PlayerMetadataBadge] {
+        guard let shown = enhancement?.presented(
+            effectiveProcessing: effectiveProcessing,
+            activeGeneration: activeGeneration,
+            delivered: delivered
+        ) else { return [] }
+        return shown.active.map { badge in
+            PlayerMetadataBadge(
+                kind: .enhancement,
+                tone: .enhancement,
+                mark: badge.rawValue,
+                accessibilityLabel: shown.accessibilityLabel(for: badge)
+            )
+        }
+    }
+
+    /// The info panel's `enhancement` row: the active badges as the value and
+    /// one neutral secondary line per enhancement. Nil means no row.
+    static func enhancementSummary(
+        _ enhancement: PlaybackEnhancement?,
+        effectiveProcessing: EffectiveProcessingReport?,
+        activeGeneration: String?,
+        delivered: String?
+    ) -> (value: String, lines: [String])? {
+        guard let shown = enhancement?.presented(
+            effectiveProcessing: effectiveProcessing,
+            activeGeneration: activeGeneration,
+            delivered: delivered
+        ) else { return nil }
+        let value = shown.active.isEmpty
+            ? "None active"
+            : shown.active.map(\.rawValue).joined(separator: " · ")
+        return (value, shown.detailLines)
     }
 
     /// The three states of MEDIA-BADGES-PLAN §2.3, as a pure function of
@@ -3132,6 +3201,7 @@ let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
     .init("stream_format", "Stream format", "NOW DECODING", [.standard, .details, .debug], always: true),
     .init("device_audio", "Device audio output", "NOW DECODING", [.standard, .details, .debug], always: true),
     .init("dynamic_range", "Dynamic range", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
+    .init("enhancement", "Enhancement", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
     .init("decode_audio", "Stream audio track", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
     .init("player_state", "Player state", "NOW DECODING", [.mini, .standard, .details, .debug]),
     .init("waiting_reason", "Waiting reason", "NOW DECODING", [.debug], placement: .notes),
@@ -3235,7 +3305,8 @@ struct PlaybackStatsView: View {
                 id: field.id, label: field.label, value: text,
                 note: notes.isEmpty ? nil : notes,
                 group: playbackInfoGroup(field.section),
-                diagnosticOnly: !field.modes.contains(.standard)
+                diagnosticOnly: !field.modes.contains(.standard),
+                lines: supplied?.lines ?? []
             )
         }
     }
@@ -3246,6 +3317,8 @@ struct PlaybackStatsView: View {
         let value: String
         var tone: PlaybackStatTone = .neutral
         var note: String?
+        /// Neutral secondary lines, each on its own line under the value.
+        var lines: [String] = []
     }
 
     private func contractValue(for id: String) -> ContractFieldValue? {
@@ -3326,6 +3399,14 @@ struct PlaybackStatsView: View {
                 activeGeneration: controller.effectiveProcessingGeneration
             ) else { return nil }
             return ContractFieldValue(value: range, note: PlayerView.toneMapPeakSummary(status))
+        case "enhancement":
+            guard let summary = PlayerView.enhancementSummary(
+                controller.playbackEnhancement,
+                effectiveProcessing: controller.effectiveProcessing,
+                activeGeneration: controller.effectiveProcessingGeneration,
+                delivered: controller.deliveredRange
+            ) else { return nil }
+            return ContractFieldValue(value: summary.value, lines: summary.lines)
         case "decode_audio":
             return nil
         case "source_read":
