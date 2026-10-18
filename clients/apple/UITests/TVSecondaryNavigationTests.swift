@@ -168,7 +168,7 @@ final class TVSecondaryNavigationTests: TVNavigationTestCase {
 
     private func openRoot(_ label: String, in app: XCUIApplication) {
         remote.press(.menu)
-        let tab = app.tabBars.buttons[label]
+        let tab = app.viewerTab(label)
         reachForSetup(tab, in: app, limit: 8)
         assertFocus(tab, in: app, context: label + " tab setup")
         remote.press(.select)

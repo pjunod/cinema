@@ -342,8 +342,9 @@ async function libraryView(o){
   const sort=o.sort,now=new Date(),rowState={rows:new Map()};
   const route=location.hash;
   setOrigin(o.href,o.title);
-  document.getElementById("main").innerHTML=
-    layoutRegion("library","shell",{kind:"library",title:o.title,href:o.href,sort,reload:o.reload});
+  const shellModel={kind:"library",title:o.title,href:o.href,sort,reload:o.reload};
+  document.getElementById("main").innerHTML=layoutRegion("library","shell",shellModel);
+  registerLayoutPresentation(()=>recomposeLibraryPresentation(shellModel),()=>!!LIB_VIEW&&(LIB_VIEW.done||LIB_VIEW.shown>0));
   const viewLibs=(await libsCached()).filter(l=>o.libIds.some(id=>String(id)===String(l.id)));
   if(LIB_LOAD!==gen||location.hash!==route||!document.getElementById("libbody"))return;
   // Keep controls outside layout-owned grid wrappers: catalog puts #libbody

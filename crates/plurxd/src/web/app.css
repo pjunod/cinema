@@ -3677,3 +3677,142 @@
 
 /* The report is a local modal shared by every shell layout. */
 .diagnostic-dialog{z-index:10050;align-items:flex-start;overflow:auto;padding:4vh 1rem}.diagnostic-card{width:min(100%,760px);max-height:none;margin:0 auto;position:relative}.diagnostic-card label{display:block;margin:1rem 0}.diagnostic-card textarea,.diagnostic-card input:not([type=checkbox]),.diagnostic-card select{width:100%}.diagnostic-card details{margin:1.2rem 0;border-top:1px solid var(--border);padding-top:1rem}.diagnostic-card summary{cursor:pointer;min-height:44px}.diagnostic-actions{flex-wrap:wrap}.diagnostic-card button{min-height:44px}.diagnostic-card img{width:256px;height:256px;background:white;max-width:100%;object-fit:contain}.diagnostic-card [role=status]{white-space:pre-wrap;overflow-wrap:anywhere}.diagnostic-card [aria-busy=true]{opacity:.85}.diagnostic-card button:focus-visible,.diagnostic-card summary:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+
+/* A common shell seam retains page, dialog and media-slot owners. */
+.layout-frame{display:contents}
+
+/* Meridian: geometry is independent of the active palette. */
+[data-layout=meridian] .md-shell{--md-nav:232px;--muted:var(--layout-muted);min-height:100dvh;padding-left:var(--md-nav)}
+[data-layout=meridian] .md-side{position:fixed;inset:0 auto 0 0;width:var(--md-nav);z-index:32;background:var(--panel);display:flex;flex-direction:column;padding:28px 16px 18px;gap:24px}
+[data-layout=meridian] .md-brand{font-size:25px;padding:0 16px}
+[data-layout=meridian] .md-mobile-brand{display:none}
+.md-nav{display:flex;flex-direction:column;gap:6px;min-height:0;overflow:auto}
+.md-nav a,.md-nav button{display:flex;align-items:center;gap:14px;min-height:46px;padding:10px 16px;border:0;border-radius:26px;background:transparent;color:var(--text);text-decoration:none;font:inherit;text-align:left;flex-shrink:0}
+.md-nav svg{width:22px;height:22px;flex-shrink:0}
+.md-nav .md-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.md-nav [aria-current=page],.md-bottom [aria-current=page]{background:var(--selected-bg);color:var(--selected-ink);font-weight:650}
+.md-divider{height:1px;background:var(--line);margin:12px 16px;flex-shrink:0}
+.md-section{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);padding:0 16px}
+[data-layout=meridian] .md-account{margin-top:auto;display:flex;align-items:center;gap:12px;background:transparent;text-align:left;min-height:44px}
+[data-layout=meridian] .md-top{position:sticky;top:0;z-index:31;display:flex;align-items:center;gap:14px;min-height:64px;padding:10px 40px;background:var(--bg);border-bottom:1px solid var(--line)}
+[data-layout=meridian] .md-top .search{width:min(460px,45vw);border:0;background:var(--panel);border-radius:26px;min-height:44px}
+[data-layout=meridian] .md-top button{min-height:44px}
+[data-layout=meridian] .md-pop{position:relative;flex-shrink:0}
+[data-layout=meridian] .md-top .profile{border:0;background:transparent}
+[data-layout=meridian] .pavatar{width:32px;height:32px;background:var(--selected-bg);color:var(--selected-ink);font-size:14px}
+[data-layout=meridian] #main{max-width:none;margin:0;padding:28px 40px 60px;min-width:0}
+[data-layout=meridian] .md-page-title{font-size:26px;font-weight:650;margin:0 0 20px}
+[data-layout=meridian] .th-hero{position:relative;isolation:isolate;overflow:hidden;min-height:375px;border-radius:18px;background:var(--bg);margin:0}
+[data-layout=meridian] .th-bg{position:absolute;inset:0;z-index:-3;background-size:cover;background-position:center}
+[data-layout=meridian] .th-scrim{position:absolute;inset:0;z-index:-2;background:linear-gradient(90deg,color-mix(in srgb,var(--hero-scrim) 97%,transparent),color-mix(in srgb,var(--hero-scrim) 94%,transparent) 58%,transparent 96%)}
+[data-layout=meridian] .th-fg{position:relative;width:58%;padding:34px 32px;color:var(--hero-ink)}
+[data-layout=meridian] .th-kick{font-size:11px;font-weight:650;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);margin:0 0 10px}
+[data-layout=meridian] .th-title{font-size:clamp(32px,3.5vw,52px);font-weight:650;line-height:1.07;letter-spacing:-.04em;margin:0 0 16px;overflow-wrap:anywhere}
+[data-layout=meridian] .th-meta{display:flex;align-items:center;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:13px}
+[data-layout=meridian] .th-desc{font-size:14px;line-height:1.65;color:var(--muted);margin:15px 0 20px;max-width:55ch;overflow-wrap:anywhere}
+[data-layout=meridian] .actions{gap:10px;flex-wrap:wrap}
+[data-layout=meridian] .btnplay{background:var(--action-bg);color:var(--action-ink);border-color:var(--action-bg);border-radius:26px;min-height:44px;padding:10px 20px}
+[data-layout=meridian] .actions .ghost{background:var(--panel2);color:var(--text);border-radius:26px;min-height:44px}
+[data-layout=meridian] .th-hprog{height:4px;background:var(--panel2);border-radius:4px;overflow:hidden;margin:15px 0;max-width:300px}
+[data-layout=meridian] .th-hprog i{display:block;height:100%;background:var(--accent)}
+[data-layout=meridian] .section{font-size:20px;margin:28px 0 14px}
+[data-layout=meridian] .rowscroll{gap:18px;padding:7px 5px 10px;margin:-7px -5px -10px;scroll-padding-inline:8px}
+[data-layout=meridian] .poster{border-radius:10px;min-width:0}
+[data-layout=meridian] .rowscroll .poster{flex:0 0 var(--poster)}
+[data-layout=meridian] .artbox,[data-layout=meridian] .poster .art{border-radius:10px 10px 0 0}
+[data-layout=meridian] .prog i{background:var(--accent)}
+[data-layout=meridian] .md-detail .hero{position:relative;isolation:isolate;background:var(--bg);border-radius:18px;overflow:hidden}
+[data-layout=meridian] .md-detail .herobg{opacity:1;filter:none;inset:0;z-index:-2}
+[data-layout=meridian] .md-detail .herobg:after{content:"";position:absolute;inset:0;background:color-mix(in srgb,var(--hero-scrim) 94%,transparent)}
+[data-layout=meridian] .md-detail .dwrap{padding:36px;gap:32px;grid-template-columns:200px minmax(0,1fr)}
+[data-layout=meridian] .md-detail .dhead{min-width:0;color:var(--hero-ink)}
+[data-layout=meridian] .md-detail .dhead h1{font-size:clamp(28px,3.2vw,48px);letter-spacing:-.035em;overflow-wrap:anywhere}
+[data-layout=meridian] .md-detail .overview{color:var(--muted)}
+[data-layout=meridian] .md-library .libbar{gap:14px;border-radius:12px;background:var(--panel);padding:14px;margin:16px 0}
+[data-layout=meridian] .search-tools{margin-bottom:24px}
+[data-layout=meridian] :is(a,button,input,select,[tabindex]):focus-visible,[data-layout=meridian] .cinema-remote-focus{outline:3px solid var(--focus-ring);outline-offset:3px;box-shadow:0 0 0 3px var(--focus-gap)}
+.md-bottom{display:none}
+[data-layout=meridian] .md-compact{--md-nav:72px}
+[data-layout=meridian] .md-compact .md-side{padding-inline:10px}
+[data-layout=meridian] .md-compact .md-label,[data-layout=meridian] .md-compact .md-section,[data-layout=meridian] .md-compact .md-divider,[data-layout=meridian] .md-compact .md-brand{display:none}
+[data-layout=meridian] .md-compact .md-nav a,[data-layout=meridian] .md-compact .md-nav button{padding:12px;justify-content:center}
+.md-panel{--muted:var(--layout-muted);background:var(--panel);color:var(--text);padding:24px;border:1px solid var(--line);border-radius:24px;width:min(390px,calc(100vw - 32px));max-height:calc(100dvh - 64px);overflow:hidden}
+.md-panel[open]{display:flex;flex-direction:column;gap:18px}
+.md-panel::backdrop{background:color-mix(in srgb,var(--bg) 75%,transparent)}
+.md-panel-head{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.md-panel-head strong{font-size:24px;letter-spacing:-.03em}
+.md-panel-head button{min-height:44px;min-width:44px;border-radius:50%}
+.md-panel .md-nav{overflow:auto;padding:7px;margin:-7px}
+.md-panel .md-nav button{min-height:46px}
+@media(min-width:600px) and (max-width:1099px){
+ [data-layout=meridian] .md-shell{--md-nav:72px}
+ [data-layout=meridian] .md-side{padding-inline:10px}
+ [data-layout=meridian] .md-side .md-label,[data-layout=meridian] .md-side .md-section,[data-layout=meridian] .md-side .md-divider,[data-layout=meridian] .md-brand{display:none}
+ [data-layout=meridian] .md-side .md-nav a,[data-layout=meridian] .md-side .md-nav button{padding:12px;justify-content:center}
+ [data-layout=meridian] .md-top{padding-inline:26px;gap:10px}
+ [data-layout=meridian] #main{padding:24px 26px 50px}
+ [data-layout=meridian] .th-fg{width:65%;padding:28px 24px}
+ [data-layout=meridian] .th-scrim{background:linear-gradient(90deg,color-mix(in srgb,var(--hero-scrim) 97%,transparent),color-mix(in srgb,var(--hero-scrim) 94%,transparent) 65%,transparent)}
+ [data-layout=meridian] .md-detail .dwrap{grid-template-columns:150px minmax(0,1fr);padding:26px;gap:24px}
+}
+@media(max-width:599px){
+ [data-layout=meridian] .md-shell{padding-left:0}
+ [data-layout=meridian] .md-side{display:none}
+ [data-layout=meridian] .md-top{padding:8px 16px;gap:10px;min-height:64px}
+ [data-layout=meridian] .md-opener,[data-layout=meridian] .md-top .activity,[data-layout=meridian] .md-top .getappbtn,[data-layout=meridian] .md-top .dvr-global{display:none}
+ [data-layout=meridian] .md-mobile-brand{display:block;font-size:24px}
+ [data-layout=meridian] .md-top .search{display:none;width:100%;min-width:0}
+ [data-layout=meridian] .md-search-open .md-top .search{display:block}
+ [data-layout=meridian] .md-search-open .md-mobile-brand{display:none}
+ [data-layout=meridian] .md-appearance-label{display:none}
+ [data-layout=meridian] .md-top .lookbtn{min-width:44px}
+ [data-layout=meridian] #main{padding:20px 18px calc(100px + env(safe-area-inset-bottom,0px))}
+ [data-layout=meridian] .md-page-title{font-size:24px;margin-bottom:18px}
+ [data-layout=meridian] .th-hero{min-height:0;border-radius:16px}
+ [data-layout=meridian] .th-bg{height:360px;background-position:center top}
+ [data-layout=meridian] .th-scrim{background:linear-gradient(0deg,var(--hero-scrim) 0%,color-mix(in srgb,var(--hero-scrim) 94%,transparent) calc(100% - 200px),transparent 100%)}
+ [data-layout=meridian] .th-fg{width:100%;padding:220px 20px 24px}
+ [data-layout=meridian] .th-title{font-size:34px;margin-bottom:12px}
+ [data-layout=meridian] .th-meta{font-size:12px;gap:10px}
+ [data-layout=meridian] .th-desc{font-size:13px}
+ [data-layout=meridian] .md-bottom{position:fixed;z-index:35;inset:auto 0 0;display:flex;flex-direction:row;align-items:stretch;gap:4px;padding:8px 12px max(12px,env(safe-area-inset-bottom));min-height:76px;background:var(--panel);border-top:1px solid var(--line)}
+ [data-layout=meridian] .md-bottom a,[data-layout=meridian] .md-bottom button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;flex:1;min-width:0;min-height:48px;border:0;border-radius:14px;text-decoration:none;font-size:11px;background:transparent;color:var(--text);padding:6px}
+ [data-layout=meridian] .md-bottom [aria-current=page]{background:var(--selected-bg);color:var(--selected-ink)}
+ [data-layout=meridian] .md-bottom svg{width:22px;height:22px}
+ [data-layout=meridian] .md-detail .dwrap{display:flex;flex-direction:column;padding:22px;gap:24px}
+ [data-layout=meridian] .md-detail .dwrap>.poster{width:130px;max-width:45%;align-self:center}
+ [data-layout=meridian] .md-detail .dhead h1{font-size:30px}
+ [data-layout=meridian] .libbar .row{gap:10px;flex-wrap:wrap}
+ [data-layout=meridian] .libbar select{max-width:100%;min-width:0;min-height:44px}
+ .md-panel{margin:auto 0 0;width:100%;max-width:none;max-height:85dvh;border-radius:24px 24px 0 0;padding:22px 20px max(24px,env(safe-area-inset-bottom))}
+}
+@media (pointer:none), (min-width:1280px) and (pointer:coarse) and (hover:none){
+ [data-layout=meridian] .md-shell{--md-nav:128px}
+ [data-layout=meridian] .md-side{inset:50% auto auto 48px;transform:translateY(-50%);width:72px;max-height:75dvh;border-radius:36px;padding:18px 10px;gap:12px}
+ [data-layout=meridian] .md-side .md-label,[data-layout=meridian] .md-side .md-section,[data-layout=meridian] .md-side .md-divider,[data-layout=meridian] .md-brand,[data-layout=meridian] .md-account{display:none}
+ [data-layout=meridian] .md-side .md-nav a,[data-layout=meridian] .md-side .md-nav button{justify-content:center;padding:12px;min-height:48px}
+ [data-layout=meridian] .md-top{padding:20px 64px 10px 32px;min-height:90px;font-size:20px}
+ [data-layout=meridian] #main{padding:20px 64px 60px 32px;font-size:21px}
+ [data-layout=meridian] .md-page-title{font-size:32px}
+ [data-layout=meridian] .th-hero{min-height:470px}
+ [data-layout=meridian] .th-fg{padding:45px;max-width:58%}
+ [data-layout=meridian] .th-title{font-size:66px}
+ [data-layout=meridian] .th-kick{font-size:16px}
+ [data-layout=meridian] .th-meta,[data-layout=meridian] .th-desc{font-size:20px}
+ [data-layout=meridian] .section{font-size:28px}
+ [data-layout=meridian] .btnplay,[data-layout=meridian] .actions .ghost{font-size:22px;min-height:56px;padding-inline:28px}
+ .md-panel{position:fixed;inset:60px auto 60px 48px;margin:0;width:330px;max-height:none;padding:28px 22px;font-size:22px}
+ .md-panel .md-nav a,.md-panel .md-nav button{min-height:58px;gap:18px}
+ .md-panel .md-section{font-size:14px}
+ .md-panel .md-nav svg{width:26px;height:26px}
+}
+@media(prefers-reduced-motion:reduce){[data-layout=meridian] *, .md-panel *{scroll-behavior:auto;transition:none;animation:none}}
+@media(prefers-reduced-transparency:reduce){.md-panel::backdrop{background:var(--bg)}}
+@media(forced-colors:active){.md-nav [aria-current=page],.md-bottom [aria-current=page]{outline:2px solid Highlight}}
+
+[data-layout=meridian] .md-top .spacer{flex:1}
+[data-layout=meridian] .rowscroll[data-shelf-kind=watch] .poster{flex-basis:calc(var(--poster)*1.8)}
+[data-layout=meridian] .rowscroll[data-shelf-kind=watch] .artbox{aspect-ratio:16/9}
+[data-layout=meridian] .rowscroll[data-shelf-kind=watch] .artbox .art{width:100%;height:100%;object-fit:cover;aspect-ratio:auto}
+
+[data-layout=meridian] .md-shell button.btnplay{background:var(--action-bg);color:var(--action-ink);border-color:var(--action-bg)}
