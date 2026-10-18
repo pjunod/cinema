@@ -1883,6 +1883,12 @@ apple-build-bump: ## Claim the next Apple build number across every generated su
 # can cache it between runs; a stale or absent cache only costs a rebuild.
 APPLE_DERIVED_DATA := build/DerivedData
 
+.PHONY: apple-tv-navigation-test
+apple-tv-navigation-test: ## Run native remote journeys and retain source-bound screenshots/results
+	@output="$${PLURX_TV_NAVIGATION_OUTPUT:-$$(mktemp -d "$${TMPDIR:-/tmp}/plurx-navigation.XXXXXXXX")/result}"; \
+	  python3 scripts/apple-tv-navigation-test --output "$$output" \
+	  --derived-data "$(CURDIR)/clients/apple/$(APPLE_DERIVED_DATA)"
+
 .PHONY: apple-build
 apple-build: ## Compile iOS and tvOS without running simulator tests
 	cd clients/apple && xcodegen generate

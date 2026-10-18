@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-15",
+  "source_commit": "9eb7f6738647a7e963b17cfb3a2f77a594863c41",
+  "xcode": "27.0 (27A266a)",
+  "simulator": "tvOS 26.5, Apple TV 4K (3rd generation, 4K)",
+  "test": "ModalAuditTests.testLibraryModalFocus",
+  "result": "failed as expected at modal focus assertion",
+  "fixture": "416 synthetic movies; first 200 loaded in grid at capture",
+  "ui_sources": "LibraryView, RemoteChoicePanel, RemoteNavigationCoordinator and styles unchanged",
+  "harness_changes": [
+    "replace app entry with direct LibraryView presentation",
+    "replace libraryPage data with synthetic page responses",
+    "add isolated XcodeGen project and remote-driven test"
+  ],
+  "observations": [
+    "View toolbar retains native focus after panel opens",
+    "Three Down presses focus A Movie 10 behind panel",
+    "Rows, Grid and Close labels not visually legible on red button fills; names remain in accessibility tree"
+  ],
+  "limits": [
+    "not production login or shell traversal",
+    "not physical Siri Remote touch/swipe or display evidence",
+    "does not reproduce full bottom-of-library workaround",
+    "one native journey, remaining findings source review or explicitly unverified risks"
+  ],
+  "initial_attempt": "Synthetic fixture expression exceeded Swift type-check time; rewritten as explicit loop before successful build and failing UI assertion",
+  "later_policy": "After this completed run, broader build/install restrictions were relayed and then superseded by the owner: only mobile app builds intended for physical-device installation, and those installations, require committed source merged into main. Simulator/emulator, CI/test and other builds not intended for physical-device installation are exempt and follow the original branch review/testing workflow; non-mobile work is also outside the restriction. Do not reuse an unmerged-source mobile test build for physical-device installation. This tvOS simulator harness remains under the normal repository workflow. No further app build/install was performed; the clarification did not initiate implementation or deployment.",
+  "cleanup": "Owned simulator deleted after evidence export.",
+  "sha256": {
+    "modal-focus-behind.png": "4e35b3a6e052c622246948ba55671ca5dd38d570420687c57d913de545020102",
+    "modal-opening.png": "5f61f33e382d0b0938ce9403b64ef3d8dd6eba8eb26c37a295d21ffbb2017969",
+    "synthetic-harness.patch": "3227d937ce44494043ec7e8eb3f35ff6ed3c5c959cdebd7303bd04e8ee42b6ff",
+    "focus-trace.txt": "930e94d4beebc7a247679c63c7d360cd00a98359789d2e82c80ada36d78e5d00"
+  }
+}

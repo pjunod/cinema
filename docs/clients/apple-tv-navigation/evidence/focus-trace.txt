@@ -1,0 +1,7 @@
+AUDIT BEFORE Attributes: Application, 0x106e09300, pid: 75917, label: 'NavigationAudit'
+                  Button, 0x106e07480, {{1340.0, 60.2}, {161.0, 73.7}}, label: 'View', Focused
+AUDIT OPEN Attributes: Application, 0x106a14fe0, pid: 75917, label: 'NavigationAudit'
+                  Button, 0x10620d510, {{1340.0, 60.2}, {161.0, 73.7}}, label: 'View', Focused
+AUDIT AFTER THREE DOWN Attributes: Application, 0x105905ac0, pid: 75917, label: 'NavigationAudit'
+                              Button, 0x105911b00, {{1248.3, 529.4}, {248.4, 478.7}}, label: 'A Movie 10, 2000', Focused
+<isolated-source>/clients/apple/AuditTests/ModalAuditTests.swift:18: error: -[NavigationAuditTests.ModalAuditTests testLibraryModalFocus] : XCTAssertTrue failed - Modal must own focus without traversing library

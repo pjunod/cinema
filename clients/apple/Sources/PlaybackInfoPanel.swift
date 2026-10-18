@@ -60,7 +60,6 @@ struct PlaybackInfoPanel: View {
         .buttonStyle(PlaybackInfoButtonStyle())
         #if os(tvOS)
         .onAppear { Task { @MainActor in await Task.yield(); closeFocused = true } }
-        .onChange(of: mode) { _, _ in closeFocused = true }
         #endif
     }
 
@@ -287,6 +286,7 @@ private struct PlaybackInfoButtonStyle: ButtonStyle {
                 .foregroundStyle(.white)
                 .background(.white.opacity(focused || configuration.isPressed ? 0.12 : 0), in: RoundedRectangle(cornerRadius: 9))
                 .overlay(RoundedRectangle(cornerRadius: 9).stroke(focused ? Palette.accent : .clear, lineWidth: 3))
+                .remoteNativeFocus(focused)
         }
     }
 }

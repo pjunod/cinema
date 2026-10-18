@@ -216,24 +216,12 @@ struct RootView: View {
         .task(id: "\(model.phase)|\(model.diagnosticNamespace)|\(Session.shared.playbackAuthorization.generation)") {
             await DiagnosticReportModel.shared.configure(model: model)
         }
-        .overlay(alignment: .bottomTrailing) {
-            if model.phase != .ready { DiagnosticReportButton(category: "connection").buttonStyle(.bordered).padding() }
-        }
         .remoteRestricted(model.phase != .ready)
         .task(id: remoteLifecycleKey) {
             remoteClient.configure(model: model, navigation: remoteNavigation, playback: remotePlayback,
                                    foreground: scenePhase == .active, background: scenePhase == .background, enabled: remoteEnabled)
             #if os(iOS)
             invitations.configure(active: scenePhase == .active && model.phase == .ready, remoteEnabled: remoteEnabled)
-            #endif
-        }
-        .overlay(alignment: .topTrailing) {
-            #if os(tvOS)
-            if remoteEnabled, model.phase == .ready, remoteClient.target != nil {
-                Button("Pair a phone") { remoteClient.startPairing() }
-                    .buttonStyle(.bordered)
-                    .padding(24)
-            }
             #endif
         }
         .overlay { RemotePairingApprovalView() }

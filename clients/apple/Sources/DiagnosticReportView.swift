@@ -6,6 +6,13 @@ final class DiagnosticReportModel: ObservableObject {
     static let shared = DiagnosticReportModel()
     @Published var presented = false
     @Published var presenter = "root"
+    var prepareFocusReturn: (() -> (() -> Void)?)?
+    private var pendingFocusReturn: (owner: String, restore: () -> Void)?
+    func restoreFocus(after owner: String) {
+        guard let pending = pendingFocusReturn, pending.owner == owner else { return }
+        pendingFocusReturn = nil
+        pending.restore()
+    }
     @Published var draft: DiagnosticStore.Draft?
     @Published var pending: [DiagnosticStore.Draft] = []
     @Published private(set) var selectionRevision: UInt64 = 0
@@ -43,6 +50,7 @@ final class DiagnosticReportModel: ObservableObject {
         DiagnosticRecorder.shared.record("lifecycle", "state", ["state": .text("starting")])
     }
     private func retire() {
+        prepareFocusReturn = nil; pendingFocusReturn = nil
         stopLocalExport()
         workRevision &+= 1
         operation?.cancel(); polling?.cancel(); transport?.cancel(); operation = nil; polling = nil; transport = nil
@@ -62,6 +70,7 @@ final class DiagnosticReportModel: ObservableObject {
         pending = restored
     }
     func open(category: String = "other", title: String? = nil, owner: String = "root", newIncident: Bool = false) {
+        if !presented || presenter != owner { prepareFocusReturn = nil; pendingFocusReturn = nil }
         stopLocalExport()
         workRevision &+= 1
         operation?.cancel(); polling?.cancel(); transport?.cancel(); cleanupShare()
@@ -128,6 +137,10 @@ final class DiagnosticReportModel: ObservableObject {
         pending = rows
     }
     func close() {
+        if presented {
+            if let restore = prepareFocusReturn?() { pendingFocusReturn = (presenter, restore) }
+            prepareFocusReturn = nil
+        }
         stopLocalExport()
         workRevision &+= 1
         if let draft, !draft.consented { Task { await store.save(draft) } }
@@ -319,23 +332,42 @@ struct DiagnosticReportButton: View {
     var category = "other"
     var title: String?
     var owner = "root"
-    var body: some View { Button("Report a problem") { DiagnosticReportModel.shared.open(category: category, title: title, owner: owner) }.accessibilityIdentifier("diagnostics-open") }
+    var label = "Report a problem"
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    @FocusState private var focused: Bool
+    var body: some View {
+        Button(label) {
+            DiagnosticReportModel.shared.open(category: category, title: title, owner: owner)
+            #if os(tvOS)
+            let scope = navigation.activeScope
+            let generation = Session.shared.playbackAuthorization.generation
+            DiagnosticReportModel.shared.prepareFocusReturn = {
+                let revision = navigation.physicalInputRevision
+                return {
+                    guard navigation.activeScope == scope, navigation.physicalInputRevision == revision, !navigation.hasOwnedModal,
+                          Session.shared.playbackAuthorization.generation == generation else { return }
+                    focused = true
+                }
+            }
+            #endif
+        }
+        .focused($focused)
+        .accessibilityIdentifier("diagnostics-open")
+    }
 }
 
 struct DiagnosticReportView: View {
     @ObservedObject var reports = DiagnosticReportModel.shared
     @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
     @State private var block = UUID()
+    @Namespace private var reportFocus
     var body: some View {
         NavigationStack {
-            Form {
-                incidentSection
-                pendingSection
+            Group {
                 #if os(tvOS)
-                if let draft = reports.draft {
-                    // Keep every report action reachable before the long preview.
-                    Section("Recent safe events") { eventPreview(draft) }
-                }
+                phoneSaveForm
+                #else
+                workbenchForm
                 #endif
             }
             // Each selected incident starts at its coverage and privacy
@@ -343,11 +375,13 @@ struct DiagnosticReportView: View {
             .id((reports.draft?.id ?? "") + "-" + String(reports.selectionRevision))
             #if os(tvOS)
             .pickerStyle(.menu)
-            #endif
+            #else
             .navigationTitle("Report a problem")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { reports.close() } } }
+            #endif
         }
         .remoteRestricted()
+        .remotePhysicalDirections()
         .onAppear { remoteNavigation.setBlocked(block, true) }
         .onDisappear {
             // Presenting the system share sheet must not retire the report or
@@ -360,6 +394,80 @@ struct DiagnosticReportView: View {
         }
         #endif
     }
+    private var workbenchForm: some View {
+        Form {
+            incidentSection
+            pendingSection
+            #if os(tvOS)
+            if let draft = reports.draft {
+                Section("Recent safe events") { eventPreview(draft) }
+            }
+            #endif
+        }
+    }
+    #if os(tvOS)
+    private var phoneSaveForm: some View {
+        VStack(alignment: .leading, spacing: 30) {
+            Text("Report a problem").font(.largeTitle.bold())
+            Text("Save the diagnostic report on your phone.")
+                .font(.title3).lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top, spacing: 70) {
+                VStack(alignment: .leading, spacing: 24) {
+                    HStack(spacing: 24) {
+                        Button("Done") { reports.close() }
+                            .prefersDefaultFocus(true, in: reportFocus)
+                            .accessibilityIdentifier("diagnostics-done")
+                        Button("Save on phone") { reports.shareOnLocalNetwork() }
+                            .disabled(reports.busy || reports.draft == nil)
+                            .accessibilityIdentifier("diagnostics-export-tv")
+                    }
+                    Text(reports.message).font(.callout)
+                        .lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("diagnostics-status")
+                    if reports.busy { ProgressView() }
+                    Text("Passwords, addresses and media are excluded. Title and platform diagnostics stay off unless enabled in Advanced.")
+                        .font(.callout).foregroundStyle(Palette.muted)
+                        .lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+                    Text("Closing keeps this draft. Nothing is sent automatically.")
+                        .font(.callout).foregroundStyle(Palette.muted)
+                        .lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+                    NavigationLink("Advanced diagnostics and history") {
+                        workbenchForm.pickerStyle(.menu)
+                            .navigationTitle("Advanced diagnostics")
+                            .remoteRestricted()
+                    }
+                    .accessibilityIdentifier("diagnostics-advanced")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 20) {
+                    if let url = reports.localExportURL {
+                        DiagnosticLocalExportView(url: url)
+                        Button("Stop local download") { reports.stopLocalExport() }
+                            .accessibilityIdentifier("diagnostics-stop-export")
+                    } else {
+                        Image(systemName: "qrcode").font(.system(size: 120))
+                            .foregroundStyle(Palette.muted)
+                        Text("Choose Save on phone to show a QR code.").font(.title3)
+                    }
+                    Text("Use trusted Wi-Fi. This unencrypted local link expires after one download or five minutes.")
+                        .font(.callout).foregroundStyle(Palette.muted)
+                        .lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+                }
+                .lineLimit(nil)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 500, alignment: .leading)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(80)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Palette.bg)
+        .foregroundStyle(Palette.onBg)
+        .focusScope(reportFocus)
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
+        .tvDiagnosticReportExit { reports.close() }
+    }
+    #endif
     private var incidentSection: some View {
         Section("Incident report") {
                     Button("Capture a new incident") { reports.open(owner: reports.presenter, newIncident: true) }.disabled(reports.busy || DiagnosticRecorder.shared.recording)
@@ -450,8 +558,8 @@ private struct DiagnosticLocalExportView: View {
     }
     var body: some View {
         if let qr { Image(uiImage: qr).interpolation(.none).resizable().scaledToFit().frame(width: 256, height: 256).accessibilityLabel("Scan to save this TV's diagnostic ZIP") }
-        Text(url.absoluteString).font(.caption).accessibilityIdentifier("diagnostics-export-url")
-        Text("Your phone must be on the same local network. Save the ZIP, then attach it to an issue.").font(.caption)
+        Text(url.absoluteString).font(.caption).lineLimit(2).accessibilityIdentifier("diagnostics-export-url")
+        Text("Your phone must be on the same local network. Save the ZIP, then attach it to an issue.").font(.caption).lineLimit(nil).fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -501,7 +609,11 @@ private struct DiagnosticPresentation: ViewModifier {
     let owner: String
     @ObservedObject var reports = DiagnosticReportModel.shared
     func body(content: Content) -> some View {
-        content.sheet(isPresented: Binding(get: { reports.presented && reports.presenter == owner }, set: { if !$0 { reports.close() } })) { DiagnosticReportView() }
+        #if os(tvOS)
+        content.fullScreenCover(isPresented: Binding(get: { reports.presented && reports.presenter == owner }, set: { if !$0 { reports.close() } }), onDismiss: { reports.restoreFocus(after: owner) }) { DiagnosticReportView() }
+        #else
+        content.sheet(isPresented: Binding(get: { reports.presented && reports.presenter == owner }, set: { if !$0 { reports.close() } }), onDismiss: { reports.restoreFocus(after: owner) }) { DiagnosticReportView() }
+        #endif
     }
 }
 extension View {
