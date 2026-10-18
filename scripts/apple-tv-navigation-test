@@ -43,6 +43,7 @@ REQUIRED = [
     "TVSecondaryNavigationTests/testEpisodeDetailsDoNotStartPlayback",
     "TVSecondaryNavigationTests/testSettingsPickerHelpReportAndExactReturn",
     "TVSecondaryNavigationTests/testSearchKeyboardBackRetrySameQueryAndResultReturn",
+    "TVHomeNavigationTests/testStandardNativeTabsReturnAfterLeavingLibrary",
     "TVHomeNavigationTests/testForegroundRefreshRetainsHomeContentAndRetryRecovers",
     "TVMeridianNavigationTests/testPanelOwnsNativeFocusAndBackPreservesLibraryRoute",
     "TVConnectionNavigationTests/testSavedConnectionRecoveryReportAndRetryKeepCredentials",
