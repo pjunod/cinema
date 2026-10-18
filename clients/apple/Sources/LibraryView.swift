@@ -6,6 +6,17 @@ private enum LibraryScrollTarget: Hashable {
     case row(String)
 }
 
+enum TVLibraryNavigation {
+    static func survivingBookmark(_ id: Int, previous: [Int], current: [Int]) -> Int? {
+        if current.contains(id) { return id }
+        guard let index = previous.firstIndex(of: id) else { return current.first }
+        let available = Set(current)
+        return previous.dropFirst(index + 1).first(where: available.contains)
+            ?? previous.prefix(index).reversed().first(where: available.contains)
+            ?? current.first
+    }
+}
+
 struct LibraryView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
@@ -19,6 +30,11 @@ struct LibraryView: View {
     @State private var expandedGroup: String?
     @State private var selectedGroup: String?
     @State private var choiceMenu: String?
+    @State private var contentBookmark: String?
+    @State private var contentOwnedFocus = false
+    @State private var toolsOwnedFocus = false
+    @State private var preparingJump = false
+    @State private var jumpGroups: [LibraryGroup] = []
     @State private var searchNonce = UUID()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -48,13 +64,33 @@ struct LibraryView: View {
         [GridItem(.adaptive(minimum: model.posterSize.posterWidth), spacing: 18, alignment: .top)]
     }
 
+    private var searchPrompt: Text? {
+        #if os(tvOS)
+        Text("Find a title in this library").foregroundColor(Palette.muted)
+        #else
+        nil
+        #endif
+    }
+
     private var loadKey: String { "\(collection.id):\(sort.rawValue)" }
 
     var body: some View {
         ScrollViewReader { proxy in
+            HStack(alignment: .top, spacing: 32) {
+                #if os(tvOS)
+                tvTools
+                    .remoteContentReturn(to: contentBookmark ?? visibleItems.first.map { "item:\($0.id)" })
+                #endif
             VStack(alignment: .leading, spacing: 12) {
+                #if os(tvOS)
+                Text(collection.title).font(.title2.bold()).foregroundStyle(Palette.onBg)
+                    .accessibilityAddTraits(.isHeader)
+                #endif
                 summary
-                TextField("Find a title in this library", text: $query)
+                TextField("Find a title in this library", text: $query, prompt: searchPrompt)
+                    #if os(tvOS)
+                    .foregroundStyle(Palette.onBg)
+                    #endif
                     #if os(iOS)
                     .textFieldStyle(.roundedBorder)
                     #endif
@@ -67,8 +103,13 @@ struct LibraryView: View {
                                 Button(group.label) {
                                     selectedGroup = group.id
                                     withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(LibraryScrollTarget.row(group.id), anchor: .top) }
+                                    #if os(tvOS)
+                                    if let item = group.items.first {
+                                        remoteNavigation.focusControl(scope: remoteScope, key: "item:\(item.id)")
+                                    }
+                                    #endif
                                 }
-                                .buttonStyle(.bordered)
+                                .shelfActionButtonStyle()
                                 .tint(selectedGroup == group.id ? Palette.accent : Palette.muted)
                                 .accessibilityLabel("Jump to \(group.label)")
                                 .accessibilityAddTraits(selectedGroup == group.id ? .isSelected : [])
@@ -92,14 +133,19 @@ struct LibraryView: View {
                 .refreshable { await load() }
                 #endif
             }
+            }
             .padding(.horizontal, screenHPad)
             .background(Palette.bg.ignoresSafeArea())
+            #if os(tvOS)
+            .navigationTitle("")
+            #else
             .navigationTitle(collection.title)
-            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
+            #if os(iOS)
             .toolbar { libraryToolbar }
-            .overlay {
+            #endif
+            .remoteChoicePresentation(isPresented: Binding(get: { choiceMenu != nil }, set: { if !$0 { choiceMenu = nil } }), scope: remoteScope + ":" + (choiceMenu ?? "view")) {
                 if let menu = choiceMenu {
                     RemoteChoicePanel(scope: remoteScope + ":" + menu, title: menu.capitalized, choices: choices(for: menu))
                 }
@@ -108,10 +154,41 @@ struct LibraryView: View {
                 updateRemoteOrder()
                 remoteNavigation.setSearch(scope: remoteScope, nonce: searchNonce) { query = $0 }
             }
-            .onChange(of: visibleItems.map(\.id)) { _, _ in updateRemoteOrder() }
+            .onChange(of: visibleItems.map(\.id)) { previous, current in
+                updateRemoteOrder()
+                guard let key = contentBookmark, let id = Int(key.dropFirst(5)),
+                      !current.contains(id) else { return }
+                let survivor = TVLibraryNavigation.survivingBookmark(id, previous: previous, current: current)
+                contentBookmark = survivor.map { "item:\($0)" }
+                if remoteNavigation.activeScope == remoteScope, contentOwnedFocus {
+                    remoteNavigation.focusControl(scope: remoteScope, key: contentBookmark ?? "library:view")
+                }
+            }
             .onChange(of: rows) { _, _ in updateRemoteOrder() }
             .onChange(of: gridColumns) { _, _ in updateRemoteOrder() }
-            .onChange(of: remoteNavigation.requestedFocus) { _, key in
+            .onChange(of: remoteNavigation.focusRevision) { _, _ in
+                guard remoteNavigation.activeScope == remoteScope,
+                      let key = remoteNavigation.focusedKey else { return }
+                contentOwnedFocus = key.hasPrefix("item:")
+                #if os(tvOS)
+                if ["library:view", "library:sort", "library:filter", "library:jump"].contains(key) {
+                    toolsOwnedFocus = true
+                } else if key.hasPrefix("item:"), toolsOwnedFocus {
+                    toolsOwnedFocus = false
+                    if let saved = contentBookmark, saved != key,
+                       visibleItems.contains(where: { "item:\($0.id)" == saved }) {
+                        remoteNavigation.focusControl(scope: remoteScope, key: saved)
+                        return
+                    }
+                }
+                #endif
+                guard key.hasPrefix("item:"),
+                      let id = Int(key.dropFirst(5)) else { return }
+                contentBookmark = key
+                selectedGroup = (rows ? state.groups : jumpGroups).first(where: { $0.items.contains(where: { $0.id == id }) })?.id
+            }
+            .onChange(of: remoteNavigation.focusRequestRevision) { _, _ in
+                let key = remoteNavigation.requestedFocus
                 guard remoteNavigation.activeScope == remoteScope, let key, key.hasPrefix("item:"),
                       let id = Int(key.dropFirst(5)) else { return }
                 if rows, let group = state.groups.first(where: { $0.items.contains(where: { $0.id == id }) }) {
@@ -186,9 +263,16 @@ struct LibraryView: View {
                             Text("\(group.items.count)\(complete ? "" : " loaded")").foregroundColor(Palette.muted)
                             Spacer()
                             Button("View all") { expandedGroup = group.id }
+                            #if os(tvOS)
+                            .shelfActionButtonStyle()
+                            #endif
                             .accessibilityLabel("View all \(group.label) items")
                             .remoteControl("group:\(group.id)", label: "View all \(group.label) items") { expandedGroup = group.id }
                         }
+                        #if os(tvOS)
+                        .padding(.horizontal, 24)
+                        #endif
+                        .tvNavigationFocusSection()
                         ScrollViewReader { rowProxy in
                         ScrollView(.horizontal) {
                             LazyHStack(alignment: .top, spacing: 18) {
@@ -202,13 +286,21 @@ struct LibraryView: View {
                                     }
                                     .posterButtonStyle()
                                     .id(item.id)
+                                    .accessibilityIdentifier("item:\(item.id)")
                                     .remoteControl("item:\(item.id)", label: item.title) { remoteNavigation.navigate(to: .item(item.id)) }
                                 }
                             }
+                            #if os(tvOS)
+                            // Keep the lifted first/last card and its ring inside
+                            // the horizontal viewport, including large posters.
+                            .padding(24)
+                            #else
                             .padding(.vertical, 12)
+                            #endif
                         }
                         .accessibilityIdentifier("library-row-\(group.id)")
-                        .onChange(of: remoteNavigation.requestedFocus) { _, key in
+                        .onChange(of: remoteNavigation.focusRequestRevision) { _, _ in
+                            let key = remoteNavigation.requestedFocus
                             guard remoteNavigation.activeScope == remoteScope, let key, key.hasPrefix("item:"), let id = Int(key.dropFirst(5)), group.items.contains(where: { $0.id == id }) else { return }
                             rowProxy.scrollTo(id, anchor: .center)
                         }
@@ -228,6 +320,7 @@ struct LibraryView: View {
                     }
                     .posterButtonStyle()
                     .id(item.id)
+                    .accessibilityIdentifier("item:\(item.id)")
                     .remoteControl("item:\(item.id)", label: item.title) { remoteNavigation.navigate(to: .item(item.id)) }
                     .onAppear {
                         visibleIndices.insert(index)
@@ -249,7 +342,7 @@ struct LibraryView: View {
     }
 
     private var remoteScope: String { "library:" + collection.id }
-    private var remoteKeys: [String] { ["library:view", "library:sort", "library:filter", "library:search"] + (rows ? state.groups.flatMap { ["group:\($0.id)"] + $0.items.map { "item:\($0.id)" } } : visibleItems.map { "item:\($0.id)" }) }
+    private var remoteKeys: [String] { ["library:view", "library:sort", "library:filter", "library:jump", "library:search"] + (rows ? state.groups.flatMap { ["group:\($0.id)"] + $0.items.map { "item:\($0.id)" } } : visibleItems.map { "item:\($0.id)" }) }
     private func updateRemoteOrder() {
         remoteNavigation.setOrder(scope: remoteScope, keys: remoteKeys, columns: rows ? 1 : gridColumns)
     }
@@ -258,8 +351,69 @@ struct LibraryView: View {
         remoteNavigation.openModal(scope: scope, opener: "library:" + menu) { choiceMenu = nil }
         if remoteNavigation.activeScope == scope { choiceMenu = menu }
     }
+    #if os(tvOS)
+    private var tvTools: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            Text("Library tools").font(.headline).foregroundStyle(Palette.muted)
+            ForEach(["view", "sort", "filter"], id: \.self) { menu in
+                Button { openChoices(menu) } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(menu.capitalized)
+                        Text(menu == "view" ? presentation.capitalized : menu == "sort" ? sort.label : filter.label)
+                            .font(.caption).foregroundStyle(Palette.muted).lineLimit(2)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                .accessibilityIdentifier("library:" + menu)
+                .remoteControl("library:" + menu, label: menu.capitalized) { openChoices(menu) }
+            }
+            Button { prepareJump() } label: {
+                Text(preparingJump ? "Loading index…" : "Jump to…")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                .disabled(visibleItems.isEmpty)
+                .accessibilityIdentifier("library:jump")
+                .remoteControl("library:jump", label: "Jump to group", enabled: !visibleItems.isEmpty) { prepareJump() }
+            Text("Left from the first title in a row opens these tools. Right returns to your title.")
+                .font(.caption).foregroundStyle(Palette.muted)
+            Spacer(minLength: 0)
+        }
+        .frame(width: 240)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .padding(.top, 16)
+        .focusSection()
+
+    }
+    #endif
+    private func prepareJump() {
+        guard !preparingJump else { return }
+        preparingJump = true
+        let identity = "\(loadKey):\(filter):\(query)"
+        Task {
+            let groups = await state.groupsForJump()
+            preparingJump = false
+            guard remoteNavigation.activeScope == remoteScope,
+                  identity == "\(loadKey):\(filter):\(query)" else { return }
+            #if os(tvOS)
+            // Loading must not disable the focused opener or present a late
+            // menu after the viewer has moved to another control.
+            guard remoteNavigation.focusedKey == "library:jump" else { return }
+            #endif
+            jumpGroups = groups
+            updateRemoteOrder()
+            openChoices("jump")
+        }
+    }
     private func choices(for menu: String) -> [RemoteChoice] {
         switch menu {
+        case "jump": return jumpGroups.compactMap { group in
+            guard let item = group.items.first else { return nil }
+            return RemoteChoice(id: group.id, label: group.label, selected: selectedGroup == group.id, returnFocus: "item:\(item.id)") {
+                selectedGroup = group.id
+                contentBookmark = "item:\(item.id)"
+            }
+        }
         case "view": return ["rows", "grid"].map { value in
             RemoteChoice(id: value, label: value.capitalized, selected: presentation == value) { presentation = value }
         }
@@ -271,6 +425,7 @@ struct LibraryView: View {
         }
         }
     }
+    #if os(iOS)
     @ToolbarContentBuilder
     private var libraryToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .automatic) {
@@ -282,6 +437,7 @@ struct LibraryView: View {
                 .remoteControl("library:filter", label: "Filter") { openChoices("filter") }
         }
     }
+    #endif
 
     @MainActor
     private func load() async {
@@ -294,7 +450,6 @@ struct LibraryView: View {
         await state.load(libraryIds: collection.libraries.map(\.id), sort: sort)
     }
 }
-
 
 /// Uses the same coordinator so arriving pages update the expanded group.
 /// Pushing a destination retains the rows' native scroll and focus state.
@@ -310,16 +465,44 @@ private struct LibraryGroupView: View {
     let reload: () async -> Void
     @State private var destinationToken = UUID()
     @State private var ownsScope = false
+    @State private var bookmark: Int?
+    @State private var toolsOwnedFocus = false
+    @State private var contentOwnedFocus = false
+    @State private var returningToTools = false
     private var remoteScope: String { parentScope + ":group:" + groupID }
     private var items: [Item] { state.groups.first { $0.id == groupID }?.items ?? [] }
     private func updateOrder() {
-        navigation.setOrder(scope: remoteScope, keys: (state.error == nil ? [] : ["group:retry"]) + items.map { "item:\($0.id)" }, columns: 1)
+        var keys: [String] = []
+        #if os(tvOS)
+        keys.append("group:tools")
+        #endif
+        keys += (state.error == nil ? [] : ["group:retry"]) + items.map { "item:\($0.id)" }
+        navigation.setOrder(scope: remoteScope, keys: keys, columns: 1)
     }
 
     var body: some View {
         ScrollViewReader { proxy in
+            HStack(alignment: .top, spacing: 32) {
+                #if os(tvOS)
+                VStack(alignment: .leading, spacing: 22) {
+                    Text("Library tools").font(.headline).foregroundStyle(Palette.muted)
+                    Button("Library tools") { returningToTools = true; dismiss() }
+                        .buttonStyle(TVReadableButtonStyle(prominent: false))
+                        .accessibilityIdentifier("group:tools")
+                        .remoteControl("group:tools", label: "Library tools") { returningToTools = true; dismiss() }
+                    Text("Left reaches tools. Right returns to your title.").font(.caption).foregroundStyle(Palette.muted)
+                    Spacer(minLength: 0)
+                }
+                .frame(width: 240)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .focusSection()
+                #endif
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    #if os(tvOS)
+                    Text(title).font(.title2.bold()).foregroundStyle(Palette.onBg)
+                        .accessibilityAddTraits(.isHeader)
+                    #endif
                     Text("\(items.count)\(state.complete ? " items" : " loaded · library still loading")")
                         .foregroundColor(Palette.muted)
                     if let error = state.error {
@@ -337,6 +520,7 @@ private struct LibraryGroupView: View {
                                 }
                             }.posterButtonStyle()
                                 .id(item.id)
+                                .accessibilityIdentifier("item:\(item.id)")
                                 .remoteControl("item:\(item.id)", label: item.title) { navigation.navigate(to: .item(item.id)) }
                         }
                     }
@@ -344,7 +528,12 @@ private struct LibraryGroupView: View {
                 .padding(.horizontal, screenHPad)
                 .padding(.bottom, 36)
             }
-            .onChange(of: navigation.requestedFocus) { _, key in
+            }
+            #if os(tvOS)
+            .padding(.horizontal, screenHPad)
+            #endif
+            .onChange(of: navigation.focusRequestRevision) { _, _ in
+                let key = navigation.requestedFocus
                 guard ownsScope, navigation.activeScope == remoteScope, let key,
                       key.hasPrefix("item:"), let id = Int(key.dropFirst(5)), items.contains(where: { $0.id == id }) else { return }
                 proxy.scrollTo(id, anchor: .center)
@@ -353,14 +542,45 @@ private struct LibraryGroupView: View {
         .background(Palette.bg.ignoresSafeArea())
         .remoteScope(remoteScope)
         .remoteRestricted(!ownsScope)
+        #if os(tvOS)
+        .navigationTitle("")
+        #else
         .navigationTitle(title)
+        #endif
         .onAppear {
             ownsScope = navigation.attachDestination(token: destinationToken, parent: parentScope, scope: remoteScope, opener: "group:" + groupID, dismiss: dismiss)
             updateOrder()
         }
-        .onChange(of: items.map(\.id)) { _, _ in updateOrder() }
+        .onChange(of: items.map(\.id)) { previous, current in
+            updateOrder()
+            #if os(tvOS)
+            guard let saved = bookmark else { return }
+            bookmark = TVLibraryNavigation.survivingBookmark(saved, previous: previous, current: current)
+            if navigation.activeScope == remoteScope, contentOwnedFocus, !current.contains(saved) {
+                navigation.focusControl(scope: remoteScope, key: bookmark.map { "item:\($0)" } ?? "group:tools")
+            }
+            #endif
+        }
+        .onChange(of: navigation.focusRevision) { _, _ in
+            guard navigation.activeScope == remoteScope, let key = navigation.focusedKey else { return }
+            contentOwnedFocus = key.hasPrefix("item:")
+            if key == "group:tools" { toolsOwnedFocus = true }
+            guard key.hasPrefix("item:"), let id = Int(key.dropFirst(5)) else { return }
+            if toolsOwnedFocus {
+                toolsOwnedFocus = false
+                if let saved = bookmark, saved != id, items.contains(where: { $0.id == saved }) {
+                    navigation.focusControl(scope: remoteScope, key: "item:\(saved)")
+                    return
+                }
+            }
+            bookmark = id
+        }
         .onChange(of: state.error) { _, _ in updateOrder() }
-        .onDisappear { navigation.detachDestination(token: destinationToken); ownsScope = false }
+        .onDisappear {
+            navigation.detachDestination(token: destinationToken)
+            ownsScope = false
+            if returningToTools { navigation.focusControl(scope: parentScope, key: "library:view") }
+        }
         .task { await reload() }
     }
 }
