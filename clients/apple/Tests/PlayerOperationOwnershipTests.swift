@@ -1016,6 +1016,9 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         try await waitUntil("initial decision") { decisions.requests.count == 1 }
         decisions.resolve(0, with: .success((try coldDecision(), caps)))
         try await waitUntil("the first session") { creates.attempts.count == 1 }
+        // The watchdog runs in its own Task; observing the create does not
+        // guarantee that its injected deadline wait has been scheduled yet.
+        try await waitUntil("the cold-start deadline") { !waits.waits.isEmpty }
         XCTAssertEqual(waits.waits.count, 1, "the cold start armed its deadline")
         // The picture the viewer is watching, which is what makes the next
         // create a CHANGE rather than a start. `surfaceContext` is `.start`
