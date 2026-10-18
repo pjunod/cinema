@@ -6,6 +6,23 @@
 The [status ledger](MACOS-VIDEO-PROCESSING-STATUS.md) tracks every outstanding
 implementation, review and qualification item.
 
+## At a glance
+
+<!-- agent head: read this section first; the body below is reference. Keep it current when the status changes. -->
+
+- **What this is:** Dated experiment and delivery evidence for macOS video processing; each result is bound to its stated source and workload. The plan is MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md and the ledger is MACOS-VIDEO-PROCESSING-STATUS.md.
+- **Where it stands:**
+  - Status: open. Observed 2026-10-07 to 2026-10-08, with later sections dated through 2026-10-15.
+  - Section 1 establishes only synthetic CPU feasibility on one Apple M3 Max; it does not establish perceptual quality, deployed performance, client behavior or supported concurrency.
+  - Newest section: the corrected shipping image qualifying Intel QSV (2026-10-15).
+- **Read further only for:**
+  - what the experiment does and does not establish: `## 1. What the experiment establishes`
+  - test environment and treatment: `## 2. Fixed environment and treatment`
+  - retained receipts and how to reproduce: `## 6. Retained receipts and reproduction`
+  - evidence still owed: `## 7. Evidence still owed`
+  - review findings and dispositions: `## 44. Combined adversarial review and its dispositions — 2026-10-10`
+  - Intel QSV outcome: `## 46. QSV shipping dependency retirement — 2026-10-15`; `## 47. Corrected shipping image qualifies Intel QSV — 2026-10-15`
+
 ## 1. What the experiment establishes
 
 On one Apple M3 Max, retaining VideoToolbox surfaces for SDR scaling and

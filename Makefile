@@ -145,6 +145,14 @@ storage-pressure-check: ## Root Linux: prove a real ENOSPC cache/scratch device 
 	PLURX_RUN_STORAGE_PRESSURE_TEST=1 $(CARGO) test --locked -p plurxd \
 	  a_full_cache_or_scratch_device_never_relocates_authoritative_bytes -- --nocapture
 
+# The bookkeeping rules CI enforces — index rows, release counters, infra
+# names, Regression-Test lines, route docs — checked in seconds with the fix
+# printed beside each failure. The pre-push hook and the fast lane's first job
+# run the same script. docs/ci/PAPERWORK.md lists every rule.
+.PHONY: paperwork
+paperwork: ## Fast bookkeeping checks (index rows, counters, names, Regression-Test) with fixes
+	@python3 scripts/paperwork
+
 .PHONY: history-check
 history-check: ## Verify every corrective commit has current regression evidence
 	@scripts/history-audit --report target/validation/history.json
@@ -1132,8 +1140,8 @@ cluster-store-check: ## Run the Store contracts against SQLite and three voters
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test schema_lineage_upgrade -- --test-threads=1
 
-.PHONY: cluster-harness-check
-cluster-harness-check: ## Run replicated growth and topology harness contracts
+.PHONY: cluster-harness-unit-check
+cluster-harness-unit-check: ## Run the embedded replicated harness unit contracts
 	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
 	  tests::a_legacy_launch_retains_the_production_snapshot_policy \
 	  --lib -- --exact
@@ -1154,36 +1162,24 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  storage_evidence::retained_p5_privileged_storage_evidence_matches_the_closed_schema \
 	  --lib -- --exact
+.PHONY: cluster-harness-nonunit-check
+cluster-harness-nonunit-check: ## Run actual replicated harness semantic campaigns
 	$(CARGO) run --locked -p plurx-cluster-check -- check
 	$(CARGO) run --locked -p plurx-cluster-check -- \
 	  topology target/validation/cluster-topology-semantic.json 3,4
 
+.PHONY: cluster-harness-check
+cluster-harness-check: ## Run replicated growth and topology harness contracts
+	$(MAKE) cluster-harness-unit-check CARGO="$(CARGO)"
+	$(MAKE) cluster-harness-nonunit-check CARGO="$(CARGO)"
+
 .PHONY: cluster-transport-recovery-contracts
 cluster-transport-recovery-contracts: ## Run transport recovery schemas, validators, and focused regressions
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=76 scripts/require-test-count $(CARGO) test --locked \
+	PLURX_EXPECT_TEST_COUNT=76 \
+	  PLURX_EXPECT_TEST_NAMES='transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly,transport_recovery::tests::two_early_acknowledgements_cannot_hide_a_long_recovery_gap,transport_recovery::tests::writer_must_cover_the_end_of_recovery,transport_recovery::tests::whole_recovery_duration_cannot_exceed_the_absolute_deadline,transport_recovery::tests::worst_transfer_duration_covers_the_complete_source_series,transport_recovery::tests::artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result,transport_recovery::tests::owned_async_task_growth_has_no_resource_slack' \
+	  scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery --lib
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly \
-	  --lib -- --exact
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::two_early_acknowledgements_cannot_hide_a_long_recovery_gap \
-	  --lib -- --exact
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::writer_must_cover_the_end_of_recovery \
-	  --lib -- --exact
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::whole_recovery_duration_cannot_exceed_the_absolute_deadline \
-	  --lib -- --exact
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::worst_transfer_duration_covers_the_complete_source_series \
-	  --lib -- --exact
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result \
-	  --lib -- --exact
-	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
-	  transport_recovery::tests::owned_async_task_growth_has_no_resource_slack \
-	  --lib -- --exact
 	scripts/require-test-count $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  transport_status::tests::owned_async_task_guard_tracks_abort_safe_lifetime \
@@ -1866,11 +1862,14 @@ uninstall-docker: ## Bring the Compose stack down; .env, the override file, and 
 	@deploy/install docker --uninstall $(INSTALL_FLAGS)
 
 .PHONY: hooks
-hooks: ## Install the lint-and-syntax pre-commit hook
-	@mkdir -p .git/hooks
-	@install -m 0755 scripts/pre-commit .git/hooks/pre-commit
-	@echo "Installed .git/hooks/pre-commit — it runs make precommit-check."
-	@echo "Bypass one run with 'git commit --no-verify'."
+hooks: ## Install the pre-commit (lint) and pre-push (paperwork) hooks, and Ripwire
+	@hooks="$$(git rev-parse --git-path hooks)"; mkdir -p "$$hooks"; \
+	  install -m 0755 scripts/pre-commit "$$hooks/pre-commit"; \
+	  install -m 0755 scripts/pre-push "$$hooks/pre-push"; \
+	  echo "Installed $$hooks/pre-commit (make precommit-check) and $$hooks/pre-push (scripts/paperwork)."
+	@if perl -e 'alarm 30; exec @ARGV' scripts/ripwire setup >/dev/null 2>&1; then echo "Ripwire is installed (scripts/ripwire find '<words>')."; \
+	  else echo "Ripwire setup failed or took over 30 s (offline?); run scripts/ripwire setup when online."; fi
+	@echo "Bypass one run with 'git commit --no-verify' or 'git push --no-verify'."
 
 ## ---- apple clients -----------------------------------------------------
 
@@ -1944,6 +1943,22 @@ android-test: android-image ## Run Android JVM unit tests + lint in the pinned i
 	  -e GRADLE_USER_HOME=/workspace/clients/android/.gradle-validation \
 	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
 	  $(ANDROID_IMAGE) ./gradlew --no-daemon testDebugUnitTest lintDebug
+
+.PHONY: android-unit-compile-lint
+android-unit-compile-lint: android-image ## Compile every JVM test source and lint after authenticated unit adoption
+	docker run --rm --platform $(ANDROID_PLATFORM) \
+	  -u $$(id -u):$$(id -g) -e HOME=/tmp \
+	  -e GRADLE_USER_HOME=/workspace/clients/android/.gradle-validation \
+	  -v "$(CURDIR)":/workspace -w /workspace/clients/android \
+	  $(ANDROID_IMAGE) ./gradlew --no-daemon compileDebugUnitTestKotlin compileDebugUnitTestJavaWithJavac lintDebug
+	@if [ "$${RETAIN_JVM_UNITS:-}" = true ]; then \
+	  docker run --rm --platform $(ANDROID_PLATFORM) \
+	    -u $$(id -u):$$(id -g) -e HOME=/tmp \
+	    -e GITHUB_SHA -e PLURX_RETAINED_UNITS \
+	    -v "$(CURDIR)":/workspace -w /workspace \
+	    $(ANDROID_IMAGE) python3 -m validation.jvm_unit_discovery --verify-adopted \
+	      --source-commit "$$(git rev-parse HEAD)"; \
+	fi
 
 .PHONY: android-instrumentation-build
 android-instrumentation-build: android-image ## Build app + test APKs for an emulator/device run

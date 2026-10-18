@@ -70,7 +70,9 @@ jobs:
   scope:
     name: validation scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 2
+    # Complete retained-evidence authentication exceeds the old two-minute budget.
+    # Use a literal bound instead of relying on expression-level fallback semantics.
+    timeout-minutes: 10
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
       apple: ${{ steps.scope.outputs.apple }}
@@ -91,8 +93,16 @@ jobs:
       retained_units: ${{ steps.retention.outputs.retained_units }}
       retain_rust: ${{ steps.retention.outputs.retain_rust }}
       retain_apple: ${{ steps.retention.outputs.retain_apple }}
+      retain_web_preflight: ${{ steps.retention.outputs.retain_web_preflight }}
       retain_android_jvm: ${{ steps.retention.outputs.retain_android_jvm }}
       retain_android_device: ${{ steps.retention.outputs.retain_android_device }}
+      retain_validation_units: ${{ steps.retention.outputs.retain_validation_units }}
+      retain_operations_units: ${{ steps.retention.outputs.retain_operations_units }}
+      retain_store_contract_units: ${{ steps.retention.outputs.retain_store_contract_units }}
+      retain_wal_units: ${{ steps.retention.outputs.retain_wal_units }}
+      retain_android_jvm_units: ${{ steps.retention.outputs.retain_android_jvm_units }}
+      retain_topology_units: ${{ steps.retention.outputs.retain_topology_units }}
+      retain_transport_units: ${{ steps.retention.outputs.retain_transport_units }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -156,8 +166,14 @@ jobs:
         id: execution_mode
         env:
           REQUESTED_MODE: ${{ vars.CI_EXECUTION_MODE || 'legacy' }}
+          RETAIN_STORE_UNITS: ${{ steps.retention.outputs.retain_store_contract_units }}
         run: |
+          set -euo pipefail
           mode="$(scripts/ci-execution-mode resolve "$REQUESTED_MODE")"
+          if [ "$RETAIN_STORE_UNITS" = true ] && [ "$mode" != legacy ]; then
+            echo "Retained Store units require legacy mode; shards would replay them" >&2
+            exit 1
+          fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
   # A stale counter must fail the aggregate gate without hiding the native test
@@ -237,9 +253,15 @@ jobs:
           PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
         run: make history-check
       - name: Check validation catalog and contract unit tests
+        env:
+          RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}
         run: |
           make validation-lint
-          python3 -m unittest discover -s tests/validation -p 'test_*.py'
+          if [ "$RETAIN_VALIDATION_UNITS" = true ]; then
+            echo "Adopted authenticated complete validation unit discovery"
+          else
+            python3 -m unittest discover -s tests/validation -p 'test_*.py'
+          fi
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -250,11 +272,24 @@ jobs:
           timeout 90s python3 scripts/provision-hiqlite-upstream "$fixture"
           printf 'PLURX_HIQLITE_UPSTREAM_DIR=%s\n' "$fixture" >> "$GITHUB_ENV"
       - name: Check CI, deploy, and shipping contracts
-        run: make operations-check
-      - name: Check the shared player input contract
+        env:
+          RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}
         run: |
-          node tests/playback/player-input-contract.test.js
-          node tests/web/player-dom.test.js
+          if [ "$RETAIN_OPERATIONS_UNITS" = true ]; then
+            echo "Adopted authenticated complete operations unit discovery"
+          else
+            make operations-check
+          fi
+      - name: Check the shared player input contract
+        env:
+          RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}
+        run: |
+          if [ "$RETAIN_WEB_PREFLIGHT" = true ]; then
+            echo "Adopted authenticated complete two-script Node preflight"
+          else
+            node tests/playback/player-input-contract.test.js
+            node tests/web/player-dom.test.js
+          fi
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; runtime and compiler surfaces are skipped."
@@ -266,6 +301,8 @@ jobs:
     # The full unit and SQLite suite continues below; contributors may merge
     # after this compile gate and policy pass, then watch that suite on main.
     if: needs.scope.outputs.rust == 'true'
+    # General executors also reclaim above 4 GiB during the large Rust check.
+    # Share the existing larger-memory topology queue; keep its host bounds.
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     # Full run 5274 exhausted twenty minutes during all-target checking.
     # Match the current bounded effort allowance; keep the same command and
@@ -433,21 +470,31 @@ jobs:
         id: store_contracts
         continue-on-error: true
         shell: bash
+        env:
+          RETAIN_STORE_UNITS: ${{ needs.scope.outputs.retain_store_contract_units }}
+          PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}
         run: |
           set -euo pipefail
           mkdir -p target/validation
-          make cluster-store-check 2>&1 | tee target/validation/cluster-store.log
+          if [ "$RETAIN_STORE_UNITS" = true ]; then
+            echo "command=python3 -m validation.qualification_unit_continuation --compile-units store_contract" >> "$GITHUB_OUTPUT"
+            python3 -m validation.qualification_unit_continuation --compile-units store_contract 2>&1 | tee target/validation/cluster-store.log
+          else
+            echo "command=make cluster-store-check" >> "$GITHUB_OUTPUT"
+            make cluster-store-check 2>&1 | tee target/validation/cluster-store.log
+          fi
       - name: Record the Store lane result
         if: always()
         env:
           LANE_RESULT: ${{ steps.store_contracts.outcome }}
+          LANE_COMMAND: ${{ steps.store_contracts.outputs.command }}
         run: >-
           python3 -m validation.ci_lane_receipt
           --output target/validation/cluster-store-receipt.json
           --log target/validation/cluster-store.log
           --lane cluster-store-legacy
           --result "$LANE_RESULT"
-          --command "make cluster-store-check"
+          --command "$LANE_COMMAND"
       - name: Retain the Store lane log and receipt
         if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -567,13 +614,20 @@ jobs:
         env:
           RUN_CLUSTER_AUTH: ${{ needs.scope.outputs.cluster_auth }}
           RUN_HIQLITE_SPIKE: ${{ needs.scope.outputs.hiqlite_spike }}
+          RETAIN_TOPOLOGY_UNITS: ${{ needs.scope.outputs.retain_topology_units }}
+          PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}
         run: |
           set -euo pipefail
           mkdir -p target/validation
           {
             if [ "$RUN_CLUSTER_AUTH" = true ]; then
               make hiqlite-vendor-clippy
-              make cluster-harness-check
+              if [ "$RETAIN_TOPOLOGY_UNITS" = true ]; then
+                python3 -m validation.qualification_unit_continuation --compile-units topology
+                make cluster-harness-nonunit-check
+              else
+                make cluster-harness-check
+              fi
             fi
             if [ "$RUN_HIQLITE_SPIKE" = true ]; then
               cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml \
@@ -588,6 +642,7 @@ jobs:
           LANE_RESULT: ${{ steps.topology_contracts.outcome }}
           RUN_CLUSTER_AUTH: ${{ needs.scope.outputs.cluster_auth }}
           RUN_HIQLITE_SPIKE: ${{ needs.scope.outputs.hiqlite_spike }}
+          RETAIN_TOPOLOGY_UNITS: ${{ needs.scope.outputs.retain_topology_units }}
         run: |
           set -euo pipefail
           receipt=(
@@ -599,7 +654,12 @@ jobs:
           )
           if [ "$RUN_CLUSTER_AUTH" = true ]; then
             receipt+=(--command "make hiqlite-vendor-clippy")
-            receipt+=(--command "make cluster-harness-check")
+            if [ "$RETAIN_TOPOLOGY_UNITS" = true ]; then
+              receipt+=(--command "python3 -m validation.qualification_unit_continuation --compile-units topology")
+              receipt+=(--command "make cluster-harness-nonunit-check")
+            else
+              receipt+=(--command "make cluster-harness-check")
+            fi
           fi
           if [ "$RUN_HIQLITE_SPIKE" = true ]; then
             receipt+=(
@@ -666,11 +726,20 @@ jobs:
         id: recovery_contracts
         continue-on-error: true
         shell: bash
+        env:
+          RETAIN_TRANSPORT_UNITS: ${{ needs.scope.outputs.retain_transport_units }}
+          PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}
         run: |
           set -euo pipefail
           mkdir -p target/validation
-          make cluster-transport-recovery-contracts \
-            2>&1 | tee target/validation/cluster-transport-recovery-contracts.log
+          {
+            test "$(uname -s)" = Linux
+            if [ "$RETAIN_TRANSPORT_UNITS" = true ]; then
+              python3 -m validation.qualification_unit_continuation --compile-units transport
+            else
+              make cluster-transport-recovery-contracts
+            fi
+          } 2>&1 | tee target/validation/cluster-transport-recovery-contracts.log
       - name: Retain recovery contract logs
         if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -904,18 +973,24 @@ jobs:
         env:
           LANE_RESULT: ${{ steps.transport_recovery.outcome }}
           EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/transport-recovery/plurx-cluster-check
-        run: >-
-          python3 -m validation.ci_lane_receipt
-          --output target/validation/cluster-transport-recovery-receipt.json
-          --log target/validation/cluster-transport-recovery.log
-          --evidence target/validation/cluster-transport-recovery.json
-          --evidence-validator "$EVIDENCE_VALIDATOR"
-          --lane cluster-transport-recovery
-          --result "$LANE_RESULT"
-          --command "make cluster-transport-recovery-contracts"
-          --command "make cluster-transport-recovery-voter-check"
-          --command "make cluster-transport-recovery-learner-check"
-          --command "transport-recovery-assemble"
+          RETAIN_TRANSPORT_UNITS: ${{ needs.scope.outputs.retain_transport_units }}
+        run: |
+          set -euo pipefail
+          unit_command="make cluster-transport-recovery-contracts"
+          if [ "$RETAIN_TRANSPORT_UNITS" = true ]; then
+            unit_command="python3 -m validation.qualification_unit_continuation --compile-units transport"
+          fi
+          python3 -m validation.ci_lane_receipt \
+            --output target/validation/cluster-transport-recovery-receipt.json \
+            --log target/validation/cluster-transport-recovery.log \
+            --evidence target/validation/cluster-transport-recovery.json \
+            --evidence-validator "$EVIDENCE_VALIDATOR" \
+            --lane cluster-transport-recovery \
+            --result "$LANE_RESULT" \
+            --command "$unit_command" \
+            --command "make cluster-transport-recovery-voter-check" \
+            --command "make cluster-transport-recovery-learner-check" \
+            --command "transport-recovery-assemble"
       - name: Retain transport recovery log, receipt, and evidence
         if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -942,6 +1017,7 @@ jobs:
     name: replicated WAL recovery contracts
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
+    # Retained outcomes still require compiling the large current native targets.
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     timeout-minutes: 60
     env:
@@ -956,7 +1032,15 @@ jobs:
         with:
           lane: cluster-wal
       - name: Run exact Hiqlite and WAL recovery regressions
-        run: make cluster-wal-check
+        env:
+          RETAIN_WAL_UNITS: ${{ needs.scope.outputs.retain_wal_units }}
+          PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}
+        run: |
+          if [ "$RETAIN_WAL_UNITS" = true ]; then
+            python3 -m validation.qualification_unit_continuation --compile-units wal
+          else
+            make cluster-wal-check
+          fi
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize
@@ -1322,7 +1406,7 @@ jobs:
   android_jvm:
     name: Android JVM tests and lint
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_jvm == 'true' && needs.scope.outputs.retain_android_jvm != 'true'
+    if: needs.scope.outputs.android_jvm == 'true'
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 20
     steps:
@@ -1357,9 +1441,17 @@ jobs:
           key: gradle-${{ hashFiles('clients/android/build.gradle.kts', 'clients/android/settings.gradle.kts', 'clients/android/app/build.gradle.kts', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-
       - name: Run unit tests and lint in the pinned Android toolchain
+        env:
+          RETAIN_JVM_LANE: ${{ needs.scope.outputs.retain_android_jvm }}
+          RETAIN_JVM_UNITS: ${{ needs.scope.outputs.retain_android_jvm_units }}
+          PLURX_RETAINED_UNITS: ${{ needs.scope.outputs.retained_units }}
         run: |
           mkdir -p target/validation/buildx
-          BUILDX_CONFIG=target/validation/buildx make android-test
+          if [ "$RETAIN_JVM_LANE" = true ] || [ "$RETAIN_JVM_UNITS" = true ]; then
+            BUILDX_CONFIG=target/validation/buildx make android-unit-compile-lint
+          else
+            BUILDX_CONFIG=target/validation/buildx make android-test
+          fi
 
   apple:
     name: Apple iOS + tvOS tests
@@ -1502,10 +1594,16 @@ jobs:
           restore-keys: gradle-
       - name: Build app and instrumentation APKs in the pinned toolchain
         run: make android-instrumentation-build
+      - name: Provision the vendored emulator action runtime
+        uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - name: Install locked emulator action dependencies
+        run: npm ci --prefix .github/actions/android-emulator-ready --ignore-scripts --omit=dev
       - name: Run the Compose and TV focus suite on a disposable emulator
         id: android_instrumentation
         continue-on-error: true
-        uses: https://github.com/reactivecircus/android-emulator-runner@4c44018e59b437e86cdfc41da381398f93ed8808 # v2
+        uses: ./.github/actions/android-emulator-ready
         with:
           # Google's Android TV repository publishes API 36 for both x86 and
           # x86_64 (and none for API 35). The x86_64 guest hangs its QEMU CPU
@@ -1532,12 +1630,11 @@ jobs:
           fi
       - name: Retry a pre-test emulator boot failure once
         if: steps.android_instrumentation.outcome == 'failure' && steps.android_instrumentation_first_attempt.outputs.started == 'false'
-        uses: https://github.com/reactivecircus/android-emulator-runner@4c44018e59b437e86cdfc41da381398f93ed8808 # v2
+        uses: ./.github/actions/android-emulator-ready
         with:
-          # The upstream action checks boot completion and then sends one
-          # unretied unlock command. API 36 can briefly reconnect ADB between
-          # those commands. Retry the disposable AVD only when our script never
-          # started; an instrumentation failure is never retried or hidden.
+          # Retry provisioning or boot failure only when our script never
+          # started. Post-boot readiness has its own bounded stage retries;
+          # an instrumentation failure is never retried or hidden.
           api-level: 36
           target: android-tv
           arch: x86
@@ -1862,7 +1959,8 @@ jobs:
       - android_device
       - package_smoke
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 2
+    # The exact-tree receipt repeats complete live evidence authentication.
+    timeout-minutes: 10
     steps:
       - name: Require every selected job to pass
         env:

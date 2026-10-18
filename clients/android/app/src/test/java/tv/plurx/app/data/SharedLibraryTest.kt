@@ -56,7 +56,7 @@ class SharedLibraryTest {
         val account = client()
         fun floor(): String? {
             var result: String? = null
-            val owned = Net.authenticatedClient { System.nanoTime() / 1_000_000 }.newBuilder().dispatcher(okhttp3.Dispatcher()).connectionPool(okhttp3.ConnectionPool())
+            val owned = Net.authenticatedClient { 0L }.newBuilder().dispatcher(okhttp3.Dispatcher()).connectionPool(okhttp3.ConnectionPool())
                 .eventListener(okhttp3.EventListener.NONE).addInterceptor { chain ->
                     result = chain.request().header("X-Plurx-Read-After")
                     Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")

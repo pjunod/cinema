@@ -162,7 +162,27 @@ WEB_LAYOUT_PATHS = (
 # Swift diff compiles nothing under crates/. Everything else — scripts,
 # deploy, validation, vendor — keeps the Rust lane, because those trees feed
 # build, packaging, or selection behavior the workspace suite pins.
-RUST_EXEMPT_PATHS = ("clients/**",)
+#
+# Agent tooling is the other exemption: these files are read by people and
+# agents, or by the paperwork job, and nothing under crates/, vendor/ or the
+# cargo workspace reads them. A diff confined to them (plus docs) has nothing
+# for the cargo gate to compile. The
+# Makefile and the CI workflows stay routing paths above and still force it,
+# and the Python suites stay out: some of them guard cargo lanes themselves.
+RUST_EXEMPT_PATHS = (
+    "clients/**",
+    ".ignore",
+    "AGENTS.md",
+    "swarm/*.txt",
+    "scripts/paperwork",
+    "scripts/pre-push",
+    "scripts/outline",
+    "scripts/quiet",
+    "scripts/ci-failures",
+    "scripts/ci-failures.fleet.example.json",
+    # Lowering a doc's size ceiling is a docs change; it must not cost a cargo run.
+    "tests/operations/doc-size-allowlist.txt",
+)
 
 # Device tests prove Android UI, focus, and packaging behavior. Server-only
 # changes can select the Android consumer through the impact graph, but they do
@@ -392,10 +412,16 @@ def scope_for_paths(
         check.id for check in selected_checks(catalog, selection, profile="ci")
     }
     point_ids = set(selection.point_ids)
+    # Documentation needs no point: a docs-only diff already skips every lane
+    # above, so a doc riding along with a tooling change must not turn into an
+    # "unknown path" that forces the release build.
     unknown_paths = tuple(
         path
         for path in paths
         if not any(matches(path, point.paths) for point in catalog.points)
+        and not (
+            matches(path, DOCS_ONLY_PATHS) and not matches(path, SHIPPED_SOURCE_PATHS)
+        )
     )
     scope = {
         "rust": needs_rust_gate(paths),

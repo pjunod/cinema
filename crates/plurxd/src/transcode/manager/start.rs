@@ -42,6 +42,15 @@ impl TranscodeManager {
         file_id: i64,
         candidate_context: Option<&super::CandidateExecutionContext>,
     ) -> Result<RollingStartInputs, String> {
+        // The same guard the catalog restore path keeps: a processed candidate
+        // exists only as the prepared VOD graph it was qualified with, and the
+        // rolling engine would serve its recipe identity unprocessed.
+        if candidate_context.is_some_and(|context| context.selected_candidate.processed_hdr10) {
+            return Err(vod_refusal_error(
+                "candidate_recipe_unavailable",
+                "processed candidate requires fresh admitted owner qualification",
+            ));
+        }
         if let Some(snapshot) = candidate_context
             .and_then(|context| context.planning_snapshot.as_ref())
             .filter(|snapshot| snapshot.file.id == file_id)
@@ -1724,6 +1733,7 @@ impl TranscodeManager {
 
         Ok(StartInfo {
             processed_dv_profile: None,
+            degraded_processing: None,
             retained_output: None,
             audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -2513,6 +2523,7 @@ impl TranscodeManager {
 
         Ok(StartInfo {
             processed_dv_profile: None,
+            degraded_processing: None,
             retained_output: None,
             audio_delivery: audio_delivery.cloned(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),

@@ -393,6 +393,53 @@ class ReleaseCutCase(unittest.TestCase):
         self.assertIn("section differs", result.stderr)
 
 
+class HistoryAnchorsSurviveACutCase(unittest.TestCase):
+    """A release cut rewrites every version claim; history anchors must not quote one.
+
+    history-check fails on any regression-registry anchor that no longer
+    occurs in its file. Four anchors quoted the Android README's
+    `**v0.3.0**`, so cutting v0.7.0 turned main's history-check red.
+    """
+
+    @staticmethod
+    def cut_files() -> set[str]:
+        files = {"CHANGELOG.md", "Cargo.toml", release_cut.ANDROID, release_cut.APPLE}
+        files |= {claim[0] for claim in release_cut.VERSION_CLAIMS}
+        return files
+
+    def anchors(self):
+        import tomllib
+
+        registries = [ROOT / "tests" / "client-fixes.toml", ROOT / "validation" / "merge-errata.toml"]
+        registries += sorted((ROOT / "validation" / "regressions.d").glob("*.toml"))
+
+        def walk(node, where):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key.endswith("_anchor") and isinstance(value, str):
+                        yield where, node.get(key[: -len("_anchor")]), key, value
+                    else:
+                        yield from walk(value, where)
+            elif isinstance(node, list):
+                for item in node:
+                    yield from walk(item, where)
+
+        for registry in registries:
+            if registry.exists():
+                yield from walk(tomllib.loads(registry.read_text(encoding="utf-8")), registry.name)
+
+    def test_no_history_anchor_in_a_cut_file_quotes_a_version(self):
+        cut_files = self.cut_files()
+        self.assertIn("clients/android/README.md", cut_files)
+        semver = re.compile(r"(?<![0-9.])[0-9]+\.[0-9]+\.[0-9]+(?![0-9])")
+        offenders = [
+            f"{where}: {path} {key} = {value!r}"
+            for where, path, key, value in self.anchors()
+            if path in cut_files and semver.search(value)
+        ]
+        self.assertEqual(offenders, [], "anchors that a release cut rewrites out from under history-check")
+
+
 class WeeklyTagWorkflowCase(unittest.TestCase):
     """The cadence Paul chose on 2026-09-23: weekly, from a green scheduled run."""
 

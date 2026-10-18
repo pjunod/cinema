@@ -5,6 +5,23 @@ physical/native acceptance and Firefox whole-window evidence remain open · **Wr
 **Source anchor:** `origin/main` at `1b2ae4f62e7d131d18c088a643470e40cdb9789c`
 · **Effort:** `effort/continuous-quality`
 
+## At a glance
+
+<!-- agent head: read this section first; the body below is reference. Keep it current when the status changes. -->
+
+- **What this is:** Implementation contract for changing video quality without a pause, flash or audio seam on every client, web first, then native.
+- **Where it stands:**
+  - Status (written 2026-09-30): implementation landed in PR #774; post-merge qualification resumed; physical/native acceptance and Firefox whole-window evidence remain open.
+  - Per-milestone state lives in the evidence ledger (CQ0-CQ7 have partial results, CQ8 is "Not run"); empty rows are unfinished work. The tail of the file is a dated running log of review rounds and test repairs.
+  - Execution order is CQ0, CQ2a, CQ1, CQ2, CQ3, CQ4, CQ5, CQ6, CQ7, CQ8.
+- **Read further only for:**
+  - what the viewer must get: `## 1. Outcome — changing quality must not restart healthy playback`
+  - how current code falls short, and who decides: `## 2. Current code — the remaining seams are real`; `## 3. Decisions — continuous media and one decision owner`
+  - request settlement, media and wire rules: `## 4. Intent and failure contract — every request settles once`; `## 5. Media contract — one presentation, aligned renditions`; `## 6. Wire and settlement — extending strict readers safely`
+  - web and native client work: `## 7. Client implementation — web first, platform facts preserved`; `## 8. Settings, telemetry and acceptance — prove what the viewer sees`
+  - the task list and its order: `## 9. Milestones — reviewable tasks on one effort branch`
+  - what has actually been proven: `## 10. Evidence ledger — empty rows are unfinished work`
+
 This is the implementation contract for Paul's request to remove the pause,
 flash and audio seam during quality changes on every client, starting with
 the web. Read §2–§5 before building, execute §9 in order, and keep the evidence

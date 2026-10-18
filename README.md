@@ -258,7 +258,8 @@ media tests also need `ffmpeg` and `ffprobe` on `PATH`.
 
 ```bash
 make run                # build and serve on http://localhost:32400
-make hooks              # install the repository's commit checks
+make hooks              # install the commit (lint) and push (paperwork) hooks
+make paperwork          # bookkeeping rules CI enforces, in seconds, with fixes
 make check              # history, operations, catalog, benchmark, and Rust baseline
 make validate-staged    # validate the functionality points affected by staged files
 make                    # list all available targets

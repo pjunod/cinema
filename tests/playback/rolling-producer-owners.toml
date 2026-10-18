@@ -8,6 +8,39 @@
 # methods 767 + 4 = 771; method-spawn 70 + 1 = 71 (HTTPS JoinSet owner plus
 # the F6 fence-loop task); UFCS lifecycle 327 + 1 = 328 (HTTPS Barrier::wait
 # plus the F6 try_wait observation). Scope/patterns/equality stay exact.
+# Current integrated HDR + subtitle ownership census: 968 namespaced tasks,
+# 1784 timers, 272 process constructors, 760 launch-shaped methods,
+# 67 free/UFCS lifecycle calls and 104 kill-on-drop constructors.
+# Both dated ownership reviews below remain; patterns, scope and equality stay.
+
+# R03 task on main-synchronized effort 2b7fd17fc: compose the existing
+# 949 task/1740 timer sites with R03's reviewed +7 task/+8 timer sites.
+# The scan deadline stays captured at catalogue entry alongside the metadata
+# description key; no extra timer or ownership scope is introduced here.
+
+# R03 processed Auto/reopen ownership reconciliation (b647b151f):
+# +7 namespaced task sites: the weak one-shot expiry timer, the weak finite
+# probe expiry timer, cancellation-independent exact probe-reader detach, the
+# bounded ten-second abandoned-instance cleanup, and three test-only owners
+# (catalogue timeout fixture, joined one-shot race threads, joined/cancelled
+# terminal waiter). Timers hold weak graph/token links; the instance allowance
+# bounds physical graphs, and terminal/cancel/expiry retire probe waits before
+# detached cleanup. No new OS child is launched.
+# +8 timer constructors: two strict recovery/link reads within the inherited
+# create deadline, the whole finite refresh on that same deadline, three weak
+# expiry/abandoned-cleanup timers, and two bounded test observations (one-shot
+# expiry and scheduler hold). No timeout supplies completion evidence.
+# The expanded transcode source counts one of those task sites (+1).
+# +1 exact-capture rendition build-gate reference pins only the captured Arc.
+# +4 dormant purge references settle terminal, idle and abandoned private
+# instances plus the unlink/retry fixture; failed physical unlink stays charged.
+# +2 broad lifecycle-method matches are joined test-only Barrier.wait calls;
+# they launch no process. Scan scopes, patterns and equality bars are unchanged.
+# HDR effort main synchronization (main 0da656d3a + effort 998083c85):
+# Preserve R01's joined/cancelled admission owner and three test-only deadline
+# observations alongside main's cluster and HEVC catalog owner changes.
+# Static recount yields 949 namespaced tasks and 1740 timer constructors;
+# no scope, pattern or equality requirement changes. No units executed here.
 # F6 controlled real-media qualification: +1 awaited fence-loop task;
 # +3 awaited sleeps (bounded segment polling, 2468ms loss, stable grace);
 # +2 bounded timeouts for segment observation and independent decode.
@@ -516,7 +549,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # kill_on_drop and registered through output_job_owned. A panic is caught and
 # answers Inconclusive; the verdict and the flight-slot removal are one locked
 # step, so the task always ends its flight and settles every waiter.
-expected_occurrences = 116
+# Merge of main 89d790d2e (#1125) into effort/dv-hdr-repair: both sides
+# raised this count independently; the integrated tree holds effort + main
+# - merge base. No new owner is introduced by the merge itself.
+expected_occurrences = 117
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
@@ -1961,7 +1997,7 @@ pattern = "rendition_build_gate"
 # PR #947 after integrating main 1088d7529: base 30; repair delta +2.
 # Cleanup and conservative cold revalidation take the existing exact-key gate;
 # neither creates a competing build owner.
-expected_occurrences = 32
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -2056,7 +2092,7 @@ pattern = "purge_if_dormant"
 # `dormant_purge_point_precedes_producer_termination` calls `purge_if_dormant` once, test-only,
 # from a task it awaits within a five-second bound. No production caller was added; the
 # settlement owner is unchanged.
-expected_occurrences = 10
+expected_occurrences = 14
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
@@ -2088,6 +2124,9 @@ expected_occurrences = 10
 
 [[module_structures]]
 id = "namespaced-task-spawn"
+# PR1045 review fix: +1 joined test-only releaser task in
+# `processed_preparation_waits_only_for_background_work_that_can_yield`; it
+# frees the held capacity after a short sleep and is awaited by the test.
 # PR947 unit follow-up: one joined test-only blocking worker owns each
 # simulated boot runtime; runtime destruction settles its detached writers
 # before the helper returns its SQLite handle for inspection or restart.
@@ -3008,6 +3047,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # per-process `CoverageRuns` slot (one walk at a time) through a drop guard,
 # so a finished, failed or panicked walk frees it; its stats run in the
 # walk's own bounded AvailabilityCache, never item detail's.
+# R01 HDR admission regression: +1 test-owned tokio task, aborted and
+# awaited before capacity/yield assertions; no detached production owner.
 # Remote diagnostics: +2 read-only snapshot tasks in diagnostics.rs. The
 # collection task drops its peer futures on cancellation or a five-second
 # deadline; the expiry task removes the original job at JOB_TTL or cancellation.
@@ -3036,7 +3077,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # process launch. +1 cancellation regression waiter is aborted and awaited;
 # the test then acquires the worker-held guard to observe completed file work
 # and adoption before temporary directory teardown.
-expected_occurrences = 974
+# Second main merge into the HTTPS effort: main 926046d0d (970) + HTTPS delta (+13) = 983.
+expected_occurrences = 983
+# Integrated ownership: prior HDR960 plus eight awaited subtitle workers.
+# Merge of main 89d790d2e (#1125) into effort/dv-hdr-repair: both sides
+# raised this count independently
+# (effort 968, main 961 via the F6 fence-loop task); the integrated tree holds effort + main
+# - merge base. No new owner is introduced by the merge itself.
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3296,6 +3343,8 @@ expected_occurrences = 15
 
 [[module_structures]]
 id = "namespaced-time-constructor"
+# PR1045 review fix: +1 test-only sleep in the same releaser task
+# (`processed_preparation_waits_only_for_background_work_that_can_yield`).
 # PR947 unit follow-up: the inventory-cancellation regression replaces
 # scheduler-turn counting with one five-second completion deadline and one
 # twenty-millisecond condition poll; all ownership/accounting assertions stay.
@@ -4638,6 +4687,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and their joined futures; cancellation drops it. The full request-chain
 # regression keeps one real ReceiverGuard credit. No production timer,
 # detached task, process or longer input deadline is introduced.
+# R01 HDR admission regression: +3 test-only bounded timeout/sleep calls
+# owned by the test and joined or cancelled before checking permit release.
+# Production reuses its existing absolute deadline and admission poll.
 # Remote diagnostics: +2, the same job's fixed JOB_TTL retention sleep and
 # five-second collection timeout. Cancellation drops each wait; these bound
 # diagnostic storage/collection and never alter playback or authorize retries.
@@ -4681,7 +4733,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # existing real capture and its snapshot-corruption observer. tokio::join!
 # owns both futures inside this test; timeout drops the capture/owned root
 # guard and observer together. No task, process or production timer is added.
-expected_occurrences = 1790
+# Integrated ownership: prior HDR1772 plus twelve bounded subtitle observations.
+# Merge of main 89d790d2e (#1125) into effort/dv-hdr-repair: both sides
+# raised this count independently
+# (effort 1784, main 1778 via the F6 sleeps and timeouts); the integrated tree holds effort + main
+# - merge base. No new owner is introduced by the merge itself.
+# Second main merge into the HTTPS effort: main 926046d0d (1790) + HTTPS delta (+12) = 1802.
+expected_occurrences = 1802
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -6041,7 +6099,12 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # F6 (main #1125): +1 test-only try_wait observation in transcode/tests/chunk_06.rs
 # proving the negative control starts with a live publisher.
 # Both deltas compose: 326 + 1 + 1 = 328.
-expected_occurrences = 328
+# Second main merge into the HTTPS effort: main 926046d0d (329) + HTTPS delta (+1) = 330.
+expected_occurrences = 330
+# Merge of main 89d790d2e (#1125) into effort/dv-hdr-repair: both sides
+# raised this count independently
+# (effort 328, main 327 via the F6 try_wait observation); the integrated tree holds effort + main
+# - merge base. No new owner is introduced by the merge itself.
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;

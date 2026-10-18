@@ -3002,8 +3002,8 @@ catalog|settings-developer@1280x860|dom|details > table|1
 catalog|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|4
 catalog|settings-developer@1280x860|dom|details.setdetails > summary[text]|4
 catalog|settings-developer@1280x860|dom|div > h1[text]|1
-catalog|settings-developer@1280x860|dom|div > h2.section[text]|23
-catalog|settings-developer@1280x860|dom|div > p.sub[text]|23
+catalog|settings-developer@1280x860|dom|div > h2.section[text]|22
+catalog|settings-developer@1280x860|dom|div > p.sub[text]|22
 catalog|settings-developer@1280x860|dom|div > p[text]|1
 catalog|settings-developer@1280x860|dom|div#app > div#pxshell.px-shell|1
 catalog|settings-developer@1280x860|dom|div#cinema-remote-management[role=status] > p[text]|1
@@ -3164,7 +3164,7 @@ catalog|settings-developer@1280x860|dom|div.card.setcard > div#cinema-remote-err
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#cinema-remote-management[role=status]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#daqerr.err[role=alert]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#https-error.err[role=alert]|1
-catalog|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|10
+catalog|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|9
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.devcheck|10
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|2
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|7
@@ -3172,11 +3172,11 @@ catalog|settings-developer@1280x860|dom|div.card.setcard > div.setrow|4
 catalog|settings-developer@1280x860|dom|div.card.setcard > label.chk[text]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > label.setfield|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > label.tog|8
-catalog|settings-developer@1280x860|dom|div.card.setcard > p.devcheck-note.devgrad[text]|9
+catalog|settings-developer@1280x860|dom|div.card.setcard > p.devcheck-note.devgrad[text]|8
 catalog|settings-developer@1280x860|dom|div.card.setcard > p.hint[text]|3
-catalog|settings-developer@1280x860|dom|div.card.setcard > p[text]|6
+catalog|settings-developer@1280x860|dom|div.card.setcard > p[text]|5
 catalog|settings-developer@1280x860|dom|div.cardhead > div.cardtools|15
-catalog|settings-developer@1280x860|dom|div.cardhead > div|23
+catalog|settings-developer@1280x860|dom|div.cardhead > div|22
 catalog|settings-developer@1280x860|dom|div.cardtools > span#aqstate.pill[text]|1
 catalog|settings-developer@1280x860|dom|div.cardtools > span#daqstate.pill[text]|1
 catalog|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|13
@@ -3251,7 +3251,7 @@ catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.activ
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|11
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings-developer@1280x860|dom|p.devcheck-description[text] > a[text]|1
-catalog|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|44
+catalog|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|42
 catalog|settings-developer@1280x860|dom|p.hint[text] > code[text]|2
 catalog|settings-developer@1280x860|dom|p[text] > code[text]|2
 catalog|settings-developer@1280x860|dom|select#vod-output-preparation > option[text]|3
@@ -3295,48 +3295,40 @@ catalog|settings-developer@1280x860|focus|021|button.settab "Sharing"
 catalog|settings-developer@1280x860|focus|022|button.settab.active "Developer"
 catalog|settings-developer@1280x860|focus|023|a "Live TV ↗ On/off, tuner, guide, recording and library cha
 catalog|settings-developer@1280x860|focus|024|a "Playback ↗ Defaults, quality switching, subtitles and del
-catalog|settings-developer@1280x860|focus|025|summary "Saved, desired and active configuration"
-catalog|settings-developer@1280x860|focus|026|input#https-enabled
-catalog|settings-developer@1280x860|focus|027|input#https-port
-catalog|settings-developer@1280x860|focus|028|input#https-cert
-catalog|settings-developer@1280x860|focus|029|input#https-key
-catalog|settings-developer@1280x860|focus|030|textarea#https-sans "127.0.0.1 ::1 localhost"
-catalog|settings-developer@1280x860|focus|031|button "Save HTTPS settings"
-catalog|settings-developer@1280x860|focus|032|button.ghost "Reload this node"
-catalog|settings-developer@1280x860|focus|033|button "Open reporting"
-catalog|settings-developer@1280x860|focus|034|input#jellyfin-compatibility-enabled
-catalog|settings-developer@1280x860|focus|035|summary "Readiness"
-catalog|settings-developer@1280x860|focus|036|input#cinema-sharing-enabled
-catalog|settings-developer@1280x860|focus|037|a "Settings → Sharing"
-catalog|settings-developer@1280x860|focus|038|input#cinema-remote-control
-catalog|settings-developer@1280x860|focus|039|input#cinema-remote-invitations
-catalog|settings-developer@1280x860|focus|040|input#pabr
-catalog|settings-developer@1280x860|focus|041|summary "Requirements and current evidence"
-catalog|settings-developer@1280x860|focus|042|input#pdisplayauto
-catalog|settings-developer@1280x860|focus|043|input#network-priors
-catalog|settings-developer@1280x860|focus|044|input#dv-hdr-processing
-catalog|settings-developer@1280x860|focus|045|input#dv-fel-reencode
-catalog|settings-developer@1280x860|focus|046|input#content-encoding
-catalog|settings-developer@1280x860|focus|047|input#vod-reorder
-catalog|settings-developer@1280x860|focus|048|input#sdr-master-codecs
-catalog|settings-developer@1280x860|focus|049|summary "Readiness — advisory only"
-catalog|settings-developer@1280x860|focus|050|input#hevc-unverified
-catalog|settings-developer@1280x860|focus|051|summary "Requirements for safe use — advisory only"
-catalog|settings-developer@1280x860|focus|052|select#vod-output-preparation "Off Copy Copy and encoded"
-catalog|settings-developer@1280x860|focus|053|input#vod-rolling-retention
-catalog|settings-developer@1280x860|focus|054|input#pmacosvideo
-catalog|settings-developer@1280x860|focus|055|button.ghost.sm "Check compatibility again"
-catalog|settings-developer@1280x860|focus|056|input#pmacoshevc
-catalog|settings-developer@1280x860|focus|057|input#dev-cinema-cec
-catalog|settings-developer@1280x860|focus|058|input#dev-cinema-receiver
-catalog|settings-developer@1280x860|focus|059|input#cinema-screen-name
-catalog|settings-developer@1280x860|focus|060|button.ghost "Register this screen"
-catalog|settings-developer@1280x860|focus|061|button.ghost "Show pairing code"
-catalog|settings-developer@1280x860|focus|062|input#dev-cinema-companion
-catalog|settings-developer@1280x860|focus|063|input#dev-cinema-suggestions
-catalog|settings-developer@1280x860|focus|064|a.ghost "Open phone remote"
-catalog|settings-developer@1280x860|focus|065|button.ghost "Refresh"
-catalog|settings-developer@1280x860|focus|066|<wrap>
+catalog|settings-developer@1280x860|focus|025|button "Open reporting"
+catalog|settings-developer@1280x860|focus|026|input#jellyfin-compatibility-enabled
+catalog|settings-developer@1280x860|focus|027|summary "Readiness"
+catalog|settings-developer@1280x860|focus|028|input#cinema-sharing-enabled
+catalog|settings-developer@1280x860|focus|029|a "Settings → Sharing"
+catalog|settings-developer@1280x860|focus|030|input#cinema-remote-control
+catalog|settings-developer@1280x860|focus|031|input#cinema-remote-invitations
+catalog|settings-developer@1280x860|focus|032|input#pabr
+catalog|settings-developer@1280x860|focus|033|summary "Requirements and current evidence"
+catalog|settings-developer@1280x860|focus|034|input#pdisplayauto
+catalog|settings-developer@1280x860|focus|035|input#network-priors
+catalog|settings-developer@1280x860|focus|036|input#dv-hdr-processing
+catalog|settings-developer@1280x860|focus|037|input#dv-fel-reencode
+catalog|settings-developer@1280x860|focus|038|input#content-encoding
+catalog|settings-developer@1280x860|focus|039|input#vod-reorder
+catalog|settings-developer@1280x860|focus|040|input#sdr-master-codecs
+catalog|settings-developer@1280x860|focus|041|summary "Readiness — advisory only"
+catalog|settings-developer@1280x860|focus|042|input#hevc-unverified
+catalog|settings-developer@1280x860|focus|043|summary "Requirements for safe use — advisory only"
+catalog|settings-developer@1280x860|focus|044|select#vod-output-preparation "Off Copy Copy and encoded"
+catalog|settings-developer@1280x860|focus|045|input#vod-rolling-retention
+catalog|settings-developer@1280x860|focus|046|input#pmacosvideo
+catalog|settings-developer@1280x860|focus|047|button.ghost.sm "Check compatibility again"
+catalog|settings-developer@1280x860|focus|048|input#pmacoshevc
+catalog|settings-developer@1280x860|focus|049|input#dev-cinema-cec
+catalog|settings-developer@1280x860|focus|050|input#dev-cinema-receiver
+catalog|settings-developer@1280x860|focus|051|input#cinema-screen-name
+catalog|settings-developer@1280x860|focus|052|button.ghost "Register this screen"
+catalog|settings-developer@1280x860|focus|053|button.ghost "Show pairing code"
+catalog|settings-developer@1280x860|focus|054|input#dev-cinema-companion
+catalog|settings-developer@1280x860|focus|055|input#dev-cinema-suggestions
+catalog|settings-developer@1280x860|focus|056|a.ghost "Open phone remote"
+catalog|settings-developer@1280x860|focus|057|button.ghost "Refresh"
+catalog|settings-developer@1280x860|focus|058|<wrap>
 catalog|settings-developer@1280x860|req|GET /api/remote/v1/grants|1
 catalog|settings-developer@1280x860|req|GET /api/remote/v1/receivers|1
 catalog|settings-developer@1280x860|req|GET /api/v1/activity|2
@@ -3373,8 +3365,8 @@ catalog|settings-developer@390x780|dom|details > table|1
 catalog|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|4
 catalog|settings-developer@390x780|dom|details.setdetails > summary[text]|4
 catalog|settings-developer@390x780|dom|div > h1[text]|1
-catalog|settings-developer@390x780|dom|div > h2.section[text]|23
-catalog|settings-developer@390x780|dom|div > p.sub[text]|23
+catalog|settings-developer@390x780|dom|div > h2.section[text]|22
+catalog|settings-developer@390x780|dom|div > p.sub[text]|22
 catalog|settings-developer@390x780|dom|div > p[text]|1
 catalog|settings-developer@390x780|dom|div#app > div#pxshell.px-shell|1
 catalog|settings-developer@390x780|dom|div#cinema-remote-management[role=status] > p[text]|1
@@ -3535,7 +3527,7 @@ catalog|settings-developer@390x780|dom|div.card.setcard > div#cinema-remote-erro
 catalog|settings-developer@390x780|dom|div.card.setcard > div#cinema-remote-management[role=status]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div#daqerr.err[role=alert]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div#https-error.err[role=alert]|1
-catalog|settings-developer@390x780|dom|div.card.setcard > div.cardhead|10
+catalog|settings-developer@390x780|dom|div.card.setcard > div.cardhead|9
 catalog|settings-developer@390x780|dom|div.card.setcard > div.devcheck|10
 catalog|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|2
 catalog|settings-developer@390x780|dom|div.card.setcard > div.setfoot|7
@@ -3543,11 +3535,11 @@ catalog|settings-developer@390x780|dom|div.card.setcard > div.setrow|4
 catalog|settings-developer@390x780|dom|div.card.setcard > label.chk[text]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > label.setfield|1
 catalog|settings-developer@390x780|dom|div.card.setcard > label.tog|8
-catalog|settings-developer@390x780|dom|div.card.setcard > p.devcheck-note.devgrad[text]|9
+catalog|settings-developer@390x780|dom|div.card.setcard > p.devcheck-note.devgrad[text]|8
 catalog|settings-developer@390x780|dom|div.card.setcard > p.hint[text]|3
-catalog|settings-developer@390x780|dom|div.card.setcard > p[text]|6
+catalog|settings-developer@390x780|dom|div.card.setcard > p[text]|5
 catalog|settings-developer@390x780|dom|div.cardhead > div.cardtools|15
-catalog|settings-developer@390x780|dom|div.cardhead > div|23
+catalog|settings-developer@390x780|dom|div.cardhead > div|22
 catalog|settings-developer@390x780|dom|div.cardtools > span#aqstate.pill[text]|1
 catalog|settings-developer@390x780|dom|div.cardtools > span#daqstate.pill[text]|1
 catalog|settings-developer@390x780|dom|div.cardtools > span.pill[text]|13
@@ -3622,7 +3614,7 @@ catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|11
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings-developer@390x780|dom|p.devcheck-description[text] > a[text]|1
-catalog|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|44
+catalog|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|42
 catalog|settings-developer@390x780|dom|p.hint[text] > code[text]|2
 catalog|settings-developer@390x780|dom|p[text] > code[text]|2
 catalog|settings-developer@390x780|dom|select#vod-output-preparation > option[text]|3
@@ -3659,55 +3651,47 @@ catalog|settings-developer@390x780|focus|014|button.settab "Sharing"
 catalog|settings-developer@390x780|focus|015|button.settab.active "Developer"
 catalog|settings-developer@390x780|focus|016|a "Live TV ↗ On/off, tuner, guide, recording and library cha
 catalog|settings-developer@390x780|focus|017|a "Playback ↗ Defaults, quality switching, subtitles and del
-catalog|settings-developer@390x780|focus|018|summary "Saved, desired and active configuration"
-catalog|settings-developer@390x780|focus|019|input#https-enabled
-catalog|settings-developer@390x780|focus|020|input#https-port
-catalog|settings-developer@390x780|focus|021|input#https-cert
-catalog|settings-developer@390x780|focus|022|input#https-key
-catalog|settings-developer@390x780|focus|023|textarea#https-sans "127.0.0.1 ::1 localhost"
-catalog|settings-developer@390x780|focus|024|button "Save HTTPS settings"
-catalog|settings-developer@390x780|focus|025|button.ghost "Reload this node"
-catalog|settings-developer@390x780|focus|026|button "Open reporting"
-catalog|settings-developer@390x780|focus|027|input#jellyfin-compatibility-enabled
-catalog|settings-developer@390x780|focus|028|summary "Readiness"
-catalog|settings-developer@390x780|focus|029|input#cinema-sharing-enabled
-catalog|settings-developer@390x780|focus|030|a "Settings → Sharing"
-catalog|settings-developer@390x780|focus|031|input#cinema-remote-control
-catalog|settings-developer@390x780|focus|032|input#cinema-remote-invitations
-catalog|settings-developer@390x780|focus|033|input#pabr
-catalog|settings-developer@390x780|focus|034|summary "Requirements and current evidence"
-catalog|settings-developer@390x780|focus|035|input#pdisplayauto
-catalog|settings-developer@390x780|focus|036|input#network-priors
-catalog|settings-developer@390x780|focus|037|input#dv-hdr-processing
-catalog|settings-developer@390x780|focus|038|input#dv-fel-reencode
-catalog|settings-developer@390x780|focus|039|input#content-encoding
-catalog|settings-developer@390x780|focus|040|input#vod-reorder
-catalog|settings-developer@390x780|focus|041|input#sdr-master-codecs
-catalog|settings-developer@390x780|focus|042|summary "Readiness — advisory only"
-catalog|settings-developer@390x780|focus|043|input#hevc-unverified
-catalog|settings-developer@390x780|focus|044|summary "Requirements for safe use — advisory only"
-catalog|settings-developer@390x780|focus|045|select#vod-output-preparation "Off Copy Copy and encoded"
-catalog|settings-developer@390x780|focus|046|input#vod-rolling-retention
-catalog|settings-developer@390x780|focus|047|input#pmacosvideo
-catalog|settings-developer@390x780|focus|048|button.ghost.sm "Check compatibility again"
-catalog|settings-developer@390x780|focus|049|input#pmacoshevc
-catalog|settings-developer@390x780|focus|050|input#dev-cinema-cec
-catalog|settings-developer@390x780|focus|051|input#dev-cinema-receiver
-catalog|settings-developer@390x780|focus|052|input#cinema-screen-name
-catalog|settings-developer@390x780|focus|053|button.ghost "Register this screen"
-catalog|settings-developer@390x780|focus|054|button.ghost "Show pairing code"
-catalog|settings-developer@390x780|focus|055|input#dev-cinema-companion
-catalog|settings-developer@390x780|focus|056|input#dev-cinema-suggestions
-catalog|settings-developer@390x780|focus|057|a.ghost "Open phone remote"
-catalog|settings-developer@390x780|focus|058|button.ghost "Refresh"
-catalog|settings-developer@390x780|focus|059|a.px-tab "Home"
-catalog|settings-developer@390x780|focus|060|a.px-tab "Channels"
-catalog|settings-developer@390x780|focus|061|a.px-tab "Recordings"
-catalog|settings-developer@390x780|focus|062|button.px-tab "Libraries"
-catalog|settings-developer@390x780|focus|063|button.px-tab "Search"
-catalog|settings-developer@390x780|focus|064|a.px-tab "Shared"
-catalog|settings-developer@390x780|focus|065|a.px-tab "Activity"
-catalog|settings-developer@390x780|focus|066|<wrap>
+catalog|settings-developer@390x780|focus|018|button "Open reporting"
+catalog|settings-developer@390x780|focus|019|input#jellyfin-compatibility-enabled
+catalog|settings-developer@390x780|focus|020|summary "Readiness"
+catalog|settings-developer@390x780|focus|021|input#cinema-sharing-enabled
+catalog|settings-developer@390x780|focus|022|a "Settings → Sharing"
+catalog|settings-developer@390x780|focus|023|input#cinema-remote-control
+catalog|settings-developer@390x780|focus|024|input#cinema-remote-invitations
+catalog|settings-developer@390x780|focus|025|input#pabr
+catalog|settings-developer@390x780|focus|026|summary "Requirements and current evidence"
+catalog|settings-developer@390x780|focus|027|input#pdisplayauto
+catalog|settings-developer@390x780|focus|028|input#network-priors
+catalog|settings-developer@390x780|focus|029|input#dv-hdr-processing
+catalog|settings-developer@390x780|focus|030|input#dv-fel-reencode
+catalog|settings-developer@390x780|focus|031|input#content-encoding
+catalog|settings-developer@390x780|focus|032|input#vod-reorder
+catalog|settings-developer@390x780|focus|033|input#sdr-master-codecs
+catalog|settings-developer@390x780|focus|034|summary "Readiness — advisory only"
+catalog|settings-developer@390x780|focus|035|input#hevc-unverified
+catalog|settings-developer@390x780|focus|036|summary "Requirements for safe use — advisory only"
+catalog|settings-developer@390x780|focus|037|select#vod-output-preparation "Off Copy Copy and encoded"
+catalog|settings-developer@390x780|focus|038|input#vod-rolling-retention
+catalog|settings-developer@390x780|focus|039|input#pmacosvideo
+catalog|settings-developer@390x780|focus|040|button.ghost.sm "Check compatibility again"
+catalog|settings-developer@390x780|focus|041|input#pmacoshevc
+catalog|settings-developer@390x780|focus|042|input#dev-cinema-cec
+catalog|settings-developer@390x780|focus|043|input#dev-cinema-receiver
+catalog|settings-developer@390x780|focus|044|input#cinema-screen-name
+catalog|settings-developer@390x780|focus|045|button.ghost "Register this screen"
+catalog|settings-developer@390x780|focus|046|button.ghost "Show pairing code"
+catalog|settings-developer@390x780|focus|047|input#dev-cinema-companion
+catalog|settings-developer@390x780|focus|048|input#dev-cinema-suggestions
+catalog|settings-developer@390x780|focus|049|a.ghost "Open phone remote"
+catalog|settings-developer@390x780|focus|050|button.ghost "Refresh"
+catalog|settings-developer@390x780|focus|051|a.px-tab "Home"
+catalog|settings-developer@390x780|focus|052|a.px-tab "Channels"
+catalog|settings-developer@390x780|focus|053|a.px-tab "Recordings"
+catalog|settings-developer@390x780|focus|054|button.px-tab "Libraries"
+catalog|settings-developer@390x780|focus|055|button.px-tab "Search"
+catalog|settings-developer@390x780|focus|056|a.px-tab "Shared"
+catalog|settings-developer@390x780|focus|057|a.px-tab "Activity"
+catalog|settings-developer@390x780|focus|058|<wrap>
 catalog|settings-developer@390x780|req|GET /api/remote/v1/grants|1
 catalog|settings-developer@390x780|req|GET /api/remote/v1/receivers|1
 catalog|settings-developer@390x780|req|GET /api/v1/activity|2
@@ -6446,8 +6430,8 @@ classic|settings-developer@1280x860|dom|div > button.ghost.profile.sm|1
 classic|settings-developer@1280x860|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings-developer@1280x860|dom|div > div#profilemenu.amenu|1
 classic|settings-developer@1280x860|dom|div > h1[text]|1
-classic|settings-developer@1280x860|dom|div > h2.section[text]|23
-classic|settings-developer@1280x860|dom|div > p.sub[text]|23
+classic|settings-developer@1280x860|dom|div > h2.section[text]|22
+classic|settings-developer@1280x860|dom|div > p.sub[text]|22
 classic|settings-developer@1280x860|dom|div > p[text]|1
 classic|settings-developer@1280x860|dom|div#app > header.top|1
 classic|settings-developer@1280x860|dom|div#app > main#main|1
@@ -6602,7 +6586,7 @@ classic|settings-developer@1280x860|dom|div.card.setcard > div#cinema-remote-err
 classic|settings-developer@1280x860|dom|div.card.setcard > div#cinema-remote-management[role=status]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div#daqerr.err[role=alert]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div#https-error.err[role=alert]|1
-classic|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|10
+classic|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|9
 classic|settings-developer@1280x860|dom|div.card.setcard > div.devcheck|10
 classic|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|2
 classic|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|7
@@ -6610,11 +6594,11 @@ classic|settings-developer@1280x860|dom|div.card.setcard > div.setrow|4
 classic|settings-developer@1280x860|dom|div.card.setcard > label.chk[text]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > label.setfield|1
 classic|settings-developer@1280x860|dom|div.card.setcard > label.tog|8
-classic|settings-developer@1280x860|dom|div.card.setcard > p.devcheck-note.devgrad[text]|9
+classic|settings-developer@1280x860|dom|div.card.setcard > p.devcheck-note.devgrad[text]|8
 classic|settings-developer@1280x860|dom|div.card.setcard > p.hint[text]|3
-classic|settings-developer@1280x860|dom|div.card.setcard > p[text]|6
+classic|settings-developer@1280x860|dom|div.card.setcard > p[text]|5
 classic|settings-developer@1280x860|dom|div.cardhead > div.cardtools|15
-classic|settings-developer@1280x860|dom|div.cardhead > div|23
+classic|settings-developer@1280x860|dom|div.cardhead > div|22
 classic|settings-developer@1280x860|dom|div.cardtools > span#aqstate.pill[text]|1
 classic|settings-developer@1280x860|dom|div.cardtools > span#daqstate.pill[text]|1
 classic|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|13
@@ -6682,7 +6666,7 @@ classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.activ
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|11
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings-developer@1280x860|dom|p.devcheck-description[text] > a[text]|1
-classic|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|44
+classic|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|42
 classic|settings-developer@1280x860|dom|p.hint[text] > code[text]|2
 classic|settings-developer@1280x860|dom|p[text] > code[text]|2
 classic|settings-developer@1280x860|dom|select#vod-output-preparation > option[text]|3
@@ -6723,48 +6707,40 @@ classic|settings-developer@1280x860|focus|021|button.settab "Sharing"
 classic|settings-developer@1280x860|focus|022|button.settab.active "Developer"
 classic|settings-developer@1280x860|focus|023|a "Live TV ↗ On/off, tuner, guide, recording and library cha
 classic|settings-developer@1280x860|focus|024|a "Playback ↗ Defaults, quality switching, subtitles and del
-classic|settings-developer@1280x860|focus|025|summary "Saved, desired and active configuration"
-classic|settings-developer@1280x860|focus|026|input#https-enabled
-classic|settings-developer@1280x860|focus|027|input#https-port
-classic|settings-developer@1280x860|focus|028|input#https-cert
-classic|settings-developer@1280x860|focus|029|input#https-key
-classic|settings-developer@1280x860|focus|030|textarea#https-sans "127.0.0.1 ::1 localhost"
-classic|settings-developer@1280x860|focus|031|button "Save HTTPS settings"
-classic|settings-developer@1280x860|focus|032|button.ghost "Reload this node"
-classic|settings-developer@1280x860|focus|033|button "Open reporting"
-classic|settings-developer@1280x860|focus|034|input#jellyfin-compatibility-enabled
-classic|settings-developer@1280x860|focus|035|summary "Readiness"
-classic|settings-developer@1280x860|focus|036|input#cinema-sharing-enabled
-classic|settings-developer@1280x860|focus|037|a "Settings → Sharing"
-classic|settings-developer@1280x860|focus|038|input#cinema-remote-control
-classic|settings-developer@1280x860|focus|039|input#cinema-remote-invitations
-classic|settings-developer@1280x860|focus|040|input#pabr
-classic|settings-developer@1280x860|focus|041|summary "Requirements and current evidence"
-classic|settings-developer@1280x860|focus|042|input#pdisplayauto
-classic|settings-developer@1280x860|focus|043|input#network-priors
-classic|settings-developer@1280x860|focus|044|input#dv-hdr-processing
-classic|settings-developer@1280x860|focus|045|input#dv-fel-reencode
-classic|settings-developer@1280x860|focus|046|input#content-encoding
-classic|settings-developer@1280x860|focus|047|input#vod-reorder
-classic|settings-developer@1280x860|focus|048|input#sdr-master-codecs
-classic|settings-developer@1280x860|focus|049|summary "Readiness — advisory only"
-classic|settings-developer@1280x860|focus|050|input#hevc-unverified
-classic|settings-developer@1280x860|focus|051|summary "Requirements for safe use — advisory only"
-classic|settings-developer@1280x860|focus|052|select#vod-output-preparation "Off Copy Copy and encoded"
-classic|settings-developer@1280x860|focus|053|input#vod-rolling-retention
-classic|settings-developer@1280x860|focus|054|input#pmacosvideo
-classic|settings-developer@1280x860|focus|055|button.ghost.sm "Check compatibility again"
-classic|settings-developer@1280x860|focus|056|input#pmacoshevc
-classic|settings-developer@1280x860|focus|057|input#dev-cinema-cec
-classic|settings-developer@1280x860|focus|058|input#dev-cinema-receiver
-classic|settings-developer@1280x860|focus|059|input#cinema-screen-name
-classic|settings-developer@1280x860|focus|060|button.ghost "Register this screen"
-classic|settings-developer@1280x860|focus|061|button.ghost "Show pairing code"
-classic|settings-developer@1280x860|focus|062|input#dev-cinema-companion
-classic|settings-developer@1280x860|focus|063|input#dev-cinema-suggestions
-classic|settings-developer@1280x860|focus|064|a.ghost "Open phone remote"
-classic|settings-developer@1280x860|focus|065|button.ghost "Refresh"
-classic|settings-developer@1280x860|focus|066|<wrap>
+classic|settings-developer@1280x860|focus|025|button "Open reporting"
+classic|settings-developer@1280x860|focus|026|input#jellyfin-compatibility-enabled
+classic|settings-developer@1280x860|focus|027|summary "Readiness"
+classic|settings-developer@1280x860|focus|028|input#cinema-sharing-enabled
+classic|settings-developer@1280x860|focus|029|a "Settings → Sharing"
+classic|settings-developer@1280x860|focus|030|input#cinema-remote-control
+classic|settings-developer@1280x860|focus|031|input#cinema-remote-invitations
+classic|settings-developer@1280x860|focus|032|input#pabr
+classic|settings-developer@1280x860|focus|033|summary "Requirements and current evidence"
+classic|settings-developer@1280x860|focus|034|input#pdisplayauto
+classic|settings-developer@1280x860|focus|035|input#network-priors
+classic|settings-developer@1280x860|focus|036|input#dv-hdr-processing
+classic|settings-developer@1280x860|focus|037|input#dv-fel-reencode
+classic|settings-developer@1280x860|focus|038|input#content-encoding
+classic|settings-developer@1280x860|focus|039|input#vod-reorder
+classic|settings-developer@1280x860|focus|040|input#sdr-master-codecs
+classic|settings-developer@1280x860|focus|041|summary "Readiness — advisory only"
+classic|settings-developer@1280x860|focus|042|input#hevc-unverified
+classic|settings-developer@1280x860|focus|043|summary "Requirements for safe use — advisory only"
+classic|settings-developer@1280x860|focus|044|select#vod-output-preparation "Off Copy Copy and encoded"
+classic|settings-developer@1280x860|focus|045|input#vod-rolling-retention
+classic|settings-developer@1280x860|focus|046|input#pmacosvideo
+classic|settings-developer@1280x860|focus|047|button.ghost.sm "Check compatibility again"
+classic|settings-developer@1280x860|focus|048|input#pmacoshevc
+classic|settings-developer@1280x860|focus|049|input#dev-cinema-cec
+classic|settings-developer@1280x860|focus|050|input#dev-cinema-receiver
+classic|settings-developer@1280x860|focus|051|input#cinema-screen-name
+classic|settings-developer@1280x860|focus|052|button.ghost "Register this screen"
+classic|settings-developer@1280x860|focus|053|button.ghost "Show pairing code"
+classic|settings-developer@1280x860|focus|054|input#dev-cinema-companion
+classic|settings-developer@1280x860|focus|055|input#dev-cinema-suggestions
+classic|settings-developer@1280x860|focus|056|a.ghost "Open phone remote"
+classic|settings-developer@1280x860|focus|057|button.ghost "Refresh"
+classic|settings-developer@1280x860|focus|058|<wrap>
 classic|settings-developer@1280x860|req|GET /api/remote/v1/grants|1
 classic|settings-developer@1280x860|req|GET /api/remote/v1/receivers|1
 classic|settings-developer@1280x860|req|GET /api/v1/activity|2
@@ -6792,8 +6768,8 @@ classic|settings-developer@390x780|dom|div > button.ghost.profile.sm|1
 classic|settings-developer@390x780|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings-developer@390x780|dom|div > div#profilemenu.amenu|1
 classic|settings-developer@390x780|dom|div > h1[text]|1
-classic|settings-developer@390x780|dom|div > h2.section[text]|23
-classic|settings-developer@390x780|dom|div > p.sub[text]|23
+classic|settings-developer@390x780|dom|div > h2.section[text]|22
+classic|settings-developer@390x780|dom|div > p.sub[text]|22
 classic|settings-developer@390x780|dom|div > p[text]|1
 classic|settings-developer@390x780|dom|div#app > header.top|1
 classic|settings-developer@390x780|dom|div#app > main#main|1
@@ -6948,7 +6924,7 @@ classic|settings-developer@390x780|dom|div.card.setcard > div#cinema-remote-erro
 classic|settings-developer@390x780|dom|div.card.setcard > div#cinema-remote-management[role=status]|1
 classic|settings-developer@390x780|dom|div.card.setcard > div#daqerr.err[role=alert]|1
 classic|settings-developer@390x780|dom|div.card.setcard > div#https-error.err[role=alert]|1
-classic|settings-developer@390x780|dom|div.card.setcard > div.cardhead|10
+classic|settings-developer@390x780|dom|div.card.setcard > div.cardhead|9
 classic|settings-developer@390x780|dom|div.card.setcard > div.devcheck|10
 classic|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|2
 classic|settings-developer@390x780|dom|div.card.setcard > div.setfoot|7
@@ -6956,11 +6932,11 @@ classic|settings-developer@390x780|dom|div.card.setcard > div.setrow|4
 classic|settings-developer@390x780|dom|div.card.setcard > label.chk[text]|1
 classic|settings-developer@390x780|dom|div.card.setcard > label.setfield|1
 classic|settings-developer@390x780|dom|div.card.setcard > label.tog|8
-classic|settings-developer@390x780|dom|div.card.setcard > p.devcheck-note.devgrad[text]|9
+classic|settings-developer@390x780|dom|div.card.setcard > p.devcheck-note.devgrad[text]|8
 classic|settings-developer@390x780|dom|div.card.setcard > p.hint[text]|3
-classic|settings-developer@390x780|dom|div.card.setcard > p[text]|6
+classic|settings-developer@390x780|dom|div.card.setcard > p[text]|5
 classic|settings-developer@390x780|dom|div.cardhead > div.cardtools|15
-classic|settings-developer@390x780|dom|div.cardhead > div|23
+classic|settings-developer@390x780|dom|div.cardhead > div|22
 classic|settings-developer@390x780|dom|div.cardtools > span#aqstate.pill[text]|1
 classic|settings-developer@390x780|dom|div.cardtools > span#daqstate.pill[text]|1
 classic|settings-developer@390x780|dom|div.cardtools > span.pill[text]|13
@@ -7028,7 +7004,7 @@ classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|11
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings-developer@390x780|dom|p.devcheck-description[text] > a[text]|1
-classic|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|44
+classic|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|42
 classic|settings-developer@390x780|dom|p.hint[text] > code[text]|2
 classic|settings-developer@390x780|dom|p[text] > code[text]|2
 classic|settings-developer@390x780|dom|select#vod-output-preparation > option[text]|3
@@ -7069,48 +7045,40 @@ classic|settings-developer@390x780|focus|021|button.settab "Sharing"
 classic|settings-developer@390x780|focus|022|button.settab.active "Developer"
 classic|settings-developer@390x780|focus|023|a "Live TV ↗ On/off, tuner, guide, recording and library cha
 classic|settings-developer@390x780|focus|024|a "Playback ↗ Defaults, quality switching, subtitles and del
-classic|settings-developer@390x780|focus|025|summary "Saved, desired and active configuration"
-classic|settings-developer@390x780|focus|026|input#https-enabled
-classic|settings-developer@390x780|focus|027|input#https-port
-classic|settings-developer@390x780|focus|028|input#https-cert
-classic|settings-developer@390x780|focus|029|input#https-key
-classic|settings-developer@390x780|focus|030|textarea#https-sans "127.0.0.1 ::1 localhost"
-classic|settings-developer@390x780|focus|031|button "Save HTTPS settings"
-classic|settings-developer@390x780|focus|032|button.ghost "Reload this node"
-classic|settings-developer@390x780|focus|033|button "Open reporting"
-classic|settings-developer@390x780|focus|034|input#jellyfin-compatibility-enabled
-classic|settings-developer@390x780|focus|035|summary "Readiness"
-classic|settings-developer@390x780|focus|036|input#cinema-sharing-enabled
-classic|settings-developer@390x780|focus|037|a "Settings → Sharing"
-classic|settings-developer@390x780|focus|038|input#cinema-remote-control
-classic|settings-developer@390x780|focus|039|input#cinema-remote-invitations
-classic|settings-developer@390x780|focus|040|input#pabr
-classic|settings-developer@390x780|focus|041|summary "Requirements and current evidence"
-classic|settings-developer@390x780|focus|042|input#pdisplayauto
-classic|settings-developer@390x780|focus|043|input#network-priors
-classic|settings-developer@390x780|focus|044|input#dv-hdr-processing
-classic|settings-developer@390x780|focus|045|input#dv-fel-reencode
-classic|settings-developer@390x780|focus|046|input#content-encoding
-classic|settings-developer@390x780|focus|047|input#vod-reorder
-classic|settings-developer@390x780|focus|048|input#sdr-master-codecs
-classic|settings-developer@390x780|focus|049|summary "Readiness — advisory only"
-classic|settings-developer@390x780|focus|050|input#hevc-unverified
-classic|settings-developer@390x780|focus|051|summary "Requirements for safe use — advisory only"
-classic|settings-developer@390x780|focus|052|select#vod-output-preparation "Off Copy Copy and encoded"
-classic|settings-developer@390x780|focus|053|input#vod-rolling-retention
-classic|settings-developer@390x780|focus|054|input#pmacosvideo
-classic|settings-developer@390x780|focus|055|button.ghost.sm "Check compatibility again"
-classic|settings-developer@390x780|focus|056|input#pmacoshevc
-classic|settings-developer@390x780|focus|057|input#dev-cinema-cec
-classic|settings-developer@390x780|focus|058|input#dev-cinema-receiver
-classic|settings-developer@390x780|focus|059|input#cinema-screen-name
-classic|settings-developer@390x780|focus|060|button.ghost "Register this screen"
-classic|settings-developer@390x780|focus|061|button.ghost "Show pairing code"
-classic|settings-developer@390x780|focus|062|input#dev-cinema-companion
-classic|settings-developer@390x780|focus|063|input#dev-cinema-suggestions
-classic|settings-developer@390x780|focus|064|a.ghost "Open phone remote"
-classic|settings-developer@390x780|focus|065|button.ghost "Refresh"
-classic|settings-developer@390x780|focus|066|<wrap>
+classic|settings-developer@390x780|focus|025|button "Open reporting"
+classic|settings-developer@390x780|focus|026|input#jellyfin-compatibility-enabled
+classic|settings-developer@390x780|focus|027|summary "Readiness"
+classic|settings-developer@390x780|focus|028|input#cinema-sharing-enabled
+classic|settings-developer@390x780|focus|029|a "Settings → Sharing"
+classic|settings-developer@390x780|focus|030|input#cinema-remote-control
+classic|settings-developer@390x780|focus|031|input#cinema-remote-invitations
+classic|settings-developer@390x780|focus|032|input#pabr
+classic|settings-developer@390x780|focus|033|summary "Requirements and current evidence"
+classic|settings-developer@390x780|focus|034|input#pdisplayauto
+classic|settings-developer@390x780|focus|035|input#network-priors
+classic|settings-developer@390x780|focus|036|input#dv-hdr-processing
+classic|settings-developer@390x780|focus|037|input#dv-fel-reencode
+classic|settings-developer@390x780|focus|038|input#content-encoding
+classic|settings-developer@390x780|focus|039|input#vod-reorder
+classic|settings-developer@390x780|focus|040|input#sdr-master-codecs
+classic|settings-developer@390x780|focus|041|summary "Readiness — advisory only"
+classic|settings-developer@390x780|focus|042|input#hevc-unverified
+classic|settings-developer@390x780|focus|043|summary "Requirements for safe use — advisory only"
+classic|settings-developer@390x780|focus|044|select#vod-output-preparation "Off Copy Copy and encoded"
+classic|settings-developer@390x780|focus|045|input#vod-rolling-retention
+classic|settings-developer@390x780|focus|046|input#pmacosvideo
+classic|settings-developer@390x780|focus|047|button.ghost.sm "Check compatibility again"
+classic|settings-developer@390x780|focus|048|input#pmacoshevc
+classic|settings-developer@390x780|focus|049|input#dev-cinema-cec
+classic|settings-developer@390x780|focus|050|input#dev-cinema-receiver
+classic|settings-developer@390x780|focus|051|input#cinema-screen-name
+classic|settings-developer@390x780|focus|052|button.ghost "Register this screen"
+classic|settings-developer@390x780|focus|053|button.ghost "Show pairing code"
+classic|settings-developer@390x780|focus|054|input#dev-cinema-companion
+classic|settings-developer@390x780|focus|055|input#dev-cinema-suggestions
+classic|settings-developer@390x780|focus|056|a.ghost "Open phone remote"
+classic|settings-developer@390x780|focus|057|button.ghost "Refresh"
+classic|settings-developer@390x780|focus|058|<wrap>
 classic|settings-developer@390x780|req|GET /api/remote/v1/grants|1
 classic|settings-developer@390x780|req|GET /api/remote/v1/receivers|1
 classic|settings-developer@390x780|req|GET /api/v1/activity|2
@@ -9840,8 +9808,8 @@ theater|settings-developer@1280x860|dom|details > table|1
 theater|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|4
 theater|settings-developer@1280x860|dom|details.setdetails > summary[text]|4
 theater|settings-developer@1280x860|dom|div > h1[text]|1
-theater|settings-developer@1280x860|dom|div > h2.section[text]|23
-theater|settings-developer@1280x860|dom|div > p.sub[text]|23
+theater|settings-developer@1280x860|dom|div > h2.section[text]|22
+theater|settings-developer@1280x860|dom|div > p.sub[text]|22
 theater|settings-developer@1280x860|dom|div > p[text]|1
 theater|settings-developer@1280x860|dom|div#app > header.th-top|1
 theater|settings-developer@1280x860|dom|div#app > main#main|1
@@ -9997,7 +9965,7 @@ theater|settings-developer@1280x860|dom|div.card.setcard > div#cinema-remote-err
 theater|settings-developer@1280x860|dom|div.card.setcard > div#cinema-remote-management[role=status]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div#daqerr.err[role=alert]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div#https-error.err[role=alert]|1
-theater|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|10
+theater|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|9
 theater|settings-developer@1280x860|dom|div.card.setcard > div.devcheck|10
 theater|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|2
 theater|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|7
@@ -10005,11 +9973,11 @@ theater|settings-developer@1280x860|dom|div.card.setcard > div.setrow|4
 theater|settings-developer@1280x860|dom|div.card.setcard > label.chk[text]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > label.setfield|1
 theater|settings-developer@1280x860|dom|div.card.setcard > label.tog|8
-theater|settings-developer@1280x860|dom|div.card.setcard > p.devcheck-note.devgrad[text]|9
+theater|settings-developer@1280x860|dom|div.card.setcard > p.devcheck-note.devgrad[text]|8
 theater|settings-developer@1280x860|dom|div.card.setcard > p.hint[text]|3
-theater|settings-developer@1280x860|dom|div.card.setcard > p[text]|6
+theater|settings-developer@1280x860|dom|div.card.setcard > p[text]|5
 theater|settings-developer@1280x860|dom|div.cardhead > div.cardtools|15
-theater|settings-developer@1280x860|dom|div.cardhead > div|23
+theater|settings-developer@1280x860|dom|div.cardhead > div|22
 theater|settings-developer@1280x860|dom|div.cardtools > span#aqstate.pill[text]|1
 theater|settings-developer@1280x860|dom|div.cardtools > span#daqstate.pill[text]|1
 theater|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|13
@@ -10082,7 +10050,7 @@ theater|settings-developer@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|6
 theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|6
 theater|settings-developer@1280x860|dom|p.devcheck-description[text] > a[text]|1
-theater|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|44
+theater|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|42
 theater|settings-developer@1280x860|dom|p.hint[text] > code[text]|2
 theater|settings-developer@1280x860|dom|p[text] > code[text]|2
 theater|settings-developer@1280x860|dom|select#vod-output-preparation > option[text]|3
@@ -10123,48 +10091,40 @@ theater|settings-developer@1280x860|focus|021|button.settab "Sharing"
 theater|settings-developer@1280x860|focus|022|button.settab.active "Developer"
 theater|settings-developer@1280x860|focus|023|a "Live TV ↗ On/off, tuner, guide, recording and library cha
 theater|settings-developer@1280x860|focus|024|a "Playback ↗ Defaults, quality switching, subtitles and del
-theater|settings-developer@1280x860|focus|025|summary "Saved, desired and active configuration"
-theater|settings-developer@1280x860|focus|026|input#https-enabled
-theater|settings-developer@1280x860|focus|027|input#https-port
-theater|settings-developer@1280x860|focus|028|input#https-cert
-theater|settings-developer@1280x860|focus|029|input#https-key
-theater|settings-developer@1280x860|focus|030|textarea#https-sans "127.0.0.1 ::1 localhost"
-theater|settings-developer@1280x860|focus|031|button "Save HTTPS settings"
-theater|settings-developer@1280x860|focus|032|button.ghost "Reload this node"
-theater|settings-developer@1280x860|focus|033|button "Open reporting"
-theater|settings-developer@1280x860|focus|034|input#jellyfin-compatibility-enabled
-theater|settings-developer@1280x860|focus|035|summary "Readiness"
-theater|settings-developer@1280x860|focus|036|input#cinema-sharing-enabled
-theater|settings-developer@1280x860|focus|037|a "Settings → Sharing"
-theater|settings-developer@1280x860|focus|038|input#cinema-remote-control
-theater|settings-developer@1280x860|focus|039|input#cinema-remote-invitations
-theater|settings-developer@1280x860|focus|040|input#pabr
-theater|settings-developer@1280x860|focus|041|summary "Requirements and current evidence"
-theater|settings-developer@1280x860|focus|042|input#pdisplayauto
-theater|settings-developer@1280x860|focus|043|input#network-priors
-theater|settings-developer@1280x860|focus|044|input#dv-hdr-processing
-theater|settings-developer@1280x860|focus|045|input#dv-fel-reencode
-theater|settings-developer@1280x860|focus|046|input#content-encoding
-theater|settings-developer@1280x860|focus|047|input#vod-reorder
-theater|settings-developer@1280x860|focus|048|input#sdr-master-codecs
-theater|settings-developer@1280x860|focus|049|summary "Readiness — advisory only"
-theater|settings-developer@1280x860|focus|050|input#hevc-unverified
-theater|settings-developer@1280x860|focus|051|summary "Requirements for safe use — advisory only"
-theater|settings-developer@1280x860|focus|052|select#vod-output-preparation "Off Copy Copy and encoded"
-theater|settings-developer@1280x860|focus|053|input#vod-rolling-retention
-theater|settings-developer@1280x860|focus|054|input#pmacosvideo
-theater|settings-developer@1280x860|focus|055|button.ghost.sm "Check compatibility again"
-theater|settings-developer@1280x860|focus|056|input#pmacoshevc
-theater|settings-developer@1280x860|focus|057|input#dev-cinema-cec
-theater|settings-developer@1280x860|focus|058|input#dev-cinema-receiver
-theater|settings-developer@1280x860|focus|059|input#cinema-screen-name
-theater|settings-developer@1280x860|focus|060|button.ghost "Register this screen"
-theater|settings-developer@1280x860|focus|061|button.ghost "Show pairing code"
-theater|settings-developer@1280x860|focus|062|input#dev-cinema-companion
-theater|settings-developer@1280x860|focus|063|input#dev-cinema-suggestions
-theater|settings-developer@1280x860|focus|064|a.ghost "Open phone remote"
-theater|settings-developer@1280x860|focus|065|button.ghost "Refresh"
-theater|settings-developer@1280x860|focus|066|<wrap>
+theater|settings-developer@1280x860|focus|025|button "Open reporting"
+theater|settings-developer@1280x860|focus|026|input#jellyfin-compatibility-enabled
+theater|settings-developer@1280x860|focus|027|summary "Readiness"
+theater|settings-developer@1280x860|focus|028|input#cinema-sharing-enabled
+theater|settings-developer@1280x860|focus|029|a "Settings → Sharing"
+theater|settings-developer@1280x860|focus|030|input#cinema-remote-control
+theater|settings-developer@1280x860|focus|031|input#cinema-remote-invitations
+theater|settings-developer@1280x860|focus|032|input#pabr
+theater|settings-developer@1280x860|focus|033|summary "Requirements and current evidence"
+theater|settings-developer@1280x860|focus|034|input#pdisplayauto
+theater|settings-developer@1280x860|focus|035|input#network-priors
+theater|settings-developer@1280x860|focus|036|input#dv-hdr-processing
+theater|settings-developer@1280x860|focus|037|input#dv-fel-reencode
+theater|settings-developer@1280x860|focus|038|input#content-encoding
+theater|settings-developer@1280x860|focus|039|input#vod-reorder
+theater|settings-developer@1280x860|focus|040|input#sdr-master-codecs
+theater|settings-developer@1280x860|focus|041|summary "Readiness — advisory only"
+theater|settings-developer@1280x860|focus|042|input#hevc-unverified
+theater|settings-developer@1280x860|focus|043|summary "Requirements for safe use — advisory only"
+theater|settings-developer@1280x860|focus|044|select#vod-output-preparation "Off Copy Copy and encoded"
+theater|settings-developer@1280x860|focus|045|input#vod-rolling-retention
+theater|settings-developer@1280x860|focus|046|input#pmacosvideo
+theater|settings-developer@1280x860|focus|047|button.ghost.sm "Check compatibility again"
+theater|settings-developer@1280x860|focus|048|input#pmacoshevc
+theater|settings-developer@1280x860|focus|049|input#dev-cinema-cec
+theater|settings-developer@1280x860|focus|050|input#dev-cinema-receiver
+theater|settings-developer@1280x860|focus|051|input#cinema-screen-name
+theater|settings-developer@1280x860|focus|052|button.ghost "Register this screen"
+theater|settings-developer@1280x860|focus|053|button.ghost "Show pairing code"
+theater|settings-developer@1280x860|focus|054|input#dev-cinema-companion
+theater|settings-developer@1280x860|focus|055|input#dev-cinema-suggestions
+theater|settings-developer@1280x860|focus|056|a.ghost "Open phone remote"
+theater|settings-developer@1280x860|focus|057|button.ghost "Refresh"
+theater|settings-developer@1280x860|focus|058|<wrap>
 theater|settings-developer@1280x860|req|GET /api/remote/v1/grants|1
 theater|settings-developer@1280x860|req|GET /api/remote/v1/receivers|1
 theater|settings-developer@1280x860|req|GET /api/v1/activity|2
@@ -10188,8 +10148,8 @@ theater|settings-developer@390x780|dom|details > table|1
 theater|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|4
 theater|settings-developer@390x780|dom|details.setdetails > summary[text]|4
 theater|settings-developer@390x780|dom|div > h1[text]|1
-theater|settings-developer@390x780|dom|div > h2.section[text]|23
-theater|settings-developer@390x780|dom|div > p.sub[text]|23
+theater|settings-developer@390x780|dom|div > h2.section[text]|22
+theater|settings-developer@390x780|dom|div > p.sub[text]|22
 theater|settings-developer@390x780|dom|div > p[text]|1
 theater|settings-developer@390x780|dom|div#app > header.th-top|1
 theater|settings-developer@390x780|dom|div#app > main#main|1
@@ -10345,7 +10305,7 @@ theater|settings-developer@390x780|dom|div.card.setcard > div#cinema-remote-erro
 theater|settings-developer@390x780|dom|div.card.setcard > div#cinema-remote-management[role=status]|1
 theater|settings-developer@390x780|dom|div.card.setcard > div#daqerr.err[role=alert]|1
 theater|settings-developer@390x780|dom|div.card.setcard > div#https-error.err[role=alert]|1
-theater|settings-developer@390x780|dom|div.card.setcard > div.cardhead|10
+theater|settings-developer@390x780|dom|div.card.setcard > div.cardhead|9
 theater|settings-developer@390x780|dom|div.card.setcard > div.devcheck|10
 theater|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|2
 theater|settings-developer@390x780|dom|div.card.setcard > div.setfoot|7
@@ -10353,11 +10313,11 @@ theater|settings-developer@390x780|dom|div.card.setcard > div.setrow|4
 theater|settings-developer@390x780|dom|div.card.setcard > label.chk[text]|1
 theater|settings-developer@390x780|dom|div.card.setcard > label.setfield|1
 theater|settings-developer@390x780|dom|div.card.setcard > label.tog|8
-theater|settings-developer@390x780|dom|div.card.setcard > p.devcheck-note.devgrad[text]|9
+theater|settings-developer@390x780|dom|div.card.setcard > p.devcheck-note.devgrad[text]|8
 theater|settings-developer@390x780|dom|div.card.setcard > p.hint[text]|3
-theater|settings-developer@390x780|dom|div.card.setcard > p[text]|6
+theater|settings-developer@390x780|dom|div.card.setcard > p[text]|5
 theater|settings-developer@390x780|dom|div.cardhead > div.cardtools|15
-theater|settings-developer@390x780|dom|div.cardhead > div|23
+theater|settings-developer@390x780|dom|div.cardhead > div|22
 theater|settings-developer@390x780|dom|div.cardtools > span#aqstate.pill[text]|1
 theater|settings-developer@390x780|dom|div.cardtools > span#daqstate.pill[text]|1
 theater|settings-developer@390x780|dom|div.cardtools > span.pill[text]|13
@@ -10430,7 +10390,7 @@ theater|settings-developer@390x780|dom|nav.th-nav[aria-label=*] > a[text]|6
 theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a[text]|6
 theater|settings-developer@390x780|dom|p.devcheck-description[text] > a[text]|1
-theater|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|44
+theater|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|42
 theater|settings-developer@390x780|dom|p.hint[text] > code[text]|2
 theater|settings-developer@390x780|dom|p[text] > code[text]|2
 theater|settings-developer@390x780|dom|select#vod-output-preparation > option[text]|3
@@ -10464,55 +10424,47 @@ theater|settings-developer@390x780|focus|014|button.settab "Sharing"
 theater|settings-developer@390x780|focus|015|button.settab.active "Developer"
 theater|settings-developer@390x780|focus|016|a "Live TV ↗ On/off, tuner, guide, recording and library cha
 theater|settings-developer@390x780|focus|017|a "Playback ↗ Defaults, quality switching, subtitles and del
-theater|settings-developer@390x780|focus|018|summary "Saved, desired and active configuration"
-theater|settings-developer@390x780|focus|019|input#https-enabled
-theater|settings-developer@390x780|focus|020|input#https-port
-theater|settings-developer@390x780|focus|021|input#https-cert
-theater|settings-developer@390x780|focus|022|input#https-key
-theater|settings-developer@390x780|focus|023|textarea#https-sans "127.0.0.1 ::1 localhost"
-theater|settings-developer@390x780|focus|024|button "Save HTTPS settings"
-theater|settings-developer@390x780|focus|025|button.ghost "Reload this node"
-theater|settings-developer@390x780|focus|026|button "Open reporting"
-theater|settings-developer@390x780|focus|027|input#jellyfin-compatibility-enabled
-theater|settings-developer@390x780|focus|028|summary "Readiness"
-theater|settings-developer@390x780|focus|029|input#cinema-sharing-enabled
-theater|settings-developer@390x780|focus|030|a "Settings → Sharing"
-theater|settings-developer@390x780|focus|031|input#cinema-remote-control
-theater|settings-developer@390x780|focus|032|input#cinema-remote-invitations
-theater|settings-developer@390x780|focus|033|input#pabr
-theater|settings-developer@390x780|focus|034|summary "Requirements and current evidence"
-theater|settings-developer@390x780|focus|035|input#pdisplayauto
-theater|settings-developer@390x780|focus|036|input#network-priors
-theater|settings-developer@390x780|focus|037|input#dv-hdr-processing
-theater|settings-developer@390x780|focus|038|input#dv-fel-reencode
-theater|settings-developer@390x780|focus|039|input#content-encoding
-theater|settings-developer@390x780|focus|040|input#vod-reorder
-theater|settings-developer@390x780|focus|041|input#sdr-master-codecs
-theater|settings-developer@390x780|focus|042|summary "Readiness — advisory only"
-theater|settings-developer@390x780|focus|043|input#hevc-unverified
-theater|settings-developer@390x780|focus|044|summary "Requirements for safe use — advisory only"
-theater|settings-developer@390x780|focus|045|select#vod-output-preparation "Off Copy Copy and encoded"
-theater|settings-developer@390x780|focus|046|input#vod-rolling-retention
-theater|settings-developer@390x780|focus|047|input#pmacosvideo
-theater|settings-developer@390x780|focus|048|button.ghost.sm "Check compatibility again"
-theater|settings-developer@390x780|focus|049|input#pmacoshevc
-theater|settings-developer@390x780|focus|050|input#dev-cinema-cec
-theater|settings-developer@390x780|focus|051|input#dev-cinema-receiver
-theater|settings-developer@390x780|focus|052|input#cinema-screen-name
-theater|settings-developer@390x780|focus|053|button.ghost "Register this screen"
-theater|settings-developer@390x780|focus|054|button.ghost "Show pairing code"
-theater|settings-developer@390x780|focus|055|input#dev-cinema-companion
-theater|settings-developer@390x780|focus|056|input#dev-cinema-suggestions
-theater|settings-developer@390x780|focus|057|a.ghost "Open phone remote"
-theater|settings-developer@390x780|focus|058|button.ghost "Refresh"
-theater|settings-developer@390x780|focus|059|a "Home"
-theater|settings-developer@390x780|focus|060|a "Shared libraries"
-theater|settings-developer@390x780|focus|061|a "Live TV"
-theater|settings-developer@390x780|focus|062|a "Recordings"
-theater|settings-developer@390x780|focus|063|a "Library channels"
-theater|settings-developer@390x780|focus|064|a "Activity"
-theater|settings-developer@390x780|focus|065|a.on "Settings"
-theater|settings-developer@390x780|focus|066|<wrap>
+theater|settings-developer@390x780|focus|018|button "Open reporting"
+theater|settings-developer@390x780|focus|019|input#jellyfin-compatibility-enabled
+theater|settings-developer@390x780|focus|020|summary "Readiness"
+theater|settings-developer@390x780|focus|021|input#cinema-sharing-enabled
+theater|settings-developer@390x780|focus|022|a "Settings → Sharing"
+theater|settings-developer@390x780|focus|023|input#cinema-remote-control
+theater|settings-developer@390x780|focus|024|input#cinema-remote-invitations
+theater|settings-developer@390x780|focus|025|input#pabr
+theater|settings-developer@390x780|focus|026|summary "Requirements and current evidence"
+theater|settings-developer@390x780|focus|027|input#pdisplayauto
+theater|settings-developer@390x780|focus|028|input#network-priors
+theater|settings-developer@390x780|focus|029|input#dv-hdr-processing
+theater|settings-developer@390x780|focus|030|input#dv-fel-reencode
+theater|settings-developer@390x780|focus|031|input#content-encoding
+theater|settings-developer@390x780|focus|032|input#vod-reorder
+theater|settings-developer@390x780|focus|033|input#sdr-master-codecs
+theater|settings-developer@390x780|focus|034|summary "Readiness — advisory only"
+theater|settings-developer@390x780|focus|035|input#hevc-unverified
+theater|settings-developer@390x780|focus|036|summary "Requirements for safe use — advisory only"
+theater|settings-developer@390x780|focus|037|select#vod-output-preparation "Off Copy Copy and encoded"
+theater|settings-developer@390x780|focus|038|input#vod-rolling-retention
+theater|settings-developer@390x780|focus|039|input#pmacosvideo
+theater|settings-developer@390x780|focus|040|button.ghost.sm "Check compatibility again"
+theater|settings-developer@390x780|focus|041|input#pmacoshevc
+theater|settings-developer@390x780|focus|042|input#dev-cinema-cec
+theater|settings-developer@390x780|focus|043|input#dev-cinema-receiver
+theater|settings-developer@390x780|focus|044|input#cinema-screen-name
+theater|settings-developer@390x780|focus|045|button.ghost "Register this screen"
+theater|settings-developer@390x780|focus|046|button.ghost "Show pairing code"
+theater|settings-developer@390x780|focus|047|input#dev-cinema-companion
+theater|settings-developer@390x780|focus|048|input#dev-cinema-suggestions
+theater|settings-developer@390x780|focus|049|a.ghost "Open phone remote"
+theater|settings-developer@390x780|focus|050|button.ghost "Refresh"
+theater|settings-developer@390x780|focus|051|a "Home"
+theater|settings-developer@390x780|focus|052|a "Shared libraries"
+theater|settings-developer@390x780|focus|053|a "Live TV"
+theater|settings-developer@390x780|focus|054|a "Recordings"
+theater|settings-developer@390x780|focus|055|a "Library channels"
+theater|settings-developer@390x780|focus|056|a "Activity"
+theater|settings-developer@390x780|focus|057|a.on "Settings"
+theater|settings-developer@390x780|focus|058|<wrap>
 theater|settings-developer@390x780|req|GET /api/remote/v1/grants|1
 theater|settings-developer@390x780|req|GET /api/remote/v1/receivers|1
 theater|settings-developer@390x780|req|GET /api/v1/activity|2

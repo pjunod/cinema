@@ -20,17 +20,13 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `172` — The transport options keep the shared
-> Settings → Info → Picture in picture focus order, followed by Report a problem.
-> Source compilation and emulator qualification are tracked by the HTTPS promotion;
-> physical-device acceptance remains open.
->
-> Build `171` — Authenticated current-account requests
+> Status: **v0.7.0**, build `173` — Authenticated current-account requests
 > echo bounded read-after receipts across the advertised voter cohort;
-> unknown writes retire the floor (#1049). Source qualification only, not yet
-> installed on hardware or qualified against the fleet read-cost target.
+> unknown writes retire the floor (#1049). Sustainable processed HDR10 Auto
+> selection is implemented on the HDR repair effort. Source qualification and
+> physical acceptance remain open for the composed client.
 >
-> Build `168` — Private incident capture, protected account
+> Private incident capture, protected account
 > storage, local ZIP sharing, resumed support delivery and physical-only TV
 > phone approval are implemented. Debug app and regression-source compilation
 > pass; release, runtime/privacy/resource and physical acceptance remain open.

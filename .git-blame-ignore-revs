@@ -1,0 +1,13 @@
+# Commits that only move code between files (no behaviour change).
+# `git blame` skips them when run with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub reads this file automatically.
+
+# Inline test modules moved into their own files
+ca8bcde2dd7e8e31df93370761d5ab48f685de4d
+024570747613da1423b9c74efb0ba22579148101
+6e48f6ff22329fb838ff12778d8761aea4939004
+# Test modules moved out of the remaining large Rust files (2026-10-17)
+1efd7a53585f97908c9f66e474c18c7413166669
+# PlayerController.swift split into three files (2026-10-17)
+74acc315ccbfa81eafa1d17affbc1d7c4db574dd

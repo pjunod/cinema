@@ -1819,6 +1819,7 @@ use crate::queue_fixture::QueueFixture;
             .expect("file");
         let digest = [7; 32];
         let candidate = plurx_core::playback::candidate::QualityCandidate {
+            processed_hdr10: false,
             id: plurx_core::playback::candidate::CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: plurx_core::playback::candidate::CandidateRoute::Encode,
@@ -1895,6 +1896,7 @@ use crate::queue_fixture::QueueFixture;
         let (mgr, _work, _cache) = cached_manager(&store);
         let digest = [9; 32];
         let candidate = plurx_core::playback::candidate::QualityCandidate {
+            processed_hdr10: false,
             id: plurx_core::playback::candidate::CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: plurx_core::playback::candidate::CandidateRoute::Encode,

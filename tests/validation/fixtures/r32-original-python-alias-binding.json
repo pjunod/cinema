@@ -1,0 +1,45 @@
+{
+  "source_commit": "ddf2397a410ef165036a5373717b38539ffc65d3",
+  "tree": "83774027a3d433e94022b972c3c5fe1906eff178",
+  "branch": "effort/dv-hdr-repair",
+  "argv": [
+    "/opt/homebrew/opt/python@3.14/bin/python3.14",
+    "-m",
+    "unittest",
+    "-v",
+    "tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_complete_children_are_independently_verified_with_shared_budgets_and_local_tables",
+    "tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_child_identity_recursion_digest_and_repeated_enrollments_refuse",
+    "tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_foreign_structural_reference_and_conflicting_log_alias_refuse",
+    "tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_inline_slots_and_aggregate_suite_command_and_table_bounds_refuse_before_adoption",
+    "tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_overlapping_lane_command_jvm_and_failed_child_never_publish_a_union",
+    "tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_actual_structural_byte_and_node_budgets_accumulate_across_child_local_decoders"
+  ],
+  "source_archive_sha256": "d1f050f918fda340e4f99c0e60bf790804f9c1f373830dbfb55d49420f74430a",
+  "selection": {
+    "kind": "First execution of six new R32 bundle composition/refusal controls on the integrated main-bound effort",
+    "selectors": [
+      "tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_complete_children_are_independently_verified_with_shared_budgets_and_local_tables",
+      "tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_child_identity_recursion_digest_and_repeated_enrollments_refuse",
+      "tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_foreign_structural_reference_and_conflicting_log_alias_refuse",
+      "tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_inline_slots_and_aggregate_suite_command_and_table_bounds_refuse_before_adoption",
+      "tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_overlapping_lane_command_jvm_and_failed_child_never_publish_a_union",
+      "tests.validation.test_promotion_unit_bundle.PromotionBundleCase.test_actual_structural_byte_and_node_budgets_accumulate_across_child_local_decoders"
+    ],
+    "prior_applicable_passing_bodies_selected": 0,
+    "basis": "All six methods are new in gated PR1094; existing applicable passing controls are retained and unselected."
+  },
+  "selection_sha256": "c3fbb218bd5fd86b4272576a8d3c0cb67f9f1588c919a44b4a43802b318773df",
+  "python_version": "3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]",
+  "python_executable": "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+  "python_binary_sha256": "87d4df53fd91304be5bac391fb204643c36b7df2023c04a0953bcbc7d4fdf634",
+  "platform": "darwin",
+  "node_executable": "/opt/homebrew/Cellar/node/26.8.1/bin/node",
+  "node_version": "v26.8.1",
+  "node_binary_sha256": "902b6a6984d5d825829ea9064ab73b734548df37bc0683990dca31c8dc2a9253",
+  "started_utc": "2026-10-14T05:05:15.366893+00:00",
+  "exit_code": 0,
+  "log_sha256": "e9fd6d5f078f77f7a842908037f4f121196cd545ec0669356f0341f8316a45f6",
+  "source_stable": true,
+  "source_clean_after": true,
+  "finished_utc": "2026-10-14T05:05:15.488667+00:00"
+}
