@@ -6,7 +6,7 @@ import java.util.UUID
 import android.view.View
 import java.lang.ref.WeakReference
 
-internal enum class RemotePresentationKind(val route:String) { Tracks("tracks"), LibraryGroup("library"), ProgrammeDetails("details") }
+internal enum class RemotePresentationKind(val route:String) { Tracks("tracks"), LibraryGroup("library"), ProgrammeDetails("details"), Navigation("library") }
 
 internal class RemoteNavigationCoordinator {
     data class Entry(val identity: String, var label: String, var frame: Rect, val requestFocus: () -> Unit, val deferred: ((RemoteAction) -> RemoteDeferredEffect?)? = null, val activate: () -> RemoteOutcome)
@@ -18,7 +18,7 @@ internal class RemoteNavigationCoordinator {
     var contextRevision by mutableLongStateOf(1); private set
     var focusRevision by mutableLongStateOf(1); private set
     var focusRequestRevision by mutableLongStateOf(1); private set
-    private data class Menu(val token: String, val scope: String, val route: String, val keys: List<String>, val opener: String?, val dismiss: () -> Unit, val realize: ((String)->Unit)?)
+    private data class Menu(val token: String, val scope: String, val route: String, val keys: List<String>, val opener: String?, val dismiss: () -> Unit, val realize: ((String)->Unit)?, val navigation: Boolean)
     private var menu: Menu? = null
     private val ownedWindows = mutableMapOf<String, Pair<String, WeakReference<View>>>()
     private var epoch = UUID.randomUUID().toString()
@@ -35,6 +35,7 @@ internal class RemoteNavigationCoordinator {
     var onHome: (() -> Unit)? = null
     private data class PlayOwner(val scope: String, val token: String, val play: (Long) -> RemoteOutcome)
     private var playOwner: PlayOwner? = null
+    val navigationMenuActive get() = menu?.navigation == true
     val onPlayItem get() = playOwner?.takeIf { it.scope == scope }?.play
     fun registerPlayItem(value: String, token: String, play: (Long) -> RemoteOutcome) { if (value == scope) playOwner = PlayOwner(value, token, play) }
     fun unregisterPlayItem(value: String, token: String) { if (playOwner?.scope == value && playOwner?.token == token) playOwner = null }
@@ -42,15 +43,15 @@ internal class RemoteNavigationCoordinator {
     val context get() = Context(epoch, contextRevision, focusRevision)
     val focusedControl get() = focusedKey
     fun restoreFocus(value: String, key: String?) { if (scope == value && key != null && key in orders[value].orEmpty()) { requestedFocus = key; focusedIdentity = null; focusRevision++; focusRequestRevision++; entries[value]?.get(key)?.requestFocus?.invoke() } }
-    val blocked get() = route !in setOf("home", "library", "details", "search", "playback", "tracks") || restrictions.values.any { it }
+    val blocked get() = if (menu?.navigation == true) false else route !in setOf("home", "library", "details", "search", "playback", "tracks") || restrictions.values.any { it }
     fun windowContextChanged() {
         contextRevision++; focusRevision++; focusedIdentity = null
         if (requestedFocus == null && focusedKey in orders[scope].orEmpty()) requestedFocus = focusedKey
         focusRequestRevision++
     }
     fun enterMenu(token: String, keys: List<String>, kind: RemotePresentationKind = RemotePresentationKind.Tracks, realize: ((String)->Unit)? = null, dismiss: () -> Unit): Boolean {
-        if (blocked || menu != null) return false
-        menu = Menu(token, scope, route, orders[scope].orEmpty(), focusedKey, dismiss, realize)
+        if ((blocked && kind != RemotePresentationKind.Navigation) || menu != null) return false
+        menu = Menu(token, scope, route, orders[scope].orEmpty(), focusedKey, dismiss, realize, kind == RemotePresentationKind.Navigation)
         route = kind.route; focusedKey = null; changedContext(); setOrder(scope, keys, ownedMenu = true)
         requestedFocus = keys.firstOrNull(); focusRequestRevision++
         return true
@@ -60,7 +61,16 @@ internal class RemoteNavigationCoordinator {
     fun closeMenu(token: String) {
         val active = menu?.takeIf { it.token == token } ?: return
         menu = null; ownedWindows.remove(token)
-        if (scope == active.scope) { route = active.route; setOrder(scope, active.keys); changedContext(); focusedKey = null; requestedFocus = active.opener; focusRequestRevision++ }
+        if (scope == active.scope) {
+            route = active.route; setOrder(scope, active.keys); changedContext(); focusedKey = null
+            val visible = active.keys.filter { key -> entries[scope]?.get(key)?.frame?.let { !it.isEmpty && it.overlaps(viewport) } == true }
+            val openerIndex = active.keys.indexOf(active.opener)
+            requestedFocus = if (!active.navigation) active.opener else active.opener?.takeIf { it in visible }
+                ?: active.keys.drop((openerIndex + 1).coerceAtLeast(0)).firstOrNull { it in visible }
+                ?: active.keys.take(openerIndex.coerceAtLeast(0)).lastOrNull { it in visible }
+                ?: visible.firstOrNull()
+            focusRequestRevision++
+        }
     }
     fun ownedWindow(token: String, view: View?) {
         val active = menu?.takeIf { it.token == token && it.scope == scope } ?: return
@@ -143,18 +153,21 @@ internal class RemoteNavigationCoordinator {
     fun clearSearch(value: String, nonce: String) { if (search?.first == value && search?.second == nonce) { search = null; changedContext() } }
     fun snapshot(): Snapshot {
         if (blocked) return Snapshot(context, "restricted", true, null, null, emptyList())
+        if (menu?.navigation == true) return Snapshot(context, "library", false,
+            focusedKey?.takeIf { it in orders[scope].orEmpty() }?.let { entries[scope]?.get(it)?.label }, null, listOf("navigate", "select", "back"))
         val label = focusedKey?.let { entries[scope]?.get(it)?.label }?.let { RemoteWire.safeLabel(it, fallback = "").ifEmpty { null } }
         return Snapshot(context, route, false, label, search?.takeIf { it.first == scope }?.second,
             buildList { if (!orders[scope].isNullOrEmpty()) add("navigate"); add("select"); add("back"); add("home"); if (search?.first == scope) add("text_replace"); if (onPlayItem != null) add("play_item") })
     }
     fun deferred(action: RemoteAction, expected: Context): RemoteDeferredEffect? {
-        if (blocked || expected != context || action.type != "select") return null
+        if (blocked || menu?.navigation == true || expected != context || action.type != "select") return null
         val entry = focusedKey?.let { entries[scope]?.get(it) } ?: return null
         if (requestedFocus != null || entry.identity != focusedIdentity || entry.frame.isEmpty || !entry.frame.overlaps(visibleViewport())) return null
         return entry.deferred?.invoke(action)
     }
     fun dispatch(action: RemoteAction, expected: Context): RemoteOutcome {
         if (blocked) return RemoteOutcome.Restricted
+        if (menu?.navigation == true && action.type !in setOf("navigate", "select", "back")) return RemoteOutcome.Restricted
         if (expected.epoch != epoch || expected.revision != contextRevision) return RemoteOutcome.StaleContext
         when (action.type) {
             "select" -> {

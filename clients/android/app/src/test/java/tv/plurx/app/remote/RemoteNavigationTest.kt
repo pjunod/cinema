@@ -8,6 +8,19 @@ import org.junit.Test
 
 class RemoteNavigationTest {
     private fun action(type: String, direction: String? = null) = RemoteAction(type, buildJsonObject { direction?.let { put("direction", it) } })
+    @Test fun restrictedRouteNavigationMenuCannotGrantContentPlaybackOrTextActions() {
+        val navigation = RemoteNavigationCoordinator()
+        navigation.enter("settings-entry", "restricted") { true }
+        navigation.search("settings-entry", "secret") { error("Must not edit restricted content") }
+        navigation.registerPlayItem("settings-entry", "old") { error("Must not play restricted content") }
+        assertTrue(navigation.enterMenu("rail", listOf("meridian:home"), RemotePresentationKind.Navigation) {})
+        assertEquals(listOf("navigate", "select", "back"), navigation.snapshot().capabilities)
+        assertNull(navigation.snapshot().textNonce)
+        for (type in listOf("play_item", "text_replace", "home")) assertEquals(RemoteOutcome.Restricted, navigation.dispatch(action(type), navigation.context))
+        assertEquals(RemoteOutcome.Applied, navigation.dispatch(action("back"), navigation.context))
+        assertTrue(navigation.snapshot().blocked)
+    }
+
     @Test fun lazyFocusRequestCannotSelectUntilRealizedNativeAcknowledgement() {
         val navigation = RemoteNavigationCoordinator()
         navigation.enter("library", "library") { true }
