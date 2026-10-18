@@ -402,23 +402,45 @@ extension View {
 }
 
 #if os(tvOS)
-/// The tool rail returns Right to the saved content identity. Other directions
-/// retain native movement between its controls.
-private struct RemoteContentReturnAdapter: ViewModifier {
+/// Back from inside a long collection moves focus to its toolbar instead of
+/// leaving the screen. Back from the toolbar is outside this adapter, so the
+/// native pop still happens there.
+private struct RemoteContentBackAdapter: ViewModifier {
     @EnvironmentObject private var navigation: RemoteNavigationCoordinator
     @Environment(\.remoteNavigationScope) private var scope
-    let target: String?
+    let target: String
+    let reveal: () -> Void
     func body(content: Content) -> some View {
-        content.onMoveCommand { direction in
-            guard direction == .right, let target else { return }
+        content.onExitCommand {
             navigation.physicalInput()
+            reveal()
             navigation.focusControl(scope: scope, key: target)
         }
     }
 }
+/// After Back, the toolbar returns Down to the title Back was pressed on,
+/// whatever column sits beneath the focused tool. Other directions, and Down
+/// when no return is pending, stay native.
+private struct RemoteContentReturnAdapter: ViewModifier {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    @Environment(\.remoteNavigationScope) private var scope
+    let target: String?
+    let consumed: () -> Void
+    func body(content: Content) -> some View {
+        content.onMoveCommand { direction in
+            guard direction == .down, let target else { return }
+            navigation.physicalInput()
+            navigation.focusControl(scope: scope, key: target)
+            consumed()
+        }
+    }
+}
 extension View {
-    func remoteContentReturn(to target: String?) -> some View {
-        modifier(RemoteContentReturnAdapter(target: target))
+    func remoteContentReturn(to target: String?, consumed: @escaping () -> Void = {}) -> some View {
+        modifier(RemoteContentReturnAdapter(target: target, consumed: consumed))
+    }
+    func remoteContentBack(to target: String, reveal: @escaping () -> Void = {}) -> some View {
+        modifier(RemoteContentBackAdapter(target: target, reveal: reveal))
     }
 }
 #endif

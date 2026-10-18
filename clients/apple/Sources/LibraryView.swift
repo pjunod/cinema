@@ -31,8 +31,8 @@ struct LibraryView: View {
     @State private var selectedGroup: String?
     @State private var choiceMenu: String?
     @State private var contentBookmark: String?
+    @State private var toolbarReturn: String?
     @State private var contentOwnedFocus = false
-    @State private var toolsOwnedFocus = false
     @State private var preparingJump = false
     @State private var jumpGroups: [LibraryGroup] = []
     @State private var searchNonce = UUID()
@@ -76,11 +76,6 @@ struct LibraryView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            HStack(alignment: .top, spacing: 32) {
-                #if os(tvOS)
-                tvTools
-                    .remoteContentReturn(to: contentBookmark ?? visibleItems.first.map { "item:\($0.id)" })
-                #endif
             VStack(alignment: .leading, spacing: 12) {
                 #if os(tvOS)
                 Text(collection.title).font(.title2.bold()).foregroundStyle(Palette.onBg)
@@ -125,14 +120,34 @@ struct LibraryView: View {
                         Button("Retry") { Task { await state.retry() } }
                     }
                 }
+                #if os(tvOS)
+                tvToolbar
+                    .remoteContentReturn(to: toolbarReturn ?? contentBookmark ?? visibleItems.first.map { "item:\($0.id)" }) { toolbarReturn = nil }
+                #endif
                 ScrollView {
+                    #if os(tvOS)
+                    // However deep the viewer is, one Back returns to the
+                    // toolbar. Back from the toolbar is outside this adapter
+                    // and leaves the library natively.
                     stateContent.padding(.bottom, 36)
+                        .remoteContentBack(to: "library:view") {
+                            // Where Back left the content; Down returns there.
+                            toolbarReturn = contentBookmark
+                        }
+                    #else
+                    stateContent.padding(.bottom, 36)
+                    #endif
                 }
                 .accessibilityIdentifier("library-results")
+                #if os(tvOS)
+                // tvOS focus ignores scroll clipping: titles scrolled up under
+                // the fixed toolbar would otherwise compete for Left/Right.
+                // As its own section, the results are entered only by Down.
+                .focusSection()
+                #endif
                 #if os(iOS)
                 .refreshable { await load() }
                 #endif
-            }
             }
             .padding(.horizontal, screenHPad)
             .background(Palette.bg.ignoresSafeArea())
@@ -170,18 +185,6 @@ struct LibraryView: View {
                 guard remoteNavigation.activeScope == remoteScope,
                       let key = remoteNavigation.focusedKey else { return }
                 contentOwnedFocus = key.hasPrefix("item:")
-                #if os(tvOS)
-                if ["library:view", "library:sort", "library:filter", "library:jump"].contains(key) {
-                    toolsOwnedFocus = true
-                } else if key.hasPrefix("item:"), toolsOwnedFocus {
-                    toolsOwnedFocus = false
-                    if let saved = contentBookmark, saved != key,
-                       visibleItems.contains(where: { "item:\($0.id)" == saved }) {
-                        remoteNavigation.focusControl(scope: remoteScope, key: saved)
-                        return
-                    }
-                }
-                #endif
                 guard key.hasPrefix("item:"),
                       let id = Int(key.dropFirst(5)) else { return }
                 contentBookmark = key
@@ -352,38 +355,32 @@ struct LibraryView: View {
         if remoteNavigation.activeScope == scope { choiceMenu = menu }
     }
     #if os(tvOS)
-    private var tvTools: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            Text("Library tools").font(.headline).foregroundStyle(Palette.muted)
+    /// One compact row under the title, the same size and style as the Live
+    /// TV toolbar. Each control names its current value.
+    private var tvToolbar: some View {
+        HStack(spacing: 16) {
             ForEach(["view", "sort", "filter"], id: \.self) { menu in
                 Button { openChoices(menu) } label: {
-                    VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 10) {
                         Text(menu.capitalized)
                         Text(menu == "view" ? presentation.capitalized : menu == "sort" ? sort.label : filter.label)
-                            .font(.caption).foregroundStyle(Palette.muted).lineLimit(2)
-                    }.frame(maxWidth: .infinity, alignment: .leading)
+                            .foregroundStyle(Palette.muted).lineLimit(1)
+                    }
                 }
-                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
                 .accessibilityIdentifier("library:" + menu)
                 .remoteControl("library:" + menu, label: menu.capitalized) { openChoices(menu) }
             }
             Button { prepareJump() } label: {
                 Text(preparingJump ? "Loading index…" : "Jump to…")
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
                 .disabled(visibleItems.isEmpty)
                 .accessibilityIdentifier("library:jump")
                 .remoteControl("library:jump", label: "Jump to group", enabled: !visibleItems.isEmpty) { prepareJump() }
-            Text("Left from the first title in a row opens these tools. Right returns to your title.")
-                .font(.caption).foregroundStyle(Palette.muted)
             Spacer(minLength: 0)
         }
-        .frame(width: 240)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .padding(.top, 16)
         .focusSection()
-
     }
     #endif
     private func prepareJump() {
