@@ -1,7 +1,8 @@
 # Continuous quality — build uninterrupted resolution changes
 
 **Status:** implementation landed in PR #774; post-merge qualification resumed;
-physical/native acceptance and Firefox whole-window evidence remain open · **Written:** 2026-09-30 ·
+physical/native and independent output acceptance remain open; Firefox browser video
+campaign passes on `89d790d2e` · **Updated:** 2026-10-17 ·
 **Source anchor:** `origin/main` at `1b2ae4f62e7d131d18c088a643470e40cdb9789c`
 · **Effort:** `effort/continuous-quality`
 
@@ -11,7 +12,7 @@ physical/native acceptance and Firefox whole-window evidence remain open · **Wr
 
 - **What this is:** Implementation contract for changing video quality without a pause, flash or audio seam on every client, web first, then native.
 - **Where it stands:**
-  - Status (written 2026-09-30): implementation landed in PR #774; post-merge qualification resumed; physical/native acceptance and Firefox whole-window evidence remain open.
+  - Status (updated 2026-10-17): implementation landed in PR #774; Firefox passes its exact-source browser video campaign. Apple 261 session safety, candidate binding and PiP startup repairs have focused local evidence; isolated HLS acquisition, physical/native acceptance, independent output and promotion remain open.
   - Per-milestone state lives in the evidence ledger (CQ0-CQ7 have partial results, CQ8 is "Not run"); empty rows are unfinished work. The tail of the file is a dated running log of review rounds and test repairs.
   - Execution order is CQ0, CQ2a, CQ1, CQ2, CQ3, CQ4, CQ5, CQ6, CQ7, CQ8.
 - **Read further only for:**
@@ -12084,3 +12085,64 @@ The shipping proxy harness is suspended after the iPad/server-picker and
 TV/sign-in incident. Paul reports that neither screen can be escaped; this
 is an open product bug. No new physical launch or passing acquisition
 campaign is claimed. Harness commit `622141077` is confirmed pushed.
+
+
+### 10.331 Firefox acceptance, session safety and isolated native startup — October 17
+
+Exact `89d790d2e` completed its retained Firefox 158.0 campaign on `lab4` at
+22:42 EDT: fifteen manual changes and five actual Auto transitions
+(1080→720→1080→720→1080) at 100/10/25/10/25 Mb/s. All 5,906 tracked source
+blobs match the baseline, including the qualification harness. The
+[sanitized source-bound receipt](evidence/cq-firefox-20261017.json) preserves
+executable, fixture, harness and browser hashes. Maximum mixed video and
+callback gap is 99.36 ms; p95 video is 84.1 ms and callback 84.08 ms. Four
+dropped frames remain recorded. One session and player serve the campaign,
+with zero wait/reopen events, stalls or hitches. The earlier `lab3` campaign
+remains invalid; no failed receipt is relabelled as a pass.
+
+Owned browser CPUs and daemon/encoder CPUs were disjoint. All 880 supervisor
+samples retain foreign activity; no exclusive CPU reservation is claimed.
+The headless result proves the existing browser video oracle under unchanged
+thresholds, without an independent display or audio-render oracle. The raw
+private archive verifies all 18 retained files and has SHA-256
+`991a0af00b532fe679ab733cbed700b1122614b1cfb8ebfc2d65df1538c85351`.
+The old Firefox lab is removed after a zero-owned-process census; baseline
+binary, ffprobe and fixture remain in a separate owned native lab.
+
+PR #1171's current source repairs saved-session instance/generation ownership,
+installed Auto candidate binding and stale named-successor rejection. The
+selected six-suite iOS run passes 58 cases; the separate unsupported-PiP
+attachment regression passes and eight shaping contracts pass. The PiP loop
+was reproduced in a disposable simulator: repeated support publication
+invalidated SwiftUI at 100% CPU before playback startup could run. Settling
+same-layer unsupported attachment starts playback, but the first MP4 route
+is direct and bypasses shaping. It provides no link-pressure or successor
+acceptance. The preserved comparison baseline is `06235b181` plus that PiP
+repair; controlled HLS baseline/candidate evidence remains pending.
+
+Paul confirmed disabling authentication-free automation mode on October 17.
+The physical sign-in incident's triggering request and the reported UI trap
+remain unconfirmed. Physical proxy launches stay suspended; no new physical
+pass, main merge or installation is claimed. The
+[current Apple investigation](APPLE-AUTO-LOW-LINK-IMPLEMENTATION.md) owns
+remaining evidence and promotion prerequisites.
+
+
+**Integrated local evidence.** After current main integration, 64 selected
+player cases, 15 authentication/home cases and one disposable iPad recovery
+UI case pass; exact integrated iOS/tvOS builds and iOS Release compilation
+also pass. Both TV recovery journeys pass, including native focus and saved-session Retry. The integrated player
+result is `/tmp/cq-main-integrated-player.xcresult`; earlier passing evidence
+and failures remain retained. The interim AAC/DTS HLS runs are invalid: a
+diagnostic daemon restart dropped the bound FFprobe environment, and named
+candidate creation refused the unavailable parser identity before successor
+attachment. This is a lab failure, with no app-regression attribution. The
+corrected lab must pass a named-candidate-bound normal create before a link
+schedule. Physical incident request, valid HLS acquisition acceptance and
+promotion remain unconfirmed.
+
+Request traces distinguish upstream headers from body consumption:
+`headers_at_ms` observes headers, while `first_byte_at_ms` and
+`upstream_end_at_ms` observe consumption inside a backpressured pump rather
+than raw network arrival. Downstream completion includes local shaping;
+these timestamps alone cannot assign upstream production/network delay.

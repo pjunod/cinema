@@ -365,6 +365,7 @@ private struct DetailBreadcrumbLinkStyle: ButtonStyle {
     private struct TVBody: View {
         let configuration: ButtonStyle.Configuration
         @Environment(\.isFocused) private var isFocused
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
             configuration.label
@@ -383,8 +384,9 @@ private struct DetailBreadcrumbLinkStyle: ButtonStyle {
                         )
                 }
                 .contentShape(Capsule())
-                .scaleEffect(configuration.isPressed ? 0.98 : 1)
-                .animation(.easeOut(duration: 0.12), value: isFocused)
+                .scaleEffect(reduceMotion ? 1 : (configuration.isPressed ? 0.98 : 1))
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isFocused)
+                .remoteNativeFocus(isFocused)
         }
     }
     #endif
@@ -694,6 +696,7 @@ struct DetailView: View {
     @State private var remoteChoiceTitle: String?
     @State private var remoteChoices: [RemoteChoice] = []
     @State private var remoteChoiceSource: RemoteOwnedChoiceSource?
+    @State private var aboutPresented = false
     #if os(iOS)
     @State private var downloadBusy = false
     @State private var reader: ReaderContext?
@@ -758,7 +761,7 @@ struct DetailView: View {
         }
         .onChange(of: selectedMediaFileID) { _, _ in remoteNavigation.contextChanged() }
         .onChange(of: pendingTrackSelection) { _, _ in remoteNavigation.contextChanged() }
-        .overlay {
+        .remoteChoicePresentation(isPresented: Binding(get: { remoteChoiceTitle != nil }, set: { if !$0 { remoteChoiceTitle = nil } }), scope: "item:\(itemId):preplay") {
             if let remoteChoiceTitle {
                 RemoteChoicePanel(scope: "item:\(itemId):preplay", title: remoteChoiceTitle, choices: remoteChoices, admission: { [source = remoteChoiceSource] in
                     guard let source, remoteNavigation.activeScope == "item:\(itemId):preplay",
@@ -766,6 +769,9 @@ struct DetailView: View {
                     return nil
                 })
             }
+        }
+        .remoteChoicePresentation(isPresented: $aboutPresented, scope: "item:\(itemId):about") {
+            TVReadableInformation(scope: "item:\(itemId):about", title: detail?.item.title ?? "About", text: detail?.item.overview ?? "")
         }
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
@@ -953,7 +959,14 @@ struct DetailView: View {
             if (detail.files ?? []).count > 1 { keys.append("detail:version") }
             #endif
         }
+        #if os(tvOS)
+        if let overview = detail.item.overview, !overview.isEmpty { keys.append("detail:about") }
+        keys += (detail.children ?? []).flatMap { item in
+            item.kind == "episode" ? ["detail:children:item:\(item.id)", "detail:children:details:\(item.id)"] : ["detail:children:item:\(item.id)"]
+        }
+        #else
         keys += (detail.children ?? []).map { "detail:children:item:\($0.id)" }
+        #endif
         return keys
     }
     private func updateRemoteDetailOrder() {
@@ -1002,13 +1015,15 @@ struct DetailView: View {
     private func trackChoiceControls(_ file: MediaFile) -> some View {
         #if os(tvOS)
         if TrackFacts.audioRows(file).count > 1 {
-            Button("Audio · " + TrackFacts.audioSummary(file, chosen: trackSelection(for: file).audioIndex)) { openPreplayTracks(file, subtitles: false) }
+            Button("Audio") { openPreplayTracks(file, subtitles: false) }
                 .buttonStyle(TVReadableButtonStyle(prominent: false))
+                .accessibilityValue(TrackFacts.audioSummary(file, chosen: trackSelection(for: file).audioIndex))
                 .remoteControl("detail:audio", label: "Choose audio") { openPreplayTracks(file, subtitles: false) }
         }
         if !TrackFacts.subtitleRows(file).isEmpty {
-            Button("Subtitles · " + TrackFacts.subtitleSummary(file, chosen: trackSelection(for: file).subtitleIndex)) { openPreplayTracks(file, subtitles: true) }
+            Button("Subtitles") { openPreplayTracks(file, subtitles: true) }
                 .buttonStyle(TVReadableButtonStyle(prominent: false))
+                .accessibilityValue(TrackFacts.subtitleSummary(file, chosen: trackSelection(for: file).subtitleIndex))
                 .remoteControl("detail:subtitles", label: "Choose subtitles") { openPreplayTracks(file, subtitles: true) }
         }
         #else
@@ -1472,6 +1487,19 @@ struct DetailView: View {
     }
 
     #if os(tvOS)
+    private var aboutButton: some View {
+        Button("About") {
+            remoteNavigation.openModal(scope: "item:\(itemId):about", opener: "detail:about") { aboutPresented = false }
+            aboutPresented = true
+        }
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
+        .accessibilityIdentifier("detail:about")
+        .remoteControl("detail:about", label: "About this title") {
+            remoteNavigation.openModal(scope: "item:\(itemId):about", opener: "detail:about") { aboutPresented = false }
+            aboutPresented = true
+        }
+    }
+
     private func tvPlayableContent(_ detail: ItemDetail) -> some View {
         let item = detail.item
         let ancestors = detail.ancestors ?? []
@@ -1536,6 +1564,7 @@ struct DetailView: View {
                         if !item.isBook {
                             watchButton(detail)
                         }
+                        if let overview = item.overview, !overview.isEmpty { aboutButton }
                     }
                     .padding(.top, 3)
 
@@ -1563,8 +1592,7 @@ struct DetailView: View {
                 .padding(.trailing, 70)
                 .padding(.bottom, TVPlayableDetailMetrics.bottomInset)
             }
-            .frame(height: TVPlayableDetailMetrics.heroHeight)
-            .clipped()
+            .frame(minHeight: TVPlayableDetailMetrics.heroHeight)
             .containerRelativeFrame(.vertical, alignment: .center)
             .tvNavigationFocusSection()
 
@@ -1765,6 +1793,7 @@ struct DetailView: View {
                                     .fixedSize()
                             }
                             watchButton(detail)
+                            if let overview = item.overview, !overview.isEmpty { aboutButton }
                         }
 
                         if let actionError {
@@ -1780,8 +1809,7 @@ struct DetailView: View {
                 .padding(.horizontal, 92)
                 .padding(.vertical, 27)
             }
-            .frame(height: TVSeriesDetailMetrics.headerHeight)
-            .clipped()
+            .frame(minHeight: TVSeriesDetailMetrics.headerHeight)
             // Treat the full-width header as a focus target. Without this, the
             // focus engine cannot find the narrower action buttons when moving
             // up from episodes at the far-right end of the horizontal shelf.

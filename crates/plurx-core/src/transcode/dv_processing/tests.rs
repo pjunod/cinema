@@ -2,6 +2,70 @@ use super::*;
 use std::path::PathBuf;
 
 #[test]
+fn completed_vaapi_policy_separates_backend_identity_without_leaking_to_other_encoders() {
+    use crate::transcode::{Encoder, VaapiHdrPolicy};
+    let plain = backend();
+    let policy = Some(VaapiHdrPolicy::MesaRadeonsiVbaq);
+    assert_ne!(
+        plain.with_completed_encoder_policy(Encoder::Vaapi, policy),
+        plain
+    );
+    assert_eq!(
+        plain.with_completed_encoder_policy(Encoder::Vaapi, policy),
+        plain.with_completed_encoder_policy(Encoder::Vaapi, policy)
+    );
+    assert_eq!(
+        plain.with_completed_encoder_policy(Encoder::Vaapi, None),
+        plain
+    );
+    for encoder in [Encoder::Software, Encoder::Nvenc] {
+        assert_eq!(plain.with_completed_encoder_policy(encoder, policy), plain);
+    }
+}
+
+#[test]
+fn explicit_export_policy_keeps_native_shapes_and_separates_resampling_identity() {
+    let native = (3840, 2160);
+    let export = DvExportPolicy::PqBilinearRgb48V1 {
+        raster: (1280, 720),
+    };
+    assert_eq!(export.raster(native).expect("bounded export"), (1280, 720));
+    assert_eq!(
+        DvExportPolicy::NativeRgb48V1
+            .raster(native)
+            .expect("native"),
+        native
+    );
+    assert_eq!(
+        DvExportPolicy::NativeRgb48V1.target_parameters().as_str(),
+        hex::encode(Sha256::digest(b"bt2020-pq-master-clip-v1"))
+    );
+    assert_ne!(
+        export.target_parameters(),
+        DvExportPolicy::NativeRgb48V1.target_parameters()
+    );
+    assert_ne!(
+        export.target_parameters(),
+        DvExportPolicy::PqBilinearRgb48V1 {
+            raster: (1920, 1080)
+        }
+        .target_parameters()
+    );
+    for raster in [
+        (3842, 2160),
+        (3840, 2162),
+        (1281, 720),
+        (1280, 721),
+        (0, 0),
+        (16, 16),
+    ] {
+        assert!(DvExportPolicy::PqBilinearRgb48V1 { raster }
+            .raster(native)
+            .is_err());
+    }
+}
+
+#[test]
 fn completed_packet_authoring_keeps_base_and_dynamic_association() {
     use crate::fmp4::{self, Unit};
     // Three Main10 pictures encoded at 24000/1001 by the retained x265
@@ -1079,6 +1143,39 @@ fn base_piecewise_rpu_accepts_delta_pivots_and_counts_actual_segments() {
     assert!(!metadata
         .applied_operations
         .contains(&DvOperation::LinearNlqResidual));
+}
+
+#[test]
+fn base_rpu_accepts_signalled_bounded_curve_extents_without_replacing_them() {
+    use dolby_vision::rpu::dovi_rpu::DoviRpu;
+    let fixture = include_bytes!("../../../tests/fixtures/dv-runtime/p8-piecewise.nal");
+    for (first, last_delta) in [(0, 509), (2, 509)] {
+        let mut rpu = DoviRpu::parse_unspec62_nalu(fixture).expect("fixture");
+        let curve = &mut rpu.rpu_data_mapping.as_mut().expect("mapping").curves[0];
+        assert_eq!(curve.pivots, [0, 512, 511]);
+        curve.pivots = vec![first, 512, last_delta];
+        rpu.modified = true;
+        let raw = rpu
+            .write_hevc_unspec62_nalu()
+            .expect("bounded curve serializes");
+        let parsed = DvBaseMetadata::from_raw_rpu(&raw, (64, 64))
+            .expect("public mapper supports bounded extents");
+        assert_eq!(parsed.polynomial_segments, 4);
+        let preserved = DoviRpu::parse_unspec62_nalu(&raw).expect("fresh RPU");
+        assert_eq!(
+            preserved.rpu_data_mapping.expect("mapping").curves[0].pivots,
+            [first, 512, last_delta]
+        );
+    }
+    for pivots in [vec![0, 0, 511], vec![0, 512, 512], vec![513, 512, 1]] {
+        let mut rpu = DoviRpu::parse_unspec62_nalu(fixture).expect("fixture");
+        rpu.rpu_data_mapping.as_mut().expect("mapping").curves[0].pivots = pivots;
+        rpu.modified = true;
+        let raw = rpu
+            .write_hevc_unspec62_nalu()
+            .expect("malformed extent control serializes");
+        assert!(DvBaseMetadata::from_raw_rpu(&raw, (64, 64)).is_err());
+    }
 }
 
 #[test]

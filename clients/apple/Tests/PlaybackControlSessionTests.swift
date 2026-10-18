@@ -92,6 +92,14 @@ private final class SubtitleCallbackQueue: @unchecked Sendable {
         callbacks.append(callback)
     }
 
+    func takeAll() -> [@MainActor @Sendable () -> Void] {
+        lock.lock()
+        defer { lock.unlock() }
+        let batch = callbacks
+        callbacks.removeAll()
+        return batch
+    }
+
     func take() -> (@MainActor @Sendable () -> Void)? {
         lock.lock()
         defer { lock.unlock() }
@@ -557,17 +565,14 @@ final class PlaybackControlSessionTests: XCTestCase {
         // consumed before the readiness edge is introduced.
         _ = try await waitForExchange { $0.sequence == 2 }
         controlAnswer.setReadiness(unavailable ? "unavailable" : "ready")
-        let readinessFloor = controlExchanges.all().map(\.sequence).max() ?? 0
-        session.playerChanged()
-        // The request after this floor captures the new readiness. One more
-        // request proves its response was processed, even if MainActor was
-        // delayed while the reporter advanced. Hold every queued callback,
-        // including processing-status notifications, across the lifecycle
-        // change; the subtitle callback need not be the first one.
-        _ = try await waitForExchange { $0.sequence >= readinessFloor + 2 }
-        var queued: [@MainActor @Sendable () -> Void] = []
-        while let callback = callbacks.take() { queued.append(callback) }
-        XCTAssertFalse(queued.isEmpty, "the real session must schedule callbacks")
+        let requestFloor = await session.reportIntent()
+        let floor = try XCTUnwrap(requestFloor)
+        // onExchange schedules every callback synchronously before another
+        // request starts. N+1 therefore fences the complete response batch
+        // for N, including processing updates before the subtitle edge.
+        _ = try await waitForExchange { $0.sequence >= floor + 1 }
+        let queuedBatch = callbacks.takeAll()
+        XCTAssertFalse(queuedBatch.isEmpty, "the real session must schedule its response batch")
 
         if replaceSession == true {
             var next = sessionBootstrap()
@@ -583,7 +588,7 @@ final class PlaybackControlSessionTests: XCTestCase {
             session.end()
         }
         if newIntent { session.clearVerdict() }
-        for callback in queued { callback() }
+        for callback in queuedBatch { callback() }
         XCTAssertEqual(deliveries, replaceSession == nil && !newIntent ? 1 : 0,
                        "a queued response loses its authority when its reporting session ends")
         if newIntent {

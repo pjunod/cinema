@@ -351,6 +351,13 @@ fn check_streaming_clock(args: &[String], windowed: bool) -> Result<(), String> 
         .ok_or_else(fail)?;
     let clock = format!("1/{scale}");
     let stages: Vec<_> = filters[0][1].split(',').collect();
+    let clock_stage = if stages.last() == Some(&"hwupload=extra_hw_frames=4")
+        && args.windows(2).any(|pair| pair == ["-c:v", "hevc_vaapi"])
+    {
+        stages.get(stages.len().saturating_sub(2))
+    } else {
+        stages.last()
+    };
     if clocks[0][0] != "-enc_time_base:v"
         || clocks[0][1] != clock
         || stages
@@ -364,9 +371,7 @@ fn check_streaming_clock(args: &[String], windowed: bool) -> Result<(), String> 
             .filter(|stage| stage.starts_with("setpts="))
             .count()
             != 1
-        || !stages
-            .last()
-            .is_some_and(|stage| stage.starts_with("setpts=N*"))
+        || !clock_stage.is_some_and(|stage| stage.starts_with("setpts=N*"))
     {
         return Err(fail());
     }
@@ -409,7 +414,10 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
         .ok_or("thread budget overflow")?;
     let codecs: Vec<_> = output.windows(2).filter(|p| p[0] == "-c:v").collect();
     if codecs.len() != 1
-        || !matches!(codecs[0][1].as_str(), "libx265" | "hevc_nvenc")
+        || !matches!(
+            codecs[0][1].as_str(),
+            "libx265" | "hevc_nvenc" | "hevc_vaapi"
+        )
         || args.iter().any(|a| {
             a == "-codec"
                 || a == "-c"
@@ -454,6 +462,45 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
         .windows(2)
         .filter(|p| p[0] == "-x265-params")
         .collect();
+    let policies: Vec<_> = output
+        .windows(2)
+        .filter(|pair| pair[0] == "-compression_level")
+        .collect();
+    if args
+        .iter()
+        .filter(|arg| arg.starts_with("-compression_level"))
+        .count()
+        != policies.len()
+        || policies.len() > 1
+        || policies
+            .first()
+            .is_some_and(|pair| pair[1] != "19" || codecs[0][1] != "hevc_vaapi")
+    {
+        return Err("unsupported or ambiguous completed VAAPI driver policy".into());
+    }
+    if codecs[0][1] == "hevc_vaapi" {
+        let filters: Vec<_> = output.windows(2).filter(|p| p[0] == "-vf").collect();
+        if !params.is_empty()
+            || filters.len() != 1
+            || !filters[0][1].ends_with(",hwupload=extra_hw_frames=4")
+            || !filters[0][1].contains("format=p010le")
+            || [
+                ("-profile:v", "main10"),
+                ("-level:v", "4"),
+                ("-async_depth", "1"),
+                ("-bf", "0"),
+            ]
+            .iter()
+            .any(|(flag, value)| {
+                let occurrences: Vec<_> =
+                    output.windows(2).filter(|pair| pair[0] == *flag).collect();
+                occurrences.len() != 1 || occurrences[0][1] != *value
+            })
+        {
+            return Err("VAAPI requires the bounded P010/Main10/level4 upload graph".into());
+        }
+        return Ok(());
+    }
     if codecs[0][1] == "hevc_nvenc" {
         let surfaces: Vec<_> = output
             .windows(2)
@@ -762,6 +809,37 @@ pub(crate) struct StreamingSegmentRequest {
     pub(crate) renderer_deadline: Instant,
     pub(crate) window: Option<SegmentWindow>,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    pub(crate) export_raster: Option<(u32, u32)>,
+}
+
+#[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
+pub(crate) const STREAMING_DECODER_THREADS: usize = 4;
+
+#[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
+pub(crate) fn streaming_helper_cpu_threads(
+    mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+) -> usize {
+    // Four frame-only decoder workers per native layer, one caller doing
+    // parsing/upload/packing, and one bounded software-Vulkan worker.
+    if mode == plurx_core::transcode::dv_processing::DvProcessingMode::BaseRpu {
+        STREAMING_DECODER_THREADS + 2
+    } else {
+        2 * STREAMING_DECODER_THREADS + 2
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn check_streaming_budget(
+    mode: plurx_core::transcode::dv_processing::DvProcessingMode,
+    args: &[String],
+    cpu: usize,
+) -> Result<(), String> {
+    let helper = streaming_helper_cpu_threads(mode);
+    let encoder = cpu
+        .checked_sub(helper)
+        .filter(|threads| *threads >= 3)
+        .ok_or("concurrent helper and encoder lack their frozen CPU debit")?;
+    check_encoder_budget(args, encoder)
 }
 
 #[cfg(target_os = "linux")]
@@ -817,9 +895,8 @@ async fn run_streaming(
         .ok_or("streaming segment requires concrete GPU admission")?;
     let cpu = held
         .software
-        .filter(|permit| permit.threads() >= 5)
-        .ok_or("concurrent renderer and encoder require at least five admitted CPU threads")?;
-    check_encoder_budget(&request.encoder_args, cpu.threads() - 2)?;
+        .ok_or("concurrent helper and encoder lack their frozen CPU debit")?;
+    check_streaming_budget(stream.mode, &request.encoder_args, cpu.threads())?;
     check_streaming_clock(&request.encoder_args, windowed)?;
     let reservation = request
         .producer
@@ -876,8 +953,23 @@ async fn run_streaming(
     if let Some(window_args) = window_args {
         args.extend(window_args);
     }
-    if base_only {
+    if base_only || stream.export_raster.is_some() {
         args.push("base-rpu".into());
+        if !base_only {
+            *args.last_mut().expect("mode") = "fel".into();
+        }
+    }
+    if let Some((width, height)) = stream.export_raster {
+        plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearRgb48V1 {
+            raster: (width, height),
+        }
+        .raster(request.shape.bl)
+        .map_err(|error| error.to_string())?;
+        args.extend([
+            width.to_string(),
+            height.to_string(),
+            "pq-bilinear-rgb48-v1".into(),
+        ]);
     }
     let renderer_env: Vec<_> = request
         .renderer_env
@@ -1080,6 +1172,7 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
     if streaming {
         #[cfg(target_os = "linux")]
         return spawn_streaming(StreamingSegmentRequest {
+            export_raster: None,
             mode: plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
             request,
             renderer_deadline: Instant::now() + Duration::from_secs(30),
@@ -1210,7 +1303,12 @@ pub(crate) async fn physical_probe() {
     use crate::admission::{Admissions, Priority, TranscodeResourceEstimate};
     use plurx_core::domain::MediaFile;
     let streaming = std::env::var("PLURX_DV_SEGMENT_STREAMING").is_ok_and(|v| v == "1");
-    let cpu_threads = if streaming { 5 } else { 3 };
+    let cpu_threads = if streaming {
+        streaming_helper_cpu_threads(plurx_core::transcode::dv_processing::DvProcessingMode::Fel)
+            + 3
+    } else {
+        3
+    };
     let max_frames = std::env::var("PLURX_DV_SEGMENT_MAX_FRAMES")
         .map(|v| v.parse::<u8>().expect("bounded picture count"))
         .unwrap_or(6);
@@ -1266,7 +1364,11 @@ pub(crate) async fn physical_probe() {
     let estimate = TranscodeResourceEstimate {
         hardware_slot: true,
         cpu_threads,
-        decoder_threads: Some(2),
+        decoder_threads: Some(if streaming {
+            STREAMING_DECODER_THREADS
+        } else {
+            1
+        }),
     };
     let admission = admissions
         .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
@@ -1662,7 +1764,8 @@ mod tests {
         let facts = plurx_core::transcode::DecodeFacts::from_ffprobe_json(
             &serde_json::json!({"streams":[{
                 "index":0,"codec_type":"video","codec_name":"hevc",
-                "profile":if hdr {"Main 10"} else {"Main"},"width":640,"height":360,
+                "profile":if hdr {"Main 10"} else {"Main"},
+                "width":source.width.unwrap_or(640),"height":source.height.unwrap_or(360),
                 "pix_fmt":if hdr {"yuv420p10le"} else {"yuv420p"},"avg_frame_rate":"24/1",
                 "color_transfer":if hdr {"smpte2084"} else {"bt709"},
                 "r_frame_rate":"24/1","sample_aspect_ratio":"1:1","disposition":{"attached_pic":0}
@@ -1710,6 +1813,102 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn reconstructed_vaapi_selection_requires_actual_raster_cadence_and_upload_proof() {
+        use plurx_core::transcode::*;
+        let mut source = encoded_recipe_source(true);
+        source.width = Some(3840);
+        source.height = Some(2160);
+        for height in [720, 1080, 2160] {
+            let options = TranscodeOptions {
+                target_height: height,
+                pipeline: Pipeline::Hdr10Passthrough,
+                ..Default::default()
+            };
+            let (plan, _, _, _) = recipe_fixture_parts(&source, &options);
+            for proved in [false, true] {
+                for rate in [24, 30, 60] {
+                    let actual = crate::vodencode::dv_runtime::completed_window_encoder(
+                        Encoder::Vaapi,
+                        proved,
+                        &plan,
+                        VodFrameGrid::new(rate, 1).expect("grid"),
+                    );
+                    assert_eq!(
+                        actual,
+                        if proved && height <= 1080 && rate <= 30 {
+                            Encoder::Vaapi
+                        } else {
+                            Encoder::Software
+                        },
+                        "{height} {rate} {proved}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn streaming_graph_accounts_every_native_decoder_and_audio_scope() {
+        use plurx_core::transcode::dv_processing::DvProcessingMode;
+        use plurx_core::transcode::*;
+        assert_eq!(STREAMING_DECODER_THREADS, 4);
+        for audio in [false, true] {
+            let mut source = encoded_recipe_source(true);
+            if audio {
+                source.audio_streams = vec![plurx_core::domain::AudioStream {
+                    index: 1,
+                    codec: "aac".into(),
+                    channels: Some(2),
+                    sample_rate: Some(48000),
+                    ..Default::default()
+                }];
+            }
+            let options = TranscodeOptions {
+                pipeline: Pipeline::Hdr10Passthrough,
+                audio_index: audio.then_some(0),
+                ..Default::default()
+            };
+            let (plan, execution, _, _) = recipe_fixture_parts(&source, &options);
+            let output = plan
+                .completed_reconstructed_output(Encoder::Vaapi)
+                .expect("typed Main10 output")
+                .with_vaapi_hdr_policy(Some(VaapiHdrPolicy::MesaRadeonsiVbaq));
+            let args = vod_completed_reconstructed_pipe_args(
+                &source,
+                &output,
+                &execution,
+                VodFrameGrid::new(24, 1).expect("grid"),
+                2.0,
+                &fd(3),
+                &fd(4),
+                VodSourceClock::ReportedOrigin(0),
+            )
+            .expect("production graph");
+            assert_eq!(
+                args.windows(2)
+                    .filter(|pair| pair[0] == "-compression_level")
+                    .map(|pair| pair[1].as_str())
+                    .collect::<Vec<_>>(),
+                ["19"]
+            );
+            for (mode, helper) in [(DvProcessingMode::BaseRpu, 6), (DvProcessingMode::Fel, 10)] {
+                assert_eq!(streaming_helper_cpu_threads(mode), helper);
+                let total = helper + if audio { 5 } else { 3 };
+                assert!(
+                    check_streaming_budget(mode, &args, total).is_ok(),
+                    "{args:?}"
+                );
+                assert!(
+                    check_streaming_budget(mode, &args, total - 1).is_err(),
+                    "every scope must fit before producer reservation"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn reconstructed_builder_clock_passes_adapter_and_rejects_mismatch() {
         use plurx_core::transcode::*;
         let mut source = encoded_recipe_source(true);
@@ -1732,7 +1931,7 @@ mod tests {
         ] {
             execution.start_seconds =
                 384.0 * f64::from(grid.denominator) / f64::from(grid.numerator);
-            for encoder in [Encoder::Software, Encoder::Nvenc] {
+            for encoder in [Encoder::Software, Encoder::Nvenc, Encoder::Vaapi] {
                 let output = plan
                     .completed_reconstructed_output(encoder)
                     .expect("typed output");
@@ -1758,9 +1957,36 @@ mod tests {
                     .any(|p| p[0] == "-enc_time_base:v" && p[1] == expected));
                 let origin = vod_reconstructed_video_origin(grid, 384)
                     .expect("nonzero audio-aligned origin");
-                assert!(args
-                    .iter()
-                    .any(|a| a.ends_with(&format!("setpts=N*{}+{origin}", grid.denominator))));
+                assert!(args.iter().any(|a| {
+                    a.split(',')
+                        .any(|stage| stage == format!("setpts=N*{}+{origin}", grid.denominator))
+                }));
+                if encoder == Encoder::Vaapi {
+                    for (flag, value) in [
+                        ("-async_depth", "0"),
+                        ("-bf", "2"),
+                        ("-profile:v", "main"),
+                        ("-level:v", "5"),
+                    ] {
+                        let mut conflicting = args.clone();
+                        conflicting.extend([flag.into(), value.into()]);
+                        assert!(check_encoder_budget(&conflicting, 5).is_err());
+                        let mut missing = args.clone();
+                        let at = missing
+                            .iter()
+                            .position(|arg| arg == flag)
+                            .expect("bounded option");
+                        missing.drain(at..at + 2);
+                        assert!(check_encoder_budget(&missing, 5).is_err());
+                    }
+                    let mut extra_stage = args.clone();
+                    let at = extra_stage
+                        .iter()
+                        .position(|arg| arg == "-vf")
+                        .expect("filter");
+                    extra_stage[at + 1].push_str(",setpts=PTS");
+                    assert!(check_streaming_clock(&extra_stage, true).is_err());
+                }
                 let mut mismatched = args.clone();
                 let at = mismatched
                     .iter()
@@ -1829,6 +2055,48 @@ mod tests {
         let mut automatic_surfaces = nvenc.clone();
         automatic_surfaces[11] = "0".into();
         assert!(check_encoder_budget(&automatic_surfaces, 3).is_err());
+        let vaapi = [
+            "-threads",
+            "1",
+            "-i",
+            &fd(3),
+            "-filter_threads",
+            "1",
+            "-c:v",
+            "hevc_vaapi",
+            "-threads:v",
+            "1",
+            "-profile:v",
+            "main10",
+            "-level:v",
+            "4",
+            "-async_depth",
+            "1",
+            "-bf",
+            "0",
+            "-vf",
+            "format=p010le,hwupload=extra_hw_frames=4",
+        ]
+        .map(str::to_owned);
+        assert!(check_encoder_budget(&vaapi, 3).is_ok());
+        assert!(check_encoder_budget(&vaapi, 2).is_err());
+        let mut qualified = vaapi.to_vec();
+        qualified.extend(["-compression_level".into(), "19".into()]);
+        assert!(check_encoder_budget(&qualified, 3).is_ok());
+        assert!(check_encoder_budget(&qualified, 2).is_err());
+        for flag in ["-compression_level", "-compression_level:v"] {
+            let mut duplicated = qualified.clone();
+            duplicated.extend([flag.into(), "19".into()]);
+            assert!(check_encoder_budget(&duplicated, 3).is_err());
+        }
+        *qualified.last_mut().expect("policy") = "20".into();
+        assert!(check_encoder_budget(&qualified, 3).is_err());
+        let mut wrong_encoder = nvenc.to_vec();
+        wrong_encoder.extend(["-compression_level".into(), "19".into()]);
+        assert!(check_encoder_budget(&wrong_encoder, 3).is_err());
+        let mut unbounded = vaapi.clone();
+        *unbounded.last_mut().expect("upload") = "format=p010le,hwupload=extra_hw_frames=0".into();
+        assert!(check_encoder_budget(&unbounded, 3).is_err());
         let duplicate_input = [
             "-threads",
             "1",

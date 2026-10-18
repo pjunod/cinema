@@ -1,16 +1,20 @@
 # Progressive subtitle translation — build English captions during playback
 
-**Status:** parent and independent engine reviewed R1–R9 design; implementation
-is authorized after the prerequisite gates below · **Requested:** 2026-10-15 ·
-**Draft base:** `73788aa88` · **Execution prerequisites:** complete the current
-subtitle usability effort, rebase to its qualified interfaces, and review the
-measured P0/P1 contracts before production implementation.
+**Status:** first route built and accepted (web direct playback, one audio
+stream, explicit spoken language); native, multi-audio, encoded, fleet,
+long-film and broader human-quality qualification remain open ·
+**Requested:** 2026-10-15 · **Execution base:** main `89d790d2` (frozen candidate
+`01d8911f` on `b2d83ae8`, see the [completion record](PROGRESSIVE-SUBTITLE-TRANSLATION-LEDGER.md)) · **Effort:** `effort/progressive-subtitle-translation`.
+Parent and independent engine reviewed R1–R9 design. Settings → Playback
+holds the permanent enable and model setup; it left Developer after the
+packaged acceptance in the [completion record](PROGRESSIVE-SUBTITLE-TRANSLATION-LEDGER.md).
 
 Companion to [offline generation](SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md):
 that effort installs a model and publishes complete same-language captions.
 This plan answers a different question: how you watch foreign-language audio
 while English captions become available progressively, without terminal setup
-or restarting the picture. Work milestone by milestone. If this requires
+or restarting the picture. Freeze P0/P1, then integrate P2–P5 as one
+compiling task with exclusive file ownership. If this requires
 weakening source, publication, playback-owner or resource-admission fences,
 stop and review the contract change before implementing it.
 
@@ -94,12 +98,42 @@ processes; it does not offer a reusable rolling recognizer state.
 
 ### 2.1 The experiment records latency, cost and correctness separately
 
-Use rights-clear speech in at least three supported source languages,
-including one with a different writing system. Include silence, music,
-multiple speakers, accented speech, fast dialogue, sentence boundaries,
-forced captions and a film-length fixture. Record exact source hashes,
-model/engine/package hashes, native platform, CPU/threads, memory, power mode,
-foreground delivery type and concurrency. Do not extrapolate ARM64 to x86.
+The finite experiment completed 18 explicitly approved attempts, including
+pressure-aborted and failed attempts retained in the receipt. Publisher
+references were paired by exact sentence identity, never row position. Base
+was rejected after destructive meaning errors in the selected German,
+Arabic and Japanese examples. Small multilingual materially improved the
+German negation and competitor count, but grammar and meaning defects remain.
+The 20-second core with two-second contexts was rejected because it omitted
+verified voiced speech. The selected **experimental** profile uses independent
+30-second cores with five seconds of left and right context. Half-open core
+intersection preserves speech and source timing; it does not remove semantic
+repetition from independently inferred straddling sentences.
+
+Two selected 30-second Small cores took 14.893 and 15.032 seconds in the P0
+process measurements, with peak engine RSS of 788 and 779 MiB. These are
+inference-call observations, not request-to-first-publication latency or
+packaged concurrent-playback qualification. The final corrected owned-child
+Stop observation was 0.235 seconds with two empty owned-group observations;
+the original EPERM probe failure remains recorded. There is no claim of broad
+movie, accent, dialogue, noise or bilingual listening quality. The selected
+model is 487,601,967 bytes, SHA-256
+`1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b`,
+from the pinned official model revision. Actual engine SHA, fixture/reference
+hashes, argv, platform and raw output remain in the bounded P0 receipt.
+
+**Sequencing amendment, approved 2026-10-15:** independent durable store, API
+and web leaves may implement the frozen structural P1 contract while the
+runtime profile is characterized. P2–P5 remain one compiling integration task.
+Selected-profile activation, translation-specific readiness and completion
+require packaged Settings installation plus actual progressive direct
+playback, source verification, seek, Stop and admission evidence. Passing
+structural tests or a fast engine call does not close those acceptance rows.
+The first playback profile is web direct with exactly one source audio stream
+(audio ordinal zero); unsupported route/audio selection has a specific
+capability reason. Spoken language is an explicit user confirmation and may
+correct erroneous metadata. Broader native, fleet, long-form and human quality
+remain visibly open follow-up qualification.
 
 | Measurement | Definition and interpretation |
 |---|---|
@@ -112,15 +146,13 @@ foreground delivery type and concurrency. Do not extrapolate ARM64 to x86.
 | Reference-based functional correctness | Compare full-context and chunked output with independently published, human-authored English reference translations for the selected source-language examples. Audit pair identity, rights and hashes. Label alignment/translation scores automated; retain omissions, hallucinations, negation, names, ordering, timing and seam defects rather than treating a score as a human verdict. |
 | Broader translation quality · open | Genuinely bilingual listening/timing review with a recorded rubric and adjudication across dialogue, noise and long-form material. Publisher references and automated diagnostics do not close this separate row; WER alone is not a translation-quality score. |
 
-Experiment with bounded source windows such as 10, 20 and 30 seconds,
-left/right context overlap such as 2 and 5 seconds, and bounded context
-strategies supported by the pinned engine. Those are experiment inputs,
-not promised latency, production defaults or quality thresholds. Retain
-per-window distributions, p50/p95 and worst observed gaps. Before milestone
-P2, write the chosen production limits and acceptance thresholds into this
-plan with the measured tradeoff. If none meets the approved useful-lag and
-quality budget, do not market realtime; revise the model/adapter or product
-status explicitly. Progressive availability may still be useful while slow.
+The selected profile is parameterized by model digest, window/context sizes,
+clock contract, pipeline revision and adapter identity. Changing those inputs
+creates a different profile and asset identity. Runtime and publication tests
+must retain deterministic clipping without asserting linguistic seam dedup.
+The ordinary packaged direct route must measure actual first committed cue,
+runway, seek recovery and foreground playback interference before claiming a
+useful progressive user path.
 
 ### 2.2 Functional delivery and broader human quality have separate gates
 
@@ -185,6 +217,12 @@ local inode are **not** byte equivalence. They remain local change fences but
 cannot allow two workers with different equal-size/equal-mtime files to
 contribute ranges to one asset. Same bytes on different inodes may share an
 asset only after the portable fingerprint matches.
+
+Source preparation is a durable cancellable operation even before its final
+content-addressed asset exists. Its Stop/Retry intent, epoch and replay fence
+survive preparation-to-asset handoff atomically. Stop during fingerprinting
+must prevent both orphan preparation and later scheduling under that intent.
+P1 freezes this boundary together with the asset Stop transaction.
 
 The conservative initial candidate is SHA-256 of the complete opened source,
 verified against the authoritative source revision before that worker may
@@ -328,6 +366,11 @@ administrator's Stop cancels the durable operation and prevents late publish;
 committed segments remain usable unless explicitly removed. Quotas bound
 range churn, active demands, per-viewer requests, retained bytes and retries.
 Pause suspends unneeded lookahead after bounded expiry; resume refreshes demand.
+
+Browser timer throttling can expire a demand. Report suspended work honestly
+while retaining authorized cached cues as selectable content; expiry does not
+delete the shared asset. A resume heartbeat may refresh an unstopped demand,
+but cannot clear the administrative Stop latch or replay an old Retry intent.
 
 ### 3.5 Administrative Stop latches the operation, not just its children
 
@@ -526,15 +569,26 @@ errors and translated text safely as text, never trusted HTML. Translation
 captions are an estimate and may be wrong; keep that note visible in setup
 and track information without obstructing playback.
 
-## 6. Serial milestones and exact ownership keep parallel work reviewable
+## 6. Freeze contracts, then integrate one compiling implementation task
 
-Start only after current subtitle usability is complete. Create
-`effort/progressive-subtitle-translation` from then-current main; refresh all
-paths/signatures below first. Task branches target the current effort. Sol
+Generation merged to main as `220157aba` through PR #1136. The new
+`effort/progressive-subtitle-translation` starts at that exact main tree;
+the generation effort remains frozen for its separate post-merge CI. Refresh
+paths/signatures below before implementation. Task branches target the effort. Sol
 agents implement; the parent coordinates and adversarially reviews. Use the
 repository normal hooks, focused regressions and manually dispatched effort
-gates; promotion requires exact-candidate qualification and main promotion.
-No deployment or physical build is implied by this plan.
+gates. The user explicitly permits merging after passed basic checks and
+watching remaining checks after merge; record that choice and outstanding
+results without claiming a full qualification pass. Retain local focused
+regressions, normal hooks, review findings and landing trailers. No deployment
+or registry publication is implied by this plan.
+
+P0/P1 are one bounded measurement/contract phase. After their review, leaf
+owners implement P2–P5 into one compiling integration task with one effort
+gate rather than separate serial milestone PRs. P6 includes only claimed
+client routes; unproved native, fleet and long-film quality remain explicit
+follow-ups. Do not reopen resolved R1–R9 design or broaden the initial corpus
+campaign merely to begin implementation.
 
 | Milestone | Exclusive owner and files | Acceptance before the next milestone |
 |---|---|---|
@@ -542,8 +596,8 @@ No deployment or physical build is implied by this plan.
 | P1 · freeze contracts | Lead: exact new core schema/API/profile/timebase contract; parent review then independent engine/UI review. | Golden DTOs and explicit permission/idempotency/CAS rules, state machine and counterexamples agreed in this document. No implementation starts with an unresolved semantic choice. |
 | P2 · durable asset/ranges | Core agent: new `crates/plurx-core/src/store/subtitle_translation*.rs`, shared job enums/traits/registries and SQLite/Hiqlite wiring/tests. Lead alone integrates shared files. | Genuine SQLite + Hiqlite tests for multi-viewer overlap, Stop/fence/lease/source replacement, out-of-order coverage CAS, restart and quotas. |
 | P3 · engine capability/runtime | Engine agent: new daemon `subtitle_translation/runtime.rs`, translation self-test/profile helpers and engine/model packaging files. Existing `subtitle_transcription.rs` changes only through lead-approved seam. | Foreign→English translation and stable overlap on selected profiles; cancellation/admission/source/failure corpus with no private artifact publication. |
-| P4 · manager/API/admission | Lead: new daemon `subtitle_translation/mod.rs`, `api.rs`, settings, worker/state/route integration and foreground admission. Own shared files from P2 onward. | Auth/revocation, dedup/independent demand lifetimes, fairness, exact manifest publication and safe statuses through real daemon routes. |
-| P5 · web | UI agent: Settings Developer, detail/preplay, watch browser, watch presentation/projection, subtitle track owner and targeted web/browser tests. Declare exact existing filenames in P1 after current effort lands. | Real installed multilingual model; foreign speech+original captions; first partial cues during attached playback; lag/gap/seek/original/Off/Retry/keyboard/fullscreen; no playback reopen. |
+| P4 · manager/API/admission | Lead: manager, mutations, source/read leases, shared worker/state/routes and foreground admission. UI agent: new daemon `subtitle_translation/api.rs` and `config.rs`, against the frozen core seam. | Auth/revocation, dedup/independent demand lifetimes, fairness, exact manifest publication and safe statuses through real daemon routes. |
+| P5 · web | UI agent: temporary setup card, watch browser/presentation/projection, subtitle track owner and targeted web/browser tests. After finite real-path acceptance, permanent enable/model setup graduates to Settings → Playback and the temporary Developer card is removed. | Real installed multilingual model; foreign speech+original captions; first partial cues during attached playback; lag/gap/seek/original/Off/Retry/keyboard/fullscreen; no playback reopen. |
 | P6 · native delivery | Apple agent owns native subtitle adapter/UI/tests; Android agent owns Android subtitle adapter/UI/tests. Freeze exact file lists from then-current tree in P1. | Native compile/unit + emulator/simulator controls; separately retain required physical display/PiP/AirPlay receipts before claiming those routes. Unsupported routes remain explicit. |
 | P7 · qualification/promotion | Lead and reviewer: exact candidate, Operations/API/Features updates, canonical receipt, this ledger/index/backlog. | Full functional matrix below for the approved limited profile, independent code review, current-main integration, main gate and explicit capability boundaries. Broader human quality may remain named open and excluded from the claim. |
 
@@ -565,7 +619,7 @@ editing it. This table gives ownership, not permission to start early.
 | Core agent, P2 | **New:** `crates/plurx-core/src/store/subtitle_translation.rs`, `subtitle_translation.sql`, `subtitle_translation_tests.rs`, `hiqlite_subtitle_translation.rs`. Lead integrates their trait/schema/registry includes after focused review. |
 | Lead, all shared core integration | `crates/plurx-core/src/store/mod.rs`, `background_jobs.rs`, `background_jobs_schema.sql`, `background_jobs_transcription.rs`, `hiqlite.rs`. Any extra registry discovered in P1 belongs to lead, not parallel leaf agents. |
 | Engine agent, P3 | **New:** `crates/plurxd/src/subtitle_translation/runtime.rs`, `profile.rs`, `self_test.rs`; experiment `tests/fixtures/subtitle-translation/measure.py` and rights/source manifest. Engine pin/catalog/package changes require their exact packaging file list to be frozen from the completed usability effort before P3. |
-| Lead, P4 | **New:** `crates/plurxd/src/subtitle_translation/mod.rs`, `api.rs`, `settings.rs`; existing `crates/plurxd/src/main.rs`, `state.rs`, `http/mod.rs`, `subtitle_models/mod.rs`, `subtitle_transcription.rs` and worker/admission shared modules identified in P1. Lead alone registers all new modules/routes. |
+| Lead, P4 | **New:** `crates/plurxd/src/subtitle_translation/mod.rs`, `manager.rs`; UI-owned `api.rs`, `config.rs`; existing `crates/plurxd/src/main.rs`, `state.rs`, `http/mod.rs`, `subtitle_models/mod.rs`, `subtitle_transcription.rs` and worker/admission shared modules identified in P1. Lead alone registers all new modules/routes. |
 | Web agent, P5 | `crates/plurxd/src/web/pages/settings-developer.js`, `detail/preplay-selection.js`, `detail/watch-browser.js`, `player/watch-presentation.js`, `player/projection-chrome.js`, `player/audio-sync.js`, `app.css`; **new:** `player/subtitle-translation.js`. Lead approves the small asset-registration edits to `web/index.html`, `http/mod.rs`, `docs/clients/WEB-SHELL-LAYOUT.md` and `crates/plurxd/src/web/jsconfig.json` together; no imports/modules in plain global scripts. |
 | Web agent, focused regressions | `tests/web/subtitle-generation.test.js`, **new:** `tests/web/subtitle-translation.test.js`, `tests/web/subtitle-translation.browser.cjs`; `tests/playback/web-control.test.js` only for declared existing-owner interactions. Lead owns Makefile/CI inventory registration. |
 | Apple agent, P6A | `clients/apple/Sources/PlayerController.swift`, `PlayerView.swift`, `PlayerItemObserver.swift`, `PlurxAPI.swift`, `SettingsStore.swift`, `SettingsView.swift`; **new:** `ProgressiveSubtitleTranslation.swift`, with focused tests under `clients/apple/Tests/`. No simultaneous other Apple agent edits to these files. |
@@ -597,52 +651,8 @@ cannot qualify translation quality, throughput, package installation or real
 partial delivery. Keep unit, browser-fixture, real-daemon and physical-client
 receipts separate. Never convert an unrun device case into a passed checkbox.
 
-## 8. Decisions still to freeze, and review ledger
+## 8. Review ledger and completion
 
-| Decision | Current proposal / missing evidence | Owner |
-|---|---|---|
-| Useful lag and startup budget | User chose progressive, not a latency guarantee. P0 must propose numeric profile-specific thresholds from measurements for parent approval. | Engine + parent |
-| Model/engine selection | Try existing multilingual base first; no assumption of sufficient quality or sustained RTF. A different model requires catalog, license, package and self-test review. | Engine |
-| Stable overlap/context policy | Commit only stable interiors with deterministic ownership; compare quality against whole-context baseline before choosing exact windows. | Engine + core |
-| Demand finishing/retention | Bound work after last viewer leaves, per-user requests, retained bytes and TTL. Set numbers from measured storage/admission budgets in P1. | Lead |
-| Native growing-track adapter | Static VTT URL reload is not assumed. Select existing-owner-compatible text/overlay/HLS routes per client after a minimal measured proof. | Native owners |
-| Viewer work-creation permissions | Initial admin-only demand creation/refresh/seek/release. Nonadmin reads cannot schedule; missing ranges stay unavailable until an admin demand produces them. Broader viewer requests require a reviewed permission/quota change. | Parent + lead |
-| Current feature dependency | No translation implementation before subtitle usability is complete; rebase plan/contracts to the final qualified current tree. | Lead |
-| Functional / broader-quality staging | Parent approved the §2.2 distinction. P0/P1 measured profiles and independent human-authored references can release bounded implementation/functional acceptance; new bilingual listening/adjudication remains open for broader quality. No human verdict or generally qualified movie translation is implied. | Parent + engine + lead |
-
-| Review | State as of 2026-10-15 | Disposition |
-|---|---|---|
-| Parent adversarial design review | Completed 2026-10-15; revised R1–R9 and single-node acceptance floor approved in design | Design review does not close the unmeasured P0/P1 prerequisite gates. |
-| Engine independent second review | Completed full-plan review 2026-10-15; R6–R8 and provenance correction recorded below | Parent and engine confirmed revised dispositions in design on 2026-10-15; P0/P1 measurement/protocol decisions remain prerequisite gates. |
-| Implementation authorization | User authorized implementation after current subtitle usability completion and reviewed P0/P1 contracts | These are prerequisite gates, not another user-permission request. This plan-only branch contains no translation implementation. |
-| Functional / broader-quality staging review | Parent approved the staged evidence boundary on 2026-10-15 after prerequisite-input review | §2.2 and §7 retain ordinary single-node progressive delivery and measured correctness/resource gates. Published human-authored references plus labeled automatic diagnostics can support the limited profile; new bilingual listening/adjudication remains open. No measurements or human verdicts fabricated. |
-| Independent staging-amendment review | Engine reviewer read the amendment on 2026-10-15; no blocking weakening or contradiction found | Selected-language reference evidence remains distinct from broader human listening; measured P0/P1 contracts and ordinary single-node, seam/timing, resource and Stop gates remain mandatory. |
-
-### 8.1 Parent adversarial findings and proposed dispositions
-
-Parent reviewed and approved the R1–R5 architectural dispositions on
-2026-10-15. They are resolved in design, not implemented or qualified.
-P0/P1 numeric bounds and semantic-seam decisions remain explicit prerequisites.
-
-| Finding, 2026-10-15 | Revised contract / exact regression obligation | Owner and status |
-|---|---|---|
-| R1 · viewer consumption could implicitly create work | §1.2/§3.4: all work-producing demand mutations are admin-only; read-only viewer seek/poll cannot enqueue. Test nonadmin POST/PUT/DELETE refusal and unchanged job/priority counts after seeks into missing coverage; authorized existing segment reads still pass. | Lead; resolved in design by parent; implementation/regression outstanding. |
-| R2 · a stable interior might wait forever for the next claim | §3.2: canonical independently finalizable core with its own bounded context; explicit beginning/EOF/disjoint/isolated-seek/cancel rules. Test final core with no successor, isolated middle core and cancellation at every publication boundary. Semantic seam policy remains a P0 quality decision, not an unproved dedup claim. | Engine + core; resolved architecture by parent; P0 seam decision/measurement outstanding. |
-| R3 · manifest CAS could publish unreachable worker-local bytes | §3.3: bounded immutable cue bytes in authoritative replicated store before/with references; read-fenced routing, digest validation, orphan grace and GC/read leases. Genuine Hiqlite failover/read/GC race tests required. | Core + lead; resolved architecture by parent; P1 store-budget freeze/implementation outstanding. |
-| R4 · chunk offset did not define playback time | §3.6: actual decoded-sample anchor and rational stream/container mapping, delay/resampler accounting, negative/nonzero PTS, VFR and client-only subtitle offset. Test against visible/audio source markers after seeks and rate/offset changes. | Engine + native/core; resolved architecture by parent; P1 mapping oracle/implementation outstanding. |
-| R5 · growing arrays and lost revisions could break resync | §5.2: bounded immutable revision pages/cursors/read leases, ETag-gap/restart reset, pruning and backward re-fetch. Test concurrent updates while paging, expired cursors, duplicate pages and pruned backward seek without new inference. | Lead + web/native; resolved architecture by parent; P1 numeric limits/implementation outstanding. |
-
-### 8.2 Independent engine findings and proposed dispositions
-
-The engine agent reviewed the complete `d78bfaf4` draft independently after
-parent R1–R5 review. Parent approved these revised architectural dispositions on 2026-10-15.
-The engine independently confirmed closure against revision `a0c3da8f` on
-2026-10-15; neither review qualifies performance or implementation. The single-node acceptance floor in
-§1 is mandatory and cannot be waived by unsupported-profile declarations.
-
-| Finding, 2026-10-15 | Revised contract / exact regression obligation | Owner and status |
-|---|---|---|
-| R6 · active demand heartbeats could recreate cancelled work after Stop | §3.5: durable operation epoch and Stop latch fence demand scheduling, claims and publication. Only explicit fresh admin intent with observed epoch can resume. Test two continuing heartbeats/seeks after Stop, zero new claims/late publish, readable committed segments, crash/replay and explicit Retry. | Lead/core + clients; resolved in design by parent and engine; implementation/regression outstanding. |
-| R7 · scanner metadata cannot establish cross-node source equivalence | §3.1: trustworthy portable cryptographic content revision; conservative full-source SHA-256/held immutable source candidate, measured cold-read cost and no sampled-hash shortcut. Test two different equal-size/equal-mtime sources refuse, identical bytes/different inode accept after verification, hashing/decoding replacement and cache invalidation. | Lead/core + engine; protocol/usable cold-latency decision must freeze in P0/P1. |
-| R8 · current idle predicate would starve during encoded playback | §4: explicitly prohibit treating zero-admission idle policy as concurrent support. Measure actual full path under one-node direct/remux/encoded and two-node cases; freeze spare-capacity admission or declared source/topology restrictions without bypassing foreground protections. | Lead + engine; P0 evidence and P1 admission contract outstanding. |
-| R9 · common adapter can hide platform inference differences | §3.3: per-segment actual platform/engine SHA plus source/model/profile/epoch/fence provenance; immutable first valid CAS winner, never overwrite with another platform's result. Test duplicate valid competing results retain the winner and its truthful provenance. | Engine/core; resolved provenance design by parent and engine; implementation/regression outstanding. |
+The review ledger, integration checkpoints and the 2026-10-17 completion record
+(packaged acceptance evidence, review fixes, open follow-ups) are in
+[PROGRESSIVE-SUBTITLE-TRANSLATION-LEDGER.md](PROGRESSIVE-SUBTITLE-TRANSLATION-LEDGER.md).

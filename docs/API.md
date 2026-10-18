@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-15, plurx has 367 routes declared by the ordinary listener's
+As of 2026-10-15, plurx has 381 routes declared by the ordinary listener's
 assembled router. The ordinary listener (`:32400` by default) serves the five
 surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
@@ -37,7 +37,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 367 routes across the registered routers.
+plurx has 381 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -2209,6 +2209,49 @@ and polled for ten minutes while showing nothing. Clients keep treating a
 codeless 503 on `overlay.json` as a wait, for older servers.
 
 ---
+
+### Progressive English translation
+
+The initial experimental route uses the attached web direct player with one
+unambiguous source audio stream. Spoken-language confirmation may correct the
+metadata tag. Small multilingual produces independent 30-second cores with
+five seconds of left/right context; clipped boundary repetition and grammar or
+meaning errors remain possible. Native, encoded and multi-audio playback are
+not qualified by this route.
+
+| Method | Path | Credential | Meaning |
+|---|---|---|---|
+| GET, PUT | `/api/v1/subtitle-translation` | admin bearer | Saved enable/model/profile/language preferences with opaque revision CAS. Readiness never rejects Save. |
+| GET | `/api/v1/subtitle-translation/models` | admin bearer | Immutable profile, bounds and distinct English-translation worker qualification. |
+| GET | `/api/v1/files/{id}/subtitle-translation/options` | bearer | Current source revision, supported profile and bounded cached asset list; no work. |
+| POST | `/api/v1/files/{id}/subtitle-translation` | admin bearer | Durable operation and expiring playback demand before source hashing; exact request replay. |
+| GET | `/api/v1/files/{id}/subtitle-translation/assets` | bearer | Explicit cursor page of cached assets. |
+| GET | `/api/v1/subtitle-translation/operations/{id}` | bearer | Closed live operation, source-check and current-job observation. |
+| PUT, DELETE | `/api/v1/subtitle-translation/operations/{id}/demands/{demand}` | admin bearer | Renew or release one viewer's versioned interest. |
+| POST | `/api/v1/subtitle-translation/operations/{id}/stop` | admin bearer | Durable global Stop advances the epoch and fences preparation, ranges and publication. |
+| POST | `/api/v1/subtitle-translation/operations/{id}/retry` | admin bearer | Explicit observed-state/epoch or failed-range revision CAS; heartbeats cannot undo Stop. |
+| GET | `/api/v1/subtitle-translation/operations/{id}/failed-ranges` | bearer | Bounded current-view failures under a read lease and scoped cursor. |
+| GET | `/api/v1/subtitle-translation/assets/{id}/manifest` | bearer | Windowed coverage/segment descriptors and a 30-second read lease. |
+| GET | `/api/v1/subtitle-translation/assets/{id}/segments` | bearer | Scoped cursor page inside the requested playback window. |
+| GET | `/api/v1/subtitle-translation/assets/{id}/coverage` | bearer | Scoped cursor page of accepted overlapping core intervals. |
+| GET | `/api/v1/subtitle-translation/assets/{id}/segments/{segment}` | bearer | Exact bounded canonical UTF-8 JSON bytes; verify the manifest digest before decoding. |
+
+Existing model Install/Test routes also accept strict version 2 translation
+requests with request UUID, intent expiry, purpose, profile ID and named workers.
+Translation qualification does not imply that the ordinary generation self-test
+ran. Work mutations require current administrator authority and an unexpired
+first-use intent; retained exact receipts replay without starting fresh work.
+Responses carry a fresh `X-Translation-Server-Now-Ms` even when receipt bodies
+retain their original clock.
+
+Page and segment requests use `X-Translation-Read-Lease`. A matching ETag/304
+does not renew that lease. Expired leases or moved cursors require resynchronizing
+the manifest; playback position and effective operation state participate in its
+ETag. Idle caches retire only after demands and leases expire. Core bytes stay
+immutable while retained; retirement is an explicit snapshot boundary, and a
+fresh lease may observe recomputed bytes with a newly verified digest. Root
+Stop and request identities are independent of cache eviction.
+
 
 ## 12. Offline packages
 

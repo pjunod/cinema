@@ -22,10 +22,11 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 
 > Status: **v0.7.0**, build `173` — Authenticated current-account requests
 > echo bounded read-after receipts across the advertised voter cohort;
-> unknown writes retire the floor (#1049). Source qualification only, not yet
-> installed on hardware or qualified against the fleet read-cost target.
+> unknown writes retire the floor (#1049). Sustainable processed HDR10 Auto
+> selection is implemented on the HDR repair effort. Source qualification and
+> physical acceptance remain open for the composed client.
 >
-> Build `168` — Private incident capture, protected account
+> Private incident capture, protected account
 > storage, local ZIP sharing, resumed support delivery and physical-only TV
 > phone approval are implemented. Debug app and regression-source compilation
 > pass; release, runtime/privacy/resource and physical acceptance remain open.

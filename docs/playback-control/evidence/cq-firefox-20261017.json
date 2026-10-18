@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "campaign_generated_at": "2026-10-18T02:42:22.107Z",
+  "source_ref": "89d790d2e",
+  "server_reported_build": "attribution-repair-2026-10-06-2014-g89d790d2e",
+  "binary_sha256": "4352897bef268866bfc88b1e493d7fe63507e2383d3b8e45d4e7d030f1abe197",
+  "harness_sha256": "070c13d0b62f3b02eec152599c13bce1db2e517d37011f83602a702ca28fe581",
+  "fixture_sha256": "d7074838fddd09bbfde0fb1585793148955ea44684da847d49677a0e42c7c28d",
+  "firefox_version": "158.0",
+  "firefox_binary_sha256": "dc8d81e0bb4d0ac54b18c419e04749f4e889ef06749b7418d153507a9be6d276",
+  "geckodriver_version": "0.37.1",
+  "outcome": "passed",
+  "manual_changes": 15,
+  "actual_auto_status": "passed",
+  "actual_auto_presented_heights": [
+    1080,
+    720,
+    1080,
+    720,
+    1080
+  ],
+  "link_stages_kbps": [
+    100000,
+    10000,
+    25000,
+    10000,
+    25000
+  ],
+  "manual_video_gap_max_ms": 84.09999999997672,
+  "mixed_video_gap_max_ms": 99.3599999998696,
+  "mixed_video_gap_p95_ms": 84.09999999997672,
+  "mixed_callback_gap_max_ms": 99.3599999998696,
+  "mixed_callback_gap_p95_ms": 84.07999999984168,
+  "wait_events": 0,
+  "reopen_events": 0,
+  "stalls": 0,
+  "hitches": 0,
+  "session_creates": 1,
+  "dropped_frames": 4,
+  "warnings": [
+    "browser quality-cycle evidence has no audio-render oracle; native device evidence remains required"
+  ],
+  "source_audit": {
+    "checked_tracked_blobs": 5906,
+    "mismatch_count": 0,
+    "source_ref": "89d790d2e"
+  },
+  "resource_observation": {
+    "supervisor_samples": 880,
+    "precheck_quiet_seconds": 60.6,
+    "max_load1": 4.32,
+    "browser_cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      8,
+      9
+    ],
+    "daemon_encoder_cpu_affinity": [
+      4,
+      5,
+      6,
+      7,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "browser_affinity_violations": 0,
+    "exclusive_cpu_claim": false,
+    "foreign_activity": "Retained raw supervisor documents production daemon/ffmpeg, observability and dashboard activity. Thresholds passed despite this activity; no exclusive CPU claim."
+  },
+  "scope": "Headless browser video evidence; no independent display or audio-render oracle.",
+  "private_archive": {
+    "location": "lab4:~/cc-cq-receipts/firefox-nuc4-20261018/acceptance-private.tar.gz",
+    "sha256": "991a0af00b532fe679ab733cbed700b1122614b1cfb8ebfc2d65df1538c85351",
+    "verified_files": 18,
+    "mismatches": 0,
+    "retained_failures": true
+  },
+  "cleanup": {
+    "owned_lab_removed": "lab4:~/cc-ff-lab",
+    "live_owned_campaign_processes": 0,
+    "production_processes_untouched": true,
+    "native_assets_preserved": "lab4:~/cq-native-acceptance-20261017"
+  }
+}

@@ -617,7 +617,7 @@ impl Pipeline<'_> {
         Ok(())
     }
 }
-fn private_attempt(root: &Path) -> std::io::Result<tempfile::TempDir> {
+pub(crate) fn private_attempt(root: &Path) -> std::io::Result<tempfile::TempDir> {
     let mut builder = tempfile::Builder::new();
     builder.prefix("attempt-");
     #[cfg(unix)]
@@ -628,8 +628,8 @@ fn private_attempt(root: &Path) -> std::io::Result<tempfile::TempDir> {
     builder.tempdir_in(root)
 }
 
-struct EngineInvocation {
-    program: PathBuf,
+pub(crate) struct EngineInvocation {
+    pub(crate) program: PathBuf,
     staged: Option<(std::fs::File, plurx_core::fs_secure::FileIdentity)>,
 }
 
@@ -756,7 +756,7 @@ async fn decoded_pcm(path: &Path, cancel: &CancellationToken) -> Result<(bool, u
         .map_err(|_| "decode_failed")?
 }
 impl EngineInvocation {
-    fn unchanged(&self) -> bool {
+    pub(crate) fn unchanged(&self) -> bool {
         self.staged.as_ref().is_none_or(|(file, identity)| {
             plurx_core::fs_secure::std_file_identity(file).ok() == Some(*identity)
         })
@@ -766,7 +766,7 @@ impl EngineInvocation {
 /// Darwin refuses executable `/dev/fd/N` handoffs. Execute a verified private
 /// copy there, retaining both handles until the owned child has been reaped.
 /// Linux executes the original held descriptor directly.
-async fn engine_invocation(
+pub(crate) async fn engine_invocation(
     engine: &crate::subtitle_models::artifacts::Engine,
     scratch: &Path,
     cancel: &CancellationToken,
@@ -1323,7 +1323,7 @@ async fn managed_pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
     }
 }
 
-fn managed_artifacts_unchanged(
+pub(crate) fn managed_artifacts_unchanged(
     engine: &crate::subtitle_models::artifacts::Engine,
     model: &crate::subtitle_models::artifacts::ManagedModel,
 ) -> Result<(), StoreError> {
@@ -1658,17 +1658,35 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         }
     }
     let mut model_cache = None;
+    let mut slow_due = tokio::time::Instant::now();
     loop {
         if shutdown.is_cancelled() {
             return;
         }
-        if let Err(error) = crate::subtitle_models::worker_pass(&state, &shutdown).await {
-            tracing::debug!(%error, "managed subtitle worker pass stopped");
+        let translating = match crate::subtitle_translation::worker_pass(&state, &shutdown).await {
+            Ok(active) => active,
+            Err(error) => {
+                tracing::debug!(%error,"translation worker pass stopped");
+                false
+            }
+        };
+        if tokio::time::Instant::now() >= slow_due {
+            if let Err(error) = crate::subtitle_models::worker_pass(&state, &shutdown).await {
+                tracing::debug!(%error, "managed subtitle worker pass stopped");
+            }
+            if let Err(error) = pass(&state, &boot, &shutdown, &mut model_cache).await {
+                tracing::debug!(%error,"offline subtitle transcription pass stopped");
+            }
+            slow_due = tokio::time::Instant::now() + Duration::from_secs(15);
         }
-        if let Err(error) = pass(&state, &boot, &shutdown, &mut model_cache).await {
-            tracing::debug!(%error,"offline subtitle transcription pass stopped");
-        }
-        tokio::select! { ()=shutdown.cancelled()=>return, ()=tokio::time::sleep(Duration::from_secs(15))=>{} }
+        // Live translation demand is served each second; otherwise the loop
+        // sleeps until the 15 s passes are due or a translation mutation wakes it.
+        let idle = if translating {
+            Duration::from_secs(1)
+        } else {
+            slow_due.saturating_duration_since(tokio::time::Instant::now())
+        };
+        tokio::select! { ()=shutdown.cancelled()=>return, ()=tokio::time::sleep(idle)=>{}, ()=state.subtitle_models.translation.wake.notified()=>{} }
     }
 }
 async fn pass(
@@ -1926,7 +1944,7 @@ async fn await_claimed_inference<T>(
         () = watch_capacity(transcode, admission) => { cancel.cancel(); operation.await },
     }
 }
-async fn watch_capacity(
+pub(crate) async fn watch_capacity(
     transcode: &crate::transcode::TranscodeManager,
     admission: &crate::transcode::FragmentAdmission,
 ) {
@@ -2334,9 +2352,9 @@ mod tests {
                 "-f",
                 "lavfi",
                 "-i",
-                "sine=frequency=1000:sample_rate=16000:duration=1",
+                "sine=frequency=1000:sample_rate=16000:duration=0.6:samples_per_frame=160",
                 "-filter:a",
-                "aselect=lt(t\\,0.2)+gte(t\\,0.6),asetpts=PTS+0.4/TB",
+                "asettb=1/16000,asetpts=PTS+6400+6400*gte(N\\,3200)",
                 "-map",
                 "0:v:0",
                 "-map",
@@ -2369,8 +2387,12 @@ mod tests {
             .args([
                 "-v",
                 "error",
+                "-select_streams",
+                "a:0",
+                "-show_packets",
+                "-show_frames",
                 "-show_entries",
-                "format=start_time:stream=codec_type,start_time",
+                "format=start_time:stream=codec_type,start_time:packet=pts_time,duration_time:frame=pts_time,nb_samples",
                 "-of",
                 "json",
             ])
@@ -2396,6 +2418,68 @@ mod tests {
             audio["start_time"], "7.400000",
             "audio starts later than container origin"
         );
+        // Prove the generated source itself contains a timestamp gap. Some
+        // FFmpeg versions forward aselect audio without evaluating it; origin
+        // timestamps alone would accept a continuous tone as this fixture.
+        let clock = facts["packets_and_frames"]
+            .as_array()
+            .expect("source clock intervals");
+        for kind in ["packet", "frame"] {
+            let mut coverage: Vec<(f64, f64)> = Vec::new();
+            let mut source_samples = 0_u64;
+            for entry in clock.iter().filter(|entry| entry["type"] == kind) {
+                let start = entry["pts_time"]
+                    .as_str()
+                    .expect("source PTS")
+                    .parse::<f64>()
+                    .expect("numeric source PTS");
+                let duration = if kind == "frame" {
+                    let count = entry["nb_samples"].as_u64().expect("decoded samples");
+                    source_samples += count;
+                    count as f64 / 16000.0
+                } else {
+                    entry["duration_time"]
+                        .as_str()
+                        .expect("packet duration")
+                        .parse::<f64>()
+                        .expect("numeric packet duration")
+                };
+                assert!(start.is_finite() && duration.is_finite() && duration > 0.0);
+                let end = start + duration;
+                if let Some(previous) = coverage.last_mut() {
+                    assert!(
+                        start + 0.000001 >= previous.1,
+                        "no overlapping source intervals"
+                    );
+                    if (start - previous.1).abs() < 0.000001 {
+                        previous.1 = end;
+                        continue;
+                    }
+                }
+                coverage.push((start, end));
+            }
+            assert_eq!(
+                coverage.len(),
+                2,
+                "{kind}: exactly two source tone spans: {coverage:?}"
+            );
+            for (actual, expected) in coverage
+                .iter()
+                .zip([(7.4_f64, 7.6_f64), (8.0_f64, 8.4_f64)])
+            {
+                assert!(
+                    (actual.0 - expected.0).abs() < 0.000001
+                        && (actual.1 - expected.1).abs() < 0.000001,
+                    "{kind}: exact delayed tone and internal source gap: {coverage:?}"
+                );
+            }
+            if kind == "frame" {
+                assert_eq!(
+                    source_samples, 9600,
+                    "source contains only the two tone spans"
+                );
+            }
+        }
         let metadata = std::fs::metadata(&file.path).expect("generated source");
         file.size = metadata.len() as i64;
         file.mtime = metadata
@@ -3207,6 +3291,7 @@ mod tests {
             sha256: hex::encode(Sha256::digest(b"model")),
         };
         let payload = JobPayload::SubtitleModelOperation {
+            translation_profile: None,
             action: ModelAction::Verify,
             model_id: "base.en".into(),
             catalog_revision: crate::subtitle_models::catalog().revision.clone(),

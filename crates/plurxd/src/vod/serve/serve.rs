@@ -681,6 +681,7 @@ impl VodServe {
                         Some((
                             std::mem::take(&mut session.children),
                             session.rendition.take(),
+                            session.root_admission.take(),
                         ))
                     } else {
                         if let Some(session) = sessions.get(&id) {
@@ -690,6 +691,7 @@ impl VodServe {
                             (
                                 std::mem::take(&mut session.children),
                                 session.rendition.take(),
+                                session.root_admission.take(),
                             )
                         })
                     }
@@ -697,18 +699,24 @@ impl VodServe {
                     None
                 }
             };
-            if let Some((children, rendition)) = expired_session {
+            if let Some((children, rendition, root_admission)) = expired_session {
                 let shared = Arc::clone(&self.shared);
                 let cleanup = spawn_cancellation_independent(async move {
                     // Keep the exact per-id gate through all child detaches.
                     // Cancelling maintain cannot let a same-id resurrection
                     // race the departed parent's still-attached reader graph.
                     let _lifecycle = lifecycle_guard;
+                    let _root_admission = root_admission;
                     for child in children {
                         child.detach(&shared.pool).await;
                     }
                     if let Some(rendition) = rendition {
                         rendition.detach_reader(&shared.pool, &id).await;
+                        if rendition.ephemeral_processing {
+                            shared
+                                .purge_if_dormant(&rendition.key, Duration::ZERO)
+                                .await;
+                        }
                         rendition.kick();
                         tracing::info!(
                             target: "plurxd::vodserve",
@@ -725,7 +733,7 @@ impl VodServe {
         // Purge un-admitted renditions dormant past their TTL. The collection
         // is only a cheap pre-filter; `purge_if_dormant` takes the exact-key
         // build gate and re-checks everything before its short map commit.
-        let dormant: Vec<String> = {
+        let dormant: Vec<(String, Duration)> = {
             let renditions = self.shared.renditions.lock().await;
             renditions
                 .values()
@@ -734,15 +742,25 @@ impl VodServe {
                         .dormant_since
                         .lock()
                         .expect("dormant lock")
-                        .is_some_and(|since| now.duration_since(since) > DORMANT_RENDITION_TTL)
+                        .is_some_and(|since| {
+                            rendition.ephemeral_processing
+                                || now.duration_since(since) > DORMANT_RENDITION_TTL
+                        })
                 })
-                .map(|rendition| rendition.key.clone())
+                .map(|rendition| {
+                    (
+                        rendition.key.clone(),
+                        if rendition.ephemeral_processing {
+                            Duration::ZERO
+                        } else {
+                            DORMANT_RENDITION_TTL
+                        },
+                    )
+                })
                 .collect()
         };
-        for key in dormant {
-            self.shared
-                .purge_if_dormant(&key, DORMANT_RENDITION_TTL)
-                .await;
+        for (key, ttl) in dormant {
+            self.shared.purge_if_dormant(&key, ttl).await;
         }
 
         // Kick every driver so holds and idle reclaims are re-examined.
@@ -1034,7 +1052,7 @@ impl VodServe {
             .await
     }
 
-    async fn blocked_wait_for_with_read_custody(
+    pub(super) async fn blocked_wait_for_with_read_custody(
         &self,
         rendition: &Arc<Rendition>,
         reader: (&str, &str),
@@ -1042,6 +1060,21 @@ impl VodServe {
         budget: Duration,
         delivery: Arc<crate::meter::Meter>,
         custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
+    ) -> Result<SegmentReady, VodError> {
+        self.blocked_wait_for_with_probe(rendition, reader, index, budget, delivery, custody, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn blocked_wait_for_with_probe(
+        &self,
+        rendition: &Arc<Rendition>,
+        reader: (&str, &str),
+        index: u32,
+        budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
+        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
+        probe: Option<&ProcessedRootProbe>,
     ) -> Result<SegmentReady, VodError> {
         let deadline = tokio::time::Instant::now() + budget;
         let key = WaitKey {
@@ -1068,6 +1101,12 @@ impl VodServe {
                 .arm_materialize_watchdog_locked(rendition, index, &mut clocks);
             (wait, demand)
         };
+        // Registration and this recheck have no await between them. A prior
+        // revoke rejects this new wait; a later revoke retires it synchronously.
+        if probe.is_some_and(|probe| !probe.live()) {
+            drop(wait);
+            return Err(VodError::Gone(Terminal::Superseded));
+        }
         // Admission comes before any persistent demand or deadline state. A
         // refused GET is not work owed by this rendition.
         rendition.kick();

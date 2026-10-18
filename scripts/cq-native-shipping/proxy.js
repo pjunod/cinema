@@ -20,7 +20,8 @@ const proxy = new lab.ShapingProxy({
   id: "cq-native-fixed-links", spec: "100/10/25/10/25/3/25 Mb/s",
   description: "CQ fixed links plus a 3 Mb/s downshift and 25 Mb/s recovery",
   stages: kbps.map((k, index) => ({ index, label: labels[index], kbps: k })),
-}, target, { listenHost: "0.0.0.0", listenPort: Number(port), publicHost, controlToken: token, autoAdvance: false });
+}, target, { listenHost: "0.0.0.0", listenPort: Number(port), publicHost, controlToken: token,
+  autoAdvance: false, traceRequests: true });
 
 (async () => {
   const base = await proxy.start();

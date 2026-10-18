@@ -14,7 +14,8 @@ final class LibraryGridCoordinator: ObservableObject {
     @Published private(set) var visibleItems: [Item] = []
     @Published private(set) var groups: [LibraryGroup] = []
     private var rowsEnabled = false
-    private var preservingRowsDuringRefresh = false
+    private var preservingItemsDuringRefresh = false
+    private var preservedItemCount = 0
     @Published private(set) var loading = true
     @Published private(set) var error: String?
     @Published private(set) var loadedCount = 0
@@ -140,16 +141,29 @@ final class LibraryGridCoordinator: ObservableObject {
         await fetchUntil(rowsEnabled || filter != .all || !query.isEmpty ? Int.max : items.count + 40)
     }
 
+    /// Build the explicit jump index on demand even in paged grid mode. Keep
+    /// ordinary grid scrolling incremental; opening Jump is the full walk.
+    func groupsForJump() async -> [LibraryGroup] {
+        await fetchUntil(Int.max)
+        let result = await worker(items, filter, query)
+        let selectedSort = sort
+        return await Task.detached(priority: .userInitiated) {
+            LibraryGroups.make(result, sort: selectedSort)
+        }.value
+    }
+
     @MainActor
     private func runDrive() {
         driveTask?.cancel()
-        guard rowsEnabled || filter != .all || !query.isEmpty else {
+        let fullWalk = rowsEnabled || filter != .all || !query.isEmpty
+        guard fullWalk || preservingItemsDuringRefresh else {
             // A cleared filter no longer needs a full catalogue walk. Keep
             // the initial viewport target; scrolling can request more later.
             requestedThrough = min(requestedThrough, 40)
             return
         }
-        driveTask = Task { await fetchUntil(Int.max) }
+        let through = fullWalk ? Int.max : preservedItemCount
+        driveTask = Task { await fetchUntil(through) }
     }
 
     @MainActor
@@ -208,9 +222,12 @@ final class LibraryGridCoordinator: ObservableObject {
                     return
                 }
                 pager = current
-                if !preservingRowsDuringRefresh || current.complete {
+                // A returning grid must not temporarily lose its distant
+                // bookmark when only the first replacement page has arrived.
+                if !preservingItemsDuringRefresh || current.complete || (!rowsEnabled && current.decided.count >= preservedItemCount) {
                     items = current.decided
                     filterNow()
+                    preservingItemsDuringRefresh = false
                 }
                 loadedCount = current.loadedCount
                 total = current.total
@@ -233,7 +250,8 @@ final class LibraryGridCoordinator: ObservableObject {
         loading = true
         error = nil
         complete = false
-        preservingRowsDuringRefresh = rowsEnabled && !items.isEmpty && self.sort == sort
+        preservingItemsDuringRefresh = !items.isEmpty && self.sort == sort
+        preservedItemCount = preservingItemsDuringRefresh ? items.count : 0
         if self.sort != sort {
             items = []; visibleItems = []; groups = []
             loadedCount = 0; total = 0
@@ -246,6 +264,6 @@ final class LibraryGridCoordinator: ObservableObject {
         await fetchUntil(40)
         guard generation == pageGeneration, !Task.isCancelled else { return }
         loading = false
-        if rowsEnabled || filter != .all || !query.isEmpty { runDrive() }
+        if rowsEnabled || filter != .all || !query.isEmpty || preservingItemsDuringRefresh { runDrive() }
     }
 }

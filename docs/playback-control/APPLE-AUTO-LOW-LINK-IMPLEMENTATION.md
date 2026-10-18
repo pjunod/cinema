@@ -1,6 +1,7 @@
 # Apple Auto acceptance — preserve sign-in and identify acquisition failures
 
-**Status:** open; label repair built, acquisition diagnosis incomplete ·
+**Status:** open; session safety, candidate binding and PiP startup repairs built;
+Firefox browser campaign passes, physical acquisition acceptance incomplete ·
 **Written:** 2026-10-17 · **Branch:** `effort/apple-auto-declared-costs`,
 PR #1156; follow-up `codex/cq-acceptance-followup`
 
@@ -11,6 +12,38 @@ launch restrictions). This is the remaining acquisition investigation and
 the record of the sign-in incident. Preserve the failed runs before cleanup.
 Do not launch the installed Release app through the shaping proxy until the
 credential and server-selection incident is understood.
+
+## Current checkpoint — source repairs and scoped acceptance
+
+After integration with current main, PR #1171's source passes 64 selected
+player cases, 15 authentication/home cases and one disposable iPad recovery
+UI case. Exact integrated iOS and tvOS builds and the iOS Release build pass;
+both TV recovery journeys pass, including native focus and saved-session Retry. The earlier 58-case selection,
+separate PiP regression and eight shaping-contract passes remain retained.
+These are local development results, not full qualification, promotion or a
+physical installation. The integrated player result is retained privately at
+`/tmp/cq-main-integrated-player.xcresult`; the authentication and iPad UI
+results are `auth-recovery-units.xcresult` and `auth-recovery-ui-r4.xcresult`.
+
+Firefox 158.0 on exact `89d790d2e` passes fifteen manual changes and five
+actual Auto transitions on `lab4`, with a 99.36 ms maximum video gap, 84.1 ms
+p95, one session and no waits, reopens, stalls or hitches. The earlier
+contended `lab3` run remains invalid. The
+[sanitized receipt](evidence/cq-firefox-20261017.json) binds all 5,906 source
+files, executable and harness hashes, measurements and cleanup. Headless
+browser video does not establish independent display or audio continuity.
+
+The disposable native simulator now starts playback after the PiP repair.
+Its first MP4 test chose a direct route that bypassed the shaping proxy, so
+that playback supplies no pressure or successor-acquisition acceptance.
+The interim AAC and DTS HLS runs are also invalid: a diagnostic daemon
+restart omitted `PLURX_BOUND_FFPROBE`, and its default dynamically linked
+parser could not establish the required bound FFprobe identity. A named
+candidate's normal create exposed `candidate_geometry_unavailable`, before
+any successor attachment. This lab failure is not attributed to the app.
+The corrected environment must pass a named-candidate-bound normal create
+before the controlled link schedule starts. No physical app was launched
+through the proxy; baseline-versus-candidate HLS acceptance remains pending.
 
 ## 1. What the retained evidence establishes
 
@@ -58,7 +91,7 @@ failure diagnostic that explains these acquisitions.
 
 ## 2. Product bug: sign-in and server picker cannot be escaped
 
-**Reported by Paul, 2026-10-17; unresolved.** After the harness runs, the
+**Reported by Paul, 2026-10-17; physical UI reproduction unresolved.** After the harness runs, the
 iPad Pro is on the server picker and the Bedroom Apple TV is on Sign in.
 Paul reports that the UI will not let him leave those screens. The retained
 TV UI log confirms Sign in, Use a different server and Report a problem
@@ -150,13 +183,60 @@ Paperwork passes 14/14; the harness suspension returns 2 before argument
 parsing or any launch, and shell syntax validation passes. Apple build 261
 is claimed above the task base; no physical installation is made.
 
+### Session and successor ownership repairs — local evidence
+
+`SettingsStore` excludes launch-argument overrides from saved server,
+identity and bearer reads. When a saved instance identity exists, bootstrap
+verifies it anonymously before sending its bearer; an unverified 401/403 or
+wrong instance preserves the saved account. A verified saved server may still reject an expired
+session. Authentication generations fence stale bootstrap, connect, login,
+home-load and logout completions after a newer user action. DEBUG acceptance
+uses transient authentication and does not rewrite the saved pairing.
+These source mechanisms and their regressions address session safety; they
+do not identify the original physical incident's request or reproduce the
+reported navigation trap.
+
+Auto control exchanges now retain the unique validated installed candidate
+when a proposal settles or is abandoned. Previously an unnamed Auto choice
+could ask the server to plan again from the original. A named Auto successor
+whose effective candidate does not match current intent is rejected before
+it can allocate or supersede a pipeline; replayed settled actions stay
+settled. This is a confirmed source repair. The original metadata timeout's
+request-level cause remains unconfirmed until the isolated comparison runs.
+
+The disposable iOS simulator exposed a separate startup feedback loop:
+`PlayerSurface.updateUIView` repeatedly attached unsupported PiP and
+published `isSupported=false`, continuously invalidating SwiftUI before the
+playback `.task` could start or arm its deadline. A read-only process sample
+recorded that exact publication chain at 100% CPU. Same-layer PiP attachment
+now settles even when unsupported; detach still permits reattachment.
+`PictureInPictureAttachmentTests.testUnsupportedAttachmentDoesNotRepublishDuringViewUpdates`
+passes against the actual unsupported simulator, counting Combine emissions.
+
+The earlier pre-main-integration 58-case result is retained privately as
+`/tmp/cq-session-binding-ios.xcresult`, and the PiP result as
+`/tmp/cq-pip-ios-focused.xcresult`. Their exact commands and the eight shaping
+contracts are retained in the follow-up checkout's `target/quiet/` logs.
+The separate baseline lab is `06235b181` plus only the PiP attachment repair;
+that source modification must remain explicit in every comparison receipt.
+
+**Request trace timing limits.** `headers_at_ms` records upstream response
+headers. `first_byte_at_ms` records the first body chunk consumed inside the
+backpressured forwarding pump; `upstream_end_at_ms` records the end of body
+consumption. Neither body timestamp measures raw network arrival.
+Downstream completion includes local shaping. Read these events as pump
+consumption and delivery timing; they cannot independently attribute an
+acquisition delay to upstream production or network transfer.
+
 ## 4. Remaining milestones and acceptance
 
 1. **Preserve the incident and restore safe operation.** Archive evidence,
    identify any retained request/status traces, reproduce navigation with
    disposable state, and prove launch failure cannot mutate saved login.
    Acceptance: saved origin/instance/token remain identical across timeout,
-   401, 403 and wrong-instance cases in both Release and DEBUG behavior.
+   unverified 401/403 and wrong-instance cases in both Release and DEBUG
+   behavior. A verified server rejecting an expired session keeps its normal
+   sign-in recovery; the physical navigation trap still needs reproduction.
 2. **Measure successor acquisition.** Record monotonic request start/header/
    completion timings, response status and byte counts by successor session,
    candidate and object class, with query strings and credentials omitted.
@@ -170,11 +250,14 @@ is claimed above the task base; no physical installation is made.
    then qualify the shipping path safely.
 4. **Promote and install.** Run the required fast lane once on the integrated
    candidate, rerun only failures, satisfy the promotion gate and qualification
-   receipt, then merge and install from main. Preserve prior manual, Chrome,
+   receipt, then merge and install from main. Use fresh dispatches for failed
+   CI attempts and authenticated applicable success receipts; Actions job
+   reruns are refused by the repository receipt contract. Preserve prior manual, Chrome,
    Android TV and Safari macOS evidence within their recorded source scope.
 
-Firefox needs a quiet browser host on the designated Mac or `lab4`; the contended `lab3`
-run is invalid. Safari iOS awaits Web Inspector and Remote Automation.
+Firefox browser video acceptance on exact `89d790d2e` is recorded above;
+the contended `lab3` run remains invalid. Safari iOS awaits Web Inspector
+and Remote Automation.
 Neither is a substitute for the Apple successor investigation.
 
 ## 5. Evidence and cleanup ownership
@@ -185,11 +268,16 @@ as of 2026-10-17. No low-link implementation plan existed there before this
 follow-up; `fable-rca` contains build logs and DerivedData only.
 
 Keep the temporary campaign clone and `/tmp/plurx-physical-release` until
-source and evidence are archived. Remove the owned `lab4` Firefox lab and
-retire only the owned `lab3` ADB server after archiving its receipts. Revert
-the explicitly enabled authentication-free automation mode. Cleanup is
-pending. The authentication-free automation-mode revert was attempted with
-noninteractive sudo; it refused because a password is required. The operator
-must run `sudo automationmodetool disable-automationmode-without-authentication`
-in an authenticated terminal. No device reauthentication, physical proxy launch, new acceptance
-campaign, merge or main installation is claimed by this document.
+source and evidence are archived. The owned `lab4` Firefox lab has been
+removed after all 18 archived files verified against their SHA-256 manifest,
+with no live owned campaign process.
+Its immutable private archive and preserved native assets are recorded in
+the sanitized receipt. Retire only the owned `lab3` ADB server after
+archiving its receipts; that cleanup is not claimed here.
+Authentication-free automation mode is reverted: Paul confirmed running
+`sudo automationmodetool disable-automationmode-without-authentication`
+on 2026-10-17 after the noninteractive sudo attempt required authentication.
+This records operator confirmation; no additional sudo operation is needed.
+Other cleanup remains pending. No device reauthentication, physical proxy
+launch, new physical acceptance campaign, merge or main installation is
+claimed by this checkpoint.

@@ -17,6 +17,7 @@ const SET_TABS=SET_GROUPS.flatMap(([,tabs])=>tabs);
 function isSettingsRoute(h){ return h==="#/settings"||h==="#/admin"||(typeof h==="string"&&h.startsWith("#/settings/")); }
 function settingsRouteTab(h){
   if(h==="#/settings/developer/enable-subtitle-transcription") return "maintenance";
+  if(h==="#/settings/developer/enable-subtitle-translation") return "playback";
   const m=/^#\/settings\/([a-z]+)(?:\/[a-z0-9-]+)?$/.exec(h||"");
   return m&&SET_TABS.some(x=>x[0]===m[1])?m[1]:null;
 }
@@ -54,7 +55,7 @@ let SETTINGS_SHOWN_TAB=null;
 // the live DOM node, so an unsaved edit, the Save it enabled, an open readiness
 // disclosure and focus all survive; the card's own Save replaces it from the
 // server's answer, and a fresh visit to the section draws it anew.
-const SETTINGS_KEPT_MOUNTS={cluster:["cluster-settings"],analysis:["subbackfillcard"],maintenance:["enable-subtitle-transcription"]};
+const SETTINGS_KEPT_MOUNTS={playback:["enable-subtitle-translation"],cluster:["cluster-settings"],analysis:["subbackfillcard"],maintenance:["enable-subtitle-transcription"]};
 let SETTINGS_PENDING_KEEP=null;
 function captureSettingsMounts(tab){
   const nodes=(SETTINGS_KEPT_MOUNTS[tab]||[]).map(id=>document.getElementById(id))
@@ -666,7 +667,7 @@ function playbackPanel(settings,readiness){
   // Chapter thumbnails and both decoder controls graduated from Developer on
   // 2026-09-28; quality switching, this browser's second player and the PGS
   // overlay on 2026-10-10 (Paul's Developer lifecycle). Each keeps its own Save.
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${local}${chapterThumbnailsCard(settings,readiness)}${preparedQualityCard(settings,readiness)}${preparedHandoffBrowserCard()}${pgsOverlayCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${rateControlCard(settings)}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${subtitleTranslationCard()}${local}${chapterThumbnailsCard(settings,readiness)}${preparedQualityCard(settings,readiness)}${preparedHandoffBrowserCard()}${pgsOverlayCard(settings,readiness)}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${rateControlCard(settings)}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}</details>`;
 }
 
 function searchSettingsCard(readiness){

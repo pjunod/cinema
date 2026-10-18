@@ -633,6 +633,26 @@ pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connec
 /// never production migration.
 #[allow(dead_code)]
 pub(crate) fn remove_common_queue_schema(connection: &rusqlite::Connection) {
+    // Refuse to discard managed subtitle model receipts before any rewind,
+    // even in a bare fixture that carries only the receipt table.
+    let receipt_table: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='subtitle_model_receipts'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("managed subtitle receipt table inventory before fixture rewind");
+    if receipt_table == 1 {
+        let managed_receipts: i64 = connection
+            .query_row("SELECT count(*) FROM subtitle_model_receipts", [], |row| {
+                row.get(0)
+            })
+            .expect("managed subtitle receipt count before fixture rewind");
+        assert_eq!(
+            managed_receipts, 0,
+            "historical fixture must not discard managed subtitle model receipts"
+        );
+    }
     rewind_empty_managed_subtitle_schema(connection);
     connection
         .execute_batch("ALTER TABLE dv_conversions DROP COLUMN requested_manually;")

@@ -6318,10 +6318,10 @@ test("the browser and the server key a learned limit identically", () => {
 // three times — once in this policy module, once in Swift, once in Kotlin —
 // because only one of the three clients can run this file. Read the other two
 // back and fail on the drift rather than discovering it on a device.
-const APPLE_PLAYER = fs.readFileSync(
-  path.join(__dirname, "../../clients/apple/Sources/PlayerController.swift"),
-  "utf8",
-);
+// The Apple player controller spans three files since #1159; read them as one.
+const APPLE_PLAYER = ["PlayerController.swift", "PlayerControllerSupport.swift", "SharedPlayerController.swift"]
+  .map((name) => fs.readFileSync(path.join(__dirname, "../../clients/apple/Sources", name), "utf8"))
+  .join("\n");
 const ANDROID_POLICY = fs.readFileSync(
   path.join(__dirname, "../../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackPolicy.kt"),
   "utf8",

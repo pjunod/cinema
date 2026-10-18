@@ -13,3 +13,17 @@ Prepared acquisition diagnostics now identify metadata/readiness deadlines
 and the successor's validated route before disposal. This does not resolve
 the outstanding acquisition failure. The shipping proxy harness is suspended
 after the sign-in incident; physical acceptance remains open.
+
+The follow-up also preserves saved account/server pairing against launch
+argument overrides and unverified bootstrap failures, fences stale
+authentication completions, retains the installed Auto candidate after a
+proposal settles, and rejects stale named successors before replacement.
+Repeated attachment on an unsupported PiP device now settles, preventing a
+SwiftUI startup feedback loop.
+
+Local evidence: 58 selected authentication, binding and prepared-ownership
+cases pass; the separate unsupported-PiP publication regression and eight
+network-shaping contracts pass. A disposable simulator starts playback after
+the PiP repair, but its direct MP4 route bypasses shaping and supplies no
+pressure acceptance. Controlled HLS acquisition, physical acceptance and
+promotion remain pending. No physical installation is claimed.

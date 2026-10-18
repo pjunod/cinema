@@ -2006,6 +2006,7 @@ internal fun Controls(
                     Icon(Icons.Filled.PictureInPictureAlt, contentDescription = "Picture in picture", tint = Color.White)
                 }
             }
+            // Preserve the shared Tracks → Settings → Info → PiP transport order.
             // Keep the shared transport options contiguous in their contract
             // order; reporting follows them without intercepting D-pad steps.
             tv.plurx.app.diagnostics.DiagnosticReportButton(category="playback",positiveTitle=title,generation=diagnosticGeneration)

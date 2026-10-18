@@ -85,6 +85,8 @@ def is_exempt(path: str) -> bool:
         "evidence" in parts[1:-1]
         or parts[1:2] == ["archive"]
         or parts[-1] == "STATUS-HISTORY.md"         # where STATUS.md sections move, by rule
+        or parts[-1].endswith(("_LOG.md", "-LOG.md"))  # running logs: append-only, read by section
+        or path == "docs/features/PROJECT-BACKLOG.md"  # cross-project ledger with an append anchor
         or path in TOOL_MAINTAINED
     )
 
