@@ -70,6 +70,32 @@ source_anchor = "p[Keys.VIEWER_LAYOUT] = value.layout.storageValue"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/data/MeridianPreferencesStoreTest.kt"
 test_anchor = "reopenedStoreRetainsIndependentLayoutThemeAndSiblingFields"
 
+# Standard restoration: current source/test anchors; execution evidence is in PR #1180.
+[[fixes]]
+id = "apple.standard-native-adaptive-ipad-restoration"
+commits = ["2b9b537017cee617de6e86518767bff19db48351"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "tabs.mode = .tabSidebar"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLayouts"
+
+[[fixes]]
+id = "apple.standard-native-tv-push-back-restoration"
+commits = ["339f4b0563389de774b287437a49ea8fe8522665"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "let hidden = layout == .meridian || standardNavigationIsPushed"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardTVNativeTabsDisappearForPushedRoutes"
+
+[[fixes]]
+id = "apple.standard-tv-theater-geometry-restoration"
+commits = []
+supplements = "apple.standard-native-tv-push-back-restoration"
+source = "clients/apple/Sources/TvHomeLayout.swift"
+source_anchor = "minHeight: standardTheater ? 540 : 360"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "testTheaterHeroKeepsLongCopyWithinTelevisionViewport"
+
 [[fixes]]
 id = "android.shared-library-fixture-platform-ownership"
 commits = ["937bfc7000269015cde95c18130694a5c862ffe7"]

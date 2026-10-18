@@ -11,6 +11,7 @@ bump may break compatibility and a **patch** bump never does.
 ### Fixed
 
 - Apple Resume retries interrupted native seeks once and retains the saved position when preparation fails or the player closes.
+- Restore Standard's native iPad/Apple TV tabs on iOS/tvOS 18 and later, full-screen TV details, and original TV Theater styling after Meridian changed the existing layouts. Theme choices and open navigation state remain independent of the layout.
 
 ### Added
 
