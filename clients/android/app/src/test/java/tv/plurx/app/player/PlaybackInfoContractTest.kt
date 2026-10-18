@@ -34,6 +34,7 @@ class PlaybackInfoContractTest {
         streamFrame = "1920×1080",
         playingAudio = "AAC · Stereo · English",
         dynamicRange = "HDR10",
+        enhancement = listOf("The full enhancement layer is in the picture.", "Dynamic metadata reaches the display."),
         subtitles = "English · native",
         decoder = "c2.android.hevc.decoder",
         stalls = "2 (1 supply · 1 decode)",
@@ -130,6 +131,18 @@ class PlaybackInfoContractTest {
             listOf("decode_resolution", "stream_frame", "player_state", "client_loaded"),
             mini,
         )
+    }
+
+    @Test
+    fun theEnhancementRowIsOneMutedLinePerDetailAndAbsentWithoutOne() {
+        val row = playbackInfoRows(details, emptyList()).single { it.id == "enhancement" }
+        assertEquals("Enhancement", row.label)
+        assertEquals(
+            listOf("The full enhancement layer is in the picture.", "Dynamic metadata reaches the display."),
+            row.value?.lines(),
+        )
+        assertEquals(PlaybackStatTone.Muted, row.tone)
+        assertEquals(null, playbackInfoRows(details.copy(enhancement = null), emptyList()).single { it.id == "enhancement" }.value)
     }
 
     @Test

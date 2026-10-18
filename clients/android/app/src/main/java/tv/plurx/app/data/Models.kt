@@ -746,8 +746,74 @@ data class EffectiveProcessingReport(
     }
 }
 
+/** A Dolby Vision enhancement the server can name; its wire spelling is [name]. */
+enum class EnhancementBadge { FEL, RPU, DYN }
+
+data class EnhancementDetail(
+    /** Null for a badge this client does not know; its sentence still stands. */
+    val badge: EnhancementBadge?,
+    val active: Boolean,
+    val text: String,
+)
+
+/**
+ * The HLS create response's `enhancement`: what Dolby Vision enhancement the
+ * delivered picture carries, computed once by the server
+ * (`plurx_core::playback::enhancement`) so every client shows the same thing.
+ *
+ * Absent for a non-Dolby-Vision source or SDR. A badge name this client does
+ * not know is dropped from [active] rather than failing the parse.
+ */
+data class PlaybackEnhancement(
+    /** Badges for the active enhancements only, in display order. */
+    val active: List<EnhancementBadge>,
+    /** Every enhancement that applies, active or not, as one sentence each. */
+    val details: List<EnhancementDetail>,
+    /**
+     * The badges of a processed HDR10 delivery are true only while the client
+     * holds a current, generation-matching `effective_processing` report.
+     */
+    val requiresEffectiveProcessing: Boolean = false,
+) {
+    /**
+     * This enhancement as it may be shown right now, or null when it must not
+     * be: a processed delivery whose report is missing, stale or for another
+     * generation shows neither pills nor the info row.
+     */
+    fun shown(report: EffectiveProcessingReport?, activeGeneration: String?, delivered: String?): PlaybackEnhancement? =
+        takeIf { !requiresEffectiveProcessing || report?.matches(activeGeneration, delivered) == true }
+
+    companion object {
+        fun fromJson(value: kotlinx.serialization.json.JsonElement?): PlaybackEnhancement? {
+            val objectValue = value as? kotlinx.serialization.json.JsonObject ?: return null
+            fun badge(element: kotlinx.serialization.json.JsonElement?): EnhancementBadge? =
+                (element as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+                    ?.let { name -> EnhancementBadge.entries.firstOrNull { it.name == name } }
+            val active = (objectValue["active"] as? kotlinx.serialization.json.JsonArray)
+                ?.mapNotNull(::badge)?.distinct().orEmpty()
+            val details = (objectValue["details"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { item ->
+                val detail = item as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+                val text = (detail["text"] as? kotlinx.serialization.json.JsonPrimitive)
+                    ?.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                val activeFlag = (detail["active"] as? kotlinx.serialization.json.JsonPrimitive)
+                    ?.takeIf { !it.isString }?.content == "true"
+                EnhancementDetail(badge(detail["badge"]), activeFlag, text)
+            }.orEmpty()
+            if (active.isEmpty() && details.isEmpty()) return null
+            val requires = (objectValue["requires_effective_processing"] as? kotlinx.serialization.json.JsonPrimitive)
+                ?.takeIf { !it.isString }?.content == "true"
+            return PlaybackEnhancement(active, details, requires)
+        }
+    }
+}
+
 @Serializable
 data class HlsStart(
+    /**
+     * Raw `enhancement` object, read through [PlaybackEnhancement.fromJson]
+     * so a malformed or newer shape can never fail the whole create response.
+     */
+    val enhancement: kotlinx.serialization.json.JsonElement? = null,
     val effective_processing: kotlinx.serialization.json.JsonElement? = null,
     val session_id: String,
     val playlist_url: String,

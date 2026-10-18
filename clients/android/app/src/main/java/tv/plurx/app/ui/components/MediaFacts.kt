@@ -30,7 +30,12 @@ import tv.plurx.app.data.DynamicRange
 import tv.plurx.app.data.MediaFileDto
 import kotlin.math.min
 
-internal enum class MediaFactKind { Resolution, Video, DynamicRange, Audio, Container }
+internal enum class MediaFactKind {
+    Resolution, Video, DynamicRange, Audio, Container,
+
+    /** One active Dolby Vision enhancement — `FEL`, `RPU` or `DYN`. */
+    Enhancement,
+}
 
 /**
  * How a fact relates to what is actually happening right now
@@ -79,12 +84,14 @@ internal fun MediaFactChip(fact: MediaFact, modifier: Modifier = Modifier) {
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = fact.icon,
-            contentDescription = null,
-            tint = color,
-            modifier = Modifier.size(13.dp),
-        )
+        fact.icon?.let { icon ->
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = color,
+                modifier = Modifier.size(13.dp),
+            )
+        }
         Text(
             text = fact.chipText,
             color = color,
@@ -112,9 +119,11 @@ internal fun playerMediaFacts(
     deliveredDolbyVisionProfile: Int? = null,
     effectiveProcessing: tv.plurx.app.data.EffectiveProcessingReport? = null,
     activeGeneration: String? = null,
+    enhancement: tv.plurx.app.data.PlaybackEnhancement? = null,
 ): List<MediaFact> = buildList {
     resolutionFact(file)?.let(::add)
     dynamicRangeFact(file, delivered, rendered, deliveredDolbyVisionProfile, effectiveProcessing, activeGeneration)?.let(::add)
+    addAll(enhancementFacts(enhancement?.shown(effectiveProcessing, activeGeneration, delivered)))
     audio?.let { audioFact(it.codec, it.channels, it.title) }?.let(::add)
 }
 
@@ -129,13 +138,34 @@ internal fun detailMediaFacts(file: MediaFileDto): List<MediaFact> = buildList {
     file.container?.takeIf { it.isNotBlank() }?.let { add(MediaFact(MediaFactKind.Container, it.uppercase())) }
 }
 
-private val MediaFact.icon: ImageVector
+/**
+ * One compact pill per active enhancement, right after the dynamic-range
+ * chip. Inactive enhancements get nothing here — their reasons live only in
+ * the info panel's "Enhancement" row ([enhancementLines]).
+ */
+internal fun enhancementFacts(enhancement: tv.plurx.app.data.PlaybackEnhancement?): List<MediaFact> =
+    enhancement?.active.orEmpty().map { badge ->
+        MediaFact(MediaFactKind.Enhancement, badge.name, enhancementSpokenName(badge), FactState.Active)
+    }
+
+/** The info panel's "Enhancement" row: one line per server detail, or null. */
+internal fun enhancementLines(enhancement: tv.plurx.app.data.PlaybackEnhancement?): List<String>? =
+    enhancement?.details?.map { it.text }?.takeIf { it.isNotEmpty() }
+
+private fun enhancementSpokenName(badge: tv.plurx.app.data.EnhancementBadge): String = when (badge) {
+    tv.plurx.app.data.EnhancementBadge.FEL -> "Dolby Vision full enhancement layer active"
+    tv.plurx.app.data.EnhancementBadge.RPU -> "Dolby Vision RPU reshaping active"
+    tv.plurx.app.data.EnhancementBadge.DYN -> "Dolby Vision dynamic metadata active"
+}
+
+private val MediaFact.icon: ImageVector?
     get() = when (kind) {
         MediaFactKind.Resolution -> Icons.Filled.Tv
         MediaFactKind.Video -> Icons.Filled.Movie
         MediaFactKind.DynamicRange -> Icons.Filled.AutoAwesome
         MediaFactKind.Container -> Icons.Filled.Movie
         MediaFactKind.Audio -> Icons.Filled.GraphicEq
+        MediaFactKind.Enhancement -> null
     }
 
 private val MediaFact.brandColor: Color
@@ -149,6 +179,8 @@ private val MediaFact.brandColor: Color
         }
         MediaFactKind.Container -> Color(0xFFABB6CA)
         MediaFactKind.Audio -> Color(0xFFA9B5FF)
+        // The single active accent: every enhancement pill is the same teal.
+        MediaFactKind.Enhancement -> Color(0xFF62CBBE)
     }
 
 private fun resolutionFact(file: MediaFileDto?): MediaFact? {

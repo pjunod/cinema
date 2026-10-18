@@ -2,6 +2,7 @@ package tv.plurx.app.ui.components
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import tv.plurx.app.data.AudioTrack
 import tv.plurx.app.data.DolbyVisionFactsDto
@@ -349,6 +350,75 @@ class MediaFactsTest {
         hdr = "hdr10",
         hdr_format = "HDR10",
     )
+
+    private val enhancementGeneration = "11111111-1111-4111-8111-111111111111"
+
+    private fun dolbyVisionP7() = MediaFileDto(
+        id = 6_200, filename = "p7.mkv", width = 3_840, height = 2_160, video_codec = "hevc",
+        hdr = "dolby_vision", hdr_format = "Dolby Vision Profile 7",
+    )
+
+    private fun enhancement(requires: Boolean) = tv.plurx.app.data.PlaybackEnhancement(
+        active = listOf(tv.plurx.app.data.EnhancementBadge.FEL, tv.plurx.app.data.EnhancementBadge.DYN),
+        details = listOf(
+            tv.plurx.app.data.EnhancementDetail(tv.plurx.app.data.EnhancementBadge.FEL, true, "The full enhancement layer is in the picture."),
+            tv.plurx.app.data.EnhancementDetail(tv.plurx.app.data.EnhancementBadge.RPU, false, "RPU reshaping is not applied on this route."),
+            tv.plurx.app.data.EnhancementDetail(tv.plurx.app.data.EnhancementBadge.DYN, true, "Dynamic metadata reaches the display."),
+        ),
+        requiresEffectiveProcessing = requires,
+    )
+
+    @Test
+    fun activeEnhancementsAreOnePillEachRightAfterTheDynamicRangeFact() {
+        val audio = AudioTrack(index = 0, codec = "eac3", channels = 6, default = true)
+        val facts = playerMediaFacts(
+            dolbyVisionP7(), audio, delivered = DynamicRange.DOLBY_VISION, rendered = DynamicRange.DOLBY_VISION,
+            enhancement = enhancement(requires = false),
+        )
+        assertEquals(
+            listOf(MediaFactKind.Resolution, MediaFactKind.DynamicRange, MediaFactKind.Enhancement,
+                MediaFactKind.Enhancement, MediaFactKind.Audio),
+            facts.map { it.kind },
+        )
+        // Exact labels, active ones only: the inactive RPU has no pill and no
+        // reason text rides in the compact row.
+        val pills = facts.filter { it.kind == MediaFactKind.Enhancement }
+        assertEquals(listOf("FEL", "DYN"), pills.map { it.chipText })
+        assertTrue(pills.all { it.state == FactState.Active })
+    }
+
+    @Test
+    fun noEnhancementMeansNoPills() {
+        val facts = playerMediaFacts(dolbyVisionP7(), null, delivered = DynamicRange.HDR10, rendered = DynamicRange.HDR10)
+        assertTrue(facts.none { it.kind == MediaFactKind.Enhancement })
+        assertNull(enhancementLines(null))
+    }
+
+    @Test
+    fun aProcessedDeliveryHidesPillsAndRowWithoutACurrentReport() {
+        val report = tv.plurx.app.data.EffectiveProcessingReport(enhancementGeneration, true, true, listOf("PolynomialReshape"))
+        fun pills(value: tv.plurx.app.data.EffectiveProcessingReport?, generation: String?) = playerMediaFacts(
+            dolbyVisionP7(), null, delivered = DynamicRange.HDR10, rendered = DynamicRange.HDR10,
+            effectiveProcessing = value, activeGeneration = generation, enhancement = enhancement(requires = true),
+        ).filter { it.kind == MediaFactKind.Enhancement }.map { it.label }
+        assertEquals(emptyList<String>(), pills(null, enhancementGeneration))
+        assertEquals(emptyList<String>(), pills(report, "22222222-2222-4222-8222-222222222222"))
+        assertEquals(listOf("FEL", "DYN"), pills(report, enhancementGeneration))
+        // The info row follows the same gate.
+        assertNull(enhancementLines(enhancement(requires = true).shown(null, enhancementGeneration, DynamicRange.HDR10)))
+    }
+
+    @Test
+    fun theInfoRowIsOneLinePerServerDetailIncludingInactiveOnes() {
+        assertEquals(
+            listOf(
+                "The full enhancement layer is in the picture.",
+                "RPU reshaping is not applied on this route.",
+                "Dynamic metadata reaches the display.",
+            ),
+            enhancementLines(enhancement(requires = false)),
+        )
+    }
 
     private companion object {
         /** `C.COLOR_TRANSFER_ST2084`, restated so the table reads as a table. */

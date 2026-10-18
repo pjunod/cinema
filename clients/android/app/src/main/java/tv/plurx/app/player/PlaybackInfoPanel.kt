@@ -129,14 +129,17 @@ internal fun PlaybackInfoPanel(
                                     expanded = if (group in expanded) expanded - group else expanded + group
                                 }
                                 if (group in expanded) rows.forEach { row ->
+                                    // Enhancement sentences are explanations, not
+                                    // measurements: each its own neutral muted line.
+                                    val valueColor = if (row.id == "enhancement") muted else Color.White
                                     Column(Modifier.fillMaxWidth().tvFocusRing(RoundedCornerShape(8.dp), focusedScale = 1f).focusable(tv).padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         HorizontalDivider(color = Color(0xFF343D4D))
                                         if (wide) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                                             Text(row.label, color = muted, fontSize = bodySize, modifier = Modifier.weight(1f))
-                                            Text(row.value, color = Color.White, fontSize = bodySize, modifier = Modifier.weight(1f))
+                                            Text(row.value, color = valueColor, fontSize = bodySize, modifier = Modifier.weight(1f))
                                         } else {
                                             Text(row.label, color = muted, fontSize = labelSize)
-                                            Text(row.value, color = Color.White, fontSize = bodySize)
+                                            Text(row.value, color = valueColor, fontSize = bodySize)
                                         }
                                         row.note?.let { Text(it, color = muted, fontSize = labelSize) }
                                     }

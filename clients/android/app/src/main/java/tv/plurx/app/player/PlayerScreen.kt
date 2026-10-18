@@ -161,6 +161,7 @@ import tv.plurx.app.ui.components.RequestInitialFocus
 import tv.plurx.app.ui.components.TvButton
 import tv.plurx.app.ui.components.TvIconButton
 import tv.plurx.app.ui.components.dynamicRangeLabel
+import tv.plurx.app.ui.components.enhancementLines
 import tv.plurx.app.ui.components.formatTime
 import tv.plurx.app.ui.components.playerMediaFacts
 import tv.plurx.app.ui.components.sourceDynamicRange
@@ -1693,6 +1694,7 @@ private fun PlayerContent(
                     deliveredDolbyVisionProfile = controller.deliveredDolbyVisionProfile,
                     effectiveProcessing = controller.effectiveProcessing,
                     activeGeneration = controller.effectiveProcessingGeneration,
+                    enhancement = controller.enhancement,
                 ),
                 onTransportHeight = { transportHeightPx = it },
                 // The arrow is the `close` control, not the BACK key: `Back`
@@ -2404,6 +2406,13 @@ private fun PlayerInfo(
                 effectiveProcessing = controller.effectiveProcessing,
                 activeGeneration = controller.effectiveProcessingGeneration,
             ),
+            enhancement = enhancementLines(
+                controller.enhancement?.shown(
+                    controller.effectiveProcessing,
+                    controller.effectiveProcessingGeneration,
+                    controller.deliveredRange,
+                ),
+            ),
             subtitles = selectedSubtitle,
             decoder = videoFormat?.codecs ?: videoFormat?.sampleMimeType,
             stalls = "${controller.playbackStallCount} (${controller.playbackStallCount} supply · 0 decode)",
@@ -2497,6 +2506,8 @@ internal data class PlaybackInfoDetails(
     val streamPixelAspect: String? = null,
     val playingAudio: String? = null,
     val dynamicRange: String? = null,
+    /** Server-computed Dolby Vision enhancement, one sentence per line. */
+    val enhancement: List<String>? = null,
     val subtitles: String = "Off",
     val decoder: String? = null,
     val stalls: String? = null,
@@ -2674,6 +2685,15 @@ internal fun playbackInfoRows(
             details.dynamicRange,
             note = toneMapPeakSummary(status),
             placement = "notes",
+        ),
+        InfoRow(
+            "enhancement",
+            "Enhancement",
+            "NOW DECODING",
+            StandardAndDebug,
+            details.enhancement?.joinToString("\n"),
+            placement = "notes",
+            tone = PlaybackStatTone.Muted,
         ),
         InfoRow("decode_audio", "Stream audio track", "NOW DECODING", StandardAndDebug, details.playingAudio, placement = "notes"),
         InfoRow("frames", "Frames", "NOW DECODING", StandardAndDebug, details.frames, tone = videoHealthTone(details.videoHealth)),
