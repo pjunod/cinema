@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "source_commit": "ef33cc71cf89da900883d7ad5d2af5336aecffbc",
+  "apple_build": 262,
+  "build_configuration": "separately signed Debug lab bundle, isolated from shipping app",
+  "app_inputs_sha256": "595c9feecfd58bf4124a340d335be46e44ece99c2b42dd052e8bf07730c572db",
+  "server_commit": "89d790d2e74d3e516aad462d19067bbcfc2cd93c",
+  "fixture_video": "Synthetic H.264 SDR, 1920x1080, 24000/1001 fps, about 600 s",
+  "link_stages_mbps": [
+    100,
+    10,
+    25,
+    10,
+    25,
+    3,
+    25
+  ],
+  "simulator_comparison": {
+    "baseline": "06235b181+PiP startup guard",
+    "fixed": "3a701ff14dc6da54a00d54cc4928cc0623a5f959",
+    "baseline_result": "6s metadata abandonment loses installed identity, accepts unbound original, retires healthy incumbent, then failure view",
+    "fixed_result": "Same voluntary abandonment retains the named installed candidate; completes 3 Mb/s dwell and recovery without reported SDK stalls or a failure view"
+  },
+  "physical_ipad": {
+    "probe_count": 294,
+    "last_position_ms": 598677,
+    "heights_observed": [
+      360,
+      720,
+      1080
+    ],
+    "stage_shaped_media_bytes": [
+      471182573,
+      70283560,
+      45851505,
+      31312001,
+      50470306,
+      28963837,
+      22993672
+    ],
+    "max_reported_access_stalls": 0,
+    "probes_without_access_stall_counter": 1,
+    "max_playing_pair_wall_gap_seconds": 2.241,
+    "max_playing_pair_film_lag_vs_wall_seconds": 0.107,
+    "all_black_ms_zero": true
+  },
+  "physical_tv_shared_aac": {
+    "probe_count": 240,
+    "last_position_ms": 488356,
+    "heights_observed": [
+      360,
+      720,
+      1080
+    ],
+    "stage_shaped_media_bytes": [
+      446602177,
+      74994590,
+      45212665,
+      31280403,
+      31236193,
+      28445484,
+      15179998
+    ],
+    "max_reported_access_stalls": 0,
+    "all_sampled_black_ms_zero": true,
+    "max_playing_pair_wall_gap_seconds": 2.218,
+    "max_playing_pair_film_lag_vs_wall_seconds": 0.092,
+    "poststartup_surface_lifetimes": [
+      {
+        "class": "preparing",
+        "source": "client_preparing",
+        "presenting": true,
+        "rate": 1,
+        "player_stopped": false,
+        "emitted_indicator_lifetime_ms": 111,
+        "captured_arrival_delta_ms": 84
+      },
+      {
+        "class": "preparing",
+        "source": "client_preparing",
+        "presenting": true,
+        "rate": 1,
+        "player_stopped": false,
+        "emitted_indicator_lifetime_ms": 111,
+        "captured_arrival_delta_ms": 87
+      }
+    ],
+    "committed_acknowledgements": 2,
+    "http410": 0,
+    "null_control_candidates": 0
+  },
+  "info_panel": {
+    "method": "Transcode \u00b7 360p",
+    "player_display_size": "640\u00d7360",
+    "stream_frame": "Unavailable",
+    "frames_at_switch": "Not measured",
+    "audio_at_switch": "Not measured",
+    "tap_to_new_quality": "Not measured"
+  },
+  "unsupported_family_finding": "TV original E-AC-3 mono to encoded AAC mono: advertised decoder-compatible rungs are refused with 422 prepared_output_unsupported; Auto blocks declined candidates and later fails. Reproduced separately, outside the first H.264/shared-AAC continuity family. Audio-boundary handling remains a product finding.",
+  "limits": [
+    "SDK samples and counters do not prove continuous display/audio output or a physical gap of 100 ms or less.",
+    "TV preparing indicators each last 111 ms while presenting=true, rate=1 and player_stopped=false; these are UI model lifetimes, not output gaps.",
+    "The iPad 104 ms arrival pair lacks class/source/presenting capture and cannot classify an actual visible wait.",
+    "No zero-dropped-frame claim: existing switch frame/audio/tap rows explicitly report Not measured.",
+    "The lab host was shared during earlier iPad/DTS-TV overlap; no exclusive-CPU claim.",
+    "The shipping Release bundle was not proxied or relaunched in this campaign.",
+    "Raw remote credential-bearing state, database and full logs were not exported; explicit allowlisted projections are retained."
+  ],
+  "server_binary_sha256": "4352897bef268866bfc88b1e493d7fe63507e2383d3b8e45d4e7d030f1abe197"
+}

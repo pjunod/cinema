@@ -1,9 +1,9 @@
 # Apple Auto acceptance — preserve sign-in and identify acquisition failures
 
-**Status:** open; session safety, candidate binding and PiP startup repairs built;
-Firefox browser campaign passes, physical acquisition acceptance incomplete ·
-**Written:** 2026-10-17 · **Branch:** `effort/apple-auto-declared-costs`,
-PR #1156; follow-up `codex/cq-session-acquisition-safety`
+**Status:** open; Apple 262 session/candidate safety built and locally tested;
+physical continuity, the TV codec boundary and promotion remain open ·
+**Updated:** 2026-10-18 · **Branch:** `effort/apple-auto-declared-costs`,
+PR #1156; task #1179 on `codex/cq-session-acquisition-safety`
 
 Companion to [continuous-quality build §10.330](CONTINUOUS-QUALITY-BUILD.md)
 (the declared-cost correction) and the
@@ -13,43 +13,55 @@ the record of the sign-in incident. Preserve the failed runs before cleanup.
 Do not launch the installed Release app through the shaping proxy until the
 credential and server-selection incident is understood.
 
-## Current checkpoint — source repairs and scoped acceptance
+## Current checkpoint — Apple 262 source proved; physical scope remains open
 
-After integration with `d352f6cb`, follow-up source `3a701ff14` passes 64 selected
-player cases, 15 authentication/home cases and one disposable iPad recovery
-UI case. Exact integrated iOS and tvOS builds and the iOS Release build pass;
-both TV recovery journeys pass, including native focus and saved-session Retry. The earlier 58-case selection,
-separate PiP regression and eight shaping-contract passes remain retained.
-These are local development results, not full qualification, promotion or a
-physical installation. The integrated player result is retained privately at
-`/tmp/cq-main-integrated-player.xcresult`; the authentication and iPad UI
-results are `auth-recovery-units.xcresult` and `auth-recovery-ui-r4.xcresult`.
+The measured task #1179 checkpoint is `ef33cc71cf89da900883d7ad5d2af5336aecffbc`, tree
+`0e84329578724a069103cd93fac873b38e651afe`, including main `efaf89152` and
+Apple build **262**. The task gate and parent PR #1156 promotion remain
+pending. The earlier #1171 landing contains the label/diagnostic checkpoint;
+it does not contain the later session and candidate ownership repairs.
 
-Firefox 158.0 on exact `89d790d2e` passes fifteen manual changes and five
-actual Auto transitions on `lab4`, with a 99.36 ms maximum video gap, 84.1 ms
-p95, one session and no waits, reopens, stalls or hitches. The earlier
-contended `lab3` run remains invalid. The
-[sanitized receipt](evidence/cq-firefox-20261017.json) binds all 5,906 source
-files, executable and harness hashes, measurements and cleanup. Headless
-browser video does not establish independent display or audio continuity.
+The measured source/build remain `ef33cc71` / Apple 262. Effort-base
+history synchronization advances the release claim to **Apple 263**.
+Every production Swift source and test remains byte-identical to the measured
+checkpoint; only release metadata and evidence documentation change. The
+final candidate still needs its own gate. These 262 observations are not relabelled as a physical 263 run.
 
-The disposable native simulator now starts playback after the PiP repair.
-Its first MP4 test chose a direct route that bypassed the shaping proxy, so
-that playback supplies no pressure or successor-acquisition acceptance.
-The interim AAC and DTS HLS runs are also invalid: a diagnostic daemon
-restart omitted `PLURX_BOUND_FFPROBE`, and its default dynamically linked
-parser could not establish the required bound FFprobe identity. A named
-candidate's normal create exposed `candidate_geometry_unavailable`, before
-any successor attachment. This lab failure is not attributed to the app.
-The corrected environment must pass a named-candidate-bound normal create
-before the controlled link schedule starts. No physical app was launched
-through the proxy; baseline-versus-candidate HLS acceptance remains pending.
+| Evidence | Result and limit |
+|---|---|
+| Exact `ef33cc71` local regression | 79/79 focused Apple units pass: 64 playback/binding/coordinator/PiP and 15 authentication/Home cases. |
+| Apple 262 recovery UI | Three unique journeys pass: iPad Sign in → server picker → reconnect/login; TV native server choice; TV Help/Back/Retry preserving the saved login. Whole result bundles retain screenshots and failed fixture attempts. |
+| Exact-source development checks | iOS/tvOS compilation and iOS Release compilation pass; paperwork is 14/14 against main `efaf89152`. Formatting, Clippy, catalog lint and 95 served-script syntax checks pass. These are local checks, not a promotion-gate result. |
+| Controlled simulator comparison | Baseline `06235b181` plus the PiP startup repair reproduces the healthy-incumbent loss; fixed source `3a701ff14` retains its named 144p incumbent through 90 s at 3 Mb/s and 79 s at 25 Mb/s, with zero stalls in 239 probes. This comparison qualifies that source and simulator oracle. |
+| Physical iPad, Apple 262 | The 598,677 ms SDK run completes 1080p → 720p → 360p with zero reported stalls and zero black observations. One 104 ms surface pair remains unclassified; independent display continuity is unmeasured. This is scoped SDK evidence, not an uninterrupted-output verdict. |
+| Apple TV | The shared-AAC run completes 1080p → 720p → 360p through 90 s at 3 Mb/s and recovery: 240 probes, zero sampled access stalls/black intervals, no unnamed controls or HTTP 410s. Two preparing indicators last 111 ms each while presenting at rate 1; frame/audio continuity is explicitly not measured. The actual Info panel reports Transcode · 360p and 640×360. The separate DTS-source E-AC-3 → AAC VOD boundary is rejected as `prepared_output_unsupported` and remains an open product finding. |
+| Safari iOS | Awaiting the user's Web Inspector/Remote Automation settings after the XCTest automation gate prevented continuation. No skip or acceptance result is recorded. |
 
-The follow-up now incorporates main `efaf89152` and claims Apple build 262.
-Its playback safety code is unchanged from `3a701ff14`; incoming Meridian
-preferences and UI helpers are preserved. Exact combined-source validation
-is running. Checkpoint PR #1171 landed only the earlier label/diagnostic
-repair; it does not contain these later ownership fixes.
+The corrected simulator environment first proves a normal named-candidate
+create with the bound FFprobe identity. Its baseline then times out a
+voluntary original preparation while the 144p incumbent has about 60 s of
+runway, reports unnamed Auto, accepts another original with
+`automatic=false`, and loses the healthy incumbent through fallback. The
+fixed source retains the installed candidate and refuses stale named
+responses. Earlier direct-MP4 and missing-bound-FFprobe trials remain invalid
+pressure evidence; they are not converted into passes.
+
+Firefox 158.0 on exact `89d790d2e` retains its fifteen manual and five Auto
+passes: 99.36 ms maximum video gap, 84.1 ms p95, four dropped frames, one
+session and no waits/reopens/stalls/hitches. The
+[sanitized receipt](evidence/cq-firefox-20261017.json) binds source, executable
+and harness. Headless browser video does not establish independent display
+or audio continuity; the contended earlier campaign remains invalid.
+
+The [sanitized native receipt](evidence/cq-native-20261018.json) records the
+measured source, shaped bytes, typed indicators and explicit oracle limits.
+Private retention preserves the explicit `ef33cc71` source archive, final
+`cq262-focused-units.xcresult`, full Apple 262 UI bundles, commands, failed
+attempts and SHA256 manifests. The physical sign-out request and reported
+navigation trap remain unconfirmed. Disposable UI recovery tests prove only
+their controlled routes. The production installed-Release proxy runner stays
+suspended. Main merge, production installation and full acceptance are not
+claimed.
 
 ## 1. What the retained evidence establishes
 
