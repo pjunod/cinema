@@ -10,7 +10,7 @@ final class TVDvrNavigationTests: TVNavigationTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         remote.press(.menu)
-        let tab = app.tabBars.buttons["Recordings"]
+        let tab = app.viewerTab("Recordings")
         reachForSetup(tab, in: app, limit: 8)
         assertFocus(tab, in: app, context: "Recordings tab")
         remote.press(.down)

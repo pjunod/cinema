@@ -7,12 +7,12 @@ import UIKit
 class TVNavigationTestCase: XCTestCase {
     let remote = XCUIRemote.shared
 
-    func openLibrary(origin: String, presentation: String = "grid", collectionID: String = "movie") -> XCUIApplication {
+    func openLibrary(origin: String, presentation: String = "grid", collectionID: String = "movie", layout: ViewerLayoutChoice = .standard) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
         // The normal saved-server selection includes both origin and the
         // public instance identity; sign-in still goes through the real UI.
-        app.launchArguments += ["-plurx.origin", origin, "-plurx.instanceId", "library-fixture"]
+        app.launchArguments += ["-plurx.origin", origin, "-plurx.instanceId", "library-fixture", "-plurx.layout", layout.rawValue]
         app.launch()
         if app.textFields["Username"].waitForExistence(timeout: 8) {
             reachForSetup(app.textFields["Username"], in: app, limit: 4)
@@ -30,7 +30,7 @@ class TVNavigationTestCase: XCTestCase {
             assertFocus(signIn, in: app, context: "Sign in setup")
             remote.press(.select)
         }
-        let libraries = app.tabBars.buttons["Libraries"]
+        let libraries = app.viewerTab("Libraries")
         XCTAssertTrue(libraries.waitForExistence(timeout: 15), app.debugDescription)
         reachForSetup(libraries, in: app, limit: 8)
         assertFocus(libraries, in: app, context: "Libraries tab")
