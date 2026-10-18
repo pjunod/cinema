@@ -460,8 +460,19 @@ extension View {
 /// persistent checkmark in the label, so focus and selection never share one
 /// signal; the house style reports actual native focus for admission.
 private struct RemoteChoiceRowStyle: ButtonStyle {
+    @ViewBuilder
     func makeBody(configuration: Configuration) -> some View {
+        #if os(tvOS)
         TVReadableButtonStyle(prominent: false, compact: true, focusScale: 1.03).makeBody(configuration: configuration)
+        #else
+        // iPhone/iPad keep a plain touch row; the TV house style is tvOS-only.
+        configuration.label
+            .foregroundStyle(Palette.onBg)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(Palette.surfaceHi, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .opacity(configuration.isPressed ? 0.7 : 1)
+        #endif
     }
 }
 
