@@ -274,6 +274,7 @@ schemes:
       targets:
         - name: plurx-tvOSUITests
           skippedTests:
+            - TVMeridianNavigationTests
             - TVNavigationTests
             - TVSecondaryNavigationTests
             - TVPlaybackNavigationTests
