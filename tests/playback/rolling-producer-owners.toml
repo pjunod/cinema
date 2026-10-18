@@ -3053,7 +3053,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # raised this count independently
 # (effort 968, main 961 via the F6 fence-loop task); the integrated tree holds effort + main
 # - merge base. No new owner is introduced by the merge itself.
-expected_occurrences = 970
+# Progressive translation: +3 directly awaited spawn_blocking owners in
+# subtitle_translation/runtime.rs (held-source SHA, PCM inspection, fixture staging).
+expected_occurrences = 973
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4690,7 +4692,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # raised this count independently
 # (effort 1784, main 1778 via the F6 sleeps and timeouts); the integrated tree holds effort + main
 # - merge base. No new owner is introduced by the merge itself.
-expected_occurrences = 1790
+# Progressive translation: +17 bounded timers (installer phase, manager metadata
+# and demand bounds, module source/readiness bounds, runtime phase/source/fence
+# bounds including the 2 s preparation open, and finite regression waits).
+expected_occurrences = 1807
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5134,7 +5139,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # production-copy fixture collection. Each runs finite owned media to
 # completion synchronously before its fixture is released. No task or timer
 # constructor is added; existing probe collector bounds remain unchanged.
-expected_occurrences = 274
+# Progressive translation: +5 constructors (held ffprobe, bounded window decode,
+# qualified recognizer; test-only shell and ps for process-group retirement).
+expected_occurrences = 279
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

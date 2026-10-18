@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "status": "P0 selected inputs only; no measured profile or translation capability qualification yet",
+  "source_base": "220157aba1befa21052faaf83495fa703208536f",
+  "engine_contract": "whisper.cpp-1.9.2-cpu-v1",
+  "engine_source_commit": "306c88f4d1286aec1bf96e544632897886af5501",
+  "model": {
+    "id": "base",
+    "download_bytes": 147951465,
+    "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
+  },
+  "samples": [
+    {
+      "id": "fleurs-de-1586",
+      "sentence_id": "1586",
+      "language": "de",
+      "path": "audio/fleurs-de-1586.wav",
+      "reference": "references/fleurs-de-1586.json",
+      "sha256": "1942763aa0b6903ba0305fe95d665497efdd75aacbb605f79d6484ac6470b33d",
+      "samples": 207360,
+      "baseline": true
+    },
+    {
+      "id": "fleurs-de-1588",
+      "sentence_id": "1588",
+      "language": "de",
+      "path": "audio/fleurs-de-1588.wav",
+      "reference": "references/fleurs-de-1588.json",
+      "sha256": "530b2731ea11b737116853d9c2a2fc4d081c8d618dcef195c608e068c41997d3",
+      "samples": 181440,
+      "baseline": false
+    },
+    {
+      "id": "fleurs-de-1581",
+      "sentence_id": "1581",
+      "language": "de",
+      "path": "audio/fleurs-de-1581.wav",
+      "reference": "references/fleurs-de-1581.json",
+      "sha256": "0da25646c505454f762cf556d15a8396ca5f0f380568f51ef36783cdacc5cd72",
+      "samples": 144000,
+      "baseline": false
+    },
+    {
+      "id": "fleurs-de-1616",
+      "sentence_id": "1616",
+      "language": "de",
+      "path": "audio/fleurs-de-1616.wav",
+      "reference": "references/fleurs-de-1616.json",
+      "sha256": "731b1f2980e0361ffbfe4d1ab8c697c2414ea545bdd458c66f79def7d67f035c",
+      "samples": 197760,
+      "baseline": false
+    },
+    {
+      "id": "fleurs-de-1576",
+      "sentence_id": "1576",
+      "language": "de",
+      "path": "audio/fleurs-de-1576.wav",
+      "reference": "references/fleurs-de-1576.json",
+      "sha256": "d65ea62051897384787e2dc5371c6ce1cdbd911bcdc2598a99b68ffa3b0acd6a",
+      "samples": 247680,
+      "baseline": false
+    },
+    {
+      "id": "fleurs-ar-1586",
+      "sentence_id": "1586",
+      "language": "ar",
+      "path": "audio/fleurs-ar-1586.wav",
+      "reference": "references/fleurs-ar-1586.json",
+      "sha256": "86ae09eb2f7697f9cd3b291bcd71e59dae790ed09fa0f4e7a1f787c63682c725",
+      "samples": 260480,
+      "baseline": true
+    },
+    {
+      "id": "fleurs-ja-1586",
+      "sentence_id": "1586",
+      "language": "ja",
+      "path": "audio/fleurs-ja-1586.wav",
+      "reference": "references/fleurs-ja-1586.json",
+      "sha256": "3f8fc19e1135559533b4da9918d280d8b3ec5c9c16b7f5c3e23b5adc233e73ba",
+      "samples": 261120,
+      "baseline": true
+    }
+  ],
+  "german_sequence": {
+    "parts": [
+      "fleurs-de-1586",
+      "fleurs-de-1588",
+      "fleurs-de-1581",
+      "fleurs-de-1616",
+      "fleurs-de-1576"
+    ],
+    "samples": 978240,
+    "sample_rate": 16000,
+    "construction": "Concatenate production-decoded mono16k PCM in listed order without added gaps; preserve exact part sample boundaries and references.",
+    "scope": "Controlled read-speech sequence, not naturally continuous dialogue or film-quality evidence."
+  },
+  "experiment_budget": {
+    "engine_calls_max": 15,
+    "threads": 2,
+    "processors": 1,
+    "core_width_seconds": [
+      10,
+      20,
+      30
+    ],
+    "left_right_context_seconds": [
+      2,
+      5
+    ],
+    "replacement_calls_max": 2,
+    "replacement_scope": "Small canonical W30/L5/R5 cores0 and1 only, after W20/L2/R2 omitted voiced passages; original15 attempts retained.",
+    "replacement_stop_calls_max": 1,
+    "replacement_stop_reason": "OriginalStop red after EPERM liveness probe; captureownedPID/PGID before signal and proveemptygroup twice withps, noEPERMpass."
+  },
+  "quality_limit": "Publisher English references and automated comparisons are not local human listening/translation-quality acceptance.",
+  "comparison_models": [
+    {
+      "id": "small",
+      "download_bytes": 487601967,
+      "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
+      "license": "MIT",
+      "status": "P0 comparison only; not a production catalog/profile qualification"
+    }
+  ]
+}

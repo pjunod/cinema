@@ -414,6 +414,7 @@ function retirePlaybackPredecessor(p){
 // Attachment ownership is not command ownership: a native seek or Pause can
 // change the current command while this same decoder is still loading.
 function beginPlaybackMediaAttachment(p){
+  if(typeof translationRetire==="function")translationRetire("attachment changed");
   clearEffectiveProcessing(p);
   // A Shared direct session is read by exactly one attachment; any new one on
   // this player, whatever its route, ends it.
