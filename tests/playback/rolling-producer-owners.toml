@@ -1,3 +1,22 @@
+# CQ #1192 Linux isolated subtitle reap fixture (runtime.rs, cfg(test) only):
+# +1 method-spawn, +1 process constructor and +1 launch-shaped method are the
+# same exact-filter self-exec child in isolated_reaper_process. A fresh 0700
+# directory, 0600 exclusive nonce/parent/filter guard and one-use claim bind it;
+# only that child enables subreaper state before its own Tokio runtime starts.
+# Its parent observes/reaps it via four try_wait sites plus one refusal kill
+# (+5 lifecycle-methods). The 30s/8MiB protocol bounds trigger owned-group
+# cleanup and direct-child kill/reap; a bounded diagnostic tail preserves failure.
+# +3 namespaced timers are synchronous 10ms std::thread::sleep polls: the exact
+# adopted descendant's 2s cleanup, direct-child 2s refusal reap and parent 30s
+# protocol observation. They create no detached task or producer authority.
+# +3 free/UFCS lifecycle sites are cleanup_announced_groups' SIGKILL after live
+# PPID/PGID ownership checks and two WNOHANG waitpid sites for the exact known
+# descendant. One is panic/refusal cleanup; the other requires actual SIGKILL
+# and reap before two empty-PGID observations within the original 3s bound.
+# Production timeout/cancellation, 300ms/10s operation budgets and non-Linux
+# semantics remain unchanged. This records finite test owners, not a general
+# post-panic cleanup guarantee. Patterns, roots and exact equality stay intact.
+
 # Current integrated HDR + subtitle ownership census: 968 namespaced tasks,
 # 1784 timers, 272 process constructors, 760 launch-shaped methods,
 # 67 free/UFCS lifecycle calls and 104 kill-on-drop constructors.
@@ -3285,7 +3304,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # `true` child (`std::process::Command::spawn`) in process::priority::tests.
 # It is never registered by the launcher, the test reaps it with `wait()`
 # after the assertion, and production gains no launch.
-expected_occurrences = 70
+expected_occurrences = 71
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4695,7 +4714,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Progressive translation: +17 bounded timers (installer phase, manager metadata
 # and demand bounds, module source/readiness bounds, runtime phase/source/fence
 # bounds including the 2 s preparation open, and finite regression waits).
-expected_occurrences = 1807
+expected_occurrences = 1810
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5141,7 +5160,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # constructor is added; existing probe collector bounds remain unchanged.
 # Progressive translation: +5 constructors (held ffprobe, bounded window decode,
 # qualified recognizer; test-only shell and ps for process-group retirement).
-expected_occurrences = 279
+expected_occurrences = 280
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5766,7 +5785,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # F5: +2 `VodServe::status()` calls in the frozen-output reporting tests.
 # Both read the attached rendition in process; neither starts an OS child,
 # spawns a task, or acquires a producer lease.
-expected_occurrences = 764
+expected_occurrences = 765
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6049,7 +6068,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # raised this count independently
 # (effort 328, main 327 via the F6 try_wait observation); the integrated tree holds effort + main
 # - merge base. No new owner is introduced by the merge itself.
-expected_occurrences = 329
+expected_occurrences = 334
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6125,7 +6144,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # #870 adds one test-only libc::kill(pid, 0) liveness observation after its
 # owned cancelled probe has settled; it verifies ESRCH and sends no signal.
 # Cinema/current-main union: both reviewed owner sets retained; exact merged source census.
-expected_occurrences = 67
+expected_occurrences = 70
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
