@@ -112,6 +112,87 @@ final class MeridianTests: XCTestCase {
         XCTAssertTrue(navigation.paths.isEmpty)
     }
 
+    #if os(iOS)
+    func testCompactMoreRendersNativeRecordingAttentionBadge() throws {
+        let model = AppModel(startServices: false)
+        model.layout = .meridian
+        let navigation = RemoteNavigationCoordinator()
+        func chrome(_ count: Int) -> AnyView {
+            AnyView(ViewerNavigationChrome(expanded: false, recordingsAttention: count,
+                togglePanel: {}, select: { _ in }, selectSource: { _ in })
+                .environmentObject(model).environmentObject(navigation).frame(width: 320, height: 72))
+        }
+        let hosting = UIHostingController(rootView: chrome(5))
+        let window = try makeWindow()
+        window.frame.size.width = 320
+        window.rootViewController = hosting
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        settle(0.5)
+        let badge = try XCTUnwrap(findAttentionBadge(hosting.view))
+        XCTAssertEqual(badge.text, "5", "The compact More opener must render the positive DVR count")
+        XCTAssertEqual(badge.accessibilityLabel, "5 recordings need attention")
+        hosting.rootView = chrome(0)
+        settle()
+        XCTAssertNil(findAttentionBadge(hosting.view))
+        model.features = ServerFeatures(liveTv: true, recordings: false, sharedLibraries: true, libraryChannels: true)
+        hosting.rootView = chrome(5)
+        settle()
+        XCTAssertNil(findAttentionBadge(hosting.view), "A hidden destination cannot leave a stale More badge")
+    }
+
+    func testStandardWideSidebarKeepsDirectDestinationsAndSettingsHost() throws {
+        let model = AppModel(startServices: false)
+        model.phase = .ready
+        model.homeLoading = false
+        model.layout = .standard
+        let root = HomeView(initialTab: .settings).environmentObject(model)
+            .environmentObject(RemoteNavigationCoordinator()).environmentObject(RemotePlaybackAdapter())
+            .environmentObject(RemoteClientModel()).environmentObject(InvitationClientModel())
+        let hosting = UIHostingController(rootView: root)
+        let window = try makeWindow()
+        window.frame = CGRect(x: 0, y: 0, width: 1024, height: 768)
+        window.rootViewController = hosting
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        settle(1)
+        let destination = try XCTUnwrap(findDestination(hosting))
+        let settings = try XCTUnwrap(destination.hosts[.settings])
+        let chrome = try XCTUnwrap(destination.chrome)
+        let sidebar = try XCTUnwrap(findCollection(chrome.view), "Standard wide chrome must contain a native sidebar List")
+        let rows = (0..<sidebar.numberOfSections).reduce(0) { $0 + sidebar.numberOfItems(inSection: $1) }
+        XCTAssertEqual(rows, HomeTab.viewerTabs.count, "Every enabled root remains a direct native sidebar destination")
+        XCTAssertEqual(settings.view.frame.minX, 288, accuracy: 1)
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "Standard native iPad sidebar — all direct destinations"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        model.layout = .meridian
+        settle()
+        XCTAssertTrue(destination.hosts[.settings] === settings)
+        window.frame.size.width = 390
+        hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
+        settle()
+        XCTAssertTrue(destination.hosts[.settings] === settings)
+        model.layout = .standard
+        window.frame.size.width = 1024
+        hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
+        settle()
+        XCTAssertTrue(destination.hosts[.settings] === settings)
+        XCTAssertNotNil(findCollection(try XCTUnwrap(destination.chrome).view))
+    }
+
+    private func findAttentionBadge(_ view: UIView) -> UILabel? {
+        if let label = view as? UILabel, label.accessibilityIdentifier == "viewer-recording-attention-badge" { return label }
+        return view.subviews.compactMap(findAttentionBadge).first
+    }
+    private func findCollection(_ view: UIView) -> UICollectionView? {
+        if let collection = view as? UICollectionView { return collection }
+        return view.subviews.compactMap(findCollection).first
+    }
+    #endif
+
     func testProductionShellRendersMeridianWithAllEnvironmentOwners() throws { try renderFixture() }
 
     func testNarrowPhoneAccessibilityNavigationRendersWithoutOverflow() throws {

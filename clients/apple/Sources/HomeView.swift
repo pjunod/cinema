@@ -104,7 +104,8 @@ struct HomeView: View {
                 .environmentObject(playback).environmentObject(client).environmentObject(invitations)
                 .dynamicTypeSize(dynamicTypeSize)) },
             chrome: AnyView(ViewerNavigationChrome(
-                expanded: navigationExpanded, togglePanel: toggleNavigation,
+                expanded: navigationExpanded, recordingsAttention: dvr.overview?.counts.attention ?? 0,
+                togglePanel: toggleNavigation,
                 select: selectFromNavigation,
                 selectSource: selectSource
             ).environmentObject(model).environmentObject(remoteNavigation).dynamicTypeSize(dynamicTypeSize)),
@@ -180,10 +181,15 @@ struct HomeView: View {
     }
 
     private func selectSource(_ source: LibraryCollection) {
+        var changedSource = false
         if case .collection(let current) = remoteNavigation.paths[.libraries]?.first, current.id == source.id {
             // Selecting the same semantic source retains every nested push.
-        } else { remoteNavigation.paths[.libraries] = [.collection(source)] }
+        } else {
+            remoteNavigation.paths[.libraries] = [.collection(source)]
+            changedSource = true
+        }
         selectFromNavigation(.libraries)
+        if changedSource { remoteNavigation.realizeSelectedDestination() }
     }
 
     private func pathBinding(_ tab: HomeTab) -> Binding<[Route]> {
