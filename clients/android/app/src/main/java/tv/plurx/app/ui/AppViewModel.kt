@@ -548,6 +548,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { settings.saveLangs(audio, sub) }
     }
 
+    fun setLayout(layout: tv.plurx.app.data.ViewerLayout) = updatePreferences { copy(layout = layout) }
+
     fun setTheme(theme: ThemeId) = updatePreferences { copy(theme = theme) }
 
     fun setAppearance(appearance: Appearance) = updatePreferences { copy(appearance = appearance) }
@@ -917,6 +919,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun episodePlayback(episode: Item): EpisodePlaybackTarget? = playableEpisode(listOf(episode))
+
+    /** Home delegates to the same series/file/resume selectors as the detail screen. */
+    internal suspend fun homePlayback(itemId: Long): PlaybackTarget? {
+        val detail = itemDetail(itemId)
+        seriesPlayback(detail)?.let { return it.playback }
+        val item = detail.item
+        if (!item.isPlayable) return null
+        val position = item.watch?.position_ms ?: 0L
+        val file = playbackFile(item, detail.files, position) ?: return null
+        val start = resumableStartMs(position, file.duration_ms ?: item.runtime_ms)
+        return PlaybackTarget(item.id, file.id, if (item.isAudiobook) audiobookLocalPosition(start, file.part_offset_ms) else start)
+    }
 
     private suspend fun playableEpisode(episodes: List<Item>): EpisodePlaybackTarget? {
         for (episode in episodes) {

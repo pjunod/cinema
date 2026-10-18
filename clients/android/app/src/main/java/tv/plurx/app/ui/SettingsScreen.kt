@@ -82,10 +82,10 @@ fun SettingsScreen(
     val offlineBookRecords by vm.offlineBookRecords.collectAsStateWithLifecycle()
     val formFactor = currentFormFactor()
     val side = formFactor.horizontalPadding()
-    var audio by remember { mutableStateOf(LANGS.firstOrNull { it.first == vm.audioLang } ?: LANGS.first()) }
-    var sub by remember { mutableStateOf(SUB_LANGS.firstOrNull { it.first == vm.subLang } ?: SUB_LANGS.first()) }
-    var confirmingSignOut by remember { mutableStateOf(false) }
-    var diagnosticSignOutConfirmation by remember { mutableStateOf(false) }
+    var audio by rememberEntryPresentation("settings:audio") { mutableStateOf(LANGS.firstOrNull { it.first == vm.audioLang } ?: LANGS.first()) }
+    var sub by rememberEntryPresentation("settings:sub") { mutableStateOf(SUB_LANGS.firstOrNull { it.first == vm.subLang } ?: SUB_LANGS.first()) }
+    var confirmingSignOut by rememberEntryPresentation("settings:confirmingSignOut") { mutableStateOf(false) }
+    var diagnosticSignOutConfirmation by rememberEntryPresentation("settings:diagnosticSignOutConfirmation") { mutableStateOf(false) }
     val diagnosticState by tv.plurx.app.diagnostics.DiagnosticRuntime.state.collectAsStateWithLifecycle()
     if (diagnosticSignOutConfirmation) {
         AlertDialog(onDismissRequest={ diagnosticSignOutConfirmation=false },title={ Text("Clear pending local reports and sign out?") },
@@ -181,6 +181,7 @@ fun SettingsScreen(
         }
         val appearance: @Composable () -> Unit = {
             SettingsSection("Appearance", "Theme and room brightness are independent, matching the web viewer.") {
+                ChoicePicker("Layout", preferences.layout, tv.plurx.app.data.ViewerLayout.entries, { it.label }, vm::setLayout)
                 ChoicePicker("Theme", preferences.theme, ThemeId.entries, { it.label }, vm::setTheme)
                 ChoicePicker("Appearance", preferences.appearance, Appearance.entries, { it.label }, vm::setAppearance)
                 ChoicePicker("Poster size", preferences.posterSize, PosterSize.entries, { it.label }, vm::setPosterSize)
