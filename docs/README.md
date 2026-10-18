@@ -106,7 +106,7 @@ index rows by status as of 2026-10-17 — the folder index is authoritative.
 | [playback-control/](playback-control/README.md) | The playback control rewrite: explicit demand, one owner per stream, prepared handoffs. | 27 open · 22 built · 13 done · 10 superseded |
 | [streaming/](streaming/README.md) | Delivery: VOD presentation, capability negotiation, Dolby Vision, decoder selection, stall investigations. | 1 live · 121 open · 19 built · 25 done |
 | [cluster/](cluster/README.md) | Phase 4 clustering: replication, membership, recovery, and replicated-failure diagnoses. | 23 open · 5 built · 9 done |
-| [clients/](clients/README.md) | Apple, Android and the web player: parity, the input contract, subtitles, overlays, layouts. | 7 live · 70 open · 28 built · 19 done |
+| [clients/](clients/README.md) | Apple, Android and the web player: parity, the input contract, subtitles, overlays, layouts. | 7 live · 73 open · 28 built · 19 done |
 | [server/](server/README.md) | The HTTP layer, scanning, images, auth and observability. | 7 open · 2 built |
 | [performance/](performance/README.md) | Where the seconds go: performance rounds and the video-quality programme. | 4 open · 1 built · 7 done |
 | [ci/](ci/README.md) | The build, the gate, and the agents that use it. | 4 live · 16 open · 3 done |

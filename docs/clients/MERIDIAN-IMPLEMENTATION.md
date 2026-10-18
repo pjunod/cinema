@@ -1,12 +1,16 @@
 # Meridian — a selectable Cinema layout and theme across web, Apple and Android
 
-**Status:** open; implementation not started; adversarial plan findings addressed
-2026-10-17. M0 visual/state-ownership checkpoint remains before product work.
+**Status:** open; M0 design/state evidence prepared for coordinating review;
+product implementation not started. Adversarial plan findings were corrected
+and rechecked 2026-10-17; M0 remains the internal release checkpoint.
 **Written:** 2026-10-17 · **Source baseline:** `e586725544f0`.
-**Owner:** coordinating chat; implementation will be assigned to GPT-6.1 Sol.
+**Owner:** coordinating chat; implementation by GPT-6.1 Sol chat
+`01a14cba-e609-7f71-93af-db0b2b797db3`.
 **Integration branch:** `effort/meridian`.
 
 This is the canonical implementation and acceptance ledger for Meridian.
+[M0 evidence and state inventory](MERIDIAN-M0.md) records the source audit,
+frozen design tokens, reproducible prototype gallery and native migration gaps.
 Read this head, then the milestone being executed. The user requested the
 current Plex layout/navigation/theme, named **Meridian**, on the web and native
 Apple/Android clients, rendered previews, an adversarial plan review, and a
@@ -385,10 +389,20 @@ Developer switch. Acceptance status belongs in this ledger.
 
 ## 7. Review dispositions and delivery ledger
 
+**User-directed PR/review policy (2026-10-17):** M0 is a proper draft pull
+request into `effort/meridian`. The coordinator dispatches GPT-6 Astra for
+adversarial PR review; Sol addresses findings and waits at the checkpoint.
+Validation is lint/syntax and UI-related tests, including applicable UI
+preference/navigation units, plus required bookkeeping. Do not run unrelated
+full backend unit suites. Report any required hook/gate conflict with this
+narrowed scope rather than silently broadening it or claiming a pass.
+
 Independent adversarial review completed 2026-10-17 by
 `meridian_adversarial_review`; verdict was request changes with three P2
 findings. The coordinator accepted all three and amended the plan before
-dispatch. No product code or native acceptance is claimed by this disposition.
+dispatch. The original reviewer independently rechecked R1–R3 and explicitly
+cleared starting M0. No product code or native acceptance is claimed by this
+disposition.
 
 | Finding | Disposition / contract correction | Verification required |
 |---|---|---|
@@ -399,8 +413,8 @@ dispatch. No product code or native acceptance is claimed by this disposition.
 
 | Packet | State | Commit / evidence / remaining work |
 |---|---|---|
-| Plan | Reviewed; findings addressed | Coordinator authored against `e586725544f0`; R1–R3 accepted and corrected; M0 checkpoint still owed. |
-| M0 | Not started | Route map, toolchains, palette checks and design renders owed. |
+| Plan | Reviewed; corrections rechecked; M0 cleared | Coordinator authored against `e586725544f0`, committed as `85ae74eb6`; original adversarial reviewer rechecked R1–R3 and explicitly cleared starting M0. |
+| M0 | Evidence prepared; coordinator review pending | `codex/meridian-m0` from `85ae74eb6`; [evidence/state inventory](MERIDIAN-M0.md), reviewable render harness and candidate tokens. Fourteen labeled design captures, 126 prototype contrast checks and 50/50 repository candidate pairs pass. Native host/branch migrations remain implementation work; no native qualification or product change. Implementer chat `01a14cba-e609-7f71-93af-db0b2b797db3`. |
 | M1–M4 | Not started | All platform implementation and preference tests owed. |
 | M5 | Not started | Integrated screenshots, interaction evidence and code review owed. |
 | M6 | Not started | Main integration, promotion and qualification owed. |
