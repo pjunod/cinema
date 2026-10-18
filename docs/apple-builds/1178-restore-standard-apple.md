@@ -2,6 +2,7 @@
 
 Build: 262
 Issue: #1178
+Restoration PR: #1180
 
 **Status:** built and simulator-verified; physical acceptance pending.
 
