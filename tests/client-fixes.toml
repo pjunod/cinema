@@ -3,56 +3,14 @@ enforce_after = "e8a910f"
 
 # Historical Meridian source/test mappings; execution receipts are separate.
 [[fixes]]
-id = "android.meridian-shared-query-and-navigation-owners"
-commits = ["1c7ec8b1849ab2929c7453889f965235b1021259"]
-source = "clients/android/app/src/main/java/tv/plurx/app/ui/SharedLibrariesScreen.kt"
-source_anchor = "val resetQuery = reset || loadedQuery != requestedQuery"
-test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/MeridianProductionHostTest.kt"
-test_anchor = "populatedSharedQueriesAndNestedCompanionMenuKeepTheirActualOwners"
-
-[[fixes]]
 id = "android.meridian-retained-primary-graph"
 commits = []
-supplements = "android.meridian-shared-query-and-navigation-owners"
+supplements = "android.meridian-retain-query-and-menu-owners"
 source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
 source_anchor = 'navigation(startDestination = "home", route = "viewer") {'
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/MeridianProductionHostTest.kt"
 test_anchor = "actualHostRestoresSearchBranchReplacesSourceAndRetiresProfile"
 
-[[fixes]]
-id = "apple.meridian-compact-recording-attention"
-commits = ["c3f59d528de60e2fc06610ebd4fca2feb1b25e1d"]
-source = "clients/apple/Sources/ViewerDestinationHost.swift"
-source_anchor = "if attention > 0 { RecordingAttentionBadge(count: attention).frame(width: 24, height: 20) }"
-test = "clients/apple/Tests/MeridianTests.swift"
-test_anchor = "testCompactMoreRendersNativeRecordingAttentionBadge"
-
-# This native journey retains a rail screenshot; it is not a pixel-fit assertion.
-[[fixes]]
-id = "apple.meridian-tv-rail-label-rendering"
-commits = ["975ade812b85a1411a0d563a60392567de6a0076"]
-source = "clients/apple/Sources/ViewerDestinationHost.swift"
-source_anchor = ".font(.system(size: 22, weight: .semibold))"
-test = "clients/apple/UITests/TVMeridianNavigationTests.swift"
-test_anchor = "testPanelOwnsNativeFocusAndBackPreservesLibraryRoute"
-
-[[fixes]]
-id = "apple.meridian-retains-native-destination-owners"
-commits = ["3d0c045f7599271ca3257029e6164fdc525d5c9a"]
-source = "clients/apple/Sources/ViewerDestinationHost.swift"
-source_anchor = "private(set) var hosts: [HomeTab: UIHostingController<AnyView>] = [:]"
-test = "clients/apple/Tests/MeridianTests.swift"
-test_anchor = "testPersistentHostRetainsImplicitStackAndStateAcrossGeometryAndLayout"
-
-[[fixes]]
-id = "android.meridian-independent-persisted-preferences"
-commits = ["734c3d292149ecbf72918131363bbda48d5313fe"]
-source = "clients/android/app/src/main/java/tv/plurx/app/data/SettingsStore.kt"
-source_anchor = "p[Keys.VIEWER_LAYOUT] = value.layout.storageValue"
-test = "clients/android/app/src/androidTest/java/tv/plurx/app/data/MeridianPreferencesStoreTest.kt"
-test_anchor = "reopenedStoreRetainsIndependentLayoutThemeAndSiblingFields"
-
-# Standard restoration: current source/test anchors; execution evidence is in PR #1180.
 [[fixes]]
 id = "apple.standard-native-adaptive-ipad-restoration"
 commits = ["2b9b537017cee617de6e86518767bff19db48351"]
@@ -7332,14 +7290,6 @@ test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/MeridianProduct
 test_anchor = "populatedSharedQueriesAndNestedCompanionMenuKeepTheirActualOwners"
 
 [[fixes]]
-id = "apple.meridian-adaptive-standard-sidebar"
-commits = ["c3f59d528de60e2fc06610ebd4fca2feb1b25e1d"]
-source = "clients/apple/Sources/ViewerDestinationHost.swift"
-source_anchor = "let railWidth: CGFloat = layout == .standard ? 288 :"
-test = "clients/apple/Tests/MeridianTests.swift"
-test_anchor = "testStandardWideSidebarKeepsDirectDestinationsAndSettingsHost"
-
-[[fixes]]
 id = "apple.meridian-tv-native-panel-labels"
 commits = ["975ade812b85a1411a0d563a60392567de6a0076"]
 source = "clients/apple/Sources/ViewerDestinationHost.swift"
@@ -7365,12 +7315,11 @@ test_anchor = "actualHostCapturesHomeAndPreservesNestedSettingsEntryAcrossLayout
 
 [[fixes]]
 id = "apple.meridian-compact-recording-attention"
-commits = []
+commits = ["c3f59d528de60e2fc06610ebd4fca2feb1b25e1d"]
 source = "clients/apple/Sources/ViewerDestinationHost.swift"
 source_anchor = "RecordingAttentionBadge(count: attention).frame(width: 24, height: 20)"
 test = "clients/apple/Tests/MeridianTests.swift"
 test_anchor = "testCompactMoreRendersNativeRecordingAttentionBadge"
-supplements = "apple.meridian-adaptive-standard-sidebar"
 
 [[fixes]]
 id = "apple.meridian-native-opener-host-preference"
