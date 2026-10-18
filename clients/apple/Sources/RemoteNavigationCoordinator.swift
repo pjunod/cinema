@@ -265,7 +265,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
         presentations.removeAll()
         presentationControllers.removeAll()
         selectedTab = .home
-        viewerNavigationAvailable = false
+        // Device layout capability survives while all account-owned actions are rebuilt.
         destinationFocusPending = false
         scope = "home"
         observedTab = .home

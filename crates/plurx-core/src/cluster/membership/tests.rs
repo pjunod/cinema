@@ -7478,7 +7478,7 @@ fn the_capability_proof_can_only_be_skipped_by_a_validation_build() {
 /// by the string literal that states it.
 fn production_source() -> String {
     include_str!("../membership.rs")
-        .split_once("\n#[cfg(test)]\nmod tests {")
+        .split_once("\n#[cfg(test)]\nmod tests;")
         .expect("the test module")
         .0
         .to_owned()
@@ -7651,10 +7651,8 @@ fn membership_sql_constants_compile_against_the_production_schema() {
 #[test]
 fn membership_fixtures_declare_only_production_columns() {
     let production = production_membership_tables();
-    let tests = include_str!("../membership.rs")
-        .split_once("\n#[cfg(test)]\nmod tests {")
-        .expect("the test module")
-        .1;
+    assert!(include_str!("../membership.rs").contains("\n#[cfg(test)]\nmod tests;"));
+    let tests = include_str!("tests.rs");
     let needle = concat!("CREATE TABLE ", "cluster_");
     let mut checked = 0;
     let mut rest = tests;

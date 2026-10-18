@@ -846,8 +846,17 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         for workflow in [publication, ci]:
             assert "target: linux-dolby-package-export" in workflow
-            assert "outputs: type=local,dest=linux-dolby-export" in workflow
             assert "linux-dolby-package=./linux-dolby-export/package" in workflow
+        assert "outputs: type=local,dest=linux-dolby-export" in publication
+        binary = ci.split("- name: Compile and export the exact candidate binaries", 1)[1].split("- name:", 1)[0]
+        media = ci.split("- name: Build and export the exact audited Bookworm media package", 1)[1].split("- name:", 1)[0]
+        unpack = ci.split("- name: Validate and unpack the complete audited media export", 1)[1].split("- name:", 1)[0]
+        assert "outputs: type=tar,dest=linux-dolby-export.tar" in media
+        assert "if: matrix.arch == 'amd64'" in media and "if: matrix.arch == 'amd64'" in unpack
+        assert "python3 -m validation.media_export linux-dolby-export.tar linux-dolby-export" in unpack
+        assert "outputs: type=local,dest=binary-export" in binary
+        assert ci.count("outputs: type=tar,dest=linux-dolby-export.tar") == 1
+        assert ci.index("- name: Validate and unpack") < ci.index("- name: Build the runtime")
         assert "runtime-assets-dolby-amd64" in publication
         candidate = (ROOT / "scripts/release-package-candidate").read_text()
         assert '"$target" == x86_64-unknown-linux-gnu' in candidate

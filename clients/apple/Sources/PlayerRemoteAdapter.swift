@@ -294,6 +294,11 @@ extension View {
     func tvDiagnosticReportExit(_ close: @escaping () -> Void) -> some View {
         modifier(TVDiagnosticReportExitAdapter(close: close))
     }
+
+    /// The viewer navigation panel owns Menu only while its caller is expanded.
+    func tvViewerNavigationPanelExit(_ close: @escaping () -> Void) -> some View {
+        onExitCommand(perform: close)
+    }
 }
 #endif
 

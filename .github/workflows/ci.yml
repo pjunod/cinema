@@ -342,9 +342,11 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-    # Run 5228 exhausted 30m after compilation and 1917 unit result rows,
-    # before the full unit/SQLite receipt. Keep the entire suite and a finite cap.
-    timeout-minutes: 60
+    # Run 5447 failed after 88m50s; the two following serial FFmpeg checks
+    # never ran. Source fixture admission may also queue independent bodies.
+    # Preserve every command with a finite 120m cap. Passing full-gate duration
+    # remains unmeasured; this budget is not a completion guarantee.
+    timeout-minutes: 120
     steps:
       - name: Capture mounted runner workspace owner
         run: |
@@ -1004,7 +1006,9 @@ jobs:
     if: needs.scope.outputs.cluster_auth == 'true'
     # Retained outcomes still require compiling the large current native targets.
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
-    timeout-minutes: 30
+    # Run 5447 passed 213 commands; the next feature target was still compiling
+    # at 30 minutes. Full completion time remains unmeasured.
+    timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "1"
     steps:
@@ -1742,9 +1746,12 @@ jobs:
           file: Dockerfile
           target: linux-dolby-package-export
           platforms: linux/amd64
-          outputs: type=local,dest=linux-dolby-export
+          outputs: type=tar,dest=linux-dolby-export.tar
           cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,scope=package-media-amd64' || '' }}
           cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,mode=max,scope=package-media-amd64' || '' }}
+      - name: Validate and unpack the complete audited media export
+        if: matrix.arch == 'amd64'
+        run: python3 -m validation.media_export linux-dolby-export.tar linux-dolby-export
       - name: Build the runtime from only the verified binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:

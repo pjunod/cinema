@@ -12,6 +12,7 @@ final class ViewerDestinationController: UIViewController {
     private var header: UIHostingController<AnyView>?
     var layout: ViewerLayout = .standard
     var expanded = false
+    var chromeFocusRequested = false
     var accessibilityNavigation = false
     var makeRoot: ((HomeTab) -> AnyView)?
 
@@ -111,7 +112,7 @@ final class ViewerDestinationController: UIViewController {
         }
     }
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
-        if expanded, let chrome { return [chrome] }
+        if expanded || (layout == .meridian && chromeFocusRequested), let chrome { return [chrome] }
         return activeHost.map { [$0] } ?? []
     }
 }
@@ -120,6 +121,7 @@ struct LegacyViewerDestinationHost: UIViewControllerRepresentable {
     let selection: HomeTab
     let layout: ViewerLayout
     let expanded: Bool
+    let chromeFocusRequested: Bool
     let accessibilityNavigation: Bool
     let panelDismissed: () -> Void
     let root: (HomeTab) -> AnyView
@@ -135,6 +137,8 @@ struct LegacyViewerDestinationHost: UIViewControllerRepresentable {
         controller.accessibilityNavigation = accessibilityNavigation
         let changedExpansion = controller.expanded != expanded
         controller.expanded = expanded
+        let changedFocusRequest = controller.chromeFocusRequested != chromeFocusRequested
+        controller.chromeFocusRequested = chromeFocusRequested
         controller.hosts[selection]?.view.isUserInteractionEnabled = !expanded
         controller.hosts[selection]?.view.accessibilityElementsHidden = expanded
         controller.makeRoot = root
@@ -149,7 +153,7 @@ struct LegacyViewerDestinationHost: UIViewControllerRepresentable {
                 panelDismissed()
             }
         }
-        if changedExpansion { controller.setNeedsFocusUpdate() }
+        if changedExpansion || changedFocusRequest { controller.setNeedsFocusUpdate() }
     }
 }
 
@@ -322,7 +326,7 @@ struct ViewerNavigationChrome: View {
             }
             .onChange(of: model.features) { _, _ in if expanded { enterPanel() } }
             .onChange(of: model.libraryCollections(grouping: .share)) { _, _ in if expanded { enterPanel() } }
-            .onExitCommand { if expanded { togglePanel() } }
+            .tvViewerNavigationPanelExit { if expanded { togglePanel() } }
             #endif
         }
     }
@@ -414,6 +418,7 @@ struct ViewerDestinationHost: View {
     let selection: HomeTab
     let layout: ViewerLayout
     let expanded: Bool
+    let chromeFocusRequested: Bool
     let accessibilityNavigation: Bool
     let visibleTabs: [HomeTab]
     let recordingsAttention: Int
@@ -427,13 +432,15 @@ struct ViewerDestinationHost: View {
     var body: some View {
         if #available(iOS 18.0, tvOS 18.0, *) {
             SwiftUIViewerDestinationHost(selection: selection, layout: layout,
-                expanded: expanded, accessibilityNavigation: accessibilityNavigation,
+                expanded: expanded, chromeFocusRequested: chromeFocusRequested,
+                accessibilityNavigation: accessibilityNavigation,
                 visibleTabs: visibleTabs, recordingsAttention: recordingsAttention,
                 selectionChanged: selectionChanged, standardNavigationIsPushed: standardNavigationIsPushed,
                 panelDismissed: panelDismissed, root: root, chrome: chrome, header: header)
         } else {
             LegacyViewerDestinationHost(selection: selection, layout: layout,
-                expanded: expanded, accessibilityNavigation: accessibilityNavigation,
+                expanded: expanded, chromeFocusRequested: chromeFocusRequested,
+                accessibilityNavigation: accessibilityNavigation,
                 panelDismissed: panelDismissed, root: root, chrome: chrome, header: header)
         }
     }
@@ -445,6 +452,7 @@ struct SwiftUIViewerDestinationHost: View {
     let selection: HomeTab
     let layout: ViewerLayout
     let expanded: Bool
+    let chromeFocusRequested: Bool
     let accessibilityNavigation: Bool
     let visibleTabs: [HomeTab]
     let recordingsAttention: Int
@@ -459,7 +467,8 @@ struct SwiftUIViewerDestinationHost: View {
 
     private var configuration: SwiftUITabChromeConfiguration {
         SwiftUITabChromeConfiguration(layout: layout,
-            hideBar: layout == .meridian || hidesStandardBar, expanded: expanded)
+            hideBar: layout == .meridian || hidesStandardBar, expanded: expanded,
+            chromeFocusRequested: layout == .meridian && chromeFocusRequested)
     }
     private var hidesStandardBar: Bool {
         #if os(tvOS)
@@ -565,6 +574,7 @@ private struct SwiftUITabChromeConfiguration: Equatable {
     let layout: ViewerLayout
     let hideBar: Bool
     let expanded: Bool
+    let chromeFocusRequested: Bool
 }
 
 /// This object does not own any controller or replace SwiftUI's delegate.
@@ -576,6 +586,7 @@ private final class SwiftUITabChromeState: ObservableObject {
     private var configuration: SwiftUITabChromeConfiguration?
     private var appliedLayout: ViewerLayout?
     private var appliedExpanded: Bool?
+    private var appliedFocusRequest: Bool?
     private var updateScheduled = false
     #if os(iOS)
     private var savedSidebarHidden = true
@@ -595,6 +606,7 @@ private final class SwiftUITabChromeState: ObservableObject {
                     tabs = tabController
                     appliedLayout = nil
                     appliedExpanded = nil
+                    appliedFocusRequest = nil
                 }
                 scheduleUpdate()
                 return
@@ -631,15 +643,19 @@ private final class SwiftUITabChromeState: ObservableObject {
         if tabs.isTabBarHidden != configuration.hideBar {
             tabs.setTabBarHidden(configuration.hideBar, animated: false)
         }
-        if let applied = appliedExpanded, applied != configuration.expanded {
+        let changedExpansion = appliedExpanded.map { $0 != configuration.expanded } ?? false
+        let changedFocusRequest = appliedFocusRequest.map { $0 != configuration.chromeFocusRequested } ?? false
+        if changedExpansion || changedFocusRequest {
             // Existing chrome's RemoteChoiceFocusReadiness chooses the exact
-            // panel row. This requests reevaluation after destination fencing.
+            // panel row, and the opener's focus binding answers a Meridian
+            // opener request. This requests reevaluation after either edge.
             var owner: UIViewController = tabs
             while let parent = owner.parent { owner = parent }
             owner.setNeedsFocusUpdate()
             owner.updateFocusIfNeeded()
         }
         appliedExpanded = configuration.expanded
+        appliedFocusRequest = configuration.chromeFocusRequested
         appliedLayout = configuration.layout
     }
 }

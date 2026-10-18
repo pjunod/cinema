@@ -29,6 +29,8 @@ use uuid::Uuid;
 pub(crate) const FEATURE_KEY: &str = "cinema.remote_control";
 pub(crate) struct Hub {
     sessions: Mutex<HashMap<Uuid, Session>>,
+    #[cfg(test)]
+    queue_clock: Mutex<Option<Instant>>,
     pub changed: Notify,
     approvals: std::sync::Arc<Semaphore>,
     generation: std::sync::atomic::AtomicU64,
@@ -45,6 +47,8 @@ impl Default for Hub {
     fn default() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            queue_clock: Mutex::new(None),
             changed: Notify::new(),
             approvals: std::sync::Arc::new(Semaphore::new(16)),
             generation: std::sync::atomic::AtomicU64::new(0),
@@ -253,6 +257,21 @@ fn pairing_hash(key: &str, code: &str) -> Result<Vec<u8>, ApiError> {
     Ok(mac.finalize().into_bytes().to_vec())
 }
 impl Hub {
+    fn queue_now(&self, now: Instant) -> Instant {
+        #[cfg(test)]
+        if let Some(frozen) = *self.queue_clock.lock().expect("test queue clock") {
+            return frozen;
+        }
+        now
+    }
+
+    #[cfg(test)]
+    pub(crate) fn freeze_queue_clock_for_test(&self) {
+        let mut clock = self.queue_clock.lock().expect("test queue clock");
+        assert!(clock.is_none(), "queue clock may only be frozen once");
+        *clock = Some(Instant::now());
+    }
+
     #[cfg(test)]
     pub(crate) fn expire_pending_for_test(&self, session: Uuid) {
         if let Ok(mut sessions) = self.sessions.lock() {
@@ -300,6 +319,7 @@ impl Hub {
     }
     fn expire(&self) -> Result<(), ApiError> {
         let now = Instant::now();
+        let queue_now = self.queue_now(now);
         let mut sessions = self.lock()?;
         sessions.retain(|_, s| now.duration_since(s.last_seen) < Duration::from_secs(15));
         for s in sessions.values_mut() {
@@ -309,7 +329,7 @@ impl Hub {
             }
             let mut expired = Vec::new();
             s.queue.retain(|q| {
-                if now.duration_since(q.at) < Duration::from_millis(500) {
+                if queue_now.duration_since(q.at) < Duration::from_millis(500) {
                     true
                 } else {
                     expired.push(q.command.clone());
@@ -324,7 +344,7 @@ impl Hub {
                 self.changed.notify_waiters();
             }
             s.batch
-                .retain(|q| now.duration_since(q.at) < Duration::from_millis(500));
+                .retain(|q| queue_now.duration_since(q.at) < Duration::from_millis(500));
             s.results
                 .retain(|(_, at)| now.duration_since(*at) < Duration::from_secs(10));
             s.pending.retain(|p| now < p.until);
@@ -1107,7 +1127,7 @@ impl Hub {
                         .grant_hash
                         .clone()
                         .ok_or_else(|| fail(401, "unauthorized"))?,
-                    at: Instant::now(),
+                    at: self.queue_now(Instant::now()),
                 });
                 self.changed.notify_waiters();
                 Ok(Some((
@@ -1301,7 +1321,7 @@ impl Hub {
         }
         let mut sessions = self.lock()?;
         let s = Self::session(&mut sessions, target)?;
-        let now = Instant::now();
+        let now = self.queue_now(Instant::now());
         let epoch = s.lease.as_ref().map(|l| l.wire.control_epoch);
         let retain = |q: &Queued| {
             Some(q.command.control_epoch) == epoch

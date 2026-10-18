@@ -561,9 +561,153 @@ pub(crate) fn remove_jellyfin_compatibility_schema(connection: &rusqlite::Connec
         .expect("remove v98-v101 Jellyfin compatibility schema");
 }
 
+/// The published v112 object witness shared by SQLite and replicated fixtures.
+#[allow(dead_code)]
+pub(crate) const TRANSLATION_FIXTURE_SHAPE_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE name GLOB 'subtitle_translation_*' AND sql IS NOT NULL ORDER BY name";
+
+#[allow(dead_code)]
+pub(crate) fn translation_fixture_shape() -> Vec<(String, String)> {
+    let expected = rusqlite::Connection::open_in_memory().expect("translation shape witness");
+    expected.execute_batch("CREATE TABLE files(id INTEGER,size INTEGER,mtime INTEGER); CREATE TABLE background_jobs(kind TEXT,state TEXT,payload_json TEXT,revision INTEGER,last_error_code TEXT);")
+        .expect("translation metadata dependencies");
+    expected
+        .execute_batch(include_str!("../../src/store/subtitle_translation.sql"))
+        .expect("published current translation objects");
+    let shape = expected
+        .prepare(TRANSLATION_FIXTURE_SHAPE_SQL)
+        .expect("translation shape query")
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("translation shape rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete translation shape");
+    shape
+}
+
+/// A read-only, closed drop plan. All 12 table inventories must be present:
+/// the exact marker is retained until execution and every other table is empty.
+#[allow(dead_code)]
+pub(crate) fn validated_empty_translation_rewind(
+    actual: &[(String, String)],
+    counts: &[(String, i64)],
+    accepted_jobs: i64,
+) -> Vec<String> {
+    assert_eq!(
+        accepted_jobs, 0,
+        "historical fixture must not discard accepted translation work"
+    );
+    assert_eq!(
+        actual,
+        translation_fixture_shape(),
+        "only the exact current translation shape may be rewound"
+    );
+    let tables: std::collections::BTreeSet<_> = actual
+        .iter()
+        .filter(|(_, sql)| sql.starts_with("CREATE TABLE"))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let counted: std::collections::BTreeMap<_, _> = counts
+        .iter()
+        .map(|(name, count)| (name.as_str(), *count))
+        .collect();
+    assert_eq!(
+        counts.len(),
+        counted.len(),
+        "each translation table is inventoried once"
+    );
+    assert_eq!(
+        tables,
+        counted.keys().copied().collect(),
+        "every translation table must be inventoried"
+    );
+    for (name, count) in counted {
+        assert_eq!(count, if name == "subtitle_translation_schema" {1} else {0}, "historical fixture must retain its exact marker and must not discard translation data in {name}");
+    }
+    let mut drops: Vec<_> = actual
+        .iter()
+        .filter(|(_, sql)| sql.starts_with("CREATE TRIGGER"))
+        .map(|(name, _)| format!("DROP TRIGGER {name}"))
+        .collect();
+    // Triggers first, then explicit FK children before assets/operations. This
+    // is not a generic down-migration or a production migration tolerance.
+    let ordered = [
+        "subtitle_translation_read_leases",
+        "subtitle_translation_snapshots",
+        "subtitle_translation_segments",
+        "subtitle_translation_ranges",
+        "subtitle_translation_source_bindings",
+        "subtitle_translation_demands",
+        "subtitle_translation_assets",
+        "subtitle_translation_requests",
+        "subtitle_translation_capabilities",
+        "subtitle_translation_commands",
+        "subtitle_translation_operations",
+        "subtitle_translation_schema",
+    ];
+    assert_eq!(
+        tables,
+        ordered.into_iter().collect(),
+        "every translation table is explicitly removed"
+    );
+    drops.extend(ordered.map(|name| format!("DROP TABLE {name}")));
+    drops
+}
+
+#[allow(dead_code)]
+fn validated_translation_rewind(connection: &rusqlite::Connection) -> String {
+    let actual = connection
+        .prepare(TRANSLATION_FIXTURE_SHAPE_SQL)
+        .expect("translation shape query")
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("translation shape rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("complete translation shape");
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("fixture SQLite version");
+    if actual.is_empty() {
+        assert!(
+            version < 112,
+            "current translation fixture cannot be missing its extension"
+        );
+        return String::new();
+    }
+    assert_eq!(
+        version, 112,
+        "only the current translation fixture may be rewound"
+    );
+    // Validate identifiers/DDL before using any names in data inventory SQL.
+    assert_eq!(
+        actual,
+        translation_fixture_shape(),
+        "exact current translation shape required"
+    );
+    let counts = actual
+        .iter()
+        .filter(|(_, sql)| sql.starts_with("CREATE TABLE"))
+        .map(|(name, _)| {
+            let count: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {name}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("translation fixture data");
+            (name.clone(), count)
+        })
+        .collect::<Vec<_>>();
+    let accepted_jobs: i64 = connection.query_row("SELECT count(*) FROM background_jobs WHERE kind IN ('subtitle_translation_prepare','subtitle_translation_range')", [], |row| row.get(0)).expect("accepted translation job inventory");
+    let drops = validated_empty_translation_rewind(&actual, &counts, accepted_jobs);
+    // No mutation: the caller must validate the managed extension as well,
+    // then execute both plans in one savepoint.
+    format!("{};", drops.join(";"))
+}
+
 /// Rewind only an exact empty managed extension in an owned historical fixture.
 #[allow(dead_code)]
 pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connection) {
+    let translation_rewind = validated_translation_rewind(connection);
     const SHAPE: &str = "SELECT name,sql FROM sqlite_master WHERE name IN ('subtitle_managed_schema','subtitle_model_receipts','subtitle_managed_source_changed','subtitle_managed_source_deleted','subtitle_managed_config_write','background_job_required_resources') ORDER BY name";
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -577,7 +721,7 @@ pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connec
         return;
     }
     assert_eq!(
-        version, 111,
+        version, 112,
         "only the current SQLite fixture may be rewound"
     );
     assert_eq!(objects, 5, "partial managed fixture cannot be rewound");
@@ -625,7 +769,7 @@ pub(crate) fn rewind_empty_managed_subtitle_schema(connection: &rusqlite::Connec
         .expect("published predecessor resource view");
     // Preserve a complete predecessor while the common-queue removal follows.
     // A savepoint keeps this atomic even inside an outer fixture transaction.
-    connection.execute_batch(&format!("SAVEPOINT rewind_managed_fixture; DROP TRIGGER subtitle_managed_config_write; DROP TRIGGER subtitle_managed_source_deleted; DROP TRIGGER subtitle_managed_source_changed; DROP VIEW background_job_required_resources; DROP TABLE subtitle_model_receipts; DROP TABLE subtitle_managed_schema; {old_view} RELEASE rewind_managed_fixture;")).expect("atomic empty managed fixture rewind");
+    connection.execute_batch(&format!("SAVEPOINT rewind_managed_fixture; {translation_rewind} DROP TRIGGER subtitle_managed_config_write; DROP TRIGGER subtitle_managed_source_deleted; DROP TRIGGER subtitle_managed_source_changed; DROP VIEW background_job_required_resources; DROP TABLE subtitle_model_receipts; DROP TABLE subtitle_managed_schema; {old_view} RELEASE rewind_managed_fixture;")).expect("atomic empty managed fixture rewind");
 }
 
 /// Wind a current test database back across the durable-queue introduction.

@@ -1736,11 +1736,12 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         let sourceURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/PlayerController.swift")
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        func body(_ start: String, until end: String) throws -> String {
-            let lower = try XCTUnwrap(source.range(of: start), "Missing source boundary: \(start)")
-            let upper = try XCTUnwrap(source.range(of: end, range: lower.upperBound..<source.endIndex),
+        func body(_ start: String, until end: String, in fixture: String? = nil) throws -> String {
+            let text = fixture ?? source
+            let lower = try XCTUnwrap(text.range(of: start), "Missing source boundary: \(start)")
+            let upper = try XCTUnwrap(text.range(of: end, range: lower.upperBound..<text.endIndex),
                                       "Missing source boundary after \(start): \(end)")
-            return String(source[lower.upperBound..<upper.lowerBound])
+            return String(text[lower.upperBound..<upper.lowerBound])
         }
         // Every stall recovery (hold, downgrade, reopen) ends the armed re-plan
         // before it acts.
@@ -1752,14 +1753,21 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         // A blocked original is not offered by a boundary either.
         let candidate = try body("private func autoOriginalBoundaryCandidate(now: Int)",
                                  until: "private func beginAutoBoundaryPreparation(")
-        XCTAssertTrue(candidate.contains("(autoBlockedUntil[$0.id] ?? 0) <= now"))
+        XCTAssertTrue(candidate.contains("return autoBoundaryOriginalCandidate(measuredCostCatalog(offered), current: current, link: link,"))
+        XCTAssertTrue(candidate.contains("outputs: decision?.measuredCandidateOutputs, rejected: autoDecoderRejected,"))
+        XCTAssertTrue(candidate.contains("blockedUntil: autoBlockedUntil, nowMs: now)"))
+        let support = try String(contentsOf: sourceURL.deletingLastPathComponent()
+            .appendingPathComponent("PlayerControllerSupport.swift"), encoding: .utf8)
+        let filter = try body("func autoBoundaryOriginalCandidate(", until: "struct AutoStallRecoveryVerdict", in: support)
+        XCTAssertTrue(filter.contains("!rejected.contains($0.id) && (blockedUntil[$0.id] ?? 0) <= nowMs"))
         // The tick asks for the candidate inside take, so only a produced
         // candidate spends the boundary.
         // The tick accepts pressure-only evaluations as well as ordinary ticks;
         // locate the function independently of its parameter spelling.
-        let tick = try body("private func tickDisplayAwareAuto(", until: "let link: Double? = {")
+        let tick = try body("private func tickDisplayAwareAuto(", until: "func playbackControlPlayerChanged()")
         XCTAssertTrue(tick.contains("if !pressureOnly, let chosen = autoBoundaryReplan.take("))
         XCTAssertTrue(tick.contains("produce: { autoOriginalBoundaryCandidate(now: now) }"))
+        XCTAssertTrue(tick.contains("isCurrent: { attemptStillCurrent($0, fence: .autoBoundaryReplanCurrent) }"))
         // A viewer quality change bumps the viewer action the re-plan fence reads.
         let quality = try body("func selectQuality(_ height: Int?) {", until: "selectedHeight = height")
         XCTAssertTrue(quality.contains("beginViewerAction()"))
@@ -1989,13 +1997,17 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertEqual(autoRecoveryCandidate([lower], current: hdrOriginal, rejected: [], decoderRecovery: true)?.height, 1_080)
     }
 
-    func testOriginalAverageIsDownsideOnlyAndNeedsFreshUnpacedSessionEvidence() {
+    func testOriginalDeclaredRateIsItsDownsideCostWhateverTheBodyEvidence() {
+        // The declared source rate is the title's sustained cost; a body of
+        // another session, a paced body or a stale one changes nothing, and
+        // it is downside-only: the peak stays unknown.
         let original = candidate(2_160, route: "remux", peak: nil)
         XCTAssertEqual(autoDownsideCostBps(original, sample: sample(), sessionId: "staged", nowMs: 2_000), 8_000_000)
         XCTAssertNil(original.peakBps)
-        XCTAssertNil(autoDownsideCostBps(original, sample: sample(), sessionId: "other", nowMs: 2_000))
-        XCTAssertNil(autoDownsideCostBps(original, sample: sample(paced: true), sessionId: "staged", nowMs: 2_000))
-        XCTAssertNil(autoDownsideCostBps(original, sample: sample(), sessionId: "staged", nowMs: 12_000))
+        XCTAssertEqual(autoDownsideCostBps(original, sample: sample(), sessionId: "other", nowMs: 2_000), 8_000_000)
+        XCTAssertEqual(autoDownsideCostBps(original, sample: sample(paced: true), sessionId: "staged", nowMs: 2_000), 8_000_000)
+        XCTAssertEqual(autoDownsideCostBps(original, sample: sample(), sessionId: "staged", nowMs: 12_000), 8_000_000)
+        XCTAssertEqual(autoDownsideCostBps(original, sample: nil, sessionId: "staged", nowMs: 2_000), 8_000_000)
     }
 
     private func sample(_ segment: String = "a", bodySeconds: Double = 0.5,

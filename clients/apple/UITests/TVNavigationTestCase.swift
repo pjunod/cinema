@@ -8,28 +8,8 @@ class TVNavigationTestCase: XCTestCase {
     let remote = XCUIRemote.shared
 
     func openLibrary(origin: String, presentation: String = "grid", collectionID: String = "movie", layout: ViewerLayoutChoice = .standard) -> XCUIApplication {
-        continueAfterFailure = false
-        let app = XCUIApplication()
-        // The normal saved-server selection includes both origin and the
-        // public instance identity; sign-in still goes through the real UI.
-        app.launchArguments += ["-plurx.origin", origin, "-plurx.instanceId", "library-fixture", "-plurx.layout", layout.rawValue]
-        app.launch()
-        if app.textFields["Username"].waitForExistence(timeout: 8) {
-            reachForSetup(app.textFields["Username"], in: app, limit: 4)
-            assertFocus(app.textFields["Username"], in: app, context: "Username setup")
-            remote.press(.select)
-            app.textFields["Username"].typeText("fixture")
-            dismissKeyboard(in: app)
-            reachForSetup(app.secureTextFields["Password"], in: app, limit: 4)
-            assertFocus(app.secureTextFields["Password"], in: app, context: "Password setup")
-            remote.press(.select)
-            app.secureTextFields["Password"].typeText("fixture")
-            dismissKeyboard(in: app)
-            let signIn = app.buttons["Sign in"]
-            reachForSetup(signIn, in: app, limit: 4)
-            assertFocus(signIn, in: app, context: "Sign in setup")
-            remote.press(.select)
-        }
+        let app = openSignIn(origin: origin, layout: layout)
+        signInToFixture(in: app)
         let libraries = app.viewerTab("Libraries")
         XCTAssertTrue(libraries.waitForExistence(timeout: 15), app.debugDescription)
         reachForSetup(libraries, in: app, limit: 8)
@@ -44,6 +24,80 @@ class TVNavigationTestCase: XCTestCase {
                       app.debugDescription)
         establishPresentation(presentation, in: app)
         return app
+    }
+
+    func openSignIn(origin: String, layout: ViewerLayoutChoice = .standard) -> XCUIApplication {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["-plurx.layout", layout.rawValue]
+        app.launch()
+        let manual = app.buttons["Add server manually"]
+        let change = app.buttons["Use a different server"]
+        let libraries = app.viewerTab("Libraries")
+        let screen = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            manual.exists || change.exists || libraries.exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [screen], timeout: 45), .completed, app.debugDescription)
+        if !manual.exists {
+            if change.exists {
+                reachForSetup(change, in: app, limit: 8)
+                assertFocus(change, in: app, context: "Choose another fixture server")
+                remote.press(.select)
+            } else {
+                let settings = app.viewerTab("Settings")
+                reachForSetup(settings, in: app, limit: 16)
+                assertFocus(settings, in: app, context: "Settings before changing fixture server")
+                remote.press(.select)
+                let account = app.buttons["settings-category-Account"]
+                reachForSetup(account, in: app, limit: 12)
+                assertFocus(account, in: app, context: "Account before changing fixture server")
+                remote.press(.right)
+                let leave = app.buttons["Change server"]
+                reachForSetup(leave, in: app, limit: 8)
+                assertFocus(leave, in: app, context: "Leave previous fixture server")
+                remote.press(.select)
+            }
+        }
+        connectManually(origin: origin, in: app)
+        return app
+    }
+
+    func connectManually(origin: String, in app: XCUIApplication) {
+        let manual = app.buttons["Add server manually"]
+        reachForSetup(manual, in: app, limit: 8)
+        assertFocus(manual, in: app, context: "Manual fixture server setup")
+        remote.press(.select)
+        let address = app.textFields.firstMatch
+        reachForSetup(address, in: app, limit: 8)
+        assertFocus(address, in: app, context: "Fixture server address")
+        remote.press(.select)
+        let previous = address.value as? String ?? ""
+        address.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + origin)
+        dismissKeyboard(in: app)
+        let connect = app.buttons["Connect"]
+        reachForSetup(connect, in: app, limit: 8)
+        assertFocus(connect, in: app, context: "Connect to fixture server")
+        remote.press(.select)
+        XCTAssertTrue(app.textFields["Username"].waitForExistence(timeout: 10), app.debugDescription)
+    }
+
+    func signInToFixture(in app: XCUIApplication) {
+        let username = app.textFields["Username"]
+        reachForSetup(username, in: app, limit: 4)
+        assertFocus(username, in: app, context: "Username setup")
+        remote.press(.select)
+        let previous = username.value as? String ?? ""
+        username.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + "fixture")
+        dismissKeyboard(in: app)
+        reachForSetup(app.secureTextFields["Password"], in: app, limit: 4)
+        assertFocus(app.secureTextFields["Password"], in: app, context: "Password setup")
+        remote.press(.select)
+        app.secureTextFields["Password"].typeText("fixture")
+        dismissKeyboard(in: app)
+        let signIn = app.buttons["Sign in"]
+        reachForSetup(signIn, in: app, limit: 4)
+        assertFocus(signIn, in: app, context: "Sign in setup")
+        remote.press(.select)
     }
 
     /// Preferences must remain writable. NSArgumentDomain launch overrides
