@@ -12,7 +12,7 @@ function translationMs(value){return Number.isSafeInteger(value)&&value>=0&&valu
 function translationClosed(value,keys){return !!value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));}
 function translationLiteral(text){return String(text).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");}
 function translationFailure(code){
-  return ({disabled:"Enable English translation in Settings to request work.",model_missing:"Install the selected multilingual model in Settings.",translation_unverified:"Test this model for English translation in Settings.",source_unverified:"Checking this source is required before new translation can run.",source_changed:"The media source changed. Refresh this title before requesting translation.",source_clock_unsupported:"This source timeline is not supported for progressive translation.",direct_audio_selection_unverified:"This direct playback profile needs one unambiguous audio stream.",delivery_unsupported:"Progressive translation is not qualified for this playback route.",waiting_for_worker:"Waiting for a qualified worker with access to the source.",worker_source_unavailable:"Waiting for a qualified worker with access to the source.",waiting_for_playback_capacity:"Waiting for capacity while the picture keeps playing.",demand_expired:"Translation work is suspended. Cached captions remain available.",worker_interrupted:"The translation worker stopped. Retry the affected range.",inference_failed:"Translation failed for this range. Retry is available when reported.",inference_timeout:"Translation exceeded its time limit for this range.",output_invalid:"The translated text failed validation.",segment_too_large:"This translated segment exceeds its supported size.",quota_exceeded:"Translation storage or request limits have been reached.",operation_stopped:"Translation is stopped. Committed captions remain available.",epoch_conflict:"Translation changed. Refresh its status before a new action.",intent_expired:"This action expired. Refresh status and try explicitly again.",request_conflict:"This request conflicts with an earlier action. Refresh status.",translation_snapshot_expired:"Caption coverage changed. Refreshing this playback window.",segment_unavailable:"A committed caption segment is unavailable. Retry reading its coverage.",permission_denied:"You no longer have access to these captions.",profile_unavailable:"No qualified translation profile is currently available.",network_error:"Translation status is unavailable. Retry status; playback continues."})[code]||"Translation is unavailable. Refresh status for current information.";
+  return ({disabled:"Enable English translation in Settings to request work.",model_missing:"Install the selected multilingual model in Settings.",translation_unverified:"Test this model for English translation in Settings.",source_unverified:"Checking this source is required before new translation can run.",source_changed:"The media source changed. Refresh this title before requesting translation.",source_clock_unsupported:"This source timeline is not supported for progressive translation.",direct_audio_selection_unverified:"This direct playback profile needs one unambiguous audio stream.",delivery_unsupported:"Progressive translation is not qualified for this playback route.",waiting_for_worker:"Waiting for a qualified worker with access to the source.",worker_source_unavailable:"Waiting for a qualified worker with access to the source.",waiting_for_playback_capacity:"Waiting for capacity while the picture keeps playing.",demand_expired:"Translation work is suspended. Cached captions remain available.",demand_conflict:"Translation paused while this player was away. Choose Translate to English to continue.",worker_interrupted:"The translation worker stopped. Retry the affected range.",inference_failed:"Translation failed for this range. Retry is available when reported.",inference_timeout:"Translation exceeded its time limit for this range.",output_invalid:"The translated text failed validation.",segment_too_large:"This translated segment exceeds its supported size.",quota_exceeded:"Translation storage or request limits have been reached.",operation_stopped:"Translation is stopped. Committed captions remain available.",epoch_conflict:"Translation changed. Refresh its status before a new action.",intent_expired:"This action expired. Refresh status and try explicitly again.",request_conflict:"This request conflicts with an earlier action. Refresh status.",translation_snapshot_expired:"Caption coverage changed. Refreshing this playback window.",segment_unavailable:"A committed caption segment is unavailable. Retry reading its coverage.",permission_denied:"You no longer have access to these captions.",profile_unavailable:"No qualified translation profile is currently available.",network_error:"Translation status is unavailable. Retry status; playback continues."})[code]||"Translation is unavailable. Refresh status for current information.";
 }
 function translationCapture(){return {auth:AUTH_GENERATION,token:TOKEN,page:PAGE_RENDER_GENERATION,route:location.hash};}
 function translationAuthCurrent(state){return !!state&&!state.retired&&state.capture.auth===AUTH_GENERATION&&state.capture.token===TOKEN&&!!ME;}
@@ -83,11 +83,12 @@ function translationRetire(reason="retired"){
   const state=SUBTITLE_TRANSLATION;if(!state)return;
   // Release is best effort; server TTL bounds work even after network/auth loss.
   if(translationCurrent(state)&&state.demand&&!state.stopped)void translationRelease(state).catch(()=>{});
-  state.retired=true;clearTimeout(state.timer);for(const controller of state.controllers)controller.abort();
+  state.retired=true;clearTimeout(state.timer);clearTimeout(state.heartbeatTimer);state.heartbeatTimer=null;for(const controller of state.controllers)controller.abort();
   state.controllers.clear();for(const [kind,handler]of state.listeners)state.video.removeEventListener(kind,handler);
   if(state.video._translationTrack)state.video._translationTrack.mode="disabled";
   if(translationSelected(state.player)){state.player.captionIntent={kind:"off"};state.player.captionIntentSerial=(state.player.captionIntentSerial||0)+1;}
   state.reason=reason;SUBTITLE_TRANSLATION=null;
+  if(state.panel?.isConnected){state.panel.hidden=true;state.panel.replaceChildren();}
 }
 function translationProfile(options,id){return (options.models||[]).find(profile=>profile.profile_id===id);}
 function translationProfileLimits(profile){
@@ -147,7 +148,7 @@ async function translationOpen(button){
   const previous=SUBTITLE_TRANSLATION;if(previous&&translationCurrent(previous)){previous.panel?.scrollIntoView({block:"nearest"});return;}
   translationRetire();
   const panel=document.getElementById("watch-subtitle-translation");if(!panel)return;
-  const state={capture:translationCapture(),player,video,panel,attachment:player.mediaAttachment,fileId:String(player.fileId),audioChoice:player.curAudio,audioIndex:player.audio[0].index,controllers:new Set(),listeners:[],segments:new Map(),cues:new Map(),coverage:[],operation:null,assetId:null,demand:null,playbackId:crypto.randomUUID(),queue:Promise.resolve(),timer:null,windowGeneration:0,retired:false,error:null};
+  const state={capture:translationCapture(),player,video,panel,attachment:player.mediaAttachment,fileId:String(player.fileId),audioChoice:player.curAudio,audioIndex:player.audio[0].index,controllers:new Set(),listeners:[],heartbeatTimer:null,heartbeatAttempt:0,segments:new Map(),cues:new Map(),coverage:[],operation:null,assetId:null,demand:null,playbackId:crypto.randomUUID(),queue:Promise.resolve(),timer:null,windowGeneration:0,retired:false,error:null};
   state.current=()=>translationCurrent(state);SUBTITLE_TRANSLATION=state;panel.hidden=false;panel.textContent="Loading translation choices…";
   try{
     const {data:options}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-translation/options`);translationValidateOptions(options,state);state.options=options;
@@ -381,18 +382,25 @@ async function translationHeartbeat(state){
     const demand=state.demand;
     try{
       const body=demand.intent||(demand.intent={...translationEnvelope(state),expected_operation_epoch:demand.epoch,demand_generation:translationNext(demand.generation),playback_id:state.playbackId,position_ms:translationPosition(state),playback_rate:state.video.playbackRate,paused:state.video.paused});
-      demand.generation=body.demand_generation;
       const {data}=await translationRequest(state,`/subtitle-translation/operations/${state.operation.operation_id}/demands/${demand.id}`,{method:"PUT",body});
       if(state.current()&&state.demand===demand&&data.operation_epoch===demand.epoch){translationAdoptReceipt(state,data);demand.intent=null;state.lastHeartbeat=performance.now();}
     }catch(error){if(state.current()&&state.demand===demand){
       if(!translationAmbiguous(error))demand.intent=null;
-      if(["operation_stopped","epoch_conflict","demand_expired"].includes(error.code)){state.demand=null;if(error.code!=="demand_expired")state.stopped=true;}
+      if(error.code==="operation_stopped"){state.demand=null;state.stopped=true;}
+      else if(error.code==="epoch_conflict"||error.code==="demand_conflict"){state.demand=null;void translationPoll(state,true);}
       if(error.status===401||error.status===403){translationRetire("access ended");return;}
       state.error=error.code?translationFailure(error.code):error.message;translationRenderStatus(state);
     }}
   });
   state.queue=task;state.heartbeatTask=task;
   try{await task;}finally{if(state.heartbeatTask===task)state.heartbeatTask=null;}
+}
+// The demand has its own cadence: read failures back off reads only, so a
+// slow manifest page or a 503 cannot let a watched operation's demand lapse.
+function translationArmHeartbeat(state){
+  if(!state.current()||state.heartbeatTimer||!state.demand||state.stopped||!state.limits)return;
+  const now=performance.now(),due=Math.max((state.lastHeartbeat||0)+state.limits.heartbeat_interval_ms,(state.heartbeatAttempt||0)+1000);
+  state.heartbeatTimer=setTimeout(async()=>{state.heartbeatTimer=null;state.heartbeatAttempt=performance.now();try{await translationHeartbeat(state);}finally{translationArmHeartbeat(state);}},Math.max(0,due-now));
 }
 async function translationRelease(state){
   if(!state.current()||!ME?.is_admin||!state.demand)return;
@@ -436,7 +444,6 @@ async function translationPoll(state,force=false){
     if(state.assetId)await translationManifest(state,force);
     if(!state.current()||state.windowGeneration!==generation)return;
     state.error=null;
-    if(state.demand&&!state.stopped&&performance.now()-(state.lastHeartbeat||0)>=state.limits.heartbeat_interval_ms)await translationHeartbeat(state);
     state.failures=0;translationRenderStatus(state);
   }catch(error){
     if(state.current()&&state.windowGeneration===generation){
@@ -447,7 +454,7 @@ async function translationPoll(state,force=false){
     }
   }finally{
     state.polling=false;
-    if(state.current()){const immediate=state.pollAgain;state.pollAgain=false;const delay=immediate?state.limits.poll_min_ms:Math.min(state.limits.retry_max_ms,state.limits.poll_max_ms*(2**Math.min(state.failures||0,4)));state.timer=setTimeout(()=>translationPoll(state,immediate),delay);}
+    if(state.current()){const immediate=state.pollAgain;state.pollAgain=false;const delay=immediate?state.limits.poll_min_ms:Math.min(state.limits.retry_max_ms,state.limits.poll_max_ms*(2**Math.min(state.failures||0,4)));state.timer=setTimeout(()=>translationPoll(state,immediate),delay);translationArmHeartbeat(state);}
   }
 }
 // Settings uses the same bounded transport but a page/account owner, not PLAYER.

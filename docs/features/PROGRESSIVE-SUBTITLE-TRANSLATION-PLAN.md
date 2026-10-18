@@ -799,8 +799,30 @@ group-writable umask (0002) because their fixtures inherit it and trip the
 service-ownership check; they pass under 022. That predates translation and is
 recorded in the backlog rather than changed here.
 
+**Adversarial review before merge.** Three independent reviews (daemon,
+store/API, web/docs) found and this change fixed, each at its cause: a
+restarted node recomputing ranges whose publication the store refused for
+lacking this boot's source binding (only preparation verifies and binds; a
+range runs on that binding or not at all, and a fresh request re-prepares);
+finished cores discarded because the viewer had moved past them (publication
+needs live demand, not the scheduling window); a 1 s loop for every subtitle
+pass that walked all operations (only demanded operations are read, the loop
+idles and is woken by translation mutations); the timeline taken from the
+container rather than the audio stream; byte-cap refusals that could never
+clear (least-recently-read eviction past 112 MiB); retired caches leaving old
+range rows a new request could not rebind (retirement fences the epoch); a
+demand that lapsed on one slow read or throttled tab being shown as Stop (the
+demand has its own cadence, only acknowledged generations advance, and a
+lapsed demand is renewed by its next heartbeat); a retired player leaving a
+dead panel; and exhausted ranges still offered for retry.
+
 **Still open.** Native clients, multiple audio streams, remux/encoded routes,
 fleet placement, long-film completion and speed, and genuinely bilingual
-human quality review. The P0 timing figures do not prove realtime on other
+human quality review. Also open from review: an operation is pinned to the
+node that first prepared it (multi-node retargeting); deb/rpm packages do not
+install a readable notice file (the daemon embeds the attribution); nothing
+yet marks an operation `complete`; manifest refreshes re-add every cue rather
+than diffing; and whether rapid seeking can exhaust the per-user read-lease
+budget is unconfirmed. The P0 timing figures do not prove realtime on other
 hardware.
 

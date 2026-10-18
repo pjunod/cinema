@@ -880,8 +880,8 @@ the pinned archive/member, exact sentence ID, source/reference hashes and
 CC BY 4.0 attribution. A controlled sequence concatenates decoded German
 samples only for the stated window experiment; it is not natural dialogue.
 German sentence1586 is also embedded in the daemon for its production
-foreign-speech-to-English self-test. Native/container distribution carries
-the attribution and full CC BY 4.0 license; runtime decoding/resampling occurs
+foreign-speech-to-English self-test. The macOS package and container image
+carry the attribution and full CC BY 4.0 license; runtime decoding/resampling occurs
 only in an owned private attempt. No local bilingual listening or general
 translation-quality verdict is claimed.
 

@@ -202,3 +202,14 @@ test('unresolved Stop suppresses queued and polled heartbeat without hiding cach
  assert.equal(h.state.stopIntent,null);assert.equal(h.state.stopped,true);assert.equal(h.state.demand,null);
  await h.ctx.translationHeartbeat(h.state);assert.equal(h.calls.filter(call=>call.init.method==='PUT').length,0);
 });
+test("a refused heartbeat keeps the acknowledged generation and a demand conflict never latches Stop",async()=>{
+ const h=harness();h.state.demand={id:DEMAND,generation:"1",epoch:"1"};h.ctx.translationPoll=async()=>{};
+ h.ctx.respond=()=>response({version:1,code:"quota_exceeded",server_now_ms:100000},429);
+ await h.ctx.translationHeartbeat(h.state);
+ assert.equal(h.state.demand.generation,"1","a refused heartbeat does not advance the demand");
+ h.ctx.respond=()=>response({version:1,code:"demand_conflict",server_now_ms:100000},409);
+ await h.ctx.translationHeartbeat(h.state);
+ const puts=h.calls.filter(call=>call.init.method==="PUT").map(call=>JSON.parse(call.init.body).demand_generation);
+ assert.deepEqual(puts,["2","2"],"the next heartbeat is still the acknowledged generation plus one");
+ assert.equal(h.state.demand,null);assert.notEqual(h.state.stopped,true,"a lapsed demand is not a Stop");
+});

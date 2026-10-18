@@ -255,7 +255,7 @@ WHEN NEW.kind IN ('subtitle_translation_prepare','subtitle_translation_range')
 BEGIN
  UPDATE subtitle_translation_ranges SET state=CASE NEW.state WHEN 'cancelling' THEN 'running' ELSE NEW.state END,
  attempts=min(3,attempts+max(0,NEW.failed_attempts-OLD.failed_attempts)),
- range_revision=range_revision+1,reason=NEW.last_error_code,retryable=CASE WHEN NEW.state='failed' AND NEW.last_error_code IN ('worker_interrupted','inference_failed','inference_timeout','worker_source_unavailable') THEN 1 ELSE 0 END,updated_at_ms=NEW.updated_at_ms
+ range_revision=range_revision+1,reason=NEW.last_error_code,retryable=CASE WHEN NEW.state='failed' AND NEW.last_error_code IN ('worker_interrupted','inference_failed','inference_timeout','worker_source_unavailable') AND min(3,attempts+max(0,NEW.failed_attempts-OLD.failed_attempts))<3 THEN 1 ELSE 0 END,updated_at_ms=NEW.updated_at_ms
  WHERE job_id=NEW.id AND range_revision<9223372036854775807;
  UPDATE subtitle_translation_operations SET state=CASE WHEN NEW.state IN ('cancelled','cancelling') AND stopped=0 THEN 'suspended' ELSE 'failed' END,
  reason=NEW.last_error_code,retryable=CASE WHEN NEW.last_error_code IN ('worker_interrupted','worker_source_unavailable','inference_failed','inference_timeout') THEN 1 ELSE 0 END,view_revision=view_revision+1,updated_at_ms=NEW.updated_at_ms

@@ -189,6 +189,60 @@ async fn durable_preparation_stop_and_exact_replay_never_resurrect_work() {
     ));
 }
 #[tokio::test]
+async fn lapsed_demand_is_renewed_by_its_next_heartbeat_but_never_after_stop() {
+    let (_dir, store, _conn) = fixture();
+    let input = create(1000);
+    let first = store
+        .mutate_subtitle_translation(input.clone())
+        .await
+        .expect("create");
+    let op = first["operation_id"].as_str().expect("root").to_owned();
+    let demand = first["demand_id"].as_str().expect("demand").to_owned();
+    let playback = match &input.action {
+        TranslationAction::Create { playback_id, .. } => playback_id.clone(),
+        _ => unreachable!(),
+    };
+    let beat = |generation: i64, now: i64| {
+        mutate(
+            TranslationAction::Demand {
+                operation_id: op.clone(),
+                expected_operation_epoch: 1,
+                demand_id: demand.clone(),
+                expected_generation: generation,
+                playback_id: playback.clone(),
+                position_ms: 1000,
+                playback_rate: 1.0,
+                paused: false,
+            },
+            now,
+        )
+    };
+    // The 15 s demand lapsed while the viewer's tab was throttled.
+    let renewed = store
+        .mutate_subtitle_translation(beat(1, 40_000))
+        .await
+        .expect("renew");
+    assert_eq!(renewed["outcome"], "accepted");
+    assert_eq!(renewed["demand_generation"], "2");
+    let stopped = store
+        .mutate_subtitle_translation(mutate(
+            TranslationAction::Stop {
+                operation_id: op.clone(),
+                expected_operation_epoch: 1,
+            },
+            41_000,
+        ))
+        .await
+        .expect("stop");
+    assert_eq!(stopped["state"], "stopped");
+    let late = store
+        .mutate_subtitle_translation(beat(2, 42_000))
+        .await
+        .expect("late heartbeat");
+    assert_ne!(late["outcome"], "accepted", "heartbeats never undo Stop");
+}
+
+#[tokio::test]
 async fn expired_missing_heartbeat_receipt_and_quotas_do_not_create_work() {
     let (_dir, store, conn) = fixture();
     let input = create(1000);

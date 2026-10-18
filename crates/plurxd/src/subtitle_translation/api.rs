@@ -534,7 +534,8 @@ fn mutation_error(outcome: &str, now: i64) -> ApiError {
         "source_changed" => (StatusCode::CONFLICT, "source_changed"),
         "disabled" => (StatusCode::CONFLICT, "disabled"),
         "stopped" | "already_stopped" => (StatusCode::CONFLICT, "operation_stopped"),
-        "state_conflict" | "range_conflict" | "demand_conflict" | "counter_exhausted" => {
+        "demand_conflict" => (StatusCode::CONFLICT, "demand_conflict"),
+        "state_conflict" | "range_conflict" | "counter_exhausted" => {
             (StatusCode::CONFLICT, "epoch_conflict")
         }
         "receipt_quota" | "rate_limited" | "demand_quota" | "operation_quota" => {

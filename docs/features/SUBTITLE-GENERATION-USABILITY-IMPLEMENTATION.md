@@ -527,8 +527,8 @@ campaigns remain explicit follow-up qualification. Their prepared drivers and di
 results are retained; they do not delay the bounded single-server claim and are
 not represented as supported, qualified fleet behavior. No optional probe or
 translation implementation is added to this integration. Progressive English
-translation remains the next authorized project after current integration and
-its essential acceptance finish, subject to its reviewed P0/P1 prerequisites.
+translation followed as its own project; see
+[PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md](PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md).
 
 The original task boundaries above remain the review history. T3/T4 now land
 as one compiling integration because manager orchestration, runtime inference
