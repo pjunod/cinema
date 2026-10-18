@@ -5,7 +5,7 @@ import XCTest
 
 /// Auto on an original or remux incumbent whose title has never been encoded
 /// whole. Each test pins one decision point of the 2026-10-17 finding on the
-/// shipping build 252 — a 1080p H.264 library title delivered as a 28.8 Mb/s
+/// shipping build 252 — Agent Zero, a 1080p H.264 title delivered as a 28.8 Mb/s
 /// original, behind 10 / 25 Mb/s links: the catalog's declared costs were
 /// discarded, the original was costed only by a body less than ten seconds
 /// old, that body's verdict expired long before the next 40 MB body could
@@ -60,6 +60,63 @@ final class AutoDeclaredCostTests: XCTestCase {
         ], outputs: nil)
     }
     private var current: QualityCandidate { ladder[0] }
+
+    func testAutoMethodLabelFollowsInstalledRemuxEncodeAndOriginalRoutes() {
+        let encode = ladder[2]
+        let direct = candidate(1_080, route: "original", recipe: 6)
+        let catalog = ladder + [direct]
+        func label(_ installed: QualityCandidate, height: Int, directPlayback: Bool = false) -> String {
+            PlayerController.onlinePlaybackMethodLabel(selectedHeight: nil, subtitleBurned: false,
+                fallbackMode: "remux", isVOD: true, pgsOverlay: false,
+                activeCandidateId: installed.id, candidates: catalog,
+                sessionHeight: height, isDirectPlayback: directPlayback)
+        }
+        XCTAssertEqual(label(original, height: 1_080), "Remux · HLS")
+        XCTAssertEqual(label(encode, height: 720), "Transcode · 720p")
+        XCTAssertEqual(label(direct, height: 1_080, directPlayback: true), "Direct play")
+        XCTAssertEqual(label(direct, height: 1_080), "Remux · HLS")
+        // A refused promotion keeps the incumbent's installed identity and
+        // height, even while the catalog still offers the encoded candidate.
+        XCTAssertEqual(label(original, height: 1_080), "Remux · HLS")
+    }
+
+    func testAutoMethodLabelUsesInstalledHeightAndPreservesOverlay() {
+        let encode = ladder[2]
+        XCTAssertEqual(PlayerController.onlinePlaybackMethodLabel(selectedHeight: nil,
+            subtitleBurned: false, fallbackMode: "remux", isVOD: true, pgsOverlay: true,
+            activeCandidateId: encode.id, candidates: ladder,
+            sessionHeight: 540, isDirectPlayback: false), "Transcode · 540p · PGS overlay")
+    }
+
+    func testAutoMethodLabelRejectsUnboundAndInvalidCandidateIdentities() {
+        let encode = ladder[2]
+        let invalid = QualityCandidate(id: encode.id, recipeDigest: original.recipeDigest,
+            route: encode.route, width: encode.width, height: encode.height,
+            targetHeight: encode.targetHeight, averageBps: encode.averageBps, peakBps: encode.peakBps,
+            grade: encode.grade, decoderCompatible: true, completeCache: false, sustainable: false)
+        for (id, catalog) in [("unbound", ladder), (encode.id, [invalid])] {
+            XCTAssertEqual(PlayerController.onlinePlaybackMethodLabel(selectedHeight: nil,
+                subtitleBurned: false, fallbackMode: "remux", isVOD: true, pgsOverlay: true,
+                activeCandidateId: id, candidates: catalog,
+                sessionHeight: 720, isDirectPlayback: false), "Remux · HLS · PGS overlay")
+        }
+        XCTAssertEqual(PlayerController.onlinePlaybackMethodLabel(selectedHeight: nil,
+            subtitleBurned: false, fallbackMode: "transcode", isVOD: true, pgsOverlay: true,
+            activeCandidateId: nil, candidates: nil,
+            sessionHeight: 720, isDirectPlayback: false), "Transcode · cached · PGS overlay")
+    }
+
+    func testAutoMethodLabelPreservesManualAndSubtitleBurnLabels() {
+        let encode = ladder[2]
+        func label(burned: Bool) -> String {
+            PlayerController.onlinePlaybackMethodLabel(selectedHeight: 480,
+                subtitleBurned: burned, fallbackMode: "remux", isVOD: true, pgsOverlay: true,
+                activeCandidateId: encode.id, candidates: ladder,
+                sessionHeight: 720, isDirectPlayback: false)
+        }
+        XCTAssertEqual(label(burned: false), "Transcode · 480p")
+        XCTAssertEqual(label(burned: true), "Transcode · subtitle burn-in")
+    }
 
     private func pressureVerdict(transfer: PlayerController.AutoCompletedTransfer?, runway: Double?,
                                  mildSamples: Int = 0, producer: Bool = false, pressureOnly: Bool = true,
@@ -161,31 +218,31 @@ final class AutoDeclaredCostTests: XCTestCase {
         // runway still loaded. A pressure-only evaluation — the one a
         // completed body triggers at arrival — must move, not wait for the
         // runway to reach ten seconds.
-        let arrival = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 37, completedAt: 30_000), runway: 60))
+        let arrival = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 37, completedAt: 30_000, candidate: current.id), runway: 60))
         XCTAssertTrue(arrival.severe)
         XCTAssertTrue(arrival.pressure)
         XCTAssertEqual(arrival.chosen?.height, 720)
         XCTAssertEqual(arrival.downsideCost, 28_814_703)
         // The same evidence on the five-second tick decides the same.
-        let tick = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 37, completedAt: 30_000), runway: 60, pressureOnly: false))
+        let tick = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 37, completedAt: 30_000, candidate: current.id), runway: 60, pressureOnly: false))
         XCTAssertEqual(tick.chosen?.height, 720)
         // With under four seconds of runway the rescue minimises acquisition
         // cost instead: the cheapest costed rung, not the largest that fits.
-        let starved = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 37, completedAt: 30_000), runway: 3))
+        let starved = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 37, completedAt: 30_000, candidate: current.id), runway: 3))
         XCTAssertEqual(starved.chosen?.height, 360)
         // Healthy headroom is not pressure, and a pressure-only evaluation
         // then has no verdict at all.
-        XCTAssertNil(pressureVerdict(transfer: body(bodySeconds: 5, completedAt: 30_000, bytes: 40_000_000), runway: 60))
-        let healthy = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 5, completedAt: 30_000), runway: 60, pressureOnly: false))
+        XCTAssertNil(pressureVerdict(transfer: body(bodySeconds: 5, completedAt: 30_000, bytes: 40_000_000, candidate: current.id), runway: 60))
+        let healthy = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 5, completedAt: 30_000, candidate: current.id), runway: 60, pressureOnly: false))
         XCTAssertFalse(healthy.pressure)
         XCTAssertNil(healthy.chosen)
         // Two mild bodies are pressure too, whatever the runway: 40 MB in
         // 13.3 s is 24 Mb/s, the 25 Mb/s stage against the 28.8 Mb/s title.
-        let mild = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 13.3, completedAt: 30_000), runway: 60, mildSamples: 2))
+        let mild = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 13.3, completedAt: 30_000, candidate: current.id), runway: 60, mildSamples: 2))
         XCTAssertFalse(mild.severe)
         XCTAssertTrue(mild.mild && mild.pressure)
         XCTAssertEqual(mild.chosen?.height, 1_080, "24 Mb/s carries the 12 Mb/s encode of the same geometry")
-        XCTAssertNil(pressureVerdict(transfer: body(bodySeconds: 13.3, completedAt: 30_000), runway: 60, mildSamples: 1))
+        XCTAssertNil(pressureVerdict(transfer: body(bodySeconds: 13.3, completedAt: 30_000, candidate: current.id), runway: 60, mildSamples: 1))
     }
 
     // MARK: Fix 3 — a completed body is evidence for as long as it took to arrive
@@ -205,33 +262,33 @@ final class AutoDeclaredCostTests: XCTestCase {
     }
 
     func testTheIncumbentLinkReadsTheSameBodyInTheTickAndInTheStallPath() throws {
-        let transfer = body(bodySeconds: 37)
-        XCTAssertEqual(autoIncumbentLinkBps(transfer, sessionId: "s", candidateId: "c", nowMs: 30_000),
+        let transfer = body(bodySeconds: 37, candidate: current.id)
+        XCTAssertEqual(autoIncumbentLinkBps(transfer, sessionId: "s", candidateId: current.id, nowMs: 30_000),
                        Double(40_000_000) * 8 / 37)
-        XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: "s", candidateId: "c", nowMs: 37_001))
+        XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: "s", candidateId: current.id, nowMs: 37_001))
         // Bound to the installed session and candidate, an actual 200 with
         // a receipt; nothing else is the incumbent's link.
-        XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: "other", candidateId: "c", nowMs: 1_000))
+        XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: "other", candidateId: current.id, nowMs: 1_000))
         XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: "s", candidateId: "other", nowMs: 1_000))
-        XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: nil, candidateId: "c", nowMs: 1_000))
-        XCTAssertNil(autoIncumbentLinkBps(body(bodySeconds: 37, receipt: nil), sessionId: "s", candidateId: "c", nowMs: 1_000))
+        XCTAssertNil(autoIncumbentLinkBps(transfer, sessionId: nil, candidateId: current.id, nowMs: 1_000))
+        XCTAssertNil(autoIncumbentLinkBps(body(bodySeconds: 37, receipt: nil, candidate: current.id), sessionId: "s", candidateId: current.id, nowMs: 1_000))
         // The tick, thirty seconds after a 37 s body: still the link.
-        let tick = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 37, completedAt: 0), runway: 60, pressureOnly: false))
+        let tick = try XCTUnwrap(pressureVerdict(transfer: body(bodySeconds: 37, completedAt: 0, candidate: current.id), runway: 60, pressureOnly: false))
         XCTAssertEqual(tick.link, Double(40_000_000) * 8 / 37)
         XCTAssertEqual(tick.chosen?.height, 720)
         // The stall path, thirty seconds after the same body: a cause and a
         // rung, rather than reopening the delivery the link cannot carry.
         let stalled = try XCTUnwrap(autoStallRecoveryVerdict(current: current, candidates: ladder,
-            transfer: body(bodySeconds: 37, completedAt: 0), transferCurrent: true, sessionId: "s", candidateId: current.id,
+            transfer: body(bodySeconds: 37, completedAt: 0, candidate: current.id), transferCurrent: true, sessionId: "s", candidateId: current.id,
             mildSamples: 0, producerPressure: false, rejected: [], switchBudgetOpen: false, nowMs: 30_000))
         XCTAssertTrue(stalled.severe)
         XCTAssertEqual(stalled.next?.height, 720)
         // Forty seconds on, that body is spent and the stall has no cause.
         XCTAssertNil(autoStallRecoveryVerdict(current: current, candidates: ladder,
-            transfer: body(bodySeconds: 37, completedAt: 0), transferCurrent: true, sessionId: "s", candidateId: current.id,
+            transfer: body(bodySeconds: 37, completedAt: 0, candidate: current.id), transferCurrent: true, sessionId: "s", candidateId: current.id,
             mildSamples: 0, producerPressure: false, rejected: [], switchBudgetOpen: true, nowMs: 40_000))
         // A body that is not the incumbent's is no link, in either path.
-        XCTAssertNil(autoLinkPressureVerdict(current: current, eligible: ladder, transfer: body(bodySeconds: 37, completedAt: 0),
+        XCTAssertNil(autoLinkPressureVerdict(current: current, eligible: ladder, transfer: body(bodySeconds: 37, completedAt: 0, candidate: current.id),
             transferCurrent: false, sessionId: "s", candidateId: current.id, mildSamples: 0, producerPressure: false,
             runwaySeconds: 60, playbackRate: 1, rejected: [], pressureOnly: true, nowMs: 30_000))
     }

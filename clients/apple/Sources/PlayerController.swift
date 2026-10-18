@@ -4167,10 +4167,37 @@ final class PlayerController: ObservableObject {
             return "Offline\(quality) · H.264 · AAC"
         }
         #endif
-        if activeBurnedSubtitle != nil { return "Transcode · subtitle burn-in" }
-        if selectedHeight != nil { return "Transcode · \(selectedHeight!)p" }
-        let mode = decision.map(Self.playbackMode) ?? "transcode"
-        let overlay = pgsOverlayIsActive ? " · PGS overlay" : ""
+        return Self.onlinePlaybackMethodLabel(selectedHeight: selectedHeight,
+            subtitleBurned: activeBurnedSubtitle != nil,
+            fallbackMode: decision.map(Self.playbackMode) ?? "transcode",
+            isVOD: isVOD, pgsOverlay: pgsOverlayIsActive,
+            activeCandidateId: autoActiveCandidateId,
+            candidates: autoRouteProtocol == "route-v1" ? decision?.qualityCandidates : nil,
+            sessionHeight: sessionHeight, isDirectPlayback: isDirectPlayback)
+    }
+
+    /// Auto keeps its selection nil while the installed session changes rungs.
+    /// Report that session's validated route and height instead of the initial
+    /// decision, which may still describe its original remux incumbent.
+    nonisolated static func onlinePlaybackMethodLabel(
+        selectedHeight: Int?, subtitleBurned: Bool, fallbackMode: String,
+        isVOD: Bool, pgsOverlay: Bool, activeCandidateId: String?,
+        candidates: [QualityCandidate]?, sessionHeight: Int?, isDirectPlayback: Bool
+    ) -> String {
+        if subtitleBurned { return "Transcode · subtitle burn-in" }
+        if let selectedHeight { return "Transcode · \(selectedHeight)p" }
+        let installed = candidates?.first { $0.id == activeCandidateId && $0.hasValidIdentity }
+        let mode: String
+        switch installed?.route {
+        case "encode": mode = "transcode"
+        case "remux": mode = "remux"
+        case "original": mode = isDirectPlayback ? "direct" : "remux"
+        default: mode = fallbackMode
+        }
+        let overlay = pgsOverlay ? " · PGS overlay" : ""
+        if installed?.route == "encode", let sessionHeight, sessionHeight > 0 {
+            return "Transcode · \(sessionHeight)p\(overlay)"
+        }
         switch mode {
         case "direct": return "Direct play\(overlay)"
         case "remux": return "Remux · HLS\(overlay)"
@@ -11941,7 +11968,7 @@ extension PlayerController {
 
     /// Refresh advisory full-output measurements without restarting Auto or
     /// replacing the installed identity. One bounded fetch may run per 30s.
-    private func refreshMissingAutoCosts(now: Int) {
+    private func refreshUnmeasuredAutoCosts(now: Int) {
         guard autoCostRefreshTask == nil, now >= autoCostRefreshNextMs,
               !autoPreparing, preparedPlayer == nil,
               let model, model.displayAwareAuto, model.autoAbr,
@@ -12236,7 +12263,7 @@ extension PlayerController {
         if !pressureOnly {
             guard now >= autoNextTickMs else { return }
             autoNextTickMs = now + 5_000
-            refreshMissingAutoCosts(now: now)
+            refreshUnmeasuredAutoCosts(now: now)
         }
         guard model?.displayAwareAuto == true, model?.autoAbr == true,
               model?.displayAwareAutoProtocol == "route-v1",
@@ -12521,6 +12548,7 @@ extension PlayerController: PreparedSuccessorHost {
     /// session and its pointer are exactly as they were — so this raises the
     /// one source that maps to no class and draws nothing.
     func notePreparedSuccessorAbandoned(_ reason: PreparedReplacementAbandonment) {
+        let wasAutomatic = autoPreparing
         if !autoPreparing { retainManualQualityFailure() }
         // A boundary preparation that was superseded or refused (`aborted`)
         // is withdrawn without backoff; one that failed is an ordinary Auto
@@ -12540,10 +12568,31 @@ extension PlayerController: PreparedSuccessorHost {
         if reason == .failed {
             let itemError = preparedSuccessorErrorDetail(preparedItem?.error as NSError?)
             let phase = String(describing: preparedReplacement.phase)
-            let readiness = preparedReplacement.readinessRemainingMs().map(String.init) ?? "unknown"
+            let remaining = preparedReplacement.readinessRemainingMs()
+            let readiness = remaining.map(String.init) ?? "unknown"
+            let itemStatus = preparedItem?.status.rawValue.description ?? "missing"
+            let playerStatus = preparedPlayer?.status.rawValue.description ?? "missing"
+            let candidate = decision?.qualityCandidates?.first {
+                $0.hasValidIdentity && $0.id == preparedReplacement.activeAction?.effectiveSelection.candidateId
+            }
+            let route = candidate.map { ["original", "remux", "encode"].contains($0.route) ? $0.route : "unknown" } ?? "unknown"
+            let elapsed = preparedOverlapStartedAtMs.map {
+                max(0, Int(ProcessInfo.processInfo.systemUptime * 1_000) - $0)
+            }.map(String.init) ?? "unknown"
+            let cause = preparedItem?.status == .failed ? "item_failed"
+                : preparedOverlapStartedAtMs != nil && preparedOverlapRemainingMs == 0 ? "overlap_deadline"
+                : remaining == 0 ? (preparedReplacement.phase == .building ? "metadata_deadline" : "readiness_deadline")
+                : "unclassified"
+            // Capture acquisition failures before disposal; after exposure,
+            // missing prepared state is unknown, not an expired overlap.
+            // Never log media URLs,
+            // request headers or error descriptions, which may carry credentials.
             noteSurfaceLogOnly(
                 "prepared_successor_failure:stage=\(phase):item=\(itemError)"
                     + ":ready_ms=\(readiness):overlap_ms=\(preparedOverlapRemainingMs)"
+                    + ":cause=\(cause):elapsed_ms=\(elapsed):item_status=\(itemStatus):player_status=\(playerStatus)"
+                    + ":candidate=\(candidate?.id ?? "unknown"):route=\(route):height=\(candidate?.height ?? 0)"
+                    + ":automatic=\(wasAutomatic):voluntary=\(autoVoluntary)"
             )
         }
         noteSurfaceLogOnly(
@@ -13636,7 +13685,9 @@ extension PlayerController: PreparedSuccessorHost {
         if retainManualQualityFailure() { return }
         if action.effectiveSelection.qualityAuto, action.effectiveSelection.candidateId != nil,
            selectedHeight == nil, !selectedQualityIsOriginal, !autoExposed {
-            notePreparedSuccessorAbandoned(.failed)
+            // The coordinator recorded abandonment before discarding the
+            // successor. Repeating it here loses the item and its deadline
+            // and makes one failed preparation appear to be two.
             playbackControl.reportEvidence()
             return
         }

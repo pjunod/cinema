@@ -8,6 +8,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- Apple Playback info reports the installed Auto rung after a prepared quality
+  switch, so an encoded 720p stream no longer retains the original Remux label.
+
 ## [0.7.0] — 2026-10-17
 
 ### Added
