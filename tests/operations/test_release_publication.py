@@ -746,10 +746,22 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
     def test_publish_and_ci_produce_and_consume_same_audited_media_export(self):
         publication = WORKFLOW.read_text()
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
-        for workflow in [publication, ci]:
-            assert "target: linux-dolby-package-export" in workflow
-            assert "outputs: type=local,dest=linux-dolby-export" in workflow
-            assert "linux-dolby-package=./linux-dolby-export/package" in workflow
+        # Publication still exports the audited package stage to the client.
+        assert "target: linux-dolby-package-export" in publication
+        assert "outputs: type=local,dest=linux-dolby-export" in publication
+        assert "linux-dolby-package=./linux-dolby-export/package" in publication
+        # CI consumes the same audited stage as a named context in one bake
+        # solve, with no client-directory export.
+        assert "linux-dolby-package-export" not in ci
+        assert "dest=linux-dolby-export" not in ci
+        assert "docker buildx bake --file .github/package-runtime.docker-bake.hcl" in ci
+        bake = (ROOT / ".github/package-runtime.docker-bake.hcl").read_text()
+        assert 'linux-dolby-package = "target:linux-dolby-package"' in bake
+        assert 'target     = "linux-dolby-package-context"' in bake
+        assert 'dockerfile = "Dockerfile.release"' in bake
+        docker = (ROOT / "Dockerfile").read_text()
+        assert ("FROM scratch AS linux-dolby-package-context\n"
+                "COPY --from=linux-dolby-package-build /work/linux-dolby/package /\n") in docker
         assert "runtime-assets-dolby-amd64" in publication
         candidate = (ROOT / "scripts/release-package-candidate").read_text()
         assert '"$target" == x86_64-unknown-linux-gnu' in candidate

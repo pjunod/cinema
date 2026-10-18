@@ -1551,23 +1551,33 @@ jobs:
               exit 1
             }
           done
-      - name: Build and export the exact audited Bookworm media package
+      # amd64 builds the audited media package and the runtime that consumes it
+      # in one bake solve: the package reaches the runtime as a BuildKit named
+      # context (target:linux-dolby-package), never through a client-directory
+      # export. See .github/package-runtime.docker-bake.hcl.
+      - name: Build the audited media package and the runtime from only the verified binaries
         if: matrix.arch == 'amd64'
-        uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: Dockerfile
-          target: linux-dolby-package-export
-          platforms: linux/amd64
-          outputs: type=local,dest=linux-dolby-export
-          cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,scope=package-media-amd64' || '' }}
-          cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,mode=max,scope=package-media-amd64' || '' }}
+        env:
+          BUILD_REF: ${{ github.sha }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+          HOSTED_CACHE: ${{ steps.buildx-cache.outputs.local != 'true' }}
+        run: |
+          set -euo pipefail
+          cache=()
+          if [ "$HOSTED_CACHE" = true ]; then
+            cache=(--set "linux-dolby-package.cache-from=type=gha,scope=package-media-amd64"
+                   --set "linux-dolby-package.cache-to=type=gha,mode=max,scope=package-media-amd64"
+                   --set "runtime-amd64.cache-from=type=gha,scope=package-runtime-amd64"
+                   --set "runtime-amd64.cache-to=type=gha,mode=min,scope=package-runtime-amd64")
+          fi
+          docker buildx bake --file .github/package-runtime.docker-bake.hcl \
+            "${cache[@]}" runtime-amd64
       - name: Build the runtime from only the verified binaries
+        if: matrix.arch != 'amd64'
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile.release
-          build-contexts: ${{ matrix.arch == 'amd64' && 'linux-dolby-package=./linux-dolby-export/package' || '' }}
           push: false
           load: true
           platforms: linux/${{ matrix.arch }}

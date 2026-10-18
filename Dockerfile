@@ -415,6 +415,13 @@ RUN python3 /opt/plurx-media/scripts/build-linux-dolby-ffmpeg --step pipeline \
 FROM scratch AS linux-dolby-package-export
 COPY --from=linux-dolby-package-build /work/linux-dolby/package /package
 
+# The same audited package with its contents at the root. CI hands it to the
+# runtime build as a BuildKit named context inside one bake solve
+# (.github/package-runtime.docker-bake.hcl), so the package never has to be
+# exported to the client directory first.
+FROM scratch AS linux-dolby-package-context
+COPY --from=linux-dolby-package-build /work/linux-dolby/package /
+
 FROM runtime-assets AS linux-dolby-install
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends python3 \
