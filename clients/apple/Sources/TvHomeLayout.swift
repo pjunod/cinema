@@ -52,14 +52,20 @@ enum TvHomeLayoutPolicy {
     }
 }
 
-#if os(tvOS)
+@MainActor
+final class HomeFeaturePresentation: ObservableObject {
+    @Published var play: PlayContext?
+    @Published var requestedItemID: Int?
+    @Published var error: String?
+}
+
 @MainActor
 struct TvTheaterHero: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let feature: TvTheaterFeature
-    @State private var requestedItemID: Int?
-    @State private var play: PlayContext?
-    @State private var playbackError: String?
+    @ObservedObject var presentation: HomeFeaturePresentation = HomeFeaturePresentation()
 
     private var item: Item { feature.item }
     private var resumeMs: Int {
@@ -75,51 +81,42 @@ struct TvTheaterHero: View {
                 .tracking(3)
                 .foregroundStyle(Palette.accent)
             Text(item.showTitle ?? item.title)
-                .font(.system(size: 52, weight: .bold))
-                .foregroundStyle(.white)
+                .font(.largeTitle.bold())
+                .foregroundStyle(Palette.heroInk)
                 .lineLimit(2)
             if item.showTitle != nil {
                 Text(item.title)
                     .font(.title3)
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(Palette.heroInk)
                     .lineLimit(1)
             }
             if !metadata.isEmpty {
                 Text(metadata)
                     .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.8))
+                    .foregroundStyle(Palette.heroInk)
                     .lineLimit(1)
             }
             if let overview = item.overview, !overview.isEmpty {
                 Text(overview)
                     .font(.callout)
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(Palette.heroInk)
                     .lineLimit(3)
             }
-            HStack(spacing: 24) {
-                PrimaryButton(
-                    title: resumeMs > 0 ? "▶  Resume · \(formatTime(resumeMs))" : "▶  Play",
-                    busy: requestedItemID != nil
-                ) {
-                    requestedItemID = item.id
-                }
-                .accessibilityIdentifier("theater-play")
-                NavigationLink(value: Route.item(item.id)) {
-                    Text("Details")
-                }
-                .buttonStyle(TVReadableButtonStyle(prominent: false))
-                .accessibilityIdentifier("theater-details")
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 16) { actionButtons }
+                } else { HStack(spacing: 24) { actionButtons } }
             }
             .padding(.top, 12)
         }
         .frame(maxWidth: 900, alignment: .leading)
         .padding(.horizontal, screenHPad)
         .padding(.vertical, 36)
-        .frame(maxWidth: .infinity, minHeight: 540, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 360, alignment: .leading)
         .background {
             GeometryReader { geometry in
                 ZStack {
-                    Color.black
+                    Palette.heroScrim
                     Palette.accent.opacity(0.18)
                     if let backdrop = item.backdrop {
                         AuthImage(path: backdrop, targetSize: geometry.size)
@@ -127,11 +124,11 @@ struct TvTheaterHero: View {
                             .clipped()
                     }
                     LinearGradient(
-                        colors: [.black.opacity(0.88), .black.opacity(0.55), .clear],
+                        colors: [Palette.heroScrim.opacity(0.97), Palette.heroScrim.opacity(0.93), Palette.heroScrim.opacity(0.7)],
                         startPoint: .leading, endPoint: .trailing
                     )
                     LinearGradient(
-                        colors: [.clear, .black.opacity(0.65)],
+                        colors: [.clear, Palette.heroScrim.opacity(0.95)],
                         startPoint: .center, endPoint: .bottom
                     )
                 }
@@ -139,45 +136,39 @@ struct TvTheaterHero: View {
             .accessibilityHidden(true)
         }
         .tvNavigationFocusSection()
-        .task(id: requestedItemID) {
-            guard let id = requestedItemID else { return }
-            defer { requestedItemID = nil }
-            do {
-                let detail = try await model.itemDetail(id)
-                guard !Task.isCancelled else { return }
-                if let context = TvHomeLayoutPolicy.playbackContext(detail) {
-                    play = context
-                } else {
-                    playbackError = "This title has no playable video file."
+    }
+
+    @ViewBuilder private var actionButtons: some View {
+                Button { presentation.requestedItemID = item.id } label: {
+                    HStack {
+                        if presentation.requestedItemID != nil { ProgressView() }
+                        Label(resumeMs > 0 ? "Resume · \(formatTime(resumeMs))" : "Play", systemImage: "play.fill")
+                    }
+                    .font(.headline).padding(.horizontal, 24).frame(minHeight: 48)
+                    .foregroundStyle(Palette.buttonInk)
+                    .background(Palette.accent, in: Capsule())
                 }
-            } catch {
-                guard !Task.isCancelled else { return }
-                playbackError = error.localizedDescription
-            }
-        }
-        .alert("Unable to play", isPresented: Binding(
-            get: { playbackError != nil }, set: { if !$0 { playbackError = nil } }
-        )) {
-            Button("OK", role: .cancel) { playbackError = nil }
-        } message: {
-            Text(playbackError ?? "")
-        }
-        .fullScreenCover(item: $play, onDismiss: {
-            Task { await model.loadHome() }
-        }) { context in
-            PlayerView(
-                itemId: context.itemId, fileId: context.fileId, startMs: context.startMs,
-                durationMs: context.durationMs, title: context.title,
-                subtitle: context.subtitle, year: context.year, airDate: context.airDate,
-                overview: context.overview, onPlayNext: { play = $0 }
-            )
-            .id(context.id)
-            .environmentObject(model)
-        }
+                .disabled(presentation.requestedItemID != nil)
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: true))
+                #else
+                .buttonStyle(.plain)
+                #endif
+                .accessibilityIdentifier("theater-play")
+                .remoteControl("home-feature:play", label: resumeMs > 0 ? "Resume" : "Play") { presentation.requestedItemID = item.id }
+                Button("Details") { navigation.navigate(to: .item(item.id)) }
+                .remoteControl("home-feature:details", label: "Details") { navigation.navigate(to: .item(item.id)) }
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: false))
+                #endif
+                .accessibilityIdentifier("theater-details")
     }
 
     private var metadata: String {
-        DetailView.tvPlayableMetadata(item, file: nil, durationMs: item.runtimeMs)
+        #if os(tvOS)
+        return DetailView.tvPlayableMetadata(item, file: nil, durationMs: item.runtimeMs)
+        #else
+        return [item.year.map(String.init), item.runtimeMs.map(DetailView.compactRuntimeLabel)].compactMap { $0 }.joined(separator: " · ")
+        #endif
     }
 }
-#endif

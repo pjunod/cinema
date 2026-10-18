@@ -23,6 +23,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
+import androidx.navigation.compose.navigation
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -72,6 +73,10 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import tv.plurx.app.ui.*
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
@@ -196,14 +201,59 @@ private fun AppRoot(
 }
 
 @Composable
-private fun MainNav(
+internal fun MainNav(
     vm: AppViewModel,
     reminderChannel: StateFlow<String?>,
     onReminderChannelUsed: () -> Unit,
     invitationId: StateFlow<String?>,
     onInvitationUsed: () -> Unit,
+    controller: androidx.navigation.NavHostController? = null,
 ) {
-    val nav = rememberNavController()
+    val nav = controller ?: rememberNavController()
+    val preferences by vm.preferences.collectAsStateWithLifecycle()
+    val home by vm.home.collectAsStateWithLifecycle()
+    val features by vm.features.collectAsStateWithLifecycle()
+    val formFactor = currentFormFactor()
+    val meridian = preferences.layout == tv.plurx.app.data.ViewerLayout.Meridian
+    var selectedPrimary by rememberSaveable { mutableStateOf("home") }
+    var selectedSource by rememberSaveable { mutableStateOf<String?>(null) }
+    var sourceNotice by rememberSaveable { mutableStateOf<String?>(null) }
+    fun selectPrimary(destination: MeridianDestination) {
+        if (selectedPrimary == destination.id) return
+        nav.navigate(destination.route) {
+            popUpTo(nav.graph.startDestinationId) { saveState = true }
+            launchSingleTop = true
+            restoreState = true
+        }
+        selectedPrimary = destination.id
+    }
+    fun selectSource(ids: String, name: String) {
+        if (selectedPrimary == "libraries" && selectedSource == ids && nav.currentDestination?.route != "libraries") return
+        val openFromOverview = nav.currentDestination?.route == "libraries"
+        if (selectedSource != ids) nav.clearBackStack("libraries")
+        nav.navigate("libraries") {
+            popUpTo(nav.graph.startDestinationId) { saveState = selectedPrimary != "libraries" }
+            launchSingleTop = true
+            restoreState = selectedSource == ids
+        }
+        if (selectedSource != ids || openFromOverview) nav.navigate("library/$ids/${Uri.encode(name)}")
+        selectedPrimary = "libraries"
+        selectedSource = ids
+        sourceNotice = null
+    }
+    val destinations = meridianDestinations(features, formFactor == FormFactor.Television)
+    LaunchedEffect(home.libraries, home.loading, selectedSource) {
+        val source = selectedSource ?: return@LaunchedEffect
+        if (!home.loading && source.split(',').any { id -> home.libraries.none { it.id.toString() == id } }) {
+            nav.clearBackStack("libraries")
+            selectedSource = null
+            sourceNotice = "The selected library is no longer available. Choose another library."
+            if (selectedPrimary == "libraries") {
+                nav.navigate("libraries") { popUpTo(nav.graph.startDestinationId); launchSingleTop = true }
+            }
+        }
+    }
+
     val context = LocalContext.current
     val remote = remember(context) { RemoteRuntime.get(context) }
     val invitations = remember(context) { tv.plurx.app.invitations.InvitationRuntime.get(context) }
@@ -214,17 +264,39 @@ private fun MainNav(
     val entryScope = currentEntry?.id ?: "restricted"
     val route = currentEntry?.destination?.route.orEmpty()
     val category = tv.plurx.app.remote.RemoteRoutes.category(route)
+    val selectHome by androidx.compose.runtime.rememberUpdatedState({
+        if (meridian) selectPrimary(MeridianDestination("home", "Home", "home"))
+        else nav.navigate("home") { popUpTo("home") { inclusive = true }; launchSingleTop = true }
+    })
+    val profileIdentity = Triple(vm.origin, vm.currentUserId, vm.serverInstanceId)
+    var previousProfile by remember { mutableStateOf(profileIdentity) }
+    LaunchedEffect(profileIdentity) {
+        if (previousProfile != profileIdentity) {
+            destinations.forEach { nav.clearBackStack(it.route) }
+            nav.clearBackStack("libraries")
+            nav.navigate("home") { popUpTo(nav.graph.id) { inclusive = true }; launchSingleTop = true }
+            selectedPrimary = "home"; selectedSource = null; sourceNotice = null
+            remoteNavigation.resetIdentity()
+            remoteNavigation.onHome = { selectHome() }
+            previousProfile = profileIdentity
+        }
+    }
+    LaunchedEffect(route) {
+        destinations.firstOrNull { it.route == route || (it.id == "live-tv" && route.startsWith("live-tv?")) || (it.id == "library-channels" && route.startsWith("library-channels?")) }?.let { selectedPrimary = it.id }
+    }
     DisposableEffect(entryScope, category) {
         val entry = currentEntry
         remoteNavigation.enter(entryScope, category) { entry != null && nav.popBackStackFrom(entry) }
         onDispose { remoteNavigation.releaseScope(entryScope) }
     }
     DisposableEffect(remoteNavigation) {
-        remoteNavigation.onHome = { nav.navigate("home") { popUpTo("home") { inclusive = true }; launchSingleTop = true } }
+        remoteNavigation.onHome = { selectHome() }
         onDispose { remote.suspendNavigation(); remoteNavigation.resetIdentity() }
     }
     LaunchedEffect(vm.origin, vm.currentUserId, vm.serverInstanceId, remote.enabled, remote.sceneEligible) {
         remote.configure(vm, remoteNavigation, tv.plurx.app.player.isTelevision(context))
+        // configure may retire the former authenticated remote identity as well.
+        remoteNavigation.onHome = { selectHome() }
     }
     val dvrScope = rememberCoroutineScope()
     val token = Session.token.orEmpty()
@@ -251,16 +323,36 @@ private fun MainNav(
     }
     Box(Modifier.fillMaxSize().onGloballyPositioned { remoteNavigation.viewport = it.boundsInWindow() }) {
     CompositionLocalProvider(LocalRemoteClient provides remote, LocalRemoteNavigation provides remoteNavigation, LocalRemoteScope provides entryScope) {
-    NavHost(navController = nav, startDestination = "home") {
+    val chromeVisible = meridian && !(route == "shared-libraries" && remoteNavigation.route in setOf("playback", "tracks")) && !route.startsWith("player/") && !route.startsWith("offline/") && !route.startsWith("reader/") && !route.startsWith("pdf-reader/") && !route.startsWith("offline-book/") && !route.startsWith("photo/")
+    NavHost(navController = nav, startDestination = "viewer", modifier = Modifier.padding(
+        start = if (chromeVisible && formFactor != FormFactor.Compact) (if (formFactor == FormFactor.Television) 88.dp else 208.dp) else 0.dp,
+        top = if (chromeVisible) 88.dp else 0.dp,
+        bottom = if (chromeVisible && formFactor == FormFactor.Compact) 88.dp else 0.dp,
+    )) {
+        // A retained graph parent gives every primary root its own saved-state key.
+        // Retaining Home itself would alias a popped foreign branch to Home.
+        navigation(startDestination = "home", route = "viewer") {
+        composable("libraries") { MeridianLibraries(home.libraries, sourceNotice) { selectSource(it.id.toString(), it.name) } }
         composable("home") { entry ->
             CompositionLocalProvider(LocalRemoteScope provides entry.id) {
             HomeScreen(
                 vm = vm,
                 onOpenItem = { id -> nav.navigate("detail/$id") },
                 onOpenCollection = { title, libraries ->
-                    nav.navigate("library/${libraries.joinToString(",") { it.id.toString() }}/${Uri.encode(title)}")
+                    if (meridian) selectSource(libraries.joinToString(",") { it.id.toString() }, title) else nav.navigate("library/${libraries.joinToString(",") { it.id.toString() }}/${Uri.encode(title)}")
                 },
                 onSearch = { nav.navigate("search") },
+                onPlayFeatured = { id ->
+                    val owner = entry.id
+                    val authorization = Session.playbackAuthorization()
+                    dvrScope.launch {
+                        val target = try { vm.homePlayback(id) } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled } catch (_: Exception) { null }
+                        if (nav.currentBackStackEntry?.id == owner && Session.playbackAuthorization() == authorization) {
+                            if (target != null) nav.navigate("player/${target.itemId}/${target.fileId}/${target.startMs}")
+                            else nav.navigate("detail/$id")
+                        }
+                    }
+                },
                 onOpenDownloads = { nav.navigate("downloads") },
                 onOpenSettings = { nav.navigate("settings") },
                 onOpenLiveTv = { nav.navigate("live-tv") },
@@ -555,6 +647,9 @@ private fun MainNav(
             }
         }
     }
+    }
+    MeridianChrome(chromeVisible, formFactor, selectedPrimary, destinations, home.libraries,
+        onSelect = ::selectPrimary, onLibrary = { selectSource(it.id.toString(), it.name) })
     val requestedInvitation by invitationId.collectAsStateWithLifecycle()
     requestedInvitation?.let { invitation ->
         AlertDialog(onDismissRequest = onInvitationUsed, title = { Text("Open invited screen?") },

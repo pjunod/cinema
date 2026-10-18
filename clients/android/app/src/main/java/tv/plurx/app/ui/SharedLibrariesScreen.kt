@@ -32,11 +32,11 @@ private sealed interface SharedBrowseRoute {
 
 @Composable
 fun SharedLibrariesScreen(onBack: () -> Unit) {
-    var stack by remember { mutableStateOf<List<SharedBrowseRoute>>(listOf(SharedBrowseRoute.Sources)) }
+    var stack by rememberEntryPresentation("shared:stack") { mutableStateOf<List<SharedBrowseRoute>>(listOf(SharedBrowseRoute.Sources)) }
     val navigation = LocalRemoteNavigation.current
     val route = stack.last()
-    val scopes = remember { mutableMapOf<SharedBrowseRoute, String>() }
-    val openers = remember { mutableMapOf<SharedBrowseRoute, String?>() }
+    val scopes = rememberEntryPresentation("shared:scopes") { mutableMapOf<SharedBrowseRoute, String>() }
+    val openers = rememberEntryPresentation("shared:openers") { mutableMapOf<SharedBrowseRoute, String?>() }
     val ownerScope = scopes.getOrPut(route) { "shared:" + UUID.randomUUID().toString() }
     var rootLive by remember { mutableStateOf(true) }
     var restoration by remember { mutableLongStateOf(0) }
@@ -174,10 +174,11 @@ private fun SharedSourceGroup(assignments: List<SharedLibraryAssignment>, histor
 
 @Composable
 private fun SharedLibraryItems(route: SharedBrowseRoute.Library, onItem: (SharedPlaybackReference) -> Boolean) {
-    var q by remember { mutableStateOf("") }
-    var browse by remember { mutableStateOf(SharedBrowseAccumulator()) }
+    var q by rememberEntryPresentation("shared:q", route) { mutableStateOf("") }
+    var browse by rememberEntryPresentation("shared:browse", route) { mutableStateOf(SharedBrowseAccumulator()) }
+    var loadedQuery by rememberEntryPresentation("shared:loaded-query", route) { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by rememberEntryPresentation("shared:error", route) { mutableStateOf<String?>(null) }
     var generation by remember { mutableLongStateOf(0) }
     val scope = rememberCoroutineScope()
     val remoteNavigation = LocalRemoteNavigation.current
@@ -189,19 +190,21 @@ private fun SharedLibraryItems(route: SharedBrowseRoute.Library, onItem: (Shared
         onDispose { remoteNavigation?.clearSearch(remoteScope, searchNonce) }
     }
     suspend fun load(reset: Boolean) {
-        if (reset) { generation++; browse = SharedBrowseAccumulator() }
+        val requestedQuery = q
+        val resetQuery = reset || loadedQuery != requestedQuery
+        if (resetQuery) { generation++; browse = SharedBrowseAccumulator(); loadedQuery = requestedQuery }
         val expected = generation
-        val cursor = if (reset) null else browse.nextCursor
+        val cursor = if (resetQuery) null else browse.nextCursor
         loading = true
         try {
             val client = SharedLibraryClient.create()
-            val page = client.page(route.row.identity, route.parent, q, cursor)
+            val page = client.page(route.row.identity, route.parent, requestedQuery, cursor)
             client.requireCurrent()
-            if (generation == expected) { browse = browse.append(page, cursor, route.row.identity); error = null }
+            if (generation == expected && q == requestedQuery) { browse = browse.append(page, cursor, route.row.identity); error = null }
         } catch (failure: Exception) { if (failure is kotlinx.coroutines.CancellationException) throw failure; if (generation == expected) error = failure.message ?: "Shared titles unavailable" }
         finally { if (generation == expected) loading = false }
     }
-    LaunchedEffect(q) { load(true) }
+    LaunchedEffect(q) { if (loadedQuery != q || browse.items.isEmpty()) load(true) }
     val grid = androidx.compose.foundation.lazy.rememberLazyListState()
     val currentItems by rememberUpdatedState(browse.items)
     val itemOffset = 2 + if (error != null) 1 else 0
@@ -230,13 +233,13 @@ private fun SharedLibraryItems(route: SharedBrowseRoute.Library, onItem: (Shared
 private fun SharedLibraryDetails(route: SharedBrowseRoute.Detail, restoreParent: (String?) -> Unit, onChildren: (String) -> Boolean) {
     val vm: AppViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
     var playbackPlan by remember { mutableStateOf<SharedPlaybackPlan?>(null) }
-    var preplayFile by remember { mutableStateOf<String?>(null) }
+    var preplayFile by rememberEntryPresentation("shared:preplayFile", route) { mutableStateOf<String?>(null) }
     var childOpener by remember { mutableStateOf<String?>(null) }
     var incumbent by remember { mutableStateOf<tv.plurx.app.player.SharedPlayerController?>(null) }
     /** The full Shared reference of what is playing; next episode resolves from it. */
-    var playing by remember { mutableStateOf(route.reference) }
+    var playing by rememberEntryPresentation("shared:playing", route) { mutableStateOf(route.reference) }
     val preferences by vm.preferences.collectAsState()
-    var detail by remember { mutableStateOf<SharedLibraryDetail?>(null) }
+    var detail by rememberEntryPresentation("shared:detail", route) { mutableStateOf<SharedLibraryDetail?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()

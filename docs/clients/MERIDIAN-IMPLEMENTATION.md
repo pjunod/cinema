@@ -1,7 +1,7 @@
 # Meridian — a selectable Cinema layout and theme across web, Apple and Android
 
-**Status:** open; web M1/M2 delivered and reviewed; Apple/Android implementation
-and native acceptance remain in progress. M0 design direction is approved.
+**Status:** implemented across web, Apple and Android; GPT-6 Astra findings
+resolved and scoped UI checks passed. Physical-device acceptance remains open.
 **Written:** 2026-10-17 · **Source baseline:** `e586725544f0`.
 **Owner:** coordinating chat; implementation will be assigned to GPT-6.1 Sol.
 **Integration branch:** `effort/meridian`.
@@ -408,9 +408,9 @@ dispatch. No product code or native acceptance is claimed by this disposition.
 | Plan | Reviewed; findings addressed | Coordinator authored against `e586725544f0`; R1–R3 accepted and corrected; M0 checkpoint still owed. |
 | M0 | Delivered; Astra approved | [Visual contract](MERIDIAN-M0.md), [Apple state inventory](MERIDIAN-APPLE-STATE.md) and [Android state inventory](MERIDIAN-ANDROID-STATE.md) arrive through PR #1170 at `3e04ef30471a588d3214f4f2de594303bb4b37cd`, reviewed by GPT-6 Astra with no actionable P1/P2 findings; coordinator approved the rendered direction. Remote lint run 5391 timed out after 601 seconds during dependency/crate checking; local pinned lint and UI checks passed. The broader Effort gate remains unsatisfied. |
 | M1 web + M2 | Delivered; Astra approved | PR #1172 merged into the effort at `addde63e0`. GPT-6 Astra approved exact product head `5839b8235`: phone search and companion source-history findings resolved, no remaining actionable findings. Eleven browser journeys and 43 focused UI units passed; 22 clean-head shipping-asset captures live under `target/meridian/web/`. Main integration preserves current subtitle playback assets. |
-| M1 native + M3/M4 | Parallel native owners | Coordinating chat dispatches separate Apple and Android workers; web worker does not edit native files/counters. Native host/state/focus proofs and platform PR reviews remain required. |
-| M5 | Not started | Integrated screenshots, interaction evidence and code review owed. |
-| M6 | Web delivery; native pending | The user authorized web main integration after lint/syntax and UI checks without waiting for broader CI. Native delivery and physical qualification remain separate; no broad promotion-gate success is claimed. |
+| M1 native + M3/M4 | Implemented; Astra cleared | Apple final `c3f59d528` follows PR #1174 through #1176; Android final `1c7ec8b18` follows PR #1173 through #1177. Exact reviewed production blobs are retained. Latest affected Apple iPad tests 3/3 and extended native TV focus journey passed; Android production UI tests 7/7 on each phone, tablet and TV plus focused JVM/lint passed. Physical-device and oldest-supported-runtime qualification remain open. |
+| M5 | Scoped UI evidence and Astra review complete | Web 11 browser journeys and 66 focused UI units passed against current main. Native simulator/emulator receipts cover the affected state, playback, search, source and focus fixes; each platform retains source-bound captures. No remaining material Astra findings. |
+| M6 | Main delivery | The user authorized all reviewed Meridian PRs and final fixes to merge after scoped lint/syntax and UI checks without waiting for broader CI. Physical qualification and broad promotion-gate evidence are separate and are not claimed. |
 
 
 ### Web checkpoint validation policy

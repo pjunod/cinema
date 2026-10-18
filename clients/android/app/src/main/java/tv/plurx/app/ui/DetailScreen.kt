@@ -11,6 +11,7 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -186,6 +187,8 @@ private fun DetailContent(
     onWatchedChanged: () -> Unit,
     onBack: () -> Unit,
 ) {
+    val preferences by vm.preferences.collectAsStateWithLifecycle()
+    val meridian = preferences.layout == tv.plurx.app.data.ViewerLayout.Meridian
     val formFactor = currentFormFactor()
     val side = formFactor.horizontalPadding()
     val item = detail.item
@@ -195,13 +198,13 @@ private fun DetailContent(
     // on the item so opening the next one starts from the server's defaults
     // again — the choice belongs to one playback and is never written back as
     // a Playback setting.
-    var trackChoices by remember(item.id) { mutableStateOf(emptyMap<Long, PreplayTracks>()) }
+    var trackChoices by rememberEntryPresentation("detail:trackChoices", item.id) { mutableStateOf(emptyMap<Long, PreplayTracks>()) }
     val resumeMs = item.watch?.position_ms ?: 0L
     val resumeFile = playbackFile(item, detail.files, resumeMs)
     val durationMs = if (item.isAudiobook) item.runtime_ms ?: resumeFile?.duration_ms else resumeFile?.duration_ms ?: item.runtime_ms
     val nearlyDone = durationMs != null && durationMs > 0 && resumeMs > durationMs * 0.95
     val canResume = resumeMs > 3_000 && !nearlyDone
-    var selectedVersion by remember(item.id) { mutableStateOf<Long?>(null) }
+    var selectedVersion by rememberEntryPresentation("detail:selectedVersion", item.id) { mutableStateOf<Long?>(null) }
     val best = detail.files.find { it.id == selectedVersion } ?: playbackFile(item, detail.files, if (canResume) resumeMs else 0L)
     val remoteNavigation = LocalRemoteNavigation.current
     val remoteScope = LocalRemoteScope.current
@@ -244,7 +247,13 @@ private fun DetailContent(
     }
     LazyColumn(Modifier.fillMaxSize().navigationBarsPadding(), state = remoteList) {
         item {
-            Box(Modifier.fillMaxWidth().height(70.dp)) { DetailBackButton(onBack) }
+            if (meridian && item.backdrop != null) {
+                Box(Modifier.fillMaxWidth().height(if (formFactor == FormFactor.Compact) 180.dp else 260.dp)) {
+                    NetworkImage(imageUrl(item.backdrop), Modifier.fillMaxSize())
+                    Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(MaterialTheme.colorScheme.background.copy(alpha = .3f), MaterialTheme.colorScheme.background))))
+                    DetailBackButton(onBack)
+                }
+            } else Box(Modifier.fillMaxWidth().height(70.dp)) { DetailBackButton(onBack) }
             Column(Modifier.fillMaxWidth().padding(horizontal = side), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 if (detail.ancestors.isNotEmpty()) AncestorBreadcrumb(detail.ancestors, onOpenItem)
                 Row(horizontalArrangement = Arrangement.spacedBy(18.dp), verticalAlignment = Alignment.Top) {
@@ -356,8 +365,8 @@ private fun DetailContent(
                         if (startingEpisodeId == null) {
                             startingEpisodeId = child.id
                             scope.launch {
-                                val result = catchingUnlessCancelled { vm.episodePlayback(child) }.getOrNull()
-                                startingEpisodeId = null
+                                val result = try { catchingUnlessCancelled { vm.episodePlayback(child) }.getOrNull() }
+                                finally { startingEpisodeId = null }
                                 if (result != null) {
                                     val target = result.playback
                                     // A different item: its own defaults apply.

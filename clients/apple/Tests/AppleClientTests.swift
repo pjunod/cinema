@@ -7573,7 +7573,7 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testNativeAppearanceChoicesMatchTheOtherNativeViewer() {
-        XCTAssertEqual(ViewerTheme.allCases.map(\.label), ["Classic", "Terminal", "noirr"])
+        XCTAssertEqual(ViewerTheme.allCases.map(\.label), ["Classic", "Terminal", "noirr", "Meridian"])
         XCTAssertEqual(
             ViewerAppearance.allCases.map(\.label),
             ["Auto (system)", "Light", "Dark"]

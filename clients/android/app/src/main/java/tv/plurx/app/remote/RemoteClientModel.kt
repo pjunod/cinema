@@ -250,7 +250,7 @@ internal class RemoteClientModel(private val app: Context) {
         val snapshot = if (effectsEligible() && playbackEligible) rawSnapshot else rawSnapshot.copy(route = "restricted", blocked = true, label = null, textNonce = null, capabilities = emptyList())
         if (snapshot.blocked) receiverGuard.invalidate()
         updateGuard(); stateRevision++
-        val owner = playback.owner?.takeIf { it.scope == navigation!!.scope }
+        val owner = playback.owner?.takeIf { it.scope == navigation!!.scope && !navigation!!.navigationMenuActive }
         if (!snapshot.blocked && receiverControl != null) { receiverGuard.mint(RemoteCreditKind.Interaction, SystemClock.elapsedRealtime()); receiverGuard.mint(RemoteCreditKind.Playback, SystemClock.elapsedRealtime()) }
         val summary = if (snapshot.blocked) null else owner?.summary?.invoke()
         val capabilities = if (snapshot.blocked) emptySet() else snapshot.capabilities.toSet() + owner?.capabilities?.invoke().orEmpty()
@@ -260,6 +260,7 @@ internal class RemoteClientModel(private val app: Context) {
     private fun apply(command: RemoteCommand): RemoteOutcome? {
         if (!current(lifecycle) || !effectsEligible()) return RemoteOutcome.Unavailable
         val navigation = navigation ?: return RemoteOutcome.Unavailable
+        if (navigation.navigationMenuActive && command.action.type !in setOf("navigate", "select", "back")) return RemoteOutcome.Restricted
         if (playback.owner?.takeIf { it.scope == navigation.scope }?.effectsEligible?.invoke() == false) { receiverGuard.invalidate(); return RemoteOutcome.Restricted }
         refreshPlaybackContext()
         updateGuard()?.let { return it }

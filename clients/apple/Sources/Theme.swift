@@ -43,6 +43,11 @@ private extension UIColor {
 /// resolves light/dark from the effective trait collection, while the selected
 /// theme comes from the same device-local preference that AppModel publishes.
 enum Palette {
+    static var selectedFill: Color { onBg }
+    static var selectedInk: Color { bg }
+    static var focusRing: Color { accent }
+    static var heroScrim: Color { bg }
+    static var heroInk: Color { onBg }
     static var bg: Color { adaptive(\.bg) }
     static var surface: Color { adaptive(\.surface) }
     static var surfaceHi: Color { adaptive(\.surfaceHi) }
@@ -67,6 +72,18 @@ enum Palette {
 
     private static func values(theme: ViewerTheme, dark: Bool) -> PaletteValues {
         switch (theme, dark) {
+        case (.meridian, true):
+            return PaletteValues(
+                bg: 0x141416, surface: 0x1E1E21, surfaceHi: 0x29292D,
+                accent: 0xE5A00D, buttonInk: 0x171205, onBg: 0xF5F5F6,
+                muted: 0xAAAAB2, outline: 0xAAAAB2
+            )
+        case (.meridian, false):
+            return PaletteValues(
+                bg: 0xF5F4F1, surface: 0xFFFFFF, surfaceHi: 0xEAE8E3,
+                accent: 0x805600, buttonInk: 0xFFFFFF, onBg: 0x202024,
+                muted: 0x606068, outline: 0x606068
+            )
         case (.classic, true):
             return PaletteValues(
                 bg: 0x0E0F13, surface: 0x171922, surfaceHi: 0x1E2230,
