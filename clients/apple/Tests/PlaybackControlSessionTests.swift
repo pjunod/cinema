@@ -144,51 +144,6 @@ private final class ControlGate: @unchecked Sendable {
 
 private let controlGate = ControlGate()
 
-/// Arm only while delivering the terminal response under test, after every
-/// earlier exchange has finished scheduling its complete callback batch.
-private final class TerminalPublicationGate: @unchecked Sendable {
-    private let lock = NSLock()
-    private var enabled = false
-    private var armed = false
-    private var consumed = false
-    let entered = DispatchSemaphore(value: 0)
-    let release = DispatchSemaphore(value: 0)
-
-    func enable(_ value: Bool) {
-        lock.lock()
-        defer { lock.unlock() }
-        enabled = value
-        armed = false
-        if value {
-            consumed = false
-            while entered.wait(timeout: .now()) == .success {}
-            while release.wait(timeout: .now()) == .success {}
-        }
-    }
-
-    func arm(for response: ControlResponse) {
-        lock.lock()
-        defer { lock.unlock() }
-        if enabled, !consumed, response.action.type == "terminal" {
-            armed = true
-            consumed = true
-        }
-    }
-
-    func holdIfArmed() {
-        lock.lock()
-        let hold = armed
-        armed = false
-        lock.unlock()
-        if hold {
-            entered.signal()
-            _ = release.wait(timeout: .now() + 5)
-        }
-    }
-}
-
-private let terminalPublicationGate = TerminalPublicationGate()
-
 /// One-shot owner handoff used to prove an ask does not wait on the new
 /// owner's unrelated sequence space.
 private final class ControlOwnerChange: @unchecked Sendable {
@@ -255,7 +210,6 @@ private final class ControlExchangeURLProtocol: URLProtocol {
         // Encoded first, so a held response carries the answer that was
         // current when the request arrived rather than when it was released.
         controlGate.waitIfArmed()
-        terminalPublicationGate.arm(for: response)
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
@@ -550,20 +504,25 @@ final class PlaybackControlSessionTests: XCTestCase {
 
     func testEndRevokesATerminalPublicationAlreadyPastTheCaptureGuard() async throws {
         controlExchanges.reset()
-        controlAnswer.set(ControlAction(type: "none"))
-        controlAnswer.setReadiness("pending")
-        terminalPublicationGate.enable(true)
+        // The first response is already terminal. Blocking every scheduled
+        // callback during a pending warm-up would stop the reporter before
+        // it could send the second request: processing-status callbacks now
+        // share this scheduling seam with subtitle readiness.
+        controlAnswer.set(ControlAction(type: "terminal", code: "unsupported", message: "late"))
+        controlAnswer.setReadiness("ready")
+        let publicationHeld = DispatchSemaphore(value: 0)
+        let publicationGate = ControlGate()
+        publicationGate.arm()
         let session = PlaybackControlSession(scheduleSubtitleReady: { _ in
-            // Processing updates also use this scheduler. Only the matching
-            // terminal response arms the barrier; baseline callbacks pass.
-            terminalPublicationGate.holdIfArmed()
+            // Hold only the first callback at the real cross-actor boundary.
+            // Later processing/subtitle callbacks must not block publication.
+            publicationGate.waitIfArmed { publicationHeld.signal() }
         })
         let player = PlayerStub()
         let (transport, urlSession) = makeTransport()
         tearDownTransport(session, urlSession)
         defer {
-            terminalPublicationGate.release.signal()
-            terminalPublicationGate.enable(false)
+            publicationGate.release()
             controlAnswer.set(ControlAction(type: "none")); controlAnswer.setReadiness(nil)
         }
         session.begin(bootstrap: sessionBootstrap(), transport: transport,
@@ -571,12 +530,14 @@ final class PlaybackControlSessionTests: XCTestCase {
         let deadline = Date().addingTimeInterval(5)
         var held = false
         while !held, Date() < deadline {
-            held = terminalPublicationGate.entered.wait(timeout: .now()) == .success
+            held = publicationHeld.wait(timeout: .now()) == .success
             if !held { try await Task.sleep(nanoseconds: 10_000_000) }
         }
         XCTAssertTrue(held)
         session.end()
-        terminalPublicationGate.release.signal()
+        publicationGate.release()
+        // Join the reporter before asserting, so nil cannot merely mean that
+        // the attempted late verdict has not reached its publication point.
         await session.endAndWait()
         XCTAssertNil(session.terminalVerdict, "End revokes publication even after its outer guard passed")
     }
