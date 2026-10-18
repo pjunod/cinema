@@ -3067,8 +3067,14 @@ assert.equal(context.ACT_TIMER, null);
             (name, labels) for name, labels in rostered_runners()
             if "unit-memory-12g" in labels
         ]
-        self.assertEqual([name for name, _ in carriers], ["gha-media1-general-01"])
-        self.assertFalse({"general", "high-cpu", "ci-store", "ci-topology"} & carriers[0][1])
+        # At least one carrier, none sharing another lane's selector. The
+        # contract does not pin a single name: a second dedicated carrier is
+        # how an offline host stops stranding the unit lane.
+        self.assertTrue(carriers, "the full unit lane needs a rostered carrier")
+        for name, labels in carriers:
+            self.assertFalse(
+                {"general", "high-cpu", "ci-store", "ci-topology"} & labels, name
+            )
 
     def test_full_runtime_job_allowances_preserve_the_existing_suites(self):
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
