@@ -1476,7 +1476,7 @@ cinema-remote-browser-check: ## Run Cinema browser contracts with provisioned Pl
 	@export PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}"; \
 		node="$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}"; \
 		if [ "$$(uname -s)" = Linux ]; then set -- xvfb-run -a "$$node"; else set -- "$$node"; fi; \
-		"$$@" --test tests/web/cinema-remote-direction.browser.cjs tests/web/cinema-remote.browser.cjs tests/web/cinema-remote-live.browser.cjs tests/web/cinema-remote-couch.browser.cjs
+		"$$@" --test tests/web/cinema-remote-direction.browser.cjs tests/web/cinema-remote.browser.cjs tests/web/cinema-remote-live.browser.cjs tests/web/cinema-remote-couch.browser.cjs tests/web/meridian.browser.cjs
 
 .PHONY: library-rows-browser-check
 library-rows-browser-check: ## Test grouped library rows with the provisioned Playwright browser
@@ -1579,6 +1579,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node tests/web/page-read-budget.test.js
 	@node --test tests/web/media-preparation.test.js
 	@node tests/web/theme-family.test.js
+	@node tests/web/meridian.test.js
 	@node tests/web/activity-node-names.test.js
 	# Every child process is listed with its priority class and a stop (P-02 §3.2).
 	@node tests/web/activity-processes.test.js
