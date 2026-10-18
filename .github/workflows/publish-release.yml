@@ -135,6 +135,11 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
+      # One leg at a time: arm64 builds the tagged sources under QEMU on this
+      # same high-cpu runner class, and its native subtitle-engine compile ran
+      # out of its 600 s guard (v0.7.0, run 5384) while the amd64 leg shared
+      # the host. Cross-compiling it is #1163; until then the legs don't contend.
+      max-parallel: 1
       matrix:
         include:
           - arch: amd64
