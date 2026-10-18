@@ -8,6 +8,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- Apple Resume retries interrupted native seeks once and retains the saved position when preparation fails or the player closes.
+
 ### Added
 
 - Web Meridian layout and independent theme, with collapsible source navigation, responsive phone destinations and cinematic Home/detail presentation. Layout changes retain the current page, library controls and playback session.

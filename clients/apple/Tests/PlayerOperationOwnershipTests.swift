@@ -291,13 +291,125 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         }
     }
 
+    func testPreparedResumeDoesNotAcceptAnInterruptedNativeSeek() async throws {
+        let decisions = Decisions()
+        var seeks: [Int] = []
+        let controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
+            try await decisions.request(file: file, selection: selection, quality: quality)
+        }, itemPreparation: .init(ready: { _, _ in }, seek: { _, ms in
+            seeks.append(ms)
+            return false
+        }))
+        defer { controller.stop(); decisions.cancelAll() }
+        controller.start(model: AppModel(), itemId: 1, fileId: 1, startMs: 90_000,
+                         durationMs: 600_000, title: "Interrupted resume")
+        try await waitUntil("held decision") { decisions.requests.count == 1 }
+        let item = AVPlayerItem(url: URL(fileURLWithPath: "/interrupted-resume"))
+        controller.player.replaceCurrentItem(with: item)
+        do {
+            try await controller.seekWhenReady(item, ms: 90_000,
+                                              owner: controller.seekPreparationOwner(at: 90_000))
+            XCTFail("An interrupted resume must not be reported as a completed seek")
+        } catch {
+            XCTAssertEqual(error as? PlaybackPreparationError, .failed)
+        }
+        XCTAssertEqual(seeks, [90_000, 90_000], "Only one native retry is allowed")
+        controller.makePeriodicPlaybackObservation()()
+        XCTAssertEqual(controller.currentMs, 90_000, "The zero clock must not overwrite the failed resume target")
+        XCTAssertEqual(controller.positionForPlaybackStop(), 90_000)
+        XCTAssertFalse(controller.isPlaying)
+    }
+
+    func testPreparedResumeRetriesAnInterruptedNativeSeekAtTheSavedPosition() async throws {
+        let decisions = Decisions()
+        var seeks: [Int] = []
+        let controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
+            try await decisions.request(file: file, selection: selection, quality: quality)
+        }, itemPreparation: .init(ready: { _, _ in }, seek: { _, ms in
+            seeks.append(ms)
+            return seeks.count == 2
+        }))
+        defer { controller.stop(); decisions.cancelAll() }
+        controller.start(model: AppModel(), itemId: 1, fileId: 1, startMs: 90_000,
+                         durationMs: 600_000, title: "Retried resume")
+        try await waitUntil("held decision") { decisions.requests.count == 1 }
+        let item = AVPlayerItem(url: URL(fileURLWithPath: "/retried-resume"))
+        controller.player.replaceCurrentItem(with: item)
+        try await controller.seekWhenReady(item, ms: 90_000,
+                                          owner: controller.seekPreparationOwner(at: 90_000))
+        XCTAssertEqual(seeks, [90_000, 90_000])
+        XCTAssertEqual(controller.currentMs, 90_000)
+        XCTAssertFalse(controller.isPlaybackBlocked)
+    }
+
+    func testPreparedResumeDoesNotRetryOverANewerSeek() async throws {
+        let decisions = Decisions()
+        var seeks: [Int] = []
+        var controller: PlayerController!
+        controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
+            try await decisions.request(file: file, selection: selection, quality: quality)
+        }, itemPreparation: .init(ready: { _, _ in }, seek: { _, ms in
+            seeks.append(ms)
+            controller.seek(toMs: 30_000)
+            return false
+        }))
+        defer { controller.stop(); decisions.cancelAll() }
+        controller.start(model: AppModel(), itemId: 1, fileId: 1, startMs: 90_000,
+                         durationMs: 600_000, title: "Superseded resume")
+        try await waitUntil("held decision") { decisions.requests.count == 1 }
+        let item = AVPlayerItem(url: URL(fileURLWithPath: "/superseded-resume"))
+        controller.player.replaceCurrentItem(with: item)
+        try await controller.seekWhenReady(item, ms: 90_000,
+                                          owner: controller.seekPreparationOwner(at: 90_000))
+        XCTAssertEqual(seeks, [90_000], "A new viewer destination revokes the native retry")
+        XCTAssertEqual(controller.currentMs, 30_000)
+        XCTAssertEqual(controller.positionForPlaybackStop(), 30_000)
+    }
+
+    func testFailedVODResumeStopsAndRetainsTheSavedPosition() async throws {
+        let prior = Session.shared.credentials
+        Session.shared.setCredentials(origin: "http://127.0.0.1:8769", token: nil)
+        defer { Session.shared.setCredentials(origin: prior.origin, token: prior.token) }
+        let decision = try coldDecision()
+        let hls = try JSONDecoder().decode(HlsStart.self, from: Data("""
+        {"sessionId":"resume-failure","playlistUrl":"/hls/resume-failure/index.m3u8","mediaOriginMs":0,"vod":true}
+        """.utf8))
+        var seeks: [Int] = []
+        let controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in (decision, self.caps) },
+            itemPreparation: .init(ready: { _, _ in }, seek: { _, ms in
+                seeks.append(ms)
+                return false
+            }), releaseHlsSession: { _, _ in }, prepareGrowingPlaylist: { _ in },
+            requestHlsSession: { _, _, body in
+                XCTAssertEqual(body.start, 90)
+                return hls
+            }, requestHlsStatus: { _, id in PlaybackSessionStatus(id: id) })
+        defer { controller.stop() }
+        controller.start(model: AppModel(), itemId: 1, fileId: 1, startMs: 90_000,
+                         durationMs: 600_000, title: "Failed VOD resume")
+        await controller.loadingTask?.value
+        XCTAssertEqual(seeks, [90_000, 90_000])
+        XCTAssertTrue(controller.isPlaybackBlocked)
+        XCTAssertFalse(controller.isPlaying)
+        controller.makePeriodicPlaybackObservation()()
+        XCTAssertEqual(controller.currentMs, 90_000)
+        XCTAssertEqual(controller.positionForPlaybackStop(), 90_000)
+        controller.retryAfterPlaybackFailure()
+        try await waitUntil("failed resume Retry") { seeks.count == 4 && controller.isPlaybackBlocked }
+        controller.makePeriodicPlaybackObservation()()
+        XCTAssertEqual(seeks, [90_000, 90_000, 90_000, 90_000])
+        XCTAssertEqual(controller.currentMs, 90_000, "The reopen error handler must retain the resume target too")
+        XCTAssertEqual(controller.positionForPlaybackStop(), 90_000)
+        XCTAssertFalse(controller.isPlaying)
+    }
+
     func testPreparedSeekDeadlineFailsWithoutWaitingForAVPlayer() async throws {
         let decisionEntered = expectation(description: "decision suspended")
         let seekEntered = expectation(description: "replacement seek suspended")
         let deadlineEntered = expectation(description: "replacement deadline suspended")
         let returned = expectation(description: "replacement preparation returned")
         var decision: CheckedContinuation<(decision: Decision, caps: DeviceCaps), Error>?
-        var finishSeek: CheckedContinuation<Void, Never>?
+        var finishSeek: CheckedContinuation<Bool, Never>?
         var expire: CheckedContinuation<Void, Error>?
         let preparation = PlayerController.ItemPreparation(ready: { _, _ in }, seek: { _, _ in
             await withCheckedContinuation {
@@ -335,7 +447,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         await operation.value
         XCTAssertTrue(try XCTUnwrap(failure).localizedDescription.contains("took too long"))
         controller.stop()
-        finishSeek?.resume()
+        finishSeek?.resume(returning: true)
         decision?.resume(throwing: CancellationError())
         await load.value
     }
@@ -367,7 +479,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
                 readiness = $0
                 readyEntered.fulfill()
             }
-        }, seek: { _, ms in seeks.append(ms) })
+        }, seek: { _, ms in seeks.append(ms); return true })
         let controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in
             try await withCheckedThrowingContinuation {
                 decision = $0
@@ -998,6 +1110,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
                 itemPreparation: .init(ready: { _, _ in }, seek: { _, ms in
                     seeks.append(ms)
                     controller.stop()
+                    return true
                 }), releaseHlsSession: { _, _ in }, prepareGrowingPlaylist: { _ in
                     try await withCheckedThrowingContinuation { publication = $0 }
                 }, requestHlsSession: { _, _, _ in hls }, requestHlsStatus: { _, id in
@@ -1038,7 +1151,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
             controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in (decision, self.caps) },
                 itemPreparation: .init(ready: { item, _ in
                     attached.append(try XCTUnwrap((item.asset as? AVURLAsset)?.url))
-                }, seek: { _, _ in controller.stop() }), releaseHlsSession: { _, _ in },
+                }, seek: { _, _ in controller.stop(); return true }), releaseHlsSession: { _, _ in },
                 prepareGrowingPlaylist: { url in
                     requests.append(url)
                     if requests.count == 1 { throw URLError(.networkConnectionLost) }
@@ -1100,6 +1213,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
             }, seek: { _, ms in
                 seeks.append(ms)
                 controller.stop()
+                return true
             }), releaseHlsSession: { _, _ in }, prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, _, _ in hls },
             requestHlsStatus: { _, id in
                 var status = PlaybackSessionStatus(id: id)
@@ -1137,7 +1251,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
                 XCTAssertFalse(controller.surface.faults.contains {
                     $0.detail == PlaybackPreparationError.timedOut.localizedDescription
                 }, "a successor must not inherit the failed native item's timeout")
-            }, seek: { _, _ in controller.stop() }), releaseHlsSession: { _, _ in },
+            }, seek: { _, _ in controller.stop(); return true }), releaseHlsSession: { _, _ in },
             prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, _, _ in hls },
             requestHlsStatus: { _, id in PlaybackSessionStatus(id: id) })
         defer { controller.stop() }
@@ -1177,7 +1291,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
             itemPreparation: .init(ready: { _, context in
                 contexts.append(context)
                 try await withCheckedThrowingContinuation { waits.append($0) }
-            }, seek: { _, ms in seeks.append(ms); controller.stop() }),
+            }, seek: { _, ms in seeks.append(ms); controller.stop(); return true }),
             releaseHlsSession: { _, _ in }, prepareGrowingPlaylist: { _ in }, requestHlsSession: { _, _, _ in hls },
             requestHlsStatus: { _, id in
                 polls += 1
@@ -1468,6 +1582,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         oldTimer()
         timer()
         XCTAssertEqual(controller.currentMs, 40_000)
+        XCTAssertEqual(controller.positionForPlaybackStop(), 40_000, "Closing before attachment must retain Resume")
         controller.selectQuality(720)
         try await waitUntil("held quality decision") { decisions.requests.count == 2 && deadlines.waits.count == 2 }
         timer()

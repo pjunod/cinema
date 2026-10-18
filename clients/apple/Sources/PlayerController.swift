@@ -47,8 +47,10 @@ final class PlayerController: ObservableObject {
         var ready: @MainActor (AVPlayerItem, PlayerItemReadiness.Context) async throws -> Void = {
             try await PlayerController.awaitItemReady($0, context: $1)
         }
-        var seek: @MainActor (AVPlayer, Int) async -> Void = { player, ms in
-            _ = await player.seek(
+        // AVPlayer can complete an interrupted seek without reaching the
+        // resume point. Preserve its result so preparation cannot accept it.
+        var seek: @MainActor (AVPlayer, Int) async -> Bool = { player, ms in
+            await player.seek(
                 to: CMTime(seconds: Double(ms) / 1000.0, preferredTimescale: 600),
                 toleranceBefore: .zero, toleranceAfter: .zero
             )
@@ -3321,6 +3323,12 @@ final class PlayerController: ObservableObject {
         return isChangingStream || player.currentItem == nil ? currentMs : realPositionMs()
     }
 
+    /// Closing during preparation must retain the requested position rather
+    /// than publish the zero (or brief lead-in) of an unprepared item.
+    func positionForPlaybackStop() -> Int {
+        currentPausedRetirement?.positionMs ?? positionForPlaybackIntent()
+    }
+
     /// Report the final position and hand any encoder back immediately.
     private func startAudioSessionObservation() {
         audioSessionObserver.start(
@@ -3418,6 +3426,7 @@ final class PlayerController: ObservableObject {
     }
 
     func stop(deactivateAudioSession: Bool = true) {
+        let position = positionForPlaybackStop()
         recordDiagnosticPlayback("terminal", action: "stop")
         diagnosticAuthorizationGeneration = nil
         cancelAutoCostCatalogRefresh()
@@ -3513,9 +3522,6 @@ final class PlayerController: ObservableObject {
         deliveryStarvation.reset()
         ttffMeasurement.reset()
         seekState.clear()
-        // A dead item reads 0:00; closing a parked player must not save that
-        // over the viewer's place in the film.
-        let position = currentPausedRetirement?.positionMs ?? realPositionMs()
         pausedRetirement = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
@@ -3808,7 +3814,8 @@ final class PlayerController: ObservableObject {
         } catch {
             guard isCurrentLifecycle(lifecycle) else { return }
             reopenQueue.clear()
-            if player.currentItem != nil {
+            if player.currentItem != nil,
+               !(error is PlaybackPreparationError && seekState.pendingMs != nil) {
                 seekState.clear()
                 currentMs = realPositionMs()
             }
@@ -7955,8 +7962,9 @@ final class PlayerController: ObservableObject {
     func seekWhenReady(_ item: AVPlayerItem, ms: Int, owner: SeekPreparationOwner) async throws {
         let generation = openGeneration
         let lifecycle = lifecycleGeneration
-        let ownsSeek = {
-            self.isCurrentLifecycle(lifecycle) && !self.isSuperseded(generation)
+        let ownsSeek = { [weak self] in
+            guard let self else { return false }
+            return self.isCurrentLifecycle(lifecycle) && !self.isSuperseded(generation)
                 && self.player.currentItem === item
                 // Pause changes transport authority, not the resume point.
                 // A newer same-position selection also still needs this seek.
@@ -7976,8 +7984,14 @@ final class PlayerController: ObservableObject {
         guard ownsSeek() else { return }
         let outcome = await PlayerSeekCompletion.run(
             operation: { [player, prepare = itemPreparation.seek] in
-                await prepare(player, ms)
-                return true
+                // A native interruption need not replace the stream. Retry
+                // once while this same destination still owns the item; both
+                // attempts share the existing preparation deadline.
+                for _ in 0..<2 {
+                    guard ownsSeek() else { return false }
+                    if await prepare(player, ms) { return true }
+                }
+                return false
             },
             waitForDeadline: waitNativeSeekDeadline
         )
@@ -7985,11 +7999,15 @@ final class PlayerController: ObservableObject {
         switch outcome {
         case .finished(true), .cancelled:
             return
-        case .finished(false):
-            throw PlaybackPreparationError.failed
-        case .timedOut:
-            item.cancelPendingSeeks()
-            throw PlaybackPreparationError.timedOut
+        case .finished(false), .timedOut:
+            if outcome == .timedOut { item.cancelPendingSeeks() }
+            // The item's clock may still be at zero. Keep the requested film
+            // position for Retry and progress reporting, and stop before the
+            // caller surfaces the preparation failure.
+            let destination = seekState.absolute(owner.targetMs, durationMs: knownDurationMs)
+            currentMs = destination.target
+            stopForBlockingSurface()
+            throw outcome == .timedOut ? PlaybackPreparationError.timedOut : PlaybackPreparationError.failed
         }
     }
 

@@ -1223,7 +1223,7 @@ struct PlayerView: View {
     }
 
     private func teardownPlayback(deactivateAudioSession: Bool = true) {
-        let stoppedAt = controller.realPositionMs()
+        let stoppedAt = controller.positionForPlaybackStop()
         nextEpisodeTask?.cancel()
         nextEpisodeTask = nil
         autoHideGeneration &+= 1
