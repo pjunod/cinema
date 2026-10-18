@@ -125,6 +125,66 @@ final class MeridianTests: XCTestCase {
         XCTAssertEqual(navigation.paths, current)
         XCTAssertEqual(navigation.selectedTab, .home)
         XCTAssertFalse(navigation.hasOwnedModal)
+        XCTAssertEqual(navigation.requestedFocus, RemoteNavigationCoordinator.viewerNavigationOpener)
+    }
+
+    #if os(tvOS)
+    func testMeridianOpenerFocusPrefersChromeUntilContentIsRequested() {
+        let controller = ViewerDestinationController()
+        controller.loadViewIfNeeded()
+        controller.makeRoot = { _ in AnyView(Text("Content")) }
+        controller.select(.libraries)
+        controller.updateChrome(AnyView(Text("Navigation")), header: AnyView(EmptyView()))
+        controller.layout = .meridian
+        controller.chromeFocusRequested = true
+        XCTAssertTrue(controller.preferredFocusEnvironments.first === controller.chrome)
+        controller.chromeFocusRequested = false
+        XCTAssertTrue(controller.preferredFocusEnvironments.first === controller.hosts[.libraries])
+        controller.layout = .standard
+        controller.chromeFocusRequested = true
+        XCTAssertTrue(controller.preferredFocusEnvironments.first === controller.hosts[.libraries])
+        controller.expanded = true
+        XCTAssertTrue(controller.preferredFocusEnvironments.first === controller.chrome)
+    }
+    #endif
+
+    func testIdentityResetKeepsCurrentMeridianOpenerAndClearsAccountActions() {
+        let navigation = RemoteNavigationCoordinator()
+        navigation.presentationBlocked = { false }
+        navigation.setViewerNavigationAvailable(true)
+        var oldActions = 0
+        navigation.register(scope: navigation.rootScope, key: RemoteNavigationCoordinator.viewerNavigationOpener,
+            entry: .init(id: UUID(), label: "Old opener", frame: CGRect(x: 0, y: 0, width: 100, height: 48)) { oldActions += 1 })
+        navigation.resetIdentity()
+        navigation.selectedTab = .libraries
+        navigation.paths[.libraries] = [.item(8)]
+        navigation.synchronizeRoute()
+        let currentPaths = navigation.paths
+        let scope = navigation.rootScope
+        navigation.setOrder(scope: scope, keys: ["library:view"], columns: 1)
+        var currentActions = 0
+        navigation.register(scope: scope, key: RemoteNavigationCoordinator.viewerNavigationOpener,
+            entry: .init(id: UUID(), label: "Current opener", frame: CGRect(x: 0, y: 0, width: 100, height: 48)) { currentActions += 1 })
+        navigation.openModal(scope: RemoteNavigationCoordinator.viewerNavigationScope,
+            opener: RemoteNavigationCoordinator.viewerNavigationOpener) {}
+        let identity = navigation.ownedModalIdentity
+        navigation.closeModal()
+        navigation.modalPresentationDismissed(scope: RemoteNavigationCoordinator.viewerNavigationScope, identity: identity)
+        XCTAssertEqual(navigation.requestedFocus, RemoteNavigationCoordinator.viewerNavigationOpener)
+        XCTAssertEqual(navigation.paths, currentPaths)
+        XCTAssertNotEqual(navigation.dispatch(.select, context: navigation.context), .applied)
+        XCTAssertEqual(currentActions, 0, "A requested focus cannot authorize Select")
+        navigation.nativeControlFocus(scope: scope, key: RemoteNavigationCoordinator.viewerNavigationOpener, focused: true)
+        XCTAssertEqual(navigation.dispatch(.select, context: navigation.context), .applied)
+        XCTAssertEqual(currentActions, 1)
+        XCTAssertEqual(oldActions, 0, "Reset must still remove the previous account's action")
+        navigation.setViewerNavigationAvailable(false)
+        navigation.setOrder(scope: scope, keys: ["library:view"], columns: 1)
+        navigation.openModal(scope: RemoteNavigationCoordinator.viewerNavigationScope,
+            opener: RemoteNavigationCoordinator.viewerNavigationOpener) {}
+        navigation.closeModal()
+        navigation.modalPresentationDismissed(scope: RemoteNavigationCoordinator.viewerNavigationScope)
+        XCTAssertEqual(navigation.requestedFocus, "library:view", "Standard layout must retire the Meridian opener")
     }
 
     func testRetiredPanelCompletionCannotDismissAReopenedPanel() throws {
@@ -500,7 +560,7 @@ private struct ImplicitDestinationHostFixture: View {
             }
         } else {
             ViewerDestinationHost(selection: driver.selection, layout: driver.layout,
-                expanded: false, accessibilityNavigation: false, visibleTabs: HomeTab.viewerTabs,
+                expanded: false, chromeFocusRequested: false, accessibilityNavigation: false, visibleTabs: HomeTab.viewerTabs,
                 recordingsAttention: 0, selectionChanged: { driver.selection = $0 },
                 standardNavigationIsPushed: driver.push, panelDismissed: {},
                 root: { AnyView(ImplicitNavigationFixture(driver: driver, title: $0.title)) },
@@ -540,7 +600,7 @@ private struct FullscreenLifecycleShell: View {
 
     var body: some View {
         ViewerDestinationHost(selection: navigation.selectedTab, layout: .standard,
-            expanded: false, accessibilityNavigation: false, visibleTabs: HomeTab.viewerTabs,
+            expanded: false, chromeFocusRequested: false, accessibilityNavigation: false, visibleTabs: HomeTab.viewerTabs,
             recordingsAttention: 0, selectionChanged: { navigation.selectedTab = $0 },
             standardNavigationIsPushed: !(navigation.paths[navigation.selectedTab] ?? []).isEmpty,
             panelDismissed: {},

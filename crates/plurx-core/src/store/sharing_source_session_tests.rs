@@ -991,6 +991,17 @@ async fn sharing_source_sqlite_first_activation_current_authority_and_lineage() 
             )])
             .await
             .expect("remove only fixture fault");
+        // Fault propagation and race refusals above may consume the five-second
+        // authority/operation lifetime. The successful write needs a fresh proof.
+        let SourceWriteAuthorityRead::Ready(authority) = store
+            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .await
+            .expect("fresh authority after fault checks")
+        else {
+            panic!("restored first-activation authority")
+        };
+        activation.now_ms = now_ms().expect("clock");
+        activation.lease_expires_at_ms = activation.now_ms + 60000;
         let created = store
             .activate_source_media_session(&authority, &activation)
             .await

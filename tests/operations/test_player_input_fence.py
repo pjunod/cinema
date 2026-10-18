@@ -202,6 +202,23 @@ class PlayerInputFenceTest(unittest.TestCase):
         self.assertEqual(len(failures), 3)
         self.assertTrue(all(f":{len(lines)}:" in failure for failure in failures))
 
+    def test_meridian_navigation_adapters_do_not_exempt_neighboring_handlers(self):
+        relative = Path("crates/plurxd/src/web/layouts/meridian.js")
+        original = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        regions = [row for row in self.fence.WEB_REGIONS if row[0] == relative]
+        self.assertEqual(len(regions), 2)
+        self.assertEqual(self.fence.scan_lines(relative, original, self.fence.web_allowed_lines(relative, original)), [])
+        raw = 'document.addEventListener("keydown", event => event.key);'
+        for _, start, end, _ in regions:
+            for marker, after in ((start, False), (end, True)):
+                with self.subTest(marker=marker):
+                    lines = original.copy()
+                    at = next(i for i, line in enumerate(lines) if marker in line) + int(after)
+                    lines.insert(at, raw)
+                    failures = self.fence.scan_lines(relative, lines, self.fence.web_allowed_lines(relative, lines))
+                    self.assertEqual(len(failures), 2)
+                    self.assertTrue(all(f":{at + 1}:" in failure for failure in failures))
+
     def test_the_fence_passes_the_repository_as_it_stands(self):
         self.assertEqual(self.fence.scan(), [])
 

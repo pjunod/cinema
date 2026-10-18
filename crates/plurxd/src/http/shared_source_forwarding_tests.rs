@@ -51,14 +51,16 @@ impl Drop for ClientDriver {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_nonowner_http_cold_probe_and_same_driver_end_require_actual_closure() {
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
     Box::pin(tokio::time::timeout(
         Duration::from_secs(120),
-        actual_nonowner_forwarding(),
+        actual_nonowner_forwarding(fixture_body_budget),
     ))
     .await
     .expect("finite real-member forwarding fixture");
 }
-async fn actual_nonowner_forwarding() {
+async fn actual_nonowner_forwarding(fixture_body_budget: tokio::sync::OwnedSemaphorePermit) {
     use plurx_core::{
         cluster::{membership::ClusterRole, migration::select_daemon_store_observing},
         config::Config,
@@ -70,7 +72,7 @@ async fn actual_nonowner_forwarding() {
         .expect("worker bind");
     let worker_address = worker_listener.local_addr().expect("worker address");
     drop(worker_listener); // The startup owner binds this exact reserved origin.
-    let worker = real_source_start_fixture_at(worker_address).await;
+    let worker = real_source_start_fixture_at(worker_address, fixture_body_budget).await;
     // Exercise both actual node and sharing routes with the strict sharing
     // fallback once; the ordinary web-shell fallback is irrelevant here.
     let worker_router = super::super::router((*worker.state).clone())

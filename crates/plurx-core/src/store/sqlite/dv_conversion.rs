@@ -1464,6 +1464,113 @@ mod tests {
         let _store = SqliteStore::open(&path).expect("retry repaired v44 migration");
     }
 
+    #[test]
+    fn historical_rewind_refuses_translation_data_and_partial_shapes_without_mutation() {
+        for scenario in [
+            "translation-job",
+            "translation-data",
+            "translation-shape",
+            "managed-data",
+            "managed-marker",
+            "managed-shape",
+        ] {
+            let connection = rusqlite::Connection::open_in_memory().expect("fixture");
+            SqliteStore::migrate(&connection).expect("current schema");
+            match scenario {
+                "translation-job" => {
+                    connection.execute_batch("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node');").expect("orphaned accepted translation fixture");
+                }
+                "translation-data" => {
+                    connection.execute("INSERT INTO subtitle_translation_capabilities VALUES('node','model',?1,'{}')", ["a".repeat(64)]).expect("retained translation capability");
+                }
+                "translation-shape" => {
+                    connection
+                        .execute_batch("DROP TRIGGER subtitle_translation_source_changed;")
+                        .expect("partial translation fixture");
+                }
+                "managed-data" => {
+                    connection
+                        .execute_batch(
+                            "INSERT INTO subtitle_model_receipts VALUES('node','model','{}');",
+                        )
+                        .expect("retained managed receipt");
+                }
+                "managed-marker" => {
+                    connection
+                        .execute_batch("DELETE FROM subtitle_managed_schema;")
+                        .expect("missing managed marker");
+                }
+                "managed-shape" => {
+                    connection
+                        .execute_batch("DROP TRIGGER subtitle_managed_source_changed;")
+                        .expect("partial managed fixture");
+                }
+                _ => unreachable!(),
+            }
+            let snapshot = || {
+                let version: i64 = connection
+                    .pragma_query_value(None, "user_version", |row| row.get(0))
+                    .expect("schema version");
+                let objects = connection
+                    .prepare("SELECT name,type,sql FROM sqlite_master ORDER BY name,type,sql")
+                    .expect("complete schema")
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    })
+                    .expect("schema rows")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("complete schema rows");
+                let capabilities = connection.prepare("SELECT node_id,model_id,profile_id,receipt_json FROM subtitle_translation_capabilities ORDER BY node_id,model_id,profile_id").expect("capability snapshot")
+                    .query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?)))
+                    .expect("capability rows").collect::<Result<Vec<_>,_>>().expect("complete capability rows");
+                let receipts = connection.prepare("SELECT node_id,model_id,receipt_json FROM subtitle_model_receipts ORDER BY node_id,model_id").expect("receipt snapshot")
+                    .query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))
+                    .expect("receipt rows").collect::<Result<Vec<_>,_>>().expect("complete receipt rows");
+                let jobs = connection.prepare("SELECT json_array(id,kind,payload_version,payload_json,dedupe_key,priority,state,target_node_id,owner_node_id,owner_boot_id,claim_id,fence,revision,lease_expires_ms,failure_policy,failed_attempts,attempt_limit,retry_deadline_ms,attempt_errors,index_diagnostic_json,yield_count,abandoned_count,not_before_ms,checkpoint_json,result_ref,last_error_code,created_at_ms,updated_at_ms) FROM background_jobs ORDER BY id").expect("background job snapshot")
+                    .query_map([], |row| row.get::<_,String>(0)).expect("background job rows").collect::<Result<Vec<_>,_>>().expect("complete background job rows");
+                let markers = connection.prepare("SELECT 'translation',singleton,version FROM subtitle_translation_schema UNION ALL SELECT 'managed',singleton,version FROM subtitle_managed_schema ORDER BY 1,2,3").expect("independent marker snapshot")
+                    .query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?)))
+                    .expect("marker rows").collect::<Result<Vec<_>,_>>().expect("complete independent marker rows");
+                (version, objects, capabilities, receipts, jobs, markers)
+            };
+            let before = snapshot();
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::queue_fixture::rewind_empty_managed_subtitle_schema(&connection);
+                }))
+                .is_err(),
+                "historical rewind must refuse {scenario}"
+            );
+            let after = snapshot();
+            assert_eq!(
+                before, after,
+                "refused rewind preserves exact DDL, schema marker and owned row payloads"
+            );
+            if scenario == "translation-data" {
+                let retained: i64 = connection
+                    .query_row(
+                        "SELECT count(*) FROM subtitle_translation_capabilities",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("retained capability");
+                assert_eq!(retained, 1);
+            }
+            if scenario == "managed-data" {
+                let retained: i64 = connection
+                    .query_row("SELECT count(*) FROM subtitle_model_receipts", [], |row| {
+                        row.get(0)
+                    })
+                    .expect("retained managed receipt");
+                assert_eq!(retained, 1);
+            }
+        }
+    }
+
     /// The downgrade fixture above has to undo every migration *after* the
     /// guard, including v89's preparation history index.
     ///
@@ -1493,7 +1600,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 67] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 68] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1617,6 +1724,9 @@ mod tests {
             // v111: the shared guarded rewind removes the exact empty managed
             // extension and restores its predecessor resource view before replay.
             "CREATE TABLE subtitle_managed_schema",
+            // v112: the shared rewind verifies exact shape and refuses all
+            // translation data before removing the empty extension.
+            "CREATE TABLE subtitle_translation_schema",
         ];
 
         assert!(

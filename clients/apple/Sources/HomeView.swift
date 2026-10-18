@@ -98,6 +98,7 @@ struct HomeView: View {
     private var shell: some View {
         ViewerDestinationHost(
             selection: selectedTab, layout: model.layout, expanded: navigationExpanded,
+            chromeFocusRequested: viewerNavigationFocusRequested,
             accessibilityNavigation: dynamicTypeSize.isAccessibilitySize,
             visibleTabs: HomeTab.viewerTabs.filter { $0.isVisible(model.features) },
             recordingsAttention: model.features.recordings ? (dvr.overview?.counts.attention ?? 0) : 0,
@@ -174,6 +175,16 @@ struct HomeView: View {
         .preferredColorScheme(model.appearance.preferredColorScheme)
         .fontDesign(model.theme.fontDesign)
         .tint(Palette.accent)
+    }
+
+    private var viewerNavigationFocusRequested: Bool {
+        #if os(tvOS)
+        return model.layout == .meridian
+            && remoteNavigation.activeScope == remoteNavigation.rootScope
+            && remoteNavigation.requestedFocus == RemoteNavigationCoordinator.viewerNavigationOpener
+        #else
+        return false
+        #endif
     }
 
     private func toggleNavigation() {

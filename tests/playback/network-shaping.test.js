@@ -488,6 +488,78 @@ async function withOrigin(bytes, run, { firstResponseDelayMs = 0 } = {}) {
   }
 }
 
+test("acquisition request trace distinguishes upstream and shaped completion without retaining credentials", async () => {
+  await withOrigin(64 * 1024, async origin => {
+    const shaper = new lab.ShapingProxy(lab.parseNetworkProfile("8mbps-to-1.5mbps"), origin,
+      { traceRequests: true });
+    const base = await shaper.start();
+    try {
+      const secret = "11111111-1111-4111-8111-111111111111";
+      const response = await fetch(`${base}/api/v1/hls/${secret}/seg0027.m4s?token=secret-bearer&acquisition_start_ms=300130`,
+        { headers: { Authorization: "Bearer another-secret" } });
+      assert.equal((await response.arrayBuffer()).byteLength, 64 * 1024);
+      const [row] = shaper.controlSnapshot().requests;
+      assert.equal(row.resource, "segment");
+      assert.equal(row.segment_index, 27);
+      assert.equal(row.acquisition_start_ms, 300130);
+      assert.equal(row.status, 200);
+      assert.equal(row.upstream_bytes, 64 * 1024);
+      assert.equal(row.outcome, "completed");
+      assert.ok(row.started_at_ms <= row.headers_at_ms);
+      assert.ok(row.headers_at_ms <= row.first_byte_at_ms);
+      assert.ok(row.first_byte_at_ms <= row.completed_at_ms);
+      assert.match(row.session_hash, /^s-[0-9a-f]{64}$/);
+      assert.doesNotMatch(JSON.stringify(shaper.controlSnapshot().requests),
+        /secret-bearer|another-secret|11111111|token=|Authorization/);
+      assert.equal(shaper.errors.length, 0);
+    } finally { await shaper.close(); }
+  }, { firstResponseDelayMs: 20 });
+});
+
+test("acquisition request trace is absent unless requested", async () => {
+  await withOrigin(1, async origin => {
+    const shaper = new lab.ShapingProxy(lab.parseNetworkProfile("8mbps-to-1.5mbps"), origin);
+    const base = await shaper.start();
+    try {
+      await (await fetch(`${base}/api/v1/server`)).arrayBuffer();
+      assert.equal(shaper.controlSnapshot().requests, undefined);
+      assert.equal(shaper.requestRecords.length, 0);
+    } finally { await shaper.close(); }
+  });
+});
+
+test("acquisition control trace binds requested and offered candidates while omitting raw payload secrets", async () => {
+  const candidate = "a".repeat(32), offered = "b".repeat(32);
+  const session = "11111111-1111-4111-8111-111111111111";
+  const reply = { accepted_sequence: 4, secret: "response-secret", action: { type: "prepare",
+    action_id: "22222222-2222-4222-8222-222222222222", session_id: session,
+    playlist_url: `/api/v1/hls/${session}/index.m3u8?token=response-token`,
+    effective_selection: { candidate_id: offered, height: 1080 } } };
+  const origin = http.createServer((request, response) => {
+    request.resume(); request.on("end", () => {
+      response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(reply));
+    });
+  });
+  await new Promise(resolve => origin.listen(0, "127.0.0.1", resolve));
+  const shaper = new lab.ShapingProxy(lab.parseNetworkProfile("8mbps-to-1.5mbps"),
+    `http://127.0.0.1:${origin.address().port}`, { traceRequests: true });
+  try {
+    const base = await shaper.start();
+    const response = await fetch(`${base}/api/v1/hls/${session}/control?token=request-token`, {
+      method: "POST", body: JSON.stringify({ sequence: 4, position_ms: 314165,
+        secret: "request-secret", selection: { quality: { mode: "auto", candidate_id: candidate, height: 360 } } }),
+    });
+    assert.deepEqual(await response.json(), reply, "the observation must not rewrite the protocol");
+    const row = shaper.controlSnapshot().requests[0];
+    assert.equal(row.control_request.candidate, candidate);
+    assert.equal(row.control_request.height, 360);
+    assert.equal(row.control_response.prepared_candidate, offered);
+    assert.equal(row.control_response.prepared_height, 1080);
+    assert.equal(row.control_response.accepted_sequence, 4);
+    assert.doesNotMatch(JSON.stringify(row), /request-secret|response-secret|request-token|response-token|11111111|22222222|playlist_url/);
+  } finally { await shaper.close(); await new Promise(resolve => origin.close(resolve)); }
+});
+
 test("the shaper holds the link, applies the cliff, and records both stages", async () => {
   // Keep each stage well beyond the bucket's 250 ms starting credit and the
   // first recorded slice. A one-second transfer puts that deliberate credit

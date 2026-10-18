@@ -304,11 +304,13 @@ struct PreparedReplacementLedger: Equatable {
     /// pipelines, so a caller can consult it before spending anything.
     func offer(_ action: PreparedReplacementAction, canPrepare: Bool = true) -> PreparedReplacementOffer {
         if isSwitching { return .busy }
+        // A rejected supersede stays retired even while another staging lives.
+        // Checking active first would re-queue its abort on every replay.
+        if settled.contains(action.actionId) { return .alreadySettled }
         if let active {
             if active.actionId == action.actionId { return .alreadyOpen }
             return .supersede(previous: active, next: action)
         }
-        if settled.contains(action.actionId) { return .alreadySettled }
         guard canPrepare else { return .declined }
         return .build(action)
     }
@@ -903,6 +905,9 @@ enum QualityChangeReopen {
 /// leak that survives a tvOS screensaver.
 @MainActor
 protocol PreparedSuccessorHost: AnyObject {
+    /// A superseded offer is aborted before it can discard a current pipeline.
+    func acceptsPreparedSuccessor(_ action: PreparedReplacementAction) -> Bool
+
     /// Build the muted, layer-less second pipeline for this staging and prime
     /// it to `filmPositionMs`. `false` means it could not be started at all —
     /// an address that will not resolve, or no player to replace — which is a
@@ -939,6 +944,10 @@ protocol PreparedSuccessorHost: AnyObject {
     /// preparation and never exercised it; this is the instrument that closes
     /// that residual.
     func recordPreparedFallbackInterruption(ms: Int)
+}
+
+extension PreparedSuccessorHost {
+    func acceptsPreparedSuccessor(_ action: PreparedReplacementAction) -> Bool { true }
 }
 
 // MARK: - The coordinator
@@ -987,6 +996,15 @@ final class PreparedReplacementCoordinator {
         filmPositionMs: @autoclosure () -> Int
     ) -> PreparedReplacementOffer {
         let offer = ledger.offer(action, canPrepare: true)
+        switch offer {
+        case .build, .supersede:
+            guard host?.acceptsPreparedSuccessor(action) != false else {
+                ledger.noteAbandoned(action, .aborted)
+                host?.preparedSuccessorOwesAnExchange()
+                return .declined
+            }
+        default: break
+        }
         switch offer {
         case .alreadyOpen, .alreadySettled, .busy:
             return offer
