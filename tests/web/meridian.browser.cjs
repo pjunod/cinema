@@ -156,3 +156,42 @@ test("companion panel Libraries and Help actions are reachable and activate thei
   await page.waitForSelector("#diagnostic-dialog");assert.equal(await page.locator(".md-panel").count(),0);assertClean(errors);
  }finally{await browser.close();}
 });
+
+test("phone search stays visible and focused across repeated query routes",async()=>{
+ const browser=await chromium.launch({headless:true});
+ try{
+  const {page,errors}=await fixture(browser,{viewport:{width:390,height:844}});await page.goto("http://meridian.test/#/");await page.waitForSelector(".md-home .btnplay");
+  await page.locator('.md-bottom button').filter({hasText:/^Search$/}).click();
+  for(const value of ["Far","Far Shore",""]){
+   await page.locator("#q").fill(value);await page.waitForFunction(value=>getQ()===value&&!!document.querySelector(value?'#search-results':'.md-home .btnplay'),value);
+   assert.equal(await page.evaluate(()=>{const q=document.getElementById('q');return document.activeElement===q&&q.getClientRects().length>0;}),true,"search remains visible and focused after "+JSON.stringify(value));
+   assert.equal(await page.locator("#q").inputValue(),value);
+   assert.equal(await page.evaluate(()=>document.getElementById('q').selectionStart),value.length);
+  }
+  assertClean(errors);
+ }finally{await browser.close();}
+});
+
+test("companion source navigation returns to the original library page and focused item",async()=>{
+ const browser=await chromium.launch({headless:true});
+ try{
+  for(const mode of ["panel","rail"]){
+   const {page,errors}=await fixture(browser,{tv:true,viewport:{width:1920,height:1080}});await page.goto("http://meridian.test/#/library/1");await page.waitForSelector("#libbody [data-remote-item]");
+   await page.evaluate(()=>{LIB_PER=5;libGoPage(1);});await page.locator('#libbody [data-remote-item]').first().focus();
+   const focused=await page.evaluate(()=>document.activeElement.dataset.remoteItem);
+   if(mode==="panel")await page.locator('.md-opener').click();
+   assert.equal(await page.evaluate(mode=>{
+    cinemaRemoteBind();
+    const id=mode==='panel'?'meridian:destination:'+Array.from(document.querySelectorAll('.md-panel a[data-meridian-destination]')).findIndex(el=>el.dataset.meridianDestination==='library:2'):'route:#/library/2:0';
+    CinemaRemote.focusById(id);return CinemaRemote.dispatch({type:'select'},CinemaRemote.snapshot());
+   },mode),"applied",mode+' source activation');
+   await page.waitForFunction(()=>location.hash==='#/library/2'&&!!document.querySelector('#libbody [data-remote-item]'));
+   assert.equal(await page.evaluate(()=>{cinemaRemoteBind();return CinemaRemote.dispatch({type:'back'},CinemaRemote.snapshot());}),"applied");
+   await page.waitForFunction(()=>location.hash==='#/library/1'&&!!document.querySelector('#libbody [data-remote-item]'),null,{timeout:2000});
+   assert.equal(await page.evaluate(()=>LIB_PAGE_AT),1,mode+' retains page');
+   assert.equal(await page.evaluate(()=>document.activeElement.dataset.remoteItem),focused,mode+' restores actual item focus');
+   assert.equal(await page.evaluate(()=>CinemaRemote.snapshot().focused_id),'item:'+focused,mode+' restores companion focus');
+   assertClean(errors);await page.close();
+  }
+ }finally{await browser.close();}
+});

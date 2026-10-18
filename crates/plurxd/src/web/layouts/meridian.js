@@ -66,7 +66,7 @@ function meridianChrome(active,inner){
   meridianProfile();
   const search=captureSearchFocus(),home=meridianPrimary()==="home",library=meridianPrimary()==="libraries",searching=meridianPrimary()==="search";
   const getapp=installAvailable()?`<button class="ghost sm getappbtn" onclick="showInstall()">Get app</button>`:"";
-  mountLayoutFrame(`<div class="md-shell${MERIDIAN_COMPACT?' md-compact':''}" data-layout-shell>
+  mountLayoutFrame(`<div class="md-shell${MERIDIAN_COMPACT?' md-compact':''}${searching||search?' md-search-open':''}" data-layout-shell>
     <aside class="md-side" aria-label="Cinema navigation"><a class="logo md-brand" href="#/">${APP_NAME}</a><nav class="md-nav" id="meridian-nav" aria-label="Sources">${meridianNavHtml()}</nav><button class="ghost md-account" onclick="toggleProfileMenu(event)" aria-label="Account"><span class="pavatar">${esc((ME&&ME.username?ME.username[0]:"?").toUpperCase())}</span><span class="md-label">${esc(ME?ME.username:"")}</span></button></aside>
     <header class="md-top"><button class="ghost md-opener" type="button" data-meridian-open aria-label="Open navigation" aria-haspopup="dialog" aria-expanded="${!MERIDIAN_COMPACT}" onclick="meridianToggleNavigation(this)">☰</button><a class="logo md-mobile-brand" href="#/">${APP_NAME}</a>
       <input class="search" id="q" type="search" name="q" autocomplete="off" placeholder="Search your libraries" aria-label="Search ${APP_NAME}" value="${esc(getQ())}"><span class="spacer"></span>
@@ -109,7 +109,7 @@ function meridianOpenPanel(opener,mode="all"){
   const close=/** @type {HTMLButtonElement} */(dialog.querySelector('[aria-label="Close navigation"]'));close.onclick=()=>meridianClosePanel(true);
   dialog.addEventListener("cancel",event=>{event.preventDefault();meridianClosePanel(true);});
   dialog.addEventListener("keydown",event=>{if(event.key==="Escape"){event.preventDefault();event.stopImmediatePropagation();meridianClosePanel(true);}});
-  const entries=Array.from(dialog.querySelectorAll("a[data-meridian-destination]")).map((element,index)=>({id:"meridian:destination:"+index,element,label:element.textContent.trim(),activate:()=>meridianNavigate(null,element)}));
+  const entries=Array.from(dialog.querySelectorAll("a[data-meridian-destination]")).map((element,index)=>({id:"meridian:destination:"+index,element,label:element.textContent.trim(),activate:()=>meridianNavigate(null,element,true)}));
   entries.push({id:"meridian:close",element:close,label:"Close navigation",activate:()=>{meridianClosePanel(true);return "applied";}});
   const searchButton=dialog.querySelector("[data-meridian-search]");
   if(searchButton)entries.push({id:"meridian:search",element:searchButton,label:"Search",activate:()=>{meridianSearch();return "applied";}});
@@ -134,15 +134,21 @@ function meridianClosePanel(restore=true){
     if(meridianVisible(recovery))recovery.focus({preventScroll:true});
   }
 }
-function meridianNavigate(event,element){
+function meridianNavigate(event,element,companion=false){
   if(event){event.preventDefault();event.stopPropagation();}
   const href=element.getAttribute("href"),id=element.dataset.meridianDestination;
   if(!meridianDestinations().some(e=>e.id===id&&e.href===href)&&!meridianSources().some(e=>e.id===id&&e.href===href))return event?false:"stale_context";
   const current=element.hasAttribute("data-meridian-source")?location.hash===href:meridianPrimary()===id;
-  meridianRememberFocus();meridianClosePanel(false);
+  meridianRememberFocus();
+  const remembered=MERIDIAN_FOCUS_MEMORY.get(location.hash),returnElement=remembered?document.querySelector(remembered):null;
+  const returnItem=returnElement?.closest("[data-remote-item]")?.getAttribute("data-remote-item");
+  meridianClosePanel(false);
   const revision=++MERIDIAN_NAV_REVISION;
   MERIDIAN_FOCUS_TICKET={route:current?location.hash:href,revision,generation:PAGE_RENDER_GENERATION+(!current&&location.hash!==href?1:0)};
-  if(!current&&location.hash!==href)location.hash=href;
+  if(!current&&location.hash!==href){
+    if(companion)cinemaRemoteRouteIntent(href,returnItem?"item:"+returnItem:null);
+    else location.hash=href;
+  }
   meridianRealizeFocus();
   return event?false:"applied";
 }
