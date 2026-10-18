@@ -7362,3 +7362,28 @@ source = "clients/apple/Sources/HomeView.swift"
 source_anchor = ".id(RemoteNavigationCoordinator.routeScope(route))"
 test = "clients/apple/UITests/TVMeridianNavigationTests.swift"
 test_anchor = "testPanelOwnsNativeFocusAndBackPreservesLibraryRoute"
+
+# Dolby Vision enhancement indicator (FEL / RPU / DYN) and its successor adoption.
+[[fixes]]
+id = "apple.dv-enhancement-pills"
+commits = ["3c4931f9faca91d0a50a97df390550274763babf"]
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = 'case .enhancement: return "plus.circle"'
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "testEnhancementPillsFollowTheRangeBadgeOnlyForActiveEnhancements"
+
+[[fixes]]
+id = "apple.prepared-successor-keeps-enhancement"
+commits = ["8a5672b3159e9f912d1826c23951d071124365c7"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "playbackEnhancement = action.enhancement"
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "testCommitAdoptsTheSuccessorsEnhancementInsteadOfClearingIt"
+
+[[fixes]]
+id = "android.enhancement-row-summary-and-successor"
+commits = ["6cc97b247465dad486a0e15cbe25b38ab2990fe7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "enhancement = tv.plurx.app.data.PlaybackEnhancement.fromJson(action.enhancement)"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "aPreparedSuccessorCarriesItsOwnEnhancementParsedLikeTheCreateResponse"
