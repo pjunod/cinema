@@ -98,6 +98,18 @@ impl SourceProducerAuthority {
 }
 
 impl TranscodeManager {
+    #[cfg(test)]
+    pub(crate) async fn source_fixture_body_budget() -> tokio::sync::OwnedSemaphorePermit {
+        static BUDGET: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
+        std::sync::Arc::clone(
+            BUDGET.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4))),
+        )
+        .acquire_owned()
+        .await
+        .expect("Source fixture body budget stays open")
+    }
+
     async fn source_start_budget_for_request(
         &self,
         request: &SessionRequest,
@@ -1533,6 +1545,10 @@ impl TranscodeManager {
         .unwrap_or(Err(SourceWorkerError::Deadline));
         if let Err(error) = &start {
             tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, "Source producer startup failed");
+            // A startup test installs an off subscriber for this test process.
+            // Retain the fixed stage/class even when that suppresses tracing.
+            #[cfg(test)]
+            eprintln!("Source producer startup failed stage={startup_stage} error_class={error:?}");
         }
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
         owner.changed.notify_waiters();

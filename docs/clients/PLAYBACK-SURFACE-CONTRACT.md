@@ -509,10 +509,16 @@ presenter adds no detector and never infers from an event:
   *and*, where a frame counter exists, frame advance — on the attached
   element, not hidden, not seeking, `wantsPlayback` true. `playing` and
   `canplay` only prompt a look.
-- **Apple:** the periodic observer's position delta (`4916`) while
-  `!isChangingStream` and `rate > 0`, *and* for a not-yet-established item
-  the first-frame proof the black-frame ladder uses — audio advancing over a
-  black picture is not presenting.
+- **Apple:** the position delta while `!isChangingStream` and `rate > 0`,
+  *and* for a not-yet-established item the first-frame proof the
+  black-frame ladder uses — audio advancing over a black picture is not
+  presenting. The periodic observer takes the sample while the film clock
+  runs; it stops firing when the clock stops, so once it has been silent
+  for one presenter-clock interval the presenter's 500 ms clock takes the
+  same sample through the same sampler (`sampleSurfacePresentation`), and a
+  stationary position is recorded as not presenting. A `media_waiting`
+  raised over a sample the observer took while the clock still moved was
+  otherwise retired in the same step by that stale evidence.
 - **Android:** `presentedVideoFrame` / `realPosition()` advance on the
   current `mediaMutationEpoch`, foreground, `playWhenReady` true.
 

@@ -3988,6 +3988,7 @@ impl HiqliteAuthStore {
     async fn subtitle_translation_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
+            // authority: committed translation shape fences extension migration and admission.
             .query_consistent_map::<RemoteShapeRow, _>(
                 super::subtitle_translation_schema::SHAPE_SQL,
                 params!(),
@@ -3999,6 +4000,7 @@ impl HiqliteAuthStore {
             .collect::<Vec<_>>();
         let version = super::subtitle_translation_schema::version(&shape)?;
         if version == Some(1) {
+            // authority: admission must observe the committed singleton marker paired with the extension shape.
             let rows=self.client().query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM subtitle_translation_schema WHERE singleton=1 AND version=1",params!()).await?;
             if !matches!(rows.as_slice(),[row] if row.count==1) {
                 return Err(StoreError::Migration(

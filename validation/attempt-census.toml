@@ -148,7 +148,7 @@ autoInitialLayout = { function = "load", scopes = ["initialDecision"] }
 autoCatalogRefresh = { function = "refreshAutoCatalogForViewerRecipe", scopes = ["lifecycle", "viewerAction"] }
 # The separate advisory-cost continuation keeps the same scopes, with its own
 # single-use fence so either continuation can be audited independently.
-autoMissingCostCatalogRefresh = { function = "refreshMissingAutoCosts", scopes = ["lifecycle", "viewerAction"] }
+autoMissingCostCatalogRefresh = { function = "refreshUnmeasuredAutoCosts", scopes = ["lifecycle", "viewerAction"] }
 autoQualityOffer = { function = "tickDisplayAwareAuto", scopes = ["lifecycle", "viewerAction"] }
 preparedPipelineRollback = { function = "commitPreparedSuccessor", scopes = ["lifecycle", "open", "seek"] }
 preparedCommit = { function = "preparedCommitStillOwned", scopes = ["viewerAction"] }

@@ -603,33 +603,31 @@ mod tests {
         );
     }
 
+    mod source_inventory {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/support/rust_source_inventory.rs"
+        ));
+    }
+
     fn collect_output_call_sites(
-        directory: &Path,
         source_root: &Path,
         sites: &mut BTreeMap<String, usize>,
     ) -> io::Result<()> {
-        for entry in std::fs::read_dir(directory)? {
-            let path = entry?.path();
-            if path.is_dir() {
-                collect_output_call_sites(&path, source_root, sites)?;
-            } else if path.extension().and_then(|value| value.to_str()) == Some("rs")
-                && path.file_name().and_then(|value| value.to_str()) != Some("process_control.rs")
-            {
-                let source = std::fs::read_to_string(&path)?;
-                let production = source
-                    .split("#[cfg(test)]\nmod tests {")
-                    .next()
-                    .expect("source prefix");
-                let count = production.matches("output_job_owned(").count();
-                if count > 0 {
-                    let file = path
-                        .strip_prefix(source_root)
-                        .expect("source below manifest src")
-                        .to_string_lossy()
-                        .replace('\\', "/")
-                        .to_owned();
-                    sites.insert(file, count);
-                }
+        for path in source_inventory::production_files(source_root, &[]) {
+            let source = std::fs::read_to_string(&path)?;
+            let production = source
+                .split("#[cfg(test)]\nmod tests {")
+                .next()
+                .expect("source prefix");
+            let count = production.matches("output_job_owned(").count();
+            if count > 0 {
+                let file = path
+                    .strip_prefix(source_root)
+                    .expect("source below manifest src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                sites.insert(file, count);
             }
         }
         Ok(())
@@ -651,8 +649,7 @@ mod tests {
             .parent()
             .expect("crates directory")
             .join("plurxd/src");
-        collect_output_call_sites(&source_root, &source_root, &mut actual)
-            .expect("audit plurxd call sites");
+        collect_output_call_sites(&source_root, &mut actual).expect("audit plurxd call sites");
         assert_eq!(actual, expected, "update the helper's caller audit");
     }
 }

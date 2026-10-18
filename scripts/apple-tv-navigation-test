@@ -45,6 +45,8 @@ REQUIRED = [
     "TVSecondaryNavigationTests/testSearchKeyboardBackRetrySameQueryAndResultReturn",
     "TVHomeNavigationTests/testForegroundRefreshRetainsHomeContentAndRetryRecovers",
     "TVConnectionNavigationTests/testSavedConnectionRecoveryReportAndRetryKeepCredentials",
+    "TVConnectionNavigationTests/testSignInCanChooseAnotherServerAndReconnectWithNativeRemote",
+    "TVMeridianNavigationTests/testPanelOwnsNativeFocusAndBackPreservesLibraryRoute",
 ]
 
 

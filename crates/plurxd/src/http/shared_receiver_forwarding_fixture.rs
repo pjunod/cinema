@@ -74,14 +74,19 @@ async fn sharing_receiver_nonowner_signed_http_resource_and_end_require_actual_d
         .parse()
         .expect("fixture IP");
     assert!(plurx_core::sharing::is_tailnet_address(address));
+    let fixture_body_budget =
+        crate::transcode::TranscodeManager::source_fixture_body_budget().await;
     Box::pin(tokio::time::timeout(
         Duration::from_secs(330),
-        actual_nonowner_b(address),
+        actual_nonowner_b(address, fixture_body_budget),
     ))
     .await
     .expect("finite actual forwarding fixture");
 }
-async fn actual_nonowner_b(address: IpAddr) {
+async fn actual_nonowner_b(
+    address: IpAddr,
+    fixture_body_budget: tokio::sync::OwnedSemaphorePermit,
+) {
     use plurx_core::{
         cluster::membership::ClusterRole,
         sharing_tls::{LiveNodeTls, SharingTlsListener},
@@ -91,7 +96,13 @@ async fn actual_nonowner_b(address: IpAddr) {
         .expect("B worker bind");
     let worker_address = worker_listener.local_addr().expect("worker address");
     drop(worker_listener); // Preserve the chosen origin for the startup socket owner.
-    let fixture = real_receiver_fixture_at(address, SourceFixtureMode::Copy, worker_address).await;
+    let fixture = real_receiver_fixture_at(
+        address,
+        SourceFixtureMode::Copy,
+        worker_address,
+        fixture_body_budget,
+    )
+    .await;
     let mut worker_membership =
         super::super::shared_source_playback::SourceFixtureMembershipOwner::start(
             fixture.state.membership.clone(),

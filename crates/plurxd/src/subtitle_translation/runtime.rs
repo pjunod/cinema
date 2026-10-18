@@ -1431,16 +1431,363 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn actual_timeout_and_cancellation_reap_owned_child_group_before_return() {
+    #[cfg(target_os = "linux")]
+    const OWNED_GROUP_TEST: &str =
+        "subtitle_translation::runtime::tests::actual_timeout_and_cancellation_reap_owned_child_group_before_return";
+
+    fn announced_children(path: &Path) -> Option<(i32, i32)> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let mut fields = text.split_whitespace();
+        let leader = fields.next()?.parse::<i32>().ok()?;
+        let descendant = fields.next()?.parse::<i32>().ok()?;
+        (fields.next().is_none() && leader > 1 && descendant > 1 && leader != descendant)
+            .then_some((leader, descendant))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_process_identity(pid: i32) -> Option<(i32, i32, String)> {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let fields: Vec<_> = text
+            .get(text.rfind(')')? + 2..)?
+            .split_whitespace()
+            .collect();
+        Some((
+            fields.get(1)?.parse().ok()?,
+            fields.get(2)?.parse().ok()?,
+            fields.first()?.to_string(),
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cleanup_announced_groups(root: &Path, owner: i32) {
+        for mode in ["timeout", "cancel"] {
+            let Some((leader, descendant)) = announced_children(&root.join(format!("{mode}.pid")))
+            else {
+                continue;
+            };
+            let leader_owned = linux_process_identity(leader)
+                .is_some_and(|(parent, group, _)| parent == owner && group == leader);
+            let descendant_owned =
+                linux_process_identity(descendant).is_some_and(|(parent, group, _)| {
+                    group == leader && (parent == owner || (parent == leader && leader_owned))
+                });
+            if leader_owned || descendant_owned {
+                // A fresh private announcement plus a live PPID/PGID match binds this signal.
+                unsafe {
+                    libc::kill(-leader, libc::SIGKILL);
+                }
+            }
+            if owner == std::process::id() as i32 {
+                // Only this isolated subreaper can adopt this exact announced descendant.
+                let until = std::time::Instant::now() + Duration::from_secs(2);
+                loop {
+                    let result =
+                        unsafe { libc::waitpid(descendant, std::ptr::null_mut(), libc::WNOHANG) };
+                    if result != 0 || std::time::Instant::now() >= until {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn validate_reaper_guard(
+        root: &Path,
+        nonce: &str,
+        parent: u32,
+        args: &[String],
+    ) -> std::io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let refuse = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid isolated reaper protocol",
+            )
+        };
+        if nonce.len() != 32
+            || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !args.iter().map(String::as_str).eq([
+                "--exact",
+                OWNED_GROUP_TEST,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            || root.canonicalize()? != root
+        {
+            return Err(refuse());
+        }
+        let directory = std::fs::symlink_metadata(root)?;
+        let guard = std::fs::symlink_metadata(root.join("guard"))?;
+        if !directory.is_dir()
+            || directory.mode() & 0o7777 != 0o700
+            || !guard.is_file()
+            || guard.mode() & 0o7777 != 0o600
+            || guard.nlink() != 1
+            || directory.uid() != unsafe { libc::geteuid() }
+            || guard.uid() != directory.uid()
+            || std::fs::read_to_string(root.join("guard"))?
+                != format!("{nonce}\n{parent}\n{OWNED_GROUP_TEST}\n")
+        {
+            return Err(refuse());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn claim_reaper_guard(
+        root: &Path,
+        nonce: &str,
+        parent: u32,
+        args: &[String],
+    ) -> std::io::Result<std::fs::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        validate_reaper_guard(root, nonce, parent, args)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("claim"))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::disallowed_methods)] // Re-exec isolates test-only process-wide subreaper state.
+    fn isolated_reaper_process() -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        const NONCE: &str = "PLURX_TEST_SUBTITLE_REAPER_NONCE";
+        const ROOT: &str = "PLURX_TEST_SUBTITLE_REAPER_ROOT";
+        match (std::env::var(NONCE), std::env::var_os(ROOT)) {
+            (Ok(nonce), Some(root)) => {
+                let root = std::path::PathBuf::from(root);
+                let args: Vec<_> = std::env::args().skip(1).collect();
+                let mut claim =
+                    claim_reaper_guard(&root, &nonce, unsafe { libc::getppid() } as u32, &args)
+                        .expect("isolated reaper protocol must be fresh, exact and exclusive");
+                write!(claim, "{nonce}\n{}\n", std::process::id()).expect("write isolated claim");
+                // The exact filter isolates this test body; its Tokio runtime is not created yet.
+                assert_eq!(
+                    unsafe {
+                        libc::prctl(
+                            libc::PR_SET_CHILD_SUBREAPER,
+                            1 as libc::c_ulong,
+                            0 as libc::c_ulong,
+                            0 as libc::c_ulong,
+                            0 as libc::c_ulong,
+                        )
+                    },
+                    0,
+                    "subreaper setup failed: {}",
+                    std::io::Error::last_os_error()
+                );
+                Some(root)
+            }
+            (Err(std::env::VarError::NotPresent), None) => {
+                let scratch = tempfile::tempdir().expect("isolated reaper directory");
+                std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(0o700))
+                    .expect("secure fresh empty reaper directory");
+                let root = scratch
+                    .path()
+                    .canonicalize()
+                    .expect("canonical isolated directory");
+                let nonce = uuid::Uuid::new_v4().simple().to_string();
+                let mut guard = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(root.join("guard"))
+                    .expect("fresh isolated guard");
+                write!(
+                    guard,
+                    "{nonce}\n{}\n{OWNED_GROUP_TEST}\n",
+                    std::process::id()
+                )
+                .expect("write guard");
+                let log = std::fs::OpenOptions::new()
+                    .read(true)
+                    .append(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(root.join("output"))
+                    .expect("private child capture");
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test executable"))
+                        .args([
+                            "--exact",
+                            OWNED_GROUP_TEST,
+                            "--nocapture",
+                            "--test-threads=1",
+                        ])
+                        .env(NONCE, &nonce)
+                        .env(ROOT, &root)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(log.try_clone().expect("capture clone"))
+                        .stderr(log)
+                        .spawn()
+                        .expect("spawn isolated reaper test");
+                let until = std::time::Instant::now() + Duration::from_secs(30);
+                let mut refusal = None;
+                let status = loop {
+                    let bytes = std::fs::metadata(root.join("output"))
+                        .expect("capture size")
+                        .len();
+                    if bytes > 8 * 1024 * 1024 || std::time::Instant::now() >= until {
+                        refusal = Some(if bytes > 8 * 1024 * 1024 {
+                            "capture exceeds 8 MiB"
+                        } else {
+                            "30 s isolated protocol deadline"
+                        });
+                        cleanup_announced_groups(&root, child.id() as i32);
+                        if child.try_wait().expect("observe refused child").is_none() {
+                            if let Err(error) = child.kill() {
+                                assert!(
+                                    child.try_wait().expect("observe kill race").is_some(),
+                                    "isolated child kill failed: {error}"
+                                );
+                            }
+                            let reap_until = std::time::Instant::now() + Duration::from_secs(2);
+                            while child.try_wait().expect("reap refused child").is_none() {
+                                assert!(std::time::Instant::now() < reap_until,
+                                    "refused isolated child PID={} did not reap after SIGKILL; identity={:?}", child.id(), linux_process_identity(child.id() as i32));
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                        }
+                        break None;
+                    }
+                    if let Some(status) = child.try_wait().expect("observe isolated child") {
+                        break Some(status);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                };
+                let mut output =
+                    std::fs::File::open(root.join("output")).expect("open child diagnostics");
+                let begin = output
+                    .metadata()
+                    .expect("capture metadata")
+                    .len()
+                    .saturating_sub(16 * 1024);
+                output
+                    .seek(SeekFrom::Start(begin))
+                    .expect("seek diagnostics tail");
+                let mut tail = Vec::new();
+                output
+                    .take(16 * 1024)
+                    .read_to_end(&mut tail)
+                    .expect("read bounded diagnostics tail");
+                let tail = String::from_utf8_lossy(&tail);
+                let expected = format!("{nonce}\n{}\n", child.id());
+                assert!(
+                    status.is_some_and(|status| status.success())
+                        && std::fs::read(root.join("claim")).ok().as_deref()
+                            == Some(expected.as_bytes())
+                        && std::fs::read(root.join("done")).ok().as_deref()
+                            == Some(expected.as_bytes()),
+                    "isolated owned-group test failed: status={status:?}, refusal={refusal:?}\n{tail}"
+                );
+                None
+            }
+            _ => panic!("partial isolated reaper environment is forbidden"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn isolated_reaper_guard_refuses_wrong_filter_nonce_parent_and_replay() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let scratch = tempfile::tempdir().expect("test setup");
+        std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("secure fresh empty reaper directory");
+        let root = scratch.path().canonicalize().expect("test setup");
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let parent = std::process::id();
+        let mut guard = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("guard"))
+            .expect("test setup");
+        write!(guard, "{nonce}\n{parent}\n{OWNED_GROUP_TEST}\n").expect("test setup");
+        let args: Vec<String> = [
+            "--exact",
+            OWNED_GROUP_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        validate_reaper_guard(&root, &nonce, parent, &args).expect("valid exact child protocol");
+        let mut wrong_filter = args.clone();
+        wrong_filter[1] = "another_test".into();
+        assert!(claim_reaper_guard(&root, &nonce, parent, &wrong_filter).is_err());
+        let mut wrong_nonce = nonce.clone().into_bytes();
+        wrong_nonce[0] = if wrong_nonce[0] == b'0' { b'1' } else { b'0' };
+        let wrong_nonce = String::from_utf8(wrong_nonce).expect("hex nonce");
+        assert!(claim_reaper_guard(&root, &wrong_nonce, parent, &args).is_err());
+        assert!(claim_reaper_guard(&root, &nonce, parent + 1, &args).is_err());
+        assert!(
+            !root.join("claim").exists(),
+            "validation must not mutate or activate a subreaper"
+        );
+        let claim = claim_reaper_guard(&root, &nonce, parent, &args).expect("first exact claim");
+        assert_eq!(
+            claim_reaper_guard(&root, &nonce, parent, &args)
+                .expect_err("replay must fail")
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        drop(claim);
+    }
+
+    #[test]
+    fn actual_timeout_and_cancellation_reap_owned_child_group_before_return() {
+        #[cfg(target_os = "linux")]
+        let root = match isolated_reaper_process() {
+            Some(root) => root,
+            None => return,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let scratch = tempfile::tempdir().expect("test setup");
+        #[cfg(not(target_os = "linux"))]
+        let root = scratch.path().to_path_buf();
+        let result = std::panic::catch_unwind(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(check_owned_child_groups(&root));
+        });
+        #[cfg(target_os = "linux")]
+        if result.is_err() {
+            cleanup_announced_groups(&root, std::process::id() as i32);
+        }
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let claim = std::fs::read(root.join("claim")).expect("read isolated claim");
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(root.join("done"))
+                .expect("fresh completion receipt")
+                .write_all(&claim)
+                .expect("record successful isolated checks");
+        }
+    }
+
+    async fn check_owned_child_groups(root: &Path) {
         for cancelled in [false, true] {
-            let scratch = tempfile::tempdir().expect("test setup");
-            let pid_path = scratch.path().join("pid");
+            let mode = if cancelled { "cancel" } else { "timeout" };
+            let pid_path = root.join(format!("{mode}.pid"));
             let mut command = tokio::process::Command::new("/bin/sh");
             command
                 .args([
                     "-c",
-                    "echo $$ > \"$1\"; /bin/sleep 60 & wait",
+                    "/bin/sleep 60 & child=$!; printf '%s %s\\n' \"$$\" \"$child\" > \"$1\"; wait",
                     "owned-group",
                 ])
                 .arg(&pid_path);
@@ -1461,40 +1808,77 @@ mod tests {
             tokio::pin!(operation);
             if cancelled {
                 tokio::select! {
-                    result = &mut operation => panic!("child exited before cancellation: {result:?}"),
+                    result = &mut operation => panic!("mode={mode}: child exited before cancellation: {result:?}"),
                     result = tokio::time::timeout(Duration::from_secs(2), async {
-                        while tokio::fs::metadata(&pid_path).await.is_err() {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                    }) => { result.expect("owned child must be observed before cancellation"); cancel.cancel(); },
+                        while announced_children(&pid_path).is_none() { tokio::time::sleep(Duration::from_millis(10)).await; }
+                    }) => { result.expect("owned child pair must be observed before cancellation"); cancel.cancel(); },
                 }
             }
-            assert!(operation.await.is_err());
-            let pgid = std::fs::read_to_string(pid_path)
-                .expect("test setup")
-                .trim()
-                .to_owned();
+            let error = operation.await.expect_err("owned operation must fail");
+            let expected = if cancelled {
+                "worker_interrupted"
+            } else {
+                "decode_failed"
+            };
+            assert!(
+                matches!(&error, StoreError::Task(reason) if reason == expected),
+                "mode={mode}: expected mapped errorKind={expected}, actual={error:?}"
+            );
+            let (leader, descendant) =
+                announced_children(&pid_path).expect("complete owned PID pair");
             let until = tokio::time::Instant::now() + Duration::from_secs(3);
             let mut empty = 0;
+            #[cfg(target_os = "linux")]
+            let mut descendant_reaped = false;
             loop {
+                #[cfg(target_os = "linux")]
+                if !descendant_reaped {
+                    let mut status = 0;
+                    let waited = unsafe { libc::waitpid(descendant, &mut status, libc::WNOHANG) };
+                    let wait_error = (waited < 0).then(std::io::Error::last_os_error);
+                    assert!(
+                        waited >= 0,
+                        "mode={mode} PID={descendant} identity={:?} errorKind={:?}: {}",
+                        linux_process_identity(descendant),
+                        wait_error.as_ref().map(std::io::Error::kind),
+                        wait_error
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_default()
+                    );
+                    if waited == descendant {
+                        assert!(libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGKILL,
+                            "mode={mode} PID={descendant}: descendant was not killed by the owned group operation, status={status}");
+                        descendant_reaped = true;
+                    }
+                }
                 let mut ps = tokio::process::Command::new("/bin/ps");
-                ps.args(["-e", "-o", "pgid="]);
+                ps.args(["-e", "-o", "pid=,ppid=,pgid=,stat="]);
                 let output = child_output(&mut ps, Duration::from_secs(2), 1024 * 1024, false)
                     .await
-                    .expect("test setup");
+                    .expect("process snapshot");
                 assert!(output.status.success());
-                let alive = String::from_utf8(output.stdout)
-                    .expect("test setup")
+                let text = String::from_utf8(output.stdout).expect("process snapshot text");
+                let members: Vec<_> = text
                     .lines()
-                    .any(|line| line.trim() == pgid);
-                empty = if alive { 0 } else { empty + 1 };
+                    .filter(|line| {
+                        line.split_whitespace()
+                            .nth(2)
+                            .and_then(|group| group.parse::<i32>().ok())
+                            == Some(leader)
+                    })
+                    .collect();
+                empty = if members.is_empty() { empty + 1 } else { 0 };
                 if empty >= 2 {
+                    #[cfg(target_os = "linux")]
+                    assert!(
+                        descendant_reaped,
+                        "mode={mode} PID={descendant}: exact adopted descendant was not reaped"
+                    );
                     break;
                 }
-                assert!(
-                    tokio::time::Instant::now() < until,
-                    "owned child/group outlived timeout/cancellation"
-                );
+                assert!(tokio::time::Instant::now() < until,
+                    "mode={mode} mapped errorKind={expected} leader={leader} descendant={descendant}; owned group outlived return; PID PPID PGID STAT={members:?}");
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }

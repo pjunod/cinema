@@ -73,6 +73,18 @@ TOKEN_FILE_ALLOWLIST = {
 WEB = Path("crates/plurxd/src/web")
 WEB_REGIONS = (
     (
+        WEB / "layouts/meridian.js",
+        "// meridian-dialog-key-adapter:begin",
+        "// meridian-dialog-key-adapter:end",
+        "The owned navigation dialog consumes Escape to close its modal and restore the opener; no playback commands.",
+    ),
+    (
+        WEB / "layouts/meridian.js",
+        "// meridian-opener-key-adapter:begin",
+        "// meridian-opener-key-adapter:end",
+        "The focused navigation opener consumes unhandled Left to open its panel outside VOD/restricted overlays.",
+    ),
+    (
         Path("clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticReportScreen.kt"),
         "// diagnostic-consent-navigation-adapter:begin",
         "// diagnostic-consent-navigation-adapter:end",

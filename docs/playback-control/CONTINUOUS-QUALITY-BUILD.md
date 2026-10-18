@@ -1,7 +1,10 @@
 # Continuous quality — build uninterrupted resolution changes
 
-**Status:** implementation landed in PR #774; post-merge qualification resumed;
-physical/native acceptance and Firefox whole-window evidence remain open · **Written:** 2026-09-30 ·
+**Status:** implementation landed in PR #774; dated acceptance checkpoints below;
+Dated pre-promotion checkpoint: measured Apple 262 quality and separate Apple 264 navigation evidence; PR #1156 owns later exact qualification, landing and install receipts;
+physical/native and independent output
+acceptance remain open; Firefox browser video passes on `89d790d2e` ·
+**Updated:** 2026-10-18 ·
 **Source anchor:** `origin/main` at `1b2ae4f62e7d131d18c088a643470e40cdb9789c`
 · **Effort:** `effort/continuous-quality`
 
@@ -11,7 +14,7 @@ physical/native acceptance and Firefox whole-window evidence remain open · **Wr
 
 - **What this is:** Implementation contract for changing video quality without a pause, flash or audio seam on every client, web first, then native.
 - **Where it stands:**
-  - Status (written 2026-09-30): implementation landed in PR #774; post-merge qualification resumed; physical/native acceptance and Firefox whole-window evidence remain open.
+  - Pre-promotion checkpoint (2026-10-18): physical quality stays Apple 262 / `ef33cc71` with 79 focused units and three recovery journeys; Apple 264 navigation is separate. Tasks #1188–#1191 are merged/development-gated. Terminal run 5447/internal 5473 is failed (17 successful/six failed/18 skipped jobs; 48 named Rust failures). Later task and Source-body scheduling records are dated in §10.332; PR #1156 owns exact qualification, landing and install receipts. Independent display/audio, the TV codec boundary and Safari iOS user settings remain open; no Safari skip or physical 264 acceptance is inferred.
   - Per-milestone state lives in the evidence ledger (CQ0-CQ7 have partial results, CQ8 is "Not run"); empty rows are unfinished work. The tail of the file is a dated running log of review rounds and test repairs.
   - Execution order is CQ0, CQ2a, CQ1, CQ2, CQ3, CQ4, CQ5, CQ6, CQ7, CQ8.
 - **Read further only for:**
@@ -11969,3 +11972,323 @@ budget now allows128MiB for coexistence. Ordinary completed caching remains zero
 and the zero-output-budget refusal control is unchanged. These are test-only
 repairs; production admission and authority stay unchanged. Retain35 passed Rust
 cases and61 Apple passes; rerun only the four failed cases before final fast lane.
+
+### 10.330 — Apple Auto on an original the title has never been encoded from (2026-10-17)
+
+The shipping Apple build 252 (`89d790d2e`) ran the native 100/10/25/10/25/3/25
+Mb/s link protocol on a real library title rather than the qualification
+fixture: Agent Zero, a 1080p H.264 library title delivered as an original the server
+costs at 28.8 Mb/s, on an iPhone 17 Pro Max and an iPad Pro behind the
+shaping proxy. Both devices
+passed 15 of 15 manual 720p/480p changes with no interruption. Auto on both
+held the remux through the whole 10 Mb/s stage (8.69 Mb/s delivered, no
+offer, no `auto_quality_recovery`), kept draining through the 25 Mb/s stage
+(24.1 Mb/s delivered, below the title), stalled for 12.3 s, reopened the
+same delivery at 1080p and failed with "The video took too long to prepare"
+after the 15-second item readiness bound. Server placement, relay and the
+one `control_rate_limited` 429 per device were not on the failing path.
+
+Four Apple decision points were wrong, and issue #1153 corrects each at its
+own site with a test that rejects the old line:
+
+- **Declared rung costs were discarded.** `measuredCostCatalog` replaced
+  every candidate's peak and average with a complete full-mux measurement
+  or nothing. The qualified campaigns in §10.291 and §10.322 passed because
+  they measured four whole-title outputs first; a library title has none,
+  so every encode rung was uncosted and `autoRecoveryCandidate` had nothing
+  it may choose for a link cause (§10.305). The catalog the server sends
+  already declares a cost for every encode rung: `peak_bps` is
+  `vbv_maxrate_bps` plus the audio budget
+  (`crates/plurxd/src/transcode/manager/candidates.rs`, the encode
+  candidate), and that is exactly the figure the continuous family
+  publishes as `sustained_bps` — `continuous_sustained_bps` in
+  `crates/plurxd/src/vodencode.rs` returns `vbv_maxrate_bps` for video and
+  the configured rate for the soundtrack, "the same figure the candidate
+  catalog advertises for the encode route" — which the web
+  (`continuous-quality.js`, `sustained_bps ?? peak_bps`) and Android
+  (`ContinuousEnrollment.kt`, `continuousLinkRate`) cost a rung by when no
+  measurement exists (#985). The catalog's `average_bps` is the encoder's
+  nominal target below it and is not a link cost on any client. For an
+  original the catalog declares the source rate as `average_bps` and no
+  peak. `autoCostedCatalog` keeps the declared figures and lets a unique
+  complete measurement replace them, and `autoDeclaredCostBps` is the one
+  cost every Auto path weighs a candidate by. The thirty-second cost
+  refresh the client ran for the whole session was the symptom: at least
+  one rung never acquired a measured cost. The refresh stays: a complete
+  measurement is the exact cost and replaces the declared one, so the
+  bounded fetch keeps looking for it while a rung is unmeasured.
+- **The original was costed only by a fresh body, and pressure on it waited
+  for the runway.** `autoDownsideCostBps` costed a remux or original from a
+  body of its own session less than ten seconds old, and the tick admitted
+  pressure on an uncosted incumbent only under ten seconds of runway. The
+  declared source rate is the title's sustained cost whether or not a body
+  has just completed, a body stands in only when the server declared no
+  rate, and a severe link or two mild bodies is pressure whatever the
+  runway. §10.321's "missing catalog costs authorize no urgent pressure
+  action" described the unmeasured catalog this closes.
+- **Completed-body evidence expired at ten seconds.** A 40 MB remux object
+  takes 37 s to cross a 9 Mb/s link, so the link was proven for ten seconds
+  in every thirty-seven, and at the stall there was no link evidence at
+  all: the recovery found no cause and `retrySameDeliveryAfterStall`
+  reopened the rung the link had just proved it could not carry — §10.305's
+  held failing rung, in the Apple stall path. A body now stays evidence
+  for max(10 s, the time it took to arrive) or until a newer body on the
+  same item supersedes it, in the pressure classifier, the Auto tick and
+  the stall path, which read the incumbent's link through one helper.
+- **A stopped film clock was never sampled.** The surface presenter's
+  evidence sampler is AVPlayer's periodic observer, which stops firing with
+  the film clock; its last sample over a still-moving clock said
+  `presenting`, and every `media_waiting` the 500 ms presenter clock raised
+  was retired in the same reduce by that stale evidence — thirty-one
+  raise/clear pairs a millisecond apart and no Buffering surface for twelve
+  seconds. Once the observer has been silent for one interval the
+  presenter's clock takes the same sample through the same sampler, so the
+  stationary position reads as not presenting and the wait is kept. The
+  evidence remains the position delta of surface contract §3.4; no
+  transport status is read.
+
+**Review round (PR #1156).** The adversarial review found that the first
+cut costed only the downshift. The voluntary upgrade still admitted any
+unmeasured original on `link > 0` through the bounded trial, and the
+display picker prefers an original, so Auto would have climbed back into
+the 28.8 Mb/s original about a minute after fleeing it, at 25 Mb/s; the
+viewer-boundary re-plan did the same. Every path now costs through
+`autoDeclaredCostBps`: a declared original needs the same 1.8× headroom
+every costed rung needs to be fitting (`autoUpgradeCandidate`,
+`autoBoundaryOriginalCandidate`), the staged successor must prove that
+same headroom before it commits, and the bounded trial remains only for an
+original the server declared no rate for. From an original, the encode
+rung of the same geometry is a lower rung too — it costs less, which is
+what a link cause is about — and `autoRecoveryCandidate` admits it when its
+cost is known to be below the incumbent's, so a 25 Mb/s link keeps 1080p
+on the 12 Mb/s encode rather than dropping to 720p. The pressure and stall
+decisions are now functions of their evidence (`autoLinkPressureVerdict`,
+`autoStallRecoveryVerdict`) and the presenter's clock beat is
+`surfaceClockTick`, so the regressions exercise the decision a completed
+body and a runway produce, and a controller whose film clock stopped,
+rather than the text of the tick.
+
+Not changed here, and recorded: a body still arrives only when it
+completes, so a link that collapses mid-body is seen when that body ends;
+the native protocol's 25 Mb/s "recovery" stage is below this title's rate
+and cannot recover a remux, which the fixture's 1080p encode rung never
+exposed; and after the failure view the harness's centre taps pressed Try
+Again, which explains the later evidence rows on the iPad and nothing
+before the failure.
+
+**Apple 260 continuation, 2026-10-17.** The 100/10/25/10/25 Mb/s stages
+step down to 720p without reported interruptions, but the later acquisition
+campaign fails. The first six-second metadata timeout precedes the 3 Mb/s
+cliff and occurs at 25 Mb/s; the second occurs after it. `item=unreported`
+means there was no item error to report, not a decoder error. The
+[remaining investigation](APPLE-AUTO-LOW-LINK-IMPLEMENTATION.md) preserves
+the timeline, the installed-method label repair and its focused tests.
+The shipping proxy harness is suspended after the iPad/server-picker and
+TV/sign-in incident. Paul reports that neither screen can be escaped; this
+is an open product bug. No new physical launch or passing acquisition
+campaign is claimed. Harness commit `622141077` is confirmed pushed.
+
+
+### 10.331 Firefox acceptance, session safety and isolated native startup — October 17
+
+Exact `89d790d2e` completed its retained Firefox 158.0 campaign on `lab4` at
+22:42 EDT: fifteen manual changes and five actual Auto transitions
+(1080→720→1080→720→1080) at 100/10/25/10/25 Mb/s. All 5,906 tracked source
+blobs match the baseline, including the qualification harness. The
+[sanitized source-bound receipt](evidence/cq-firefox-20261017.json) preserves
+executable, fixture, harness and browser hashes. Maximum mixed video and
+callback gap is 99.36 ms; p95 video is 84.1 ms and callback 84.08 ms. Four
+dropped frames remain recorded. One session and player serve the campaign,
+with zero wait/reopen events, stalls or hitches. The earlier `lab3` campaign
+remains invalid; no failed receipt is relabelled as a pass.
+
+Owned browser CPUs and daemon/encoder CPUs were disjoint. All 880 supervisor
+samples retain foreign activity; no exclusive CPU reservation is claimed.
+The headless result proves the existing browser video oracle under unchanged
+thresholds, without an independent display or audio-render oracle. The raw
+private archive verifies all 18 retained files and has SHA-256
+`991a0af00b532fe679ab733cbed700b1122614b1cfb8ebfc2d65df1538c85351`.
+The old Firefox lab is removed after a zero-owned-process census; baseline
+binary, ffprobe and fixture remain in a separate owned native lab.
+
+The acquisition follow-up source repairs saved-session instance/generation ownership,
+installed Auto candidate binding and stale named-successor rejection. The
+selected six-suite iOS run passes 58 cases; the separate unsupported-PiP
+attachment regression passes and eight shaping contracts pass. The PiP loop
+was reproduced in a disposable simulator: repeated support publication
+invalidated SwiftUI at 100% CPU before playback startup could run. Settling
+same-layer unsupported attachment starts playback, but the first MP4 route
+is direct and bypasses shaping. It provides no link-pressure or successor
+acceptance. The preserved comparison baseline is `06235b181` plus that PiP
+repair; controlled HLS baseline/candidate evidence remains pending.
+
+Paul confirmed disabling authentication-free automation mode on October 17.
+The physical sign-in incident's triggering request and the reported UI trap
+remain unconfirmed. Physical proxy launches stay suspended; no new physical
+pass, main merge or installation is claimed. The
+[current Apple investigation](APPLE-AUTO-LOW-LINK-IMPLEMENTATION.md) owns
+remaining evidence and promotion prerequisites.
+
+
+**Integrated local evidence.** After current main integration, 64 selected
+player cases, 15 authentication/home cases and one disposable iPad recovery
+UI case pass; exact integrated iOS/tvOS builds and iOS Release compilation
+also pass. Both TV recovery journeys pass, including native focus and saved-session Retry. The integrated player
+result is `/tmp/cq-main-integrated-player.xcresult`; earlier passing evidence
+and failures remain retained. The interim AAC/DTS HLS runs are invalid: a
+diagnostic daemon restart dropped the bound FFprobe environment, and named
+candidate creation refused the unavailable parser identity before successor
+attachment. This is a lab failure, with no app-regression attribution. The
+corrected lab must pass a named-candidate-bound normal create before a link
+schedule. Physical incident request, valid HLS acquisition acceptance and
+promotion remain unconfirmed.
+
+Request traces distinguish upstream headers from body consumption:
+`headers_at_ms` observes headers, while `first_byte_at_ms` and
+`upstream_end_at_ms` observe consumption inside a backpressured pump rather
+than raw network arrival. Downstream completion includes local shaping;
+these timestamps alone cannot assign upstream production/network delay.
+
+### 10.332 Apple 262 exact-source checks and bounded native evidence — October 18
+
+**Pre-promotion checkpoint — 2026-10-18.** PR #1156 owns later exact
+qualification, landing and installation receipts. Source/development facts
+below remain scoped facts after landing; this checkpoint is not that receipt.
+
+Tasks #1179/#1183 pass eight-job gates 5423/5433 on `f29ea145b` / Apple 263
+and `9a2b6312` / Apple 264. Task #1186 merged `df4d51e36` after gate 5438 on
+`7f21f7428`. Its unchanged production web source `5a7b41928` passes 104/104
+structural captures: 300 existing DOM deltas, zero existing focus/request
+drift and 26 new Meridian route/viewport captures. This is not media evidence.
+
+Task #1187 merged `1452a6c6d`, tree `369959827`, after all eight development
+jobs passed in run 5441/internal 5467 on `27da0cde`. Rust source `35f237c5`
+passes 66 focused cases: 39 core, 21 contract and six daemon, covering 56 retained
+failing case IDs plus ten compiled instances of four new test definitions.
+Per-case logs/manifests, formatting, Clippy, catalog and normal hooks retain
+source attribution. Source audits and schema refusal guards remain intact;
+these focused/development passes are not qualification.
+
+**Merged repair tasks.** Each of #1188–#1191 passed all eight first-attempt
+Effort development gate jobs before merging:
+
+| Task | Source-bound development record |
+|---|---|
+| #1188 · CI media transport | Tested `04672473`, gate 5444/internal 5470; merged `b5d286f00`, same tree `0cb0ac80`. Six archive regressions and the existing publication-contract regression pass; full actual-tar preservation passes. |
+| #1189 · daemon/integration fixtures | Merged `200c534de`; exact source, focused outcomes and eight-job gate are retained by the task PR. |
+| #1190 · broker admission clock | Merged `4cee6f0f6`; fixed-time admission boundary and original revoke regression pass without changing production wire guards. |
+| #1191 · restore endpoint acquisition | Merged `ba9a08ecb`; five focused hiqlite cases pass on the intended base, with formatting/Clippy; pre-acquisition retries cannot conceal later failure. |
+| #1192 · remaining daemon fixtures | Merged `ccb69ba02` (tree `4ccc473f3`); all eight first-attempt jobs passed in gate 5486/UI 5460 on `dbb6f27f`; 13 Mac/14 Linux focused passes and two CI contracts. |
+| Source fixture body budget | PR #1156 owns subsequent task gate/merge and qualification/landing/install receipts |
+
+**Terminal full qualification.** Run 5447/internal 5473 has all 41 jobs
+terminal: 17 successful, six failed, 18 skipped; no qualification receipt. Its 48
+named Rust failures comprise one core, one broker and 46 daemon. Source accounts
+for 39 daemon cases (27 actor/12 HTTP). The failed Rust run takes 88 min 50 s; the
+two following serial FFmpeg checks never run. Original run 5436/internal 5462
+on `5a7b41928` remains failed: 39 named Rust failures, 20 Store-lane failures
+and 3,440 announced daemon cases without outcomes at 60 minutes. Lane counts
+are not a unique-failure union. Both old amd64 builds complete but their
+second media export reaches 90 minutes, repeating another host's failure.
+
+**Controlled transport evidence.** Two local exports reach 120-second
+inactivity bounds; tar completes in 6.9 s/8.4 s. The matched explicit
+attestation/metadata probe completes metadata. Both raw tars have SHA256
+`af0309e6b83979db3bc3831f7868d954349abaa1aa811313edf4b307f26192cd`:
+1,456,936,448 bytes, 38,755 members (4,607 directories/34,148 regular files),
+1,428,110,983 expanded bytes and no links. Partial local output is not equal.
+Reviewed validator `f212f2cd` validates full headers/payload/link graph/modes
+before fresh atomic publication; actual extraction has zero preservation
+deltas, manifest `59a9aabeb95abf0038c7fe114d6ea4d1a8375eb9313e0bc6a4963f70f8217543`.
+Only second CI media output uses tar; binary/publication local exports,
+producer, assembler, context and smoke assertions remain unchanged.
+
+**Source fixture scheduling.** Mac compilation passes;
+Linux 4eee020e4 passes pinned Rust 1.97.1 check, Clippy, compilation and all 40 cases (40 test threads, four-body limit; zero ignored). Mac initially passes 39/40; the one failed HDR-to-SDR
+case passes separately on the same binary using existing `ffmpeg-full` with
+`zscale`, absent from the original Homebrew FFmpeg. Both failed attempts
+remain failed; no fresh 40/40 Mac result is inferred. A four-body permit is acquired
+before Store/clock/proof setup and outside unchanged 120/330-second wrappers;
+nested Receiver/Source transfers one permit through explicit shutdown.
+Within-body concurrency, assertions, deadlines and production guards remain.
+Same-binary `6989` experiments show concurrency sensitivity, not the historical
+CI cause. RAII on panic does not guarantee four physical Stores or complete
+asynchronous cleanup. The check-job envelope is 120 minutes; passing full-suite
+duration remains unmeasured. Store/WAL limits are unchanged by that hunk.
+
+Probe limits: the earlier two-CPU attempt expires before export; isolated
+source omits `.git` and uses another provenance URN. Internal BuildKit cause
+is unconfirmed. Monitoring and bounded cleanup have separate deadlines; the
+original Python optimization environment is unknown, with later explicit-zero
+revalidation. None of these results supplies a full package/runtime smoke pass.
+
+The physical quality and focused 79-unit checkpoint remains
+`ef33cc71cf89da900883d7ad5d2af5336aecffbc`, tree
+`0e84329578724a069103cd93fac873b38e651afe`, Apple **262**, with main
+`efaf89152` integrated. Eight quality/authentication source modules remain
+byte-identical; the later 264 changes concern native navigation ownership and
+its inventories. These observations are not relabelled as physical 264 output.
+
+**Apple 264 follow-up.** The first full preflight found a stale continuation
+name, two omitted native journeys and Meridian input registrations. Their
+focused contracts pass without weakening assertions. The unchanged native
+panel journey then exposed account reset clearing the persistent layout
+capability: its still-visible opener was absent from the return order, so
+Back selected library content. A bounded trace ruled out late physical input.
+Reset now preserves the layout capability while removing account actions,
+orders, routes, presentations and focus authority. The hosting controller
+follows only the current explicit opener request. The new reset regression
+fails before the correction and passes after; existing reset security still
+passes. Four unique focused native cases pass across their retained source
+checkpoints. The unchanged native Back/source/primary journey passes 1/1 in
+133.884 s on clean `3534fec33`; final task `9a2b6312` changes only its history
+mapping. All temporary probes are removed; failed/partial and passing bundles
+remain archived with explicit provenance. The owned simulator is deleted.
+This validates navigation behavior, not independent display/audio continuity.
+
+**Exact local evidence.** The final combined unit result is **79/79**:
+64 playback/binding/coordinator/PiP cases and 15 authentication/Home cases.
+Three recovery UI journeys pass across focused reruns: one iPad and two TV
+journeys, including native focus and saved-session Retry. The first iPad
+attempt could not compile because its target omitted the shared navigation
+helper; registration fixes it. The first TV bundle preserves a passing
+saved-session case and a new case whose obsolete TabBar assertion failed
+after Home was visibly focused. Its corrected semantic selector passes on a
+focused rerun. Whole bundles preserve both failures and screenshots.
+
+Integrated iOS/tvOS and iOS Release compilation pass. Paperwork is 14/14
+against main `efaf89152`; formatting/Clippy/catalog lint and 95 served-script
+syntax checks pass. The explicit committed-source archive and final
+`cq262-focused-units.xcresult` have verified private SHA256 manifests. These
+results remain development evidence rather than a passed promotion gate.
+
+**Causal simulator comparison.** A valid bound-FFprobe setup proves normal
+named-candidate creation before shaping. Baseline `06235b181` plus the PiP
+startup repair reproduces a six-second voluntary-original preparation
+failure with about 60 s of healthy 144p runway. Abandonment then reports
+unnamed Auto, a new original is accepted with `automatic=false`, its next
+preparation fails, fallback retires the healthy incumbent, HLS requests
+receive HTTP 410, and playback fails. Fixed source `3a701ff14` retains named
+144p through 90 s at 3 Mb/s and 79 s at 25 Mb/s, with zero stalls in 239
+probes. The acquisition timeout's producer/network cause remains separate;
+the reproduced fallback seam and its retention repair are established.
+Earlier direct and missing-bound-FFprobe trials remain invalid.
+
+**Physical scopes.** Apple 262 on the iPad reaches film position 598,677 ms in 294 SDK probes
+through 1080p → 720p → 360p, zero reported stalls and zero black observations.
+A 104 ms surface pair is still unclassified; independent display continuity
+is unmeasured, so an uninterrupted-output verdict remains open. The shared-AAC
+TV run reaches film position 488,356 ms in 240 probes through 1080p → 720p → 360p,
+90 s at 3 Mb/s and recovery: zero sampled access stalls/black intervals, no unnamed
+controls or HTTP 410s. Two 111 ms preparing indicators occur while presenting
+at rate 1. The Info panel reports Transcode · 360p and 640×360; frame/audio/tap
+continuity explicitly reads Not measured. The separate DTS-source E-AC-3 → AAC
+VOD boundary is rejected as `prepared_output_unsupported` and remains a
+distinct product finding, outside the first shared-AAC continuity family. Safari iOS awaits user
+Web Inspector/Remote Automation settings after the XCTest automation gate;
+it is neither skipped nor accepted.
+
+Firefox retains its exact `89d790d2e` browser-video scope from §10.331. The
+original physical sign-out request and reported navigation trap remain
+unconfirmed. The [current investigation](APPLE-AUTO-LOW-LINK-IMPLEMENTATION.md)
+owns the remaining physical classifications and promotion evidence.

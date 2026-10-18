@@ -80,13 +80,32 @@ final class ServerFeaturesTests: XCTestCase {
             contentsOf: testsDirectory.appendingPathComponent("../Sources/HomeView.swift").standardizedFileURL,
             encoding: .utf8
         )
-        // One gate per optional tab in the iOS shell and one in the tvOS shell.
-        for tab in ["liveTv", "recordings", "libraryChannels"] {
-            XCTAssertEqual(
-                source.components(separatedBy: "if HomeTab.\(tab).isVisible(model.features) {").count - 1, 2, tab
-            )
-            XCTAssertEqual(source.components(separatedBy: ".tag(HomeTab.\(tab))").count - 1, 2, tab)
+        let chrome = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/ViewerDestinationHost.swift").standardizedFileURL,
+            encoding: .utf8
+        )
+        // Both platforms use the same chrome and visibility filter. Every
+        // optional destination must enter through that filtered collection.
+        XCTAssertTrue(source.contains("ViewerDestinationHost("))
+        XCTAssertTrue(source.contains("chrome: AnyView(ViewerNavigationChrome("))
+        XCTAssertTrue(chrome.contains("HomeTab.viewerTabs.filter { $0.isVisible(model.features) }"))
+        XCTAssertTrue(chrome.contains("ForEach(tabs, id:"))
+        XCTAssertTrue(chrome.contains("ForEach(tabs.filter { ![.home, .libraries, .search].contains($0) }"))
+        XCTAssertFalse(chrome.contains("ForEach(HomeTab.viewerTabs"), "no shell bypasses visibility")
+        for tab in [HomeTab.liveTv, .recordings, .libraryChannels] {
+            XCTAssertTrue(HomeTab.viewerTabs.contains(tab), "optional tabs remain available when enabled")
+            var features = ServerFeatures.all
+            switch tab {
+            case .liveTv: features.liveTv = false
+            case .recordings: features.recordings = false
+            case .libraryChannels: features.libraryChannels = false
+            default: XCTFail("unexpected optional tab")
+            }
+            XCTAssertFalse(HomeTab.viewerTabs.filter { $0.isVisible(features) }.contains(tab))
+            XCTAssertTrue(HomeTab.viewerTabs.filter { $0.isVisible(.all) }.contains(tab))
         }
+        XCTAssertTrue(source.contains("guard tab.isVisible(model.features) else { return }"))
+        XCTAssertTrue(source.contains("let visible = selectedTab.visibleSelection(model.features)"))
         XCTAssertTrue(source.contains("if model.features.sharedLibraries {\n                    SharedLibrariesEntry()"))
         XCTAssertTrue(source.contains(".onChange(of: model.features) { _, _ in keepSelectionVisible() }"))
         XCTAssertTrue(source.contains("let shared = model.features.sharedLibraries ? [\"libraries:shared\"] : []"))

@@ -3,13 +3,8 @@
 mod cached_owner_delivery_tests {
     use super::*;
     use futures_util::FutureExt;
-    use plurx_core::cluster::membership::{
-        ActivitySigningKey, ClusterPeer, ClusterRole, JoinSecrets, MembershipManager,
-        RedeemJoinRequest, StartupMembershipAdmission, decode_join_token, join_token_digest,
-    };
     use plurx_core::cluster::migration::select_daemon_store_observing;
     use plurx_core::config::Config;
-    use std::borrow::Cow;
     fn config(root: &std::path::Path) -> Config {
         let held: Vec<_> = (0..3)
             .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned port"))
@@ -60,100 +55,7 @@ mod cached_owner_delivery_tests {
         let selected = select_daemon_store_observing(&source_config, Some(startup.as_ref()))
             .await
             .expect("actual singleton activation within production phase");
-        startup.stop_probe().await;
         let leader = selected.membership_manager();
-        let token = leader
-            .issue_token(Duration::from_secs(120))
-            .await
-            .expect("real token");
-        let payload = decode_join_token(&token.token).expect("owned token");
-        let learner_root = crate::test_tempdir().expect("owned learner root");
-        let learner_config = config(learner_root.path());
-        let learner_id = uuid::Uuid::new_v4().to_string();
-        let (protocol_min, protocol_max) = payload.declared_protocol_range();
-        leader
-            .redeem(&RedeemJoinRequest {
-                token_digest: join_token_digest(&token.token),
-                raft_id: token.raft_id,
-                node_id: learner_id.clone(),
-                hostname: "causal-clock-control".into(),
-                raft_address: learner_config.cluster.raft_bind.to_string(),
-                api_address: learner_config.cluster.api_bind.to_string(),
-                http_base: learner_config.cluster.artwork_url.clone(),
-                schema_version: payload.schema_version(),
-                protocol_version: protocol_min,
-                protocol_min,
-                protocol_max,
-                live_tv_v1: true,
-                sharing: Default::default(),
-            })
-            .await
-            .expect("real authorized staged identity");
-        let local = ClusterPeer {
-            raft_id: token.raft_id,
-            raft_address: learner_config.cluster.raft_bind.to_string(),
-            api_address: learner_config.cluster.api_bind.to_string(),
-        };
-        let mut nodes: Vec<_> = payload
-            .bootstrap()
-            .iter()
-            .map(hiqlite::Node::from)
-            .collect();
-        nodes.push(hiqlite::Node::from(&local));
-        let learner_client = tokio::time::timeout(
-            Duration::from_secs(45),
-            Box::pin(hiqlite::start_node_for_clock_observation(
-                hiqlite::NodeConfig {
-                    node_id: token.raft_id,
-                    nodes,
-                    listen_addr_api: Cow::Borrowed("127.0.0.1"),
-                    listen_addr_raft: Cow::Borrowed("127.0.0.1"),
-                    data_dir: Cow::Owned(learner_root.path().to_string_lossy().into_owned()),
-                    filename_db: Cow::Borrowed("clock-causal.db"),
-                    secret_raft: payload.secrets().raft.clone(),
-                    secret_api: payload.secrets().api.clone(),
-                    tls_raft: Some(hiqlite::tls::ServerTlsConfig::TlsAutoCertificates),
-                    tls_api: Some(hiqlite::tls::ServerTlsConfig::TlsAutoCertificates),
-                    learner_only: true,
-                    health_check_delay_secs: 0,
-                    ..plurx_core::cluster::migration::production_hiqlite_defaults_with_read_pool(1)
-                },
-                Arc::new(StartupMembershipAdmission::default()),
-            )),
-        )
-        .await
-        .expect("unchanged 45-second learner budget")
-        .expect("actual committed learner");
-        let mut identity = selected.identity.clone();
-        identity.node_id.clone_from(&learner_id);
-        identity.raft_id = token.raft_id;
-        let learner = MembershipManager::clock_observation(
-            learner_client.clone(),
-            selected.replication_monitor(),
-            Arc::clone(&selected.store),
-            identity,
-            local,
-            source_config.cluster.join_url.clone(),
-            learner_config.cluster.artwork_url.clone(),
-            JoinSecrets {
-                raft: payload.secrets().raft.clone(),
-                api: payload.secrets().api.clone(),
-                credential_key: payload.secrets().credential_key.clone(),
-            },
-            ActivitySigningKey::from_seed_hex(&"13".repeat(32)).expect("test-owned signing key"),
-            payload.activation_marker().clone(),
-            ClusterRole::Voter,
-            learner_root.path().into(),
-        )
-        .await
-        .expect("actual pending observation identity");
-        let applied = learner_client
-            .local_db_raft_metrics()
-            .expect("real applied watch")
-            .membership_snapshot();
-        assert!(applied.committed && applied.members.contains(&token.raft_id));
-        assert!(!applied.voters.contains(&token.raft_id));
-
         let session = uuid::Uuid::new_v4().to_string();
         let owner_root = crate::test_tempdir().expect("cached caption fixture");
         let mut owner =
@@ -166,6 +68,66 @@ mod cached_owner_delivery_tests {
             leader.clone(),
             Arc::clone(&owner.store),
         );
+        // Admit the ingress through the same learner protocol, clock proof,
+        // activation and normal membership initialization used by the daemon.
+        // Keep the source clock probe alive while the membership grows.
+        leader
+            .activate_learner_protocol()
+            .await
+            .expect("activate actual learner admission");
+        {
+            let mut routes = startup.router.write().expect("cached caption fixture");
+            *routes = routes.clone().merge(
+                axum::Router::new()
+                    .route(
+                        "/api/v1/cluster/learner/join/redeem",
+                        axum::routing::post(super::super::super::cluster::redeem_learner_join),
+                    )
+                    .route(
+                        "/api/v1/cluster/learner/join/finalize",
+                        axum::routing::post(super::super::super::cluster::finalize_learner_join),
+                    )
+                    .with_state(owner.state.clone()),
+            );
+        }
+        let token = leader
+            .issue_learner_token(Duration::from_secs(120))
+            .await
+            .expect("real learner token");
+        let learner_root = crate::test_tempdir().expect("owned learner root");
+        let token_path = learner_root.path().join("join.token");
+        tokio::fs::write(&token_path, format!("{}\n", token.token))
+            .await
+            .expect("owned learner token file");
+        let mut learner_config = config(learner_root.path());
+        learner_config.cluster.join_token_file = token_path.clone();
+        let learner_startup = Arc::new(crate::StartupObservationHttp::new(
+            learner_config.server.bind,
+        ));
+        let learner_selected = tokio::time::timeout(
+            Duration::from_secs(45),
+            Box::pin(select_daemon_store_observing(
+                &learner_config,
+                Some(learner_startup.as_ref()),
+            )),
+        )
+        .await
+        .expect("unchanged 45-second learner budget")
+        .expect("actual finalized learner activation and clock admission");
+        assert!(!token_path.exists(), "a finalized join consumes its token");
+        assert_eq!(learner_selected.identity.raft_id, token.raft_id);
+        let learner_id = learner_selected.identity.node_id.clone();
+        let learner = learner_selected.membership_manager();
+        let applied = learner_selected
+            .local_client()
+            .expect("actual learner client")
+            .local_db_raft_metrics()
+            .expect("real applied watch")
+            .membership_snapshot();
+        assert!(applied.committed && applied.members.contains(&token.raft_id));
+        assert!(!applied.voters.contains(&token.raft_id));
+        assert!(!learner.may_run_cluster_jobs().await);
+
         let user = owner
             .store
             .create_user("caption-owner", "hash", false)
@@ -251,14 +213,19 @@ mod cached_owner_delivery_tests {
                 .expect("cached caption fixture")
                 .is_none()
         );
-        // Startup owns this listener through activation. Install the relay on
-        // that same socket, as production does, instead of rebinding its port.
-        *startup.router.write().expect("cached caption fixture") = axum::Router::new()
-            .route(
-                crate::media_sessions::RELAY_PATH,
-                axum::routing::post(super::super::super::internal_media_sessions::relay),
-            )
-            .with_state(owner.state.clone());
+        // Retain the actual signed clock route and its original observer when
+        // adding the relay to the startup-owned socket.
+        {
+            let mut routes = startup.router.write().expect("cached caption fixture");
+            *routes = routes.clone().merge(
+                axum::Router::new()
+                    .route(
+                        crate::media_sessions::RELAY_PATH,
+                        axum::routing::post(super::super::super::internal_media_sessions::relay),
+                    )
+                    .with_state(owner.state.clone()),
+            );
+        }
         // Production starts this sampler before heartbeat publication. Without
         // it, an unsampled node truthfully stays out of the media directory.
         let sampler_stop = tokio_util::sync::CancellationToken::new();
@@ -274,6 +241,11 @@ mod cached_owner_delivery_tests {
                         .heartbeat()
                         .await
                         .expect("actual owner readiness heartbeat");
+                    ingress
+                        .membership
+                        .heartbeat()
+                        .await
+                        .expect("actual finalized ingress heartbeat");
                     let peers = ingress
                         .membership
                         .media_peers()
@@ -294,6 +266,18 @@ mod cached_owner_delivery_tests {
             })
             .await
             .expect("actual sampled owner becomes eligible before relay");
+            let clock = super::super::super::peer_transport::PeerTransport::new(
+                ingress.membership.clone(),
+            )
+            .clock_request(&owner.state.node_id, &source_config.cluster.join_url)
+            .await
+            .expect("signed clock service survives relay installation");
+            assert_eq!(clock.status, reqwest::StatusCode::OK);
+            assert!(clock.clock_timing.is_some(), "actual four-stamp clock timing");
+            let timing: super::super::super::internal_clock::ClockResponse =
+                serde_json::from_slice(&clock.body).expect("actual signed clock response");
+            assert_eq!(timing.node_id, owner.state.node_id);
+            assert!(timing.sent_unix_ms >= timing.received_unix_ms);
             let response = subtitle_vtt(
                 State(ingress.clone()),
                 AxPath((session.clone(), 0, format!("cached-{revision}"))),
@@ -354,10 +338,11 @@ mod cached_owner_delivery_tests {
         sampler_stop.cancel();
         sampler.await.expect("owned passive sampler drained");
         startup.stop_and_drain().await;
-        learner_client
-            .shutdown_retained_startup()
+        learner_startup.stop_and_drain().await;
+        learner_selected
+            .shutdown()
             .await
-            .expect("retained learner listeners and writers drained");
+            .expect("actual learner listeners and writers drained");
         selected.shutdown().await.expect("cached caption fixture");
         if let Err(panic) = checks {
             std::panic::resume_unwind(panic);

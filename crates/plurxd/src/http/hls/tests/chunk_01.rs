@@ -189,29 +189,18 @@
         ("prepared_link.rs", include_str!("../prepared_link.rs")),
     ];
 
+    mod source_inventory {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/support/rust_source_inventory.rs"));
+    }
+
     fn hls_product_source() -> String {
         let hls = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http/hls");
-        let mut on_disk = std::collections::BTreeSet::new();
-        let mut directories = vec![hls.clone()];
-        while let Some(directory) = directories.pop() {
-            for entry in std::fs::read_dir(&directory).expect("an hls module directory") {
-                let path = entry.expect("a directory entry").path();
-                if path.file_stem().and_then(|stem| stem.to_str()) == Some("tests") {
-                    continue;
-                }
-                if path.is_dir() {
-                    directories.push(path);
-                } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-                    on_disk.insert(
-                        path.strip_prefix(&hls)
-                            .expect("a module under http/hls/")
-                            .to_str()
-                            .expect("a UTF-8 module path")
-                            .replace('\\', "/"),
-                    );
-                }
-            }
-        }
+        let parent = hls.with_extension("rs");
+        let on_disk: std::collections::BTreeSet<String> =
+            source_inventory::production_files(&hls, &[&parent]).into_iter()
+                .map(|path| path.strip_prefix(&hls).expect("module under http/hls")
+                    .to_str().expect("UTF-8 module path").replace('\\', "/"))
+                .collect();
         let listed: std::collections::BTreeSet<String> = HLS_PRODUCT_SOURCES[1..]
             .iter()
             .map(|(name, _)| (*name).to_owned())

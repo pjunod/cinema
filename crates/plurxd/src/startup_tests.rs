@@ -2555,8 +2555,8 @@ fn booted_state(dir: &std::path::Path) -> AppState {
     )
 }
 
-#[test]
-fn the_assembled_state_carries_the_configured_identity_and_directories() {
+#[tokio::test]
+async fn the_assembled_state_carries_the_configured_identity_and_directories() {
     let tmp = crate::test_tempdir().expect("tempdir");
     let state = booted_state(tmp.path());
     let root = std::fs::canonicalize(tmp.path()).expect("canonical state root");
@@ -2572,6 +2572,7 @@ fn the_assembled_state_carries_the_configured_identity_and_directories() {
         tmp.path().join("cache").join("runtime").is_dir(),
         "the ffmpeg runtime cache must exist before any session starts"
     );
+    crate::telemetry::drain_for_shutdown(&state.store).await;
 }
 
 /// The server answers requests, then stops when it is told to — and the
