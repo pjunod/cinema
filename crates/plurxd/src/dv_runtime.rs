@@ -1582,3 +1582,68 @@ mod private_window_outcome_tests {
         assert_eq!(private_window_outcome(vec![7], b"", ok).unwrap(), vec![7]);
     }
 }
+
+#[cfg(test)]
+mod processed_selection_has_no_software_gates {
+    /// The processed HDR10 entry point: processing is the selected delivery
+    /// once the Developer setting is on and the first window verifies. These
+    /// were silent gates (720p clamp, speed qualification, Auto only) that
+    /// kept HDR10-E from ever playing; they must not return.
+    fn entry_body() -> &'static str {
+        let source = include_str!("transcode/manager/create.rs");
+        source
+            .split_once("pub(crate) async fn prepare_processed_hdr10(")
+            .expect("processed HDR10 entry point")
+            .1
+            .split_once("pub(super) async fn prepare_vod_encoding_with_preference(")
+            .expect("entry point end")
+            .0
+    }
+
+    #[test]
+    fn no_resolution_clamp_speed_threshold_or_auto_only_gate() {
+        let body = entry_body();
+        assert!(!body.contains(".min(720)"), "resolution clamp is back");
+        assert!(
+            !body.contains("milli_realtime"),
+            "speed qualification is back"
+        );
+        assert!(
+            !body.contains("request.automatic"),
+            "Auto-only gate is back"
+        );
+        // Every decline after the setting check is reported, never silent.
+        let after_setting = body
+            .split_once("// The setting is on for a DV source")
+            .expect("setting check")
+            .1;
+        let reported = after_setting
+            .split_once("let Ok(_preparation_slot)")
+            .expect("resource stage")
+            .0;
+        assert!(!reported.contains("return Ok(None)"), "{reported}");
+    }
+
+    #[test]
+    fn every_catalog_start_is_offered_processing() {
+        let source = include_str!("http/hls/create.rs");
+        let guard = source
+            .split_once(".prepare_processed_hdr10(")
+            .expect("processed call")
+            .0;
+        let guard = &guard[guard.rfind("    if ").expect("call guard")..];
+        assert!(!guard.contains("candidate_auto_policy"), "{guard}");
+        assert!(!guard.contains("continuous.is_none()"), "{guard}");
+    }
+
+    #[test]
+    fn prepared_processing_admission_has_no_speed_proof() {
+        let source = include_str!("transcode/manager/create.rs");
+        let admit = source
+            .split_once("admitted processed executable changed")
+            .expect("prepared admission")
+            .0;
+        let admit = &admit[admit.len().saturating_sub(2500)..];
+        assert!(!admit.contains("production_evidence"), "{admit}");
+    }
+}
