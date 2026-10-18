@@ -667,6 +667,9 @@ async fn remote_retained_batch_keeps_examined_and_new_queue_in_sequence_order() 
 async fn remote_poll_byte_budget_retains_oversized_command_overflow() {
     let f = fixture().await;
     let (gid, secret, epoch) = paired_named(&f, &"\\".repeat(80)).await;
+    // Hold this Hub's queue clock fixed while adding reply metadata. Store
+    // and runtime timers stay real; queue expiry has its own regression.
+    f.state.remote.freeze_queue_clock_for_test();
     for sequence in 1..=32 {
         let mut body = command(&f, &gid, &epoch, sequence);
         if sequence < 32 {

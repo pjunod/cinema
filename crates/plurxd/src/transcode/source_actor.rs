@@ -1533,6 +1533,10 @@ impl TranscodeManager {
         .unwrap_or(Err(SourceWorkerError::Deadline));
         if let Err(error) = &start {
             tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, "Source producer startup failed");
+            // A startup test installs an off subscriber for this test process.
+            // Retain the fixed stage/class even when that suppresses tracing.
+            #[cfg(test)]
+            eprintln!("Source producer startup failed stage={startup_stage} error_class={error:?}");
         }
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
         owner.changed.notify_waiters();
