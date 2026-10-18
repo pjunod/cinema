@@ -2155,7 +2155,7 @@ assert.equal(context.ACT_TIMER, null);
                 runs_on = re.search(r"(?m)^    runs-on: ([^\n]+)$", job)
                 if runs_on and "ci-topology" in runs_on.group(1):
                     topology_jobs[(path, name)] = job
-        for expected in ("rust_compile", "cluster_topology", "cluster_wal",
+        for expected in ("rust_compile", "check", "cluster_topology", "cluster_wal",
                          "cluster_transport_recovery_contracts",
                          "cluster_transport_recovery_voter",
                          "cluster_transport_recovery_learner",
@@ -2179,6 +2179,7 @@ assert.equal(context.ACT_TIMER, null);
         ci_jobs = workflow_job_blocks(".github/workflows/ci.yml")
         for compiler in (
             ci_jobs["rust_compile"],
+            ci_jobs["check"],
             ci_jobs["cluster_wal"],
             workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
         ):
@@ -3962,10 +3963,7 @@ assert.equal(context.ACT_TIMER, null);
                     and name == "apple_compile"
                 ):
                     expected = apple
-                elif path == ".github/workflows/ci.yml" and name in {
-                    "check",
-                    "cluster_daemon",
-                }:
+                elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
                     # The pinned private CI image supplies shipped FFmpeg 8;
                     # host trust labels remain unchanged, without a FFmpeg-6
                     # installation requirement on these image-owned jobs.
@@ -4007,7 +4005,12 @@ assert.equal(context.ACT_TIMER, null);
                     "cluster_transport_recovery",
                 }:
                     expected = ci_topology
-                elif path == ".github/workflows/ci.yml" and name == "cluster_wal":
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "cluster_wal",
+                    "check",
+                }:
+                    # `check` runs on the topology host so its rust-gate lane
+                    # keeps a persistent cache (main run 5325).
                     expected = local("Linux", "X64", "lab", "baremetal", "ci-topology")
                 elif (
                     path in {
@@ -4395,7 +4398,13 @@ assert.equal(context.ACT_TIMER, null);
                 # Provision before the first compiler-capable local action.
                 self.assertLess(block.index(dependency), block.index("uses: ./.github/actions/ffmpeg"))
                 checked.add(name)
-        self.assertEqual(checked, {"check", "cluster_daemon", "web_layout", "vod_web"})
+        self.assertEqual(checked, {"cluster_daemon", "web_layout", "vod_web"})
+        # The host-run unit gate verifies the same dependency before FFmpeg.
+        unit_gate = jobs["check"]
+        self.assertLess(
+            unit_gate.index("uses: ./.github/actions/rust-native-deps"),
+            unit_gate.index("uses: ./.github/actions/ffmpeg"),
+        )
         action = read(".github/actions/rust-native-deps/action.yml")
         self.assertIn("pkg-config --exists openssl", action)
         self.assertIn("#include <openssl/ssl.h>", action)
@@ -4421,7 +4430,26 @@ assert.equal(context.ACT_TIMER, null);
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
         image = None
         self.assertNotIn("coverage", jobs)
-        for name in ("check", "cluster_daemon", "web_layout", "vod_web"):
+        unit_gate = jobs["check"]
+        unit_header = unit_gate.split("\n    steps:", 1)[0]
+        self.assertNotIn("    container:", unit_gate)
+        self.assertNotIn("plurx-ci@sha256:", unit_gate)
+        self.assertNotIn("Capture mounted runner workspace owner", unit_gate)
+        self.assertNotIn("Restore persistent runner workspace ownership", unit_gate)
+        self.assertNotIn("ffmpeg-6", unit_gate)
+        self.assertIn('major: "8"', unit_gate)
+        self.assertIn("binary: /usr/lib/jellyfin-ffmpeg/ffmpeg", unit_gate)
+        self.assertRegex(unit_header, r"(?m)^      PLURX_FFMPEG: /usr/lib/jellyfin-ffmpeg/ffmpeg$")
+        self.assertRegex(unit_header, r"(?m)^      PLURX_FFPROBE: /usr/lib/jellyfin-ffmpeg/ffprobe$")
+        path_step = workflow_step_blocks(unit_gate)[
+            "Resolve ffmpeg to the shipped FFmpeg 8 build"
+        ]
+        self.assertIn('run: echo /usr/lib/jellyfin-ffmpeg >> "$GITHUB_PATH"', path_step)
+        self.assertLess(
+            unit_gate.index("Resolve ffmpeg to the shipped FFmpeg 8 build"),
+            unit_gate.index("uses: ./.github/actions/ffmpeg"),
+        )
+        for name in ("cluster_daemon", "web_layout", "vod_web"):
             with self.subTest(job=name):
                 block = jobs[name]
                 self.assertNotIn("ffmpeg-6", block)

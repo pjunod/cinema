@@ -304,71 +304,24 @@ jobs:
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
     if: needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_rust != 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
-    # Private, smoke-tested CI target; never expose the management credential.
-    container:
-      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
-      credentials:
-        username: noirr
-        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    # On the topology runner's host, not in the CI image: inside a container
+    # cargo-cache falls back to the ephemeral workspace, so every run compiled
+    # cold, and the 4-8 GiB general runners could not hold the plurxd test
+    # build. The host must carry jellyfin-ffmpeg8 and libssl-dev; the ffmpeg
+    # and rust-native-deps actions verify both and never install as non-root.
+    runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     # Run 5228 exhausted 30m after compilation and 1917 unit result rows,
     # before the full unit/SQLite receipt. Keep the entire suite and a finite cap.
     timeout-minutes: 60
+    # The topology cgroup allows 24 GiB. The plurxd test codegen peaks near
+    # 13.8 GB on its own, and the workspace check at -j8 peaked near 15 GB
+    # combined. Six jobs leave headroom for plurxd plus five smaller crates.
+    env:
+      CARGO_BUILD_JOBS: "6"
+      # The CI image set these; the host job names the same shipped build.
+      PLURX_FFMPEG: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      PLURX_FFPROBE: /usr/lib/jellyfin-ffmpeg/ffprobe
     steps:
-      - name: Capture mounted runner workspace owner
-        run: |
-          # Forgejo v13.1.0 provisions paired random job volumes and deletes
-          # both on cleanup (BindWorkdir=false, ReuseContainers=false).
-          # Persistent host binds still require their actual non-root owner.
-          ephemeral="$(python3 - "$GITHUB_WORKSPACE" <<'PYTHON'
-          import os
-          import re
-          import sys
-
-          def ephemeral_workspace(workspace, act_path, mountinfo, env):
-              if env.get("ACT") != "true" or env.get("FORGEJO_ACTIONS") != "true":
-                  return False
-              records = [line.split() for line in mountinfo.splitlines()]
-              def direct(path):
-                  rows = [r for r in records if len(r) >= 10 and r[4] == path]
-                  return rows[0] if len(rows) == 1 else None
-              work, act = direct(workspace), direct(act_path)
-              if work is None or act is None or work[0] == act[0]:
-                  return False
-              match = re.fullmatch(r"/var/lib/docker/volumes/([0-9a-f]{32})/_data", work[3])
-              if match is None or act[3] != "/var/lib/docker/volumes/" + match[1] + "-env/_data":
-                  return False
-              try:
-                  wi, ai = work.index("-"), act.index("-")
-                  return (wi >= 6 and ai >= 6 and wi + 3 < len(work) and ai + 3 < len(act)
-                          and work[0].isdigit() and act[0].isdigit() and work[2] == act[2]
-                          and work[wi + 1:wi + 3] == act[ai + 1:ai + 3]
-                          and "rw" in work[5].split(",") and "rw" in act[5].split(","))
-              except (ValueError, IndexError):
-                  return False
-
-          with open("/proc/self/mountinfo", encoding="utf-8") as mounted:
-              ephemeral = ephemeral_workspace(os.path.realpath(sys.argv[1]),
-                  os.path.realpath("/var/run/act"), mounted.read(), os.environ)
-          print("yes" if ephemeral else "no")
-          PYTHON
-          )"
-          if [ "$ephemeral" = yes ]; then
-            echo 'PLURX_WORKSPACE_MODE=forgejo-ephemeral' >> "$GITHUB_ENV"
-            echo 'HOST_WORKSPACE_OWNER=' >> "$GITHUB_ENV"
-            echo 'Paired Forgejo job volumes are removed by the provisioner; no host bind to restore'
-            exit 0
-          fi
-          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
-          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
-            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
-          fi
-          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
-            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
-            exit 1
-          fi
-          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
-          echo 'PLURX_WORKSPACE_MODE=persistent-bind' >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -376,6 +329,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: ./.github/actions/rust-native-deps
+      - name: Resolve ffmpeg to the shipped FFmpeg 8 build
+        # The CI image linked ffmpeg and ffprobe into /usr/local/bin. On the
+        # host, put the shipped build first on PATH for the steps that follow.
+        run: echo /usr/lib/jellyfin-ffmpeg >> "$GITHUB_PATH"
       - uses: ./.github/actions/ffmpeg
         with:
           major: "8"
@@ -384,6 +341,7 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: rust-gate
+          budget-gb: "60"
       - name: Run format, Clippy, unit, and SQLite contracts
         run: make ci-rust-gate
       - name: Enforce persistent Cargo bounds
@@ -393,13 +351,6 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
-
-      - name: Restore persistent runner workspace ownership
-        if: always()
-        run: |
-          if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
-            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
-          fi
 
   cluster_store_legacy:
     name: replicated Store contracts (legacy)
