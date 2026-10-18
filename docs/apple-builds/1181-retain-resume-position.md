@@ -1,6 +1,6 @@
 # Retain the saved position when an Apple resume seek is interrupted
 
-Build: 263
+Build: 266
 Issue: #1181
 PR: #1182
 
