@@ -49,7 +49,7 @@ import Foundation
         remote.press(.select); _ = app.buttons["Playback quality"].firstMatch.waitForExistence(timeout: 3)
     }
 
-    func startPlayback() {
+    func startPlayback() throws {
         app = XCUIApplication(bundleIdentifier: "tv.plurx.app")
         app.launchArguments = ["-plurx.origin", env["CQ_PROXY"] ?? "", "-plurx.playbackInfoMode", "debug"]
         remote.press(.menu); sleep(1)
@@ -68,6 +68,7 @@ import Foundation
         }
         if !onTab { log("buttons", ["labels": Array(labels(app.buttons).prefix(40))]) }
         XCTAssertTrue(onTab, "Libraries tab")
+        if !(onTab) { throw XCTSkip("navigation failed before playback; see the logged screen") }
         remote.press(.select)
         sleep(2)
         let movies = app.buttons["library-open-category:movie"]
@@ -128,7 +129,7 @@ import Foundation
 
     func testCampaign() throws {
         continueAfterFailure = true
-        startPlayback()
+        try startPlayback()
         if env["CQ_PHASE"] == "probe" {
             log("choices", ["choices": openQuality()]); remote.press(.menu)
             log("info_rows", ["rows": openInfoRows()]); return

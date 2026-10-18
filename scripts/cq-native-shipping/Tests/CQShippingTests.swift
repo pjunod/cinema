@@ -26,7 +26,7 @@ final class CQShippingTests: XCTestCase {
         _ = app.buttons["Playback quality"].waitForExistence(timeout: 3)
     }
 
-    func startPlayback() {
+    func startPlayback() throws {
         app = XCUIApplication(bundleIdentifier: "tv.plurx.app")
         app.launchArguments = ["-plurx.origin", env["CQ_PROXY"] ?? "", "-plurx.playbackInfoMode", "debug"]
         app.launch()
@@ -34,6 +34,7 @@ final class CQShippingTests: XCTestCase {
         let libs = app.tabBars.buttons["Libraries"].exists ? app.tabBars.buttons["Libraries"] : app.buttons["Libraries"].firstMatch
         if !libs.waitForExistence(timeout: 30) { log("home_missing", ["buttons": Array(labels(app.buttons).prefix(40)), "texts": Array(labels(app.staticTexts).prefix(20))]) }
         XCTAssertTrue(libs.exists, "home did not load")
+        if !(libs.exists) { throw XCTSkip("navigation failed before playback; see the logged screen") }
         libs.tap()
         let movies = app.buttons["library-open-category:movie"]
         if movies.waitForExistence(timeout: 15) { movies.tap() }
@@ -113,7 +114,7 @@ final class CQShippingTests: XCTestCase {
     func testCampaign() throws {
         guard env["CQ_PHASE"] != "home" else { return }
         continueAfterFailure = true
-        startPlayback()
+        try startPlayback()
         if env["CQ_PHASE"] == "probe" {
             sleep(8)
             log("choices", ["choices": qualityChoices()])
