@@ -7163,3 +7163,11 @@ source_anchor = "enum RemoteChoiceBackdrop { case page, video }"
 test = "clients/apple/UITests/TVSharedPlaybackNavigationTests.swift"
 test_anchor = "func testSharedPlaybackRevealQualityReportAndBackRetainSession()"
 
+[[fixes]]
+id = "apple.tv-choice-row-ios-touch-style"
+commits = ["4dfc68ae09107a1b85a7083290551cf82b064f69"]
+source = "clients/apple/Sources/RemoteNavigationViews.swift"
+source_anchor = "// iPhone/iPad keep a plain touch row; the TV house style is tvOS-only."
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "func testViewModalOwnsFocusAndBackRestoresOpener416()"
+
