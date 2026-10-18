@@ -675,6 +675,16 @@ enum DvrRecordingsChip: String, CaseIterable, Identifiable {
 /// page: a viewer deciding what to record and a viewer checking what will be
 /// recorded are the same person two seconds apart.
 struct DvrRecordingsPanel: View {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    @FocusState private var focusedControl: String?
+    @State private var nativePanel: DvrNativePanel?
+    @State private var openerKey = "chip:upcoming"
+    @State private var lastFocusedControl: String?
+    @State private var previousOrder: [String] = []
+    @State private var restoreTarget: String?
+    @State private var nativeGeneration: UInt64 = 0
+    @State private var restorationRevision: UInt64 = 0
+    @State private var manualChannelLabel = "Choose a channel"
     @ObservedObject var dvr: DvrController
     let now: Int
     @State private var chip = DvrRecordingsChip.upcoming
@@ -707,12 +717,10 @@ struct DvrRecordingsPanel: View {
             #endif
             if let summary { Text(summary).font(LiveTvType.tertiary).foregroundStyle(Palette.muted) }
             if let serverLine = serverLine { Text(serverLine).font(LiveTvType.tertiary).foregroundStyle(Palette.muted) }
-            if let row = dvr.confirmFileDelete {
-                confirmation(row)
-            }
-            if let row = confirmStop {
-                stopConfirmation(row)
-            }
+            #if os(iOS)
+            if let row = dvr.confirmFileDelete { confirmation(row) }
+            if let row = confirmStop { stopConfirmation(row) }
+            #endif
             content
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -729,6 +737,25 @@ struct DvrRecordingsPanel: View {
             case .sharedLibrary(let library, let parent, let title): SharedLibraryItemsView(library: library, parent: parent, title: title)
             case .sharedItem(let reference, let library): SharedLibraryDetailView(reference: reference, library: library)
             }
+        }
+        #endif
+        #if os(tvOS)
+        .remoteRestricted()
+        .remotePhysicalDirections()
+        .onChange(of: navigation.physicalInputRevision) { _, value in
+            if value != restorationRevision { restoreTarget = nil }
+        }
+        .remoteChoicePresentation(isPresented: Binding(get: { nativePanel != nil }, set: { if !$0 { nativePanel = nil } }), scope: "dvr:modal", onDismiss: restoreNativeFocus) {
+            nativePresentation.remoteRestricted()
+        }
+        .onChange(of: focusedControl) { _, key in if let key { lastFocusedControl = key } }
+        .onChange(of: controlOrder) { old, surviving in
+            let previousFocus = lastFocusedControl ?? openerKey
+            guard nativePanel == nil, !surviving.contains(previousFocus) else { return }
+            restoreTarget = TVSecondaryFocusFallback.target(opener: previousFocus, previous: old, surviving: surviving)
+        }
+        .onChange(of: dvr.confirmFileDelete?.id) { _, id in
+            if id != nil, let row = dvr.confirmFileDelete { showNative(.delete(row), opener: "delete:" + row.id) }
         }
         #endif
         .task(id: chip) {
@@ -799,6 +826,7 @@ struct DvrRecordingsPanel: View {
         #if os(tvOS)
         .buttonStyle(TVReadableButtonStyle(prominent: chip == entry, compact: true))
         .focusEffectDisabled()
+        .tvSecondaryControl("chip:" + entry.rawValue, focus: $focusedControl, restore: $restoreTarget)
         #else
         .buttonStyle(.plain)
         .foregroundStyle(chip == entry ? Palette.onBg : Palette.muted)
@@ -833,6 +861,7 @@ struct DvrRecordingsPanel: View {
     }
 
     @ViewBuilder private var content: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 6) {
                 switch chip {
@@ -881,7 +910,11 @@ struct DvrRecordingsPanel: View {
                     manualRecording
                 }
             }
-            .padding(.trailing, 4)
+            .padding(.trailing, 12)
+            .padding(.vertical, 8)
+        }
+        .tvNavigationFocusSection()
+        .onChange(of: restoreTarget) { _, key in if let key { proxy.scrollTo(key, anchor: .center) } }
         }
     }
 
@@ -901,17 +934,27 @@ struct DvrRecordingsPanel: View {
                     DvrRecordingDetailView(recordingId: row.id)
                 } label: {
                     Text(row.title).font(LiveTvType.primary).lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .buttonStyle(.plain)
+                .dvrTitleStyle()
+                .tvSecondaryControl("recording:" + row.id, focus: $focusedControl, restore: $restoreTarget)
                 Text(libraryDetail(row))
                     .font(LiveTvType.tertiary).foregroundStyle(Palette.muted).lineLimit(1)
             }
             Spacer(minLength: 8)
             if let itemId = row.itemId, row.fileId != nil {
                 NavigationLink(value: Route.item(itemId)) { Text("Play") }
-                    .buttonStyle(.plain)
+                    .dvrTitleStyle()
+                    .tvSecondaryControl("play:" + row.id, focus: $focusedControl, restore: $restoreTarget)
             }
-            DvrActionButton(label: "Delete") { Task { await dvr.delete(row) } }
+            DvrActionButton(label: "Delete") {
+                #if os(tvOS)
+                showNative(.delete(row), opener: "delete:" + row.id)
+                #else
+                Task { await dvr.delete(row) }
+                #endif
+            }
+            .tvSecondaryControl("delete:" + row.id, focus: $focusedControl, restore: $restoreTarget)
         }
     }
 
@@ -937,8 +980,10 @@ struct DvrRecordingsPanel: View {
                         DvrRecordingDetailView(recordingId: row.id)
                     } label: {
                         Text(row.title).font(LiveTvType.primary).lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .buttonStyle(.plain)
+                    .dvrTitleStyle()
+                    .tvSecondaryControl("recording:" + row.id, focus: $focusedControl, restore: $restoreTarget)
                     if row.ruleId != nil {
                         Text("SERIES").font(LiveTvType.eyebrow).foregroundStyle(Palette.muted)
                     }
@@ -970,32 +1015,53 @@ struct DvrRecordingsPanel: View {
         switch row.state {
         case .recording:
             DvrActionButton(label: row.stopping ? "Stopping…" : "Stop") {
+                #if os(tvOS)
+                showNative(.stop(row), opener: "action:" + row.id)
+                #else
                 confirmStop = row
+                #endif
             }
+            .tvSecondaryControl("action:" + row.id, focus: $focusedControl, restore: $restoreTarget)
         case .cancelled:
             DvrActionButton(label: "Restore") { Task { await dvr.restore(row) } }
+                .tvSecondaryControl("action:" + row.id, focus: $focusedControl, restore: $restoreTarget)
         default:
             DvrActionButton(label: "Skip") { Task { await dvr.delete(row) } }
+                .tvSecondaryControl("action:" + row.id, focus: $focusedControl, restore: $restoreTarget)
         }
     }
 
     @ViewBuilder private func ruleRow(_ rule: DvrRule) -> some View {
         rowFrame {
+            #if os(tvOS)
+            Button { showNative(.ruleOptions(rule), opener: "rule:" + rule.id) } label: {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(rule.name).font(LiveTvType.primary).lineLimit(2)
+                    Text(ruleDetail(rule)).font(LiveTvType.tertiary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .dvrTitleStyle()
+            .tvSecondaryControl("rule:" + rule.id, focus: $focusedControl, restore: $restoreTarget)
+            #else
             VStack(alignment: .leading, spacing: 2) {
                 Text(rule.name).font(LiveTvType.primary).lineLimit(1)
-                Text(ruleDetail(rule))
-                    .font(LiveTvType.tertiary).foregroundStyle(Palette.muted).lineLimit(2)
+                Text(ruleDetail(rule)).font(LiveTvType.tertiary).foregroundStyle(Palette.muted).lineLimit(2)
             }
+            #endif
             Spacer(minLength: 8)
-            DvrActionButton(label: "▲") { Task { await dvr.moveRule(rule, by: -1) } }
-            DvrActionButton(label: "▼") { Task { await dvr.moveRule(rule, by: 1) } }
-            DvrActionButton(label: rule.newOnly ? "New only" : "Every showing") {
-                Task { await dvr.setRule(rule, newOnly: !rule.newOnly) }
-            }
+            DvrActionButton(label: "Move earlier") { Task { await dvr.moveRule(rule, by: -1) } }
+                .tvSecondaryControl("earlier:" + rule.id, focus: $focusedControl, restore: $restoreTarget)
+            DvrActionButton(label: "Move later") { Task { await dvr.moveRule(rule, by: 1) } }
+                .tvSecondaryControl("later:" + rule.id, focus: $focusedControl, restore: $restoreTarget)
             DvrActionButton(label: rule.enabled ? "On" : "Off", prominent: rule.enabled) {
                 Task { await dvr.setRule(rule, enabled: !rule.enabled) }
             }
+            .tvSecondaryControl("enabled:" + rule.id, focus: $focusedControl, restore: $restoreTarget)
+            #if os(iOS)
+            DvrActionButton(label: rule.newOnly ? "New only" : "Every showing") { Task { await dvr.setRule(rule, newOnly: !rule.newOnly) } }
             DvrActionButton(label: "Delete") { Task { await dvr.deleteRule(rule) } }
+            #endif
         }
     }
 
@@ -1010,9 +1076,17 @@ struct DvrRecordingsPanel: View {
 
     private var manualRecording: some View {
         VStack(alignment: .leading, spacing: 10) {
+            #if os(tvOS)
+            Text("Choose a channel, a start delay and a recording duration. Starts are Now, 5 or 15 minutes from now.")
+                .font(LiveTvType.secondary).foregroundStyle(Palette.muted)
+            DvrActionButton(label: manualChannelLabel) { showNative(.channels, opener: "manual:channel") }
+                .tvSecondaryControl("manual:channel", focus: $focusedControl, restore: $restoreTarget)
+                .accessibilityIdentifier("dvr-manual-channel")
+            #else
             Text("Record one channel for an exact time range, even beyond the guide horizon.")
                 .font(LiveTvType.secondary).foregroundStyle(Palette.muted)
             TextField("Channel ID", text: $manualChannel)
+            #endif
             TextField("Title (optional)", text: $manualTitle)
             #if os(iOS)
             DatePicker("Starts", selection: $manualStart)
@@ -1068,6 +1142,89 @@ struct DvrRecordingsPanel: View {
             DvrActionButton(label: "Remove") { Task { await dvr.forget(reminder) } }
         }
     }
+
+    private var controlOrder: [String] {
+        let chips = DvrRecordingsChip.allCases.map { "chip:" + $0.rawValue }
+        switch chip {
+        case .saved:
+            return chips + dvr.library.flatMap { ["recording:" + $0.id, "delete:" + $0.id] }
+        case .rules:
+            return chips + dvr.rules.flatMap { ["rule:" + $0.id, "earlier:" + $0.id, "later:" + $0.id, "enabled:" + $0.id] }
+        case .manual: return chips + ["manual:channel"]
+        case .attention:
+            return chips + dvr.attention.flatMap { ["recording:" + $0.id, "action:" + $0.id] }
+        case .upcoming:
+            return chips + dvr.schedule.filter { [.scheduled, .conflict, .withdrawn, .stale].contains($0.state) }
+                .sorted { ($0.captureStart, $0.id) < ($1.captureStart, $1.id) }
+                .flatMap { ["recording:" + $0.id, "action:" + $0.id] }
+        case .skipped:
+            return chips + dvr.schedule.filter { $0.state == .cancelled }
+                .sorted { ($0.captureStart, $0.id) < ($1.captureStart, $1.id) }
+                .flatMap { ["recording:" + $0.id, "action:" + $0.id] }
+        case .reminders: return chips
+        }
+    }
+    #if os(tvOS)
+    private func showNative(_ panel: DvrNativePanel, opener: String) {
+        guard nativePanel == nil else { return }
+        nativeGeneration = Session.shared.playbackAuthorization.generation
+        openerKey = focusedControl ?? opener
+        previousOrder = controlOrder
+        restoreTarget = nil
+        nativePanel = panel
+        navigation.openModal(scope: "dvr:modal", opener: openerKey) {
+            nativePanel = nil
+            dvr.dismissFileDelete()
+        }
+    }
+    private func restoreNativeFocus() {
+        guard navigation.canRestorePhysicalFocus(after: "dvr:modal") else { restoreTarget = nil; return }
+        restorationRevision = navigation.physicalInputRevision
+        restoreTarget = TVSecondaryFocusFallback.target(opener: openerKey, previous: previousOrder, surviving: controlOrder)
+    }
+    private func performNative(_ action: @escaping () async -> Void) {
+        let generation = nativeGeneration
+        navigation.closeModal()
+        Task {
+            guard generation == Session.shared.playbackAuthorization.generation else { return }
+            await action()
+        }
+    }
+    @ViewBuilder private var nativePresentation: some View {
+        switch nativePanel {
+        case .delete(let row):
+            TVSecondaryConfirmation(title: "Delete \(row.title)?", message: "The recording and its saved file will be permanently removed.", cancelLabel: "Keep it", confirmLabel: "Delete the file", onCancel: { navigation.closeModal() }) {
+                performNative { await dvr.delete(row, deleteFile: true) }
+            }
+        case .stop(let row):
+            TVSecondaryConfirmation(title: "Stop recording \(row.title)?", message: "Any captured portion will be kept. Watching continues.", cancelLabel: "Keep recording", confirmLabel: "Stop recording", onCancel: { navigation.closeModal() }) {
+                performNative { await dvr.delete(row) }
+            }
+        case .ruleConfirm(let rule):
+            TVSecondaryConfirmation(title: "Delete series rule \(rule.name)?", message: "Future airings will no longer be scheduled by this rule. Saved recordings are kept.", cancelLabel: "Keep rule", confirmLabel: "Delete rule", onCancel: { navigation.closeModal() }) {
+                performNative { await dvr.deleteRule(rule) }
+            }
+        case .ruleOptions(let rule):
+            VStack(alignment: .leading, spacing: 24) {
+                Text(rule.name).font(.title2.bold())
+                Text(ruleDetail(rule)).font(.body)
+                DvrActionButton(label: rule.newOnly ? "Record every showing" : "Record new episodes only") {
+                    performNative { await dvr.setRule(rule, newOnly: !rule.newOnly) }
+                }
+                DvrActionButton(label: "Delete rule…") { nativePanel = .ruleConfirm(rule) }
+                DvrActionButton(label: "Close") { navigation.closeModal() }
+            }.padding(48).frame(maxWidth: 900)
+        case .channels:
+            DvrChannelPicker(selected: manualChannel, onCancel: { navigation.closeModal() }) { channel in
+                guard nativeGeneration == Session.shared.playbackAuthorization.generation else { navigation.closeModal(); return }
+                manualChannel = channel.id
+                manualChannelLabel = channel.title
+                navigation.closeModal()
+            }
+        case nil: EmptyView()
+        }
+    }
+    #endif
 
     private func rowFrame<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         HStack(alignment: .center, spacing: 10) {
@@ -1159,7 +1316,9 @@ struct DvrCaptureActivityView: View {
                         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 8))
                     }
                     #if os(tvOS)
-                    .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+                    .// A full-width title keeps its ring inside the row and clear of
+        // adjacent actions. Scaling it clipped the leading text on TV.
+        buttonStyle(TVReadableButtonStyle(prominent: false, compact: true, focusScale: 1))
                     #else
                     .buttonStyle(.plain)
                     #endif
@@ -1193,6 +1352,11 @@ struct DvrCaptureActivityView: View {
 }
 
 struct DvrRecordingDetailView: View {
+    @EnvironmentObject private var navigation: RemoteNavigationCoordinator
+    @FocusState private var focusedControl: String?
+    @State private var restoreTarget: String?
+    @State private var confirmationGeneration: UInt64 = 0
+    @State private var restorationRevision: UInt64 = 0
     @ObservedObject private var dvr = DvrController.shared
     let recordingId: String
     @State private var confirmStop: DvrRecording?
@@ -1210,6 +1374,7 @@ struct DvrRecordingDetailView: View {
                         }
                     }
                     actionRow(row)
+                    #if os(iOS)
                     if let row = confirmStop {
                         HStack(spacing: 10) {
                             Text("Stop recording \(row.title)? Any captured portion will be kept. Watching continues.")
@@ -1221,8 +1386,13 @@ struct DvrRecordingDetailView: View {
                             DvrActionButton(label: "Keep recording") { confirmStop = nil }
                         }
                     }
+                    #endif
                     Divider()
                     Text("History").font(LiveTvType.primary)
+                        #if os(tvOS)
+                        .focusable()
+                        .tvSecondaryControl("history", focus: $focusedControl, restore: $restoreTarget)
+                        #endif
                     if !dvr.selectedHistoryComplete {
                         Text(dvr.selectedHistoryTruncatedBefore == nil
                              ? "History starts when this version began collecting events."
@@ -1236,6 +1406,9 @@ struct DvrRecordingDetailView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 4)
+                        #if os(tvOS)
+                        .focusable()
+                        #endif
                     }
                     if dvr.selectedEventsNext != nil {
                         DvrActionButton(label: "Load older history") {
@@ -1253,6 +1426,29 @@ struct DvrRecordingDetailView: View {
         }
         .background(Palette.bg)
         .navigationTitle("Recording details")
+        #if os(tvOS)
+        .remoteRestricted()
+        .remotePhysicalDirections()
+        .onChange(of: navigation.physicalInputRevision) { _, value in
+            if value != restorationRevision { restoreTarget = nil }
+        }
+        .remoteChoicePresentation(isPresented: Binding(get: { confirmStop != nil }, set: { if !$0 { confirmStop = nil } }), scope: "dvr:detail-confirmation", onDismiss: {
+            guard navigation.canRestorePhysicalFocus(after: "dvr:detail-confirmation") else { restoreTarget = nil; return }
+            restorationRevision = navigation.physicalInputRevision
+            restoreTarget = dvr.selectedRecording?.state == .recording ? "stop" : "history"
+        }) {
+            if let row = confirmStop {
+                TVSecondaryConfirmation(title: "Stop recording \(row.title)?", message: "Any captured portion will be kept. Watching continues.", cancelLabel: "Keep recording", confirmLabel: "Stop recording", onCancel: { navigation.closeModal() }) {
+                    navigation.closeModal()
+                    let generation = confirmationGeneration
+                    Task {
+                        guard generation == Session.shared.playbackAuthorization.generation else { return }
+                        await dvr.delete(row)
+                    }
+                }
+            }
+        }
+        #endif
         .task(id: recordingId) {
             await dvr.selectRecording(recordingId)
             while !Task.isCancelled,
@@ -1285,7 +1481,12 @@ struct DvrRecordingDetailView: View {
             if row.state == .recording {
                 DvrActionButton(label: row.stopping ? "Stopping…" : "Stop") {
                     confirmStop = row
+                    #if os(tvOS)
+                    confirmationGeneration = Session.shared.playbackAuthorization.generation
+                    navigation.openModal(scope: "dvr:detail-confirmation", opener: "stop") { confirmStop = nil }
+                    #endif
                 }
+                .tvSecondaryControl("stop", focus: $focusedControl, restore: $restoreTarget)
             } else if row.state == .cancelled {
                 DvrActionButton(label: "Restore") { Task { await dvr.restore(row) } }
             }
@@ -1306,5 +1507,92 @@ struct DvrRecordingDetailView: View {
         if let attempt = event.attempt { facts.append("attempt \(attempt)") }
         if let reason = event.reasonCode { facts.append(reason.replacingOccurrences(of: "_", with: " ")) }
         return facts.joined(separator: " · ")
+    }
+}
+
+private extension View {
+    @ViewBuilder func dvrTitleStyle() -> some View {
+        #if os(tvOS)
+        buttonStyle(TVReadableButtonStyle(prominent: false, compact: true, focusScale: 1))
+        #else
+        buttonStyle(.plain)
+        #endif
+    }
+}
+
+private enum DvrNativePanel {
+    case delete(DvrRecording)
+    case stop(DvrRecording)
+    case ruleOptions(DvrRule)
+    case ruleConfirm(DvrRule)
+    case channels
+}
+
+#if os(tvOS)
+private struct DvrChannelPicker: View {
+    let selected: String
+    let onCancel: () -> Void
+    let choose: (LiveTvChannel) -> Void
+    @State private var channels: [LiveTvChannel] = []
+    @State private var query = ""
+    @State private var failure: String?
+    @State private var loading = false
+    @Namespace private var channelFocus
+    private var matches: [LiveTvChannel] {
+        TVRecordingChannelSearch.matches(channels, query: query)
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Choose recording channel").font(.title2.bold())
+            TextField("Channel number or name", text: $query)
+                .accessibilityIdentifier("dvr-channel-search")
+            if loading { ProgressView() }
+            if let failure {
+                Text(failure).font(.body)
+                DvrActionButton(label: "Retry") { Task { await load() } }
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    ForEach(matches) { channel in
+                        Button { choose(channel) } label: {
+                            HStack { Text(channel.title); Spacer(); if channel.id == selected { Image(systemName: "checkmark") } }
+                        }
+                        .buttonStyle(TVReadableButtonStyle(prominent: false))
+                        .prefersDefaultFocus(channel.id == selected || (selected.isEmpty && channel.id == matches.first?.id), in: channelFocus)
+                        .accessibilityIdentifier("dvr-channel-" + channel.id)
+                    }
+                    if !loading && matches.isEmpty { Text("No matching channels.").focusable() }
+                }.padding(12)
+            }
+            DvrActionButton(label: "Cancel", action: onCancel)
+        }
+        .padding(48).frame(maxWidth: 1100)
+        .focusScope(channelFocus)
+        .remoteRestricted()
+        .task { await load() }
+    }
+    private func load() async {
+        guard !loading else { return }
+        let authorization = Session.shared.playbackAuthorization
+        loading = true; failure = nil
+        do {
+            let lineup = try await LiveTvAPI(origin: authorization.origin, token: authorization.token).lineup()
+            guard authorization.generation == Session.shared.playbackAuthorization.generation else { return }
+            channels = lineup.channels
+        } catch {
+            guard authorization.generation == Session.shared.playbackAuthorization.generation else { return }
+            failure = error.localizedDescription
+        }
+        loading = false
+    }
+}
+#endif
+
+enum TVRecordingChannelSearch {
+    static func matches(_ channels: [LiveTvChannel], query: String) -> [LiveTvChannel] {
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return search.isEmpty ? channels : channels.filter {
+            $0.guideNumber.localizedCaseInsensitiveContains(search) || $0.guideName.localizedCaseInsensitiveContains(search)
+        }
     }
 }

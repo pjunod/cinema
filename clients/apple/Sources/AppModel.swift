@@ -61,6 +61,7 @@ final class AppModel: ObservableObject {
     private let settings = SettingsStore()
     private var api: PlurxAPI?
     private var homeLoadTask: Task<Void, Never>?
+    private var recoveryAttempt = UUID()
 
     init(startServices: Bool = true) {
         discovery = ServerDiscovery()
@@ -109,6 +110,8 @@ final class AppModel: ObservableObject {
     // MARK: - Session lifecycle
 
     private func bootstrap() async {
+        recoveryAttempt = UUID()
+        let attempt = recoveryAttempt
         #if DEBUG
         // Physical acceptance must use the argument the lab supplied, not a
         // previously saved server. Never rediscover another ingress when that
@@ -168,6 +171,9 @@ final class AppModel: ObservableObject {
         guard let savedToken else { phase = .needLogin; return }
         do {
             let me = try await requireAPI().me()
+            // Retry, sign-out or a server change while this was in flight
+            // owns the session now; never adopt the abandoned origin.
+            guard recoveryAttempt == attempt else { return }
             username = me.username
             userId = me.id
             settings.username = me.username
@@ -197,11 +203,19 @@ final class AppModel: ObservableObject {
                 return
             }
             #endif
-            if let recovered = await rediscoverSavedServer(
+            // Network discovery may probe several unavailable hosts. Keep
+            // recovery actions usable while it runs, and retire its answer if
+            // the viewer retries, signs out, or chooses another server.
+            guard recoveryAttempt == attempt else { return }
+            showReconnectFailure(searching: true)
+            let recovered = await rediscoverSavedServer(
                 expectedInstanceId: settings.instanceId,
-                savedOrigin: savedOrigin
-            ) {
-                await retrySavedSession(at: recovered, token: savedToken)
+                savedOrigin: savedOrigin,
+                attempt: attempt
+            )
+            guard recoveryAttempt == attempt, phase == .reconnectFailed else { return }
+            if let recovered {
+                await retrySavedSession(at: recovered, token: savedToken, attempt: attempt)
             } else {
                 showReconnectFailure()
             }
@@ -215,6 +229,7 @@ final class AppModel: ObservableObject {
     }
 
     func connect(_ raw: String) async {
+        recoveryAttempt = UUID()
         let normalized = Self.normalizeOrigin(raw)
         guard !normalized.isEmpty else { return }
         authError = nil
@@ -362,14 +377,13 @@ final class AppModel: ObservableObject {
     }
 
     /// A cancelled refresh should leave the last good Home screen in place.
-    /// The same applies to a transient refresh failure when cached content is
-    /// available; a fatal empty-state message is reserved for initial loads
-    /// that have never produced anything useful.
+    /// A failed refresh keeps cached titles but exposes the inline Retry row.
+    /// Cancellation alone is silent; it is not a failed user-visible refresh.
     nonisolated static func homeErrorMessage(for error: Error, hasCachedContent: Bool) -> String? {
         if error is CancellationError { return nil }
         if let urlError = error as? URLError, urlError.code == .cancelled { return nil }
-        guard !hasCachedContent else { return nil }
-        return (error as? LocalizedError)?.errorDescription ?? "Failed to load"
+        return (error as? LocalizedError)?.errorDescription
+            ?? (hasCachedContent ? "Refresh failed" : "Failed to load")
     }
 
     /// Is this the answer a server gives to a bearer it no longer honors?
@@ -433,6 +447,7 @@ final class AppModel: ObservableObject {
     }
 
     private func signOutLocally(message: String? = nil) {
+        recoveryAttempt = UUID()
         DiagnosticReportModel.shared.signOut()
         settings.clearToken()
         Session.shared.setCredentials(origin: origin, token: nil)
@@ -451,6 +466,7 @@ final class AppModel: ObservableObject {
     }
 
     func changeServer() {
+        recoveryAttempt = UUID()
         DiagnosticReportModel.shared.signOut()
         // Clearing the origin clears the persisted bearer in the same write:
         // abandoning a server must not leave its credential on disk where the
@@ -470,7 +486,8 @@ final class AppModel: ObservableObject {
         discovery.restart()
     }
 
-    private func retrySavedSession(at recovered: RecoveredServer, token: String) async {
+    private func retrySavedSession(at recovered: RecoveredServer, token: String, attempt: UUID) async {
+        guard recoveryAttempt == attempt else { return }
         origin = recovered.origin
         serverName = recovered.name
         displayAwareAuto = false
@@ -489,6 +506,7 @@ final class AppModel: ObservableObject {
 
         do {
             let me = try await requireAPI().me()
+            guard recoveryAttempt == attempt else { return }
             username = me.username
             userId = me.id
             settings.username = me.username
@@ -498,21 +516,25 @@ final class AppModel: ObservableObject {
             await refreshClusterIngress()
             await loadHome()
         } catch APIError.http(let code) where code == 401 || code == 403 {
+            guard recoveryAttempt == attempt else { return }
             Session.shared.setCredentials(origin: recovered.origin, token: nil)
             settings.clearToken()
             authError = Session.shared.takeSessionExpiryNotice()
             phase = .needLogin
         } catch {
+            guard recoveryAttempt == attempt else { return }
             showReconnectFailure()
         }
     }
 
     private func rediscoverSavedServer(
         expectedInstanceId: String?,
-        savedOrigin: String
+        savedOrigin: String,
+        attempt: UUID
     ) async -> RecoveredServer? {
         let candidates = await discovery.availableServers()
         for candidate in candidates {
+            guard recoveryAttempt == attempt, !Task.isCancelled else { return nil }
             guard let candidateOrigin = try? await discovery.resolve(candidate),
                   let info = try? await PlurxAPI(origin: candidateOrigin).serverInfo(),
                   Self.matchesSavedServer(
@@ -520,6 +542,7 @@ final class AppModel: ObservableObject {
                     expectedInstanceId: expectedInstanceId,
                     savedOrigin: savedOrigin
                   ) else { continue }
+            guard recoveryAttempt == attempt, !Task.isCancelled else { return nil }
             return RecoveredServer(
                 origin: candidateOrigin,
                 instanceId: info.instanceId,
@@ -550,8 +573,11 @@ final class AppModel: ObservableObject {
         Session.shared.configureNodeOrigins(ingress.nodeUrls ?? [], primary: origin)
     }
 
-    private func showReconnectFailure() {
-        authError = "Couldn't reach \(serverName ?? origin). I also searched this network for the saved server."
+    private func showReconnectFailure(searching: Bool = false) {
+        let discoveryMessage = searching
+            ? "Searching this network for the saved server. You can retry or choose another server."
+            : "I also searched this network for the saved server."
+        authError = "Couldn't reconnect to \(serverName ?? origin). \(discoveryMessage)"
         phase = .reconnectFailed
     }
 

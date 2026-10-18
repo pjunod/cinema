@@ -280,6 +280,46 @@ final class LiveTvTests: XCTestCase {
         XCTAssertNil(controller.playbackError, "a stopped tune cannot restore its failure")
     }
 
+    func testAutoHideRechecksChannelFailureAfterCountdown() async {
+        let controller = LibraryChannelPlayerController()
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        controller.player.replaceCurrentItem(with: item)
+        let armed = expectation(description: "Countdown suspended while playback is healthy")
+        var continuation: CheckedContinuation<Void, Never>?
+        let countdown = Task { @MainActor in
+            await PlaybackControlAutoHide.afterDelay(while: { controller.playbackError == nil }, delay: {
+                await withCheckedContinuation { continuation = $0; armed.fulfill() }
+            })
+        }
+        await fulfillment(of: [armed], timeout: 2)
+        controller.handleItemFailure(item, sequence: 0)
+        XCTAssertNotNil(controller.playbackError)
+        continuation?.resume()
+        let hide = await countdown.value
+        XCTAssertFalse(hide, "An error arriving during the countdown must retain its recovery controls")
+        await controller.stop()
+    }
+
+    func testAutoHideRechecksPresentationAndCancellationAfterCountdown() async {
+        for cancellation in [false, true] {
+            var presentationOpen = false
+            let armed = expectation(description: "Countdown armed before a newer owner")
+            var continuation: CheckedContinuation<Void, Never>?
+            let countdown = Task { @MainActor in
+                await PlaybackControlAutoHide.afterDelay(while: { !presentationOpen }, delay: {
+                    await withCheckedContinuation { continuation = $0; armed.fulfill() }
+                })
+            }
+            await fulfillment(of: [armed], timeout: 2)
+            if cancellation { countdown.cancel() } else { presentationOpen = true }
+            continuation?.resume()
+            let hide = await countdown.value
+            XCTAssertFalse(hide, "A newer presentation or input must retire the old hide request")
+        }
+        let hide = await PlaybackControlAutoHide.afterDelay(while: { true }, delay: {})
+        XCTAssertTrue(hide, "An unchanged idle surface still hides normally")
+    }
+
     func testAppleTvLibraryChannelsOfferFullscreenWithoutRetuning() throws {
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let source = try String(
@@ -287,8 +327,10 @@ final class LiveTvTests: XCTestCase {
             encoding: .utf8)
         XCTAssertTrue(source.contains("Button(\"Fullscreen\") { fullscreen = true }"))
         XCTAssertTrue(source.contains(".fullScreenCover(isPresented: $fullscreen)"))
-        XCTAssertTrue(source.contains("VideoPlayer(player: controller.player).ignoresSafeArea()"),
-                      "fullscreen must reuse the active channel player instead of opening another session")
+        XCTAssertTrue(source.contains("PlayerSurface(player: controller.player, pictureInPicture: channelPictureInPicture"),
+                      "fullscreen must reuse the active channel player without a second AVKit control owner")
+        XCTAssertTrue(source.contains(".liveTvRemoteAdapter(.root, state: channelInputState, apply: applyChannelInput)"))
+        XCTAssertTrue(source.contains("if channelChromeVisible {"), "all channel controls must belong to revealable chrome")
         XCTAssertTrue(source.contains("if controller.watching != nil && !fullscreen {"),
                       "only one surface should render the shared player while fullscreen is open")
         XCTAssertTrue(source.contains("Button(\"Return to channels\") { fullscreen = false }"))
@@ -1435,8 +1477,9 @@ final class LiveTvTests: XCTestCase {
             .components(separatedBy: "private var fullscreenSurface: some View {")[1]
             .components(separatedBy: "private func applyLiveOutcome")[0]
         XCTAssertTrue(fullscreen.contains(
-            ".focusable(!overlayVisible && !temporaryGuide)"
+            "if !overlayVisible && !temporaryGuide {"
         ))
+        XCTAssertTrue(fullscreen.contains("LiveTvRevealSurface(state:"))
         XCTAssertFalse(fullscreen.contains(".focusable(true)"))
     }
 
@@ -1446,10 +1489,10 @@ final class LiveTvTests: XCTestCase {
             .components(separatedBy: "private var fullscreenSurface: some View {")[1]
             .components(separatedBy: "private func applyLiveOutcome")[0]
         XCTAssertTrue(fullscreen.contains(
-            ".onAppear { focusedControl = overlayVisible ? .pillPlay : .reveal }"
+            ".onAppear { coverControl = overlayVisible ? .pillPlay : .reveal }"
         ))
         XCTAssertTrue(fullscreen.contains(
-            "target == .reveal { focusedControl = .pillPlay }"
+            "target == .reveal { coverControl = .pillPlay }"
         ))
         for guardPart in [
             "guard fullscreen",
@@ -1468,14 +1511,14 @@ final class LiveTvTests: XCTestCase {
         let infoDismissal = fullscreen
             .components(separatedBy: ".onChange(of: showingInfo)")[1]
             .components(separatedBy: ".onChange(of: showingMore)")[0]
-        XCTAssertFalse(infoDismissal.contains("focusedControl"))
+        XCTAssertFalse(infoDismissal.contains("coverControl"))
         let opener = source
             .components(separatedBy: "private func returnFocusToCoverSheetOpener()")[1]
             .components(separatedBy: "#endif")[0]
-        XCTAssertTrue(opener.contains("let opener = coverSheetOpener ?? .pillPlay"))
-        XCTAssertTrue(opener.contains("focusedControl = nil"))
+        XCTAssertTrue(opener.contains("let requestedOpener = coverSheetOpener ?? .pillPlay"))
+        XCTAssertTrue(opener.contains("coverControl = nil"))
         XCTAssertTrue(opener.contains("await Task.yield()"))
-        XCTAssertTrue(opener.contains("focusedControl = opener"))
+        XCTAssertTrue(opener.contains("coverControl = requestedOpener == .pillActivity && dvr.indicatorLabel == nil"))
         XCTAssertTrue(source.contains("Button { coverSheetOpener = .pillInfo; showStreamInfo() }"))
         XCTAssertTrue(source.contains("Button { coverSheetOpener = .pillMore; showingMore = true }"))
     }
@@ -1517,7 +1560,7 @@ final class LiveTvTests: XCTestCase {
         // 2. One key per focusable: the page toolbar and the cover's pills no
         //    longer share `.guide` / `.channels` / `.more`.
         for pill in [".pillPlay", ".pillGuide", ".pillChannels", ".pillInfo", ".pillMore", ".pillActivity"] {
-            XCTAssertEqual(source.components(separatedBy: ".focused($focusedControl, equals: \(pill))").count - 1,
+            XCTAssertEqual(source.components(separatedBy: ".focused(focus, equals: \(pill))").count - 1,
                            1, pill)
         }
         XCTAssertEqual(source.components(separatedBy: ".focused($focusedControl, equals: .guide)").count - 1, 1)
@@ -1547,8 +1590,13 @@ final class LiveTvTests: XCTestCase {
         for key in [".picture", ".watch", ".record", ".recordSeries", ".remind"] {
             XCTAssertTrue(source.contains(".focused($focusedControl, equals: \(key))"), key)
         }
-        XCTAssertTrue(source.contains("return moveDetailFocus(input, region: .onNow)"))
-        XCTAssertTrue(source.contains("return moveDetailFocus(input, region: .guideStage)"))
+        XCTAssertTrue(source.contains("return moveDetailFocus(input, from: source, region: region)"))
+        for region in ["onNow", "guideStage"] {
+            XCTAssertTrue(source.contains("detailInput(from: .picture, region: .\(region))"))
+        }
+        for key in ["watch", "record", "recordSeries", "remind"] {
+            XCTAssertTrue(source.contains("detailInput(from: .\(key), region: browse == .guide ? .guideStage : .onNow)"))
+        }
         XCTAssertTrue(source.contains("programmeActions(channel, programme, keyed: true)"))
         let region = source
             .components(separatedBy: "private func moveDetailFocus(")[1]
@@ -1562,10 +1610,10 @@ final class LiveTvTests: XCTestCase {
         //    Watch, the temporary guide's Close, the Over picture Close — not
         //    always to the toolbar.
         XCTAssertTrue(source.contains("onTopBoundary: { edge in"))
-        XCTAssertTrue(source.contains("focusedControl = .guideClose"))
+        XCTAssertTrue(source.contains("coverControl = .guideClose"))
         XCTAssertTrue(source.contains("focusedControl = .overClose"))
         XCTAssertTrue(source.contains("guidePageTopBoundary(edge)"))
-        XCTAssertTrue(source.contains(".focused($focusedControl, equals: .guideClose)"))
+        XCTAssertTrue(source.contains("focusRequested: coverControl == .guideClose"))
         XCTAssertTrue(source.contains(".focused($focusedControl, equals: .overClose)"))
         XCTAssertFalse(source.contains("onToolbarBoundary"))
 
@@ -1598,7 +1646,7 @@ final class LiveTvTests: XCTestCase {
         XCTAssertTrue(source.contains("Button { browse = .list; fullscreen = false } label: {"))
         XCTAssertFalse(source.contains("Button { requestChannelFocus(); fullscreen = false }"))
         XCTAssertTrue(source.contains("if browseBeforeTemporaryGuide == nil { browseBeforeTemporaryGuide = browse }"))
-        XCTAssertTrue(source.contains("focusedControl = overlayVisible ? .pillGuide : .reveal"))
+        XCTAssertTrue(source.contains("coverControl = overlayVisible ? .pillGuide : .reveal"))
         XCTAssertFalse(source.contains("focusedControl = .guide\n"),
                        "no undeferred write to a segment that may be under the cover")
         // Neither request resigns the toolbar's focus first — that handed the
@@ -1655,9 +1703,8 @@ final class LiveTvTests: XCTestCase {
 
     func testFiveFullscreenActionsAndNoFavorite() throws {
         let source = try liveTvViewSource()
-        let buttons = source
-            .components(separatedBy: "private var liveSurfaceButtons: some View {")[1]
-            .components(separatedBy: "#endif")[0]
+        let start = try XCTUnwrap(source.range(of: "private func liveSurfaceButtons(focus:"))
+        let buttons = String(source[start.upperBound...]).components(separatedBy: "#endif")[0]
         XCTAssertEqual(buttons.components(separatedBy: "Label(").count - 1, 5)
         for action in [
             "\"Play live\" : \"Pause\"",
@@ -2618,15 +2665,14 @@ final class LiveTvTests: XCTestCase {
             source.contains("state: { .fullscreenHidden }"),
             "the reveal adapter must report liveInputState, never assert a state it cannot know"
         )
-        XCTAssertEqual(
-            source.components(separatedBy: "detail == nil, live.playing, !live.paused").count - 1,
-            2,
-            """
-            `detail` belongs in BOTH auto-hide guards, entry and post-sleep. \
-            In one only, a programme sheet opened during those four seconds \
-            still lets the chrome hide underneath it
-            """
-        )
+        let countdown = source.components(separatedBy: ".task(id: overlayGeneration)")[1]
+            .components(separatedBy: "#if os(tvOS)")[0]
+        XCTAssertTrue(countdown.contains("PlaybackControlAutoHide.afterDelay"),
+                      "The shared countdown rechecks its predicate after waiting")
+        XCTAssertTrue(countdown.contains("detail == nil"),
+                      "Programme sheets must keep the playback controls mounted")
+        XCTAssertTrue(countdown.contains("!showingDvrActivity"),
+                      "Recording activity must retain its playback opener")
         // Both directions of the overlay change defer past the update that
         // inserts the view they then want focused, because tvOS drops an
         // assignment aimed at a view that does not exist yet. Undeferred, the
@@ -2653,14 +2699,14 @@ final class LiveTvTests: XCTestCase {
         let source = try String(
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
-        XCTAssertTrue(source.contains(".focused($focusedControl, equals: FocusTarget.reveal)"))
+        XCTAssertTrue(source.contains("LiveTvRevealSurface(state: { liveInputState }"))
         // Was `focusedControl = visible ? .guide : .reveal`, which the
         // rebuilt surface split into the two branches of
         // `onChange(of: overlayVisible)` and retargeted to `.play`. This
         // assertion had been failing on main ever since: the fast lane
         // compiles the Apple target and does not run it.
-        XCTAssertTrue(source.contains(".focusable(!overlayVisible && !temporaryGuide)"))
-        XCTAssertTrue(source.contains("focusedControl = .reveal"))
+        XCTAssertTrue(source.contains("if !overlayVisible && !temporaryGuide {"))
+        XCTAssertTrue(source.contains("coverControl = .reveal"))
         // Tuning stays inside the selected browse layout. The viewer chooses
         // fullscreen explicitly with Return to live or by selecting the
         // already-playing channel.
@@ -2709,9 +2755,10 @@ final class LiveTvTests: XCTestCase {
             return String(source[lower..<upper])
         }
         let more = try section("private var morePanel", "private var liveToolbar")
-        XCTAssertEqual(more.components(separatedBy: "Button(").count - 1, 8)
-        XCTAssertEqual(more.components(separatedBy: ".buttonStyle(TVReadableButtonStyle").count - 1, 8,
-                       "every More action owns a readable foreground/background pair")
+        XCTAssertTrue(more.contains("DiagnosticReportButton(category: \"playback\", owner: \"live-player-more\")"))
+        XCTAssertTrue(more.contains("Button(\"Reminder actions\")"))
+        XCTAssertTrue(more.contains(".buttonStyle(TVReadableButtonStyle(prominent: false))"),
+                      "More and nested reminder actions inherit the readable TV style")
         let layout = try section("private var layoutPanel", "private var morePanel")
         XCTAssertEqual(layout.components(separatedBy: ".buttonStyle(TVReadableButtonStyle").count - 1, 2,
                        "the layout choice and Close action must not inherit the red tint")
@@ -2874,6 +2921,21 @@ final class LiveTvTests: XCTestCase {
         try await Task.sleep(nanoseconds: UInt64(LiveTvInputRouting.channelCoalesceMilliseconds + 250) * 1_000_000)
         XCTAssertEqual(requests.starts, 1, "three presses inside the window are one tuner start")
         XCTAssertEqual(LiveTvInputRouting.channelCoalesceMilliseconds, 350)
+    }
+
+    func testGuideFollowingNowAdvancesAfterIdleWithoutOverridingManualPaging() {
+        let old = 1_800 * 100
+        let later = old + 5_400 + 75
+        let available = LiveTvGuideWindow(start: old - 3_600, end: later + 21_600)
+        XCTAssertEqual(LiveTvGridMetrics.followingWindowStart(
+            current: old, now: later, followsNow: true, available: available), old + 5_400)
+        XCTAssertEqual(LiveTvGridMetrics.followingWindowStart(
+            current: old, now: later, followsNow: false, available: available), old)
+        XCTAssertEqual(LiveTvGridMetrics.followingWindowStart(
+            current: old, now: later, followsNow: true, available: nil), old + 5_400)
+        let short = LiveTvGuideWindow(start: old, end: old + 900)
+        XCTAssertEqual(LiveTvGridMetrics.followingWindowStart(
+            current: old, now: later, followsNow: true, available: short), old)
     }
 
     /// A hard-coded 300 pt slot filled 58% of a 1920 pt screen and could never

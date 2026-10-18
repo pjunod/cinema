@@ -131,7 +131,11 @@ jobs:
     if: >-
       always() && needs.resolve.result == 'success' &&
       needs.resolve.outputs.version_exists != 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    # Each leg builds on its own architecture. arm64 runs on the native
+    # aarch64 Linux VM on the M4 lab Mac, never under QEMU on an X64 host:
+    # emulated C/C++ stages (FFmpeg, the subtitle engine) overran their build
+    # guards there (v0.7.0, runs 5384 and 5399; #1163).
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -139,8 +143,10 @@ jobs:
         include:
           - arch: amd64
             target: x86_64-unknown-linux-gnu
+            runs_on: '["self-hosted", "Linux", "X64", "lab", "general", "high-cpu"]'
           - arch: arm64
             target: aarch64-unknown-linux-gnu
+            runs_on: '["self-hosted", "Linux", "ARM64", "lab", "release-arm64"]'
     steps:
       - name: Check out the trusted packaging tool
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

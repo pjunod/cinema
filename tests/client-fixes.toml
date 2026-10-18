@@ -350,7 +350,7 @@ test_anchor = "liveConfigurationLeavesTheTargetOffsetToThePlaylist"
 id = "apple.live-tv-fullscreen-focus"
 commits = ["861c6e24"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = ".focusable(!overlayVisible && !temporaryGuide)"
+source_anchor = "if !overlayVisible && !temporaryGuide {"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheRevealLayerIsNotFocusableWhileTheOverlayOrTheGuideIsVisible"
 
@@ -360,7 +360,7 @@ commits = ["90c18453"]
 source = "clients/apple/Sources/LiveTvView.swift"
 # The Info dismissal's deferred write moved into returnFocusToCoverSheetOpener
 # (PR #589), which every cover sheet's onDismiss now calls.
-source_anchor = "let opener = coverSheetOpener ?? .pillPlay"
+source_anchor = "let requestedOpener = coverSheetOpener ?? .pillPlay"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testFullscreenFocusDefaultsToPauseAndReturnsThereFromTheRevealLayer"
 
@@ -1259,7 +1259,7 @@ test_anchor = "a refused picture-in-picture never latches the retention flag"
 id = "apple.live-tv-ten-foot-surface-keeps-something-focusable"
 commits = ["9268f5f6"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = ".focused($focusedControl, equals: FocusTarget.reveal)"
+source_anchor = "LiveTvRevealSurface(state: { liveInputState }"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidden"
 
@@ -2229,7 +2229,7 @@ test_anchor = "theReorderBodyCarriesTheIdsAsJsonStringsInOrder"
 id = "apple.live-tv-reveal-layer-reports-its-real-state"
 commits = ["c7709372"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = ".revealSurface,"
+source_anchor = "LiveTvRevealSurface(state: { liveInputState }"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheRevealLayerReportsTheStateItIsInRatherThanTheOneItWants"
 
@@ -3146,7 +3146,7 @@ test_anchor = "func testNativeSeekDeadlineRecoversASeekThatNeverCompletes()"
 id = "apple.live-tv-appletv-navigation"
 commits = ["17ab5f50e"]
 source = "clients/apple/Sources/LiveTvView.swift"
-source_anchor = "private func moveDetailFocus(_ input: LiveTvContractInput, region: DetailRegion) -> Bool {"
+source_anchor = "private func moveDetailFocus(_ input: LiveTvContractInput, from current: FocusTarget,"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "func testAppleTvLiveNavigationIsReversibleAndReachesEverything() throws"
 
@@ -4687,7 +4687,7 @@ test_anchor = "fun titleRowsUseServerKeysAndKeepEveryItemInPagerOrder()"
 id = "apple.native-library-refresh-retains-rows"
 commits = ["a7dbd3542a3e8786ac3802b9ad933312f916cf55"]
 source = "clients/apple/Sources/LibraryGridCoordinator.swift"
-source_anchor = "if !preservingRowsDuringRefresh || current.complete {"
+source_anchor = "if !preservingItemsDuringRefresh || current.complete || (!rowsEnabled && current.decided.count >= preservedItemCount) {"
 test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
 test_anchor = "func testReturningRefreshesWatchStateWithoutDroppingLateRows()"
 
@@ -6885,6 +6885,92 @@ source_anchor = 'Section("Recent safe events")'
 test = "clients/apple/UITests/DiagnosticReportingTests.swift"
 test_anchor = "testTVZIPDownloadsSelectedIncidentAndCloseRevokesNewLink"
 
+[[fixes]]
+id = "apple.tv-native-choice-modal-owner"
+commits = ["d09b3ada6f09a74d4133f34f80d79f7985f24113"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func enterChoicePanel(scope: String, keys: [String], selected: String?)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testChoiceEntrySelectsCurrentValueAndNativeDismissalRestoresOpener()"
+
+[[fixes]]
+id = "apple.tv-choice-return-target-and-host-back"
+commits = ["b7f15a0af070eb187b9f4cfbfb57e75eef72ad0b"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func closeModal(returnFocus override: String? = nil)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testChoiceReturnOverrideRequiresParentOrderAndNativeAcknowledgment()"
+
+[[fixes]]
+id = "apple.tv-selected-native-focus-and-activation-order"
+# Integrated from the task workspace into this actual corrective commit.
+commits = ["e0477e3ccae2bafd181be6800332b3d94a8e61fb"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func physicalControlActivation(scope: String)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testLateControlTapRetiresAuthorityWithoutCancelingNewPresentationIntent()"
+
+[[fixes]]
+id = "apple.tv-actual-style-focus-entry-admission"
+commits = []
+supplements = "apple.tv-selected-native-focus-and-activation-order"
+source = "clients/apple/Sources/RemoteNavigationViews.swift"
+source_anchor = "func remoteNativeFocus(_ actuallyFocused: Bool)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testActualStyleFocusKeepsPendingEntryInertUntilNativeAcknowledgment()"
+
+[[fixes]]
+id = "apple.tv-dismiss-return-survives-native-settlement"
+commits = []
+supplements = "apple.tv-selected-native-focus-and-activation-order"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "restoration.intent == physicalIntent"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testEarlyNativeTargetAcknowledgmentCannotRetirePostDismissalReturn()"
+
+[[fixes]]
+id = "apple.tv-tab-change-defers-content-entry"
+commits = []
+supplements = "apple.tv-selected-native-focus-and-activation-order"
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "requestFocus(changedTab ? nil : restoredFocus[scope], force: changedTab)"
+test = "clients/apple/Tests/RemoteNavigationTests.swift"
+test_anchor = "func testTabMovementDefersContentFocusWhileSameTabBackRestoresBookmark()"
+
+
+[[fixes]]
+id = "apple.tv-recovery-visible-during-discovery"
+commits = ["b1067e120b2b24ee56ab277f6468d66f35ed70b1"]
+source = "clients/apple/Sources/AppModel.swift"
+source_anchor = "guard recoveryAttempt == attempt, phase == .reconnectFailed else { return }"
+test = "clients/apple/UITests/TVConnectionNavigationTests.swift"
+test_anchor = "func testSavedConnectionRecoveryReportAndRetryKeepCredentials()"
+
+[[fixes]]
+id = "apple.tv-shared-playback-and-readable-about"
+commits = []
+supplements = "apple.tv-recovery-visible-during-discovery"
+source = "clients/apple/Sources/SharedLibrariesView.swift"
+source_anchor = "TVReadableInformation("
+test = "clients/apple/UITests/TVSharedPlaybackNavigationTests.swift"
+test_anchor = "func testSharedPlaybackRevealQualityReportAndBackRetainSession()"
+
+[[fixes]]
+id = "apple.tv-row-header-native-focus-and-clearance"
+commits = ["3cd66d8992727ba97bb1217b25b87eda48d2a48f"]
+source = "clients/apple/Sources/LibraryView.swift"
+source_anchor = ".tvNavigationFocusSection()"
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "func testRowsViewAllOpensGroupAndBackRestoresHeader()"
+
+[[fixes]]
+id = "apple.tv-hidden-playback-does-not-paint-native-bezel"
+commits = ["035b8e80a985927ab4ea19f4f40c0b261ca31b84"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = ".buttonStyle(PlaybackRevealButtonStyle())"
+test = "clients/apple/UITests/TVPlaybackNavigationTests.swift"
+test_anchor = "func testLocalMovieHiddenRevealReportAndBackRetainPlayback()"
+
 # F5 attached VOD facts: frozen rendition metadata, separate from source/display.
 [[fixes]]
 id = "web.vod-attached-output-facts"
@@ -7004,6 +7090,87 @@ source_anchor = "while let callback = callbacks.take() { queued.append(callback)
 test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
 test_anchor = "testQueuedSubtitleReadinessIsDeliveredForItsCurrentSession"
 [[fixes]]
+id = "apple.tv-full-guide-lazy-viewport"
+commits = ["18577692c30128a49541d290d43463c2a7eeb11c"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "LazyVStack(alignment: .leading, spacing: 0) {"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testGuide77ChannelsKeepsNativeFocusVisibleAndResponsive()"
+
+[[fixes]]
+id = "apple.tv-guide-explicit-toolbar-origin"
+commits = ["03252a5d77791697f7bb5b94650fbfe08eeae8a5"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "if input == .down { lastToolbarFocus = source }"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testGuideToolsAndTimeReturnKeepNativeFocus()"
+
+[[fixes]]
+id = "apple.tv-guide-mounted-player-focus"
+commits = ["1a1ba1d51aed7db5fbc7dfd8dc87037bdf4dd86e"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private func coverControlInput(from source: FocusTarget,"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testLiveFullscreenRevealMoreReportAndBackRetainSession()"
+
+[[fixes]]
+id = "apple.tv-guide-readable-station-column"
+commits = ["67c0a4d9cb6eb1ab3ef59801ce7dcac0720c60e3"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "#if !os(tvOS)\n                                    LiveTvFormatBadges(channel: row.channel).fixedSize()"
+test = "clients/apple/UITests/TVPhysicalNavigationAcceptanceTests.swift"
+test_anchor = "func testPhysicalFullGuideRemainsVisibleAndResponsive()"
+
+[[fixes]]
+id = "apple.tv-autohide-rechecks-current-ownership"
+commits = ["c8ca674b6453e6353011372f9910338a513845c0"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "return !Task.isCancelled && eligible()"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testAutoHideRechecksChannelFailureAfterCountdown()"
+
+[[fixes]]
+id = "apple.tv-recording-activity-restores-player-opener"
+commits = []
+supplements = "apple.tv-autohide-rechecks-current-ownership"
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "&& !showingLayout && !showingDvrActivity && detail == nil"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testLiveFullscreenRevealMoreReportAndBackRetainSession()"
+
+[[fixes]]
+id = "apple.tv-playback-releases-directional-focus"
+commits = ["fe561010fbcd4617a5962a9a5adadc90ee96bc17"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "if focused != value { focused = value }"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "Guide return Right reaches Channels pass"
+
+[[fixes]]
+id = "apple.tv-channel-watch-spans-favorite-column"
+commits = ["6e608dbfe6f54d751ee6dd74a9abc018a5ab8416"]
+source = "clients/apple/Sources/LibraryChannels.swift"
+source_anchor = 'Text(channel.enabled ? "Watch live" : "Disabled")'
+test = "clients/apple/UITests/TVPlaybackNavigationTests.swift"
+test_anchor = "Down from Favorite reaches Watch across a short programme row"
+
+[[fixes]]
+id = "apple.tv-live-transport-single-direction-owner"
+commits = ["86171c0e21dc9906a54459cd80c6c3fd057d6354"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "LiveTvRemoteAdapter(scope: .controls, state: { liveInputState })"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "Left edge retains Pause during active input"
+
+[[fixes]]
+id = "apple.tv-synopsis-outline-viewport-clearance"
+commits = ["8e964f6d98018fbabf594efa1b781c4b9baea1c0"]
+source = "clients/apple/Sources/Components.swift"
+source_anchor = '.padding(8)'
+test = "clients/apple/UITests/TVSecondaryNavigationTests.swift"
+test_anchor = "Synopsis focus outline fits inside the reading viewport"
+
+[[fixes]]
 id = "android.diagnostics-preserves-shared-transport-order"
 commits = ["5a918f7192a95cbbd958ad764717a901ebf2435b"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"
@@ -7028,3 +7195,11 @@ source = "clients/android/app/build.gradle.kts"
 source_anchor = "versionCode ="
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "test_android_counter_the_target_already_ships_fails_against_the_target"
+
+[[fixes]]
+id = "apple.tv-guide-lazy-row-focus-destination"
+commits = ["ff7dfda26f804c5ba0676a8fd03dacec5ebcc85e"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private func realizeFocusDestination(in channelId: String)"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testGuide77ChannelsKeepsNativeFocusVisibleAndResponsive()"

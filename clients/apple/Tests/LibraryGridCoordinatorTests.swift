@@ -200,4 +200,48 @@ final class LibraryGridCoordinatorTests: XCTestCase {
         state.presentationChanged(rows: true)
         await waitUntil { state.groups.flatMap(\.items).count == 20 }
     }
+
+    func testGridReturnKeepsDistantBookmarkUntilReplacementPrefixReady() async throws {
+        let original = try items(421)
+        var refreshed = original
+        refreshed[0].watch = Watch(positionMs: 0, durationMs: 60_000, watched: true)
+        var returning = false
+        let gate = LibraryWorkerGate()
+        let state = LibraryGridCoordinator(fetch: { _, _, offset in
+            if returning && offset == 200 { await gate.block("grid-refresh") }
+            let rows = returning ? refreshed : original
+            return Page(items: Array(rows.dropFirst(offset).prefix(200)), total: rows.count)
+        }, delay: { _ in })
+        defer { state.stop() }
+        await state.load(libraryIds: [1], sort: .title)
+        _ = await state.groupsForJump()
+        await waitUntil { state.visibleItems.count == 421 }
+        state.stop()
+        returning = true
+        await state.load(libraryIds: [1], sort: .title)
+        await gate.waitFor("grid-refresh")
+        XCTAssertEqual(state.visibleItems.last?.id, 421, "A covered grid keeps its late focus target mounted")
+        XCTAssertEqual(state.visibleItems.count, 421)
+        await gate.release("grid-refresh")
+        await waitUntil { state.complete && state.visibleItems.first?.watch?.watched == true }
+        XCTAssertEqual(state.visibleItems.last?.id, 421)
+        XCTAssertTrue(state.groups.isEmpty, "Refreshing the loaded prefix does not change the presentation")
+    }
+
+    func testExplicitGridJumpLoadsFinalPageWithoutSwitchingPresentation() async throws {
+        let rows = try items(5000)
+        var offsets: [Int] = []
+        let state = LibraryGridCoordinator(fetch: { _, _, offset in
+            offsets.append(offset)
+            return Page(items: Array(rows.dropFirst(offset).prefix(200)), total: rows.count)
+        }, delay: { _ in })
+        defer { state.stop() }
+        await state.load(libraryIds: [1], sort: .title)
+        XCTAssertLessThan(state.items.count, rows.count, "Ordinary grid loading stays incremental")
+        let index = await state.groupsForJump()
+        XCTAssertEqual(index.flatMap(\.items).map(\.id), rows.map(\.id))
+        XCTAssertEqual(offsets.last, 4800)
+        XCTAssertTrue(state.complete)
+        XCTAssertTrue(state.groups.isEmpty, "Jump must not switch the grid into rows")
+    }
 }
