@@ -4,7 +4,7 @@
 // production code.
 #![allow(clippy::disallowed_methods)]
 
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -46,9 +46,68 @@ fn toml_string(value: &std::path::Path) -> String {
         .replace('"', "\\\"")
 }
 
-struct Daemon(Child);
+struct Daemon(Child, tempfile::NamedTempFile);
 
 impl Daemon {
+    fn spawn(mut command: Command) -> Self {
+        let capture = tempfile::NamedTempFile::new().expect("private child log capture");
+        command
+            .env("PLURX_LOG", "info")
+            .env("PLURX_LOG_FORMAT", "json")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null());
+        // One append-only file description shared by both streams prevents
+        // stdout and stderr from overwriting each other's evidence.
+        let stdout = std::fs::OpenOptions::new()
+            .append(true)
+            .open(capture.path())
+            .expect("append child stdout");
+        let stderr = stdout.try_clone().expect("append child stderr");
+        command.stdout(stdout).stderr(stderr);
+        Self(command.spawn().expect("start captured daemon"), capture)
+    }
+
+    fn captured_logs(&self) -> Result<String, String> {
+        std::fs::read(self.1.path())
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .map_err(|error| format!("reading owned child log: {error}"))
+    }
+
+    fn log_tail(&self) -> String {
+        let logs = self.captured_logs().unwrap_or_else(|error| error);
+        let mut tail: Vec<_> = logs.chars().rev().take(16_384).collect();
+        tail.reverse();
+        tail.into_iter().collect()
+    }
+
+    fn ensure_running(&mut self) -> Result<(), String> {
+        match self.0.try_wait() {
+            Ok(None) => Ok(()),
+            Ok(Some(status)) => Err(format!(
+                "owned daemon {} exited before owned HTTP bind: {status}; logs:\n{}",
+                self.0.id(),
+                self.log_tail()
+            )),
+            Err(error) => Err(format!(
+                "checking owned daemon {}: {error}; logs:\n{}",
+                self.0.id(),
+                self.log_tail()
+            )),
+        }
+    }
+
+    fn owned_bind_probe(&mut self, address: SocketAddr) -> Result<bool, String> {
+        self.ensure_running()?;
+        // A TCP connect alone can hit another host-network job's listener or
+        // even a loopback self-connection. The successful bind event must come
+        // from this child's fresh capture, not an earlier boot or a marker.
+        let logs = self.captured_logs()?;
+        let bound = has_listening_event(&logs, address)
+            && TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok();
+        self.ensure_running()?;
+        Ok(bound)
+    }
+
     fn stop(&mut self) {
         if self.0.try_wait().expect("daemon status").is_none() {
             #[cfg(unix)]
@@ -65,7 +124,11 @@ impl Daemon {
         }
         let status = self.0.wait().expect("wait daemon");
         #[cfg(unix)]
-        assert!(status.success(), "daemon did not drain cleanly: {status}");
+        assert!(
+            status.success(),
+            "daemon did not drain cleanly: {status}; logs:\n{}",
+            self.log_tail()
+        );
     }
 
     #[cfg(unix)]
@@ -84,6 +147,13 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "owned daemon {} captured logs:\n{}",
+                self.0.id(),
+                self.log_tail()
+            );
+        }
         if self.0.try_wait().ok().flatten().is_none() {
             let _ = self.0.kill();
             let _ = self.0.wait();
@@ -143,18 +213,117 @@ fn wait_bounded(mut child: Child, timeout: Duration) -> BoundedRun {
     BoundedRun { status, logs }
 }
 
+fn has_listening_event(logs: &str, address: SocketAddr) -> bool {
+    logs.lines().any(|line| {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        event["level"].as_str() == Some("INFO")
+            && event["target"].as_str() == Some("plurxd")
+            && event["fields"]["message"].as_str() == Some("listening")
+            && event["fields"]["addr"]
+                .as_str()
+                .and_then(|value| value.parse::<SocketAddr>().ok())
+                == Some(address)
+    })
+}
+
 fn wait_for_bind(daemon: &mut Daemon, port: u16) {
     let deadline = Instant::now() + Duration::from_secs(60);
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
     loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
+        match daemon.owned_bind_probe(address) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => panic!("{error}"),
         }
-        if let Some(status) = daemon.0.try_wait().expect("daemon status") {
-            panic!("daemon exited before HTTP bind: {status}");
-        }
-        assert!(Instant::now() < deadline, "daemon HTTP bind timed out");
+        assert!(
+            Instant::now() < deadline,
+            "owned daemon HTTP bind timed out at {address}; logs:\n{}",
+            daemon.log_tail()
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[test]
+fn only_the_exact_structured_owned_listening_event_counts() {
+    let address = SocketAddr::from(([127, 0, 0, 1], 12345));
+    let event = serde_json::json!({
+        "level": "INFO",
+        "target": "plurxd",
+        "fields": { "message": "listening", "addr": address.to_string() }
+    });
+    assert!(has_listening_event(&event.to_string(), address));
+    for (key, replacement) in [
+        ("message", "not listening"),
+        ("addr", "127.0.0.1:12346"),
+        ("addr", "127.0.0.1:123450"),
+    ] {
+        let mut other = event.clone();
+        other["fields"][key] = replacement.into();
+        assert!(!has_listening_event(&other.to_string(), address));
+    }
+    let mut other_target = event.clone();
+    other_target["target"] = "foreign".into();
+    assert!(!has_listening_event(&other_target.to_string(), address));
+    let mut other_level = event.clone();
+    other_level["level"] = "WARN".into();
+    assert!(!has_listening_event(&other_level.to_string(), address));
+    assert!(!has_listening_event(
+        "listening addr=127.0.0.1:12345\n{partial-json",
+        address
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn foreign_listener_and_cached_marker_cannot_report_an_owned_child_bound() {
+    let root = canonical_tempdir().expect("foreign listener fixture");
+    let marker = root.path().join("hiqlite/activation.json");
+    std::fs::create_dir_all(marker.parent().expect("marker parent")).expect("cached target");
+    std::fs::write(&marker, b"cached previous boot marker").expect("cached marker");
+    let foreign = TcpListener::bind("127.0.0.1:0").expect("real foreign listener");
+    let address = foreign.local_addr().expect("foreign address");
+    assert!(TcpStream::connect(address).is_ok());
+
+    let sentinel = format!("fixture child alive without binding {address}");
+    let mut command = Command::new("/bin/sh");
+    command
+        .args([
+            "-c",
+            r#"printf '%s\n' "$CQ_CAPTURE_SENTINEL" >&2; exec sleep 60"#,
+        ])
+        .env("CQ_CAPTURE_SENTINEL", &sentinel);
+    let mut child = Daemon::spawn(command);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !child
+        .captured_logs()
+        .expect("child logs")
+        .contains(&sentinel)
+    {
+        assert!(!child.owned_bind_probe(address).expect("live child status"));
+        assert!(
+            Instant::now() < deadline,
+            "fixture child did not write its sentinel"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(marker.is_file());
+    assert!(!child.owned_bind_probe(address).expect("live child status"));
+    child.0.kill().expect("stop owned fixture child");
+    child.0.wait().expect("wait for owned fixture child");
+    let refusal = child
+        .owned_bind_probe(address)
+        .expect_err("exited child is fatal");
+    assert!(
+        refusal.contains("exited before owned HTTP bind"),
+        "{refusal}"
+    );
+    assert!(
+        refusal.contains(&sentinel),
+        "lost child diagnostics: {refusal}"
+    );
 }
 
 async fn wait_for_ready(daemon: &mut Daemon, port: u16) {
@@ -474,19 +643,13 @@ fn maintenance_commands_obey_their_activated_store_boundaries() {
     )
     .expect("maintenance config");
 
-    let mut daemon = Daemon(
-        Command::new(env!("CARGO_BIN_EXE_plurxd"))
-            .args([
-                "--config",
-                config_path.to_str().expect("config path"),
-                "run",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start daemon"),
-    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_plurxd"));
+    command.args([
+        "--config",
+        config_path.to_str().expect("config path"),
+        "run",
+    ]);
+    let mut daemon = Daemon::spawn(command);
     wait_for_bind(&mut daemon, server_port);
     assert!(data.join("hiqlite/activation.json").is_file());
 
@@ -562,19 +725,15 @@ fn subsequent_plurxd_run_reopens_the_completed_replicated_target() {
 
     let start = |activation_failpoint: Option<&str>| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_plurxd"));
-        command
-            .args([
-                "--config",
-                config_path.to_str().expect("config path"),
-                "run",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        command.args([
+            "--config",
+            config_path.to_str().expect("config path"),
+            "run",
+        ]);
         if let Some(value) = activation_failpoint {
             command.env("PLURX_CLUSTER_ACTIVATION_FAILPOINT", value);
         }
-        Daemon(command.spawn().expect("start daemon"))
+        Daemon::spawn(command)
     };
 
     let mut first = start(None);
@@ -681,19 +840,13 @@ async fn sigkill_recovery_preserves_acknowledged_writes(advertise_host: &str) {
     .expect("SIGKILL recovery config");
 
     let start = || {
-        Daemon(
-            Command::new(env!("CARGO_BIN_EXE_plurxd"))
-                .args([
-                    "--config",
-                    config_path.to_str().expect("config path"),
-                    "run",
-                ])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("start recovery daemon"),
-        )
+        let mut command = Command::new(env!("CARGO_BIN_EXE_plurxd"));
+        command.args([
+            "--config",
+            config_path.to_str().expect("config path"),
+            "run",
+        ]);
+        Daemon::spawn(command)
     };
 
     let mut first = start();
