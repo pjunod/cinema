@@ -1,10 +1,8 @@
 # Apple Auto acceptance — preserve sign-in and identify acquisition failures
 
-**Status:** open for broader output continuity and the TV codec boundary;
-Apple 264 safeguards and native/web/Rust fixture repairs are development-gated;
-controlled tar transport passes focused and complete-archive checks ·
-**Updated:** 2026-10-18 · **Parent:** PR #1156 owns exact qualification, landing
-and installation identities; tasks #1179, #1183, #1186 and #1187 merged
+**Status:** dated source/development checkpoint; broader output continuity
+and the TV codec boundary remain open · **Updated:** 2026-10-18 ·
+**Parent:** PR #1156 owns later exact qualification, landing and install receipts
 
 Companion to [continuous-quality build §10.330](CONTINUOUS-QUALITY-BUILD.md)
 (the declared-cost correction) and the
@@ -14,60 +12,56 @@ the record of the sign-in incident. Preserve the failed runs before cleanup.
 Do not launch the installed Release app through the shaping proxy until the
 credential and server-selection incident is understood.
 
-## Current checkpoint — Apple 264 navigation and scoped Apple 262 quality evidence
+## Pre-promotion checkpoint — 2026-10-18
 
-Task #1179 merged as `8d169859d` after all eight Effort development gate
-jobs passed in run 5423 on `f29ea145b` / Apple 263. Task #1183 merged as
-`7dd231718` after all eight jobs passed in run 5433 on `9a2b6312` / Apple
-**264**. Both include main `efaf89152`. PR #1156 carries the final main-bound
-qualification, landing and installation identities; development gates do not
-replace the parent receipt.
+Apple 264 navigation remains distinct from measured Apple 262 quality.
+Tasks #1179/#1183 passed eight-job development gates 5423/5433. Native/web
+fixture task #1186 passed gate 5438; Rust fixture task #1187 passed gate 5441
+(internal 5467), merged `1452a6c6d`, with 66 focused passes: 39 core, 21
+contract and six daemon. These cover 56 retained failing case IDs plus ten
+compiled instances of four new test definitions, with source manifests,
+formatting, Clippy and normal hooks. No development gate is a full receipt.
 
-**Fixture development records.** Task #1186 merged reviewed native/Android
-fixtures and the web structure golden as `df4d51e36`, after all eight jobs
-passed in run 5438 on `7f21f7428`. The unchanged web source passed 104/104
-route/viewport captures: 300 existing-layout DOM deltas match frame wrappers
-and translation controls, with zero existing focus/request drift; Meridian
-adds 26 captures. This structural result is not media-continuity evidence.
+**Later development records.** Tasks #1188–#1191 merged after all eight
+first-attempt development jobs passed. #1188 changes only the second CI media
+export transport; #1189 repairs daemon/integration fixtures; #1190 pairs
+broker admission with one clock; #1191 bounds pre-acquisition endpoint
+collisions in isolated restore fixtures. Task #1192:
+merged `ccb69ba02`, tree `4ccc473f3`, after gate 5486/UI 5460 passed all eight first-attempt jobs on `dbb6f27f`; 13 Mac and 14 Linux focused cases plus two CI contracts pass.
 
-Task #1187 merged as `1452a6c6d`, tree `369959827`, after all eight development
-gate jobs passed in run 5441 (internal 5467) on `27da0cde`. Its Rust source
-`35f237c5` passes 66 focused cases: 39 core, 21 contract and six daemon,
-covering 56 retained failing case IDs plus ten compiled instances of four new
-test definitions. Source manifests match before/after execution. Formatting, workspace Clippy, catalog and normal hooks
-pass. Source-ownership audits retain production/test shared inputs and refuse
-unsupported production contexts; guarded schema fixtures preserve production
-refusals. These are focused/development results, not a full-suite receipt.
-The finite 95-minute Rust envelope remains a planning cap without a measured
-full-suite completion guarantee.
+**Terminal qualification.** Full run 5447/internal 5473 remains failed:
+17 successful, six failed and 18 skipped jobs, with no qualification receipt.
+Rust completes 48 named failures: one core, one broker and 46 daemon,
+including 27 Source-actor and 12 HTTP Source cases. Original run 5436/internal
+5462 also remains failed: 39 named Rust failures, 20 Store-lane failures and
+3,440 announced daemon cases without outcomes at 60 minutes. Lane counts are
+not a unique-failure union; absent outcomes are not passes.
 
-**Failed qualification and controlled export.** Original full run 5436
-(internal 5462), on `5a7b41928`, remains terminal and failed: 39 named Rust
-failures, 20 Store-lane failures and 3,440 announced daemon tests without
-outcomes at the 60-minute cutoff. Both amd64 release builds complete, but the
-second media-package export reaches the 90-minute limit, repeating the earlier
-hang on another host. Lane counts are not a unique-failure union.
+**Source scheduling checkpoint.** Four concurrent fixture bodies acquire
+before Store/clock/proof setup and before unchanged 120/330-second wrappers;
+nested Receiver/Source setup transfers one permit through explicit shutdown.
+Mac compilation passes; Linux 4eee020e4 passes pinned Rust 1.97.1 check, Clippy, compilation and all 40 cases (40 test threads, four-body limit; zero ignored);
+PR #1156 owns subsequent task gate/merge and qualification/landing/install receipts. Mac initially passes 39/40; its failed HDR-to-SDR case
+passes separately on the same binary with existing `ffmpeg-full`/`zscale`.
+The original failure remains failed; this is not a fresh 40/40 campaign. Same-binary `6989` experiments
+show concurrency sensitivity; the historical CI cause is unconfirmed.
+Within-body concurrency, assertions, guards and deadlines remain. This is
+not a four-physical-Store ceiling or a post-panic cleanup guarantee. The
+Rust check-job cap is 120 minutes; passing full duration remains unmeasured.
 
-Two isolated local exports hit 120-second inactivity bounds; corresponding
-tar exports finish in 6.9 s and 8.4 s. The latter uses CI-style explicit
-attestation/metadata flags and completes metadata generation. Both tars have
-the same digest. Final validator `f212f2cd` passes all 38,755 raw-member
-path/type/mode/link/content checks and the focused archive regressions. Its
-source review is scoped to this finite CI transport; actual artifacts contain
-no links. Partial local output is missing/truncated and is not byte-equivalent.
+**Preserved structural/transport scope.** Task #1186's 104/104 web captures
+retain zero existing focus/request drift; 300 existing DOM deltas and 26 new
+Meridian captures are structural evidence. Two controlled local exports hit
+120-second inactivity bounds; tar completes in 6.9 s/8.4 s. The matched-flags
+probe completes metadata; the full 38,755-member archive passes preservation
+checks. Incomplete local output is not equivalent. Isolated `.git` absence,
+provenance URN differences and separate monitor/cleanup bounds limit the
+comparison; internal BuildKit cause is unconfirmed. Later revalidation uses
+explicit Python optimization zero; the original environment is unknown.
 
-The completed transport task's dated development-gate and merge record is
-recorded in build ledger §10.332 before the candidate is frozen. PR #1156 is
-the live authority for exact qualification, landing and installation identities;
-source and development checks alone do not establish those outcomes.
-
-Probe limits: the earlier two-CPU producer attempt expires before export and
-provides no transport comparison. The isolated context omits `.git` and uses a
-different provenance URN; internal BuildKit cause remains unconfirmed. Build
-monitoring and bounded cleanup have separate deadlines. The original Python
-optimization environment was not recorded; later revalidation explicitly uses
-optimization zero. None of these probes establishes full package/runtime smoke
-acceptance.
+PR #1156 is the authority for later exact qualification, landing and install
+receipts. This dated checkpoint does not claim those outcomes or a full
+package/runtime smoke pass.
 
 The physical quality and 79 focused-unit measurements remain bound to
 `ef33cc71cf89da900883d7ad5d2af5336aecffbc`, tree
