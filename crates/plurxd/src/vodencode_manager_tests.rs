@@ -74,7 +74,13 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     let request = SessionRequest {
         request_id: Some("actual-processed-hdr-window".into()),
         automatic: false,
-        kind: SessionKind::Transcode { height: 720 },
+        // Any resolution: PLURX_DV_WINDOW_HEIGHT selects the rung (720 by default).
+        kind: SessionKind::Transcode {
+            height: std::env::var("PLURX_DV_WINDOW_HEIGHT")
+                .ok()
+                .and_then(|height| height.parse().ok())
+                .unwrap_or(720),
+        },
         hdr10: true,
         audio_index: Some(0),
         start_seconds: 0.0,
