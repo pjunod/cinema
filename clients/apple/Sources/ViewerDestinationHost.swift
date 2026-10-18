@@ -308,7 +308,11 @@ struct ViewerNavigationChrome: View {
                     Label(tab.title, systemImage: tab.symbol).lineLimit(1)
                 } else { Image(systemName: tab.symbol) }
             }
+            #if os(tvOS)
+            .font(.system(size: 22, weight: .semibold))
+            #else
             .font(.callout.weight(.semibold))
+            #endif
             .frame(maxWidth: .infinity, minHeight: compact ? 56 : 48, alignment: !compact && labels && model.layout == .meridian ? .leading : .center)
             .padding(.horizontal, compact ? 4 : 8)
             .foregroundStyle(navigation.selectedTab == tab ? Palette.selectedInk : Palette.onBg)

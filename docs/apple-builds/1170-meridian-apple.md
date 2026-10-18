@@ -1,6 +1,6 @@
 # Select Meridian layout and theme on Apple
 
-Build: 260
+Build: 261
 Issue: #1170
 
 Appearance now offers independent Layout (Standard or Meridian) and Theme
