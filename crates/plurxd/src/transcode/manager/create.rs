@@ -1240,10 +1240,9 @@ impl TranscodeManager {
             &snapshot.file.dolby_vision,
         )
         .map_err(|error| vod_refusal_error("vod_dv_planning_invalid", error.to_string()))?
-        // The bounded offline tool and finite adapter do not qualify a whole
-        // source generation. Actual held-source interval and output verification
-        // must replace this arm; catalog tags and preferences cannot do so.
-        .unwrap_or(DvFallbackReason::ProductionUnqualified);
+        // Preflight passed and the settings allow processing: preparation
+        // runs the first window and selects processing from its result.
+        .unwrap_or(DvFallbackReason::AwaitingFirstWindow);
         Ok(DvSelection::KeepExisting(reason))
     }
 
@@ -1261,7 +1260,7 @@ impl TranscodeManager {
 
     /// Called only after ingress has acquired its durable create and checked
     /// predecessor admission. Catalog/restore paths never call this producer.
-    pub(crate) async fn qualify_processed_hdr10_auto(
+    pub(crate) async fn prepare_processed_hdr10(
         &self,
         request: &SessionRequest,
         recovery: &SessionRecoveryIdentity,
@@ -1281,17 +1280,17 @@ impl TranscodeManager {
         #[cfg(target_os = "linux")]
         {
             use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
-            if !request.automatic
-                || request.continuous_media.is_some()
-                || request.subtitle_burn.is_some()
-                || matches!(
-                    request.kind,
-                    SessionKind::Copy {
-                        preserve_dolby_vision: true,
-                        ..
-                    }
-                )
-            {
+            // Silent only where HDR10-E is not what this play is: a native
+            // Dolby Vision display (the DV route serves it), an SDR output,
+            // or the Developer-tab setting off. Everything after the setting
+            // check names its reason in the plan notes.
+            if matches!(
+                request.kind,
+                SessionKind::Copy {
+                    preserve_dolby_vision: true,
+                    ..
+                }
+            ) {
                 return Ok(None);
             }
             let Some(original) = request.candidate_context.as_ref() else {
@@ -1301,18 +1300,6 @@ impl TranscodeManager {
             // Its accepted destination still permits preference-driven DV
             // processing, subject to the actual completed decoder contract.
             if !hdr10_intent && original.selected_candidate.grade != OutputGrade::Hdr10 {
-                return Ok(None);
-            }
-            let Some(caps) = original.canonical_caps.as_ref() else {
-                return Ok(None);
-            };
-            if !caps
-                .hls_hevc_sample_entries
-                .as_ref()
-                .is_some_and(|entries| entries.iter().any(|entry| entry == "hvc1"))
-                || !caps.containers.iter().any(|container| container == "mp4")
-                || !caps.transports.iter().any(|transport| transport == "hls")
-            {
                 return Ok(None);
             }
             let Some(planning) = self
@@ -1326,9 +1313,29 @@ impl TranscodeManager {
             {
                 return Ok(None);
             }
-            // From here on processing applies and real resources are asked
-            // for, so every decline names its reason: the create reports it
-            // with the ordinary start it falls back to.
+            // The setting is on for a DV source: from here every decline is
+            // reported with the ordinary start it falls back to.
+            if request.continuous_media.is_some() {
+                return Err("the continuous adaptive route has no processed rendition yet".into());
+            }
+            if request.subtitle_burn.is_some() {
+                return Err("burned-in subtitles are not drawn into processed HDR10 yet".into());
+            }
+            let Some(caps) = original.canonical_caps.as_ref() else {
+                return Err("the client did not report its playback capabilities".into());
+            };
+            if !caps
+                .hls_hevc_sample_entries
+                .as_ref()
+                .is_some_and(|entries| entries.iter().any(|entry| entry == "hvc1"))
+                || !caps.containers.iter().any(|container| container == "mp4")
+                || !caps.transports.iter().any(|transport| transport == "hls")
+            {
+                return Err(
+                    "the client does not report HLS fMP4 HEVC (hvc1), which processed output needs"
+                        .into(),
+                );
+            }
             let Ok(_preparation_slot) =
                 Arc::clone(&self.processed_preparation_slot).try_acquire_owned()
             else {
@@ -1348,11 +1355,12 @@ impl TranscodeManager {
             } else {
                 request.audio_offset_ms.clamp(-15_000, 15_000)
             };
+            // The processed rendition is the selected rendition: same height,
+            // at any resolution the source has.
             let height = file
                 .height
                 .unwrap_or(0)
                 .min(i64::from(original.selected_candidate.target_height))
-                .min(720)
                 & !1;
             if height < 32 {
                 return Ok(None);
@@ -1473,70 +1481,16 @@ impl TranscodeManager {
                 };
                 encoding.reset_active_production(0, true);
                 encoding.note_active_segment(0, first, end_ms(first_entry));
-                let semantic = match &encoding.dv_processing {
-                    plurx_core::transcode::dv_processing::DvSelection::Selected(selected) => {
-                        selected.semantic_digest()
-                    }
-                    _ => return Err("the processed trial selected no processing plan".into()),
-                };
-                for entry in plan.entries.iter().skip(first as usize + 1).take(6) {
-                    if tokio::time::Instant::now() >= deadline {
-                        break;
-                    }
-                    let worker = root
-                        .permit
-                        .clone()
-                        .try_claim_worker()
-                        .ok_or("processed qualification credit still busy")?;
-                    let (_, selected) = runtime
-                        .execute_until(
-                            &file,
-                            &encoding.plan,
-                            &encoding.options,
-                            grid,
-                            entry,
-                            &encoding.executable.path,
-                            crate::dv_segment::SegmentAdmission::Retained(worker),
-                            Arc::new(crate::prodrun::ProducerSlot::new()),
-                            tokio_util::sync::CancellationToken::new(),
-                            None,
-                            Some(deadline),
-                        )
-                        .await?;
-                    if selected.semantic_digest() != semantic {
-                        return Err("processed qualification recipe changed".into());
-                    }
-                    encoding.note_active_segment(0, entry.index, end_ms(entry));
-                    if encoding.active_production_evidence().is_some_and(|proof| {
-                        proof.milli_realtime >= 1150
-                            && proof.active_ms >= 2000
-                            && proof.completed_segments >= 2
-                    }) {
-                        break;
-                    }
+                // The first verified window was produced during preparation.
+                // Processing is the selected delivery from here: no extra
+                // trial windows and no speed threshold decide it. Measured
+                // throughput is reported (Developer tab), never a gate.
+                if !matches!(
+                    &encoding.dv_processing,
+                    plurx_core::transcode::dv_processing::DvSelection::Selected(_)
+                ) {
+                    return Err("the processed trial selected no processing plan".into());
                 }
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(
-                    "processed qualification ran out of its share of the startup budget".into(),
-                );
-            }
-            match root.production_evidence() {
-                None => return Err("processed windows produced no sustained-speed evidence".into()),
-                Some(proof)
-                    if proof.milli_realtime < 1150
-                        || proof.active_ms < 2000
-                        || proof.completed_segments < 2 =>
-                {
-                    return Err(format!(
-                        "processed windows ran at {}x real time over {} ms and {} segments; \
-                         1.15x over 2000 ms and 2 segments is required",
-                        proof.milli_realtime as f64 / 1000.0,
-                        proof.active_ms,
-                        proof.completed_segments
-                    ));
-                }
-                Some(_) => {}
             }
             let encoding = &root.encoding;
             if !encoding
@@ -1723,7 +1677,7 @@ impl TranscodeManager {
         let dv_tools = if matches!(
             &dv_processing,
             plurx_core::transcode::dv_processing::DvSelection::KeepExisting(
-                plurx_core::transcode::dv_processing::DvFallbackReason::ProductionUnqualified
+                plurx_core::transcode::dv_processing::DvFallbackReason::AwaitingFirstWindow
             )
         ) && (req.candidate_context.is_none() || processed_trial)
         {
@@ -2871,11 +2825,6 @@ impl TranscodeManager {
             || context.selected_candidate.recipe_digest != actual
             || i64::from(context.selected_candidate.target_height)
                 != prepared.encoding.options.target_height
-            || prepared.production_evidence().is_none_or(|proof| {
-                proof.milli_realtime < 1150
-                    || proof.active_ms < 2000
-                    || proof.completed_segments < 2
-            })
             || !prepared
                 .encoding
                 .engine

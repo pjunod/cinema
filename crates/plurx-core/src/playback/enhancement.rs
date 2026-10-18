@@ -1,0 +1,306 @@
+//! What Dolby Vision enhancement the delivered picture actually carries, as
+//! the player shows it: short badges for what is active (FEL, RPU, DYN) and
+//! plain detail rows for everything, including why something is not in use.
+//!
+//! The server computes this once so every client renders the same thing and
+//! none has to reconstruct the delivery route from wire fields.
+
+use serde::{Deserialize, Serialize};
+
+/// The enhancements a badge can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EnhancementBadge {
+    /// The full enhancement layer's residual is in the delivered picture.
+    #[serde(rename = "FEL")]
+    Fel,
+    /// The RPU's reshaping (polynomial/MMR) was applied by the server.
+    #[serde(rename = "RPU")]
+    Rpu,
+    /// Dolby Vision dynamic display metadata (L1/L2/L8) reaches the display.
+    #[serde(rename = "DYN")]
+    Dyn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnhancementDetail {
+    pub badge: EnhancementBadge,
+    pub active: bool,
+    /// One plain sentence: what it is when active, why not when inactive.
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaybackEnhancement {
+    /// Badges for the active enhancements only, in display order.
+    pub active: Vec<EnhancementBadge>,
+    /// Every enhancement that applies to this source, active or not.
+    pub details: Vec<EnhancementDetail>,
+    /// The FEL/RPU badges of a processed HDR10 delivery are shown only while
+    /// the client holds a current `effective_processing` report for this
+    /// generation (they clear on seek, fallback or replacement with it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_effective_processing: bool,
+}
+
+/// How the picture reaches the client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnhancementRoute {
+    /// Dolby Vision delivered as the source's own profile.
+    NativeDolbyVision,
+    /// Profile 7 rewritten to 8.1 from the base layer: the EL is dropped.
+    ConvertedProfile81,
+    /// The reconstructed picture re-encoded as 8.1 with the FEL baked in.
+    ReconstructedProfile81 { fel_contributed: bool },
+    /// Server-processed HDR10 (HDR10-E).
+    ProcessedHdr10 { fel_contributed: bool },
+    /// The HDR10 base layer with the Dolby Vision metadata removed.
+    Hdr10Base,
+    /// SDR or any other output: no Dolby Vision enhancement applies.
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnhancementFacts<'a> {
+    /// Source Dolby Vision profile (5, 7, 8); `None` for a non-DV source.
+    pub source_profile: Option<u8>,
+    /// Whether the source declares an enhancement layer.
+    pub source_el_present: Option<bool>,
+    pub route: EnhancementRoute,
+    /// Developer tab: "Process Dolby Vision for HDR output".
+    pub hdr_processing_enabled: bool,
+    /// Developer tab: FEL re-encode to Profile 8.1.
+    pub fel_reencode_enabled: bool,
+    /// Why processing was declined for this play, when it was.
+    pub decline_reason: Option<&'a str>,
+}
+
+fn detail(badge: EnhancementBadge, active: bool, text: impl Into<String>) -> EnhancementDetail {
+    EnhancementDetail {
+        badge,
+        active,
+        text: text.into(),
+    }
+}
+
+/// `None` for a source without Dolby Vision: the player shows nothing.
+pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnhancement> {
+    use EnhancementBadge::{Dyn, Fel, Rpu};
+    let profile = facts.source_profile?;
+    let has_el = profile == 7 && facts.source_el_present != Some(false);
+    let not_used = |setting: bool, setting_name: &str| -> String {
+        match (setting, facts.decline_reason) {
+            (false, _) => format!("not used — {setting_name} is off in Settings → Developer"),
+            (true, Some(reason)) => format!("not used for this play — {reason}"),
+            (true, None) => "not used for this play".to_owned(),
+        }
+    };
+    let mut details = Vec::new();
+    let mut requires_effective_processing = false;
+    match &facts.route {
+        EnhancementRoute::NativeDolbyVision => {
+            if has_el {
+                details.push(detail(
+                    Fel,
+                    false,
+                    "FEL: delivered for the display to decode",
+                ));
+            } else if profile == 7 {
+                details.push(detail(Fel, false, "FEL: not in this source"));
+            }
+            details.push(detail(
+                Rpu,
+                false,
+                "RPU: carried to the display, which applies it",
+            ));
+            details.push(detail(
+                Dyn,
+                true,
+                "DYN: L1/L2/L8 dynamic metadata carried to the display",
+            ));
+        }
+        EnhancementRoute::ConvertedProfile81 => {
+            if has_el {
+                details.push(detail(
+                    Fel,
+                    false,
+                    format!(
+                        "FEL: {}",
+                        not_used(facts.fel_reencode_enabled, "FEL re-encode")
+                    ),
+                ));
+            }
+            details.push(detail(
+                Rpu,
+                false,
+                "RPU: converted to Profile 8.1 and carried to the display",
+            ));
+            details.push(detail(
+                Dyn,
+                true,
+                "DYN: L1/L2/L8 dynamic metadata carried to the display",
+            ));
+        }
+        EnhancementRoute::ReconstructedProfile81 { fel_contributed } => {
+            details.push(detail(
+                Fel,
+                *fel_contributed,
+                if *fel_contributed {
+                    "FEL: full enhancement layer reconstructed into the picture"
+                } else {
+                    "FEL: no enhancement-layer detail in this window"
+                },
+            ));
+            details.push(detail(
+                Rpu,
+                false,
+                "RPU: rewritten for the reconstructed picture and carried to the display",
+            ));
+            details.push(detail(
+                Dyn,
+                true,
+                "DYN: L1/L2/L8 dynamic metadata carried to the display",
+            ));
+        }
+        EnhancementRoute::ProcessedHdr10 { fel_contributed } => {
+            requires_effective_processing = true;
+            if has_el {
+                details.push(detail(
+                    Fel,
+                    *fel_contributed,
+                    if *fel_contributed {
+                        "FEL: full enhancement layer reconstructed into the picture"
+                    } else {
+                        "FEL: no enhancement-layer detail in this window"
+                    },
+                ));
+            }
+            details.push(detail(
+                Rpu,
+                true,
+                "RPU: base reshaping (polynomial and MMR) applied by the server",
+            ));
+            details.push(detail(
+                Dyn,
+                false,
+                "DYN: not carried — HDR10 has no Dolby Vision dynamic metadata",
+            ));
+        }
+        EnhancementRoute::Hdr10Base => {
+            let why = not_used(facts.hdr_processing_enabled, "Dolby Vision processing");
+            if has_el {
+                details.push(detail(Fel, false, format!("FEL: {why}")));
+            }
+            details.push(detail(Rpu, false, format!("RPU: {why}")));
+            details.push(detail(
+                Dyn,
+                false,
+                "DYN: not carried — HDR10 has no Dolby Vision dynamic metadata",
+            ));
+        }
+        EnhancementRoute::Other => return None,
+    }
+    let active = details
+        .iter()
+        .filter(|detail| detail.active)
+        .map(|detail| detail.badge)
+        .collect();
+    Some(PlaybackEnhancement {
+        active,
+        details,
+        requires_effective_processing,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use EnhancementBadge::{Dyn, Fel, Rpu};
+
+    fn facts(route: EnhancementRoute) -> EnhancementFacts<'static> {
+        EnhancementFacts {
+            source_profile: Some(7),
+            source_el_present: Some(true),
+            route,
+            hdr_processing_enabled: true,
+            fel_reencode_enabled: false,
+            decline_reason: None,
+        }
+    }
+
+    #[test]
+    fn processed_hdr10_with_fel_shows_fel_and_rpu_only() {
+        let shown = playback_enhancement(&facts(EnhancementRoute::ProcessedHdr10 {
+            fel_contributed: true,
+        }))
+        .expect("DV source");
+        assert_eq!(shown.active, [Fel, Rpu]);
+        assert!(shown.requires_effective_processing);
+        assert!(shown.details.iter().any(|d| d.badge == Dyn && !d.active));
+    }
+
+    #[test]
+    fn converted_p81_shows_dyn_and_says_why_fel_is_unused() {
+        let shown =
+            playback_enhancement(&facts(EnhancementRoute::ConvertedProfile81)).expect("DV source");
+        assert_eq!(shown.active, [Dyn]);
+        let fel = shown
+            .details
+            .iter()
+            .find(|d| d.badge == Fel)
+            .expect("FEL row");
+        assert!(!fel.active);
+        assert!(fel.text.contains("FEL re-encode is off"), "{}", fel.text);
+    }
+
+    #[test]
+    fn reconstructed_p81_carries_fel_and_dyn() {
+        let shown = playback_enhancement(&facts(EnhancementRoute::ReconstructedProfile81 {
+            fel_contributed: true,
+        }))
+        .expect("DV source");
+        assert_eq!(shown.active, [Fel, Dyn]);
+        assert!(!shown.requires_effective_processing);
+    }
+
+    #[test]
+    fn hdr10_base_has_no_badges_and_a_neutral_reason() {
+        let mut base = facts(EnhancementRoute::Hdr10Base);
+        base.decline_reason = Some("the client does not report HLS fMP4 HEVC (hvc1)");
+        let shown = playback_enhancement(&base).expect("DV source");
+        assert!(shown.active.is_empty());
+        assert!(shown.details[0]
+            .text
+            .contains("not used for this play — the client"));
+        base.hdr_processing_enabled = false;
+        let shown = playback_enhancement(&base).expect("DV source");
+        assert!(shown.details[0]
+            .text
+            .contains("is off in Settings → Developer"));
+    }
+
+    #[test]
+    fn native_profile8_shows_dyn_and_no_fel_row() {
+        let mut native = facts(EnhancementRoute::NativeDolbyVision);
+        native.source_profile = Some(8);
+        native.source_el_present = Some(false);
+        let shown = playback_enhancement(&native).expect("DV source");
+        assert_eq!(shown.active, [Dyn]);
+        assert!(shown.details.iter().all(|d| d.badge != Fel));
+    }
+
+    #[test]
+    fn non_dv_sources_and_sdr_show_nothing() {
+        let mut none = facts(EnhancementRoute::Hdr10Base);
+        none.source_profile = None;
+        assert!(playback_enhancement(&none).is_none());
+        assert!(playback_enhancement(&facts(EnhancementRoute::Other)).is_none());
+    }
+
+    #[test]
+    fn wire_names_are_the_badge_labels() {
+        assert_eq!(
+            serde_json::to_string(&[Fel, Rpu, Dyn]).expect("badges serialize"),
+            r#"["FEL","RPU","DYN"]"#
+        );
+    }
+}

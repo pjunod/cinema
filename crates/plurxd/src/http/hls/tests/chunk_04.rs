@@ -350,6 +350,7 @@ fn preparation_row(
         ..staged_candidate_request()
     };
     let response = StartResponse {
+            enhancement: None,
             effective_processing: None,
         delivered_audio: None,
         quality_catalog_status: None,
@@ -502,6 +503,7 @@ async fn activate_superseding_route(
         request: request.clone(),
     };
     let start = StartResponse {
+            enhancement: None,
             effective_processing: None,
         delivered_audio: None,
         quality_catalog_status: None,
@@ -2498,6 +2500,7 @@ async fn the_ingress_control_gate_answers_a_lost_owner_gone() {
             .replace("\"typeless_playlist\":true", "\"typeless_playlist\":false")
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id)),
             response_json: serde_json::to_string(&StartResponse {
+            enhancement: None,
             effective_processing: None,
                 delivered_audio: None,
                 quality_catalog_status: None,

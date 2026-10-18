@@ -41,7 +41,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 8] = [
+    let inputs: [(&str, &[u8]); 9] = [
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -74,6 +74,10 @@ fn renderer_source_identity() -> String {
             "segment_decode_render.c",
             include_bytes!("../../../tools/dv_processing/segment_decode_render.c"),
         ),
+        (
+            "yuv420p10.h",
+            include_bytes!("../../../tools/dv_processing/yuv420p10.h"),
+        ),
     ];
     let mut identity = Sha256::new();
     for (name, bytes) in inputs {
@@ -82,6 +86,40 @@ fn renderer_source_identity() -> String {
         identity.update(Sha256::digest(bytes));
     }
     hex::encode(identity.finalize())
+}
+/// Decode on the GPU the renderer already draws on. The helper maps VA-API
+/// surfaces straight into its Vulkan renderer; a host copy of a decoded 4K
+/// picture costs more than decoding it in software. The VA-API runtime and
+/// drivers are the media runtime's (the same ones the encoder uses), so its
+/// library directory follows the bundle's own on the search path.
+fn gpu_decode_environment(
+    environment: &mut Vec<(String, std::ffi::OsString)>,
+    device: &str,
+    ffmpeg: &str,
+) {
+    if !Path::new(device).exists() {
+        return;
+    }
+    environment.push(("PLURX_DV_DECODE_DEVICE".into(), device.into()));
+    let Some(media_lib) = Path::new(ffmpeg)
+        .parent()
+        .map(|bin| bin.join("lib"))
+        .filter(|lib| lib.join("libva.so.2").exists())
+    else {
+        return;
+    };
+    match environment
+        .iter_mut()
+        .find(|(name, _)| name == "LD_LIBRARY_PATH")
+    {
+        Some((_, value)) => {
+            let mut joined = value.clone();
+            joined.push(":");
+            joined.push(media_lib.as_os_str());
+            *value = joined;
+        }
+        None => environment.push(("LD_LIBRARY_PATH".into(), media_lib.into_os_string())),
+    }
 }
 fn hash_file(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -436,7 +474,7 @@ pub(crate) fn completed_window_encoder(
     preferred: plurx_core::transcode::Encoder,
     vaapi_upload_proved: bool,
     plan: &plurx_core::transcode::ResolvedTranscode,
-    grid: plurx_core::transcode::VodFrameGrid,
+    _grid: plurx_core::transcode::VodFrameGrid,
 ) -> plurx_core::transcode::Encoder {
     use plurx_core::transcode::Encoder;
     if preferred == Encoder::Nvenc {
@@ -446,8 +484,8 @@ pub(crate) fn completed_window_encoder(
         && plan
             .completed_reconstructed_output(Encoder::Vaapi)
             .is_some()
-        && u64::from(grid.numerator) <= 30 * u64::from(grid.denominator)
     {
+        // Any raster and cadence: the window's HEVC level follows them.
         Encoder::Vaapi
     } else {
         Encoder::Software
@@ -714,13 +752,12 @@ impl RuntimeRecipe {
                 .effective_width()
                 .zip(plan.output_contract().effective_height())
                 .ok_or("no immutable output raster")?;
-            let export_policy = if self.destination
-                == plurx_core::transcode::dv_processing::DvDestination::Hdr10
-            {
-                plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearRgb48V1 { raster }
-            } else {
-                plurx_core::transcode::dv_processing::DvExportPolicy::NativeRgb48V1
-            };
+            // Both destinations leave the GPU as 10-bit YCbCr at the output
+            // raster: the encoder only uploads it, it never converts colour.
+            let export_policy =
+                plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearYuv420p10V1 {
+                    raster,
+                };
             let export_raster = export_policy
                 .raster(self.native_bl)
                 .map_err(|e| e.to_string())?;
@@ -745,13 +782,14 @@ impl RuntimeRecipe {
                 ),
                 ("MESA_SHADER_CACHE_MAX_SIZE".into(), "64M".into()),
             ]);
+            gpu_decode_environment(
+                &mut renderer_env,
+                &plurx_core::transcode::vaapi_device(),
+                &crate::ffmpeg::ffmpeg_bin(),
+            );
             let request = crate::dv_segment::StreamingSegmentRequest {
                 mode: self.mode,
-                export_raster: matches!(
-                    export_policy,
-                    plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearRgb48V1 { .. }
-                )
-                .then_some(export_raster),
+                export_raster: Some(export_raster),
                 request: crate::dv_segment::SegmentRequest {
                     renderer: self.tools.renderer.clone(),
                     renderer_env,
@@ -985,7 +1023,10 @@ pub(crate) async fn run_private_window(
                     .read_to_end(&mut bytes)
                     .await
                     .map_err(|e| e.to_string())?;
-                if bytes.is_empty() || bytes.len() as u64 > OUTPUT_LIMIT {
+                // Only an over-limit spool fails here: the reader stopped,
+                // so the encoder can never finish. An empty spool waits for
+                // the helper and encoder outcomes, which name the real cause.
+                if bytes.len() as u64 > OUTPUT_LIMIT {
                     return Err("DV encoder private-output bound exceeded".to_owned());
                 }
                 Ok(bytes)
@@ -1014,17 +1055,14 @@ pub(crate) async fn run_private_window(
                         .await
                         .map_err(|e| e.to_string())?
                     {
-                        return if status.success() {
-                            Ok(())
-                        } else {
-                            Err(format!("DV encoder failed: {status}"))
-                        };
+                        return Ok(status);
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             };
-            let (bytes, _, (), ()) = tokio::try_join!(output, diagnostic, completed_helper, exit)?;
-            Ok::<_, String>(bytes)
+            let (bytes, diagnostic, (), status) =
+                tokio::try_join!(output, diagnostic, completed_helper, exit)?;
+            private_window_outcome(bytes, &diagnostic, status)
         };
         tokio::pin!(capture);
         tokio::select! {
@@ -1043,6 +1081,47 @@ pub(crate) async fn run_private_window(
         evidence,
         registration,
     })
+}
+
+/// Decide a completed private window from its encoder outcome. The helper's
+/// own refusal already failed the join; what remains is the encoder's exit
+/// status, its last diagnostic line and whether it wrote anything.
+#[cfg(target_os = "linux")]
+fn private_window_outcome(
+    bytes: Vec<u8>,
+    diagnostic: &[u8],
+    status: std::process::ExitStatus,
+) -> Result<Vec<u8>, String> {
+    if !status.success() {
+        return Err(match encoder_diagnostic_tail(diagnostic) {
+            Some(line) => format!("DV encoder failed: {status}: {line}"),
+            None => format!("DV encoder failed: {status}"),
+        });
+    }
+    if bytes.is_empty() {
+        return Err(match encoder_diagnostic_tail(diagnostic) {
+            Some(line) => format!("DV encoder exited cleanly with no output: {line}"),
+            None => "DV encoder exited cleanly with no output".to_owned(),
+        });
+    }
+    Ok(bytes)
+}
+
+/// The last ffmpeg message that is not a `-progress` key=value line, bounded
+/// for a log/plan note.
+#[cfg(any(target_os = "linux", test))]
+fn encoder_diagnostic_tail(diagnostic: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(diagnostic);
+    let line = text.lines().rev().map(str::trim).find(|line| {
+        !line.is_empty()
+            && !line.split_once('=').is_some_and(|(key, _)| {
+                !key.is_empty()
+                    && key
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            })
+    })?;
+    Some(line.chars().take(300).collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -1364,7 +1443,7 @@ impl PrivateWindow {
                 || rendered.render_errors != 0
                 || pair.bl_width == 0
                 || pair.bl_height == 0
-                || pair.bl_width > 3840
+                || pair.bl_width > 4096
                 || pair.bl_height > 2160
                 || (mode == DvProcessingMode::Fel
                     && (pair.el_width == 0
@@ -1465,5 +1544,41 @@ impl PrivateWindow {
             source_tick: tick,
             runtime_device,
         })
+    }
+}
+
+#[cfg(test)]
+mod private_window_outcome_tests {
+    use super::encoder_diagnostic_tail;
+
+    #[test]
+    fn diagnostic_tail_skips_progress_lines_and_is_bounded() {
+        let stderr = b"[hevc_vaapi @ 0x1] Failed to create encode pipeline\n\
+            Error while opening encoder\nframe=0\nfps=0.0\nprogress=end\n";
+        assert_eq!(
+            encoder_diagnostic_tail(stderr).as_deref(),
+            Some("Error while opening encoder")
+        );
+        assert_eq!(encoder_diagnostic_tail(b"frame=1\nprogress=end\n"), None);
+        let long = "x".repeat(1000);
+        assert_eq!(encoder_diagnostic_tail(long.as_bytes()).unwrap().len(), 300);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_or_failed_encoder_output_names_its_cause() {
+        use super::private_window_outcome;
+        use std::os::unix::process::ExitStatusExt;
+        let ok = std::process::ExitStatus::from_raw(0);
+        let failed = std::process::ExitStatus::from_raw(1 << 8);
+        let stderr = b"Impossible to convert between the formats\nprogress=end\n";
+        let error = private_window_outcome(Vec::new(), stderr, ok).unwrap_err();
+        assert!(error.contains("no output"), "{error}");
+        assert!(error.contains("Impossible to convert"), "{error}");
+        assert!(!error.contains("bound exceeded"), "{error}");
+        let error = private_window_outcome(vec![1], stderr, failed).unwrap_err();
+        assert!(error.starts_with("DV encoder failed:"), "{error}");
+        assert!(error.contains("Impossible to convert"), "{error}");
+        assert_eq!(private_window_outcome(vec![7], b"", ok).unwrap(), vec![7]);
     }
 }

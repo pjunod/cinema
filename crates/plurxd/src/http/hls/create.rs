@@ -1318,6 +1318,63 @@ fn session_delivered_processing_shape(
     )
 }
 
+/// The FEL / RPU / DYN indicator for what this session actually delivers.
+fn session_enhancement(
+    source: Option<&MediaFile>,
+    kind: &crate::transcode::SessionKind,
+    grade: plurx_core::transcode::OutputGrade,
+    processed_dv_profile: Option<u8>,
+    effective: Option<&plurx_core::transcode::dv_processing::DvEffectiveProcessingReport>,
+    snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
+    decline: Option<&str>,
+) -> Option<plurx_core::playback::enhancement::PlaybackEnhancement> {
+    use plurx_core::playback::enhancement::{EnhancementFacts, EnhancementRoute};
+    let file = source?;
+    let profile = file
+        .dolby_vision
+        .profile
+        .and_then(|profile| u8::try_from(profile).ok());
+    let has_el = file.dolby_vision.el_present != Some(false);
+    let (delivered, _) =
+        session_delivered_processing_shape(source, kind, grade, processed_dv_profile);
+    let (_, preserve, convert) = session_delivery_shape(kind);
+    let route = if processed_dv_profile == Some(8)
+        && matches!(kind, crate::transcode::SessionKind::Transcode { .. })
+    {
+        EnhancementRoute::ReconstructedProfile81 {
+            fel_contributed: profile == Some(7) && has_el,
+        }
+    } else {
+        match delivered {
+            Some("dolby_vision") if convert => EnhancementRoute::ConvertedProfile81,
+            Some("dolby_vision") if preserve || !convert => EnhancementRoute::NativeDolbyVision,
+            Some("hdr10") => match effective {
+                Some(report) => EnhancementRoute::ProcessedHdr10 {
+                    fel_contributed: report.fel_contributed(),
+                },
+                None => EnhancementRoute::Hdr10Base,
+            },
+            _ => EnhancementRoute::Other,
+        }
+    };
+    let setting = |key: &str| {
+        plurx_core::store::stored_switch(
+            snapshot
+                .and_then(|snapshot| snapshot.settings.get(key))
+                .map(String::as_str),
+            false,
+        )
+    };
+    plurx_core::playback::enhancement::playback_enhancement(&EnhancementFacts {
+        source_profile: profile,
+        source_el_present: file.dolby_vision.el_present,
+        route,
+        hdr_processing_enabled: setting(plurx_core::store::keys::DV_HDR_PROCESSING),
+        fel_reencode_enabled: setting(plurx_core::store::keys::DV_FEL_REENCODE),
+        decline_reason: decline,
+    })
+}
+
 /// What a session kind means to the two badge helpers.
 ///
 /// One reading for both, so the range and the profile can never disagree
@@ -3105,6 +3162,9 @@ async fn create_with_purpose_inner(
     }
     let fingerprint = purpose.bind_policy(&mut request, resolved.intent_fingerprint)?;
     let mut plan_notes = resolved.plan_notes;
+    // The first reason Dolby Vision processing was declined for this play,
+    // for the enhancement details the player shows.
+    let mut processing_decline: Option<String> = None;
     let native_subtitles = resolved.native_subtitles;
     let native_subtitle = resolved.native_subtitle;
     let now_ms = unix_ms();
@@ -3455,11 +3515,13 @@ async fn create_with_purpose_inner(
     } else {
         None
     };
-    if candidate_auto_policy
-        && continuous.is_none()
-        && pinned_owner
-            .as_ref()
-            .is_none_or(|owner| owner == &state.node_id)
+    // Every catalog start with a DV source is offered processing: Auto or a
+    // chosen rung, any route. The qualifier itself decides applicability and
+    // names every decline. Only a reopen pinned to another node's session is
+    // left to that node, which owns the producer.
+    if pinned_owner
+        .as_ref()
+        .is_none_or(|owner| owner == &state.node_id)
     {
         let recovery = crate::transcode::SessionRecoveryIdentity {
             principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
@@ -3470,7 +3532,7 @@ async fn create_with_purpose_inner(
         };
         match state
             .transcode
-            .qualify_processed_hdr10_auto(&request, &recovery, hdr10_requested)
+            .prepare_processed_hdr10(&request, &recovery, hdr10_requested)
             .await
         {
             Ok(Some((mut processed, candidate))) => {
@@ -3584,6 +3646,7 @@ async fn create_with_purpose_inner(
                         Err(reason) => {
                             tracing::warn!(target: "plurxd::http::hls", %reason,
                                 "processed Auto candidate not adopted; retaining ordinary candidate");
+                            processing_decline.get_or_insert_with(|| reason.to_string());
                             plan_notes.push(processing_declined_note(&reason));
                         }
                     }
@@ -3593,6 +3656,7 @@ async fn create_with_purpose_inner(
             Err(reason) => {
                 tracing::warn!(target: "plurxd::http::hls", %reason,
                     "processed Auto qualification refused; retaining ordinary candidate");
+                processing_decline.get_or_insert_with(|| reason.to_string());
                 plan_notes.push(processing_declined_note(&reason));
             }
         }
@@ -4001,6 +4065,7 @@ async fn create_with_purpose_inner(
                         .to_owned(),
                 )
             })?;
+        processing_decline.get_or_insert_with(|| reason.to_string());
         plan_notes.push(processing_declined_note(&reason));
         request = ordinary;
         candidate_route = request
@@ -4169,11 +4234,22 @@ async fn create_with_purpose_inner(
     } else {
         None
     };
+    let effective_processing = state
+        .transcode
+        .dv_effective_report(&info.session_id, &incarnation_id)
+        .await;
+    let enhancement = session_enhancement(
+        source.as_ref(),
+        &info.kind,
+        info.grade,
+        info.processed_dv_profile,
+        effective_processing.as_ref(),
+        planning_snapshot.as_ref(),
+        processing_decline.as_deref(),
+    );
     let response = StartResponse {
-        effective_processing: state
-            .transcode
-            .dv_effective_report(&info.session_id, &incarnation_id)
-            .await,
+        enhancement,
+        effective_processing,
         delivered_audio: info.audio_delivery.clone(),
         display_aware_auto_protocol: quality_negotiated.then(|| "route-v1".to_owned()),
         quality_candidate_id: request
@@ -5889,6 +5965,7 @@ impl PreparedSourcePlayback {
             info.playlist_url.clone()
         };
         Ok(StartResponse {
+            enhancement: None,
             effective_processing: None,
             delivered_audio: info.audio_delivery.clone(),
             measured_candidate_outputs: None,

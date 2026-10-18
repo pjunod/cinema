@@ -32,11 +32,12 @@ use crate::domain::ScanType;
 /// This contract does not participate in ordinary pipeline negotiation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconstructedPqInput {
-    Rgb48Bt2020Pq,
+    /// BT.2020 NCL limited-range 4:2:0 10-bit PQ, converted on the GPU.
+    Yuv420p10Bt2020NclPq,
 }
 impl ReconstructedPqInput {
     pub fn pixel_format(self) -> &'static str {
-        "rgb48le"
+        "yuv420p10le"
     }
     pub fn transfer(self) -> &'static str {
         "smpte2084"

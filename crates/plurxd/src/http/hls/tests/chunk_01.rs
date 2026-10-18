@@ -270,7 +270,7 @@
             .split_once("let recovery = crate::transcode::SessionRecoveryIdentity {")
             .expect("processed qualification identity")
             .1
-            .split_once(".qualify_processed_hdr10_auto(")
+            .split_once(".prepare_processed_hdr10(")
             .expect("processed qualification call")
             .0;
         assert!(qualification.contains("recovery_epoch: recovery_epoch.clone(),"));
@@ -305,7 +305,7 @@
     fn a_processed_candidate_that_cannot_be_adopted_or_consumed_degrades_with_its_reason() {
         let source = hls_product_source();
         let qualification = source
-            .split_once(".qualify_processed_hdr10_auto(")
+            .split_once(".prepare_processed_hdr10(")
             .expect("processed qualification call")
             .1
             .split_once("crate::media_pool::mark_create_phase(\"processed_qualification\");")
@@ -1012,6 +1012,7 @@
             },
         };
         let start = StartResponse {
+            enhancement: None,
             effective_processing: None,
             delivered_audio: None,
         quality_catalog_status: None,
@@ -1872,6 +1873,7 @@
             .recipe_json
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
         let start = StartResponse {
+            enhancement: None,
             effective_processing: None,
             delivered_audio: None,
         quality_catalog_status: None,
@@ -2196,6 +2198,7 @@
             },
         };
         let start = StartResponse {
+            enhancement: None,
             effective_processing: None,
             delivered_audio: None,
         quality_catalog_status: None,
@@ -2475,6 +2478,7 @@
                 },
             };
             let start = StartResponse {
+            enhancement: None,
             effective_processing: None,
                 delivered_audio: None,
         quality_catalog_status: None,

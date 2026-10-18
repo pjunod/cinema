@@ -26,7 +26,7 @@ fn completed_vaapi_policy_separates_backend_identity_without_leaking_to_other_en
 #[test]
 fn explicit_export_policy_keeps_native_shapes_and_separates_resampling_identity() {
     let native = (3840, 2160);
-    let export = DvExportPolicy::PqBilinearRgb48V1 {
+    let export = DvExportPolicy::PqBilinearYuv420p10V1 {
         raster: (1280, 720),
     };
     assert_eq!(export.raster(native).expect("bounded export"), (1280, 720));
@@ -46,7 +46,7 @@ fn explicit_export_policy_keeps_native_shapes_and_separates_resampling_identity(
     );
     assert_ne!(
         export.target_parameters(),
-        DvExportPolicy::PqBilinearRgb48V1 {
+        DvExportPolicy::PqBilinearYuv420p10V1 {
             raster: (1920, 1080)
         }
         .target_parameters()
@@ -59,7 +59,7 @@ fn explicit_export_policy_keeps_native_shapes_and_separates_resampling_identity(
         (0, 0),
         (16, 16),
     ] {
-        assert!(DvExportPolicy::PqBilinearRgb48V1 { raster }
+        assert!(DvExportPolicy::PqBilinearYuv420p10V1 { raster }
             .raster(native)
             .is_err());
     }
@@ -442,7 +442,7 @@ fn production_registry_is_empty_even_for_relabelled_synthetic_evidence() {
     let mut input = input(DvDestination::Hdr10);
     assert!(matches!(
         resolve_dv_processing(&input).expect("valid synthetic control"),
-        DvSelection::KeepExisting(DvFallbackReason::ProductionUnqualified)
+        DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow)
     ));
     let scope: DvEvidenceScope =
         serde_json::from_str("\"production_route\"").expect("valid synthetic control");
@@ -457,7 +457,7 @@ fn production_registry_is_empty_even_for_relabelled_synthetic_evidence() {
         .scope = scope;
     assert!(matches!(
         resolve_inner(&input, true).expect("valid synthetic control"),
-        DvSelection::KeepExisting(DvFallbackReason::ProductionUnqualified)
+        DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow)
     ));
 }
 #[test]

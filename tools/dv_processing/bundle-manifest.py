@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 INPUTS = ("base_dv_renderer.h", "dv_trace.h", "fel_renderer.h", "hevc-rasl-frame-thread.patch", "nlq_clipping.h",
-          "nut_timing.h", "rgb48.h", "segment_decode_render.c")
+          "nut_timing.h", "rgb48.h", "segment_decode_render.c", "yuv420p10.h")
 GRAPH = "p7-fel-linear-dz-bt2020-pq-master-clip-v1"
 
 

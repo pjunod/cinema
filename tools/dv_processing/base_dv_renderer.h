@@ -168,12 +168,16 @@ static void base_gpu_init(int width, int height) {
   pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
                            PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE |
                            ((EXPORT_WIDTH != width || EXPORT_HEIGHT != height) ?
-                            PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR : 0));
+                            PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR : 0) |
+                           (EXPORT_YUV10 ? PL_FMT_CAP_SAMPLEABLE : 0));
   require(base_context.renderer && fmt && fmt->texel_size == 16,
           "base renderer/output format");
   base_context.output_texture = pl_tex_create(gpu,
       pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = fmt,
-                    .renderable = true, .host_readable = true));
+                    .renderable = true, .host_readable = true,
+                    .sampleable = EXPORT_YUV10));
+  require(!EXPORT_YUV10 || dv_yuv10_init(gpu, EXPORT_WIDTH, EXPORT_HEIGHT),
+          "GPU yuv420p10 export planes");
   base_context.rgba = malloc(EXPORT_FLOAT_COUNT * sizeof(float));
   require(base_context.output_texture && base_context.rgba, "base output buffer");
   if (EXPORT_WIDTH != width || EXPORT_HEIGHT != height) {
@@ -226,22 +230,35 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   struct pl_render_errors errors = pl_renderer_get_errors(base_context.renderer);
   require(errors.errors == 0 && errors.num_disabled_hooks == 0,
           "base renderer errors");
+  const uint8_t *exported = NULL;
+  size_t exported_bytes = 0;
+  uint8_t *packed = NULL;
+  if (EXPORT_YUV10) {
+    require(dv_yuv10_export(base_context.renderer, gpu, base_context.output_texture),
+            "base GPU yuv420p10 export");
+    pl_unmap_avframe(gpu, &source);
+    exported = dv_yuv10_context.frame;
+    exported_bytes = dv_yuv10_frame_bytes();
+  } else {
   require(pl_tex_download(gpu, pl_tex_transfer_params(
               .tex = base_context.output_texture, .ptr = base_context.rgba)),
           "base RGB download");
   pl_unmap_avframe(gpu, &source);
   size_t pixels = EXPORT_FLOAT_COUNT / 4;
-  uint8_t *packed = malloc(pixels * 6);
+  packed = malloc(pixels * 6);
   require(packed != NULL, "base packed RGB buffer");
   require(dv_pack_rgba_rgb48(base_context.rgba, pixels, packed, pixels * 6),
           "finite base RGBA");
-  sink(packed, pixels * 6, NULL);
+  exported = packed;
+  exported_bytes = pixels * 6;
+  }
+  sink(exported, exported_bytes, NULL);
   char rgb_hash[65];
   if (diagnostic_hashes) {
     struct AVSHA *sha = av_sha_alloc();
     uint8_t hash[32];
     require(sha && av_sha_init(sha, 256) == 0, "base RGB SHA256");
-    av_sha_update(sha, packed, pixels * 6);
+    av_sha_update(sha, exported, exported_bytes);
     av_sha_final(sha, hash);
     av_free(sha);
     for (int i = 0; i < 32; i++) snprintf(rgb_hash + 2*i, 3, "%02x", hash[i]);
@@ -257,7 +274,8 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   if (mapping->polynomial_segments) printf(",\"PolynomialReshape\"");
   if (mapping->mmr_segments) printf(",\"MmrReshape\"");
   printf(",\"RpuColorConversion\",\"TargetMapping\"]");
-  if (diagnostic_hashes) printf(",\"rgb_sha256\":\"%s\"", rgb_hash);
+  if (diagnostic_hashes)
+    printf(EXPORT_YUV10 ? ",\"yuv10_sha256\":\"%s\"" : ",\"rgb_sha256\":\"%s\"", rgb_hash);
   printf(",\"creative_trims_applied\":false,\"render_errors\":%u,"
          "\"production_qualified\":false}\n", errors.errors);
 }
@@ -266,6 +284,7 @@ static void base_gpu_close(void) {
   for (int i = 0; i < 4; i++) pl_tex_destroy(gpu, &base_context.textures[i]);
   pl_tex_destroy(gpu, &base_context.output_texture);
   pl_tex_destroy(gpu, &base_context.native_texture);
+  if (EXPORT_YUV10) dv_yuv10_close(gpu);
   pl_renderer_destroy(&base_context.renderer);
   pl_vulkan_destroy(&base_context.vk);
   pl_log_destroy(&base_context.log);

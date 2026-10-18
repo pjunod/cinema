@@ -2770,7 +2770,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             matches!(
                 TranscodeManager::vod_dv_processing_from_snapshot(&hdr, &request)
                     .expect("HDR route"),
-                DvSelection::KeepExisting(Reason::ProductionUnqualified)
+                DvSelection::KeepExisting(Reason::AwaitingFirstWindow)
             ),
             "HDR processing does not depend on DV conversion permission, nor grant qualification"
         );
@@ -2815,7 +2815,7 @@ case "$*" in *-show_data*) cat "$(dirname "$PLURX_TEST_PROBE_PATH")/configuratio
             matches!(
                 TranscodeManager::vod_dv_processing_from_snapshot(&allowed, &request)
                     .expect("P8.1 route"),
-                DvSelection::KeepExisting(Reason::ProductionUnqualified)
+                DvSelection::KeepExisting(Reason::AwaitingFirstWindow)
             ),
             "saved choices and scanner flags cannot grant a runtime qualification"
         );

@@ -39,7 +39,8 @@ cd "$root/ffmpeg-build"
     --disable-swresample --disable-swscale --enable-static --disable-shared \
     --enable-avcodec --enable-avformat --enable-avutil --enable-decoder=hevc \
     --enable-parser=hevc --enable-bsf=dovi_split,hevc_mp4toannexb,extract_extradata \
-    --enable-demuxer=matroska,hevc,mov --enable-muxer=matroska,nut,mp4 --enable-protocol=file
+    --enable-demuxer=matroska,hevc,mov --enable-muxer=matroska,nut,mp4 --enable-protocol=file \
+    --enable-libdrm --enable-vaapi --enable-hwaccel=hevc_vaapi
 make -j "$jobs"
 make install
 
