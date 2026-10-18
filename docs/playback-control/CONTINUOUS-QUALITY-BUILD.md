@@ -1,7 +1,7 @@
 # Continuous quality — build uninterrupted resolution changes
 
 **Status:** implementation landed in PR #774; post-merge qualification resumed;
-Measured Apple 262 checks pass; final Apple 263 release claim preserves the measured production code; qualification is pending;
+Measured Apple 262 checks pass; Apple 263 task #1179 merged after its development gate; main-bound qualification is pending;
 physical/native and independent output
 acceptance remain open; Firefox browser video passes on `89d790d2e` ·
 **Updated:** 2026-10-18 ·
@@ -14,7 +14,7 @@ acceptance remain open; Firefox browser video passes on `89d790d2e` ·
 
 - **What this is:** Implementation contract for changing video quality without a pause, flash or audio seam on every client, web first, then native.
 - **Where it stands:**
-  - Status (updated 2026-10-18): Apple 262 at `ef33cc71` passes 79 focused units, three recovery UI journeys, affected compilation and paperwork. Valid simulator comparison repairs the retained-incumbent failure; physical iPad SDK evidence still has one unclassified 104 ms surface pair, shared-AAC TV SDK playback completes with zero sampled access stalls; independent output continuity remains unmeasured, a separate E-AC-3-to-AAC VOD boundary finding is open, and Safari awaits user settings. Task #1179 gate, physical/independent-output acceptance and parent #1156 promotion remain pending. Firefox retains its old-source browser-video scope; see §10.332.
+  - Status (updated 2026-10-18): Apple 262 at `ef33cc71` passes 79 focused units, three recovery UI journeys, affected compilation and paperwork. Valid simulator comparison repairs the retained-incumbent failure; physical iPad SDK evidence still has one unclassified 104 ms surface pair, shared-AAC TV SDK playback completes with zero sampled access stalls; independent output continuity remains unmeasured, a separate E-AC-3-to-AAC VOD boundary finding is open, and Safari awaits user settings. Task #1179 merged after green Effort development gate run 5423; physical/independent-output acceptance and parent #1156 qualification/promotion remain pending. Firefox retains its old-source browser-video scope; see §10.332.
   - Per-milestone state lives in the evidence ledger (CQ0-CQ7 have partial results, CQ8 is "Not run"); empty rows are unfinished work. The tail of the file is a dated running log of review rounds and test repairs.
   - Execution order is CQ0, CQ2a, CQ1, CQ2, CQ3, CQ4, CQ5, CQ6, CQ7, CQ8.
 - **Read further only for:**
@@ -12154,14 +12154,17 @@ these timestamps alone cannot assign upstream production/network delay.
 The measured task #1179 checkpoint is `ef33cc71cf89da900883d7ad5d2af5336aecffbc`, tree
 `0e84329578724a069103cd93fac873b38e651afe`, with main `efaf89152` integrated.
 Apple 262 preserves the session/candidate safety repairs and incoming
-Meridian preferences. The task gate and parent #1156 promotion remain
-pending; no main merge or production installation is claimed.
+Meridian preferences. Task #1179 merged as `8d169859d` after all eight
+Effort development gate jobs passed in run 5423 on `f29ea145b`
+(tree `72582cdb45b89512a608229b1658a0186418de2d`). Parent #1156 still
+needs main-bound qualification; no main merge or production installation is claimed.
 
 The measured source/build remain `ef33cc71` / Apple 262. Effort-base
 history synchronization advances the release claim to **Apple 263**.
 Every production Swift source and test remains byte-identical to the measured
-checkpoint; only release metadata and evidence documentation change. The
-final candidate still needs its own gate. These 262 observations are not relabelled as a physical 263 run.
+checkpoint; the remaining differences are synchronized base history, release
+metadata, evidence documentation and mutable regression-anchor repairs. The
+final effort candidate still needs main-bound qualification. These 262 observations are not relabelled as a physical 263 run.
 
 **Exact local evidence.** The final combined unit result is **79/79**:
 64 playback/binding/coordinator/PiP cases and 15 authentication/Home cases.

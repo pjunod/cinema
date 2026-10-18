@@ -1,7 +1,7 @@
 # Apple Auto acceptance — preserve sign-in and identify acquisition failures
 
 **Status:** open; Apple 262 session/candidate safety built and locally tested;
-physical continuity, the TV codec boundary and promotion remain open ·
+task #1179 merged after its development gate; physical continuity, the TV codec boundary and promotion remain open ·
 **Updated:** 2026-10-18 · **Branch:** `effort/apple-auto-declared-costs`,
 PR #1156; task #1179 on `codex/cq-session-acquisition-safety`
 
@@ -17,15 +17,18 @@ credential and server-selection incident is understood.
 
 The measured task #1179 checkpoint is `ef33cc71cf89da900883d7ad5d2af5336aecffbc`, tree
 `0e84329578724a069103cd93fac873b38e651afe`, including main `efaf89152` and
-Apple build **262**. The task gate and parent PR #1156 promotion remain
-pending. The earlier #1171 landing contains the label/diagnostic checkpoint;
+Apple build **262**. Task #1179 merged as `8d169859d` after all eight
+Effort development gate jobs passed in run 5423 on `f29ea145b`
+(tree `72582cdb45b89512a608229b1658a0186418de2d`). Parent PR #1156
+qualification and promotion remain pending. The earlier #1171 landing contains the label/diagnostic checkpoint;
 it does not contain the later session and candidate ownership repairs.
 
 The measured source/build remain `ef33cc71` / Apple 262. Effort-base
 history synchronization advances the release claim to **Apple 263**.
 Every production Swift source and test remains byte-identical to the measured
-checkpoint; only release metadata and evidence documentation change. The
-final candidate still needs its own gate. These 262 observations are not relabelled as a physical 263 run.
+checkpoint; the remaining differences are synchronized base history, release
+metadata, evidence documentation and mutable regression-anchor repairs. The
+final effort candidate still needs main-bound qualification. These 262 observations are not relabelled as a physical 263 run.
 
 | Evidence | Result and limit |
 |---|---|
