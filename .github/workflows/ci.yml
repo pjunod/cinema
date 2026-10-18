@@ -342,11 +342,11 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-    # Run 5436 reached the daemon after 55m37s and still emitted outcomes at
-    # the 60m cutoff; runs 5314 and 5360 also exhausted 60m. Preserve the full
-    # suite and serial FFmpeg checks with a finite 95m cap. Complete-daemon
-    # duration remains unmeasured; this budget is not a completion guarantee.
-    timeout-minutes: 95
+    # Run 5447 failed after 88m50s; the two following serial FFmpeg checks
+    # never ran. Source fixture admission may also queue independent bodies.
+    # Preserve every command with a finite 120m cap. Passing full-gate duration
+    # remains unmeasured; this budget is not a completion guarantee.
+    timeout-minutes: 120
     steps:
       - name: Capture mounted runner workspace owner
         run: |
