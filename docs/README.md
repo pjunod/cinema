@@ -110,7 +110,7 @@ index rows by status as of 2026-10-17 — the folder index is authoritative.
 | [server/](server/README.md) | The HTTP layer, scanning, images, auth and observability. | 7 open · 2 built |
 | [performance/](performance/README.md) | Where the seconds go: performance rounds and the video-quality programme. | 4 open · 1 built · 7 done |
 | [ci/](ci/README.md) | The build, the gate, and the agents that use it. | 4 live · 16 open · 3 done |
-| [features/](features/README.md) | Whole capabilities planned end to end, including the project backlog. | 4 live · 43 open · 10 built · 6 done |
+| [features/](features/README.md) | Whole capabilities planned end to end, including the project backlog. | 4 live · 41 open · 13 built · 6 done |
 | [reviews/](reviews/README.md) | Pull-request and effort review records. | 2 live · 10 open · 7 done · 1 superseded |
 | [archive/](archive/README.md) | Finished work, kept for history. | 2 rows |
 

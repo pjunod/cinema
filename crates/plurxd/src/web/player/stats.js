@@ -667,6 +667,7 @@ async function reportProgress(fileId, ended, attachedOwner){
   catch(e){ p.lastBeatMs=null; p.lastBeatAt=null; }
 }
 function closePlayer(options={}){
+  if(typeof translationRetire==="function")translationRetire("player closed");
   if(WATCH_CLOSE_PROMISE)return WATCH_CLOSE_PROMISE;
   const closingWatch=watchDetach();
   const closingGeneration=WATCH_GENERATION;

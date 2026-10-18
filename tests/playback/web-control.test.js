@@ -8055,7 +8055,7 @@ test("paused subtitle selection projects ordinal zero and Off immediately", asyn
     "function audioFactLabel(t){return t.title;}function subFactLabel(t){return t.title;}function langName(){return 'English';}",
     ...["setSub","clearSubs","rememberPlaybackSelection","pbSyncSubIcon","watchCurrentFile",
       "watchSelectedAudio","watchSelectedSub","watchTrackChip","watchFoldButton","watchTrackRow",
-      "watchDeliveryRow","watchLedgerHtml","watchBindLedger","watchRenderLedger","watchFolds","watchRenderSubtitleGeneration","watchCanGenerateSubtitles","watchGenerationAction"].map(shippedSource),
+      "watchDeliveryRow","watchLedgerHtml","watchBindLedger","watchRenderLedger","watchFolds","watchRenderSubtitleGeneration","watchCanGenerateSubtitles","watchGenerationAction","watchTranslationAction"].map(shippedSource),
     "return {setSub,video,player:PLAYER,ledger,band,ccOn:()=>ccOn};",
   ].join("\n"))(policy);
   await h.setSub(0);
