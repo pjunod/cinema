@@ -17,34 +17,31 @@ final class ViewerDestinationController: UIViewController {
     var visibleTabs = HomeTab.viewerTabs
     var recordingsAttention = 0
     var selectionChanged: ((HomeTab) -> Void)?
-    #if os(iOS)
     private(set) var nativeTabs: UITabBarController?
     private var standardSidebarHidden = true
     private var nativeLayout: ViewerLayout?
     private var updatingNativeSelection = false
-    #endif
+    var standardNavigationIsPushed = false
 
     private var appearanceOwner: UIViewController? {
-        #if os(iOS)
         if let nativeTabs { return nativeTabs }
-        #endif
         return activeHost
     }
 
     override func loadView() {
         view = UIView()
         view.backgroundColor = .clear
-        #if os(iOS)
-        if #available(iOS 18.0, *) {
+        if #available(iOS 18.0, tvOS 18.0, *) {
             let tabs = UITabBarController()
             tabs.delegate = self
+            #if os(iOS)
             tabs.mode = .tabSidebar
+            #endif
             nativeTabs = tabs
             addChild(tabs)
             view.addSubview(tabs.view)
             tabs.didMove(toParent: self)
         }
-        #endif
     }
     override var shouldAutomaticallyForwardAppearanceMethods: Bool { false }
     override func viewWillAppear(_ animated: Bool) {
@@ -70,21 +67,18 @@ final class ViewerDestinationController: UIViewController {
     private var activeHost: UIHostingController<AnyView>? { activeTab.flatMap { hosts[$0] } }
 
     func select(_ tab: HomeTab) {
-        #if os(iOS)
-        if #available(iOS 18.0, *) {
+        if #available(iOS 18.0, tvOS 18.0, *) {
             updatingNativeSelection = true
             defer { updatingNativeSelection = false }
             activeTab = tab
             updateNativeTabs()
             guard let item = nativeTabs?.tabs.first(where: { $0.identifier == tab.title }) else { return }
-            activeTab = tab
             if nativeTabs?.selectedTab !== item {
                 UIView.performWithoutAnimation { nativeTabs?.selectedTab = item }
             }
             view.setNeedsLayout()
             return
         }
-        #endif
         guard tab != activeTab else { return }
         let appearing = view.window != nil
         if let old = activeHost {
@@ -111,18 +105,19 @@ final class ViewerDestinationController: UIViewController {
         view.setNeedsLayout()
     }
 
-    #if os(iOS)
-    /// The system owns Standard's adaptive tab bar/sidebar. The same native
+    /// The system owns Standard's tab bar and adaptive iPad sidebar. The same native
     /// container and destination hosts survive when Meridian hides that chrome.
-    @available(iOS 18.0, *)
+    @available(iOS 18.0, tvOS 18.0, *)
     private func updateNativeTabs() {
         loadViewIfNeeded()
         guard let nativeTabs else { return }
+        #if os(iOS)
         // Meridian supplies every destination itself. Expose only its selected
         // tab to the hidden compact bar so UIKit cannot wrap overflow roots in
         // a second "More" navigation stack.
         let compactTabs = layout == .meridian ? activeTab.map { [$0.title] } : nil
         if nativeTabs.compactTabIdentifiers != compactTabs { nativeTabs.compactTabIdentifiers = compactTabs }
+        #endif
         if nativeTabs.tabs.map(\.identifier) != visibleTabs.map(\.title) {
             let existing = Dictionary(uniqueKeysWithValues: nativeTabs.tabs.map { ($0.identifier, $0) })
             nativeTabs.tabs = visibleTabs.map { tab in
@@ -136,16 +131,28 @@ final class ViewerDestinationController: UIViewController {
                 }
             }
         }
-        nativeTabs.tabs.first(where: { $0.identifier == HomeTab.recordings.title })?.badgeValue = recordingsAttention > 0 ? String(recordingsAttention) : nil
+        if let recordings = nativeTabs.tabs.first(where: { $0.identifier == HomeTab.recordings.title }) {
+            #if os(tvOS)
+            recordings.title = recordingsAttention > 0 ? "Recordings · \(recordingsAttention)" : "Recordings"
+            #else
+            recordings.badgeValue = recordingsAttention > 0 ? String(recordingsAttention) : nil
+            #endif
+        }
         nativeTabs.view.tintColor = UIColor(Palette.accent)
+        #if os(iOS)
         if nativeLayout != layout {
             if nativeLayout == .standard { standardSidebarHidden = nativeTabs.sidebar.isHidden }
             nativeTabs.sidebar.isHidden = layout == .standard ? standardSidebarHidden : true
-            nativeTabs.setTabBarHidden(layout == .meridian, animated: false)
             nativeLayout = layout
         }
+        #endif
+        #if os(tvOS)
+        let hidden = layout == .meridian || standardNavigationIsPushed
+        #else
+        let hidden = layout == .meridian
+        #endif
+        if nativeTabs.isTabBarHidden != hidden { nativeTabs.setTabBarHidden(hidden, animated: false) }
     }
-    #endif
 
     func updateChrome(_ content: AnyView, header headerContent: AnyView) {
         if let chrome { chrome.rootView = content }
@@ -162,8 +169,7 @@ final class ViewerDestinationController: UIViewController {
     }
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        #if os(iOS)
-        if #available(iOS 18.0, *), nativeTabs != nil {
+        if #available(iOS 18.0, tvOS 18.0, *), nativeTabs != nil {
             updateNativeTabs()
             chrome?.view.isHidden = layout == .standard
             if layout == .standard {
@@ -173,9 +179,6 @@ final class ViewerDestinationController: UIViewController {
             }
         }
         let destinationView = nativeTabs?.view ?? activeHost?.view
-        #else
-        let destinationView = activeHost?.view
-        #endif
         let bounds = view.bounds.inset(by: view.safeAreaInsets)
         #if os(tvOS)
         let rail = layout == .meridian
@@ -207,20 +210,19 @@ final class ViewerDestinationController: UIViewController {
     }
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
         if expanded, let chrome { return [chrome] }
+        if layout == .standard, let nativeTabs { return [nativeTabs] }
         return activeHost.map { [$0] } ?? []
     }
 }
 
-#if os(iOS)
 extension ViewerDestinationController: UITabBarControllerDelegate {
-    @available(iOS 18.0, *)
+    @available(iOS 18.0, tvOS 18.0, *)
     func tabBarController(_ tabBarController: UITabBarController, didSelectTab selectedTab: UITab, previousTab: UITab?) {
         guard let tab = visibleTabs.first(where: { $0.title == selectedTab.identifier }) else { return }
         activeTab = tab
         if !updatingNativeSelection { selectionChanged?(tab) }
     }
 }
-#endif
 
 struct ViewerDestinationHost: UIViewControllerRepresentable {
     let selection: HomeTab
@@ -230,6 +232,7 @@ struct ViewerDestinationHost: UIViewControllerRepresentable {
     let visibleTabs: [HomeTab]
     let recordingsAttention: Int
     let selectionChanged: (HomeTab) -> Void
+    let standardNavigationIsPushed: Bool
     let panelDismissed: () -> Void
     let root: (HomeTab) -> AnyView
     let chrome: AnyView
@@ -241,6 +244,7 @@ struct ViewerDestinationHost: UIViewControllerRepresentable {
     }
     func updateUIViewController(_ controller: ViewerDestinationController, context: Context) {
         controller.layout = layout
+        controller.standardNavigationIsPushed = standardNavigationIsPushed
         controller.accessibilityNavigation = accessibilityNavigation
         let changedExpansion = controller.expanded != expanded
         controller.expanded = expanded

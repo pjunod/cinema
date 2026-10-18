@@ -218,6 +218,51 @@ final class MeridianTests: XCTestCase {
 
     func testProductionShellRendersMeridianWithAllEnvironmentOwners() throws { try renderFixture() }
 
+    #if os(tvOS)
+    func testStandardTVClassicRendersWithOriginalTheme() throws { try renderFixture(layout: .standard) }
+    func testStandardTVTheaterRendersWithOriginalTheme() throws { try renderFixture(layout: .standard, tvHomeLayout: .theater) }
+
+    func testStandardTVNativeTabsDisappearForPushedRoutes() throws {
+        guard #available(tvOS 18.0, *) else { throw XCTSkip("Native retained tabs require tvOS 18") }
+        let model = AppModel(startServices: false)
+        model.phase = .ready
+        model.homeLoading = false
+        model.layout = .standard
+        let navigation = RemoteNavigationCoordinator()
+        let hosting = UIHostingController(rootView: HomeView(initialTab: .settings).environmentObject(model)
+            .environmentObject(navigation).environmentObject(RemotePlaybackAdapter())
+            .environmentObject(RemoteClientModel()).environmentObject(InvitationClientModel()))
+        let window = try makeWindow()
+        window.rootViewController = hosting
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        settle(0.6)
+        let destination = try XCTUnwrap(findDestination(hosting))
+        let tabs = try XCTUnwrap(destination.nativeTabs)
+        XCTAssertFalse(tabs.isTabBarHidden)
+        XCTAssertEqual(tabs.tabs.map(\.title), HomeTab.viewerTabs.map(\.title))
+        XCTAssertTrue(try XCTUnwrap(destination.chrome).view.isHidden)
+        navigation.paths[.settings] = [.sharedLibraries]
+        settle(0.6)
+        XCTAssertTrue(tabs.isTabBarHidden, "Standard detail replaces the entire tab shell")
+        XCTAssertEqual(findNavigation(try XCTUnwrap(destination.hosts[.settings]))?.viewControllers.count, 2)
+        navigation.paths[.settings] = []
+        settle(0.6)
+        XCTAssertFalse(tabs.isTabBarHidden, "Back restores native tabs")
+        let stack = try XCTUnwrap(findNavigation(try XCTUnwrap(destination.hosts[.settings])))
+        stack.pushViewController(UIHostingController(rootView: Text("Implicit settings destination")), animated: false)
+        settle(0.6)
+        XCTAssertTrue(tabs.isTabBarHidden, "Implicit pushes also replace the Standard shell")
+        stack.popViewController(animated: false)
+        settle(0.6)
+        XCTAssertFalse(tabs.isTabBarHidden, "Implicit Back restores native tabs")
+        model.layout = .meridian
+        settle(0.6)
+        XCTAssertTrue(tabs.isTabBarHidden)
+        XCTAssertFalse(try XCTUnwrap(destination.chrome).view.isHidden)
+    }
+    #endif
+
     #if os(iOS)
     func testStandardHomeRendersWithOriginalTheme() throws { try renderFixture(layout: .standard) }
 
@@ -253,13 +298,17 @@ final class MeridianTests: XCTestCase {
         #endif
     }
 
-    private func renderFixture(width: CGFloat? = nil, dynamicTypeSize: DynamicTypeSize = .large, layout: ViewerLayout = .meridian) throws {
+    private func renderFixture(width: CGFloat? = nil, dynamicTypeSize: DynamicTypeSize = .large, layout: ViewerLayout = .meridian, tvHomeLayout: TvHomeLayout = .classic) throws {
         let model = AppModel(startServices: false)
         model.phase = .ready
         model.homeLoading = false
         model.layout = layout
         let previousTheme = model.theme
         defer { model.setTheme(previousTheme) }
+        let settings = SettingsStore()
+        let previousTVLayout = settings.tvHomeLayout
+        settings.tvHomeLayout = tvHomeLayout
+        defer { settings.tvHomeLayout = previousTVLayout }
         model.setTheme(layout == .standard ? .noirr : .meridian)
         model.appearance = .dark
         model.libraries = [Library(id: 1, name: "Fixture Movies", kind: "movie"), Library(id: 2, name: "Fixture Series", kind: "show")]
@@ -288,7 +337,7 @@ final class MeridianTests: XCTestCase {
             window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
         }
         let attachment = XCTAttachment(image: image)
-        attachment.name = "\(layout.rawValue) native production shell — fixture titles — \(Int(window.bounds.width))x\(Int(window.bounds.height))"
+        attachment.name = "\(layout.rawValue) \(tvHomeLayout.rawValue) native production shell — fixture titles — \(Int(window.bounds.width))x\(Int(window.bounds.height))"
         attachment.lifetime = .keepAlways
         add(attachment)
         // A bounded window permits an independent simctl framebuffer capture.

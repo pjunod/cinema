@@ -10,7 +10,7 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-- Restore Standard's native adaptive iPad tabs and sidebar on iOS 18 and later after Meridian replaced them with a fixed custom sidebar. Existing themes and open navigation state remain independent of the layout choice.
+- Restore Standard's native iPad/Apple TV tabs on iOS/tvOS 18 and later, full-screen TV details, and original TV Theater styling after Meridian changed the existing layouts. Theme choices and open navigation state remain independent of the layout.
 
 ### Added
 
