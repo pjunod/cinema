@@ -1,6 +1,6 @@
 # Playback info describes the installed Auto rung
 
-Build: 263
+Build: 264
 Issue: #1156
 
 After Auto switches an original remux to an encoded rung, Playback info now
@@ -27,3 +27,20 @@ network-shaping contracts pass. A disposable simulator starts playback after
 the PiP repair, but its direct MP4 route bypasses shaping and supplies no
 pressure acceptance. Controlled HLS acquisition, physical acceptance and
 promotion remain pending. No physical installation is claimed.
+
+Qualification follow-up: the attempt census names the renamed unmeasured-cost
+refresh, the TV runner requires both new navigation journeys, and the physical
+scheme excludes the Meridian fixture. Viewer panel Menu handling now uses the
+existing platform adapter boundary; two bounded web navigation regions preserve
+the same Escape/Left behavior while leaving neighboring handlers fenced.
+
+The qualification journey also found that the collapsed Meridian host preferred
+content while the coordinator requested the navigation opener. On tvOS Meridian,
+the host now follows that explicit current opener request; later content requests
+clear the preference. Native focus acknowledgment and modal identity remain owned
+by the existing coordinator.
+
+The native trace then identified account reset clearing the persistent layout
+capability while Meridian remained visible. Reset now retains that capability
+while still removing all account actions, orders, routes and focus authority,
+so rebuilding the current library order keeps its opener eligible for Back.

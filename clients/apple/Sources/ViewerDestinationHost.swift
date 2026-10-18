@@ -12,6 +12,7 @@ final class ViewerDestinationController: UIViewController {
     private var header: UIHostingController<AnyView>?
     var layout: ViewerLayout = .standard
     var expanded = false
+    var chromeFocusRequested = false
     var accessibilityNavigation = false
     var makeRoot: ((HomeTab) -> AnyView)?
 
@@ -111,7 +112,7 @@ final class ViewerDestinationController: UIViewController {
         }
     }
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
-        if expanded, let chrome { return [chrome] }
+        if expanded || (layout == .meridian && chromeFocusRequested), let chrome { return [chrome] }
         return activeHost.map { [$0] } ?? []
     }
 }
@@ -120,6 +121,7 @@ struct ViewerDestinationHost: UIViewControllerRepresentable {
     let selection: HomeTab
     let layout: ViewerLayout
     let expanded: Bool
+    let chromeFocusRequested: Bool
     let accessibilityNavigation: Bool
     let panelDismissed: () -> Void
     let root: (HomeTab) -> AnyView
@@ -135,6 +137,8 @@ struct ViewerDestinationHost: UIViewControllerRepresentable {
         controller.accessibilityNavigation = accessibilityNavigation
         let changedExpansion = controller.expanded != expanded
         controller.expanded = expanded
+        let changedFocusRequest = controller.chromeFocusRequested != chromeFocusRequested
+        controller.chromeFocusRequested = chromeFocusRequested
         controller.hosts[selection]?.view.isUserInteractionEnabled = !expanded
         controller.hosts[selection]?.view.accessibilityElementsHidden = expanded
         controller.makeRoot = root
@@ -149,7 +153,7 @@ struct ViewerDestinationHost: UIViewControllerRepresentable {
                 panelDismissed()
             }
         }
-        if changedExpansion { controller.setNeedsFocusUpdate() }
+        if changedExpansion || changedFocusRequest { controller.setNeedsFocusUpdate() }
     }
 }
 
@@ -322,7 +326,7 @@ struct ViewerNavigationChrome: View {
             }
             .onChange(of: model.features) { _, _ in if expanded { enterPanel() } }
             .onChange(of: model.libraryCollections(grouping: .share)) { _, _ in if expanded { enterPanel() } }
-            .onExitCommand { if expanded { togglePanel() } }
+            .tvViewerNavigationPanelExit { if expanded { togglePanel() } }
             #endif
         }
     }
