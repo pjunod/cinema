@@ -8,6 +8,7 @@ import org.junit.Test
 class ViewerPreferencesTest {
     @Test
     fun persistedEnumsRoundTripEverySupportedValue() {
+        ViewerLayout.entries.forEach { assertEquals(it, ViewerLayout.fromStorage(it.storageValue)) }
         ThemeId.entries.forEach { assertEquals(it, ThemeId.fromStorage(it.storageValue)) }
         Appearance.entries.forEach { assertEquals(it, Appearance.fromStorage(it.storageValue)) }
         PosterSize.entries.forEach { assertEquals(it, PosterSize.fromStorage(it.storageValue)) }
@@ -20,6 +21,8 @@ class ViewerPreferencesTest {
 
     @Test
     fun corruptPreferencesFallBackToSafeViewerDefaults() {
+        assertEquals(ViewerLayout.Standard, ViewerLayout.fromStorage(null))
+        assertEquals(ViewerLayout.Standard, ViewerLayout.fromStorage("unknown"))
         assertEquals(ThemeId.Classic, ThemeId.fromStorage("unknown"))
         assertEquals(Appearance.System, Appearance.fromStorage("unknown"))
         assertEquals(PosterSize.Medium, PosterSize.fromStorage("unknown"))
@@ -28,6 +31,15 @@ class ViewerPreferencesTest {
         assertEquals(SubtitleReadiness.OnDemand, SubtitleReadiness.fromStorage("unknown"))
         assertEquals(OfflineQuality.Standard, OfflineQuality.fromStorage("unknown"))
         assertEquals(OfflineNetwork.WifiOnly, OfflineNetwork.fromStorage("unknown"))
+    }
+
+    @Test fun layoutAndThemeChangesPreserveSiblingPreferences() {
+        val original = ViewerPreferences(posterSize = PosterSize.ExtraLarge, libraryPresentation = LibraryPresentation.Grid, homeGrouping = HomeGrouping.Library)
+        val meridian = original.copy(layout = ViewerLayout.Meridian)
+        assertEquals(ThemeId.Classic, meridian.theme)
+        assertEquals(original, meridian.copy(layout = ViewerLayout.Standard))
+        assertEquals(ViewerLayout.Standard, original.copy(theme = ThemeId.Meridian).layout)
+        assertEquals(meridian, meridian.copy(theme = ThemeId.Meridian).copy(theme = ThemeId.Classic))
     }
 
     @Test

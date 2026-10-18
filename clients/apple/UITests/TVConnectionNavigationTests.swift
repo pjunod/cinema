@@ -49,7 +49,7 @@ final class TVConnectionNavigationTests: TVNavigationTestCase {
         assertFocus(retry, in: app, context: "Retry after connection recovers")
         let signIns = server.requestCount("POST /api/v1/auth/login")
         remote.press(.select)
-        XCTAssertTrue(app.tabBars.buttons["Home"].waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.viewerTab("Home").waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertEqual(server.requestCount("POST /api/v1/auth/login"), signIns,
                        "Retry must reuse the saved sign-in")
     }

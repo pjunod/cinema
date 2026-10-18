@@ -10,7 +10,7 @@ final class TVRemoteManagementNavigationTests: TVNavigationTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         remote.press(.menu)
-        let settings = app.tabBars.buttons["Settings"]
+        let settings = app.viewerTab("Settings")
         reachForSetup(settings, in: app, limit: 8)
         remote.press(.down)
         let developer = app.buttons["settings-category-Developer"]

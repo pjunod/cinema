@@ -10,7 +10,7 @@ final class TVPhysicalNavigationAcceptanceTests: TVNavigationTestCase {
         let app = XCUIApplication()
         app.launch()
         defer { app.terminate() }
-        let tab = app.tabBars.buttons["Live TV"]
+        let tab = app.viewerTab("Live TV")
         XCTAssertTrue(tab.waitForExistence(timeout: 30),
                       "Physical acceptance requires the device's existing saved sign-in")
         reachForSetup(tab, in: app, limit: 8)
@@ -71,7 +71,7 @@ final class TVPhysicalNavigationAcceptanceTests: TVNavigationTestCase {
         let app = XCUIApplication()
         app.launch()
         defer { app.terminate() }
-        let libraries = app.tabBars.buttons["Libraries"]
+        let libraries = app.viewerTab("Libraries")
         XCTAssertTrue(libraries.waitForExistence(timeout: 30),
                       "Physical acceptance requires the device's existing saved sign-in")
         reachForSetup(libraries, in: app, limit: 8)

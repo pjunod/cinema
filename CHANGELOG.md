@@ -8,6 +8,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- Web Meridian layout and independent theme, with collapsible source navigation, responsive phone destinations and cinematic Home/detail presentation. Layout changes retain the current page, library controls and playback session.
+
 ### Fixed
 
 - Apple preserves saved server/account pairing against launch overrides and

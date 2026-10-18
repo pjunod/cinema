@@ -46,6 +46,7 @@ const THEMES={
   // 4.49 and are replaced here by the review's corrected set. Dark --bad is
   // ours: #e5534b passes on --bg but lands at 4.25 / 3.89 on the panels, and
   // status text mostly lives on cards.
+  meridian:{name:"Meridian",dark:{"--bg":"#141416","--panel":"#1e1e21","--panel2":"#29292d","--text":"#f5f5f6","--muted":"#aaaab2","--prose":"#d0d0d5","--accent":"#e5a00d","--accent2":"#e5a00d","--btn-ink":"#171205","--good":"#52b788","--bad":"#ee7168","--warn":"#f2c14e","--selected-bg":"#f5f5f6","--selected-ink":"#202024","--radius":"12px","--font":FONT_UI,"--font-mono":FONT_SYS_MONO},light:{"--bg":"#f5f4f1","--panel":"#ffffff","--panel2":"#eae8e3","--text":"#202024","--muted":"#606068","--prose":"#424248","--accent":"#805600","--accent2":"#805600","--btn-ink":"#ffffff","--good":"#246b49","--bad":"#bd332d","--warn":"#805600","--selected-bg":"#29292d","--selected-ink":"#ffffff","--radius":"12px","--font":FONT_UI,"--font-mono":FONT_SYS_MONO}},
   amber:{name:"Amber",
     dark:{"--bg":"#191a1d","--panel":"#212327","--panel2":"#2a2d32","--line":"#383c43","--text":"#eceef0","--muted":"#9aa0a7","--accent":"#e5a00d","--accent2":"#cc7b19","--good":"#52b788","--bad":"#ee7168","--warn":"#f2c14e","--radius":"8px","--btn-ink":"#1c1303","--prose":"#c9cdd2","--font":FONT_UI,"--font-mono":FONT_SYS_MONO},
     light:{"--bg":"#f3f4f6","--panel":"#ffffff","--panel2":"#e9ebee","--line":"#d5d9de","--text":"#1e2124","--muted":"#5f666d","--accent":"#8b5e00","--accent2":"#a95f16","--good":"#246b49","--bad":"#bd332d","--warn":"#8a6116","--radius":"8px","--btn-ink":"#ffffff","--prose":"#3a4046","--font":FONT_UI,"--font-mono":FONT_SYS_MONO}},
@@ -130,6 +131,30 @@ function resolveMode(app){
   if(app==="light"||app==="dark") return app;
   return (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";
 }
+function themeContrast(foreground,background){
+  const channels=color=>/^#[0-9a-f]{6}$/i.test(color)?[1,3,5].map(at=>parseInt(color.slice(at,at+2),16)/255):null;
+  const light=color=>{const values=channels(color);return values?values.map(v=>v<=.04045?v/12.92:Math.pow((v+.055)/1.055,2.4)).reduce((sum,v,index)=>sum+v*[.2126,.7152,.0722][index],0):null;};
+  const a=light(foreground),b=light(background);return a===null||b===null?0:(Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+}
+function themeActionRole(palette){
+  const choose=background=>[palette["--btn-ink"],palette["--bg"],palette["--text"]].reduce((best,ink)=>themeContrast(ink,background)>themeContrast(best,background)?ink:best);
+  let background=palette["--accent"],ink=choose(background);
+  if(themeContrast(ink,background)>=4.5)return {background,ink};
+  // Some existing palettes have no 4.5:1 ink on their mid-tone accent. Derive
+  // the smallest safe shade from that same palette; other layouts keep their
+  // original --accent/--btn-ink and no Meridian color enters this calculation.
+  const channels=hex=>[1,3,5].map(at=>parseInt(hex.slice(at,at+2),16));
+  const accent=channels(background);
+  for(let step=1;step<=20;step++)for(const target of [palette["--text"],palette["--bg"]]){
+    const to=channels(target);
+    background="#"+accent.map((v,index)=>Math.round(v+(to[index]-v)*step/20).toString(16).padStart(2,"0")).join("");
+    ink=choose(background);if(themeContrast(ink,background)>=4.5)return {background,ink};
+  }
+  return {background:palette["--text"],ink:palette["--bg"]};
+}
+function themeLayoutMuted(palette){
+  return ["--bg","--panel","--panel2"].every(key=>themeContrast(palette["--muted"],palette[key])>=4.5)?palette["--muted"]:palette["--text"];
+}
 let APPLIED_VARS=[];
 function applyTheme(){
   let id=null, app=null;
@@ -142,7 +167,16 @@ function applyTheme(){
   // to a different theme in light mode — swaps the whole personality of the UI
   // on a control that claims to change brightness.
   const mode=theme.darkOnly?"dark":resolveMode(app||"auto");
-  const vars=theme[mode]||theme.dark;
+  const palette=theme[mode]||theme.dark,action=themeActionRole(theme[mode]||theme.dark);
+  // Geometry never selects a palette. Resolve every shared semantic role on
+  // every paint, so leaving Meridian cannot leak its selection/button colors.
+  const vars=Object.assign({},palette,{
+    "--selected-bg":palette["--selected-bg"]||palette["--text"],
+    "--selected-ink":palette["--selected-ink"]||palette["--bg"],
+    "--focus-ring":palette["--accent"],"--focus-gap":palette["--bg"],
+    "--action-bg":action.background,"--action-ink":action.ink,"--layout-muted":themeLayoutMuted(palette),
+    "--hero-scrim":palette["--bg"],"--hero-ink":palette["--text"]
+  });
   const root=document.documentElement;
   // drop vars the previous theme set that this one doesn't (e.g. noirr's --glow)
   for(const k of APPLIED_VARS) if(!(k in vars)) root.style.removeProperty(k);
@@ -177,6 +211,7 @@ const LAYOUTS={
   classic:{name:"Classic", surfaces:["desktop","mobile","tv"]},
   catalog:{name:"Catalog", surfaces:["desktop","mobile","tv"]},
   theater:{name:"Theater", surfaces:["desktop","mobile","tv"]},
+  meridian:{name:"Meridian", surfaces:["desktop","mobile","tv"]},
 };
 // Which kind of surface this browser is, from viewport and input capability —
 // never a user-agent string. UA sniffing is wrong the moment someone resizes a

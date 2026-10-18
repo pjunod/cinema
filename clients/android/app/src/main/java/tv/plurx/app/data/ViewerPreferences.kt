@@ -3,12 +3,20 @@ package tv.plurx.app.data
 enum class ThemeId(val storageValue: String, val label: String) {
     Classic("classic", "Classic"),
     Terminal("terminal", "Terminal"),
-    Noirr("noirr", "noirr");
+    Noirr("noirr", "noirr"),
+    Meridian("meridian", "Meridian");
 
     companion object {
         fun fromStorage(value: String?): ThemeId = entries.firstOrNull {
             it.storageValue == value
         } ?: Classic
+    }
+}
+
+enum class ViewerLayout(val storageValue: String, val label: String) {
+    Standard("standard", "Standard"), Meridian("meridian", "Meridian");
+    companion object {
+        fun fromStorage(value: String?): ViewerLayout = entries.firstOrNull { it.storageValue == value } ?: Standard
     }
 }
 
@@ -126,6 +134,7 @@ enum class LibraryPresentation(val storageValue: String, val label: String) {
 
 data class ViewerPreferences(
     val theme: ThemeId = ThemeId.Classic,
+    val layout: ViewerLayout = ViewerLayout.Standard,
     val appearance: Appearance = Appearance.System,
     val posterSize: PosterSize = PosterSize.Medium,
     val libraryPresentation: LibraryPresentation = LibraryPresentation.Rows,

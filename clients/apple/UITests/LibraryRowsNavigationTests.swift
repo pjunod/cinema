@@ -19,7 +19,7 @@ final class LibraryRowsNavigationTests: XCTestCase {
         XCTAssertTrue(app.buttons["Add server manually"].waitForExistence(timeout: 5), app.debugDescription)
         connectManually(origin: origin, in: app)
         signInToFixture(app)
-        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label == %@", "Libraries")).firstMatch.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.viewerTab("Libraries").waitForExistence(timeout: 15), app.debugDescription)
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = "sign-in-server-picker-recovery"
         attachment.lifetime = .keepAlways
@@ -68,7 +68,7 @@ final class LibraryRowsNavigationTests: XCTestCase {
     private func openLibrary(origin: String) -> XCUIApplication {
         let app = appAtLogin(origin: origin)
         signInToFixture(app)
-        let libraries = app.buttons.matching(NSPredicate(format: "label == %@", "Libraries")).firstMatch
+        let libraries = app.viewerTab("Libraries")
         XCTAssertTrue(libraries.waitForExistence(timeout: 15), app.debugDescription)
         libraries.tap()
         let open = app.buttons["library-open-category:movie"]
@@ -88,7 +88,7 @@ final class LibraryRowsNavigationTests: XCTestCase {
         app.launch()
         let manual = app.buttons["Add server manually"]
         let changeServer = app.buttons["Use a different server"]
-        let libraries = app.buttons.matching(NSPredicate(format: "label == %@", "Libraries")).firstMatch
+        let libraries = app.viewerTab("Libraries")
         // A previous fixture's closed port may spend the production 30 s
         // connectivity budget before recovery controls replace the spinner.
         let initialScreen = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
@@ -101,7 +101,7 @@ final class LibraryRowsNavigationTests: XCTestCase {
             } else {
                 // A fixture from a preceding test may still be reachable at
                 // this port. Leave it through the ordinary Account control.
-                let settings = app.buttons.matching(NSPredicate(format: "label == %@", "Settings")).firstMatch
+                let settings = app.viewerTab("Settings")
                 XCTAssertTrue(settings.waitForExistence(timeout: 10), app.debugDescription)
                 settings.tap()
                 let change = app.buttons["Change server"]

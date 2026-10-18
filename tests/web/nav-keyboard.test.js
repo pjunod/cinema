@@ -78,7 +78,7 @@ assert.equal(episode.attributes.get("role"), "link");
 // gone, and Classic — which had none at all — is covered by the same one.
 assert.doesNotMatch(source, /function catalogEnhanceCards\(/);
 assert.doesNotMatch(source, /function theaterEnhanceCards\(/);
-assert.equal((source.match(/navKeyboardWireOnce\(\);/g) || []).length, 3,
+assert.equal((source.match(/navKeyboardWireOnce\(\);/g) || []).length, 4,
   "every layout's chrome wires the shared card reach");
 
 // ---- the search caret survives the rebuild its own typing causes ----------

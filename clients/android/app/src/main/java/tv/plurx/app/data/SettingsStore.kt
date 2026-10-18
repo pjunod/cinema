@@ -41,6 +41,7 @@ class SettingsStore(private val context: Context) {
         val USER_ID = longPreferencesKey("user_id")
         val AUDIO_LANG = stringPreferencesKey("audio_lang")
         val SUB_LANG = stringPreferencesKey("sub_lang")
+        val VIEWER_LAYOUT = stringPreferencesKey("viewer_layout")
         val THEME = stringPreferencesKey("theme")
         val APPEARANCE = stringPreferencesKey("appearance")
         val LIBRARY_PRESENTATION = stringPreferencesKey("library_presentation")
@@ -76,6 +77,7 @@ class SettingsStore(private val context: Context) {
             subLang = p[Keys.SUB_LANG] ?: "eng",
             preferences = ViewerPreferences(
                 theme = ThemeId.fromStorage(p[Keys.THEME]),
+                layout = ViewerLayout.fromStorage(p[Keys.VIEWER_LAYOUT]),
                 appearance = Appearance.fromStorage(p[Keys.APPEARANCE]),
                 posterSize = PosterSize.fromStorage(p[Keys.POSTER_SIZE]),
                 libraryPresentation = LibraryPresentation.fromStorage(p[Keys.LIBRARY_PRESENTATION]),
@@ -183,6 +185,7 @@ class SettingsStore(private val context: Context) {
     suspend fun saveViewerPreferences(value: ViewerPreferences) {
         context.dataStore.edit { p ->
             p[Keys.THEME] = value.theme.storageValue
+            p[Keys.VIEWER_LAYOUT] = value.layout.storageValue
             p[Keys.APPEARANCE] = value.appearance.storageValue
             p[Keys.POSTER_SIZE] = value.posterSize.storageValue
             p[Keys.LIBRARY_PRESENTATION] = value.libraryPresentation.storageValue

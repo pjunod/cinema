@@ -39,6 +39,27 @@ final class RemoteNavigationCoordinator: ObservableObject {
     private var physicalModalReturn: (scope: String, revision: UInt64)?
     @Published var selectedTab: HomeTab = .home
     @Published var paths: [HomeTab: [Route]] = [:]
+    private var viewerNavigationAvailable = false
+    private var destinationFocusPending = false
+    static let viewerNavigationScope = "viewer-navigation"
+    static let viewerNavigationOpener = "viewer-navigation:open"
+
+    func setViewerNavigationAvailable(_ available: Bool) {
+        viewerNavigationAvailable = available
+        for scope in Array(orderedKeys.keys) {
+            var keys = orderedKeys[scope, default: []].filter { $0 != Self.viewerNavigationOpener }
+            if available && scope == rootScope { keys.append(Self.viewerNavigationOpener) }
+            orderedKeys[scope] = keys
+        }
+    }
+    func realizeSelectedDestination() {
+        destinationFocusPending = true
+        let keys = orderedKeys[activeScope, default: []].filter { $0 != Self.viewerNavigationOpener }
+        if let first = keys.first {
+            destinationFocusPending = false
+            requestFocus(restoredFocus[activeScope].flatMap { keys.contains($0) ? $0 : nil } ?? first, force: true)
+        }
+    }
     private(set) var epoch = UUID()
     private(set) var scope = "home"
     private(set) var focusedKey: String?
@@ -173,7 +194,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
     }
     func contextChanged() { advanceContext() }
     private var blocked: Bool {
-        exhausted || activeScope == "restricted" || !blockers.isEmpty || presentationBlocked()
+        exhausted || activeScope == "restricted" || (!blockers.isEmpty && modal?.scope != Self.viewerNavigationScope) || presentationBlocked()
     }
     var context: Context { Context(epoch: epoch, contextRevision: contextRevision, focusRevision: focusRevision) }
     private func advanceContext() {
@@ -205,6 +226,7 @@ final class RemoteNavigationCoordinator: ObservableObject {
             restoredFocus[scope] = focusedKey
         }
         scope = rootScope
+        setViewerNavigationAvailable(viewerNavigationAvailable)
         advanceContext()
         #if os(tvOS)
         // Tab movement remains in the native tab bar. Its Down action enters
@@ -243,6 +265,8 @@ final class RemoteNavigationCoordinator: ObservableObject {
         presentations.removeAll()
         presentationControllers.removeAll()
         selectedTab = .home
+        viewerNavigationAvailable = false
+        destinationFocusPending = false
         scope = "home"
         observedTab = .home
         observedPath = []
@@ -304,7 +328,11 @@ final class RemoteNavigationCoordinator: ObservableObject {
         if activeScope == scope && focusedKey == key { physicalFocus(scope: scope, key: nil) }
         if entries[scope]?.isEmpty == true && !liveScopes.contains(scope) { releaseScope(scope) }
     }
-    func setOrder(scope: String, keys: [String], columns: Int) {
+    func setOrder(scope: String, keys incomingKeys: [String], columns: Int) {
+        var keys = incomingKeys
+        if viewerNavigationAvailable && scope == rootScope && !keys.contains(Self.viewerNavigationOpener) {
+            keys.append(Self.viewerNavigationOpener)
+        }
         guard keys.count <= maximumOrderedKeys, Set(keys).count == keys.count,
               orderedKeys[scope] != nil || orderedKeys.count < maximumScopes else { return }
         if orderedKeys[scope] != keys {
@@ -312,6 +340,10 @@ final class RemoteNavigationCoordinator: ObservableObject {
             if activeScope == scope { advanceContext() }
         }
         self.columns[scope] = max(1, columns)
+        if destinationFocusPending && scope == activeScope, let first = incomingKeys.first {
+            destinationFocusPending = false
+            requestFocus(restoredFocus[scope].flatMap { incomingKeys.contains($0) ? $0 : nil } ?? first, force: true)
+        }
     }
     func setSearch(scope: String, nonce: UUID, replace: @escaping (String) -> Void) {
         if textContexts[scope]?.0 != nonce && self.scope == scope { advanceContext() }

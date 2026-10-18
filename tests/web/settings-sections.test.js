@@ -1759,7 +1759,7 @@ test("password reset is a form with a confirm field, not two prompt() dialogs", 
 });
 
 test("the viewer's four appearance choices share one popover", () => {
-  assert.equal((SHIPPED_UI.match(/id="lookmenu"/g) || []).length, 3, "one menu per layout chrome");
+  assert.equal((SHIPPED_UI.match(/id="lookmenu"/g) || []).length, 4, "one menu per layout chrome");
   assert.equal((SHIPPED_UI.match(/id="thememenu"|id="appmenu"|id="sizemenu"/g) || []).length, 0);
   const menu = shippedSource("lookMenuHtml");
   assert.match(menu, /themeMenuHtml\(\)/); assert.match(menu, /appMenuHtml\(\)/); assert.match(menu, /sizeMenuHtml\(\)/);

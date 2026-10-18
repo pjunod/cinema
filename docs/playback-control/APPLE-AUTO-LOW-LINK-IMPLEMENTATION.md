@@ -3,7 +3,7 @@
 **Status:** open; session safety, candidate binding and PiP startup repairs built;
 Firefox browser campaign passes, physical acquisition acceptance incomplete ·
 **Written:** 2026-10-17 · **Branch:** `effort/apple-auto-declared-costs`,
-PR #1156; follow-up `codex/cq-acceptance-followup`
+PR #1156; follow-up `codex/cq-session-acquisition-safety`
 
 Companion to [continuous-quality build §10.330](CONTINUOUS-QUALITY-BUILD.md)
 (the declared-cost correction) and the
@@ -15,7 +15,7 @@ credential and server-selection incident is understood.
 
 ## Current checkpoint — source repairs and scoped acceptance
 
-After integration with current main, PR #1171's source passes 64 selected
+After integration with `d352f6cb`, follow-up source `3a701ff14` passes 64 selected
 player cases, 15 authentication/home cases and one disposable iPad recovery
 UI case. Exact integrated iOS and tvOS builds and the iOS Release build pass;
 both TV recovery journeys pass, including native focus and saved-session Retry. The earlier 58-case selection,
@@ -44,6 +44,12 @@ any successor attachment. This lab failure is not attributed to the app.
 The corrected environment must pass a named-candidate-bound normal create
 before the controlled link schedule starts. No physical app was launched
 through the proxy; baseline-versus-candidate HLS acceptance remains pending.
+
+The follow-up now incorporates main `efaf89152` and claims Apple build 262.
+Its playback safety code is unchanged from `3a701ff14`; incoming Meridian
+preferences and UI helpers are preserved. Exact combined-source validation
+is running. Checkpoint PR #1171 landed only the earlier label/diagnostic
+repair; it does not contain these later ownership fixes.
 
 ## 1. What the retained evidence establishes
 

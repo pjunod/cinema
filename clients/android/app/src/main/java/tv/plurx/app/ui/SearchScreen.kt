@@ -63,9 +63,9 @@ fun SearchScreen(
     // Retained across rotation and process death: retyping a query on a TV
     // remote because the app was backgrounded is the whole reason this exists.
     var query by rememberSaveable { mutableStateOf("") }
-    var results by remember { mutableStateOf<List<Item>>(emptyList()) }
-    var loading by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var results by rememberEntryPresentation("search:results") { mutableStateOf<List<Item>>(emptyList()) }
+    var loading by rememberEntryPresentation("search:loading") { mutableStateOf(false) }
+    var error by rememberEntryPresentation("search:error") { mutableStateOf<String?>(null) }
     val remoteNavigation = LocalRemoteNavigation.current
     val remoteScope = LocalRemoteScope.current
     val textNonce = remember(remoteScope) { UUID.randomUUID().toString() }

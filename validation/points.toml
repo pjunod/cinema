@@ -1275,6 +1275,8 @@ paths = [
   "crates/plurxd/src/web/**",
   "docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md",
   "docs/clients/UI-*.md",
+  "docs/clients/MERIDIAN*.md",
+  "scripts/meridian/**",
   "docs/clients/PLAYER-INPUT-CONTRACT*.md",
   "scripts/contrast-*",
   "scripts/player-contract-table",

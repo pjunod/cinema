@@ -12109,7 +12109,7 @@ private archive verifies all 18 retained files and has SHA-256
 The old Firefox lab is removed after a zero-owned-process census; baseline
 binary, ffprobe and fixture remain in a separate owned native lab.
 
-PR #1171's current source repairs saved-session instance/generation ownership,
+The acquisition follow-up source repairs saved-session instance/generation ownership,
 installed Auto candidate binding and stale named-successor rejection. The
 selected six-suite iOS run passes 58 cases; the separate unsupported-PiP
 attachment regression passes and eight shaping contracts pass. The PiP loop

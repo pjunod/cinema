@@ -103,6 +103,10 @@ player obeys, subtitles and overlays, layouts and themes.
 | [PGS-OVERLAY-REVIEW-ASSESSMENT.md](PGS-OVERLAY-REVIEW-ASSESSMENT.md) | Accepted findings, and the re-review requested. | done |
 | [APPLE-PGS-OVERLAY-ACCEPTANCE.md](APPLE-PGS-OVERLAY-ACCEPTANCE.md) | One iPad Pro run, one decidable acceptance record. | open |
 | [UI-LAYOUTS-PLAN.md](UI-LAYOUTS-PLAN.md) | Four layouts and five themes, proposed for review. | done |
+| [MERIDIAN-IMPLEMENTATION.md](MERIDIAN-IMPLEMENTATION.md) | Meridian web/Apple/Android layout and theme: visual contract, native navigation ownership, Sol build packets, review and rendered acceptance ledger. | open |
+| [MERIDIAN-M0.md](MERIDIAN-M0.md) | Meridian M0 platform references, route/state-owner map, lifetime adapters, semantic tokens, toolchains and reproducible design gallery. | open |
+| [MERIDIAN-APPLE-STATE.md](MERIDIAN-APPLE-STATE.md) | Every Apple Meridian destination, implicit/bound stack, sheet/player lifetime, retained-host adapter and focused acceptance gap. | open |
+| [MERIDIAN-ANDROID-STATE.md](MERIDIAN-ANDROID-STATE.md) | Every Android Meridian destination, presentation/player lifetime, branch/selection migration and focused acceptance gap. | open |
 | [UI-LAYOUTS-REVIEW.md](UI-LAYOUTS-REVIEW.md) | Ship a smaller, honest first slice. | done |
 | [UI-LAYOUTS-IMPLEMENTATION.md](UI-LAYOUTS-IMPLEMENTATION.md) | The accepted slice, as built. | built |
 | [UI-LAYOUTS-STATUS.md](UI-LAYOUTS-STATUS.md) | Ground truth for what of that slice is proven. | open |

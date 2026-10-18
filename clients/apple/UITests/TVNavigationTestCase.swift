@@ -7,10 +7,10 @@ import UIKit
 class TVNavigationTestCase: XCTestCase {
     let remote = XCUIRemote.shared
 
-    func openLibrary(origin: String, presentation: String = "grid", collectionID: String = "movie") -> XCUIApplication {
-        let app = openSignIn(origin: origin)
+    func openLibrary(origin: String, presentation: String = "grid", collectionID: String = "movie", layout: ViewerLayoutChoice = .standard) -> XCUIApplication {
+        let app = openSignIn(origin: origin, layout: layout)
         signInToFixture(in: app)
-        let libraries = app.tabBars.buttons["Libraries"]
+        let libraries = app.viewerTab("Libraries")
         XCTAssertTrue(libraries.waitForExistence(timeout: 15), app.debugDescription)
         reachForSetup(libraries, in: app, limit: 8)
         assertFocus(libraries, in: app, context: "Libraries tab")
@@ -26,13 +26,14 @@ class TVNavigationTestCase: XCTestCase {
         return app
     }
 
-    func openSignIn(origin: String) -> XCUIApplication {
+    func openSignIn(origin: String, layout: ViewerLayoutChoice = .standard) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
+        app.launchArguments += ["-plurx.layout", layout.rawValue]
         app.launch()
         let manual = app.buttons["Add server manually"]
         let change = app.buttons["Use a different server"]
-        let libraries = app.tabBars.buttons["Libraries"]
+        let libraries = app.viewerTab("Libraries")
         let screen = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             manual.exists || change.exists || libraries.exists
         }, object: nil)
@@ -43,7 +44,7 @@ class TVNavigationTestCase: XCTestCase {
                 assertFocus(change, in: app, context: "Choose another fixture server")
                 remote.press(.select)
             } else {
-                let settings = app.tabBars.buttons["Settings"]
+                let settings = app.viewerTab("Settings")
                 reachForSetup(settings, in: app, limit: 16)
                 assertFocus(settings, in: app, context: "Settings before changing fixture server")
                 remote.press(.select)
