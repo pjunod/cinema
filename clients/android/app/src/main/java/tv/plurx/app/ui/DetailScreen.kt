@@ -193,7 +193,7 @@ private fun DetailContent(
     val side = formFactor.horizontalPadding()
     val item = detail.item
     val scope = rememberCoroutineScope()
-    var startingEpisodeId by rememberEntryPresentation("detail:startingEpisodeId", item.id) { mutableStateOf<Long?>(null) }
+    var startingEpisodeId by remember(item.id) { mutableStateOf<Long?>(null) }
     // The viewer's pre-play track choice, per file, for this item only. Keyed
     // on the item so opening the next one starts from the server's defaults
     // again — the choice belongs to one playback and is never written back as
@@ -365,8 +365,8 @@ private fun DetailContent(
                         if (startingEpisodeId == null) {
                             startingEpisodeId = child.id
                             scope.launch {
-                                val result = catchingUnlessCancelled { vm.episodePlayback(child) }.getOrNull()
-                                startingEpisodeId = null
+                                val result = try { catchingUnlessCancelled { vm.episodePlayback(child) }.getOrNull() }
+                                finally { startingEpisodeId = null }
                                 if (result != null) {
                                     val target = result.playback
                                     // A different item: its own defaults apply.
