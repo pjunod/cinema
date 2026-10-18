@@ -108,7 +108,9 @@ function meridianOpenPanel(opener,mode="all"){
   MERIDIAN_PANEL={dialog,opener,route:location.hash,revision,mode,returns};
   const close=/** @type {HTMLButtonElement} */(dialog.querySelector('[aria-label="Close navigation"]'));close.onclick=()=>meridianClosePanel(true);
   dialog.addEventListener("cancel",event=>{event.preventDefault();meridianClosePanel(true);});
+  // meridian-dialog-key-adapter:begin
   dialog.addEventListener("keydown",event=>{if(event.key==="Escape"){event.preventDefault();event.stopImmediatePropagation();meridianClosePanel(true);}});
+  // meridian-dialog-key-adapter:end
   const entries=Array.from(dialog.querySelectorAll("a[data-meridian-destination]")).map((element,index)=>({id:"meridian:destination:"+index,element,label:element.textContent.trim(),activate:()=>meridianNavigate(null,element,true)}));
   entries.push({id:"meridian:close",element:close,label:"Close navigation",activate:()=>{meridianClosePanel(true);return "applied";}});
   const searchButton=dialog.querySelector("[data-meridian-search]");
@@ -187,5 +189,7 @@ function meridianWireOnce(){
   document.addEventListener("focusin",()=>{if(layoutId()==="meridian")meridianRememberFocus();});
   new MutationObserver(()=>meridianRealizeFocus()).observe(document.getElementById("app"),{childList:true,subtree:true});
   for(const type of ["keydown","pointerdown"])document.addEventListener(type,event=>{if(event.isTrusted&&MERIDIAN_FOCUS_TICKET){MERIDIAN_FOCUS_TICKET=null;MERIDIAN_NAV_REVISION++;}},true);
+  // meridian-opener-key-adapter:begin
   document.addEventListener("keydown",event=>{if(layoutId()==="meridian"&&event.key==="ArrowLeft"&&!event.defaultPrevented&&document.activeElement?.matches("[data-meridian-open]")){event.preventDefault();meridianOpenPanel(document.activeElement,"all");}});
+  // meridian-opener-key-adapter:end
 }

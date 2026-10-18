@@ -322,7 +322,7 @@ struct ViewerNavigationChrome: View {
             }
             .onChange(of: model.features) { _, _ in if expanded { enterPanel() } }
             .onChange(of: model.libraryCollections(grouping: .share)) { _, _ in if expanded { enterPanel() } }
-            .onExitCommand { if expanded { togglePanel() } }
+            .tvViewerNavigationPanelExit { if expanded { togglePanel() } }
             #endif
         }
     }

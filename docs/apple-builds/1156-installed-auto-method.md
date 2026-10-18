@@ -1,6 +1,6 @@
 # Playback info describes the installed Auto rung
 
-Build: 263
+Build: 264
 Issue: #1156
 
 After Auto switches an original remux to an encoded rung, Playback info now
@@ -27,3 +27,9 @@ network-shaping contracts pass. A disposable simulator starts playback after
 the PiP repair, but its direct MP4 route bypasses shaping and supplies no
 pressure acceptance. Controlled HLS acquisition, physical acceptance and
 promotion remain pending. No physical installation is claimed.
+
+Qualification follow-up: the attempt census names the renamed unmeasured-cost
+refresh, the TV runner requires both new navigation journeys, and the physical
+scheme excludes the Meridian fixture. Viewer panel Menu handling now uses the
+existing platform adapter boundary; two bounded web navigation regions preserve
+the same Escape/Left behavior while leaving neighboring handlers fenced.
