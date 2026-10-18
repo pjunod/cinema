@@ -7077,7 +7077,7 @@ id = "https.apple-subtitle-failure-fixture-holds-complete-readiness-batch"
 commits = []
 supplements = "https.qualification-client-corrections"
 source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
-source_anchor = "while let callback = callbacks.take() { queued.append(callback) }"
+source_anchor = "let queuedBatch = callbacks.takeAll()"
 test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
 test_anchor = "testQueuedSubtitleFailureIsDeliveredOnlyToItsCurrentIntent"
 
@@ -7086,7 +7086,7 @@ id = "https.apple-subtitle-ready-fixture-holds-complete-readiness-batch"
 commits = []
 supplements = "https.qualification-client-corrections"
 source = "clients/apple/Tests/PlaybackControlSessionTests.swift"
-source_anchor = "while let callback = callbacks.take() { queued.append(callback) }"
+source_anchor = "let queuedBatch = callbacks.takeAll()"
 test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
 test_anchor = "testQueuedSubtitleReadinessIsDeliveredForItsCurrentSession"
 [[fixes]]

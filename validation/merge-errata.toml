@@ -407,3 +407,7 @@ reason = "Corrective commit e67c063a (fix(release): anchor the changelog heading
 [[errata]]
 commit = "a40c2068dab79811a5aed0a39d7229b65bd27dca"
 reason = "Corrective commit a40c2068 (fix(release): stop the publisher refusing a present changelog heading) reached main through merge e154f8852 for PR #1155, whose subject uses the form 'Merge pull request #1155: ...' and is not recognized as a landing. It carries Regression-Test: tests/operations/test_release_publication.py::ReleaseTagValidationCase::test_a_changelog_larger_than_the_pipe_buffer_still_validates. The Apple TV navigation promotion qualification (run 5376) reported it as outside any landing. This permanent erratum records the unrecognized landing without rewriting history, moving the audit boundary, waiving future regression fields or claiming a new test run."
+
+[[errata]]
+commit = "28250ece1ea78bd41fba0a373049b462431fb768"
+reason = "Corrective commit 28250ece (fix(scripts): hand ship-physical's resolved Android SDK to the release signer) reached main through merge 926046d0d for PR #1165, whose subject uses the form 'Merge pull request #1165: ...' and is not recognized as a landing. The HTTPS promotion fast lane (run 5413) reported it as outside any landing. This permanent erratum records the unrecognized landing without rewriting history, moving the audit boundary, waiving future regression fields or claiming a new test run."
