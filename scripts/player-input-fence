@@ -73,6 +73,24 @@ TOKEN_FILE_ALLOWLIST = {
 WEB = Path("crates/plurxd/src/web")
 WEB_REGIONS = (
     (
+        Path("clients/apple/Sources/ViewerDestinationHost.swift"),
+        ".onExitCommand { if expanded { togglePanel() } }",
+        ".onExitCommand { if expanded { togglePanel() } }",
+        "The expanded Meridian navigation panel owns Back to collapse itself; no playback commands.",
+    ),
+    (
+        WEB / "layouts/meridian.js",
+        'dialog.addEventListener("keydown",event=>',
+        'dialog.addEventListener("keydown",event=>',
+        "The modal Meridian navigation dialog owns Escape; no playback commands.",
+    ),
+    (
+        WEB / "layouts/meridian.js",
+        'document.addEventListener("keydown",event=>{if(layoutId()==="meridian"',
+        'document.addEventListener("keydown",event=>{if(layoutId()==="meridian"',
+        "The focused Meridian navigation opener owns Left outside playback and restricted surfaces.",
+    ),
+    (
         Path("clients/android/app/src/main/java/tv/plurx/app/diagnostics/DiagnosticReportScreen.kt"),
         "// diagnostic-consent-navigation-adapter:begin",
         "// diagnostic-consent-navigation-adapter:end",

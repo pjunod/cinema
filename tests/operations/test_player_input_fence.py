@@ -205,6 +205,20 @@ class PlayerInputFenceTest(unittest.TestCase):
     def test_the_fence_passes_the_repository_as_it_stands(self):
         self.assertEqual(self.fence.scan(), [])
 
+    def test_meridian_navigation_regions_do_not_exempt_other_handlers(self):
+        for path, raw, expected in (
+            ("clients/apple/Sources/ViewerDestinationHost.swift", ".onExitCommand { stopPlayback() }", 1),
+            ("crates/plurxd/src/web/layouts/meridian.js", 'window.addEventListener("keydown", event => event.key);', 2),
+        ):
+            with self.subTest(path=path):
+                relative = Path(path)
+                lines = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+                self.assertEqual(self.fence.scan_lines(relative, lines, self.fence.web_allowed_lines(relative, lines)), [])
+                lines.append(raw)
+                failures = self.fence.scan_lines(relative, lines, self.fence.web_allowed_lines(relative, lines))
+                self.assertEqual(len(failures), expected)
+                self.assertTrue(all(f":{len(lines)}:" in failure for failure in failures))
+
 
 if __name__ == "__main__":
     unittest.main()
