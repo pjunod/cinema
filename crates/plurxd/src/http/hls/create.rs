@@ -3552,25 +3552,33 @@ async fn create_with_purpose_inner(
                         advisory,
                     )
                     .await;
-                    let link_admitted = link_receipts::processed_candidate_admissible(
-                        &state,
-                        identity.as_ref(),
-                        source,
-                        &candidate,
-                        advisory,
-                    )
-                    .await;
+                    // Link evidence is Auto's bandwidth policy. A rung the
+                    // viewer chose is not second-guessed by it, exactly as the
+                    // ordinary start above is not.
+                    let link_admitted = !candidate_auto_policy
+                        || link_receipts::processed_candidate_admissible(
+                            &state,
+                            identity.as_ref(),
+                            source,
+                            &candidate,
+                            advisory,
+                        )
+                        .await;
                     let mut admitted = if recovered && link_admitted {
                         vec![candidate.clone()]
                     } else {
                         Vec::new()
                     };
-                    admitted = link_receipts::link_starved_catalog(
-                        network_prior.as_ref(),
-                        admitted,
-                        unix_ms(),
-                    );
-                    if let Some(receipt) = link_receipts::requested_receipt(&headers) {
+                    if candidate_auto_policy {
+                        admitted = link_receipts::link_starved_catalog(
+                            network_prior.as_ref(),
+                            admitted,
+                            unix_ms(),
+                        );
+                    }
+                    if let Some(receipt) = link_receipts::requested_receipt(&headers)
+                        .filter(|_| candidate_auto_policy)
+                    {
                         admitted = link_receipts::positive_catalog(
                             &state,
                             identity.as_ref(),
@@ -3592,9 +3600,13 @@ async fn create_with_purpose_inner(
                         .iter()
                         .any(|admitted| admitted.id == candidate.id && admitted.playable())
                     {
-                        Err("the processed candidate was not admitted by the recovery \
-                             and link evidence of this playback"
-                            .to_owned())
+                        Err(if recovered {
+                            "Auto's link evidence for this playback does not admit the \
+                             processed candidate's bitrate"
+                        } else {
+                            "this playback's recovery evidence rejects the processed recipe"
+                        }
+                        .to_owned())
                     } else {
                         let context = processed
                             .candidate_context
@@ -3629,7 +3641,9 @@ async fn create_with_purpose_inner(
                             height = i64::from(candidate.target_height);
                             candidate_route = Some(candidate.route);
                             ordinary_link_source_binding = link_source_binding.take();
-                            link_source_binding = if let Some(identity) = identity.as_ref() {
+                            link_source_binding = if let (true, Some(identity)) =
+                                (candidate_auto_policy, identity.as_ref())
+                            {
                                 link_receipts::request_binding_until(
                                     identity,
                                     source,

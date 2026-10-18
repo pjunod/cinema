@@ -1363,7 +1363,7 @@ impl TranscodeManager {
                 .min(i64::from(original.selected_candidate.target_height))
                 & !1;
             if height < 32 {
-                return Ok(None);
+                return Err("the source has no picture height to process".into());
             }
             let mut trial = request.clone();
             trial.request_id = Some(recovery.incarnation_id.clone());

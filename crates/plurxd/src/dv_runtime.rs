@@ -1654,16 +1654,13 @@ mod processed_selection_has_no_software_gates {
             !body.contains("request.automatic"),
             "Auto-only gate is back"
         );
-        // Every decline after the setting check is reported, never silent.
+        // Every decline after the setting check, to the end of the entry
+        // point, is reported, never silent.
         let after_setting = body
             .split_once("// The setting is on for a DV source")
             .expect("setting check")
             .1;
-        let reported = after_setting
-            .split_once("let Ok(_preparation_slot)")
-            .expect("resource stage")
-            .0;
-        assert!(!reported.contains("return Ok(None)"), "{reported}");
+        assert!(!after_setting.contains("Ok(None)"), "{after_setting}");
     }
 
     #[test]
