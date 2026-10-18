@@ -192,7 +192,7 @@ final class TVPlaybackNavigationTests: TVNavigationTestCase {
     private func openChannels(origin: String) -> XCUIApplication {
         let app = openLibrary(origin: origin)
         remote.press(.menu)
-        let channels = app.tabBars.buttons["Channels"]
+        let channels = app.viewerTab("Channels")
         reachForSetup(channels, in: app, limit: 8)
         assertFocus(channels, in: app, context: "Channels tab setup")
         remote.press(.select)

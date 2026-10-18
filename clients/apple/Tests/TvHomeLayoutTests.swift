@@ -16,6 +16,8 @@ final class TvHomeLayoutTests: XCTestCase {
         )
         let renderer = ImageRenderer(content:
             TvTheaterHero(feature: TvTheaterFeature(item: item, isContinueWatching: true))
+                .environmentObject(AppModel(startServices: false))
+                .environmentObject(RemoteNavigationCoordinator())
                 .frame(width: 1920)
         )
         let image = try XCTUnwrap(renderer.uiImage)

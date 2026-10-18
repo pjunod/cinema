@@ -58,7 +58,7 @@ final class LibraryRowsNavigationTests: XCTestCase {
             app.secureTextFields["Password"].typeText("fixture")
             app.buttons["Sign in"].tap()
         }
-        let libraries = app.tabBars.buttons["Libraries"]
+        let libraries = app.viewerTab("Libraries")
         XCTAssertTrue(libraries.waitForExistence(timeout: 15), app.debugDescription)
         libraries.tap()
         let open = app.buttons["library-open-category:movie"]

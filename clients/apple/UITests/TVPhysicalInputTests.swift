@@ -18,7 +18,7 @@ final class TVPhysicalInputTests: XCTestCase {
         let app = XCUIApplication()
         wakeDevice()
         app.launch()
-        let settings = app.tabBars.buttons["Settings"]
+        let settings = app.viewerTab("Settings")
         XCTAssertTrue(settings.waitForExistence(timeout: 30),
                       "Apple TV must already be signed in")
         XCTAssertTrue(focus(settings, in: app), "Could not focus Settings tab")
@@ -156,7 +156,7 @@ final class TVPhysicalInputTests: XCTestCase {
         let app = XCUIApplication()
         wakeDevice()
         app.launch()
-        let libraries = app.tabBars.buttons["Libraries"]
+        let libraries = app.viewerTab("Libraries")
         XCTAssertTrue(libraries.waitForExistence(timeout: 30),
                       "Apple TV must already be signed in")
         XCTAssertTrue(focus(libraries, in: app),
@@ -170,7 +170,7 @@ final class TVPhysicalInputTests: XCTestCase {
             // Relaunch returns from a collection detail to the ordinary root;
             // it retains the account and lets cleanup use the same controls.
             app.launch()
-            let restoreLibraries = app.tabBars.buttons["Libraries"]
+            let restoreLibraries = app.viewerTab("Libraries")
             if restoreLibraries.waitForExistence(timeout: 30)
                 && focus(restoreLibraries, in: app) {
                 remote.press(.select)

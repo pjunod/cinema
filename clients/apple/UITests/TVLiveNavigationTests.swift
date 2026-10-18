@@ -10,7 +10,7 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         remote.press(.menu)
-        let tab = app.tabBars.buttons["Live TV"]
+        let tab = app.viewerTab("Live TV")
         reachForSetup(tab, in: app, limit: 8)
         remote.press(.select)
         let guide = app.buttons["Guide"]
@@ -62,7 +62,7 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         remote.press(.menu)
-        let tab = app.tabBars.buttons["Live TV"]
+        let tab = app.viewerTab("Live TV")
         reachForSetup(tab, in: app, limit: 8)
         remote.press(.select)
         let guide = app.buttons["Guide"]
@@ -108,7 +108,7 @@ final class TVLiveNavigationTests: TVNavigationTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         remote.press(.menu)
-        let tab = app.tabBars.buttons["Live TV"]
+        let tab = app.viewerTab("Live TV")
         reachForSetup(tab, in: app, limit: 8)
         assertFocus(tab, in: app, context: "Live TV tab")
         remote.press(.select)

@@ -59,6 +59,12 @@ struct AuthImage: View {
             image = nil
             return
         }
+        #if DEBUG
+        if path.hasPrefix("meridian-fixture:") {
+            image = MeridianFixtureArtwork.image(path: path)
+            return
+        }
+        #endif
         let key = AuthImageCache.key(origin: Session.shared.credentials.origin, path: path,
                                      maxPixelSize: maxPixelSize)
         // Read memory and disk before touching the network. An expired disk
@@ -711,3 +717,39 @@ actor AuthImageDiskCache {
         directory.appendingPathComponent(token).appendingPathExtension(pathExtension)
     }
 }
+
+#if DEBUG
+/// Original, deterministic artwork for simulator evidence; never fetched from
+/// a third-party catalogue and never compiled into Release image loading.
+private enum MeridianFixtureArtwork {
+    @MainActor static func image(path: String) -> UIImage {
+        let poster = path.contains("poster")
+        let size = poster ? CGSize(width: 600, height: 900) : CGSize(width: 1600, height: 900)
+        return UIGraphicsImageRenderer(size: size).image { renderer in
+            let context = renderer.cgContext
+            let colors = [UIColor(red: 0.05, green: 0.11, blue: 0.21, alpha: 1).cgColor,
+                          UIColor(red: 0.31, green: 0.22, blue: 0.24, alpha: 1).cgColor,
+                          UIColor(red: 0.75, green: 0.39, blue: 0.16, alpha: 1).cgColor]
+            let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors as CFArray, locations: [0, 0.65, 1])!
+            context.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: size.width, y: size.height), options: [])
+            for index in 0..<45 {
+                let x = CGFloat((index * 137 + 29) % Int(size.width))
+                let y = CGFloat((index * 71 + 11) % 420)
+                UIColor.white.withAlphaComponent(0.35).setFill()
+                context.fillEllipse(in: CGRect(x: x, y: y, width: 2, height: 2))
+            }
+            UIColor(red: 0.95, green: 0.72, blue: 0.44, alpha: 0.8).setFill()
+            context.fillEllipse(in: CGRect(x: size.width * 0.7, y: 175, width: 130, height: 130))
+            UIColor(red: 0.025, green: 0.05, blue: 0.09, alpha: 1).setFill()
+            for index in 0..<24 {
+                let width = size.width / 22
+                let height = CGFloat(80 + (index * 79) % 250)
+                context.fill(CGRect(x: CGFloat(index) * width, y: size.height - height, width: width - 4, height: height))
+            }
+            let title = path.contains("night") ? "NIGHT ROUTES" : path.contains("horizon") ? "BEYOND THE HORIZON" : "THE MERIDIAN SIGNAL"
+            let attributes: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: poster ? 48 : 52, weight: .bold), .foregroundColor: UIColor.white]
+            (title as NSString).draw(in: CGRect(x: 40, y: poster ? 60 : 490, width: size.width - 80, height: 170), withAttributes: attributes)
+        }
+    }
+}
+#endif

@@ -166,21 +166,21 @@ final class TVNavigationTests: TVNavigationTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         remote.press(.menu)
-        let libraries = app.tabBars.buttons["Libraries"]
+        let libraries = app.viewerTab("Libraries")
         reachForSetup(libraries, in: app, limit: 4)
         assertFocus(libraries, in: app, context: "Libraries root tab")
         remote.press(.left)
-        assertFocus(app.tabBars.buttons["Home"], in: app, context: "Home root tab")
+        assertFocus(app.viewerTab("Home"), in: app, context: "Home root tab")
         for label in ["Libraries", "Live TV", "Recordings", "Channels", "Search", "Settings"] {
             remote.press(.right)
-            let tab = app.tabBars.buttons[label]
+            let tab = app.viewerTab(label)
             assertFocus(tab, in: app, context: label + " root tab")
             XCTAssertTrue(app.descendants(matching: .any)["root-screen-" + label].waitForExistence(timeout: 5),
                           label + " must display its route without Select: " + app.debugDescription)
         }
         for label in ["Search", "Channels", "Recordings", "Live TV", "Libraries", "Home"] {
             remote.press(.left)
-            assertFocus(app.tabBars.buttons[label], in: app, context: label + " reverse root tab")
+            assertFocus(app.viewerTab(label), in: app, context: label + " reverse root tab")
             XCTAssertTrue(app.descendants(matching: .any)["root-screen-" + label].waitForExistence(timeout: 5),
                           label + " must display its route without Select: " + app.debugDescription)
         }
@@ -227,7 +227,7 @@ final class TVNavigationTests: TVNavigationTestCase {
         remote.press(.menu)
         assertFocus(view, in: app, context: "Rows Back restores View")
         remote.press(.menu)
-        XCTAssertTrue(app.tabBars.buttons["Libraries"].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.viewerTab("Libraries").waitForExistence(timeout: 5),
                       "Back must return to Libraries, not leave the app")
     }
 
