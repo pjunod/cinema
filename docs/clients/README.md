@@ -10,6 +10,7 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [Meridian source identity](../apple-builds/1195-meridian-source-identity.md) | Choosing another source from the Meridian panel opens it and focuses its tools; Apple native TV job limit 120 minutes. Physical Apple TV acceptance pending. | built |
 | [Retained Apple resume position](../apple-builds/1181-retain-resume-position.md) | Interrupted native resume seeks retry once; failed preparation, Retry and Close retain the saved destination. Physical iPad acceptance pending. | built |
 | [Restore Standard Apple layouts](../apple-builds/1178-restore-standard-apple.md) | Restores native iPad/Apple TV tabs and original TV Theater styling after Meridian changed Standard; existing themes stay unchanged. | built |
 | [APPLE-TV-NAVIGATION-AUDIT.md](APPLE-TV-NAVIGATION-AUDIT.md) | October 15 whole-app TV navigation source audit, native menu failure reproduction, 36 findings, implementation ledger and mandatory navigation acceptance contract. | open |
