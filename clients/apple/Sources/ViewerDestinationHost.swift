@@ -579,6 +579,7 @@ private final class SwiftUITabChromeState: ObservableObject {
     private var updateScheduled = false
     #if os(iOS)
     private var savedSidebarHidden = true
+    private var capturedSidebar = false
     #endif
 
     func configure(_ value: SwiftUITabChromeConfiguration) {
@@ -616,8 +617,11 @@ private final class SwiftUITabChromeState: ObservableObject {
         guard let tabs, let configuration else { return }
         #if os(iOS)
         if configuration.layout == .meridian {
-            if appliedLayout != .meridian {
+            // Only Standard's sidebar is the viewer's choice; a controller
+            // rediscovered while Meridian already hid it keeps the saved one.
+            if appliedLayout == .standard || !capturedSidebar {
                 savedSidebarHidden = tabs.sidebar.isHidden
+                capturedSidebar = true
             }
             if !tabs.sidebar.isHidden { tabs.sidebar.isHidden = true }
         } else if appliedLayout == .meridian {
@@ -627,15 +631,15 @@ private final class SwiftUITabChromeState: ObservableObject {
         if tabs.isTabBarHidden != configuration.hideBar {
             tabs.setTabBarHidden(configuration.hideBar, animated: false)
         }
-        if appliedExpanded != configuration.expanded {
+        if let applied = appliedExpanded, applied != configuration.expanded {
             // Existing chrome's RemoteChoiceFocusReadiness chooses the exact
             // panel row. This requests reevaluation after destination fencing.
             var owner: UIViewController = tabs
             while let parent = owner.parent { owner = parent }
             owner.setNeedsFocusUpdate()
             owner.updateFocusIfNeeded()
-            appliedExpanded = configuration.expanded
         }
+        appliedExpanded = configuration.expanded
         appliedLayout = configuration.layout
     }
 }

@@ -110,7 +110,7 @@ struct TvTheaterHero: View {
                     .lineLimit(3)
             }
             Group {
-                if !standardTheater && dynamicTypeSize.isAccessibilitySize {
+                if dynamicTypeSize.isAccessibilitySize {
                     VStack(alignment: .leading, spacing: 16) { actionButtons }
                 } else { HStack(spacing: 24) { actionButtons } }
             }
