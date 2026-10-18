@@ -7278,3 +7278,11 @@ source_anchor = "RecordingAttentionBadge(count: attention).frame(width: 24, heig
 test = "clients/apple/Tests/MeridianTests.swift"
 test_anchor = "testCompactMoreRendersNativeRecordingAttentionBadge"
 supplements = "apple.meridian-adaptive-standard-sidebar"
+
+[[fixes]]
+id = "apple.meridian-native-opener-host-preference"
+commits = ["32a99cde5b0275d70cf5a106cb407090b59e7173"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "if expanded || (layout == .meridian && chromeFocusRequested), let chrome"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testMeridianOpenerFocusPrefersChromeUntilContentIsRequested"

@@ -39,3 +39,8 @@ content while the coordinator requested the navigation opener. On tvOS Meridian,
 the host now follows that explicit current opener request; later content requests
 clear the preference. Native focus acknowledgment and modal identity remain owned
 by the existing coordinator.
+
+The native trace then identified account reset clearing the persistent layout
+capability while Meridian remained visible. Reset now retains that capability
+while still removing all account actions, orders, routes and focus authority,
+so rebuilding the current library order keeps its opener eligible for Back.
