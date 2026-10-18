@@ -7286,3 +7286,11 @@ source = "clients/apple/Sources/ViewerDestinationHost.swift"
 source_anchor = "if expanded || (layout == .meridian && chromeFocusRequested), let chrome"
 test = "clients/apple/Tests/MeridianTests.swift"
 test_anchor = "testMeridianOpenerFocusPrefersChromeUntilContentIsRequested"
+
+[[fixes]]
+id = "apple.meridian-opener-capability-survives-account-reset"
+commits = ["3534fec330286ac63aa9a7e1d1eba5e1e6296deb"]
+source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
+source_anchor = "func resetIdentity() {"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testIdentityResetKeepsCurrentMeridianOpenerAndClearsAccountActions"
