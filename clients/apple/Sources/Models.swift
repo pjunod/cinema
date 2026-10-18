@@ -238,10 +238,17 @@ enum LibraryGrouping: String, CaseIterable, Identifiable {
 
 /// Native themes shared with the Android viewer. Web-only catalogue themes can
 /// be added here once their tokens and platform treatment have an Apple port.
+enum ViewerLayout: String, CaseIterable, Identifiable {
+    case standard, meridian
+    var id: String { rawValue }
+    var label: String { self == .standard ? "Standard" : "Meridian" }
+}
+
 enum ViewerTheme: String, CaseIterable, Identifiable {
     case classic
     case terminal
     case noirr
+    case meridian
 
     var id: String { rawValue }
     var label: String {
@@ -249,6 +256,7 @@ enum ViewerTheme: String, CaseIterable, Identifiable {
         case .classic: return "Classic"
         case .terminal: return "Terminal"
         case .noirr: return "noirr"
+        case .meridian: return "Meridian"
         }
     }
 }
@@ -807,11 +815,14 @@ struct QualityCandidate: Codable, Identifiable {
     let decoderCompatible: Bool
     let completeCache: Bool
     let sustainable: Bool
+    var plannedCodec: String? = nil
+    var processedHdr10: Bool? = nil
 
     var hasValidIdentity: Bool {
         guard recipeDigest.count == 32, (1...16_384).contains(width), (1...16_384).contains(height),
               (0...16_384).contains(targetHeight), ["original", "remux", "encode"].contains(route),
-              ["sdr", "hdr10"].contains(grade) else { return false }
+              ["sdr", "hdr10"].contains(grade),
+              processedHdr10 != true || (route == "encode" && grade == "hdr10" && plannedCodec == "hevc") else { return false }
         var bytes = Data("plurx:auto-quality-candidate:v1\0".utf8)
         bytes.append(contentsOf: recipeDigest)
         let expected = SHA256.hash(data: bytes).prefix(16).map { String(format: "%02x", $0) }.joined()

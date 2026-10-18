@@ -159,6 +159,7 @@ class SubtitleEnginePackageCase(unittest.TestCase):
         expected = {"base.en": (147964211, "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"),
                     "base": (147951465, "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"),
                     "tiny.en": (77704715, "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f")}
+        expected["small"] = (487601967, "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b")
         self.assertEqual({item["id"] for item in catalog["models"]}, set(expected))
         for item in catalog["models"]:
             self.assertEqual((item["download_bytes"], item["sha256"]), expected[item["id"]])
@@ -166,7 +167,7 @@ class SubtitleEnginePackageCase(unittest.TestCase):
             self.assertIn("/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/", item["url"])
             # This base model has n_vocab=51865: 99 language tokens. Engine
             # language ID 99 (yue) belongs to the newer 51866-vocabulary models.
-            self.assertEqual(len(item["languages"]), 99 if item["id"] == "base" else 1)
+            self.assertEqual(len(item["languages"]), 99 if item["id"] in ("base", "small") else 1)
             self.assertNotIn("yue", item["languages"])
             self.assertEqual(len(set(item["languages"])), len(item["languages"]))
             self.assertNotIn("*", item["languages"])

@@ -20,12 +20,18 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.7.0**, build `173` — Authenticated current-account requests
-> echo bounded read-after receipts across the advertised voter cohort;
-> unknown writes retire the floor (#1049). Source qualification only, not yet
-> installed on hardware or qualified against the fleet read-cost target.
+> Status: **v0.7.0**, build `174` — Meridian adds independent layout/theme
+> choices, native phone/tablet/TV navigation and cinematic browsing. Focused
+> production-host emulator evidence is recorded with the implementation PR;
+> physical-device and complete playback acceptance remain open.
 >
-> Build `168` — Private incident capture, protected account
+> Build `173` — Authenticated current-account requests
+> echo bounded read-after receipts across the advertised voter cohort;
+> unknown writes retire the floor (#1049). Sustainable processed HDR10 Auto
+> selection is implemented on the HDR repair effort. Source qualification and
+> physical acceptance remain open for the composed client.
+>
+> Private incident capture, protected account
 > storage, local ZIP sharing, resumed support delivery and physical-only TV
 > phone approval are implemented. Debug app and regression-source compilation
 > pass; release, runtime/privacy/resource and physical acceptance remain open.

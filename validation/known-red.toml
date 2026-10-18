@@ -46,7 +46,7 @@ requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
 command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::sharing_receiver_real_pinned_prepared_handoff_commit_and_abort -- --ignored --exact --nocapture"
 
 [[fixtures]]
-test = "crates/plurxd/src/http/mod.rs::http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart"
+test = "crates/plurxd/src/http/tests.rs::http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart"
 owner = "sharing"
 reason = "Pinned transport response-loss recovery requires an isolated numeric CGNAT fixture, not the host network."
 requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
@@ -67,21 +67,21 @@ requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
 command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::sharing_start_decode::tests::sharing_start_transport_pinned_source_h1_and_receiver_h1_h2_preserve_raw_envelope -- --ignored --exact --nocapture"
 
 [[fixtures]]
-test = "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_receiver_pinned_decision_http1_http2_revalidates_file_assignment_and_login"
+test = "crates/plurxd/src/http/shared_library/tests.rs::http::shared_library::tests::sharing_receiver_pinned_decision_http1_http2_revalidates_file_assignment_and_login"
 owner = "sharing"
 reason = "Authenticated Source and B authority requires a real pinned peer in a disposable CGNAT namespace."
 requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
 command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_library::tests::sharing_receiver_pinned_decision_http1_http2_revalidates_file_assignment_and_login -- --ignored --exact --nocapture"
 
 [[fixtures]]
-test = "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_receiver_pinned_source_blocked_http1_http2_revalidate_current_scope"
+test = "crates/plurxd/src/http/shared_library/tests.rs::http::shared_library::tests::sharing_receiver_pinned_source_blocked_http1_http2_revalidate_current_scope"
 owner = "sharing"
 reason = "Authenticated Source and B authority requires a real pinned peer in a disposable CGNAT namespace."
 requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
 command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_library::tests::sharing_receiver_pinned_source_blocked_http1_http2_revalidate_current_scope -- --ignored --exact --nocapture"
 
 [[fixtures]]
-test = "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection"
+test = "crates/plurxd/src/http/shared_library/tests.rs::http::shared_library::tests::sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection"
 owner = "sharing"
 reason = "Authenticated Source and B authority requires a real pinned peer in a disposable CGNAT namespace."
 requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"

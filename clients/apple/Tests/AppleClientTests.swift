@@ -4827,7 +4827,8 @@ final class AppleClientTests: XCTestCase {
         )
 
         XCTAssertTrue(playerSource.contains(".playerRemoteAdapter(\n            .root"))
-        XCTAssertTrue(playerSource.contains(".playerRemoteAdapter(\n                            .surface"))
+        XCTAssertTrue(playerSource.contains("PlayerRevealSurface(state: inputState, apply: applyPlayerInputOutcome)"))
+        XCTAssertTrue(adapterSource.contains("NativePlaybackRevealTarget"))
         XCTAssertTrue(playerSource.contains(".playerRemoteAdapter(\n            .timeline"))
         let handlerSuffixes = ["MoveCommand", "ExitCommand", "PlayPauseCommand"]
         for token in handlerSuffixes.map({ ".on" + $0 }) {
@@ -7572,7 +7573,7 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testNativeAppearanceChoicesMatchTheOtherNativeViewer() {
-        XCTAssertEqual(ViewerTheme.allCases.map(\.label), ["Classic", "Terminal", "noirr"])
+        XCTAssertEqual(ViewerTheme.allCases.map(\.label), ["Classic", "Terminal", "noirr", "Meridian"])
         XCTAssertEqual(
             ViewerAppearance.allCases.map(\.label),
             ["Auto (system)", "Light", "Dark"]
@@ -11251,7 +11252,9 @@ final class AppleClientTests: XCTestCase {
     func testTransientRefreshFailureKeepsCachedHomeContentVisible() {
         let failure = APIError.transport("The request timed out.")
 
-        XCTAssertNil(AppModel.homeErrorMessage(for: failure, hasCachedContent: true))
+        XCTAssertEqual(AppModel.homeErrorMessage(for: failure, hasCachedContent: true),
+                       AppModel.homeErrorMessage(for: failure, hasCachedContent: false),
+                       "Cached titles survive, but failure must still expose inline Retry")
         XCTAssertEqual(
             AppModel.homeErrorMessage(for: failure, hasCachedContent: false),
             "The request timed out."

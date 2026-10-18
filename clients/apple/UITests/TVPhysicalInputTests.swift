@@ -6,11 +6,19 @@ import XCTest
 final class TVPhysicalInputTests: XCTestCase {
     private let remote = XCUIRemote.shared
 
+    /// These journeys drive a real, signed-in Apple TV. A failed expectation
+    /// means the screen is not the one the next press was written for, and
+    /// continuing would steer the saved account's own UI blindly.
+    override func setUp() {
+        super.setUp()
+        continueAfterFailure = false
+    }
+
     func testSettingsChoicesOpenAsMenusOnAppleTV() throws {
         let app = XCUIApplication()
         wakeDevice()
         app.launch()
-        let settings = app.tabBars.buttons["Settings"]
+        let settings = app.viewerTab("Settings")
         XCTAssertTrue(settings.waitForExistence(timeout: 30),
                       "Apple TV must already be signed in")
         XCTAssertTrue(focus(settings, in: app), "Could not focus Settings tab")
@@ -39,6 +47,7 @@ final class TVPhysicalInputTests: XCTestCase {
     func testPlaybackRemoteControls() throws {
         let app = try playbackApp()
         let playPause = app.buttons["player-play-pause"]
+        try awaitPlayer(app)
         remote.press(.select) // Reveal chrome if playback has hidden it.
         XCTAssertTrue(playPause.waitForExistence(timeout: 20), app.debugDescription)
 
@@ -60,6 +69,7 @@ final class TVPhysicalInputTests: XCTestCase {
         let app = try playbackApp(startMs: 5_100_000)
         let position = app.staticTexts["player-position"]
         let back = app.buttons["player-skip-back"]
+        try awaitPlayer(app)
         remote.press(.select)
         XCTAssertTrue(position.waitForExistence(timeout: 45), app.debugDescription)
         XCTAssertTrue(back.waitForExistence(timeout: 5))
@@ -106,6 +116,7 @@ final class TVPhysicalInputTests: XCTestCase {
     func testCaptionSelectionWithRemote() throws {
         let trackLabel = try requiredEnvironment("PLURX_TVOS_CAPTION_LABEL")
         let app = try playbackApp()
+        try awaitPlayer(app)
         remote.press(.select)
         // SwiftUI's tvOS Menu may be a PopUpButton in the modern accessibility
         // tree even when the legacy Button query reports its identifier.
@@ -145,7 +156,7 @@ final class TVPhysicalInputTests: XCTestCase {
         let app = XCUIApplication()
         wakeDevice()
         app.launch()
-        let libraries = app.tabBars.buttons["Libraries"]
+        let libraries = app.viewerTab("Libraries")
         XCTAssertTrue(libraries.waitForExistence(timeout: 30),
                       "Apple TV must already be signed in")
         XCTAssertTrue(focus(libraries, in: app),
@@ -154,19 +165,12 @@ final class TVPhysicalInputTests: XCTestCase {
 
         // Grouping is a saved user preference. Establish the named fixture
         // through ordinary UI, and restore it even if navigation/paging fails.
-        let category = app.buttons["Category"]
-        let library = app.buttons["Library"]
-        XCTAssertTrue(category.waitForExistence(timeout: 10) && library.exists,
-                      "Library grouping choices are unavailable")
-        let originalGrouping = try XCTUnwrap(
-            category.isSelected != library.isSelected
-                ? (category.isSelected ? "Category" : "Library") : nil,
-            "Could not observe the current library grouping")
+        let originalGrouping = try currentLibraryGrouping(in: app)
         defer {
             // Relaunch returns from a collection detail to the ordinary root;
             // it retains the account and lets cleanup use the same controls.
             app.launch()
-            let restoreLibraries = app.tabBars.buttons["Libraries"]
+            let restoreLibraries = app.viewerTab("Libraries")
             if restoreLibraries.waitForExistence(timeout: 30)
                 && focus(restoreLibraries, in: app) {
                 remote.press(.select)
@@ -228,9 +232,10 @@ final class TVPhysicalInputTests: XCTestCase {
             "-plurx.acceptance.fileId", fileID,
             "-plurx.acceptance.title", "Physical remote acceptance",
         ]
-        if let origin = ProcessInfo.processInfo.environment["PLURX_TVOS_ORIGIN"] {
-            app.launchArguments += ["-plurx.origin", origin]
-        }
+        // PlaybackAcceptanceLaunch refuses a launch without an explicit
+        // origin, so a missing value can only produce a non-player screen.
+        let origin = try requiredEnvironment("PLURX_TVOS_ORIGIN")
+        app.launchArguments += ["-plurx.origin", origin]
         app.launchArguments += [
             "-plurx.acceptance.startMs", String(startMs),
             "-plurx.acceptance.probe", "YES",
@@ -238,6 +243,22 @@ final class TVPhysicalInputTests: XCTestCase {
         wakeDevice()
         app.launch()
         return app
+    }
+
+    /// Remote input is only meaningful once the player owns the screen. A
+    /// launch that lands on server choice, sign-in or recovery instead must
+    /// stop here: Select on those screens changes the saved connection and
+    /// signs the device out of its real account.
+    private func awaitPlayer(_ app: XCUIApplication) throws {
+        let player = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier IN %@", ["player-reveal", "player-play-pause"])
+        ).firstMatch
+        guard player.waitForExistence(timeout: 45) else {
+            attachScreen(app, name: "playback-not-presented")
+            struct PlayerNotPresented: Error {}
+            XCTFail("Acceptance launch did not present the player; no remote input was sent")
+            throw PlayerNotPresented()
+        }
     }
 
     private func wakeDevice() {
@@ -332,21 +353,35 @@ final class TVPhysicalInputTests: XCTestCase {
         return reached
     }
 
+    private func currentLibraryGrouping(in app: XCUIApplication) throws -> String {
+        let grouping = app.buttons["Group by"]
+        XCTAssertTrue(grouping.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(focus(grouping, in: app), "Could not focus Group by")
+        remote.press(.select)
+        let category = app.buttons["Category"]
+        let library = app.buttons["Library"]
+        XCTAssertTrue(category.waitForExistence(timeout: 5) && library.exists,
+                      "Group by must expose Category and Library choices")
+        let selected = try XCTUnwrap(category.isSelected != library.isSelected
+                                    ? (category.isSelected ? "Category" : "Library") : nil,
+                                    "Could not observe selected grouping in the choice panel")
+        remote.press(.menu)
+        XCTAssertTrue(grouping.hasFocus, "Group by Back must restore its opener")
+        return selected
+    }
+
     private func setLibraryGrouping(_ label: String, in app: XCUIApplication) -> Bool {
+        let grouping = app.buttons["Group by"]
+        guard grouping.waitForExistence(timeout: 10), focus(grouping, in: app) else { return false }
+        remote.press(.select)
         let choice = app.buttons[label]
-        guard choice.waitForExistence(timeout: 10) else { return false }
-        if !choice.isSelected {
-            guard focus(choice, in: app) else { return false }
-            // A tvOS segmented picker can select while focus moves onto it.
-            if !choice.isSelected { remote.press(.select) }
-        }
-        let end = Date().addingTimeInterval(5)
-        while Date() < end {
-            if choice.exists && choice.isSelected { return true }
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        attachScreen(app, name: "library-grouping-not-selected")
-        return false
+        guard choice.waitForExistence(timeout: 5) else { return false }
+        // Two choices plus Close: no unbounded search through background cards.
+        for _ in 0..<2 where !choice.hasFocus { remote.press(.down) }
+        for _ in 0..<2 where !choice.hasFocus { remote.press(.up) }
+        guard choice.hasFocus else { return false }
+        remote.press(.select)
+        return (try? currentLibraryGrouping(in: app)) == label
     }
 
     private func loadedCount(_ label: String) throws -> Int {

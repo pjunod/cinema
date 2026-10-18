@@ -116,6 +116,7 @@ fun HomeScreen(
     onOpenItem: (Long) -> Unit,
     onOpenCollection: (title: String, libraries: List<Library>) -> Unit,
     onSearch: () -> Unit,
+    onPlayFeatured: (Long) -> Unit = onOpenItem,
     onOpenDownloads: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenLiveTv: () -> Unit = {},
@@ -126,13 +127,14 @@ fun HomeScreen(
     val state by vm.home.collectAsStateWithLifecycle()
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     val features by vm.features.collectAsStateWithLifecycle()
+    val meridian = preferences.layout == tv.plurx.app.data.ViewerLayout.Meridian
     val formFactor = currentFormFactor()
     val side = formFactor.horizontalPadding()
     val posterWidth = (preferences.posterSize.widthDp * formFactor.posterScale()).dp
 
     Column(Modifier.fillMaxSize().navigationBarsPadding().semantics { testTagsAsResourceId = true }
         .testTag(if (state.hasContent) "plurx-home-ready" else "plurx-home-loading")) {
-        HomeTopBar(
+        if (!meridian) HomeTopBar(
             theme = preferences.theme,
             username = vm.username,
             formFactor = formFactor,
@@ -147,7 +149,7 @@ fun HomeScreen(
             features = features,
         )
 
-        if (HomeHeaderSection.SharedLibraries in homeHeaderSections(features)) SharedLibrariesEntry(onOpenSharedLibraries)
+        if (!meridian && HomeHeaderSection.SharedLibraries in homeHeaderSections(features)) SharedLibrariesEntry(onOpenSharedLibraries)
 
         when {
             // Only a cold start gets a spinner. Once anything has arrived the
@@ -179,7 +181,7 @@ fun HomeScreen(
                     }
                 }
                 RemoteOrder(buildList {
-                    addAll(homeHeaderRemoteKeys(features))
+                    if (meridian) addAll(listOf("meridian:feature:play", "meridian:feature:details")) else addAll(homeHeaderRemoteKeys(features))
                     listOf("Continue watching" to continueShelfItems, "Next up" to state.hubs.next_up, "Recently added" to state.hubs.recently_added).forEach { (key, items) -> items.forEach { add("row:" + key + ":item:" + it.id) } }
                     add("choice:Group by")
                     collections.forEach { collection ->
@@ -197,15 +199,16 @@ fun HomeScreen(
                 // loadHome() runs on every return from the player and a hub
                 // gaining a row would otherwise yank focus back to the top.
                 val fallbackFocus = remember { FocusRequester() }
+                val featureFocus = remember { FocusRequester() }
                 var claimedInitialFocus by rememberSaveable { mutableStateOf(false) }
                 RequestInitialFocus(
-                    shelfFocus[visibleShelfKeys.firstOrNull()] ?: fallbackFocus,
+                    if (meridian) featureFocus else shelfFocus[visibleShelfKeys.firstOrNull()] ?: fallbackFocus,
                     enabled = !claimedInitialFocus && visibleShelfKeys.isNotEmpty(),
                     onFocusRequested = { claimedInitialFocus = true },
                 )
                 fun previousShelf(key: String): FocusRequester? {
                     val index = visibleShelfKeys.indexOf(key)
-                    return visibleShelfKeys.getOrNull(index - 1)?.let { shelfFocus[it] }
+                    return visibleShelfKeys.getOrNull(index - 1)?.let { shelfFocus[it] } ?: featureFocus.takeIf { meridian }
                 }
                 fun nextShelf(key: String): FocusRequester? {
                     val index = visibleShelfKeys.indexOf(key)
@@ -244,13 +247,10 @@ fun HomeScreen(
                         .verticalScroll(rememberScrollState())
                         .padding(bottom = 32.dp)
                 ) {
-                    if (formFactor == FormFactor.Compact) {
-                        state.hubs.continue_watching.firstOrNull()?.let { featured ->
-                            CompactContinueHero(
-                                item = featured,
-                                side = side,
-                                onOpen = { onOpenItem(featured.id) },
-                            )
+                    if (meridian || formFactor == FormFactor.Compact) {
+                        (state.hubs.continue_watching.firstOrNull() ?: state.hubs.recently_added.firstOrNull())?.let { featured ->
+                            if (meridian) MeridianFeature(featured, side, featureFocus = featureFocus, onPlay = { onPlayFeatured(featured.id) }, onDetails = { onOpenItem(featured.id) })
+                            else CompactContinueHero(item = featured, side = side, onOpen = { onOpenItem(featured.id) })
                         }
                     }
                     MediaRow(
@@ -482,6 +482,7 @@ internal fun HomeTopBar(
                 ThemeId.Classic -> "cinema"
                 ThemeId.Terminal -> ":~\$ cinema ▊"
                 ThemeId.Noirr -> "noirr ▬"
+                ThemeId.Meridian -> "Cinema"
             },
             color = Accent,
             fontSize = if (formFactor == FormFactor.Television) 32.sp else 26.sp,

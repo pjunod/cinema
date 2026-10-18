@@ -503,6 +503,7 @@ fn d6_unknown_aspect_fallback_lands_below_the_starved_rung_instead_of_refusing()
     let row = |height: u32, route: CandidateRoute| {
         let digest = [(height / 8) as u8 ^ route as u8; 32];
         QualityCandidate {
+            processed_hdr10: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route,
@@ -525,6 +526,15 @@ fn d6_unknown_aspect_fallback_lands_below_the_starved_rung_instead_of_refusing()
         row(720, CandidateRoute::Encode),
         row(480, CandidateRoute::Encode),
     ];
+    let mut stale_processed = row(1080, CandidateRoute::Encode);
+    stale_processed.processed_hdr10 = true;
+    stale_processed.planned_codec = Some("hevc".into());
+    stale_processed.grade = plurx_core::transcode::OutputGrade::Hdr10;
+    stale_processed.sustainable = false;
+    let mut with_description = vec![stale_processed];
+    with_description.extend(offered.clone());
+    assert!(auto_encode_fallback(&with_description, None, 1080)
+        .is_some_and(|row| !row.processed_hdr10), "stale descriptive identity cannot become ordinary Auto fallback");
     let now = 10 * NETWORK_PRIOR_STARVED_TTL_MS;
     let prior = NetworkPrior {
         link_worst_rung_height: Some(1080),
@@ -576,6 +586,57 @@ fn d6_unknown_aspect_fallback_lands_below_the_starved_rung_instead_of_refusing()
             .map(|picked| picked.target_height),
         Some(360)
     );
+}
+
+#[test]
+fn processed_requalification_replaces_hint_once_and_refuses_full_recipe_collision() {
+    use plurx_core::playback::candidate::CandidateId;
+    let mut candidate = crate::transcode::continuous_test_candidate_context(
+        CandidateId::for_recipe_digest([7; 32]), [7; 32], 720).selected_candidate;
+    candidate.processed_hdr10 = true;
+    candidate.planned_codec = Some("hevc".into());
+    candidate.grade = plurx_core::transcode::OutputGrade::Hdr10;
+    candidate.sustainable = false;
+    let mut hint = crate::media_pool::WorkerQualityCandidate {
+        node_id: "node-a".into(), candidate,
+        binding: Some(crate::media_pool::PlanningBinding { generation: 1, source_digest: "a".repeat(64) }),
+        partial: false, dispatch_supported: true,
+    };
+    let mut catalog = crate::media_pool::QualityCatalogResult {
+        candidates: vec![hint.clone(), hint.clone()], complete: false,
+        causes: vec![crate::media_pool::CatalogCause::LocalDeadline], authority_refused: false,
+    };
+    let mut partial_ordinary = hint.clone();
+    partial_ordinary.candidate = crate::transcode::continuous_test_candidate_context(
+        CandidateId::for_recipe_digest([9; 32]), [9; 32], 720).selected_candidate;
+    partial_ordinary.partial = true;
+    let mixed = vec![hint.clone(), partial_ordinary.clone()];
+    let initial = eligible_quality_workers(&mixed, true, "node-a");
+    assert!(initial.iter().any(|row| row.candidate.id == partial_ordinary.candidate.id),
+        "stale complete description cannot suppress local partial ordinary Auto fallback");
+    assert!(auto_encode_fallback(&initial.iter().map(|row| row.candidate.clone()).collect::<Vec<_>>(), None, 720)
+        .is_some_and(|row| !row.processed_hdr10));
+    for ceiling in [None, Some(720)] {
+        let prepared = preparation_catalog_workers(&mixed, "node-a", true, ceiling);
+        assert!(prepared.iter().any(|row| row.candidate.id == partial_ordinary.candidate.id),
+            "unplayable complete processed hints cannot suppress fitting ordinary preparation");
+        assert!(!preparation_catalog_workers(&mixed, "node-a", false, ceiling).iter()
+            .any(|row| row.candidate.id == partial_ordinary.candidate.id),
+            "explicit preparation cannot borrow Auto's partial fallback");
+    }
+    let explicit = eligible_quality_workers(&mixed, false, "node-a");
+    assert_eq!(explicit.len(), 1, "explicit known identity keeps independent completeness");
+    assert_eq!(explicit[0].candidate.id, hint.candidate.id);
+    hint.candidate.sustainable = true;
+    upsert_processed_worker_candidate(&mut catalog, hint.clone()).expect("admitted requalification");
+    assert_eq!(catalog.candidates.len(), 1, "one selected descriptor can bind recovery and link receipts");
+    assert!(catalog.candidates[0].candidate.playable());
+    assert!(!catalog.complete, "independent descriptor does not complete ordinary discovery");
+    let mut collision = hint.clone();
+    collision.candidate.recipe_digest = [8; 32];
+    catalog.candidates.push(collision);
+    assert!(upsert_processed_worker_candidate(&mut catalog, hint).is_err());
+    assert_eq!(catalog.candidates.len(), 2, "collision refusal leaves the prior catalog untouched");
 }
 
 #[tokio::test]
@@ -2288,6 +2349,7 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
             dispatch_supported: true,
             partial: false,
             candidate: QualityCandidate {
+                processed_hdr10: false,
                 id: CandidateId::for_recipe_digest([seed; 32]),
                 recipe_digest: [seed; 32],
                 route: CandidateRoute::Encode,
@@ -4319,6 +4381,7 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
     );
     let digest = [12; 32];
     let candidate = QualityCandidate {
+        processed_hdr10: false,
         id: CandidateId::for_recipe_digest(digest),
         recipe_digest: digest,
         route: CandidateRoute::Encode,
@@ -4339,6 +4402,9 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
         .request;
     request.kind = crate::transcode::SessionKind::Transcode { height: 720 };
     request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
+        catalog_query: None,
+        prepared_processing: None,
+        ordinary_request: None,
         planning_snapshot: None,
         retained_output: None,
         canonical_caps: None,
@@ -4386,6 +4452,7 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
     };
     for route in [CandidateRoute::Original, CandidateRoute::Remux] {
         let copy_candidate = QualityCandidate {
+            processed_hdr10: false,
             route,
             ..candidate.clone()
         };
@@ -4630,6 +4697,7 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
     // link receipts are bound to below.
     let incumbent_digest = [7; 32];
     let incumbent = QualityCandidate {
+        processed_hdr10: false,
         id: CandidateId::for_recipe_digest(incumbent_digest),
         recipe_digest: incumbent_digest,
         route: CandidateRoute::Encode,
@@ -4753,6 +4821,7 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
     .expect("accepted actor");
     let digest = [12; 32];
     let candidate = QualityCandidate {
+        processed_hdr10: false,
         id: CandidateId::for_recipe_digest(digest),
         recipe_digest: digest,
         route: CandidateRoute::Remux,
@@ -4772,6 +4841,9 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
         .expect("recipe")
         .request;
     request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
+        catalog_query: None,
+        prepared_processing: None,
+        ordinary_request: None,
         planning_snapshot: None,
         retained_output: None,
         canonical_caps: None,
@@ -5455,6 +5527,7 @@ async fn prepared_owner_catalog_is_bounded_by_the_create_stage_not_the_prime() {
     state.serving.validation_set_ready(true).await;
     let digest = [0x5a; 32];
     let candidate = QualityCandidate {
+        processed_hdr10: false,
         id: CandidateId::for_recipe_digest(digest),
         recipe_digest: digest,
         route: CandidateRoute::Encode,
@@ -5733,6 +5806,7 @@ fn sharing_resource_validator_accepts_actual_master_and_subtitle_generators() {
 fn finite_auto_hevc_preference_preserves_shape_evidence_and_explicit_choice() {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
     let avc = QualityCandidate {
+        processed_hdr10: false,
         id: CandidateId::for_recipe_digest([1; 32]),
         recipe_digest: [1; 32],
         route: CandidateRoute::Encode,
@@ -5762,7 +5836,7 @@ fn finite_auto_hevc_preference_preserves_shape_evidence_and_explicit_choice() {
         Some(avc.id),
         "disabled preference or explicit identity retains its row"
     );
-    for restriction in 0..6 {
+    for restriction in 0..7 {
         let mut chosen = avc.clone();
         let mut alternative = hevc.clone();
         match restriction {
@@ -5771,6 +5845,11 @@ fn finite_auto_hevc_preference_preserves_shape_evidence_and_explicit_choice() {
             2 => alternative.height = 720,
             3 => alternative.grade = plurx_core::transcode::OutputGrade::Hdr10,
             4 => alternative.decoder_compatible = false,
+            5 => {
+                chosen.grade = plurx_core::transcode::OutputGrade::Hdr10;
+                alternative.grade = plurx_core::transcode::OutputGrade::Hdr10;
+                alternative.processed_hdr10 = true;
+            }
             _ => alternative.peak_bps = Some(20_000_000),
         };
         let rows = vec![chosen, alternative];
@@ -5874,7 +5953,7 @@ fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
     let row = |node: &str, seed: u8, height, partial| crate::media_pool::WorkerQualityCandidate {
         node_id: node.into(), binding: None, partial, dispatch_supported: true,
-        candidate: QualityCandidate { id: CandidateId::for_recipe_digest([seed;32]), recipe_digest:[seed;32],
+        candidate: QualityCandidate { processed_hdr10: false, id: CandidateId::for_recipe_digest([seed;32]), recipe_digest:[seed;32],
             route: CandidateRoute::Encode, planned_codec:None, normalized_geometry:true, width:1280,height,target_height:height,
             average_bps:None,peak_bps:None,grade:plurx_core::transcode::OutputGrade::Sdr,decoder_compatible:true,complete_cache:false,sustainable:true }
     };
@@ -5886,6 +5965,31 @@ fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
     let mut cold = local.clone(); cold.candidate.sustainable = false;
     assert_eq!(preparation_catalog_workers(&[cold.clone()],"local",true,Some(720)).len(),1,"unknown production may stage a bounded first attachment, without claiming sustainable proof");
     assert!(!cold.candidate.playable(),"bootstrap admission does not manufacture measured production");
+    let ordinary_cold = cold.candidate.clone();
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&ordinary_cold), 720).is_some(),
+        "ordinary first-window admission needs no fabricated production proof");
+    let mut processed_cold = ordinary_cold.clone();
+    processed_cold.processed_hdr10 = true;
+    processed_cold.grade = plurx_core::transcode::OutputGrade::Hdr10;
+    processed_cold.planned_codec = Some("hevc".into());
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed_cold), 720).is_none(),
+        "a descriptive processed recipe cannot borrow ordinary cold admission");
+    let mut processed = processed_cold.clone();
+    processed.sustainable = true;
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed), 720).is_some(),
+        "qualified executable processed output can stage within the ceiling");
+    let mut wrong_grade = processed.clone();
+    wrong_grade.grade = plurx_core::transcode::OutputGrade::Sdr;
+    let mut wrong_codec = processed.clone();
+    wrong_codec.planned_codec = Some("h264".into());
+    for refused in [processed_cold, wrong_grade, wrong_codec] {
+        assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&refused), 720).is_none());
+        let mixed = [refused, ordinary_cold.clone()];
+        assert!(auto_bootstrap_encode_fallback(&mixed, 720).is_some_and(|candidate| !candidate.processed_hdr10),
+            "stale processed hints cannot replace a usable ordinary bootstrap");
+    }
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed), 480).is_none(),
+        "processed output never escapes the actual bootstrap height ceiling");
     let mut zero_geometry = local.clone(); zero_geometry.candidate.width = 0;
     let mut parser_only = local.clone(); parser_only.dispatch_supported = false;
     assert!(preparation_catalog_workers(&[forged,incompatible,larger_actual,larger_rung,zero_geometry,parser_only],"local",true,Some(720)).is_empty(), "bounded bootstrap rejects invalid identity/decoder/raster/rung/work admission");

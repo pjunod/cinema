@@ -33,7 +33,25 @@ enum AppBuildInfo {
     }
 }
 
+enum TVSettingsCategory: String, CaseIterable, Identifiable {
+    case playback = "Playback"
+    case help = "Help"
+    case appearance = "Appearance"
+    case liveTv = "Live TV"
+    case sharing = "Sharing"
+    case account = "Account"
+    case remotes = "Remotes & devices"
+    case developer = "Developer"
+    case about = "About"
+    var id: String { rawValue }
+}
+
 struct SettingsView: View {
+    var category: TVSettingsCategory? = nil
+    @FocusState private var focusedCategory: TVSettingsCategory?
+    @State private var lastCategory = TVSettingsCategory.playback
+    @State private var selectedCategory = TVSettingsCategory.playback
+    @Namespace private var categoryFocus
     @EnvironmentObject var model: AppModel
     @EnvironmentObject private var remoteClient: RemoteClientModel
     @State private var diagnosticSignOutConfirmation = false
@@ -67,7 +85,47 @@ struct SettingsView: View {
         #endif
     }
 
-    var body: some View {
+    @ViewBuilder var body: some View {
+        #if os(tvOS)
+        if category == nil {
+            HStack(alignment: .top, spacing: 28) {
+                List(TVSettingsCategory.allCases) { entry in
+                    Button { selectedCategory = entry } label: {
+                        HStack {
+                            Text(entry.rawValue)
+                            Spacer()
+                            if selectedCategory == entry { Image(systemName: "checkmark") }
+                        }
+                    }
+                    .focused($focusedCategory, equals: entry)
+                    .prefersDefaultFocus(entry == lastCategory, in: categoryFocus)
+                    .accessibilityIdentifier("settings-category-" + entry.id)
+                    .buttonStyle(TVReadableButtonStyle(prominent: false))
+                }
+                .frame(width: 360)
+                .focusScope(categoryFocus)
+                .focusSection()
+                .onChange(of: focusedCategory) { _, value in
+                    if let value { lastCategory = value; selectedCategory = value }
+                }
+                Divider()
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(selectedCategory.rawValue).font(.title2.bold()).padding(.horizontal, 24)
+                    SettingsView(category: selectedCategory)
+                        .id(selectedCategory)
+                }
+                .focusSection()
+                .tvSettingsContentExit { focusedCategory = selectedCategory }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .navigationTitle("Settings")
+        } else { settingsForm }
+        #else
+        settingsForm
+        #endif
+    }
+
+    private var settingsForm: some View {
         Form {
             Section {
                 Picker("Quality", selection: Binding(
@@ -109,6 +167,7 @@ struct SettingsView: View {
             } footer: {
                 Text("Track choices apply when a title has more than one. Instant subtitle switching prepares subtitles from the first frame; After a short pause builds them the first time you turn them on. Pause/resume and quality handoff are on by default; their readiness rows are advisory and never change either switch.")
             }
+            .settingsCategory(.playback, selection: category)
 
             #if os(iOS)
             Section {
@@ -136,6 +195,12 @@ struct SettingsView: View {
             #endif
 
             Section {
+                Picker("Layout", selection: Binding(
+                    get: { model.layout }, set: { model.setLayout($0) }
+                )) {
+                    ForEach(ViewerLayout.allCases) { layout in Text(layout.label).tag(layout) }
+                }
+                .accessibilityIdentifier("settings-viewer-layout")
                 Picker("Theme", selection: Binding(
                     get: { model.theme },
                     set: { model.setTheme($0) }
@@ -161,6 +226,7 @@ struct SettingsView: View {
                     }
                 }
                 #if os(tvOS)
+                if model.layout == .standard {
                 Picker("Home layout", selection: Binding(
                     get: { TvHomeLayout(rawValue: tvHomeLayoutRaw) ?? .classic },
                     set: { tvHomeLayoutRaw = $0.rawValue }
@@ -170,6 +236,10 @@ struct SettingsView: View {
                     }
                 }
                 .accessibilityIdentifier("settings-tv-home-layout")
+                } else {
+                    Text("Meridian provides its own featured Home. Your Standard Home choice is remembered.")
+                        .foregroundStyle(Palette.muted)
+                }
                 #endif
                 Picker(libraryGroupingLabel, selection: Binding(
                     get: { model.libraryGrouping },
@@ -188,6 +258,7 @@ struct SettingsView: View {
                 Text("Theme and room brightness are independent. Home layout groups shelves by media category or by individual library.")
                 #endif
             }
+            .settingsCategory(.appearance, selection: category)
 
             // Server Live TV settings, as on the web's Settings → Live TV. The
             // tuner, guide, recording and Library channel cards used to sit in
@@ -214,8 +285,10 @@ struct SettingsView: View {
                 Text("Server settings require administrator access.")
                 #endif
             }
+            .settingsCategory(.liveTv, selection: category)
 
             Section("Sharing") { NavigationLink("Shared libraries and Source status") { SharedSharingSettingsView() } }
+                .settingsCategory(.sharing, selection: category)
 
             Section("Account") {
                 LabeledContent("Signed in as", value: model.username ?? "—")
@@ -241,31 +314,39 @@ struct SettingsView: View {
                     #endif
                 }
             }
+            .settingsCategory(.account, selection: category)
 
             Section("Remotes & devices") {
                 NavigationLink("Manage remote pairings") { RemoteDeviceSettingsView() }
                 Text(remoteClient.status).font(.caption)
             }
+            .settingsCategory(.remotes, selection: category)
             Section("Developer") {
                 NavigationLink("Shared libraries, Cinema remotes and other features awaiting evidence") { LiveTvDeveloperView() }
             }
+            .settingsCategory(.developer, selection: category)
 
             Section("Help") {
                 DiagnosticReportButton()
-                Text("Save a bounded private incident locally, send it to support, or finish on a phone.").font(.caption)
+                Text("Save a private diagnostic ZIP on your phone, then attach it to your bug report.").font(.caption)
             }
+            .settingsCategory(.help, selection: category)
 
             Section("About") {
                 LabeledContent("App version", value: AppBuildInfo.current)
             }
+            .settingsCategory(.about, selection: category)
         }
         #if os(tvOS)
         // The default Form picker pushes a choice list through the stack that
         // wraps the whole tab bar. On Apple TV that destination can be empty;
         // keep every settings choice in a focusable menu on this screen.
         .pickerStyle(.menu)
+        .buttonStyle(TVReadableButtonStyle(prominent: false))
         #endif
+        #if os(iOS)
         .navigationTitle("Settings")
+        #endif
         .tint(Palette.accent)
         .background(Palette.bg)
         .alert("Clear pending local reports and sign out?", isPresented: $diagnosticSignOutConfirmation) {
@@ -361,5 +442,16 @@ struct PlaybackHandoffDetailsView: View {
             }
         }
         .navigationTitle("Pause and quality handoff")
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func settingsCategory(_ value: TVSettingsCategory, selection: TVSettingsCategory?) -> some View {
+        #if os(tvOS)
+        if value == selection { self }
+        #else
+        self
+        #endif
     }
 }

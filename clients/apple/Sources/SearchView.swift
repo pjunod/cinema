@@ -9,6 +9,9 @@ struct SearchView: View {
     @State private var searching = false
     @State private var hasSearched = false
     @State private var error: String?
+    @State private var retryGeneration = 0
+    @State private var resultBookmark: Int?
+    @State private var resultsOwnedFocus = false
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: model.posterSize.posterWidth), spacing: 18, alignment: .top)]
@@ -16,20 +19,35 @@ struct SearchView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-        ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 #if os(tvOS)
-                TextField("Search movies, shows, and episodes", text: $query)
+                TextField("Search movies, shows, and episodes", text: $query,
+                          prompt: Text("Search movies, shows, and episodes").foregroundColor(Palette.muted))
+                    .foregroundStyle(Palette.onBg)
                     .padding(.horizontal, screenHPad)
                     .padding(.top, 8)
                     .remoteControl("search:field", label: "Search") {}
                 #endif
 
-                searchContent
+                if let error {
+                    HStack {
+                        Text("Search unavailable: \(error)").foregroundStyle(Palette.muted)
+                        Button("Retry") { retryGeneration += 1 }
+                            .shelfActionButtonStyle()
+                            .accessibilityIdentifier("search:retry")
+                            .remoteControl("search:retry", label: "Retry search") { retryGeneration += 1 }
+                    }.padding(.horizontal, screenHPad)
+                }
+                if searching {
+                    ProgressView("Searching…").tint(Palette.accent)
+                        .padding(.horizontal, screenHPad)
+                }
+                ScrollView {
+                    searchContent
                     .padding(.horizontal, screenHPad)
+                    .padding(.bottom, 36)
+                }
             }
-            .padding(.bottom, 36)
-        }
         .background(Palette.bg.ignoresSafeArea())
         .navigationTitle("Search")
         #if os(iOS)
@@ -43,42 +61,46 @@ struct SearchView: View {
             remoteNavigation.setSearch(scope: "search", nonce: searchNonce) { query = $0 }
         }
         .onDisappear { remoteNavigation.removeSearch(scope: "search", nonce: searchNonce); searchNonce = UUID() }
-        .onChange(of: results.map(\.id)) { _, _ in updateRemoteOrder() }
-        .onChange(of: remoteNavigation.requestedFocus) { _, key in
+        .onChange(of: results.map(\.id)) { previous, current in
+            updateRemoteOrder()
+            guard let saved = resultBookmark else { return }
+            resultBookmark = TVLibraryNavigation.survivingBookmark(saved, previous: previous, current: current)
+            if remoteNavigation.activeScope == "search", resultsOwnedFocus, !current.contains(saved) {
+                remoteNavigation.focusControl(scope: "search", key: resultBookmark.map { "search:item:\($0)" } ?? "search:field")
+            }
+        }
+        .onChange(of: remoteNavigation.focusRevision) { _, _ in
+            guard remoteNavigation.activeScope == "search", let key = remoteNavigation.focusedKey else { return }
+            resultsOwnedFocus = key.hasPrefix("search:item:")
+            if resultsOwnedFocus { resultBookmark = Int(key.dropFirst(12)) }
+        }
+        .onChange(of: error) { _, _ in updateRemoteOrder() }
+        .onChange(of: remoteNavigation.focusRequestRevision) { _, _ in
+            let key = remoteNavigation.requestedFocus
             guard remoteNavigation.activeScope == "search", let key, key.hasPrefix("search:item:"), let id = Int(key.dropFirst(12)) else { return }
             proxy.scrollTo(id, anchor: .center)
         }
-        .task(id: query) { await performSearch() }
+        .task(id: "\(retryGeneration):\(query)") { await performSearch() }
         }
     }
 
     @ViewBuilder
     private var searchContent: some View {
-        if searching {
-            ProgressView().tint(Palette.accent)
-                .frame(maxWidth: .infinity).padding(.top, 70)
-        } else if let error {
-            ContentUnavailableView(
-                "Search unavailable",
-                systemImage: "exclamationmark.triangle",
-                description: Text(error)
-            )
-            .frame(maxWidth: .infinity)
-        } else if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             ContentUnavailableView(
                 "Find something to watch",
                 systemImage: "magnifyingglass",
                 description: Text("Search across every library share on this Cinema server.")
             )
             .frame(maxWidth: .infinity)
-        } else if hasSearched && results.isEmpty {
+        } else if hasSearched && results.isEmpty && error == nil && !searching {
             ContentUnavailableView(
                 "No results",
                 systemImage: "magnifyingglass",
                 description: Text("Try another title or a broader phrase.")
             )
             .frame(maxWidth: .infinity)
-        } else {
+        } else if !results.isEmpty {
             Text("\(results.count) \(results.count == 1 ? "result" : "results")")
                 .font(.system(.subheadline, design: .monospaced))
                 .foregroundColor(Palette.muted)
@@ -99,7 +121,7 @@ struct SearchView: View {
     }
 
     private func updateRemoteOrder() {
-        remoteNavigation.setOrder(scope: "search", keys: ["search:field"] + results.map { "search:item:\($0.id)" }, columns: 1)
+        remoteNavigation.setOrder(scope: "search", keys: ["search:field"] + (error == nil ? [] : ["search:retry"]) + results.map { "search:item:\($0.id)" }, columns: 1)
     }
 
     private func performSearch() async {

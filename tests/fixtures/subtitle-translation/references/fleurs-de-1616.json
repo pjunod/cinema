@@ -1,0 +1,56 @@
+{
+  "dataset": "Google FLEURS",
+  "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+  "config": "de_de",
+  "split": "dev",
+  "sentence_id": "1616",
+  "selection": "Exact publisher sentence ID1586 for three-language baseline; German sequence uses first distinct IDs in pinned archive order with unique publisher English text, stopping after60s. Selected before engine execution.",
+  "archive_url": "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/de_de/audio/dev.tar.gz",
+  "archive_bytes": 227694463,
+  "archive_sha256": "72cac13bbddbddf674d8102a9e7b90a3b1db5d777ed92e88eccc5ae69cb8fc9d",
+  "archive_member": "dev/10271331673746997728.wav",
+  "audio_bytes": 791098,
+  "audio_sha256": "731b1f2980e0361ffbfe4d1ab8c697c2414ea545bdd458c66f79def7d67f035c",
+  "audio": {
+    "samples": 197760,
+    "rate": 16000,
+    "channels": 1,
+    "format_code": 3,
+    "bits": 32
+  },
+  "source_tsv_sha256": "055b6ddecc9ad493d9ead86babe3ebe225148dd3c174fa6f95cb83a4f9586e18",
+  "source_raw_text": "Die Wissenschaft weist nun darauf hin, dass diese massive Kohlenstoffwirtschaft die Biosphäre aus einem ihrer stabilen Zustände, der die menschliche Evolution in den letzten zwei Millionen Jahren getragen hat, herausgebracht hat.",
+  "source_normalized_text": "die wissenschaft weist nun darauf hin dass diese massive kohlenstoffwirtschaft die biosphäre aus einem ihrer stabilen zustände der die menschliche evolution in den letzten zwei millionen jahren getragen hat herausgebracht hat",
+  "english_reference": "Science now indicates that this massive carbon economy has dislodged the biosphere from one of its stable states that has supported human evolution for the past two million years.",
+  "english_reference_utf8_sha256": "6db6a200e612defa5049d9f1128887b61a83b51aa987cd451c25f1478ac655e2",
+  "english_tsv_records": [
+    {
+      "split": "dev",
+      "filename": "9092098889572728579.wav",
+      "raw": "Science now indicates that this massive carbon economy has dislodged the biosphere from one of its stable states that has supported human evolution for the past two million years."
+    },
+    {
+      "split": "dev",
+      "filename": "12443760270511039663.wav",
+      "raw": "Science now indicates that this massive carbon economy has dislodged the biosphere from one of its stable states that has supported human evolution for the past two million years."
+    },
+    {
+      "split": "dev",
+      "filename": "17570214275534524933.wav",
+      "raw": "Science now indicates that this massive carbon economy has dislodged the biosphere from one of its stable states that has supported human evolution for the past two million years."
+    }
+  ],
+  "english_tsv_sha256": {
+    "dev": "9d57ee7e91e9d4c92edb39f6bbea668ef8dc2a3ff96eb510d5580b2ad05d17ec"
+  },
+  "license": "CC BY4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "license_text": "licenses/CC-BY-4.0.txt",
+  "license_text_sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+  "attribution": "FLEURS: Conneau, Ma, Khanuja, Zhang, Axelrod, Dalmia, Riesa, Rivera and Bapna (2022), Google.",
+  "publisher_card_url": "https://huggingface.co/datasets/google/fleurs/blob/70bb2e84b976b7e960aa89f1c648e09c59f894dd/README.md",
+  "publisher_card_sha256": "688f79f2a5c731af3796e9f683eb02f9b3f09d040decd8c5625d0f37098e71c6",
+  "reference_origin": "Publisher n-way aligned FLEURS/FLoRes sentence, exact ID; English Wikipedia source sentences and professional translations described by FLORES-101 paper https://arxiv.org/abs/2106.03193. No agent-generated reference.",
+  "review_limit": "Identifier/text/rights provenance audit only; no local bilingual listening/timing verdict or natural-dialogue quality qualification.",
+  "changes": "Extracted original WAV and publisher source/English text without modification; provenance metadata added."
+}

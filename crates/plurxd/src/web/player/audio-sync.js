@@ -100,7 +100,9 @@ async function setSub(index){
       {title:"That subtitle requires an SDR burn-in. HDR playback was kept unchanged."});
     return false;   // nothing changed, so nothing to remember
   }
-  const video=document.getElementById("video");
+  const captionSerial=typeof translationSelectSource==="function"?translationSelectSource(me,index):(me.captionIntentSerial=(me.captionIntentSerial||0)+1);
+  const attachment=me.mediaAttachment,auth=typeof AUTH_GENERATION==="undefined"?null:AUTH_GENERATION;
+  const video=/** @type {HTMLVideoElement|null} */(document.getElementById("video"));
   const position=positionForPlaybackIntent(video,me);
   me.curSub=index;
   if(burnAction==="burn"||me.burnedSub!=null){
@@ -144,7 +146,7 @@ async function setSub(index){
     tr.src=subUrl(index);
     v.appendChild(tr);
     // Setting mode triggers the fetch; do it after the element registers.
-    setTimeout(()=>{ if(PLAYER===me && me.curSub===index && tr.track) tr.track.mode="showing"; },30);
+    setTimeout(()=>{ if(PLAYER===me && me.curSub===index && me.captionIntentSerial===captionSerial && me.mediaAttachment===attachment && document.getElementById("video")===v && (auth==null||auth===AUTH_GENERATION) && tr.track) tr.track.mode="showing"; },30);
     return;
   }
   let text;
@@ -153,10 +155,10 @@ async function setSub(index){
     if(!r.ok) throw new Error("HTTP "+r.status);
     text=await r.text();
   }catch(err){
-    if(PLAYER===me && me.curSub===index) toast("Couldn't load that subtitle track");
+    if(PLAYER===me && me.curSub===index && me.captionIntentSerial===captionSerial) toast("Couldn't load that subtitle track");
     return;
   }
-  if(PLAYER!==me || me.curSub!==index || (me.offset||0)!==off) return;  // switched away mid-fetch
+  if(PLAYER!==me || document.getElementById("video")!==v || me.curSub!==index || me.captionIntentSerial!==captionSerial || me.mediaAttachment!==attachment || (auth!=null&&auth!==AUTH_GENERATION) || (me.offset||0)!==off) return;  // switched away mid-fetch
   // One script track per <video>, reused: a script-created track can't be
   // removed, so re-adding one per seek would pile them up over a session.
   if(!v._vsubs) v._vsubs=v.addTextTrack("subtitles","");
@@ -234,6 +236,7 @@ async function switchAudio(idx){
   const me=PLAYER, v=document.getElementById("video");
   if(!me||!v||idx===me.curAudio) return;
   endWait(false); // cancel a timer armed for the stream this switch replaces
+  if(typeof translationRetire==="function")translationRetire("audio changed");
   me.curAudio=idx;
   renderPlayerInfo();
   const pos=positionForPlaybackIntent(v,me);

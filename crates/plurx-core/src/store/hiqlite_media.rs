@@ -1080,32 +1080,7 @@ async fn local_pairs(
 }
 
 #[cfg(test)]
-mod query_helper_tests {
-    use super::*;
-    use crate::store::hiqlite::disconnected_test_client;
-
-    #[tokio::test]
-    async fn shared_read_helpers_reject_misordered_placeholders() {
-        let client = disconnected_test_client();
-        for error in [
-            scalar(&client, "SELECT $2 AS value WHERE $1 = 1")
-                .await
-                .expect_err("scalar helper must validate SQL"),
-            scalar_with(
-                &client,
-                "SELECT $2 AS value WHERE $1 = 1".to_owned(),
-                params!(1, 2),
-            )
-            .await
-            .expect_err("parameterized scalar helper must validate SQL"),
-            pairs(&client, "SELECT $2 AS label, $1 AS count")
-                .await
-                .expect_err("pairs helper must validate SQL"),
-        ] {
-            assert!(error.to_string().contains("expected $1, found $2"));
-        }
-    }
-}
+mod query_helper_tests;
 
 impl HiqliteAuthStore {
     pub(super) async fn local_get_item(&self, id: i64) -> Result<Option<Item>, StoreError> {
@@ -4948,34 +4923,4 @@ impl From<&mut Row<'_>> for ProgressRailRow {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fts_expression_quotes_tokens_and_prefixes_only_the_last() {
-        assert_eq!(
-            fts_query("The Matrix"),
-            Some("(\"the\") AND (\"matrix\"*)".to_owned())
-        );
-        assert_eq!(fts_query("..."), None);
-    }
-
-    #[test]
-    fn in_transaction_budget_refusal_is_not_mislabeled_as_a_root_change() {
-        assert_eq!(
-            reconcile_refusal(Some("same-root"), "same-root", 2, 1),
-            Some(ReconcileOutcome::RefusedPrune {
-                requested: 2,
-                limit: 1,
-            })
-        );
-    }
-
-    #[test]
-    fn replicated_id_sets_are_bound_as_json_instead_of_inlined_sql() {
-        let source = include_str!("hiqlite_media.rs");
-        assert!(!source.contains(&["fn id", "_list"].concat()));
-        assert!(!source.contains(&["IN ({", "list})"].concat()));
-        assert_eq!(ids_json(&[3, 5, 8]).expect("JSON ids"), "[3,5,8]");
-    }
-}
+mod tests;

@@ -688,3 +688,10 @@ async function saveSdrMasterCodecs(btn){
     toast("SDR master CODECS preference saved");
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
 }
+
+function subtitleTranslationCard(){
+  return setCard(`${cardHead("English subtitle translation","Translate foreign speech while the movie keeps playing.",'<span class="pill">Experimental accuracy</span>')}
+    <p>Install a compatible multilingual model, then choose Translate to English in the player. Partial captions may lag or be wrong; original captions and Off remain available.</p>
+    <p class="hint">Supported on local web direct playback with one audio stream. Other delivery routes, multiple audio streams and native clients remain unsupported.</p>
+    <button type="button" class="sm" onclick="openTranslationSettings()">Configure English translation</button><div id="subtitle-translation-form"></div>`,{id:"enable-subtitle-translation"});
+}

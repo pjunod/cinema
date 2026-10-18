@@ -149,6 +149,8 @@ test("file route census allows only explicit local administration and reader exc
     "detail/preplay-selection.js":["`/files/${encodeURIComponent(fileId)}/subtitles/transcribe`","`/files/${fileId}/subtitles/search?language=${encodeURIComponent(language)}`","`/files/${fileId}/subtitles/download`","`/api/v1/files/${exactWireId(file)}/content`","`/files/${id}/dv-conversion`"],
     // Continuous enrollment is Local-only; the real Start guard is exercised below.
     "player/continuous-quality.js":["`/files/${fileId}/hls/continuous-candidates`","`/files/${fileId}/hls/continuous-sessions`"],
+    // Progressive translation is Local-only: the player refuses any non-local file context before a request.
+    "player/subtitle-translation.js":["`/files/${encodeURIComponent(state.fileId)}/subtitle-translation/options`","`/files/${encodeURIComponent(state.fileId)}/subtitle-translation/assets?cursor=${encodeURIComponent(cursor)}`","`/files/${encodeURIComponent(state.fileId)}/subtitle-translation`"],
   };
   const seen=new Set(),unexpected=[];
   for(const file of shellSource().rows.body){

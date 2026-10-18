@@ -614,12 +614,15 @@ data class QualityCandidate(
     val decoder_compatible: Boolean,
     val complete_cache: Boolean,
     val sustainable: Boolean,
+    val planned_codec: String? = null,
+    val processed_hdr10: Boolean = false,
 ) {
     val hasValidIdentity: Boolean
         get() {
             if (recipe_digest.size != 32 || recipe_digest.any { it !in 0..255 } || width !in 1..16384 ||
                 height !in 1..16384 || target_height !in 0..16384 || route !in listOf("original", "remux", "encode") ||
-                grade !in listOf("sdr", "hdr10")) return false
+                grade !in listOf("sdr", "hdr10") || processed_hdr10 &&
+                (route != "encode" || grade != "hdr10" || planned_codec != "hevc")) return false
             val hash = java.security.MessageDigest.getInstance("SHA-256")
             hash.update("plurx:auto-quality-candidate:v1\u0000".toByteArray(Charsets.UTF_8))
             val expected = hash.digest(recipe_digest.map { it.toByte() }.toByteArray())

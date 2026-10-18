@@ -1273,6 +1273,7 @@ catalog|item@1280x860|dom|a > svg.px-ico[aria-hidden=true]|10
 catalog|item@1280x860|dom|a.px-tab > span[text]|5
 catalog|item@1280x860|dom|a.px-tab > svg.px-ico[aria-hidden=true]|5
 catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
+catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
 catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
 catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 catalog|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
@@ -1446,6 +1447,7 @@ catalog|item@390x780|dom|a > svg.px-ico[aria-hidden=true]|10
 catalog|item@390x780|dom|a.px-tab > span[text]|5
 catalog|item@390x780|dom|a.px-tab > svg.px-ico[aria-hidden=true]|5
 catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
+catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
 catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
 catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 catalog|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
@@ -2447,6 +2449,7 @@ catalog|player@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* ty
 catalog|player@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|player@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|player@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
+catalog|player@1280x860|dom|dd > button.ghost.sm[type=button text]|2
 catalog|player@1280x860|dom|dd > div.watch-trks|4
 catalog|player@1280x860|dom|dd > span.mode-chip[text]|2
 catalog|player@1280x860|dom|dd > span.mode-detail[text]|2
@@ -2556,8 +2559,8 @@ catalog|player@1280x860|dom|div.watch-stage > aside#watch-title-panel.watch-titl
 catalog|player@1280x860|dom|div.watch-stage > div.watch-picture|1
 catalog|player@1280x860|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 catalog|player@1280x860|dom|dl.watch-ledger > dd[text]|2
-catalog|player@1280x860|dom|dl.watch-ledger > dd|8
-catalog|player@1280x860|dom|dl.watch-ledger > dt[text]|10
+catalog|player@1280x860|dom|dl.watch-ledger > dd|10
+catalog|player@1280x860|dom|dl.watch-ledger > dt[text]|12
 catalog|player@1280x860|dom|g > path|5
 catalog|player@1280x860|dom|main#main > section#watch-browser.watch-browser[aria-label=*]|1
 catalog|player@1280x860|dom|nav.px-nav > a|3
@@ -2571,6 +2574,8 @@ catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+catalog|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 catalog|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -2622,6 +2627,7 @@ catalog|player@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* typ
 catalog|player@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|player@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|player@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
+catalog|player@390x780|dom|dd > button.ghost.sm[type=button text]|2
 catalog|player@390x780|dom|dd > div.watch-trks|4
 catalog|player@390x780|dom|dd > span.mode-chip[text]|2
 catalog|player@390x780|dom|dd > span.mode-detail[text]|2
@@ -2730,8 +2736,8 @@ catalog|player@390x780|dom|div.watch-stage > aside#watch-title-panel.watch-title
 catalog|player@390x780|dom|div.watch-stage > div.watch-picture|1
 catalog|player@390x780|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 catalog|player@390x780|dom|dl.watch-ledger > dd[text]|2
-catalog|player@390x780|dom|dl.watch-ledger > dd|8
-catalog|player@390x780|dom|dl.watch-ledger > dt[text]|10
+catalog|player@390x780|dom|dl.watch-ledger > dd|10
+catalog|player@390x780|dom|dl.watch-ledger > dt[text]|12
 catalog|player@390x780|dom|g > path|5
 catalog|player@390x780|dom|main#main > section#watch-browser.watch-browser[aria-label=*]|1
 catalog|player@390x780|dom|nav.px-nav > a|3
@@ -2745,6 +2751,8 @@ catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > d
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+catalog|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 catalog|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -2992,8 +3000,8 @@ catalog|settings-developer@1280x860|dom|button.settab[role=link aria-current=fal
 catalog|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|4
 catalog|settings-developer@1280x860|dom|details.setdetails > summary[text]|4
 catalog|settings-developer@1280x860|dom|div > h1[text]|1
-catalog|settings-developer@1280x860|dom|div > h2.section[text]|23
-catalog|settings-developer@1280x860|dom|div > p.sub[text]|23
+catalog|settings-developer@1280x860|dom|div > h2.section[text]|22
+catalog|settings-developer@1280x860|dom|div > p.sub[text]|22
 catalog|settings-developer@1280x860|dom|div > p[text]|1
 catalog|settings-developer@1280x860|dom|div#app > div#pxshell.px-shell|1
 catalog|settings-developer@1280x860|dom|div#cinema-remote-management[role=status] > p[text]|1
@@ -3042,8 +3050,6 @@ catalog|settings-developer@1280x860|dom|div#enable-output-preparation.setsection
 catalog|settings-developer@1280x860|dom|div#enable-output-preparation.setsection > p[text]|1
 catalog|settings-developer@1280x860|dom|div#enable-sdr-codecs.setsection > h2[text]|1
 catalog|settings-developer@1280x860|dom|div#enable-sdr-codecs.setsection > p[text]|1
-catalog|settings-developer@1280x860|dom|div#enable-subtitle-transcription.setsection > h2[text]|1
-catalog|settings-developer@1280x860|dom|div#enable-subtitle-transcription.setsection > p[text]|1
 catalog|settings-developer@1280x860|dom|div#enable-vod-reorder.setsection > h2[text]|1
 catalog|settings-developer@1280x860|dom|div#enable-vod-reorder.setsection > p[text]|1
 catalog|settings-developer@1280x860|dom|div#hevc-copy-card.card.setcard > details.setdetails|1
@@ -3107,7 +3113,6 @@ catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-macos
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-macos-video.setsection|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-output-preparation.setsection|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-sdr-codecs.setsection|1
-catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-subtitle-transcription.setsection|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-vod-reorder.setsection|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#hevc-copy-card.card.setcard|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#jellyfin-compatibility-settings.card.setcard|1
@@ -3118,7 +3123,7 @@ catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#sdr-codecs-c
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vod-output-preparation-card.card.setcard|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vod-reorder-card.card.setcard|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vod-rolling-retention-card.card.setcard|1
-catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|10
+catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|9
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|2
 catalog|settings-developer@1280x860|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
@@ -3144,7 +3149,6 @@ catalog|settings-developer@1280x860|dom|div#vod-rolling-retention-card.card.setc
 catalog|settings-developer@1280x860|dom|div#vod-rolling-retention-card.card.setcard > p.hint[text]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > a.ghost[text]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > button.ghost[text]|3
-catalog|settings-developer@1280x860|dom|div.card.setcard > button.sm[text]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > button[type=button text]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#aqerr.err[role=alert]|1
@@ -3153,18 +3157,17 @@ catalog|settings-developer@1280x860|dom|div.card.setcard > div#cinema-receiver-s
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#cinema-remote-error.err[role=alert]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#cinema-remote-management[role=status]|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > div#daqerr.err[role=alert]|1
-catalog|settings-developer@1280x860|dom|div.card.setcard > div#subtitle-transcription-form|1
-catalog|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|10
+catalog|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|9
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.devcheck|10
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|2
 catalog|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|7
 catalog|settings-developer@1280x860|dom|div.card.setcard > label.setfield|1
 catalog|settings-developer@1280x860|dom|div.card.setcard > label.tog|8
-catalog|settings-developer@1280x860|dom|div.card.setcard > p.devcheck-note.devgrad[text]|9
+catalog|settings-developer@1280x860|dom|div.card.setcard > p.devcheck-note.devgrad[text]|8
 catalog|settings-developer@1280x860|dom|div.card.setcard > p.hint[text]|3
-catalog|settings-developer@1280x860|dom|div.card.setcard > p[text]|2
+catalog|settings-developer@1280x860|dom|div.card.setcard > p[text]|1
 catalog|settings-developer@1280x860|dom|div.cardhead > div.cardtools|14
-catalog|settings-developer@1280x860|dom|div.cardhead > div|23
+catalog|settings-developer@1280x860|dom|div.cardhead > div|22
 catalog|settings-developer@1280x860|dom|div.cardtools > span#aqstate.pill[text]|1
 catalog|settings-developer@1280x860|dom|div.cardtools > span#daqstate.pill[text]|1
 catalog|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|12
@@ -3233,7 +3236,7 @@ catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.activ
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|11
 catalog|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings-developer@1280x860|dom|p.devcheck-description[text] > a[text]|1
-catalog|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|44
+catalog|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|42
 catalog|settings-developer@1280x860|dom|p.hint[text] > code[text]|2
 catalog|settings-developer@1280x860|dom|select#vod-output-preparation > option[text]|3
 catalog|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|4
@@ -3294,17 +3297,16 @@ catalog|settings-developer@1280x860|focus|045|input#vod-rolling-retention
 catalog|settings-developer@1280x860|focus|046|input#pmacosvideo
 catalog|settings-developer@1280x860|focus|047|button.ghost.sm "Check compatibility again"
 catalog|settings-developer@1280x860|focus|048|input#pmacoshevc
-catalog|settings-developer@1280x860|focus|049|button.sm "Configure transcription"
-catalog|settings-developer@1280x860|focus|050|input#dev-cinema-cec
-catalog|settings-developer@1280x860|focus|051|input#dev-cinema-receiver
-catalog|settings-developer@1280x860|focus|052|input#cinema-screen-name
-catalog|settings-developer@1280x860|focus|053|button.ghost "Register this screen"
-catalog|settings-developer@1280x860|focus|054|button.ghost "Show pairing code"
-catalog|settings-developer@1280x860|focus|055|input#dev-cinema-companion
-catalog|settings-developer@1280x860|focus|056|input#dev-cinema-suggestions
-catalog|settings-developer@1280x860|focus|057|a.ghost "Open phone remote"
-catalog|settings-developer@1280x860|focus|058|button.ghost "Refresh"
-catalog|settings-developer@1280x860|focus|059|<wrap>
+catalog|settings-developer@1280x860|focus|049|input#dev-cinema-cec
+catalog|settings-developer@1280x860|focus|050|input#dev-cinema-receiver
+catalog|settings-developer@1280x860|focus|051|input#cinema-screen-name
+catalog|settings-developer@1280x860|focus|052|button.ghost "Register this screen"
+catalog|settings-developer@1280x860|focus|053|button.ghost "Show pairing code"
+catalog|settings-developer@1280x860|focus|054|input#dev-cinema-companion
+catalog|settings-developer@1280x860|focus|055|input#dev-cinema-suggestions
+catalog|settings-developer@1280x860|focus|056|a.ghost "Open phone remote"
+catalog|settings-developer@1280x860|focus|057|button.ghost "Refresh"
+catalog|settings-developer@1280x860|focus|058|<wrap>
 catalog|settings-developer@1280x860|req|GET /api/remote/v1/grants|1
 catalog|settings-developer@1280x860|req|GET /api/remote/v1/receivers|1
 catalog|settings-developer@1280x860|req|GET /api/v1/activity|2
@@ -3338,8 +3340,8 @@ catalog|settings-developer@390x780|dom|button.settab[role=link aria-current=fals
 catalog|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|4
 catalog|settings-developer@390x780|dom|details.setdetails > summary[text]|4
 catalog|settings-developer@390x780|dom|div > h1[text]|1
-catalog|settings-developer@390x780|dom|div > h2.section[text]|23
-catalog|settings-developer@390x780|dom|div > p.sub[text]|23
+catalog|settings-developer@390x780|dom|div > h2.section[text]|22
+catalog|settings-developer@390x780|dom|div > p.sub[text]|22
 catalog|settings-developer@390x780|dom|div > p[text]|1
 catalog|settings-developer@390x780|dom|div#app > div#pxshell.px-shell|1
 catalog|settings-developer@390x780|dom|div#cinema-remote-management[role=status] > p[text]|1
@@ -3388,8 +3390,6 @@ catalog|settings-developer@390x780|dom|div#enable-output-preparation.setsection 
 catalog|settings-developer@390x780|dom|div#enable-output-preparation.setsection > p[text]|1
 catalog|settings-developer@390x780|dom|div#enable-sdr-codecs.setsection > h2[text]|1
 catalog|settings-developer@390x780|dom|div#enable-sdr-codecs.setsection > p[text]|1
-catalog|settings-developer@390x780|dom|div#enable-subtitle-transcription.setsection > h2[text]|1
-catalog|settings-developer@390x780|dom|div#enable-subtitle-transcription.setsection > p[text]|1
 catalog|settings-developer@390x780|dom|div#enable-vod-reorder.setsection > h2[text]|1
 catalog|settings-developer@390x780|dom|div#enable-vod-reorder.setsection > p[text]|1
 catalog|settings-developer@390x780|dom|div#hevc-copy-card.card.setcard > details.setdetails|1
@@ -3453,7 +3453,6 @@ catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-macos-
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-macos-video.setsection|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-output-preparation.setsection|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-sdr-codecs.setsection|1
-catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-subtitle-transcription.setsection|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-vod-reorder.setsection|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#hevc-copy-card.card.setcard|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#jellyfin-compatibility-settings.card.setcard|1
@@ -3464,7 +3463,7 @@ catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#sdr-codecs-ca
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#vod-output-preparation-card.card.setcard|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#vod-reorder-card.card.setcard|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div#vod-rolling-retention-card.card.setcard|1
-catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|10
+catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|9
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|2
 catalog|settings-developer@390x780|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
@@ -3490,7 +3489,6 @@ catalog|settings-developer@390x780|dom|div#vod-rolling-retention-card.card.setca
 catalog|settings-developer@390x780|dom|div#vod-rolling-retention-card.card.setcard > p.hint[text]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > a.ghost[text]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > button.ghost[text]|3
-catalog|settings-developer@390x780|dom|div.card.setcard > button.sm[text]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > button[type=button text]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > details.setdetails|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div#aqerr.err[role=alert]|1
@@ -3499,18 +3497,17 @@ catalog|settings-developer@390x780|dom|div.card.setcard > div#cinema-receiver-st
 catalog|settings-developer@390x780|dom|div.card.setcard > div#cinema-remote-error.err[role=alert]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div#cinema-remote-management[role=status]|1
 catalog|settings-developer@390x780|dom|div.card.setcard > div#daqerr.err[role=alert]|1
-catalog|settings-developer@390x780|dom|div.card.setcard > div#subtitle-transcription-form|1
-catalog|settings-developer@390x780|dom|div.card.setcard > div.cardhead|10
+catalog|settings-developer@390x780|dom|div.card.setcard > div.cardhead|9
 catalog|settings-developer@390x780|dom|div.card.setcard > div.devcheck|10
 catalog|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|2
 catalog|settings-developer@390x780|dom|div.card.setcard > div.setfoot|7
 catalog|settings-developer@390x780|dom|div.card.setcard > label.setfield|1
 catalog|settings-developer@390x780|dom|div.card.setcard > label.tog|8
-catalog|settings-developer@390x780|dom|div.card.setcard > p.devcheck-note.devgrad[text]|9
+catalog|settings-developer@390x780|dom|div.card.setcard > p.devcheck-note.devgrad[text]|8
 catalog|settings-developer@390x780|dom|div.card.setcard > p.hint[text]|3
-catalog|settings-developer@390x780|dom|div.card.setcard > p[text]|2
+catalog|settings-developer@390x780|dom|div.card.setcard > p[text]|1
 catalog|settings-developer@390x780|dom|div.cardhead > div.cardtools|14
-catalog|settings-developer@390x780|dom|div.cardhead > div|23
+catalog|settings-developer@390x780|dom|div.cardhead > div|22
 catalog|settings-developer@390x780|dom|div.cardtools > span#aqstate.pill[text]|1
 catalog|settings-developer@390x780|dom|div.cardtools > span#daqstate.pill[text]|1
 catalog|settings-developer@390x780|dom|div.cardtools > span.pill[text]|12
@@ -3579,7 +3576,7 @@ catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|11
 catalog|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 catalog|settings-developer@390x780|dom|p.devcheck-description[text] > a[text]|1
-catalog|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|44
+catalog|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|42
 catalog|settings-developer@390x780|dom|p.hint[text] > code[text]|2
 catalog|settings-developer@390x780|dom|select#vod-output-preparation > option[text]|3
 catalog|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|4
@@ -3633,24 +3630,23 @@ catalog|settings-developer@390x780|focus|038|input#vod-rolling-retention
 catalog|settings-developer@390x780|focus|039|input#pmacosvideo
 catalog|settings-developer@390x780|focus|040|button.ghost.sm "Check compatibility again"
 catalog|settings-developer@390x780|focus|041|input#pmacoshevc
-catalog|settings-developer@390x780|focus|042|button.sm "Configure transcription"
-catalog|settings-developer@390x780|focus|043|input#dev-cinema-cec
-catalog|settings-developer@390x780|focus|044|input#dev-cinema-receiver
-catalog|settings-developer@390x780|focus|045|input#cinema-screen-name
-catalog|settings-developer@390x780|focus|046|button.ghost "Register this screen"
-catalog|settings-developer@390x780|focus|047|button.ghost "Show pairing code"
-catalog|settings-developer@390x780|focus|048|input#dev-cinema-companion
-catalog|settings-developer@390x780|focus|049|input#dev-cinema-suggestions
-catalog|settings-developer@390x780|focus|050|a.ghost "Open phone remote"
-catalog|settings-developer@390x780|focus|051|button.ghost "Refresh"
-catalog|settings-developer@390x780|focus|052|a.px-tab "Home"
-catalog|settings-developer@390x780|focus|053|a.px-tab "Channels"
-catalog|settings-developer@390x780|focus|054|a.px-tab "Recordings"
-catalog|settings-developer@390x780|focus|055|button.px-tab "Libraries"
-catalog|settings-developer@390x780|focus|056|button.px-tab "Search"
-catalog|settings-developer@390x780|focus|057|a.px-tab "Shared"
-catalog|settings-developer@390x780|focus|058|a.px-tab "Activity"
-catalog|settings-developer@390x780|focus|059|<wrap>
+catalog|settings-developer@390x780|focus|042|input#dev-cinema-cec
+catalog|settings-developer@390x780|focus|043|input#dev-cinema-receiver
+catalog|settings-developer@390x780|focus|044|input#cinema-screen-name
+catalog|settings-developer@390x780|focus|045|button.ghost "Register this screen"
+catalog|settings-developer@390x780|focus|046|button.ghost "Show pairing code"
+catalog|settings-developer@390x780|focus|047|input#dev-cinema-companion
+catalog|settings-developer@390x780|focus|048|input#dev-cinema-suggestions
+catalog|settings-developer@390x780|focus|049|a.ghost "Open phone remote"
+catalog|settings-developer@390x780|focus|050|button.ghost "Refresh"
+catalog|settings-developer@390x780|focus|051|a.px-tab "Home"
+catalog|settings-developer@390x780|focus|052|a.px-tab "Channels"
+catalog|settings-developer@390x780|focus|053|a.px-tab "Recordings"
+catalog|settings-developer@390x780|focus|054|button.px-tab "Libraries"
+catalog|settings-developer@390x780|focus|055|button.px-tab "Search"
+catalog|settings-developer@390x780|focus|056|a.px-tab "Shared"
+catalog|settings-developer@390x780|focus|057|a.px-tab "Activity"
+catalog|settings-developer@390x780|focus|058|<wrap>
 catalog|settings-developer@390x780|req|GET /api/remote/v1/grants|1
 catalog|settings-developer@390x780|req|GET /api/remote/v1/receivers|1
 catalog|settings-developer@390x780|req|GET /api/v1/activity|2
@@ -4981,6 +4977,7 @@ classic|home@390x780|req|GET /api/v1/me|1
 classic|home@390x780|req|GET /api/v1/server|1
 classic|item@1280x860|dom|^ > div#app|1
 classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
+classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
 classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
 classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 classic|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
@@ -5124,6 +5121,7 @@ classic|item@1280x860|req|GET /api/v1/me|1
 classic|item@1280x860|req|GET /api/v1/server|1
 classic|item@390x780|dom|^ > div#app|1
 classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
+classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
 classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
 classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 classic|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
@@ -5924,6 +5922,7 @@ classic|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-labe
 classic|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|player@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|player@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
+classic|player@1280x860|dom|dd > button.ghost.sm[type=button text]|2
 classic|player@1280x860|dom|dd > div.watch-trks|4
 classic|player@1280x860|dom|dd > span.mode-chip[text]|2
 classic|player@1280x860|dom|dd > span.mode-detail[text]|2
@@ -6018,8 +6017,8 @@ classic|player@1280x860|dom|div.watch-stage > aside#watch-title-panel.watch-titl
 classic|player@1280x860|dom|div.watch-stage > div.watch-picture|1
 classic|player@1280x860|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 classic|player@1280x860|dom|dl.watch-ledger > dd[text]|2
-classic|player@1280x860|dom|dl.watch-ledger > dd|8
-classic|player@1280x860|dom|dl.watch-ledger > dt[text]|10
+classic|player@1280x860|dom|dl.watch-ledger > dd|10
+classic|player@1280x860|dom|dl.watch-ledger > dt[text]|12
 classic|player@1280x860|dom|g > path|5
 classic|player@1280x860|dom|header.top > a.logo[text]|1
 classic|player@1280x860|dom|header.top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -6037,6 +6036,8 @@ classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+classic|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 classic|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -6074,6 +6075,7 @@ classic|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label
 classic|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
+classic|player@390x780|dom|dd > button.ghost.sm[type=button text]|2
 classic|player@390x780|dom|dd > div.watch-trks|4
 classic|player@390x780|dom|dd > span.mode-chip[text]|2
 classic|player@390x780|dom|dd > span.mode-detail[text]|2
@@ -6167,8 +6169,8 @@ classic|player@390x780|dom|div.watch-stage > aside#watch-title-panel.watch-title
 classic|player@390x780|dom|div.watch-stage > div.watch-picture|1
 classic|player@390x780|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 classic|player@390x780|dom|dl.watch-ledger > dd[text]|2
-classic|player@390x780|dom|dl.watch-ledger > dd|8
-classic|player@390x780|dom|dl.watch-ledger > dt[text]|10
+classic|player@390x780|dom|dl.watch-ledger > dd|10
+classic|player@390x780|dom|dl.watch-ledger > dt[text]|12
 classic|player@390x780|dom|g > path|5
 classic|player@390x780|dom|header.top > a.logo[text]|1
 classic|player@390x780|dom|header.top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -6186,6 +6188,8 @@ classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > d
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+classic|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 classic|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -6378,8 +6382,8 @@ classic|settings-developer@1280x860|dom|div > button.ghost.profile.sm|1
 classic|settings-developer@1280x860|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings-developer@1280x860|dom|div > div#profilemenu.amenu|1
 classic|settings-developer@1280x860|dom|div > h1[text]|1
-classic|settings-developer@1280x860|dom|div > h2.section[text]|23
-classic|settings-developer@1280x860|dom|div > p.sub[text]|23
+classic|settings-developer@1280x860|dom|div > h2.section[text]|22
+classic|settings-developer@1280x860|dom|div > p.sub[text]|22
 classic|settings-developer@1280x860|dom|div > p[text]|1
 classic|settings-developer@1280x860|dom|div#app > header.top|1
 classic|settings-developer@1280x860|dom|div#app > main#main|1
@@ -6429,8 +6433,6 @@ classic|settings-developer@1280x860|dom|div#enable-output-preparation.setsection
 classic|settings-developer@1280x860|dom|div#enable-output-preparation.setsection > p[text]|1
 classic|settings-developer@1280x860|dom|div#enable-sdr-codecs.setsection > h2[text]|1
 classic|settings-developer@1280x860|dom|div#enable-sdr-codecs.setsection > p[text]|1
-classic|settings-developer@1280x860|dom|div#enable-subtitle-transcription.setsection > h2[text]|1
-classic|settings-developer@1280x860|dom|div#enable-subtitle-transcription.setsection > p[text]|1
 classic|settings-developer@1280x860|dom|div#enable-vod-reorder.setsection > h2[text]|1
 classic|settings-developer@1280x860|dom|div#enable-vod-reorder.setsection > p[text]|1
 classic|settings-developer@1280x860|dom|div#hevc-copy-card.card.setcard > details.setdetails|1
@@ -6487,7 +6489,6 @@ classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-macos
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-macos-video.setsection|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-output-preparation.setsection|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-sdr-codecs.setsection|1
-classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-subtitle-transcription.setsection|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-vod-reorder.setsection|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#hevc-copy-card.card.setcard|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#jellyfin-compatibility-settings.card.setcard|1
@@ -6498,7 +6499,7 @@ classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#sdr-codecs-c
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vod-output-preparation-card.card.setcard|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vod-reorder-card.card.setcard|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vod-rolling-retention-card.card.setcard|1
-classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|10
+classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|9
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|2
 classic|settings-developer@1280x860|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
@@ -6524,7 +6525,6 @@ classic|settings-developer@1280x860|dom|div#vod-rolling-retention-card.card.setc
 classic|settings-developer@1280x860|dom|div#vod-rolling-retention-card.card.setcard > p.hint[text]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > a.ghost[text]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > button.ghost[text]|3
-classic|settings-developer@1280x860|dom|div.card.setcard > button.sm[text]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > button[type=button text]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div#aqerr.err[role=alert]|1
@@ -6533,18 +6533,17 @@ classic|settings-developer@1280x860|dom|div.card.setcard > div#cinema-receiver-s
 classic|settings-developer@1280x860|dom|div.card.setcard > div#cinema-remote-error.err[role=alert]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div#cinema-remote-management[role=status]|1
 classic|settings-developer@1280x860|dom|div.card.setcard > div#daqerr.err[role=alert]|1
-classic|settings-developer@1280x860|dom|div.card.setcard > div#subtitle-transcription-form|1
-classic|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|10
+classic|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|9
 classic|settings-developer@1280x860|dom|div.card.setcard > div.devcheck|10
 classic|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|2
 classic|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|7
 classic|settings-developer@1280x860|dom|div.card.setcard > label.setfield|1
 classic|settings-developer@1280x860|dom|div.card.setcard > label.tog|8
-classic|settings-developer@1280x860|dom|div.card.setcard > p.devcheck-note.devgrad[text]|9
+classic|settings-developer@1280x860|dom|div.card.setcard > p.devcheck-note.devgrad[text]|8
 classic|settings-developer@1280x860|dom|div.card.setcard > p.hint[text]|3
-classic|settings-developer@1280x860|dom|div.card.setcard > p[text]|2
+classic|settings-developer@1280x860|dom|div.card.setcard > p[text]|1
 classic|settings-developer@1280x860|dom|div.cardhead > div.cardtools|14
-classic|settings-developer@1280x860|dom|div.cardhead > div|23
+classic|settings-developer@1280x860|dom|div.cardhead > div|22
 classic|settings-developer@1280x860|dom|div.cardtools > span#aqstate.pill[text]|1
 classic|settings-developer@1280x860|dom|div.cardtools > span#daqstate.pill[text]|1
 classic|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|12
@@ -6606,7 +6605,7 @@ classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.activ
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|11
 classic|settings-developer@1280x860|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings-developer@1280x860|dom|p.devcheck-description[text] > a[text]|1
-classic|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|44
+classic|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|42
 classic|settings-developer@1280x860|dom|p.hint[text] > code[text]|2
 classic|settings-developer@1280x860|dom|select#vod-output-preparation > option[text]|3
 classic|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|4
@@ -6664,17 +6663,16 @@ classic|settings-developer@1280x860|focus|045|input#vod-rolling-retention
 classic|settings-developer@1280x860|focus|046|input#pmacosvideo
 classic|settings-developer@1280x860|focus|047|button.ghost.sm "Check compatibility again"
 classic|settings-developer@1280x860|focus|048|input#pmacoshevc
-classic|settings-developer@1280x860|focus|049|button.sm "Configure transcription"
-classic|settings-developer@1280x860|focus|050|input#dev-cinema-cec
-classic|settings-developer@1280x860|focus|051|input#dev-cinema-receiver
-classic|settings-developer@1280x860|focus|052|input#cinema-screen-name
-classic|settings-developer@1280x860|focus|053|button.ghost "Register this screen"
-classic|settings-developer@1280x860|focus|054|button.ghost "Show pairing code"
-classic|settings-developer@1280x860|focus|055|input#dev-cinema-companion
-classic|settings-developer@1280x860|focus|056|input#dev-cinema-suggestions
-classic|settings-developer@1280x860|focus|057|a.ghost "Open phone remote"
-classic|settings-developer@1280x860|focus|058|button.ghost "Refresh"
-classic|settings-developer@1280x860|focus|059|<wrap>
+classic|settings-developer@1280x860|focus|049|input#dev-cinema-cec
+classic|settings-developer@1280x860|focus|050|input#dev-cinema-receiver
+classic|settings-developer@1280x860|focus|051|input#cinema-screen-name
+classic|settings-developer@1280x860|focus|052|button.ghost "Register this screen"
+classic|settings-developer@1280x860|focus|053|button.ghost "Show pairing code"
+classic|settings-developer@1280x860|focus|054|input#dev-cinema-companion
+classic|settings-developer@1280x860|focus|055|input#dev-cinema-suggestions
+classic|settings-developer@1280x860|focus|056|a.ghost "Open phone remote"
+classic|settings-developer@1280x860|focus|057|button.ghost "Refresh"
+classic|settings-developer@1280x860|focus|058|<wrap>
 classic|settings-developer@1280x860|req|GET /api/remote/v1/grants|1
 classic|settings-developer@1280x860|req|GET /api/remote/v1/receivers|1
 classic|settings-developer@1280x860|req|GET /api/v1/activity|2
@@ -6699,8 +6697,8 @@ classic|settings-developer@390x780|dom|div > button.ghost.profile.sm|1
 classic|settings-developer@390x780|dom|div > div#lookmenu.amenu.lookmenu|1
 classic|settings-developer@390x780|dom|div > div#profilemenu.amenu|1
 classic|settings-developer@390x780|dom|div > h1[text]|1
-classic|settings-developer@390x780|dom|div > h2.section[text]|23
-classic|settings-developer@390x780|dom|div > p.sub[text]|23
+classic|settings-developer@390x780|dom|div > h2.section[text]|22
+classic|settings-developer@390x780|dom|div > p.sub[text]|22
 classic|settings-developer@390x780|dom|div > p[text]|1
 classic|settings-developer@390x780|dom|div#app > header.top|1
 classic|settings-developer@390x780|dom|div#app > main#main|1
@@ -6750,8 +6748,6 @@ classic|settings-developer@390x780|dom|div#enable-output-preparation.setsection 
 classic|settings-developer@390x780|dom|div#enable-output-preparation.setsection > p[text]|1
 classic|settings-developer@390x780|dom|div#enable-sdr-codecs.setsection > h2[text]|1
 classic|settings-developer@390x780|dom|div#enable-sdr-codecs.setsection > p[text]|1
-classic|settings-developer@390x780|dom|div#enable-subtitle-transcription.setsection > h2[text]|1
-classic|settings-developer@390x780|dom|div#enable-subtitle-transcription.setsection > p[text]|1
 classic|settings-developer@390x780|dom|div#enable-vod-reorder.setsection > h2[text]|1
 classic|settings-developer@390x780|dom|div#enable-vod-reorder.setsection > p[text]|1
 classic|settings-developer@390x780|dom|div#hevc-copy-card.card.setcard > details.setdetails|1
@@ -6808,7 +6804,6 @@ classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-macos-
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-macos-video.setsection|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-output-preparation.setsection|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-sdr-codecs.setsection|1
-classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-subtitle-transcription.setsection|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-vod-reorder.setsection|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#hevc-copy-card.card.setcard|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#jellyfin-compatibility-settings.card.setcard|1
@@ -6819,7 +6814,7 @@ classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#sdr-codecs-ca
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#vod-output-preparation-card.card.setcard|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#vod-reorder-card.card.setcard|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div#vod-rolling-retention-card.card.setcard|1
-classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|10
+classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|9
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|2
 classic|settings-developer@390x780|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
@@ -6845,7 +6840,6 @@ classic|settings-developer@390x780|dom|div#vod-rolling-retention-card.card.setca
 classic|settings-developer@390x780|dom|div#vod-rolling-retention-card.card.setcard > p.hint[text]|1
 classic|settings-developer@390x780|dom|div.card.setcard > a.ghost[text]|1
 classic|settings-developer@390x780|dom|div.card.setcard > button.ghost[text]|3
-classic|settings-developer@390x780|dom|div.card.setcard > button.sm[text]|1
 classic|settings-developer@390x780|dom|div.card.setcard > button[type=button text]|1
 classic|settings-developer@390x780|dom|div.card.setcard > details.setdetails|1
 classic|settings-developer@390x780|dom|div.card.setcard > div#aqerr.err[role=alert]|1
@@ -6854,18 +6848,17 @@ classic|settings-developer@390x780|dom|div.card.setcard > div#cinema-receiver-st
 classic|settings-developer@390x780|dom|div.card.setcard > div#cinema-remote-error.err[role=alert]|1
 classic|settings-developer@390x780|dom|div.card.setcard > div#cinema-remote-management[role=status]|1
 classic|settings-developer@390x780|dom|div.card.setcard > div#daqerr.err[role=alert]|1
-classic|settings-developer@390x780|dom|div.card.setcard > div#subtitle-transcription-form|1
-classic|settings-developer@390x780|dom|div.card.setcard > div.cardhead|10
+classic|settings-developer@390x780|dom|div.card.setcard > div.cardhead|9
 classic|settings-developer@390x780|dom|div.card.setcard > div.devcheck|10
 classic|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|2
 classic|settings-developer@390x780|dom|div.card.setcard > div.setfoot|7
 classic|settings-developer@390x780|dom|div.card.setcard > label.setfield|1
 classic|settings-developer@390x780|dom|div.card.setcard > label.tog|8
-classic|settings-developer@390x780|dom|div.card.setcard > p.devcheck-note.devgrad[text]|9
+classic|settings-developer@390x780|dom|div.card.setcard > p.devcheck-note.devgrad[text]|8
 classic|settings-developer@390x780|dom|div.card.setcard > p.hint[text]|3
-classic|settings-developer@390x780|dom|div.card.setcard > p[text]|2
+classic|settings-developer@390x780|dom|div.card.setcard > p[text]|1
 classic|settings-developer@390x780|dom|div.cardhead > div.cardtools|14
-classic|settings-developer@390x780|dom|div.cardhead > div|23
+classic|settings-developer@390x780|dom|div.cardhead > div|22
 classic|settings-developer@390x780|dom|div.cardtools > span#aqstate.pill[text]|1
 classic|settings-developer@390x780|dom|div.cardtools > span#daqstate.pill[text]|1
 classic|settings-developer@390x780|dom|div.cardtools > span.pill[text]|12
@@ -6927,7 +6920,7 @@ classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.active
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > button.settab[role=link aria-current=false text]|11
 classic|settings-developer@390x780|dom|nav.settabs[aria-label=*] > div.setgroup[text]|5
 classic|settings-developer@390x780|dom|p.devcheck-description[text] > a[text]|1
-classic|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|44
+classic|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|42
 classic|settings-developer@390x780|dom|p.hint[text] > code[text]|2
 classic|settings-developer@390x780|dom|select#vod-output-preparation > option[text]|3
 classic|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|4
@@ -6985,17 +6978,16 @@ classic|settings-developer@390x780|focus|045|input#vod-rolling-retention
 classic|settings-developer@390x780|focus|046|input#pmacosvideo
 classic|settings-developer@390x780|focus|047|button.ghost.sm "Check compatibility again"
 classic|settings-developer@390x780|focus|048|input#pmacoshevc
-classic|settings-developer@390x780|focus|049|button.sm "Configure transcription"
-classic|settings-developer@390x780|focus|050|input#dev-cinema-cec
-classic|settings-developer@390x780|focus|051|input#dev-cinema-receiver
-classic|settings-developer@390x780|focus|052|input#cinema-screen-name
-classic|settings-developer@390x780|focus|053|button.ghost "Register this screen"
-classic|settings-developer@390x780|focus|054|button.ghost "Show pairing code"
-classic|settings-developer@390x780|focus|055|input#dev-cinema-companion
-classic|settings-developer@390x780|focus|056|input#dev-cinema-suggestions
-classic|settings-developer@390x780|focus|057|a.ghost "Open phone remote"
-classic|settings-developer@390x780|focus|058|button.ghost "Refresh"
-classic|settings-developer@390x780|focus|059|<wrap>
+classic|settings-developer@390x780|focus|049|input#dev-cinema-cec
+classic|settings-developer@390x780|focus|050|input#dev-cinema-receiver
+classic|settings-developer@390x780|focus|051|input#cinema-screen-name
+classic|settings-developer@390x780|focus|052|button.ghost "Register this screen"
+classic|settings-developer@390x780|focus|053|button.ghost "Show pairing code"
+classic|settings-developer@390x780|focus|054|input#dev-cinema-companion
+classic|settings-developer@390x780|focus|055|input#dev-cinema-suggestions
+classic|settings-developer@390x780|focus|056|a.ghost "Open phone remote"
+classic|settings-developer@390x780|focus|057|button.ghost "Refresh"
+classic|settings-developer@390x780|focus|058|<wrap>
 classic|settings-developer@390x780|req|GET /api/remote/v1/grants|1
 classic|settings-developer@390x780|req|GET /api/remote/v1/receivers|1
 classic|settings-developer@390x780|req|GET /api/v1/activity|2
@@ -8314,6 +8306,7 @@ theater|home@390x780|req|GET /api/v1/me|1
 theater|home@390x780|req|GET /api/v1/server|1
 theater|item@1280x860|dom|^ > div#app|1
 theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
+theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
 theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
 theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 theater|item@1280x860|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
@@ -8459,6 +8452,7 @@ theater|item@1280x860|req|GET /api/v1/me|1
 theater|item@1280x860|req|GET /api/v1/server|1
 theater|item@390x780|dom|^ > div#app|1
 theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > button.ghost.sm[text]|2
+theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#pp-sub-field-2|1
 theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-generate-2[role=status aria-live=polite]|1
 theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div#subtitle-search-2|1
 theater|item@390x780|dom|aside.media-preparation-side[aria-label=*] > div.prep-eyebrow[text]|1
@@ -9265,6 +9259,7 @@ theater|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-labe
 theater|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|player@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|player@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
+theater|player@1280x860|dom|dd > button.ghost.sm[type=button text]|2
 theater|player@1280x860|dom|dd > div.watch-trks|4
 theater|player@1280x860|dom|dd > span.mode-chip[text]|2
 theater|player@1280x860|dom|dd > span.mode-detail[text]|2
@@ -9359,8 +9354,8 @@ theater|player@1280x860|dom|div.watch-stage > aside#watch-title-panel.watch-titl
 theater|player@1280x860|dom|div.watch-stage > div.watch-picture|1
 theater|player@1280x860|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 theater|player@1280x860|dom|dl.watch-ledger > dd[text]|2
-theater|player@1280x860|dom|dl.watch-ledger > dd|8
-theater|player@1280x860|dom|dl.watch-ledger > dt[text]|10
+theater|player@1280x860|dom|dl.watch-ledger > dd|10
+theater|player@1280x860|dom|dl.watch-ledger > dt[text]|12
 theater|player@1280x860|dom|g > path|5
 theater|player@1280x860|dom|header.th-top > a.logo[text]|1
 theater|player@1280x860|dom|header.th-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -9378,6 +9373,8 @@ theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+theater|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 theater|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -9415,6 +9412,7 @@ theater|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label
 theater|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
+theater|player@390x780|dom|dd > button.ghost.sm[type=button text]|2
 theater|player@390x780|dom|dd > div.watch-trks|4
 theater|player@390x780|dom|dd > span.mode-chip[text]|2
 theater|player@390x780|dom|dd > span.mode-detail[text]|2
@@ -9508,8 +9506,8 @@ theater|player@390x780|dom|div.watch-stage > aside#watch-title-panel.watch-title
 theater|player@390x780|dom|div.watch-stage > div.watch-picture|1
 theater|player@390x780|dom|div.watch-trks > button.on.trk[aria-pressed=true type=button text]|4
 theater|player@390x780|dom|dl.watch-ledger > dd[text]|2
-theater|player@390x780|dom|dl.watch-ledger > dd|8
-theater|player@390x780|dom|dl.watch-ledger > dt[text]|10
+theater|player@390x780|dom|dl.watch-ledger > dd|10
+theater|player@390x780|dom|dl.watch-ledger > dt[text]|12
 theater|player@390x780|dom|g > path|5
 theater|player@390x780|dom|header.th-top > a.logo[text]|1
 theater|player@390x780|dom|header.th-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
@@ -9527,6 +9525,8 @@ theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > d
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div#watch-head|1
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
+theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
+theater|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 theater|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
@@ -9714,8 +9714,8 @@ theater|settings-developer@1280x860|dom|button.settab[role=link aria-current=fal
 theater|settings-developer@1280x860|dom|details.setdetails > div.setdetails-body|4
 theater|settings-developer@1280x860|dom|details.setdetails > summary[text]|4
 theater|settings-developer@1280x860|dom|div > h1[text]|1
-theater|settings-developer@1280x860|dom|div > h2.section[text]|23
-theater|settings-developer@1280x860|dom|div > p.sub[text]|23
+theater|settings-developer@1280x860|dom|div > h2.section[text]|22
+theater|settings-developer@1280x860|dom|div > p.sub[text]|22
 theater|settings-developer@1280x860|dom|div > p[text]|1
 theater|settings-developer@1280x860|dom|div#app > header.th-top|1
 theater|settings-developer@1280x860|dom|div#app > main#main|1
@@ -9766,8 +9766,6 @@ theater|settings-developer@1280x860|dom|div#enable-output-preparation.setsection
 theater|settings-developer@1280x860|dom|div#enable-output-preparation.setsection > p[text]|1
 theater|settings-developer@1280x860|dom|div#enable-sdr-codecs.setsection > h2[text]|1
 theater|settings-developer@1280x860|dom|div#enable-sdr-codecs.setsection > p[text]|1
-theater|settings-developer@1280x860|dom|div#enable-subtitle-transcription.setsection > h2[text]|1
-theater|settings-developer@1280x860|dom|div#enable-subtitle-transcription.setsection > p[text]|1
 theater|settings-developer@1280x860|dom|div#enable-vod-reorder.setsection > h2[text]|1
 theater|settings-developer@1280x860|dom|div#enable-vod-reorder.setsection > p[text]|1
 theater|settings-developer@1280x860|dom|div#hevc-copy-card.card.setcard > details.setdetails|1
@@ -9824,7 +9822,6 @@ theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-macos
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-macos-video.setsection|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-output-preparation.setsection|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-sdr-codecs.setsection|1
-theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-subtitle-transcription.setsection|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#enable-vod-reorder.setsection|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#hevc-copy-card.card.setcard|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#jellyfin-compatibility-settings.card.setcard|1
@@ -9835,7 +9832,7 @@ theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#sdr-codecs-c
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vod-output-preparation-card.card.setcard|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vod-reorder-card.card.setcard|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div#vod-rolling-retention-card.card.setcard|1
-theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|10
+theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.card.setcard|9
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.sethead|1
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > div.setsection|2
 theater|settings-developer@1280x860|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
@@ -9861,7 +9858,6 @@ theater|settings-developer@1280x860|dom|div#vod-rolling-retention-card.card.setc
 theater|settings-developer@1280x860|dom|div#vod-rolling-retention-card.card.setcard > p.hint[text]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > a.ghost[text]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > button.ghost[text]|3
-theater|settings-developer@1280x860|dom|div.card.setcard > button.sm[text]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > button[type=button text]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > details.setdetails|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div#aqerr.err[role=alert]|1
@@ -9870,18 +9866,17 @@ theater|settings-developer@1280x860|dom|div.card.setcard > div#cinema-receiver-s
 theater|settings-developer@1280x860|dom|div.card.setcard > div#cinema-remote-error.err[role=alert]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div#cinema-remote-management[role=status]|1
 theater|settings-developer@1280x860|dom|div.card.setcard > div#daqerr.err[role=alert]|1
-theater|settings-developer@1280x860|dom|div.card.setcard > div#subtitle-transcription-form|1
-theater|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|10
+theater|settings-developer@1280x860|dom|div.card.setcard > div.cardhead|9
 theater|settings-developer@1280x860|dom|div.card.setcard > div.devcheck|10
 theater|settings-developer@1280x860|dom|div.card.setcard > div.hint[text]|2
 theater|settings-developer@1280x860|dom|div.card.setcard > div.setfoot|7
 theater|settings-developer@1280x860|dom|div.card.setcard > label.setfield|1
 theater|settings-developer@1280x860|dom|div.card.setcard > label.tog|8
-theater|settings-developer@1280x860|dom|div.card.setcard > p.devcheck-note.devgrad[text]|9
+theater|settings-developer@1280x860|dom|div.card.setcard > p.devcheck-note.devgrad[text]|8
 theater|settings-developer@1280x860|dom|div.card.setcard > p.hint[text]|3
-theater|settings-developer@1280x860|dom|div.card.setcard > p[text]|2
+theater|settings-developer@1280x860|dom|div.card.setcard > p[text]|1
 theater|settings-developer@1280x860|dom|div.cardhead > div.cardtools|14
-theater|settings-developer@1280x860|dom|div.cardhead > div|23
+theater|settings-developer@1280x860|dom|div.cardhead > div|22
 theater|settings-developer@1280x860|dom|div.cardtools > span#aqstate.pill[text]|1
 theater|settings-developer@1280x860|dom|div.cardtools > span#daqstate.pill[text]|1
 theater|settings-developer@1280x860|dom|div.cardtools > span.pill[text]|12
@@ -9948,7 +9943,7 @@ theater|settings-developer@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|6
 theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|6
 theater|settings-developer@1280x860|dom|p.devcheck-description[text] > a[text]|1
-theater|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|44
+theater|settings-developer@1280x860|dom|p.devcheck-note.devgrad[text] > b[text]|42
 theater|settings-developer@1280x860|dom|p.hint[text] > code[text]|2
 theater|settings-developer@1280x860|dom|select#vod-output-preparation > option[text]|3
 theater|settings-developer@1280x860|dom|span.devcheck-status > span.ok.pill[text]|4
@@ -10006,17 +10001,16 @@ theater|settings-developer@1280x860|focus|045|input#vod-rolling-retention
 theater|settings-developer@1280x860|focus|046|input#pmacosvideo
 theater|settings-developer@1280x860|focus|047|button.ghost.sm "Check compatibility again"
 theater|settings-developer@1280x860|focus|048|input#pmacoshevc
-theater|settings-developer@1280x860|focus|049|button.sm "Configure transcription"
-theater|settings-developer@1280x860|focus|050|input#dev-cinema-cec
-theater|settings-developer@1280x860|focus|051|input#dev-cinema-receiver
-theater|settings-developer@1280x860|focus|052|input#cinema-screen-name
-theater|settings-developer@1280x860|focus|053|button.ghost "Register this screen"
-theater|settings-developer@1280x860|focus|054|button.ghost "Show pairing code"
-theater|settings-developer@1280x860|focus|055|input#dev-cinema-companion
-theater|settings-developer@1280x860|focus|056|input#dev-cinema-suggestions
-theater|settings-developer@1280x860|focus|057|a.ghost "Open phone remote"
-theater|settings-developer@1280x860|focus|058|button.ghost "Refresh"
-theater|settings-developer@1280x860|focus|059|<wrap>
+theater|settings-developer@1280x860|focus|049|input#dev-cinema-cec
+theater|settings-developer@1280x860|focus|050|input#dev-cinema-receiver
+theater|settings-developer@1280x860|focus|051|input#cinema-screen-name
+theater|settings-developer@1280x860|focus|052|button.ghost "Register this screen"
+theater|settings-developer@1280x860|focus|053|button.ghost "Show pairing code"
+theater|settings-developer@1280x860|focus|054|input#dev-cinema-companion
+theater|settings-developer@1280x860|focus|055|input#dev-cinema-suggestions
+theater|settings-developer@1280x860|focus|056|a.ghost "Open phone remote"
+theater|settings-developer@1280x860|focus|057|button.ghost "Refresh"
+theater|settings-developer@1280x860|focus|058|<wrap>
 theater|settings-developer@1280x860|req|GET /api/remote/v1/grants|1
 theater|settings-developer@1280x860|req|GET /api/remote/v1/receivers|1
 theater|settings-developer@1280x860|req|GET /api/v1/activity|2
@@ -10037,8 +10031,8 @@ theater|settings-developer@390x780|dom|button.settab[role=link aria-current=fals
 theater|settings-developer@390x780|dom|details.setdetails > div.setdetails-body|4
 theater|settings-developer@390x780|dom|details.setdetails > summary[text]|4
 theater|settings-developer@390x780|dom|div > h1[text]|1
-theater|settings-developer@390x780|dom|div > h2.section[text]|23
-theater|settings-developer@390x780|dom|div > p.sub[text]|23
+theater|settings-developer@390x780|dom|div > h2.section[text]|22
+theater|settings-developer@390x780|dom|div > p.sub[text]|22
 theater|settings-developer@390x780|dom|div > p[text]|1
 theater|settings-developer@390x780|dom|div#app > header.th-top|1
 theater|settings-developer@390x780|dom|div#app > main#main|1
@@ -10089,8 +10083,6 @@ theater|settings-developer@390x780|dom|div#enable-output-preparation.setsection 
 theater|settings-developer@390x780|dom|div#enable-output-preparation.setsection > p[text]|1
 theater|settings-developer@390x780|dom|div#enable-sdr-codecs.setsection > h2[text]|1
 theater|settings-developer@390x780|dom|div#enable-sdr-codecs.setsection > p[text]|1
-theater|settings-developer@390x780|dom|div#enable-subtitle-transcription.setsection > h2[text]|1
-theater|settings-developer@390x780|dom|div#enable-subtitle-transcription.setsection > p[text]|1
 theater|settings-developer@390x780|dom|div#enable-vod-reorder.setsection > h2[text]|1
 theater|settings-developer@390x780|dom|div#enable-vod-reorder.setsection > p[text]|1
 theater|settings-developer@390x780|dom|div#hevc-copy-card.card.setcard > details.setdetails|1
@@ -10147,7 +10139,6 @@ theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-macos-
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-macos-video.setsection|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-output-preparation.setsection|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-sdr-codecs.setsection|1
-theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-subtitle-transcription.setsection|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#enable-vod-reorder.setsection|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#hevc-copy-card.card.setcard|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#jellyfin-compatibility-settings.card.setcard|1
@@ -10158,7 +10149,7 @@ theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#sdr-codecs-ca
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#vod-output-preparation-card.card.setcard|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#vod-reorder-card.card.setcard|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div#vod-rolling-retention-card.card.setcard|1
-theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|10
+theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.card.setcard|9
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.sethead|1
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > div.setsection|2
 theater|settings-developer@390x780|dom|div#setbody.adminwrap > nav.setdestinations[aria-label=*]|1
@@ -10184,7 +10175,6 @@ theater|settings-developer@390x780|dom|div#vod-rolling-retention-card.card.setca
 theater|settings-developer@390x780|dom|div#vod-rolling-retention-card.card.setcard > p.hint[text]|1
 theater|settings-developer@390x780|dom|div.card.setcard > a.ghost[text]|1
 theater|settings-developer@390x780|dom|div.card.setcard > button.ghost[text]|3
-theater|settings-developer@390x780|dom|div.card.setcard > button.sm[text]|1
 theater|settings-developer@390x780|dom|div.card.setcard > button[type=button text]|1
 theater|settings-developer@390x780|dom|div.card.setcard > details.setdetails|1
 theater|settings-developer@390x780|dom|div.card.setcard > div#aqerr.err[role=alert]|1
@@ -10193,18 +10183,17 @@ theater|settings-developer@390x780|dom|div.card.setcard > div#cinema-receiver-st
 theater|settings-developer@390x780|dom|div.card.setcard > div#cinema-remote-error.err[role=alert]|1
 theater|settings-developer@390x780|dom|div.card.setcard > div#cinema-remote-management[role=status]|1
 theater|settings-developer@390x780|dom|div.card.setcard > div#daqerr.err[role=alert]|1
-theater|settings-developer@390x780|dom|div.card.setcard > div#subtitle-transcription-form|1
-theater|settings-developer@390x780|dom|div.card.setcard > div.cardhead|10
+theater|settings-developer@390x780|dom|div.card.setcard > div.cardhead|9
 theater|settings-developer@390x780|dom|div.card.setcard > div.devcheck|10
 theater|settings-developer@390x780|dom|div.card.setcard > div.hint[text]|2
 theater|settings-developer@390x780|dom|div.card.setcard > div.setfoot|7
 theater|settings-developer@390x780|dom|div.card.setcard > label.setfield|1
 theater|settings-developer@390x780|dom|div.card.setcard > label.tog|8
-theater|settings-developer@390x780|dom|div.card.setcard > p.devcheck-note.devgrad[text]|9
+theater|settings-developer@390x780|dom|div.card.setcard > p.devcheck-note.devgrad[text]|8
 theater|settings-developer@390x780|dom|div.card.setcard > p.hint[text]|3
-theater|settings-developer@390x780|dom|div.card.setcard > p[text]|2
+theater|settings-developer@390x780|dom|div.card.setcard > p[text]|1
 theater|settings-developer@390x780|dom|div.cardhead > div.cardtools|14
-theater|settings-developer@390x780|dom|div.cardhead > div|23
+theater|settings-developer@390x780|dom|div.cardhead > div|22
 theater|settings-developer@390x780|dom|div.cardtools > span#aqstate.pill[text]|1
 theater|settings-developer@390x780|dom|div.cardtools > span#daqstate.pill[text]|1
 theater|settings-developer@390x780|dom|div.cardtools > span.pill[text]|12
@@ -10271,7 +10260,7 @@ theater|settings-developer@390x780|dom|nav.th-nav[aria-label=*] > a[text]|6
 theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|settings-developer@390x780|dom|nav.th-pills[aria-label=*] > a[text]|6
 theater|settings-developer@390x780|dom|p.devcheck-description[text] > a[text]|1
-theater|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|44
+theater|settings-developer@390x780|dom|p.devcheck-note.devgrad[text] > b[text]|42
 theater|settings-developer@390x780|dom|p.hint[text] > code[text]|2
 theater|settings-developer@390x780|dom|select#vod-output-preparation > option[text]|3
 theater|settings-developer@390x780|dom|span.devcheck-status > span.ok.pill[text]|4
@@ -10322,24 +10311,23 @@ theater|settings-developer@390x780|focus|038|input#vod-rolling-retention
 theater|settings-developer@390x780|focus|039|input#pmacosvideo
 theater|settings-developer@390x780|focus|040|button.ghost.sm "Check compatibility again"
 theater|settings-developer@390x780|focus|041|input#pmacoshevc
-theater|settings-developer@390x780|focus|042|button.sm "Configure transcription"
-theater|settings-developer@390x780|focus|043|input#dev-cinema-cec
-theater|settings-developer@390x780|focus|044|input#dev-cinema-receiver
-theater|settings-developer@390x780|focus|045|input#cinema-screen-name
-theater|settings-developer@390x780|focus|046|button.ghost "Register this screen"
-theater|settings-developer@390x780|focus|047|button.ghost "Show pairing code"
-theater|settings-developer@390x780|focus|048|input#dev-cinema-companion
-theater|settings-developer@390x780|focus|049|input#dev-cinema-suggestions
-theater|settings-developer@390x780|focus|050|a.ghost "Open phone remote"
-theater|settings-developer@390x780|focus|051|button.ghost "Refresh"
-theater|settings-developer@390x780|focus|052|a "Home"
-theater|settings-developer@390x780|focus|053|a "Shared libraries"
-theater|settings-developer@390x780|focus|054|a "Live TV"
-theater|settings-developer@390x780|focus|055|a "Recordings"
-theater|settings-developer@390x780|focus|056|a "Library channels"
-theater|settings-developer@390x780|focus|057|a "Activity"
-theater|settings-developer@390x780|focus|058|a.on "Settings"
-theater|settings-developer@390x780|focus|059|<wrap>
+theater|settings-developer@390x780|focus|042|input#dev-cinema-cec
+theater|settings-developer@390x780|focus|043|input#dev-cinema-receiver
+theater|settings-developer@390x780|focus|044|input#cinema-screen-name
+theater|settings-developer@390x780|focus|045|button.ghost "Register this screen"
+theater|settings-developer@390x780|focus|046|button.ghost "Show pairing code"
+theater|settings-developer@390x780|focus|047|input#dev-cinema-companion
+theater|settings-developer@390x780|focus|048|input#dev-cinema-suggestions
+theater|settings-developer@390x780|focus|049|a.ghost "Open phone remote"
+theater|settings-developer@390x780|focus|050|button.ghost "Refresh"
+theater|settings-developer@390x780|focus|051|a "Home"
+theater|settings-developer@390x780|focus|052|a "Shared libraries"
+theater|settings-developer@390x780|focus|053|a "Live TV"
+theater|settings-developer@390x780|focus|054|a "Recordings"
+theater|settings-developer@390x780|focus|055|a "Library channels"
+theater|settings-developer@390x780|focus|056|a "Activity"
+theater|settings-developer@390x780|focus|057|a.on "Settings"
+theater|settings-developer@390x780|focus|058|<wrap>
 theater|settings-developer@390x780|req|GET /api/remote/v1/grants|1
 theater|settings-developer@390x780|req|GET /api/remote/v1/receivers|1
 theater|settings-developer@390x780|req|GET /api/v1/activity|2
