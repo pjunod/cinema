@@ -11249,12 +11249,11 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(AppModel.homeErrorMessage(for: mapped, hasCachedContent: false))
     }
 
-    func testTransientRefreshFailureKeepsCachedHomeContentVisible() {
+    func testTransientRefreshFailureExposesRetryAlongsideCachedHome() {
         let failure = APIError.transport("The request timed out.")
 
-        XCTAssertEqual(AppModel.homeErrorMessage(for: failure, hasCachedContent: true),
-                       AppModel.homeErrorMessage(for: failure, hasCachedContent: false),
-                       "Cached titles survive, but failure must still expose inline Retry")
+        XCTAssertEqual(AppModel.homeErrorMessage(for: failure, hasCachedContent: true), "The request timed out.")
+        XCTAssertNil(AppModel.homeErrorMessage(for: CancellationError(), hasCachedContent: true))
         XCTAssertEqual(
             AppModel.homeErrorMessage(for: failure, hasCachedContent: false),
             "The request timed out."

@@ -14,6 +14,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Apple preserves saved server/account pairing against launch overrides and
+  unverified bootstrap failures; stale authentication completions cannot
+  overwrite a newer server choice or login.
+- Apple Auto retains its installed candidate after a proposal settles and
+  rejects stale named successors before replacing a current preparation.
+- Apple playback starts on devices without Picture in Picture support by
+  settling repeated attachment to the same player layer.
 - Apple Playback info reports the installed Auto rung after a prepared quality
   switch, so an encoded 720p stream no longer retains the original Remux label.
 

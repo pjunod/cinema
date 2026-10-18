@@ -1,5 +1,6 @@
 import AVKit
 import Combine
+import CryptoKit
 import Foundation
 import MediaPlayer
 
@@ -9206,8 +9207,9 @@ extension PlayerController {
             quality: manualQualityRetention.retained?.incumbent ?? selectedHeight.map { .manual(height: $0) }
                 ?? (selectedQualityIsOriginal ? .original :
                     (model?.displayAwareAuto == true &&
-                     model?.displayAwareAutoProtocol == "route-v1" && autoRouteProtocol == "route-v1" ? autoDesiredCandidate : nil)
-                        .map { .autoCandidate(height: (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight).contains($0.targetHeight) ? $0.targetHeight : nil, candidateId: $0.id) } ?? .auto),
+                     model?.displayAwareAutoProtocol == "route-v1" && autoRouteProtocol == "route-v1"
+                        ? autoControlQualitySelection(desired: autoDesiredCandidate,
+                            installedId: autoActiveCandidateId, candidates: decision?.qualityCandidates) : .auto)),
             audioTrack: selectedAudio,
             subtitle: SubtitleSelection(
                 mode: mode,
@@ -9767,12 +9769,37 @@ extension PlayerController {
 /// failing to prime a successor is an error branch produces a stuck player on
 /// the first device that has one slot.
 extension PlayerController: PreparedSuccessorHost {
+    func acceptsPreparedSuccessor(_ action: PreparedReplacementAction) -> Bool {
+        let matches = autoPreparedCandidateMatches(selection: playbackControlSelection().quality,
+            effective: action.effectiveSelection)
+        let safeCandidate = { (id: String?) -> String in
+            guard let id, let candidate = self.decision?.qualityCandidates?.first(where: {
+                $0.hasValidIdentity && $0.id == id
+            }) else { return "unknown" }
+            return candidate.id
+        }
+        let fingerprint = { (value: String) in
+            SHA256.hash(data: Data(value.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+        }
+        let response = decision?.qualityCandidates?.first {
+            $0.hasValidIdentity && $0.id == action.effectiveSelection.candidateId
+        }
+        let recipe = response?.recipeDigest.map { String(format: "%02x", $0) }.joined() ?? "unknown"
+        noteSurfaceLogOnly("prepared_acquisition_binding:accepted=\(matches):action=\(fingerprint(action.actionId))"
+            + ":session=\(fingerprint(action.sessionId)):desired=\(safeCandidate(autoDesiredCandidate?.id))"
+            + ":installed=\(safeCandidate(autoActiveCandidateId)):response=\(safeCandidate(action.effectiveSelection.candidateId))"
+            + ":recipe=\(recipe)")
+        return matches
+    }
+
     /// Build the muted second pipeline on its staging layer and prime it to the film
     /// position the viewer is watching.
     func startPreparedSuccessor(
         _ action: PreparedReplacementAction,
         filmPositionMs: Int
     ) -> Bool {
+        guard autoPreparedCandidateMatches(selection: playbackControlSelection().quality,
+            effective: action.effectiveSelection) else { return false }
         discardPreparedSuccessor()
         let capturedFilmPositionMs = max(0, filmPositionMs)
         guard let incumbentItem = player.currentItem else { return false }

@@ -636,6 +636,29 @@ func autoDownsideCostBps(_ candidate: QualityCandidate, sample: PlayerController
     }
 }
 
+/// A settled or abandoned proposal leaves the installed Auto route in force.
+/// Sending unnamed Auto here asks the server to plan again from the source.
+func autoControlQualitySelection(desired: QualityCandidate?, installedId: String?,
+                                 candidates: [QualityCandidate]?) -> QualitySelection {
+    let valid = (candidates ?? []).filter { $0.hasValidIdentity && $0.decoderCompatible }
+    let requested = desired.flatMap { desired -> QualityCandidate? in
+        guard desired.hasValidIdentity else { return nil }
+        let matches = valid.filter { $0.id == desired.id && $0.recipeDigest == desired.recipeDigest }
+        return matches.count == 1 ? matches.first : nil
+    }
+    let installed = valid.filter { $0.id == installedId }
+    guard let selected = requested ?? (installed.count == 1 ? installed.first : nil) else { return .auto }
+    return .autoCandidate(height: (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight)
+        .contains(selected.targetHeight) ? selected.targetHeight : nil, candidateId: selected.id)
+}
+
+/// Reject a superseded named Auto recipe before it allocates another player.
+/// An unnamed bootstrap and manual/compound transitions keep their own rules.
+func autoPreparedCandidateMatches(selection: QualitySelection, effective: EffectiveSelection) -> Bool {
+    guard case .autoCandidate(_, let expected) = selection else { return true }
+    return effective.qualityAuto && effective.candidateId == expected
+}
+
 /// The pressure half of an Auto evaluation, decided from evidence alone so a
 /// test can feed it a completed body and a runway and read the rung it moves
 /// to. `nil` is a pressure-only evaluation that found no pressure: nothing to

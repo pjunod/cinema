@@ -1,7 +1,10 @@
 # Continuous quality — build uninterrupted resolution changes
 
 **Status:** implementation landed in PR #774; post-merge qualification resumed;
-physical/native acceptance and Firefox whole-window evidence remain open · **Written:** 2026-09-30 ·
+Measured Apple 262 checks pass; final Apple 263 release claim preserves the measured production code; qualification is pending;
+physical/native and independent output
+acceptance remain open; Firefox browser video passes on `89d790d2e` ·
+**Updated:** 2026-10-18 ·
 **Source anchor:** `origin/main` at `1b2ae4f62e7d131d18c088a643470e40cdb9789c`
 · **Effort:** `effort/continuous-quality`
 
@@ -11,7 +14,7 @@ physical/native acceptance and Firefox whole-window evidence remain open · **Wr
 
 - **What this is:** Implementation contract for changing video quality without a pause, flash or audio seam on every client, web first, then native.
 - **Where it stands:**
-  - Status (written 2026-09-30): implementation landed in PR #774; post-merge qualification resumed; physical/native acceptance and Firefox whole-window evidence remain open.
+  - Status (updated 2026-10-18): Apple 262 at `ef33cc71` passes 79 focused units, three recovery UI journeys, affected compilation and paperwork. Valid simulator comparison repairs the retained-incumbent failure; physical iPad SDK evidence still has one unclassified 104 ms surface pair, shared-AAC TV SDK playback completes with zero sampled access stalls; independent output continuity remains unmeasured, a separate E-AC-3-to-AAC VOD boundary finding is open, and Safari awaits user settings. Task #1179 gate, physical/independent-output acceptance and parent #1156 promotion remain pending. Firefox retains its old-source browser-video scope; see §10.332.
   - Per-milestone state lives in the evidence ledger (CQ0-CQ7 have partial results, CQ8 is "Not run"); empty rows are unfinished work. The tail of the file is a dated running log of review rounds and test repairs.
   - Execution order is CQ0, CQ2a, CQ1, CQ2, CQ3, CQ4, CQ5, CQ6, CQ7, CQ8.
 - **Read further only for:**
@@ -12084,3 +12087,125 @@ The shipping proxy harness is suspended after the iPad/server-picker and
 TV/sign-in incident. Paul reports that neither screen can be escaped; this
 is an open product bug. No new physical launch or passing acquisition
 campaign is claimed. Harness commit `622141077` is confirmed pushed.
+
+
+### 10.331 Firefox acceptance, session safety and isolated native startup — October 17
+
+Exact `89d790d2e` completed its retained Firefox 158.0 campaign on `lab4` at
+22:42 EDT: fifteen manual changes and five actual Auto transitions
+(1080→720→1080→720→1080) at 100/10/25/10/25 Mb/s. All 5,906 tracked source
+blobs match the baseline, including the qualification harness. The
+[sanitized source-bound receipt](evidence/cq-firefox-20261017.json) preserves
+executable, fixture, harness and browser hashes. Maximum mixed video and
+callback gap is 99.36 ms; p95 video is 84.1 ms and callback 84.08 ms. Four
+dropped frames remain recorded. One session and player serve the campaign,
+with zero wait/reopen events, stalls or hitches. The earlier `lab3` campaign
+remains invalid; no failed receipt is relabelled as a pass.
+
+Owned browser CPUs and daemon/encoder CPUs were disjoint. All 880 supervisor
+samples retain foreign activity; no exclusive CPU reservation is claimed.
+The headless result proves the existing browser video oracle under unchanged
+thresholds, without an independent display or audio-render oracle. The raw
+private archive verifies all 18 retained files and has SHA-256
+`991a0af00b532fe679ab733cbed700b1122614b1cfb8ebfc2d65df1538c85351`.
+The old Firefox lab is removed after a zero-owned-process census; baseline
+binary, ffprobe and fixture remain in a separate owned native lab.
+
+The acquisition follow-up source repairs saved-session instance/generation ownership,
+installed Auto candidate binding and stale named-successor rejection. The
+selected six-suite iOS run passes 58 cases; the separate unsupported-PiP
+attachment regression passes and eight shaping contracts pass. The PiP loop
+was reproduced in a disposable simulator: repeated support publication
+invalidated SwiftUI at 100% CPU before playback startup could run. Settling
+same-layer unsupported attachment starts playback, but the first MP4 route
+is direct and bypasses shaping. It provides no link-pressure or successor
+acceptance. The preserved comparison baseline is `06235b181` plus that PiP
+repair; controlled HLS baseline/candidate evidence remains pending.
+
+Paul confirmed disabling authentication-free automation mode on October 17.
+The physical sign-in incident's triggering request and the reported UI trap
+remain unconfirmed. Physical proxy launches stay suspended; no new physical
+pass, main merge or installation is claimed. The
+[current Apple investigation](APPLE-AUTO-LOW-LINK-IMPLEMENTATION.md) owns
+remaining evidence and promotion prerequisites.
+
+
+**Integrated local evidence.** After current main integration, 64 selected
+player cases, 15 authentication/home cases and one disposable iPad recovery
+UI case pass; exact integrated iOS/tvOS builds and iOS Release compilation
+also pass. Both TV recovery journeys pass, including native focus and saved-session Retry. The integrated player
+result is `/tmp/cq-main-integrated-player.xcresult`; earlier passing evidence
+and failures remain retained. The interim AAC/DTS HLS runs are invalid: a
+diagnostic daemon restart dropped the bound FFprobe environment, and named
+candidate creation refused the unavailable parser identity before successor
+attachment. This is a lab failure, with no app-regression attribution. The
+corrected lab must pass a named-candidate-bound normal create before a link
+schedule. Physical incident request, valid HLS acquisition acceptance and
+promotion remain unconfirmed.
+
+Request traces distinguish upstream headers from body consumption:
+`headers_at_ms` observes headers, while `first_byte_at_ms` and
+`upstream_end_at_ms` observe consumption inside a backpressured pump rather
+than raw network arrival. Downstream completion includes local shaping;
+these timestamps alone cannot assign upstream production/network delay.
+
+### 10.332 Apple 262 exact-source checks and bounded native evidence — October 18
+
+The measured task #1179 checkpoint is `ef33cc71cf89da900883d7ad5d2af5336aecffbc`, tree
+`0e84329578724a069103cd93fac873b38e651afe`, with main `efaf89152` integrated.
+Apple 262 preserves the session/candidate safety repairs and incoming
+Meridian preferences. The task gate and parent #1156 promotion remain
+pending; no main merge or production installation is claimed.
+
+The measured source/build remain `ef33cc71` / Apple 262. Effort-base
+history synchronization advances the release claim to **Apple 263**.
+Every production Swift source and test remains byte-identical to the measured
+checkpoint; only release metadata and evidence documentation change. The
+final candidate still needs its own gate. These 262 observations are not relabelled as a physical 263 run.
+
+**Exact local evidence.** The final combined unit result is **79/79**:
+64 playback/binding/coordinator/PiP cases and 15 authentication/Home cases.
+Three recovery UI journeys pass across focused reruns: one iPad and two TV
+journeys, including native focus and saved-session Retry. The first iPad
+attempt could not compile because its target omitted the shared navigation
+helper; registration fixes it. The first TV bundle preserves a passing
+saved-session case and a new case whose obsolete TabBar assertion failed
+after Home was visibly focused. Its corrected semantic selector passes on a
+focused rerun. Whole bundles preserve both failures and screenshots.
+
+Integrated iOS/tvOS and iOS Release compilation pass. Paperwork is 14/14
+against main `efaf89152`; formatting/Clippy/catalog lint and 95 served-script
+syntax checks pass. The explicit committed-source archive and final
+`cq262-focused-units.xcresult` have verified private SHA256 manifests. These
+results remain development evidence rather than a passed promotion gate.
+
+**Causal simulator comparison.** A valid bound-FFprobe setup proves normal
+named-candidate creation before shaping. Baseline `06235b181` plus the PiP
+startup repair reproduces a six-second voluntary-original preparation
+failure with about 60 s of healthy 144p runway. Abandonment then reports
+unnamed Auto, a new original is accepted with `automatic=false`, its next
+preparation fails, fallback retires the healthy incumbent, HLS requests
+receive HTTP 410, and playback fails. Fixed source `3a701ff14` retains named
+144p through 90 s at 3 Mb/s and 79 s at 25 Mb/s, with zero stalls in 239
+probes. The acquisition timeout's producer/network cause remains separate;
+the reproduced fallback seam and its retention repair are established.
+Earlier direct and missing-bound-FFprobe trials remain invalid.
+
+**Physical scopes.** Apple 262 on the iPad reaches film position 598,677 ms in 294 SDK probes
+through 1080p → 720p → 360p, zero reported stalls and zero black observations.
+A 104 ms surface pair is still unclassified; independent display continuity
+is unmeasured, so an uninterrupted-output verdict remains open. The shared-AAC
+TV run reaches film position 488,356 ms in 240 probes through 1080p → 720p → 360p,
+90 s at 3 Mb/s and recovery: zero sampled access stalls/black intervals, no unnamed
+controls or HTTP 410s. Two 111 ms preparing indicators occur while presenting
+at rate 1. The Info panel reports Transcode · 360p and 640×360; frame/audio/tap
+continuity explicitly reads Not measured. The separate DTS-source E-AC-3 → AAC
+VOD boundary is rejected as `prepared_output_unsupported` and remains a
+distinct product finding, outside the first shared-AAC continuity family. Safari iOS awaits user
+Web Inspector/Remote Automation settings after the XCTest automation gate;
+it is neither skipped nor accepted.
+
+Firefox retains its exact `89d790d2e` browser-video scope from §10.331. The
+original physical sign-out request and reported navigation trap remain
+unconfirmed. The [current investigation](APPLE-AUTO-LOW-LINK-IMPLEMENTATION.md)
+owns the remaining physical classifications and promotion evidence.
