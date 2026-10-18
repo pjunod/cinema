@@ -4105,6 +4105,23 @@ assert.equal(context.ACT_TIMER, null);
             for name, block in workflow_job_blocks(path).items():
                 runs_on = re.search(r"(?m)^    runs-on: .+$", block)
                 self.assertIsNotNone(runs_on, f"{path}:{name} has no runner")
+                if name == "image":
+                    # Each architecture builds natively on its own runner:
+                    # never arm64 under QEMU on an X64 host (v0.7.0, #1163).
+                    self.assertEqual(
+                        "    runs-on: ${{ fromJSON(matrix.runs_on) }}",
+                        runs_on.group(0),
+                        f"{path}:{name}",
+                    )
+                    self.assertEqual(
+                        {
+                            ("self-hosted", "Linux", "X64", "lab", "general", "high-cpu"),
+                            ("self-hosted", "Linux", "ARM64", "lab", "release-arm64"),
+                        },
+                        set(self_hosted_label_sets(block)),
+                        f"{path}:{name} must build each architecture on its own runner",
+                    )
+                    continue
                 expected = release_general if name == "resolve" else release_high_cpu
                 self.assertEqual(expected, runs_on.group(0), f"{path}:{name}")
 
