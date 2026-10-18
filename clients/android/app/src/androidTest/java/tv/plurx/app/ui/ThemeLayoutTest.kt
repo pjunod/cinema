@@ -1,10 +1,14 @@
 package tv.plurx.app.ui
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
 import org.junit.Rule
 import org.junit.Test
 import tv.plurx.app.data.Appearance
@@ -20,7 +24,7 @@ class ThemeLayoutTest {
     @Test
     fun everyThemeRendersCoreControls() {
         compose.setContent {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 ThemeId.entries.forEach { theme ->
                     val title = "Alignment check — ${theme.label}"
                     PlurxTheme(theme, Appearance.Dark) {
@@ -33,8 +37,8 @@ class ThemeLayoutTest {
             }
         }
         ThemeId.entries.forEach { theme ->
-            compose.onNodeWithText(theme.label).assertIsDisplayed()
-            compose.onNodeWithText("Alignment check — ${theme.label}").assertIsDisplayed()
+            compose.onNodeWithText(theme.label).performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Alignment check — ${theme.label}").performScrollTo().assertIsDisplayed()
         }
     }
 }
