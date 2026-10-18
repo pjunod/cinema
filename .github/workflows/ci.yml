@@ -262,8 +262,11 @@ jobs:
     if: needs.scope.outputs.rust == 'true'
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     timeout-minutes: 20
+    # The topology cgroup allows 24 GiB. The plurxd test codegen peaks near
+    # 13.8 GB on its own, and the workspace check at -j8 peaked near 15 GB
+    # combined. Six jobs leave headroom for plurxd plus five smaller crates.
     env:
-      CARGO_BUILD_JOBS: "1"
+      CARGO_BUILD_JOBS: "6"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -275,6 +278,9 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: rust-compile
+          # Every job on the topology runner passes this same budget: the
+          # job with the smallest one would prune every other lane.
+          budget-gb: "60"
       - name: Compile every Rust target without executing tests
         run: make effort-rust-check
       - name: Enforce persistent Cargo bounds
@@ -545,6 +551,7 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: cluster-topology
+          budget-gb: "60"
       - name: Run replicated topology contracts
         id: topology_contracts
         continue-on-error: true
@@ -647,6 +654,7 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: cluster-transport-recovery-contracts
+          budget-gb: "60"
       - name: Run recovery schemas, validators, and focused regressions
         id: recovery_contracts
         continue-on-error: true
@@ -690,10 +698,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      # The voter, learner and aggregate jobs build the same transport-recovery
+      # profile, so they share one lane; Cargo's target-dir lock serialises them.
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
-          lane: cluster-transport-recovery-voter
+          lane: cluster-transport-recovery
+          budget-gb: "60"
       - name: Build the exact voter role runner
         env:
           PLURX_BUILD_SHA: ${{ github.sha }}
@@ -761,7 +772,8 @@ jobs:
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
-          lane: cluster-transport-recovery-learner
+          lane: cluster-transport-recovery
+          budget-gb: "60"
       - name: Build the exact learner role runner
         env:
           PLURX_BUILD_SHA: ${{ github.sha }}
@@ -831,7 +843,8 @@ jobs:
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
-          lane: cluster-transport-recovery-aggregate
+          lane: cluster-transport-recovery
+          budget-gb: "60"
       - name: Build the exact evidence validator
         id: build_recovery_validator
         continue-on-error: true
@@ -929,8 +942,11 @@ jobs:
     if: needs.scope.outputs.cluster_auth == 'true'
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     timeout-minutes: 30
+    # The topology cgroup allows 24 GiB. The plurxd test codegen peaks near
+    # 13.8 GB on its own, and the workspace check at -j8 peaked near 15 GB
+    # combined. Six jobs leave headroom for plurxd plus five smaller crates.
     env:
-      CARGO_BUILD_JOBS: "1"
+      CARGO_BUILD_JOBS: "6"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -940,6 +956,7 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: cluster-wal
+          budget-gb: "60"
       - name: Run exact Hiqlite and WAL recovery regressions
         run: make cluster-wal-check
       - name: Enforce persistent Cargo bounds

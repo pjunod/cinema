@@ -123,9 +123,11 @@ jobs:
     # Preserve the larger-memory compiler lane and current main's finite
     # cold-cache budget for every-target compilation and vendored Clippy.
     timeout-minutes: 30
-    # Keep compilation within the runner's existing memory allocation.
+    # The topology cgroup allows 24 GiB. The plurxd test codegen peaks near
+    # 13.8 GB on its own, and the workspace check at -j8 peaked near 15 GB
+    # combined. Six jobs leave headroom for plurxd plus five smaller crates.
     env:
-      CARGO_BUILD_JOBS: "1"
+      CARGO_BUILD_JOBS: "6"
     steps:
       - name: Check out the candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -140,6 +142,9 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: effort-rust
+          # Every job on the topology runner passes this same budget: the
+          # job with the smallest one would prune every other lane.
+          budget-gb: "60"
       - name: Compile every Rust target without executing tests
         run: |
           make effort-rust-check

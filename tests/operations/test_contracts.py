@@ -1746,7 +1746,7 @@ assert.equal(context.ACT_TIMER, null);
             )
             self.assertRegex(
                 compiler_header,
-                r'(?m)^      CARGO_BUILD_JOBS: "1"$',
+                r'(?m)^      CARGO_BUILD_JOBS: "6"$',
             )
         self.assertIn("run: make effort-rust-check", fast_rust)
         self.assertNotIn("cargo test", fast_rust)
@@ -2142,6 +2142,69 @@ assert.equal(context.ACT_TIMER, null);
             if path.name != "coverage.yml":
                 self.assertNotIn("--filename coverage", path.read_text())
 
+    def test_topology_runner_jobs_share_one_cache_budget_and_recovery_lane(self):
+        # Run 5325: serial rustc on the 24 GiB topology runner timed the WAL
+        # job out, and the 30 GB default budget evicted its lane every run.
+        cache_step = re.compile(
+            r"(?ms)^      - (?:id|name): [^\n]+\n(?:        [^\n]*\n)*?"
+            r"        uses: \./\.github/actions/cargo-cache\n(?:        [^\n]*\n)*"
+        )
+        topology_jobs = {}
+        for path in (".github/workflows/ci.yml", ".github/workflows/effort-ci.yml"):
+            for name, job in workflow_job_blocks(path).items():
+                runs_on = re.search(r"(?m)^    runs-on: ([^\n]+)$", job)
+                if runs_on and "ci-topology" in runs_on.group(1):
+                    topology_jobs[(path, name)] = job
+        for expected in ("rust_compile", "cluster_topology", "cluster_wal",
+                         "cluster_transport_recovery_contracts",
+                         "cluster_transport_recovery_voter",
+                         "cluster_transport_recovery_learner",
+                         "cluster_transport_recovery"):
+            self.assertIn((".github/workflows/ci.yml", expected), topology_jobs)
+        self.assertIn((".github/workflows/effort-ci.yml", "rust_compile"), topology_jobs)
+        for key, job in topology_jobs.items():
+            steps = cache_step.findall(job)
+            self.assertTrue(steps, key)
+            for step in steps:
+                self.assertEqual(
+                    re.findall(r"(?m)^          budget-gb: ([^\n]+)$", step),
+                    ['"60"'],
+                    key,
+                )
+            self.assertEqual(
+                re.findall(r"(?m)^[ \t]*budget-gb: (?!\$\{\{)([^\n]+)$", job),
+                ['"60"'] * len(steps),
+                key,
+            )
+        ci_jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        for compiler in (
+            ci_jobs["rust_compile"],
+            ci_jobs["cluster_wal"],
+            workflow_job_blocks(".github/workflows/effort-ci.yml")["rust_compile"],
+        ):
+            self.assertEqual(
+                re.findall(r"(?m)^[ \t]*CARGO_BUILD_JOBS: [^\n]+$", compiler),
+                ['      CARGO_BUILD_JOBS: "6"'],
+            )
+        role_lanes = {
+            name: re.findall(r"(?m)^          lane: ([^\n]+)$", ci_jobs[name])
+            for name in (
+                "cluster_transport_recovery_voter",
+                "cluster_transport_recovery_learner",
+                "cluster_transport_recovery",
+            )
+        }
+        self.assertEqual(
+            set(map(tuple, role_lanes.values())), {("cluster-transport-recovery",)}
+        )
+        self.assertEqual(
+            re.findall(
+                r"(?m)^          lane: ([^\n]+)$",
+                ci_jobs["cluster_transport_recovery_contracts"],
+            ),
+            ["cluster-transport-recovery-contracts"],
+        )
+
     def test_coverage_uses_general_runner_with_pinned_ffmpeg_container(self):
         # Retain this historical regression anchor after reserving its pool.
         coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
@@ -2183,10 +2246,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("timeout-minutes: 15", effort_jobs["preflight"])
         self.assertIn("timeout-minutes: 30", effort_jobs["rust_compile"])
         effort_rust_header = effort_jobs["rust_compile"].split("\n    steps:", 1)[0]
-        self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"', effort_rust_header)
+        self.assertIn('    env:\n      CARGO_BUILD_JOBS: "6"', effort_rust_header)
         self.assertEqual(
             re.findall(r"(?m)^[ \t]*CARGO_BUILD_JOBS: [^\n]+$", effort_jobs["rust_compile"]),
-            ['      CARGO_BUILD_JOBS: "1"'],
+            ['      CARGO_BUILD_JOBS: "6"'],
         )
         self.assertIn(
             "if: always() && steps.cargo-cache.outputs.local == 'true'",
