@@ -3460,10 +3460,18 @@ final class AppleClientTests: XCTestCase {
             source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex)
         )
         let body = String(source[start.upperBound..<end.lowerBound])
-        XCTAssertTrue(body.contains("self.present(.tick)"), "it feeds the reducer's clock")
-        // Pure: the presenter's clock may not touch the player.
+        XCTAssertTrue(body.contains("Task.sleep(for: .milliseconds(Self.surfaceClockIntervalMs))"))
+        XCTAssertTrue(body.contains("self.surfaceClockTick(nowMs: PlaybackControlSession.monotonicMs())"),
+                      "the wall clock delegates even when AVPlayer's film clock stops")
+        let tickStart = try XCTUnwrap(source.range(of: "func surfaceClockTick(nowMs: Int) {"))
+        let tickEnd = try XCTUnwrap(source.range(of: "\n    }\n", range: tickStart.upperBound..<source.endIndex))
+        let tick = String(source[tickStart.upperBound..<tickEnd.lowerBound])
+        XCTAssertTrue(tick.contains("present(.tick)"), "the delegated heartbeat feeds the reducer's clock")
+        XCTAssertTrue(tick.contains("sampleSurfacePresentation(at: realPositionMs(), evidence: currentLocalVideoEvidence())"))
+        // Both the timer and its delegated callback observe the player without
+        // changing playback as an effect of the presenter's clock.
         for forbidden in ["player.pause()", "player.play()", "reopen(", "seek(", "prepare("] {
-            XCTAssertFalse(body.contains(forbidden), "the presenter's clock does not \(forbidden)")
+            XCTAssertFalse((body + tick).contains(forbidden), "the presenter's clock does not \(forbidden)")
         }
     }
 
