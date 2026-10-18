@@ -74,3 +74,51 @@ and it still has to increase whenever Apple release inputs change.
 generated form of every surface, refuses to let per-build narrative move back
 into either status blockquote, and merges two branches cut from one base in
 sequence to prove they no longer collide.
+
+## Notes moved from the docs index
+
+These lines used to sit in `docs/README.md`; they point at fragments in this folder.
+
+Apple build 160: [Native Live TV and shelf layouts](320-native-layout-followup.md).
+
+Native Home restoration: [Original Apple Home screens](334-original-home.md) — **open**.
+
+Apple Home clipping: [Featured movie content bounds](570-home-hero-clipping.md).
+
+Apple playback controls: [10 and 30 second seeking](689-playback-seek-controls.md).
+
+Apple seek icons: [Directional arrows for seek distances](694-seek-arrow-icons.md).
+
+Apple playback buffer: [944-playback-buffer-limit.md](944-playback-buffer-limit.md).
+
+Apple temporary serving fence: [962-temporary-serving-fence-control.md](962-temporary-serving-fence-control.md).
+
+Apple display wake: [818-display-wake.md](818-display-wake.md) — playback owns the display idle timer.
+
+Apple build 222: [Verified Dolby Vision processing reports](968-dv-processing-reports.md).
+
+Apple build 137: [Library channel startup and contrast](245-library-channel-start-and-contrast.md).
+
+Apple build 138: [Library channel playback decision](245-library-channel-playback-decision.md).
+
+Apple build 141: [Library channel buffering demand](245-library-channel-buffering-demand.md).
+
+Apple build 143: [Playback lifecycle recovery and prepared handoff](257-playback-lifecycle.md).
+
+Apple build 147: [The playback surface contract](278-playback-surface-contract.md).
+
+Apple build 151: [Playback surface reach](278-playback-surface-reach.md).
+
+Apple build 152: [Banner actions](278-banner-actions.md).
+
+Apple build 153: [Live TV stall and fullscreen surface](300-live-tv-surface.md).
+
+Previous: [Live TV playback method](245-live-tv-playback-method.md).
+
+| Note | Answers | |
+|---|---|---|
+| [Remote diagnostics Apple wire](remote-diagnostics-wire.md) | What is added to the Apple report format contract? | built |
+| [Remote diagnostics Apple capture](remote-diagnostics-capture.md) | What changes in native private report capture, share, send and TV approval? | open |
+| [remote-diagnostics-qualification.md](remote-diagnostics-qualification.md) | Qualifies offline phone ZIP export, native TV local downloads and same-incident relaunch recovery. | built |
+
+Apple growing playlist attachment: [preparation and failover correction](914-growing-playlist-attachment.md) — **built; physical acceptance open**.

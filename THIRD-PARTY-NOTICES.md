@@ -860,6 +860,7 @@ the tree, so it is redistributed with every clone the way the Gradle wrapper in
 |---|---|---|---|---|
 | [acorn](https://github.com/acornjs/acorn) | 8.18.0 | `tests/vendor/acorn.js` | MIT — [full text](licenses/acorn-MIT.txt) | Copyright (c) 2012-2022 by various contributors |
 | [Google FLEURS](https://huggingface.co/datasets/google/fleurs) | `70bb2e84b976b7e960aa89f1c648e09c59f894dd` | `tests/fixtures/subtitle-recognition/fleurs-de.wav` and publisher reference text | CC BY 4.0 — [full text](licenses/CC-BY-4.0.txt) | Conneau, Ma, Khanuja, Zhang, Axelrod, Dalmia, Riesa, Rivera and Bapna (2022), Google |
+| [Google FLEURS · translation inputs and self-test](https://huggingface.co/datasets/google/fleurs) | `70bb2e84b976b7e960aa89f1c648e09c59f894dd` | `tests/fixtures/subtitle-translation/audio/`, compiled German runtime self-test, and publisher source/English reference text | CC BY 4.0 — [full text](licenses/CC-BY-4.0.txt) | Conneau, Ma, Khanuja, Zhang, Axelrod, Dalmia, Riesa, Rivera and Bapna (2022), Google |
 | [Tears of Steel](https://mango.blender.org/) | 2012 official short film | `tests/fixtures/subtitle-recognition/TOS-en.srt` and derived `base-film.raw.vtt` | CC BY 3.0 — [full text](licenses/CC-BY-3.0.txt) | (CC) Blender Foundation \| mango.blender.org |
 
 The speech fixture directory carries adjacent `LICENSE.txt` attribution,
@@ -872,6 +873,17 @@ executables can embed the small raw-VTT timing regression input. The Kafka
 book excerpt is public domain in the USA; its joined-line extraction is
 identified separately in that notice. No external movie or audiobook file
 is redistributed with the repository.
+
+The translation P0 FLEURS samples and publisher source/English reference text
+are extracted without alteration. Their per-sentence reference records retain
+the pinned archive/member, exact sentence ID, source/reference hashes and
+CC BY 4.0 attribution. A controlled sequence concatenates decoded German
+samples only for the stated window experiment; it is not natural dialogue.
+German sentence1586 is also embedded in the daemon for its production
+foreign-speech-to-English self-test. The macOS package and container image
+carry the attribution and full CC BY 4.0 license; runtime decoding/resampling occurs
+only in an owned private attempt. No local bilingual listening or general
+translation-quality verdict is claimed.
 
 `tests/web/asset-order.test.js` needs a real JavaScript parser: it refuses a
 web-asset order in which a file runs something at load that names a binding

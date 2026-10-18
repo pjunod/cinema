@@ -164,6 +164,12 @@ class API:
         return bounded_json(self.bytes(path, query))
 
     def pages(self, path, query=None, field=None):
+        if ('/api/v1/repos/' in self.root
+                and re.fullmatch(r'/issues/[1-9][0-9]*/comments', path)):
+            require(field is None, 'Issue comments require an unwrapped list')
+            from validation import issue_comment_pages
+
+            return issue_comment_pages.pages(self, path, query)
         items = []
         for page in range(1, MAX_PAGES + 1):
             payload = self.get(path, {**(query or {}), "page": page, "limit": 50})

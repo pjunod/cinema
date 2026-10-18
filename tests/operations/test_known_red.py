@@ -69,12 +69,12 @@ class KnownRedContractTest(unittest.TestCase):
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_direct_range_head_through_b",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_quality_reopen_preserves_position_and_releases_slot",
             "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_prepared_handoff_commit_and_abort",
-            "crates/plurxd/src/http/mod.rs::http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart",
+            "crates/plurxd/src/http/tests.rs::http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart",
             "crates/plurxd/tests/sharing_daemon_restart.rs::sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart",
             "crates/plurxd/src/http/sharing_start_decode.rs::http::sharing_start_decode::tests::sharing_start_transport_pinned_source_h1_and_receiver_h1_h2_preserve_raw_envelope",
-            "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_receiver_pinned_decision_http1_http2_revalidates_file_assignment_and_login",
-            "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_receiver_pinned_source_blocked_http1_http2_revalidate_current_scope",
-            "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection",
+            "crates/plurxd/src/http/shared_library/tests.rs::http::shared_library::tests::sharing_receiver_pinned_decision_http1_http2_revalidates_file_assignment_and_login",
+            "crates/plurxd/src/http/shared_library/tests.rs::http::shared_library::tests::sharing_receiver_pinned_source_blocked_http1_http2_revalidate_current_scope",
+            "crates/plurxd/src/http/shared_library/tests.rs::http::shared_library::tests::sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection",
         })
         # #811 adds three ffmpeg 8 fixture checks of the repeated-HEVC
         # description collapse (generations, output, copy pipe), each needing
@@ -131,7 +131,7 @@ class KnownRedContractTest(unittest.TestCase):
         # adds a loopback-only synthetic acceptance server. Bind their identities
         # and environment reasons rather than silently admitting unknown ignores.
         additional_fixture_reasons = {
-            "crates/plurxd/src/decode_facts.rs::decode_facts::tests::" + name:
+            "crates/plurxd/src/decode_facts/tests.rs::decode_facts::tests::" + name:
                 "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"
             for name in (
                 "namespace_probe_executes_bound_source_and_denies_secondary_images",
@@ -162,9 +162,15 @@ class KnownRedContractTest(unittest.TestCase):
         # Shared-read indexing adds one operator-run differential over a real
         # source on the target storage, named by PLURX_SHARED_READ_SOURCE.
         additional_fixture_reasons[
-            "crates/plurxd/src/fragindex.rs::fragindex::tests::"
+            "crates/plurxd/src/fragindex/tests.rs::fragindex::tests::"
             "real_source_shared_read_differential"
         ] = "reads a whole real source several times; run by hand on the target storage"
+        # DV repair R02 exercises actual source probing, native helper windows,
+        # AAC cadence and VAAPI output; it requires the installed HDR graph.
+        additional_fixture_reasons[
+            "crates/plurxd/src/vodencode_manager_tests.rs::transcode::tests::"
+            "actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_seek"
+        ] = "requires an actual HDR source, reviewed helper bundle and proved VAAPI device"
         # DV Profile 5 completeness uses private, bounded FFmpeg captures;
         # keep these operator-run checks distinct from known-red tests.
         for identity in (
@@ -172,7 +178,7 @@ class KnownRedContractTest(unittest.TestCase):
             "captured_dvh1_completeness_preserves_dolby_vision_and_publishes",
             "crates/plurxd/src/copyseg.rs::copyseg::tests::"
             "captured_dvh1_rolling_options_publish_and_reject_unproven_samples",
-            "crates/plurxd/src/fragindex.rs::fragindex::tests::"
+            "crates/plurxd/src/fragindex/tests.rs::fragindex::tests::"
             "captured_dvh1_completeness_builds_a_constant_index",
         ):
             additional_fixture_reasons[identity] = (
@@ -185,9 +191,9 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 11)
-        # DV completeness adds three private capture checks: 32 -> 35.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 35)
+        self.assertEqual(len(additional_fixtures), 12)
+        # HDR runtime and DV completeness add four private checks: 32 -> 36.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 36)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())

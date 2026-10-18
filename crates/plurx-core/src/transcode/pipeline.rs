@@ -45,7 +45,7 @@ impl ReconstructedPqInput {
         "bt2020"
     }
     pub(super) fn pairs_with(self, encoder: Encoder) -> bool {
-        matches!(encoder, Encoder::Software | Encoder::Nvenc)
+        matches!(encoder, Encoder::Software | Encoder::Nvenc | Encoder::Vaapi)
     }
 }
 
@@ -304,10 +304,11 @@ impl Pipeline {
             // is ever attempted — unproved pairings fall back to software.
             Pipeline::DoviTonemapx => true,
             // The same software-decode constraint applies to HDR passthrough.
-            // Its encode half has two measured routes: libx265 and QSV
-            // Main10. Other families remain refused until measured.
+            // Its encode half uses the independently proved Main10 upload
+            // routes; the daemon additionally requires the Dolby renderer and
+            // per-source RPU pixel proof before choosing this pipeline.
             Pipeline::DoviPassthrough => {
-                matches!(encoder, Encoder::Software | Encoder::Qsv)
+                matches!(encoder, Encoder::Software | Encoder::Qsv | Encoder::Vaapi)
             }
             // Plain HDR has no RPU dependency; its VAAPI P010/Main10 graph
             // has an independent boot proof and a 1080p planner ceiling.
@@ -1335,7 +1336,8 @@ mod tests {
 
         assert!(p.pairs_with(Encoder::Software));
         assert!(p.pairs_with(Encoder::Qsv));
-        for encoder in [Encoder::Nvenc, Encoder::Vaapi, Encoder::VideoToolbox] {
+        assert!(p.pairs_with(Encoder::Vaapi));
+        for encoder in [Encoder::Nvenc, Encoder::VideoToolbox] {
             assert!(
                 !p.pairs_with(encoder),
                 "{encoder:?} has no measured HEVC Main10 encoder"
@@ -1422,7 +1424,7 @@ mod tests {
         assert!(p.pairs_with(Encoder::Software));
         assert!(p.pairs_with(Encoder::Qsv));
         assert!(p.pairs_with(Encoder::Vaapi));
-        assert!(!Pipeline::DoviPassthrough.pairs_with(Encoder::Vaapi));
+        assert!(Pipeline::DoviPassthrough.pairs_with(Encoder::Vaapi));
         // Reviewed VideoToolbox Main10 is independently proved by the route
         // planner; plain HDR10 has no Dolby metadata dependency.
         assert!(p.pairs_with(Encoder::VideoToolbox));

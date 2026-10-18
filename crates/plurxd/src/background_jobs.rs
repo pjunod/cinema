@@ -991,10 +991,107 @@ impl JobFence {
             .await
     }
 
+    pub(crate) async fn bind_translation_source(
+        &self,
+        source: plurx_core::store::background_jobs::JobPayload,
+        source_sha256: String,
+        local_identity: String,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let mut request =
+            plurx_core::store::subtitle_translation_publication::BindTranslationSource {
+                token,
+                source,
+                source_sha256,
+                local_identity,
+                now_ms: unix_ms()?,
+            };
+        let result = match self.0.store.bind_translation_source(request.clone()).await {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.bind_translation_source(request).await?
+            }
+        };
+        if result {
+            state.token = None;
+        }
+        Ok(result)
+    }
+    pub(crate) async fn publish_translation_segment(
+        &self,
+        source: plurx_core::store::background_jobs::JobPayload,
+        segment: plurx_core::store::subtitle_translation::SegmentDraft,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let mut request =
+            plurx_core::store::subtitle_translation_publication::PublishTranslationSegment {
+                token,
+                source,
+                segment,
+                now_ms: unix_ms()?,
+            };
+        let result = match self
+            .0
+            .store
+            .publish_translation_segment(request.clone())
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_translation_segment(request).await?
+            }
+        };
+        if result {
+            state.token = None;
+        }
+        Ok(result)
+    }
+
     pub(crate) async fn publish_subtitle_model(
         &self,
         source: plurx_core::store::background_jobs::JobPayload,
+        receipt: plurx_core::store::background_jobs_transcription::SubtitleModelReceipt,
+    ) -> Result<bool, StoreError> {
+        self.publish_qualified_subtitle_model(source, receipt, None)
+            .await
+    }
+
+    pub(crate) async fn publish_translation_model(
+        &self,
+        source: plurx_core::store::background_jobs::JobPayload,
+        receipt: plurx_core::store::background_jobs_transcription::SubtitleModelReceipt,
+        translation: plurx_core::store::background_jobs_transcription::TranslationQualification,
+    ) -> Result<bool, StoreError> {
+        self.publish_qualified_subtitle_model(source, receipt, Some(translation))
+            .await
+    }
+    async fn publish_qualified_subtitle_model(
+        &self,
+        source: plurx_core::store::background_jobs::JobPayload,
         mut receipt: plurx_core::store::background_jobs_transcription::SubtitleModelReceipt,
+        translation: Option<
+            plurx_core::store::background_jobs_transcription::TranslationQualification,
+        >,
     ) -> Result<bool, StoreError> {
         let mut state = self.0.state.lock().await;
         if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
@@ -1010,6 +1107,7 @@ impl JobFence {
         receipt.fence = token.fence;
         receipt.verified_at_ms = now_ms;
         let mut request = plurx_core::store::background_jobs_transcription::PublishSubtitleModel {
+            translation,
             token,
             source,
             receipt,

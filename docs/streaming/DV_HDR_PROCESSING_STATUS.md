@@ -2,7 +2,7 @@
 
 **Status:** built for supported bounded routes and merged to `main`; full-suite
 qualification, broader reference and hardware acceptance open ·
-**Updated:** 2026-10-10 · **Integration:** merged to `main` as `c96142ac` (#968)
+**Updated:** 2026-10-15 · **Integration:** merged to `main` as `c96142ac` (#968)
 
 Companion to the [build handoff](DV_HDR_PROCESSING_BUILD.md) and
 [source feasibility findings](DV_HDR_PROCESSING_FEASIBILITY.md). This is the
@@ -960,3 +960,10 @@ The retained artifacts are on #968: the synthetic HTTP acceptance archive
 (62), the Android full-run, focused and lint evidence (63) and the late helper
 diagnostic (64). Attachment 62 records its actual source identity. It is not
 relabelled for a later commit.
+
+## 24. Fleet HDR repair — reproduced failures and acceptance still owed
+
+**Status:** repair implementation built; integrated qualification and physical acceptance open · 2026-10-13 · Integration: `effort/dv-hdr-repair`.
+
+The reproduced failures, the repair rounds (R1 onward) and the acceptance still
+owed are in the running log, [DV_HDR_REPAIR_LOG.md](DV_HDR_REPAIR_LOG.md).

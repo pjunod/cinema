@@ -8,6 +8,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-17
+
 ### Added
 
 - **Navigation lists only switched-on sections.** Live TV, Recordings,
@@ -3263,7 +3265,8 @@ a hundred commits of history.
   binary is stamped with the git commit it was built from, and `/api/v1/server`
   reports both. See [docs/RELEASING.md](docs/RELEASING.md).
 
-[Unreleased]: https://github.com/pjunod/plurx/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/pjunod/plurx/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/pjunod/plurx/compare/v0.3.0...v0.7.0
 [0.3.0]: https://github.com/pjunod/plurx/compare/v0.2.8...v0.3.0
 [0.2.8]: https://github.com/pjunod/plurx/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/pjunod/plurx/releases/tag/v0.2.7

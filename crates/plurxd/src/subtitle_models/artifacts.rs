@@ -8,7 +8,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CatalogModel {
     pub id: String,

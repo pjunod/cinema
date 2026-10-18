@@ -3,6 +3,7 @@ set -euo pipefail
 
 expected="${PLURX_EXPECT_TEST_COUNT:-}"
 minimum="${PLURX_EXPECT_TEST_COUNT_AT_LEAST:-}"
+required_names="${PLURX_EXPECT_TEST_NAMES:-}"
 is_test=false
 is_exact=false
 for argument in "$@"; do
@@ -15,7 +16,7 @@ done
 if [[ -z "$expected" && "$is_test" == true && "$is_exact" == true ]]; then
   expected=1
 fi
-if [[ -z "$expected" && -z "$minimum" ]]; then
+if [[ -z "$expected" && -z "$minimum" && -z "$required_names" ]]; then
   exec "$@"
 fi
 
@@ -50,4 +51,21 @@ fi
 if [[ -n "$minimum" && "$actual" -lt "$minimum" ]]; then
   printf 'expected at least %s matching Rust test(s), but %s passed\n' "$minimum" "$actual" >&2
   exit 1
+fi
+
+# Named regressions in a full filtered batch need one passing outcome each;
+# rerunning them individually adds no evidence and spends the same units twice.
+if [[ -n "$required_names" ]]; then
+  IFS=',' read -r -a names <<< "$required_names"
+  for name in "${names[@]}"; do
+    if [[ ! "$name" =~ ^[A-Za-z0-9_:]+$ ]]; then
+      printf 'invalid required Rust test name: %s\n' "$name" >&2
+      exit 1
+    fi
+    matches="$(awk -v name="$name" '$1 == "test" && $2 == name && $NF == "ok" { n++ } END { print n + 0 }' "$output")"
+    if [[ "$matches" != 1 ]]; then
+      printf 'expected one passing outcome for %s, observed %s\n' "$name" "$matches" >&2
+      exit 1
+    fi
+  done
 fi

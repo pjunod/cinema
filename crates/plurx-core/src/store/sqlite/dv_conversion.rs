@@ -1630,6 +1630,32 @@ mod tests {
             "a migration was appended above the Dolby Vision recovery guard. TWO fixtures wind a current database backwards by hand and must each drop whatever the new migration created, or the reopen replays it against a database that already has it: `sqlite_v43_guard_migration_refuses_an_unrecoverable_committed_claim` here, which winds back to v43, and `populated_v14_import_fixture` in `tests/store_contract.rs`, which winds back to v14 and is only exercised by the 20-minute `cluster-store-check` lane. This assertion is in the fast gate so both are named before that lane runs. Add the drops, then add the table to `DROPPED_BY_THE_FIXTURE`."
         );
 
+        let receipts = rusqlite::Connection::open_in_memory().expect("receipt fixture");
+        receipts
+            .execute_batch(
+                "CREATE TABLE subtitle_model_receipts(receipt_json TEXT NOT NULL);
+                 INSERT INTO subtitle_model_receipts VALUES('{}');",
+            )
+            .expect("seed a managed model receipt");
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::queue_fixture::remove_common_queue_schema(&receipts);
+        }))
+        .expect_err("historical rewind must refuse a populated managed receipt table");
+        let refusal = refused
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| refused.downcast_ref::<&str>().copied())
+            .expect("fixture refusal message");
+        assert!(refusal.contains("must not discard managed subtitle model receipts"));
+        assert_eq!(
+            receipts
+                .query_row("SELECT count(*) FROM subtitle_model_receipts", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("receipt survives refused rewind"),
+            1
+        );
+
         for table in DROPPED_BY_THE_FIXTURE {
             assert!(
                 crate::store::sqlite::MIGRATIONS[GUARD_SCHEMA_VERSION as usize..]

@@ -604,6 +604,12 @@ pub struct TranscodeManager {
     decode_facts: crate::decode_facts::DecodeFactCache,
     decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
     candidate_production_proofs: Arc<crate::vodencode::CandidateProductionProofs>,
+    #[cfg(any(target_os = "linux", test))]
+    processed_candidate_hints: manager_candidates::ProcessedCandidateHints,
+    #[cfg(target_os = "linux")]
+    processed_preparation_slot: Arc<tokio::sync::Semaphore>,
+    #[cfg(target_os = "linux")]
+    processed_instance_slots: Arc<tokio::sync::Semaphore>,
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,

@@ -4,6 +4,7 @@ function clearLocalSession(expectedGeneration,notice){
   // A logout response can arrive after another sign-in. It belongs to the
   // captured bearer, never to whichever credential happens to be current now.
   if(expectedGeneration!==AUTH_GENERATION) return false;
+  if(typeof translationReset==="function")translationReset();
   if(typeof cinemaRemoteRetire==="function")cinemaRemoteRetire(true);
   if(typeof cinemaRemoteRouteChanged==="function")cinemaRemoteRouteChanged();
   if(typeof sharingRetire==="function")sharingRetire();

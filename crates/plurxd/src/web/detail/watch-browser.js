@@ -120,14 +120,15 @@ function watchLedgerHtml(){
   const selA=watchSelectedAudio(f),selS=watchSelectedSub(f);
   const audioLabel=(a,on)=>watchTrackChip(audioFactLabel(a),on,playing&&audioOffered.has(a.index)?`data-watch-audio="${a.index}"`:null,playing?"Not offered for this playback":"Starts when playback does");
   const subLabel=(s,on)=>watchTrackChip(subFactLabel(s),on,playing&&subOffered.has(s.index)?`data-watch-sub="${s.index}"`:null,playing?"Not offered for this playback":"Starts when playback does");
-  const offChip=on=>watchTrackChip("Off",on,playing?'data-watch-sub="-1"':null);
+  const translated=typeof translationSelected==="function"&&translationSelected(PLAYER);
+  const offChip=on=>watchTrackChip("Off",on&&!translated,playing?'data-watch-sub="-1"':null);
   const delivery=watchDeliveryRow(f);
   const file=[f.container&&f.container.toUpperCase(),fmtSize(f.size),fmtDur(f.duration_ms)].filter(Boolean).join(" · ");
   return `<dl class="watch-ledger">
     ${vid?`<dt>Video</dt><dd>${esc(vid)}</dd>`:""}
     <dt>Audio</dt><dd>${auds.length?watchTrackRow("audio",auds,selA,audioLabel,null):"None"}</dd>
-    ${(subs.length||f.video_codec)?`<dt>Subtitles</dt><dd>${watchTrackRow("subs",subs,selS,subLabel,offChip)}</dd>`:""}
-    ${watchCanGenerateSubtitles(f)?`<dt>Captions</dt><dd>${watchGenerationAction(f)}</dd>`:""}
+    ${(subs.length||f.video_codec)?`<dt>Subtitles</dt><dd>${translated?watchTrackChip("English · AI translation · partial",true,null):""}${watchTrackRow("subs",subs,selS,subLabel,offChip)}</dd>`:""}
+    ${watchCanGenerateSubtitles(f)||watchTranslationAction(f)?`<dt>Captions</dt><dd>${watchGenerationAction(f)}${watchTranslationAction(f)}</dd>`:""}
     ${delivery?`<dt>Delivery</dt><dd>${delivery}</dd>`:""}
     <dt>File</dt><dd><span class="watch-fn">${esc(f.filename||"")}</span>${file?`<span class="watch-fmeta">${esc(file)}</span>`:""}</dd></dl>`;
 }
@@ -142,8 +143,9 @@ function watchBindLedger(node){
     const want=Number(b.dataset.watchSub),f=watchCurrentFile();
     // Re-applying the selected subtitle is not a no-op in the player: a
     // burned track would start a fresh transcode. Refuse it here.
-    if(PLAYER&&f&&want!==watchSelectedSub(f))setSub(want);
+    if(PLAYER&&f&&(want!==watchSelectedSub(f)||(typeof translationSelected==="function"&&translationSelected(PLAYER))))setSub(want);
   }));
+  node.querySelectorAll("[data-watch-translate]").forEach(b=>b.addEventListener("click",()=>watchTranslateSubtitles(b)));
   node.querySelectorAll("[data-watch-generate]").forEach(b=>b.addEventListener("click",()=>watchGenerateSubtitles(b)));
   node.querySelectorAll("[data-watch-fold]").forEach(b=>b.addEventListener("click",()=>watchToggleFold(b.dataset.watchFold)));
 }
@@ -181,10 +183,11 @@ async function watchGenerateSubtitles(button){
 function watchRenderLedger(){
   if(!WATCH?.page)return;
   watchRenderSubtitleGeneration();
+  if(typeof translationWatchChanged==="function")translationWatchChanged();
   const html=watchLedgerHtml();
   // A re-render replaces the control that had focus; put focus back on the
   // same control so a keyboard fold or switch does not drop to <body>.
-  const active=document.activeElement,focusedHost=active&&active.closest&&active.closest(".watch-ledger-host"),keep=focusedHost?["watchAudio","watchSub","watchFold","watchGenerate"].map(k=>active.dataset[k]!=null?`[data-${k.replace(/[A-Z]/g,m=>"-"+m.toLowerCase())}="${active.dataset[k]}"]`:null).find(Boolean):null;
+  const active=document.activeElement,focusedHost=active&&active.closest&&active.closest(".watch-ledger-host"),keep=focusedHost?["watchAudio","watchSub","watchFold","watchGenerate","watchTranslate"].map(k=>active.dataset[k]!=null?`[data-${k.replace(/[A-Z]/g,m=>"-"+m.toLowerCase())}="${active.dataset[k]}"]`:null).find(Boolean):null;
   for(const id of ["watch-ledger","watch-band-ledger"]){
     const node=document.getElementById(id);if(!node)continue;
     node.innerHTML=html;
@@ -384,4 +387,19 @@ function watchMarkChapter(){
       if(left<strip.scrollLeft||right>strip.scrollLeft+strip.clientWidth)strip.scrollTo({left:Math.max(0,left-10),behavior:"smooth"});
     }
   }
+}
+
+function watchTranslationAction(file){
+  return ME&&file?.available&&file.video_codec&&playbackFileContextForFile(file).source_ref.kind==="local"?`<button type="button" class="ghost sm" data-watch-translate="${esc(String(file.id))}">Translate to English</button>`:"";
+}
+async function watchTranslateSubtitles(button){
+  const file=watchCurrentFile();if(!file||button.dataset.watchTranslate!==String(file.id))return;
+  const owner=WATCH,dialog=button.closest("dialog");if(dialog?.open)dialog.close();
+  if(WATCH.mode==="full"){
+    if(document.fullscreenElement&&document.exitFullscreen){try{await document.exitFullscreen();}catch(error){return;}}
+    else if(isFullscreenAnywhere()){exitFullscreenAnywhere();return;}
+    if(WATCH!==owner||watchCurrentFile()!==file)return;watchReturnBrowser();
+  }
+  const panel=document.getElementById("watch-subtitle-translation");if(!panel)return;
+  await translationOpen(button);if(panel.isConnected){panel.focus({preventScroll:true});panel.scrollIntoView({block:"nearest"});}
 }

@@ -828,7 +828,7 @@ Only executed evidence earns `passed`.
 Install the pre-commit hook once:
 
 ```bash
-make hooks        # copies scripts/pre-commit into .git/hooks/pre-commit
+make hooks        # installs scripts/pre-commit and scripts/pre-push (paperwork)
 ```
 
 The hook deliberately runs only `make precommit-check`: validation-catalog
