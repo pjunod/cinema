@@ -612,7 +612,7 @@ test("Home render generations refuse out-of-order route completions", async () =
   const phases = [];
   const api = (url) => new Promise((resolve, reject) => requests.push({ url, resolve, reject }));
   const harness = new Function(
-    "document", "location", "api", "homeGroup", "buildHomeSections", "layoutChrome", "layoutView", "wireRails", "restoreScroll", "setPagePhase",
+    "document", "location", "api", "homeGroup", "buildHomeSections", "layoutChrome", "layoutView", "wireRails", "restoreScroll", "setPagePhase", "registerLayoutPresentation",
     `let PAGE_RENDER_GENERATION=0,PHOTO_SET=[],LB_AT=-1;
      ${shippedTopLevelSource("viewHome")};
      return {viewHome,navigate:(hash)=>{location.hash=hash;PAGE_RENDER_GENERATION++;}};`,
@@ -620,7 +620,7 @@ test("Home render generations refuse out-of-order route completions", async () =
     document, location, api, () => "share",
     (batch, group) => ({ libs: batch.libraries.map((row) => row.library), group, sections: batch.libraries }),
     (_, inner) => { main.innerHTML = inner; }, (_, page) => JSON.stringify(page),
-    () => {}, () => {}, (_, generation, phase) => phases.push({ generation, phase }),
+    () => {}, () => {}, (_, generation, phase) => phases.push({ generation, phase }), () => {},
   );
 
   const current = harness.viewHome();

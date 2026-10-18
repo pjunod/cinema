@@ -686,8 +686,10 @@ function chapterList(p){
 async function viewItem(id,isCurrent=()=>true){
   const generation=PAGE_RENDER_GENERATION;
   const prepared=takeAutoplayNextPreparation(id);
+  let page=null;
+  registerLayoutPresentation(()=>recomposeItemPresentation(page),()=>!!page);
   layoutChrome("home",`<div class="empty">Loading…</div>`);
-  const page=await loadItem(id,()=>isCurrent()&&generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${id}`,prepared?.page);
+  page=await loadItem(id,()=>isCurrent()&&generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${id}`,prepared?.page);
   if(!page)return;
   if(!isCurrent()||generation!==PAGE_RENDER_GENERATION||location.hash!==`#/item/${id}`)return;
   WATCH_ITEM_PAGE=page;

@@ -1,7 +1,7 @@
 # Meridian — a selectable Cinema layout and theme across web, Apple and Android
 
-**Status:** open; implementation not started; adversarial plan findings addressed
-2026-10-17. M0 visual/state-ownership checkpoint remains before product work.
+**Status:** open; M0 reviewed and approved; web M1/M2 candidate implemented,
+unmerged. Apple/Android implementation belongs to parallel native workers.
 **Written:** 2026-10-17 · **Source baseline:** `e586725544f0`.
 **Owner:** coordinating chat; implementation will be assigned to GPT-6.1 Sol.
 **Integration branch:** `effort/meridian`.
@@ -235,8 +235,8 @@ contrast trap. Preserve all other palettes' behavior and player black surfaces.
 
 ## 4. Build packets and review checkpoints
 
-Use one effort and sequential reviewable task branches based on its current
-head. Shared owners above make the independent-main exception inapplicable.
+Use one effort with reviewable task branches based on its current head.
+Shared owners above make the independent-main exception inapplicable.
 No production code changes before plan findings are addressed and coordinator
 dispatches Sol. Each packet ends with a compact review handoff: exact commit,
 diff stat, affected outlines, regression commands/results and limitations.
@@ -251,10 +251,16 @@ diff stat, affected outlines, regression commands/results and limitations.
 | M5 — integrated review | Complete cross-layout/theme/settings matrix and gallery, review diff adversarially, address findings, run affected integrated checks. | Coordinator verifies exact commit and independently inspects renders/tests; no unresolved P1/P2 correctness issue. |
 | M6 — promotion | Freeze task merges, integrate current main, requalify resulting candidate and prepare main-bound PR under repository rules. | Required current-candidate promotion gate and qualification receipt; implemented, merged, simulator-qualified and physical-accepted states reported separately. |
 
-M2/M3/M4 may not concurrently mutate common preferences/docs/release counters.
-The requested implementer is one GPT-6.1 Sol chat. It may use read-only research
-or explicit review agents under repository rules; it does not delegate product
-implementation to a different model without user instruction.
+The coordinator authorized concurrent GPT-6.1 Sol implementation for M2/M3/M4
+on isolated `codex/meridian-web`, `codex/meridian-apple` and
+`codex/meridian-android` branches and worktrees. Each native worker owns its
+platform files, tests and release counters; web owns web files and the current
+shared document changes. The coordinator integrates the shared ledger. This
+supersedes the original sequential packet policy without allowing concurrent
+edits to a shared file. Fresh GPT-6 Astra review examines each actual PR head
+and findings are repaired before integration. Implementation does not wait for
+CI; workers provide native screenshots and evidence at checkpoints. Required
+merge and promotion gates still apply.
 
 ## 5. Tests and rendered evidence
 
@@ -400,7 +406,21 @@ dispatch. No product code or native acceptance is claimed by this disposition.
 | Packet | State | Commit / evidence / remaining work |
 |---|---|---|
 | Plan | Reviewed; findings addressed | Coordinator authored against `e586725544f0`; R1–R3 accepted and corrected; M0 checkpoint still owed. |
-| M0 | Not started | Route map, toolchains, palette checks and design renders owed. |
-| M1–M4 | Not started | All platform implementation and preference tests owed. |
+| M0 | Approved; unmerged | Draft PR #1170 at `3e04ef30471a588d3214f4f2de594303bb4b37cd`, reviewed by GPT-6 Astra with no actionable P1/P2 findings; coordinator approved the rendered direction. Remote lint run 5391 timed out after 601 seconds during dependency/crate checking; local pinned lint and UI checks passed. The broader Effort gate remains unsatisfied. |
+| M1 web + M2 | Implemented candidate; review due | `codex/meridian-web` starts from effort `85ae74eb6` and uses reviewed M0 ref `3e04ef304` as design input without merging M0. Rebase after M0 integration and reconcile shared ledger/index edits. Actual shipping-asset screenshots and focused preference, retained-owner, TV focus/Back, active-palette and playback-continuity journeys live under `target/meridian/web/`. |
+| M1 native + M3/M4 | Parallel native owners | Coordinating chat dispatches separate Apple and Android workers; web worker does not edit native files/counters. Native host/state/focus proofs and platform PR reviews remain required. |
 | M5 | Not started | Integrated screenshots, interaction evidence and code review owed. |
 | M6 | Not started | Main integration, promotion and qualification owed. |
+
+
+### Web checkpoint validation policy
+
+The human requested prompt product delivery, proper PRs and GPT-6 Astra review,
+with lint/syntax and UI-related checks only plus required bookkeeping. No
+unrelated full backend unit suite or broad compiler/unit CI lane is dispatched.
+Web's retained shell/main seam keeps current page generation and mounted library,
+preplay, reader and playback owners while updating navigation. Other palettes
+retain their original tokens; Meridian resolves safe action/muted roles from
+the active palette, including a derived accent shade when an existing mid-tone
+accent has no safe text ink. The temporary M0 dependency does not satisfy a
+merge gate or claim native qualification.
