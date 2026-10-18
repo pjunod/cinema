@@ -48,7 +48,6 @@ REQUIRED = [
     "TVMeridianNavigationTests/testPanelOwnsNativeFocusAndBackPreservesLibraryRoute",
     "TVConnectionNavigationTests/testSavedConnectionRecoveryReportAndRetryKeepCredentials",
     "TVConnectionNavigationTests/testSignInCanChooseAnotherServerAndReconnectWithNativeRemote",
-    "TVMeridianNavigationTests/testPanelOwnsNativeFocusAndBackPreservesLibraryRoute",
 ]
 
 
