@@ -131,7 +131,10 @@ function playbackEnhancementFromWire(raw){
   const known=['FEL','RPU','DYN'];
   if(!raw||typeof raw!=='object'||!Array.isArray(raw.active)||!Array.isArray(raw.details)) return null;
   const active=[...new Set(raw.active.filter(badge=>known.includes(badge)))];
-  const details=raw.details.filter(d=>d&&known.includes(d.badge)&&typeof d.text==='string'
+  // A detail line for a badge this client has no pill for (a newer server's
+  // enhancement) still says something true, so the Playback info row keeps its
+  // text; only the pills are limited to the badges `known` lists.
+  const details=raw.details.filter(d=>d&&typeof d.badge==='string'&&typeof d.text==='string'
     &&d.text.length>0&&d.text.length<=240).map(d=>({badge:d.badge,active:d.active===true,text:d.text}));
   return {active,details,requires_effective_processing:raw.requires_effective_processing===true};
 }
@@ -164,7 +167,8 @@ function enhancementPills(enhancement){
   if(!enhancement||!enhancement.active.length) return '';
   return enhancement.active.map(badge=>{
     const detail=enhancement.details.find(d=>d.badge===badge&&d.active);
-    return `<span class="vbadge enh" title="${esc(detail?detail.text:badge)}">${esc(badge)}</span>`;
+    const label=detail?detail.text:badge;
+    return `<span class="vbadge enh" title="${esc(label)}" aria-label="${esc(label)}">${esc(badge)}</span>`;
   }).join('');
 }
 function playerRangeBadge(f){

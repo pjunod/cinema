@@ -344,6 +344,9 @@ function beginPreparedReplacement(p,action,sharedContext=null){
     fileId:p.fileId,
     candidateRecipeDigest:(p.qualityCandidates||[]).find(row=>row.id===action.effective_selection?.candidate_id)?.recipe_digest?.slice(),
     playlistUrl:action.playlist_url,controlBootstrap:action.control||null,
+    // The successor's own enhancement claim, parsed as on a create response;
+    // absent (an older server) stays null.
+    enhancement:typeof playbackEnhancementFromWire==="function"?playbackEnhancementFromWire(action.enhancement):null,
     sharedContext,
     mediaOriginMs:originMs,offeredOriginMs,
     selection:action.effective_selection,
@@ -1077,9 +1080,10 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   // Authoritative before visible, so anything that reads PLAYER.hls during the
   // swap reads the instance that owns the picture.
   clearEffectiveProcessing(p);
-  // The successor's session was never created through StartResponse, so it
-  // carries no enhancement claim; the predecessor's is kept for a rollback.
-  p.enhancement=null;
+  // The successor's own enhancement, as its StartResponse reported it (null
+  // when the server sent none); the predecessor's is kept for a rollback. The
+  // report cleared above still gates any `requires_effective_processing` claim.
+  p.enhancement=state.enhancement||null;
   p.hls=state.hls;
   p.sessionId=state.sessionId;
   p.probeUrl=state.playlistUrl;

@@ -159,13 +159,49 @@ test('the Enhancement info row lists each details[].text on its own neutral line
   assert.match(css,/\.pi-row small\[data-stats-note="enhancement"\]\{white-space:pre-line\}/);
   assert.match(css,/\.vbadge\.enh\{[^}]*var\(--enhance\)/);
 });
-test('every session attach replaces the enhancement; prepared swaps never inherit it',()=>{
+test('every session attach replaces the enhancement; prepared swaps adopt the successor own, never the predecessor one',()=>{
   const directed=fs.readFileSync(path.join(root,'player/directed-change.js'),'utf8');
   const start=directed.indexOf('function attachSession(');
   const attach=directed.slice(start,directed.indexOf('\nfunction ',start+1));
   assert.match(attach,/t\.enhancement=playbackEnhancementFromWire\(info\.enhancement\);/);
   assert.match(fs.readFileSync(path.join(root,'player/prepared-replacement.js'),'utf8'),
-    /clearEffectiveProcessing\(p\);\n[^]*?p\.enhancement=null;\n {2}p\.hls=state\.hls;/);
+    /clearEffectiveProcessing\(p\);\n[^]*?p\.enhancement=state\.enhancement\|\|null;\n {2}p\.hls=state\.hls;/);
   assert.match(fs.readFileSync(path.join(root,'player/prepared-switch-measurement.js'),'utf8'),
     /p\.enhancement=predecessor\.enhancement\|\|null;/);
+});
+test('pills carry an aria-label; unknown-badge detail lines survive but never draw a pill',()=>{
+  const wire={active:['FEL','XYZ','DYN'],details:[
+    {badge:'FEL',active:true,text:'FEL: full enhancement layer reconstructed into the picture'},
+    {badge:'DYN',active:true,text:'DYN: L1/L2/L8 dynamic metadata carried as HDR10+'},
+    {badge:'XYZ',active:false,text:'XYZ: something a newer server explains'}]};
+  const context=enhancementSetup(wire);
+  assert.deepEqual([...context.PLAYER.enhancement.active],['FEL','DYN'],'no pill for an unknown badge');
+  assert.deepEqual([...context.PLAYER.enhancement.details.map(d=>d.badge)],['FEL','DYN','XYZ']);
+  context.PLAYER.effectiveProcessing=null;
+  context.PLAYER.enhancement.requires_effective_processing=false;
+  const html=context.playerFactBadges();
+  assert.match(html,/class="vbadge enh" title="FEL: full enhancement layer reconstructed into the picture" aria-label="FEL: full enhancement layer reconstructed into the picture">FEL</);
+  assert.match(html,/aria-label="DYN: L1\/L2\/L8 dynamic metadata carried as HDR10\+">DYN</);
+  assert.doesNotMatch(html,/XYZ/);
+  assert.equal(context.playerEnhancementRow(context.PLAYER).note.split('\n').pop(),
+    'XYZ: something a newer server explains','the Playback info row keeps the unknown line');
+  assert.equal(enhancementSetup({active:[],details:[{badge:7,active:true,text:'x'},
+    {badge:'FEL',active:true,text:''}]}).PLAYER.enhancement.details.length,0,'malformed lines still drop');
+  const unlabelled=enhancementSetup({active:['RPU'],details:[]});
+  unlabelled.PLAYER.enhancement.requires_effective_processing=false;
+  assert.match(unlabelled.playerFactBadges(),/aria-label="RPU">RPU</,'falls back to the badge name');
+});
+test('a prepared successor adopts the enhancement on its action, null when absent',()=>{
+  const source_=fs.readFileSync(path.join(root,'player/prepared-replacement.js'),'utf8');
+  assert.match(source_,/enhancement:typeof playbackEnhancementFromWire==="function"\?playbackEnhancementFromWire\(action\.enhancement\):null,/);
+  const context=enhancementSetup(processedEnhancement);
+  const adopted=context.playbackEnhancementFromWire(nativeEnhancement);
+  assert.deepEqual([...adopted.active],['DYN']);
+  assert.equal(context.playbackEnhancementFromWire(undefined),null,'absent on the successor is null');
+  context.PLAYER.enhancement=adopted;
+  context.PLAYER.effectiveProcessing=null;
+  assert.deepEqual(pills(context),['DYN'],'an unprocessed successor still shows what it carries');
+  const gated=enhancementSetup(processedEnhancement);
+  gated.clearEffectiveProcessing(gated.PLAYER);
+  assert.deepEqual(pills(gated),[],'FEL/RPU wait for a current effective_processing report');
 });
