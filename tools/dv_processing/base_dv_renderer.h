@@ -175,9 +175,27 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
                             void (*sink)(const uint8_t *, size_t, void *), bool diagnostic_hashes) {
   pl_gpu gpu = base_context.vk->gpu;
   struct pl_frame source = {0};
-  require(pl_map_avframe_ex(gpu, &source,
-              pl_avframe_params(.frame = frame, .tex = base_context.textures,
-                                .map_dovi = true)), "public base AVFrame upload");
+  // A GPU-decoded surface is mapped in place. If this Vulkan device cannot
+  // import it, copy it to host memory once and keep doing so for the window.
+  AVFrame *host = NULL;
+  const AVFrame *input = frame;
+  if (frame->format == AV_PIX_FMT_VAAPI && dv_hw_host_copy) {
+    input = host = dv_host_frame(frame);
+    require(host != NULL, "decoded surface host copy");
+  }
+  if (!pl_map_avframe_ex(gpu, &source,
+          pl_avframe_params(.frame = input, .tex = base_context.textures,
+                            .map_dovi = true))) {
+    require(frame->format == AV_PIX_FMT_VAAPI && host == NULL,
+            "public base AVFrame upload");
+    dv_hw_host_copy = true;
+    input = host = dv_host_frame(frame);
+    require(host != NULL, "decoded surface host copy");
+    require(pl_map_avframe_ex(gpu, &source,
+                pl_avframe_params(.frame = input, .tex = base_context.textures,
+                                  .map_dovi = true)),
+            "public base AVFrame upload");
+  }
   struct pl_dovi_metadata dovi = mapping->dovi;
   source.repr.dovi = &dovi;
   source.enhancement_layer = NULL;
@@ -233,6 +251,7 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   exported = packed;
   exported_bytes = pixels * 6;
   }
+  av_frame_free(&host);
   sink(exported, exported_bytes, NULL);
   char rgb_hash[65];
   if (diagnostic_hashes) {

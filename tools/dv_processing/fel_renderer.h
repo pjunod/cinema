@@ -407,11 +407,14 @@ static void gpu_render(uint16_t *decoded[2], const AVFrame *hardware[2],
     // path uses: DV-coded full-range BL with the parsed metadata, and raw EL
     // residual components. The mapped sample/colour depth (10 in 16) keeps
     // the same code/1023 normalization as the host upload.
-    for (int layer = 0; layer < 2; layer++) {
+    bool mapped = true;
+    for (int layer = 0; layer < 2 && mapped; layer++) {
       struct pl_frame *live = &fel_mapped[layer];
-      require(pl_map_avframe_ex(gpu, live, pl_avframe_params(
-                  .frame = hardware[layer], .tex = context.mapped[layer])),
-              "GPU decoded layer mapping");
+      if (!pl_map_avframe_ex(gpu, live, pl_avframe_params(
+              .frame = hardware[layer], .tex = context.mapped[layer]))) {
+        mapped = false;
+        break;
+      }
       fel_mapped_live = layer + 1;
       struct pl_frame *frame = layer ? &enhancement_frame : &source;
       frame->num_planes = live->num_planes;
@@ -419,7 +422,23 @@ static void gpu_render(uint16_t *decoded[2], const AVFrame *hardware[2],
         frame->planes[p] = live->planes[p];
       frame->repr.bits = live->repr.bits;
     }
-  } else
+    if (!mapped) {
+      // This Vulkan device cannot import the decoder's surfaces: copy them
+      // to host memory and take the ordinary upload path from now on.
+      fel_unmap(gpu);
+      dv_hw_host_copy = true;
+      source.num_planes = enhancement_frame.num_planes = 3;
+      source.repr.bits = (struct pl_bit_encoding){.sample_depth = 10, .color_depth = 10};
+      enhancement_frame.repr.bits = (struct pl_bit_encoding){0};
+      require(dv_host_pack != NULL, "decoded surface host copy");
+      // The caller owns and frees decoded[].
+      for (int layer = 0; layer < 2; layer++)
+        if (!decoded[layer])
+          decoded[layer] = dv_host_pack(hardware[layer]);
+      hardware = NULL;
+    }
+  }
+  if (!hardware)
   for (int layer = 0; layer < 2; layer++) {
     int width = layer ? ELWIDTH : WIDTH, height = layer ? ELHEIGHT : HEIGHT;
     size_t offset = 0;

@@ -11,11 +11,13 @@
 #include <libavformat/avformat.h>
 #include <libavutil/dovi_meta.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_vaapi.h>
 #include <libavutil/opt.h>
 #include <libavutil/sha.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <va/va.h>
 
 #define PAIR_WINDOW 16
 static bool base_only;
@@ -26,8 +28,11 @@ static bool source_eof, discover_el;
 // GPU decode: PLURX_DV_DECODE_DEVICE names the admitted VA-API render node.
 // Surfaces stay on the GPU and are mapped into the renderer; a host copy of
 // a decoded 4K picture costs more than software decoding it.
+// Without a usable device the helper decodes in software, as before GPU
+// decode existed, and says why in its decoder trace.
 static AVBufferRef *hw_device;
 static bool hw_fell_back;
+static const char *software_reason = "no-decode-device";
 static unsigned preroll, paired, preroll_cap;
 struct rational {
   int64_t num;
@@ -429,9 +434,12 @@ static void render_pairs(void) {
     bool surfaces = bl->format == AV_PIX_FMT_VAAPI;
     need(base_only || surfaces == (el->format == AV_PIX_FMT_VAAPI),
          "both layers decoded the same way");
+    // Mapped surfaces need no host copy; after an import failure the
+    // renderer takes host copies for the rest of the window.
+    bool mapped = surfaces && !dv_hw_host_copy;
     uint16_t *native[2] = {
-        (base_only || surfaces) && !diagnostic_hashes ? NULL : pack(bl),
-        base_only || (surfaces && !diagnostic_hashes) ? NULL : pack(el)};
+        (base_only || mapped) && !diagnostic_hashes ? NULL : pack(bl),
+        base_only || (mapped && !diagnostic_hashes) ? NULL : pack(el)};
     const AVFrame *hardware[2] = {bl, el};
     if (!initialized) {
       if (base_only)
@@ -486,7 +494,7 @@ static void render_pairs(void) {
     if (base_only)
       base_gpu_render(bl, &base_mapped, emitted, pts, duration, write_rgb, diagnostic_hashes);
     else
-      gpu_render(native, surfaces ? hardware : NULL, nalu, raw->size + 2, emitted, pts, duration,
+      gpu_render(native, mapped ? hardware : NULL, nalu, raw->size + 2, emitted, pts, duration,
                  chroma(bl->chroma_location), chroma(el->chroma_location),
                  write_rgb, NULL, debug_frames);
     char rpu_path[64];
@@ -550,6 +558,29 @@ static void receive(struct layer *layer) {
   need(window_done || result == AVERROR(EAGAIN) || result == AVERROR_EOF,
        "decoder receive");
   av_frame_free(&frame);
+}
+// The device must decode HEVC Main10 itself; otherwise every window would be
+// a single-threaded software decode behind a GPU device that does nothing.
+static bool decodes_hevc_main10(AVBufferRef *device) {
+  VADisplay display =
+      ((AVVAAPIDeviceContext *)((AVHWDeviceContext *)device->data)->hwctx)->display;
+  int profiles = vaMaxNumProfiles(display), entrypoints = vaMaxNumEntrypoints(display);
+  if (profiles <= 0 || entrypoints <= 0)
+    return false;
+  VAProfile *profile = calloc((size_t)profiles, sizeof(*profile));
+  VAEntrypoint *entrypoint = calloc((size_t)entrypoints, sizeof(*entrypoint));
+  bool main10 = false, decode = false;
+  if (profile && vaQueryConfigProfiles(display, profile, &profiles) == VA_STATUS_SUCCESS)
+    for (int i = 0; i < profiles; i++)
+      main10 |= profile[i] == VAProfileHEVCMain10;
+  if (main10 && entrypoint &&
+      vaQueryConfigEntrypoints(display, VAProfileHEVCMain10, entrypoint,
+                               &entrypoints) == VA_STATUS_SUCCESS)
+    for (int i = 0; i < entrypoints; i++)
+      decode |= entrypoint[i] == VAEntrypointVLD;
+  free(profile);
+  free(entrypoint);
+  return main10 && decode;
 }
 static enum AVPixelFormat hardware_format(AVCodecContext *context,
                                           const enum AVPixelFormat *offered) {
@@ -794,11 +825,18 @@ int main(int argc, char **argv) {
   }
   if (streaming)
     open_nut(argv[11]);
+  dv_host_pack = pack;
   const char *decode_device = getenv("PLURX_DV_DECODE_DEVICE");
-  if (decode_device && *decode_device)
-    need(av_hwdevice_ctx_create(&hw_device, AV_HWDEVICE_TYPE_VAAPI,
-                                decode_device, NULL, 0) >= 0,
-         "admitted GPU decode device");
+  if (decode_device && *decode_device) {
+    if (av_hwdevice_ctx_create(&hw_device, AV_HWDEVICE_TYPE_VAAPI,
+                               decode_device, NULL, 0) < 0) {
+      hw_device = NULL;
+      software_reason = "decode-device-unavailable";
+    } else if (!decodes_hevc_main10(hw_device)) {
+      av_buffer_unref(&hw_device);
+      software_reason = "no-hevc-main10-decode";
+    }
+  }
   layers[0] = open_layer(stream, 0);
   if (!base_only)
     layers[1] = open_layer(stream, 1);
@@ -895,8 +933,14 @@ int main(int argc, char **argv) {
     av_bsf_free(&layers[k].split);
     avcodec_free_context(&layers[k].decoder);
   }
-  const char *decoder_mode = hw_device && !hw_fell_back ? "vaapi"
-                             : hw_device ? "vaapi-software-fallback" : "software";
+  const char *decoder_mode = !hw_device       ? "software"
+                             : hw_fell_back     ? "vaapi-software-fallback"
+                             : dv_hw_host_copy  ? "vaapi-host-copy"
+                                                : "vaapi";
+  const char *decoder_reason = !hw_device       ? software_reason
+                               : hw_fell_back    ? "no-gpu-surface-offered"
+                               : dv_hw_host_copy ? "surface-import-failed"
+                                                 : "";
   av_buffer_unref(&hw_device);
   av_packet_free(&packet);
   avformat_close_input(&input);
@@ -923,7 +967,8 @@ int main(int argc, char **argv) {
            (long long)last_emitted_end, source_time_base.num,
            source_time_base.den, (unsigned long long)movie_io.bytes);
   }
-  printf("{\"kind\":\"decoder\",\"mode\":\"%s\"}\n", decoder_mode);
+  printf("{\"kind\":\"decoder\",\"mode\":\"%s\",\"reason\":\"%s\"}\n",
+         decoder_mode, decoder_reason);
   printf("{\"kind\":\"segment_complete\",\"frames\":%d,\"pair_window_bound\":"
          "16,\"gpu_contexts\":1,\"output_policy\":\"bt2020-pq-master-clip\","
          "\"production_qualified\":false}\n",
