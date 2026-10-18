@@ -342,9 +342,11 @@ jobs:
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-    # Run 5228 exhausted 30m after compilation and 1917 unit result rows,
-    # before the full unit/SQLite receipt. Keep the entire suite and a finite cap.
-    timeout-minutes: 60
+    # Run 5436 reached the daemon after 55m37s and still emitted outcomes at
+    # the 60m cutoff; runs 5314 and 5360 also exhausted 60m. Preserve the full
+    # suite and serial FFmpeg checks with a finite 95m cap. Complete-daemon
+    # duration remains unmeasured; this budget is not a completion guarantee.
+    timeout-minutes: 95
     steps:
       - name: Capture mounted runner workspace owner
         run: |
