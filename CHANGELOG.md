@@ -8,6 +8,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore Standard's native iPad/Apple TV tabs on iOS/tvOS 18 and later, full-screen TV details, and original TV Theater styling after Meridian changed the existing layouts. Theme choices and open navigation state remain independent of the layout; framework-owned tabs preserve fullscreen playback after switching destinations.
+
 ### Added
 
 - Web Meridian layout and independent theme, with collapsible source navigation, responsive phone destinations and cinematic Home/detail presentation. Layout changes retain the current page, library controls and playback session.

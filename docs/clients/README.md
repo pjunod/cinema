@@ -10,6 +10,7 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [Restore Standard Apple layouts](../apple-builds/1178-restore-standard-apple.md) | Restores native iPad/Apple TV tabs and original TV Theater styling after Meridian changed Standard; existing themes stay unchanged. | built |
 | [APPLE-TV-NAVIGATION-AUDIT.md](APPLE-TV-NAVIGATION-AUDIT.md) | October 15 whole-app TV navigation source audit, native menu failure reproduction, 36 findings, implementation ledger and mandatory navigation acceptance contract. | open |
 | [APPLE-TV-NAVIGATION-FINDINGS.md](APPLE-TV-NAVIGATION-FINDINGS.md) | The 36 Apple TV navigation findings (F01–F36): evidence, fix and proof for each. | open |
 | [APPLE-TV-NAVIGATION-CONTRACT.md](APPLE-TV-NAVIGATION-CONTRACT.md) | The Apple TV navigation release contract: remote actions, ownership, required journeys and qualification. | open |

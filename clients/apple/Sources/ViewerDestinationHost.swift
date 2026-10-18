@@ -117,7 +117,7 @@ final class ViewerDestinationController: UIViewController {
     }
 }
 
-struct ViewerDestinationHost: UIViewControllerRepresentable {
+struct LegacyViewerDestinationHost: UIViewControllerRepresentable {
     let selection: HomeTab
     let layout: ViewerLayout
     let expanded: Bool
@@ -409,5 +409,290 @@ struct RecordingAttentionBadge: UIViewRepresentable {
         label.accessibilityLabel = "\(count) recordings need attention"
         label.backgroundColor = UIColor(Palette.accent)
         label.textColor = UIColor(Palette.buttonInk)
+    }
+}
+
+/// Native SwiftUI tabs own destination and presentation identity. Older systems
+/// retain the existing custom container.
+struct ViewerDestinationHost: View {
+    let selection: HomeTab
+    let layout: ViewerLayout
+    let expanded: Bool
+    let chromeFocusRequested: Bool
+    let accessibilityNavigation: Bool
+    let visibleTabs: [HomeTab]
+    let recordingsAttention: Int
+    let selectionChanged: (HomeTab) -> Void
+    let standardNavigationIsPushed: Bool
+    let panelDismissed: () -> Void
+    let root: (HomeTab) -> AnyView
+    let chrome: AnyView
+    let header: AnyView
+
+    var body: some View {
+        if #available(iOS 18.0, tvOS 18.0, *) {
+            SwiftUIViewerDestinationHost(selection: selection, layout: layout,
+                expanded: expanded, chromeFocusRequested: chromeFocusRequested,
+                accessibilityNavigation: accessibilityNavigation,
+                visibleTabs: visibleTabs, recordingsAttention: recordingsAttention,
+                selectionChanged: selectionChanged, standardNavigationIsPushed: standardNavigationIsPushed,
+                panelDismissed: panelDismissed, root: root, chrome: chrome, header: header)
+        } else {
+            LegacyViewerDestinationHost(selection: selection, layout: layout,
+                expanded: expanded, chromeFocusRequested: chromeFocusRequested,
+                accessibilityNavigation: accessibilityNavigation,
+                panelDismissed: panelDismissed, root: root, chrome: chrome, header: header)
+        }
+    }
+}
+
+/// SwiftUI owns one tab and presentation graph across Standard and Meridian.
+@available(iOS 18.0, tvOS 18.0, *)
+struct SwiftUIViewerDestinationHost: View {
+    let selection: HomeTab
+    let layout: ViewerLayout
+    let expanded: Bool
+    let chromeFocusRequested: Bool
+    let accessibilityNavigation: Bool
+    let visibleTabs: [HomeTab]
+    let recordingsAttention: Int
+    let selectionChanged: (HomeTab) -> Void
+    let standardNavigationIsPushed: Bool
+    let panelDismissed: () -> Void
+    let root: (HomeTab) -> AnyView
+    let chrome: AnyView
+    let header: AnyView
+
+    @StateObject private var nativeChrome = SwiftUITabChromeState()
+
+    private var configuration: SwiftUITabChromeConfiguration {
+        SwiftUITabChromeConfiguration(layout: layout,
+            hideBar: layout == .meridian || hidesStandardBar, expanded: expanded,
+            chromeFocusRequested: layout == .meridian && chromeFocusRequested)
+    }
+    private var hidesStandardBar: Bool {
+        #if os(tvOS)
+        standardNavigationIsPushed
+        #else
+        false
+        #endif
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let meridian = layout == .meridian
+            #if os(tvOS)
+            let rail = meridian
+            let railWidth: CGFloat = meridian ? (expanded ? 232 : 88) : 0
+            let barHeight: CGFloat = 80
+            #else
+            let rail = meridian && geometry.size.width >= 600
+            let railWidth: CGFloat = rail ? (geometry.size.width >= 1100 ? 232 : 88) : 0
+            let barHeight: CGFloat = accessibilityNavigation ? 96 : 72
+            #endif
+            let headerHeight: CGFloat = rail ? 64 : 0
+            let bottomHeight: CGFloat = meridian && !rail ? barHeight : 0
+
+            // The tab view always occupies the same structural position. Layout
+            // changes alter its bounds, never its type, identity, or parent.
+            ZStack(alignment: .topLeading) {
+                nativeTabs
+                    .frame(width: max(0, geometry.size.width - railWidth),
+                           height: max(0, geometry.size.height - headerHeight - bottomHeight))
+                    .offset(x: railWidth, y: headerHeight)
+                    .disabled(expanded)
+                    .allowsHitTesting(!expanded)
+                    .accessibilityHidden(expanded)
+
+                if meridian {
+                    chrome
+                        .frame(width: rail ? railWidth : geometry.size.width,
+                               height: rail ? geometry.size.height : barHeight)
+                        .offset(y: rail ? 0 : max(0, geometry.size.height - barHeight))
+                }
+
+                if rail {
+                    header
+                        .frame(width: max(0, geometry.size.width - railWidth), height: 64)
+                        .offset(x: railWidth)
+                        .disabled(expanded)
+                        .allowsHitTesting(!expanded)
+                        .accessibilityHidden(expanded)
+                }
+            }
+        }
+        .onChange(of: configuration, initial: true) { _, value in nativeChrome.configure(value) }
+        .onChange(of: expanded) { wasExpanded, isExpanded in
+            if wasExpanded && !isExpanded {
+                // Match the existing panel fence: release the old presentation
+                // only after the collapsed chrome has reached the view graph.
+                Task { @MainActor in
+                    await Task.yield()
+                    panelDismissed()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var nativeTabs: some View {
+        #if os(iOS)
+        tabs.tabViewStyle(.sidebarAdaptable)
+        #else
+        tabs
+        #endif
+    }
+
+    private var tabs: some View {
+        TabView(selection: Binding(get: { selection }, set: selectionChanged)) {
+            ForEach(visibleTabs, id: \.self) { tab in
+                Tab(tabTitle(tab), systemImage: tab.symbol, value: tab) {
+                    root(tab)
+                        .id(tab)
+                        .background(SwiftUITabChromeProbe(state: nativeChrome))
+                        .toolbarVisibility(configuration.hideBar ? .hidden : .visible, for: .tabBar)
+                }
+                #if os(iOS)
+                .badge(tab == .recordings ? recordingsAttention : 0)
+                // Hide only native tab entries; SwiftUI retains their content
+                // state while Meridian supplies its own destination controls.
+                .hidden(layout == .meridian && tab != selection)
+                #endif
+            }
+        }
+    }
+
+    private func tabTitle(_ tab: HomeTab) -> String {
+        #if os(tvOS)
+        if tab == .recordings && recordingsAttention > 0 { return "Recordings · \(recordingsAttention)" }
+        #endif
+        return tab.title
+    }
+}
+
+@available(iOS 18.0, tvOS 18.0, *)
+private struct SwiftUITabChromeConfiguration: Equatable {
+    let layout: ViewerLayout
+    let hideBar: Bool
+    let expanded: Bool
+    let chromeFocusRequested: Bool
+}
+
+/// This object does not own any controller or replace SwiftUI's delegate.
+/// UIKit is used only for chrome controls without a matching SwiftUI setting.
+@available(iOS 18.0, tvOS 18.0, *)
+@MainActor
+private final class SwiftUITabChromeState: ObservableObject {
+    private weak var tabs: UITabBarController?
+    private var configuration: SwiftUITabChromeConfiguration?
+    private var appliedLayout: ViewerLayout?
+    private var appliedExpanded: Bool?
+    private var appliedFocusRequest: Bool?
+    private var updateScheduled = false
+    #if os(iOS)
+    private var savedSidebarHidden = true
+    private var capturedSidebar = false
+    #endif
+
+    func configure(_ value: SwiftUITabChromeConfiguration) {
+        configuration = value
+        scheduleUpdate()
+    }
+
+    func discover(from controller: UIViewController) {
+        var ancestor: UIViewController? = controller
+        while let candidate = ancestor {
+            if let tabController = candidate as? UITabBarController {
+                if tabs !== tabController {
+                    tabs = tabController
+                    appliedLayout = nil
+                    appliedExpanded = nil
+                    appliedFocusRequest = nil
+                }
+                scheduleUpdate()
+                return
+            }
+            ancestor = candidate.parent
+        }
+    }
+
+    private func scheduleUpdate() {
+        guard !updateScheduled else { return }
+        updateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.updateScheduled = false
+            self.apply()
+        }
+    }
+
+    private func apply() {
+        guard let tabs, let configuration else { return }
+        #if os(iOS)
+        if configuration.layout == .meridian {
+            // Only Standard's sidebar is the viewer's choice; a controller
+            // rediscovered while Meridian already hid it keeps the saved one.
+            if appliedLayout == .standard || !capturedSidebar {
+                savedSidebarHidden = tabs.sidebar.isHidden
+                capturedSidebar = true
+            }
+            if !tabs.sidebar.isHidden { tabs.sidebar.isHidden = true }
+        } else if appliedLayout == .meridian {
+            if tabs.sidebar.isHidden != savedSidebarHidden { tabs.sidebar.isHidden = savedSidebarHidden }
+        }
+        #endif
+        if tabs.isTabBarHidden != configuration.hideBar {
+            tabs.setTabBarHidden(configuration.hideBar, animated: false)
+        }
+        let changedExpansion = appliedExpanded.map { $0 != configuration.expanded } ?? false
+        let changedFocusRequest = appliedFocusRequest.map { $0 != configuration.chromeFocusRequested } ?? false
+        if changedExpansion || changedFocusRequest {
+            // Existing chrome's RemoteChoiceFocusReadiness chooses the exact
+            // panel row, and the opener's focus binding answers a Meridian
+            // opener request. This requests reevaluation after either edge.
+            var owner: UIViewController = tabs
+            while let parent = owner.parent { owner = parent }
+            owner.setNeedsFocusUpdate()
+            owner.updateFocusIfNeeded()
+        }
+        appliedExpanded = configuration.expanded
+        appliedFocusRequest = configuration.chromeFocusRequested
+        appliedLayout = configuration.layout
+    }
+}
+
+@available(iOS 18.0, tvOS 18.0, *)
+private struct SwiftUITabChromeProbe: UIViewControllerRepresentable {
+    let state: SwiftUITabChromeState
+
+    final class Controller: UIViewController {
+        weak var state: SwiftUITabChromeState?
+        override func loadView() {
+            view = UIView()
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = false
+            view.accessibilityElementsHidden = true
+        }
+        override func didMove(toParent parent: UIViewController?) {
+            super.didMove(toParent: parent)
+            state?.discover(from: self)
+        }
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            state?.discover(from: self)
+        }
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            state?.discover(from: self)
+        }
+    }
+
+    func makeUIViewController(context: Context) -> Controller {
+        let controller = Controller()
+        controller.state = state
+        return controller
+    }
+    func updateUIViewController(_ controller: Controller, context: Context) {
+        controller.state = state
+        state.discover(from: controller)
     }
 }

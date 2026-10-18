@@ -39,6 +39,7 @@ struct HomeView: View {
     @EnvironmentObject private var invitations: InvitationClientModel
     @State private var navigationExpanded = false
     @State private var navigationPanelIdentity: UUID?
+    @State private var destinationRootVisible: [HomeTab: Bool] = [:]
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @EnvironmentObject private var remoteNavigation: RemoteNavigationCoordinator
@@ -99,6 +100,10 @@ struct HomeView: View {
             selection: selectedTab, layout: model.layout, expanded: navigationExpanded,
             chromeFocusRequested: viewerNavigationFocusRequested,
             accessibilityNavigation: dynamicTypeSize.isAccessibilitySize,
+            visibleTabs: HomeTab.viewerTabs.filter { $0.isVisible(model.features) },
+            recordingsAttention: model.features.recordings ? (dvr.overview?.counts.attention ?? 0) : 0,
+            selectionChanged: select,
+            standardNavigationIsPushed: !(remoteNavigation.paths[selectedTab] ?? []).isEmpty || destinationRootVisible[selectedTab] == false,
             panelDismissed: { [identity = navigationPanelIdentity] in remoteNavigation.modalPresentationDismissed(scope: RemoteNavigationCoordinator.viewerNavigationScope, identity: identity) },
             root: { tab in AnyView(destinationRoot(tab)
                 .environmentObject(model).environmentObject(remoteNavigation)
@@ -158,6 +163,14 @@ struct HomeView: View {
             .appDestinations()
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("root-screen-" + tab.title)
+            #if os(tvOS)
+            .onAppear { destinationRootVisible[tab] = true }
+            .onDisappear {
+                // A tab switch is not a push. Only the selected root can
+                // hide Standard's tabs while its implicit destination is up.
+                if selectedTab == tab { destinationRootVisible[tab] = false }
+            }
+            #endif
         }
         .preferredColorScheme(model.appearance.preferredColorScheme)
         .fontDesign(model.theme.fontDesign)

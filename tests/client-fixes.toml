@@ -1,6 +1,57 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Historical Meridian source/test mappings; execution receipts are separate.
+[[fixes]]
+id = "android.meridian-retained-primary-graph"
+commits = []
+supplements = "android.meridian-retain-query-and-menu-owners"
+source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
+source_anchor = 'navigation(startDestination = "home", route = "viewer") {'
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/MeridianProductionHostTest.kt"
+test_anchor = "actualHostRestoresSearchBranchReplacesSourceAndRetiresProfile"
+
+[[fixes]]
+id = "apple.standard-native-adaptive-ipad-restoration"
+commits = ["2b9b537017cee617de6e86518767bff19db48351"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "tabs.tabViewStyle(.sidebarAdaptable)"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLayouts"
+
+[[fixes]]
+id = "apple.standard-native-tv-push-back-restoration"
+commits = ["339f4b0563389de774b287437a49ea8fe8522665"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "hideBar: layout == .meridian || hidesStandardBar"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardTVNativeTabsDisappearForPushedRoutes"
+
+[[fixes]]
+id = "apple.standard-meridian-framework-owned-tabview"
+commits = ["5e6bb62a58cd7026bb199fd58739cf637c4eff2b"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "TabView(selection: Binding(get: { selection }, set: selectionChanged)) {"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardNativeTabFullscreenRetainsContentAfterAnotherTabsPushedChoice"
+
+[[fixes]]
+id = "apple.native-tab-chrome-review-fixes"
+commits = ["0304492bc58167d1f1fd0c85e1c15d004d923e73"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "if appliedLayout == .standard || !capturedSidebar {"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLayouts"
+
+[[fixes]]
+id = "apple.standard-tv-theater-geometry-restoration"
+commits = []
+supplements = "apple.standard-native-tv-push-back-restoration"
+source = "clients/apple/Sources/TvHomeLayout.swift"
+source_anchor = "minHeight: standardTheater ? 540 : 360"
+test = "clients/apple/Tests/TvHomeLayoutTests.swift"
+test_anchor = "testTheaterHeroKeepsLongCopyWithinTelevisionViewport"
+
 [[fixes]]
 id = "android.shared-library-fixture-platform-ownership"
 commits = ["937bfc7000269015cde95c18130694a5c862ffe7"]
@@ -7239,14 +7290,6 @@ test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/MeridianProduct
 test_anchor = "populatedSharedQueriesAndNestedCompanionMenuKeepTheirActualOwners"
 
 [[fixes]]
-id = "apple.meridian-adaptive-standard-sidebar"
-commits = ["c3f59d528de60e2fc06610ebd4fca2feb1b25e1d"]
-source = "clients/apple/Sources/ViewerDestinationHost.swift"
-source_anchor = "let railWidth: CGFloat = layout == .standard ? 288 :"
-test = "clients/apple/Tests/MeridianTests.swift"
-test_anchor = "testStandardWideSidebarKeepsDirectDestinationsAndSettingsHost"
-
-[[fixes]]
 id = "apple.meridian-tv-native-panel-labels"
 commits = ["975ade812b85a1411a0d563a60392567de6a0076"]
 source = "clients/apple/Sources/ViewerDestinationHost.swift"
@@ -7272,12 +7315,11 @@ test_anchor = "actualHostCapturesHomeAndPreservesNestedSettingsEntryAcrossLayout
 
 [[fixes]]
 id = "apple.meridian-compact-recording-attention"
-commits = []
+commits = ["c3f59d528de60e2fc06610ebd4fca2feb1b25e1d"]
 source = "clients/apple/Sources/ViewerDestinationHost.swift"
 source_anchor = "RecordingAttentionBadge(count: attention).frame(width: 24, height: 20)"
 test = "clients/apple/Tests/MeridianTests.swift"
 test_anchor = "testCompactMoreRendersNativeRecordingAttentionBadge"
-supplements = "apple.meridian-adaptive-standard-sidebar"
 
 [[fixes]]
 id = "apple.meridian-native-opener-host-preference"
