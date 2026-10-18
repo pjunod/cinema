@@ -35,6 +35,7 @@ final class AppModel: ObservableObject {
     @Published var audioLang: String
     @Published var subLang: String
     @Published var autoplay: Bool
+    @Published var layout: ViewerLayout
     @Published var theme: ViewerTheme
     @Published var appearance: ViewerAppearance
     @Published var posterSize: PosterSize
@@ -71,6 +72,7 @@ final class AppModel: ObservableObject {
         audioLang = settings.audioLang
         subLang = settings.subLang
         autoplay = settings.autoplay
+        layout = settings.layout
         theme = settings.theme
         appearance = settings.appearance
         posterSize = settings.posterSize
@@ -80,6 +82,27 @@ final class AppModel: ObservableObject {
         libraryGrouping = settings.libraryGrouping
         offlineQuality = settings.offlineQuality
         offlineNetwork = settings.offlineNetwork
+        #if DEBUG
+        // Simulator visual evidence uses the shipping shell and owners without
+        // contacting a server or touching a viewer's media. Release has no seam.
+        if ProcessInfo.processInfo.arguments.contains("-meridian-ui-fixture") {
+            layout = .meridian
+            theme = .meridian
+            appearance = .dark
+            settings.theme = .meridian
+            phase = .ready
+            homeLoading = false
+            libraries = [Library(id: 1, name: "Movies", kind: "movie"), Library(id: 2, name: "Series", kind: "show")]
+            hubs = Hubs(
+                continueWatching: [Item(id: 7, kind: "movie", title: "The Meridian Signal", year: 2026,
+                    overview: "An engineer follows a mysterious transmission across the midnight city, finding an unlikely ally at the last station before dawn.",
+                    poster: "meridian-fixture:signal:poster", backdrop: "meridian-fixture:signal:backdrop", runtimeMs: 7_200_000, watch: Watch(positionMs: 900_000, watched: false))],
+                nextUp: [Item(id: 8, kind: "episode", title: "After the Crossing", poster: "meridian-fixture:night:poster", showTitle: "Night Routes")],
+                recentlyAdded: [Item(id: 9, kind: "movie", title: "Beyond the Horizon", poster: "meridian-fixture:horizon:poster")]
+            )
+            return
+        }
+        #endif
         guard startServices else { return }
         discovery.start()
         Task {
@@ -640,6 +663,11 @@ final class AppModel: ObservableObject {
     func setAutoSkip(_ enabled: Bool) {
         autoSkip = enabled
         settings.autoSkip = enabled
+    }
+
+    func setLayout(_ layout: ViewerLayout) {
+        settings.layout = layout
+        self.layout = layout
     }
 
     func setTheme(_ theme: ViewerTheme) {

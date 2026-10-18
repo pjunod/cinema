@@ -10,7 +10,7 @@ final class TVHomeNavigationTests: TVNavigationTestCase {
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
         remote.press(.menu)
-        let home = app.tabBars.buttons["Home"]
+        let home = app.viewerTab("Home")
         reachForSetup(home, in: app, limit: 8)
         remote.press(.select)
         let title = app.staticTexts["A Movie 0"].firstMatch

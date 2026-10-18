@@ -238,10 +238,17 @@ enum LibraryGrouping: String, CaseIterable, Identifiable {
 
 /// Native themes shared with the Android viewer. Web-only catalogue themes can
 /// be added here once their tokens and platform treatment have an Apple port.
+enum ViewerLayout: String, CaseIterable, Identifiable {
+    case standard, meridian
+    var id: String { rawValue }
+    var label: String { self == .standard ? "Standard" : "Meridian" }
+}
+
 enum ViewerTheme: String, CaseIterable, Identifiable {
     case classic
     case terminal
     case noirr
+    case meridian
 
     var id: String { rawValue }
     var label: String {
@@ -249,6 +256,7 @@ enum ViewerTheme: String, CaseIterable, Identifiable {
         case .classic: return "Classic"
         case .terminal: return "Terminal"
         case .noirr: return "noirr"
+        case .meridian: return "Meridian"
         }
     }
 }
