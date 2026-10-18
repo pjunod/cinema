@@ -1762,11 +1762,9 @@ impl DvBaseMetadata {
             if blocks.is_empty() {
                 continue;
             }
-            if !matches!(level, 1 | 2 | 3 | 4 | 5 | 6 | 8 | 9 | 11 | 254)
-                || matches!(level, 2 | 8) && blocks.len() > 16
-            {
-                return Err(invalid());
-            }
+            // Display metadata is carried, never applied by the master
+            // reconstruction, so any level, trim version, content type or
+            // CM version is accepted; only an impossible active area is not.
             for block in blocks {
                 let valid = match block {
                     ExtMetadataBlock::Level5(value) => {
@@ -1776,20 +1774,6 @@ impl DvBaseMetadata {
                             && u32::from(value.active_area_top_offset)
                                 + u32::from(value.active_area_bottom_offset)
                                 < raster.1
-                    }
-                    ExtMetadataBlock::Level8(value) => value.length == 10,
-                    ExtMetadataBlock::Level9(value) => {
-                        value.length == 1 && value.source_primary_index == 0
-                    }
-                    ExtMetadataBlock::Level11(value) => {
-                        value.content_type == 1
-                            && value.whitepoint == 0
-                            && value.reference_mode_flag
-                            && value.reserved_byte2 == 0
-                            && value.reserved_byte3 == 0
-                    }
-                    ExtMetadataBlock::Level254(value) => {
-                        value.dm_mode == 0 && value.dm_version_index == 2
                     }
                     _ => true,
                 };
@@ -2048,16 +2032,10 @@ impl DvParsedMetadata {
         scalar.nlq_threshold = [4096; 3];
         scalar.nlq_max_integer = [1; 3];
         scalar.nlq_max_fraction = [0; 3];
-        if !scalar.supported(DvMetadataSubset::SyntheticP7IdentityLinearNlqV1)
-            || !self
-                .creative_trim_levels
-                .iter()
-                .all(|level| matches!(level, 2 | 8))
-            || !self
-                .other_metadata_levels
-                .iter()
-                .all(|level| matches!(level, 1 | 3 | 4 | 5 | 6 | 9 | 11 | 254))
-        {
+        // Display metadata (L1-L11, L254, L255) does not enter the master
+        // reconstruction: it travels unapplied. Only the reshaping and NLQ
+        // parameters below decide whether the renderer can rebuild a picture.
+        if !scalar.supported(DvMetadataSubset::SyntheticP7IdentityLinearNlqV1) {
             return false;
         }
         for component in 0..3 {

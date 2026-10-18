@@ -125,18 +125,9 @@ static void map_parsed_rpu(const uint8_t *bytes, size_t size,
   // This master-domain reconstruction does not target a display. L2/L8 display
   // trims remain unapplied and are exported in the original RPU for a later
   // P8.1 display mapper. HDR10 output explicitly reports that limitation.
-  require(dm->dm_data.level2.len <= 16 && dm->dm_data.level8.len <= 16,
-          "unsupported creative trims");
-  // L4 is retained as opaque per-frame display metadata. Its temporal
-  // display-mapping semantics are not implemented by this master renderer.
-  // L3 offsets describe display-mapping statistics, not master reconstruction.
-  // Their original values also travel in the exported, unapplied metadata.
-  for (size_t i = 0; i < dm->dm_data.level8.len; i++)
-    require(dm->dm_data.level8.list && dm->dm_data.level8.list[i] &&
-                dm->dm_data.level8.list[i]->length == 10,
-            "unsupported extended L8 trim format");
-  require(dm->dm_data.level10.len == 0 && !dm->dm_data.level255,
-          "unsupported metadata level");
+  // Display metadata (L2/L8 trims, L3/L4, L9 primaries, L10, L11, L254,
+  // L255) is carried unapplied by this master reconstruction and exported in
+  // the original RPU: any version is accepted.
   if (dm->dm_data.level5)
     require((unsigned)dm->dm_data.level5->active_area_left_offset +
                     dm->dm_data.level5->active_area_right_offset <
@@ -145,21 +136,6 @@ static void map_parsed_rpu(const uint8_t *bytes, size_t size,
                     dm->dm_data.level5->active_area_bottom_offset <
                 (unsigned)picture_height,
             "invalid active area metadata");
-  if (dm->dm_data.level9)
-    require(dm->dm_data.level9->length == 1 &&
-                dm->dm_data.level9->source_primary_index == 0,
-            "unsupported explicit source primaries");
-  if (dm->dm_data.level11)
-    require(dm->dm_data.level11->content_type == 1 &&
-                dm->dm_data.level11->whitepoint == 0 &&
-                dm->dm_data.level11->reference_mode_flag &&
-                dm->dm_data.level11->reserved_byte2 == 0 &&
-                dm->dm_data.level11->reserved_byte3 == 0,
-            "unsupported content type/whitepoint policy");
-  if (dm->dm_data.level254)
-    require(dm->dm_data.level254->dm_mode == 0 &&
-                dm->dm_data.level254->dm_version_index == 2,
-            "unsupported CM mode/version");
   require(dm->signal_eotf_param0 == 0 && dm->signal_eotf_param1 == 0 &&
               dm->signal_eotf_param2 == 0,
           "unsupported EOTF parameters");

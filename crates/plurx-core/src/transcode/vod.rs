@@ -1994,7 +1994,10 @@ mod tests {
         assert!(args.windows(2).any(|p| p == ["-map", "0:v:0"]));
         // The reconstructed input carries the grid rate so the last picture
         // has its full frame duration.
-        let input = args.iter().position(|a| a == "/dev/fd/3").expect("video input");
+        let input = args
+            .iter()
+            .position(|a| a == "/dev/fd/3")
+            .expect("video input");
         assert_eq!(args[input - 3..input - 1], ["-r", "24/1"]);
         assert!(args.windows(2).any(|p| p == ["-c:v", "libx265"]));
         assert!(args.windows(2).any(|p| p == ["-threads:a", "1"]));

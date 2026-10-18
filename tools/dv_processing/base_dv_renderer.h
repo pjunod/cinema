@@ -49,12 +49,8 @@ static void base_metadata(const AVFrame *frame, const uint8_t *nal, size_t size,
               dm->signal_eotf_param0 == 0 && dm->signal_eotf_param1 == 0 &&
               dm->signal_eotf_param2 == 0 && dm->signal_full_range_flag == 1,
           "unsupported base reconstructed signal");
-  require(dm->dm_data.level2.len <= 16 && dm->dm_data.level8.len <= 16 &&
-              !dm->dm_data.level10.len && !dm->dm_data.level255,
-          "unsupported base display metadata subset");
-  for (size_t i = 0; i < dm->dm_data.level8.len; i++)
-    require(dm->dm_data.level8.list[i] && dm->dm_data.level8.list[i]->length == 10,
-            "unsupported base extended trim format");
+  // Display metadata (L2/L8 trims, L9 primaries, L10, L11, L254, L255) is
+  // carried unapplied by the master reconstruction: any version is accepted.
   if (dm->dm_data.level5)
     require((unsigned)dm->dm_data.level5->active_area_left_offset +
                     dm->dm_data.level5->active_area_right_offset <
@@ -63,21 +59,6 @@ static void base_metadata(const AVFrame *frame, const uint8_t *nal, size_t size,
                     dm->dm_data.level5->active_area_bottom_offset <
                 (unsigned)frame->height,
             "invalid base active area");
-  if (dm->dm_data.level9)
-    require(dm->dm_data.level9->length == 1 &&
-                dm->dm_data.level9->source_primary_index == 0,
-            "unsupported explicit source primaries");
-  if (dm->dm_data.level11)
-    require(dm->dm_data.level11->content_type == 1 &&
-                dm->dm_data.level11->whitepoint == 0 &&
-                dm->dm_data.level11->reference_mode_flag &&
-                dm->dm_data.level11->reserved_byte2 == 0 &&
-                dm->dm_data.level11->reserved_byte3 == 0,
-            "unsupported content type/whitepoint policy");
-  if (dm->dm_data.level254)
-    require(dm->dm_data.level254->dm_mode == 0 &&
-                dm->dm_data.level254->dm_version_index == 2,
-            "unsupported CM mode/version");
   AVFrameSideData *side = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
   require(side && side->size >= sizeof(AVDOVIMetadata) + sizeof(AVDOVIDataMapping) && side->size <= 65536,
           "actual decoder-derived base metadata required");
