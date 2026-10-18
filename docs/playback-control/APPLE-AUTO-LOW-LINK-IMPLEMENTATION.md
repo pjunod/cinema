@@ -1,9 +1,9 @@
 # Apple Auto acceptance — preserve sign-in and identify acquisition failures
 
-**Status:** open; Apple 262 session/candidate safety built and locally tested;
-task #1179 merged after its development gate; physical continuity, the TV codec boundary and promotion remain open ·
-**Updated:** 2026-10-18 · **Branch:** `effort/apple-auto-declared-costs`,
-PR #1156; task #1179 on `codex/cq-session-acquisition-safety`
+**Status:** open for broader output continuity and the TV codec boundary;
+Apple 264 session/candidate and navigation safeguards are built, reviewed and
+development-gated · **Updated:** 2026-10-18 ·
+**Branch:** `effort/apple-auto-declared-costs`, PR #1156; tasks #1179 and #1183 merged
 
 Companion to [continuous-quality build §10.330](CONTINUOUS-QUALITY-BUILD.md)
 (the declared-cost correction) and the
@@ -13,28 +13,30 @@ the record of the sign-in incident. Preserve the failed runs before cleanup.
 Do not launch the installed Release app through the shaping proxy until the
 credential and server-selection incident is understood.
 
-## Current checkpoint — Apple 262 source proved; physical scope remains open
+## Current checkpoint — Apple 264 navigation and scoped Apple 262 quality evidence
 
-The measured task #1179 checkpoint is `ef33cc71cf89da900883d7ad5d2af5336aecffbc`, tree
-`0e84329578724a069103cd93fac873b38e651afe`, including main `efaf89152` and
-Apple build **262**. Task #1179 merged as `8d169859d` after all eight
-Effort development gate jobs passed in run 5423 on `f29ea145b`
-(tree `72582cdb45b89512a608229b1658a0186418de2d`). Parent PR #1156
-qualification and promotion remain pending. The earlier #1171 landing contains the label/diagnostic checkpoint;
-it does not contain the later session and candidate ownership repairs.
+Task #1179 merged as `8d169859d` after all eight Effort development gate
+jobs passed in run 5423 on `f29ea145b` / Apple 263. Task #1183 merged as
+`7dd231718` after all eight jobs passed in run 5433 on `9a2b6312` / Apple
+**264**. Both include main `efaf89152`. PR #1156 carries the final main-bound
+qualification receipt and landing record; the development gates do not replace it.
 
-The measured source/build remain `ef33cc71` / Apple 262. Effort-base
-history synchronization advances the release claim to **Apple 263**.
-Every production Swift source and test remains byte-identical to the measured
-checkpoint; the remaining differences are synchronized base history, release
-metadata, evidence documentation and mutable regression-anchor repairs. The
-final effort candidate still needs main-bound qualification. These 262 observations are not relabelled as a physical 263 run.
+The physical quality and 79 focused-unit measurements remain bound to
+`ef33cc71cf89da900883d7ad5d2af5336aecffbc`, tree
+`0e84329578724a069103cd93fac873b38e651afe`, Apple **262**. The later 264
+follow-up preserves the current layout capability during account reset and
+honors an explicit native opener request. Eight quality/authentication source
+modules remain byte-identical to the measured checkpoint; the full Swift tree
+is not identical. The new native focus journey passes on `3534fec33`; final
+task `9a2b6312` adds only its live history mapping. No physical 264 campaign
+or independent display/audio continuity is inferred from those software checks.
 
 | Evidence | Result and limit |
 |---|---|
 | Exact `ef33cc71` local regression | 79/79 focused Apple units pass: 64 playback/binding/coordinator/PiP and 15 authentication/Home cases. |
 | Apple 262 recovery UI | Three unique journeys pass: iPad Sign in → server picker → reconnect/login; TV native server choice; TV Help/Back/Retry preserving the saved login. Whole result bundles retain screenshots and failed fixture attempts. |
-| Exact-source development checks | iOS/tvOS compilation and iOS Release compilation pass; paperwork is 14/14 against main `efaf89152`. Formatting, Clippy, catalog lint and 95 served-script syntax checks pass. These are local checks, not a promotion-gate result. |
+| Apple 264 navigation/reset | Four unique focused native cases pass across source-bound bundles. The new reset/opener regression fails before the fix and passes after; the existing account-reset security test still passes. The unchanged TV native journey passes 1/1 in 133.884 s, including Back, source changes and primary return. Its bundle retains an existing publishing-during-view-update warning. |
+| Development checks | Both task gates pass on their exact heads, including iOS/tvOS compilation. Measured 262 iOS/tvOS and iOS Release compilation remain earlier source-bound evidence. Normal hooks and final task paperwork pass; no development result is a main-promotion receipt. |
 | Controlled simulator comparison | Baseline `06235b181` plus the PiP startup repair reproduces the healthy-incumbent loss; fixed source `3a701ff14` retains its named 144p incumbent through 90 s at 3 Mb/s and 79 s at 25 Mb/s, with zero stalls in 239 probes. This comparison qualifies that source and simulator oracle. |
 | Physical iPad, Apple 262 | 294 SDK probes reach film position 598,677 ms through 1080p → 720p → 360p with zero reported stalls and zero black observations. One 104 ms surface pair remains unclassified; independent display continuity is unmeasured. This is scoped SDK evidence, not an uninterrupted-output verdict. |
 | Apple TV | The shared-AAC run reaches film position 488,356 ms in 240 probes through 1080p → 720p → 360p, 90 s at 3 Mb/s and recovery: zero sampled access stalls/black intervals, no unnamed controls or HTTP 410s. Two preparing indicators last 111 ms each while presenting at rate 1; frame/audio continuity is explicitly not measured. The actual Info panel reports Transcode · 360p and 640×360. The separate DTS-source E-AC-3 → AAC VOD boundary is rejected as `prepared_output_unsupported` and remains an open product finding. |
@@ -63,8 +65,9 @@ Private retention preserves the explicit `ef33cc71` source archive, final
 attempts and SHA256 manifests. The physical sign-out request and reported
 navigation trap remain unconfirmed. Disposable UI recovery tests prove only
 their controlled routes. The production installed-Release proxy runner stays
-suspended. Main merge, production installation and full acceptance are not
-claimed.
+suspended. Main qualification and installation identities belong to the
+parent PR receipt and release record; this ledger does not turn source-bound
+software checks into full physical acceptance.
 
 ## 1. What the retained evidence establishes
 
@@ -302,3 +305,32 @@ This records operator confirmation; no additional sudo operation is needed.
 Other cleanup remains pending. No device reauthentication, physical proxy
 launch, new physical acceptance campaign, merge or main installation is
 claimed by this checkpoint.
+
+## Apple 264 qualification follow-up
+
+The first full qualification attempt stopped in operations preflight on three
+inventories: the renamed unmeasured-cost continuation, two missing TV journey
+selections and unregistered Meridian input adapters. No assertion was weakened.
+The census keeps the same fence scopes; the runner now requires both journeys;
+the physical scheme excludes the synthetic Meridian fixture. Apple Menu keeps
+its guarded close callback in the platform adapter. Two bounded web regions
+register only the existing dialog Escape and opener Left handlers; neighboring
+raw handlers still fail the fence.
+
+The unchanged native journey then exposed a separate reset defect. A bounded
+DEBUG trace identified the actual viewer-navigation modal, its correct root
+parent and return opener, but false layout availability and absent opener-order
+membership. Dismissal chose content before any late controller or content-Back
+event. Reset now retains that device-layout capability while clearing account
+actions, registrations, orders, routes, search, presentations and native focus
+authority. Standard layout still removes the opener, and Select still requires
+the current native acknowledgment. The native hosting preference follows the
+current explicit opener request and clears for later content requests.
+
+The new reset regression fails on the previous production source and passes
+after the correction. The unchanged native UI journey passes through Back,
+current/source selection, different primary and return to retained library
+tools, without a playback request. All temporary probes were removed before
+that run. Whole passing and failed bundles, the explicitly partial first UI
+bundle, expected-red provenance, traces, source and verified checksums are
+privately retained. The disposable simulator was deleted after retention.

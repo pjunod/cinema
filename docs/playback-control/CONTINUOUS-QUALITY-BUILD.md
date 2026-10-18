@@ -1,7 +1,7 @@
 # Continuous quality — build uninterrupted resolution changes
 
 **Status:** implementation landed in PR #774; post-merge qualification resumed;
-Measured Apple 262 checks pass; Apple 263 task #1179 merged after its development gate; main-bound qualification is pending;
+Measured Apple 262 quality checks pass; Apple 264 navigation/reset repairs are reviewed and development-gated; final main qualification is recorded in PR #1156;
 physical/native and independent output
 acceptance remain open; Firefox browser video passes on `89d790d2e` ·
 **Updated:** 2026-10-18 ·
@@ -14,7 +14,7 @@ acceptance remain open; Firefox browser video passes on `89d790d2e` ·
 
 - **What this is:** Implementation contract for changing video quality without a pause, flash or audio seam on every client, web first, then native.
 - **Where it stands:**
-  - Status (updated 2026-10-18): Apple 262 at `ef33cc71` passes 79 focused units, three recovery UI journeys, affected compilation and paperwork. Valid simulator comparison repairs the retained-incumbent failure; physical iPad SDK evidence still has one unclassified 104 ms surface pair, shared-AAC TV SDK playback completes with zero sampled access stalls; independent output continuity remains unmeasured, a separate E-AC-3-to-AAC VOD boundary finding is open, and Safari awaits user settings. Task #1179 merged after green Effort development gate run 5423; physical/independent-output acceptance and parent #1156 qualification/promotion remain pending. Firefox retains its old-source browser-video scope; see §10.332.
+  - Status (updated 2026-10-18): Apple 262 / `ef33cc71` retains its 79 focused units, three recovery journeys and scoped low-link evidence. Apple 264 task #1183 additionally passes the unchanged native panel Back/source/primary journey after preserving layout capability across account reset; both task development gates pass. PR #1156 carries final main qualification and landing. Independent display/audio continuity, the separate TV E-AC-3-to-AAC boundary and Safari iOS settings remain open; see §10.332.
   - Per-milestone state lives in the evidence ledger (CQ0-CQ7 have partial results, CQ8 is "Not run"); empty rows are unfinished work. The tail of the file is a dated running log of review rounds and test repairs.
   - Execution order is CQ0, CQ2a, CQ1, CQ2, CQ3, CQ4, CQ5, CQ6, CQ7, CQ8.
 - **Read further only for:**
@@ -12151,20 +12151,34 @@ these timestamps alone cannot assign upstream production/network delay.
 
 ### 10.332 Apple 262 exact-source checks and bounded native evidence — October 18
 
-The measured task #1179 checkpoint is `ef33cc71cf89da900883d7ad5d2af5336aecffbc`, tree
-`0e84329578724a069103cd93fac873b38e651afe`, with main `efaf89152` integrated.
-Apple 262 preserves the session/candidate safety repairs and incoming
-Meridian preferences. Task #1179 merged as `8d169859d` after all eight
-Effort development gate jobs passed in run 5423 on `f29ea145b`
-(tree `72582cdb45b89512a608229b1658a0186418de2d`). Parent #1156 still
-needs main-bound qualification; no main merge or production installation is claimed.
+Task #1179 merged as `8d169859d` after Effort development gate run 5423
+passed on `f29ea145b` / Apple 263. Task #1183 merged as `7dd231718` after
+run 5433 passed all eight jobs on `9a2b6312` / Apple **264**. PR #1156 is
+the authority for final main-bound qualification and landing.
 
-The measured source/build remain `ef33cc71` / Apple 262. Effort-base
-history synchronization advances the release claim to **Apple 263**.
-Every production Swift source and test remains byte-identical to the measured
-checkpoint; the remaining differences are synchronized base history, release
-metadata, evidence documentation and mutable regression-anchor repairs. The
-final effort candidate still needs main-bound qualification. These 262 observations are not relabelled as a physical 263 run.
+The physical quality and focused 79-unit checkpoint remains
+`ef33cc71cf89da900883d7ad5d2af5336aecffbc`, tree
+`0e84329578724a069103cd93fac873b38e651afe`, Apple **262**, with main
+`efaf89152` integrated. Eight quality/authentication source modules remain
+byte-identical; the later 264 changes concern native navigation ownership and
+its inventories. These observations are not relabelled as physical 264 output.
+
+**Apple 264 follow-up.** The first full preflight found a stale continuation
+name, two omitted native journeys and Meridian input registrations. Their
+focused contracts pass without weakening assertions. The unchanged native
+panel journey then exposed account reset clearing the persistent layout
+capability: its still-visible opener was absent from the return order, so
+Back selected library content. A bounded trace ruled out late physical input.
+Reset now preserves the layout capability while removing account actions,
+orders, routes, presentations and focus authority. The hosting controller
+follows only the current explicit opener request. The new reset regression
+fails before the correction and passes after; existing reset security still
+passes. Four unique focused native cases pass across their retained source
+checkpoints. The unchanged native Back/source/primary journey passes 1/1 in
+133.884 s on clean `3534fec33`; final task `9a2b6312` changes only its history
+mapping. All temporary probes are removed; failed/partial and passing bundles
+remain archived with explicit provenance. The owned simulator is deleted.
+This validates navigation behavior, not independent display/audio continuity.
 
 **Exact local evidence.** The final combined unit result is **79/79**:
 64 playback/binding/coordinator/PiP cases and 15 authentication/Home cases.
