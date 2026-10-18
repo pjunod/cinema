@@ -4,6 +4,12 @@
 #   run DEVICE_ID TARGET_ORIGIN PUBLIC_HOST PORT TITLE PHASE OUT_DIR [ios|tvos]
 # PHASE: home (list a library page), probe, campaign (15 manual + Auto), auto (Auto only).
 set -uo pipefail
+# The Release launch override can clear the viewer's Keychain token on an
+# authentication failure. Preserve the incident evidence before repairing or
+# replacing this path; a caller must not accidentally repeat the campaign.
+echo 'DISABLED: shipping-app proxy launches are suspended after the 2026-10-17 sign-in incident.' >&2
+echo 'See docs/playback-control/APPLE-AUTO-LOW-LINK-IMPLEMENTATION.md; use disposable app/account state for investigation.' >&2
+exit 2
 DEV=$1 TARGET=$2 PUBLIC=$3 PORT=$4 TITLE=$5 PHASE=$6 OUT=$7 OS=${8:-ios}
 HERE=$(cd "$(dirname "$0")" && pwd)
 : "${PLURX_DEVELOPMENT_TEAM:?set PLURX_DEVELOPMENT_TEAM to your Apple team identifier}"

@@ -11974,7 +11974,7 @@ cases and61 Apple passes; rerun only the four failed cases before final fast lan
 
 The shipping Apple build 252 (`89d790d2e`) ran the native 100/10/25/10/25/3/25
 Mb/s link protocol on a real library title rather than the qualification
-fixture: a 1080p H.264 library title delivered as an original the server
+fixture: Agent Zero, a 1080p H.264 library title delivered as an original the server
 costs at 28.8 Mb/s, on an iPhone 17 Pro Max and an iPad Pro behind the
 shaping proxy. Both devices
 passed 15 of 15 manual 720p/480p changes with no interruption. Auto on both
@@ -12072,3 +12072,15 @@ and cannot recover a remux, which the fixture's 1080p encode rung never
 exposed; and after the failure view the harness's centre taps pressed Try
 Again, which explains the later evidence rows on the iPad and nothing
 before the failure.
+
+**Apple 260 continuation, 2026-10-17.** The 100/10/25/10/25 Mb/s stages
+step down to 720p without reported interruptions, but the later acquisition
+campaign fails. The first six-second metadata timeout precedes the 3 Mb/s
+cliff and occurs at 25 Mb/s; the second occurs after it. `item=unreported`
+means there was no item error to report, not a decoder error. The
+[remaining investigation](APPLE-AUTO-LOW-LINK-IMPLEMENTATION.md) preserves
+the timeline, the installed-method label repair and its focused tests.
+The shipping proxy harness is suspended after the iPad/server-picker and
+TV/sign-in incident. Paul reports that neither screen can be escaped; this
+is an open product bug. No new physical launch or passing acquisition
+campaign is claimed. Harness commit `622141077` is confirmed pushed.
