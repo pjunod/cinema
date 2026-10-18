@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Boot a disposable Android TV emulator, wait until ADB is stable, and run
+# the instrumented suite on it. CI's android_device job calls this in place of
+# the upstream emulator action.
+#
+# The action reads sys.boot_completed once and sends its unlock immediately.
+# On a slow runner ADB is still reconnecting at that moment: the device reads
+# offline, then not found, and the unretried unlock exits 255 before any test
+# runs (main run 5325). Here the unlock waits for three consecutive polls with
+# the device online and booted, and is itself retried within the deadline.
+#
+# The AVD and SDK packages match what the action installed: API 36 android-tv
+# x86 on the tv_1080p profile, forced creation, two cores, animations off.
+set -euo pipefail
+
+API_LEVEL=36
+TARGET=android-tv
+ARCH=x86
+PROFILE=tv_1080p
+AVD_NAME=plurx-ci
+BUILD_TOOLS_VERSION=37.0.0
+# SDK command-line tools 20.0, the build the action downloads.
+CMDLINE_TOOLS_URL=https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip
+# Google's Android TV repository publishes API 36 for both x86 and x86_64
+# (and none for API 35). The x86_64 guest hangs its QEMU CPU threads under
+# nested KVM on the lab runners; the x86 guest keeps the same TV/API contract.
+EMULATOR_OPTIONS=(-no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none)
+PORT="${PLURX_EMULATOR_PORT:-5554}"
+BOOT_DEADLINE_SECONDS="${PLURX_EMULATOR_BOOT_DEADLINE:-600}"
+POLL_SECONDS=2
+STABLE_POLLS=3
+
+SERIAL="emulator-${PORT}"
+PACKAGE="system-images;android-${API_LEVEL};${TARGET};${ARCH}"
+
+log() { echo "ci-android-emulator-run: $*"; }
+die() { echo "ci-android-emulator-run: $*" >&2; exit 1; }
+
+[[ "$PORT" =~ ^[0-9]+$ ]] || die "PLURX_EMULATOR_PORT must be a port number"
+[[ "$BOOT_DEADLINE_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+  || die "PLURX_EMULATOR_BOOT_DEADLINE must be whole seconds"
+[ -n "${ANDROID_HOME:-}" ] || die "ANDROID_HOME must name the job's Android SDK directory"
+[ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] \
+  || die "/dev/kvm is not usable; the emulator would boot without acceleration"
+
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+mkdir -p target/validation
+EMULATOR_LOG="$PWD/target/validation/android-emulator.log"
+
+export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+export ANDROID_AVD_HOME="$HOME/.android/avd"
+cmdline_tools="$ANDROID_HOME/cmdline-tools/latest"
+export PATH="$cmdline_tools/bin:$ANDROID_HOME/platform-tools:$PATH"
+mkdir -p "$ANDROID_HOME" "$ANDROID_AVD_HOME"
+
+# --- SDK: reuse what is already present, install what is missing ----------
+if [ ! -x "$cmdline_tools/bin/sdkmanager" ]; then
+  log "installing the Android command-line tools"
+  download="$(mktemp -d)"
+  curl -fsSL --retry 3 -o "$download/cmdline-tools.zip" "$CMDLINE_TOOLS_URL"
+  rm -rf "$ANDROID_HOME/cmdline-tools"
+  mkdir -p "$ANDROID_HOME/cmdline-tools"
+  unzip -q "$download/cmdline-tools.zip" -d "$ANDROID_HOME/cmdline-tools"
+  mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$cmdline_tools"
+  rm -rf "$download"
+fi
+# `yes` dies of SIGPIPE once sdkmanager stops reading; only sdkmanager's
+# status decides this pipeline.
+{ yes || true; } | sdkmanager --licenses >/dev/null
+sdkmanager --install "build-tools;${BUILD_TOOLS_VERSION}" platform-tools \
+  "platforms;android-${API_LEVEL}" >/dev/null
+sdkmanager --install emulator --channel=0 >/dev/null
+sdkmanager --install "$PACKAGE" --channel=0 >/dev/null
+
+# --- Disposable AVD --------------------------------------------------------
+emulator_pid=""
+cleanup() {
+  local status=$?
+  set +e
+  if [ -n "$emulator_pid" ] && kill -0 "$emulator_pid" 2>/dev/null; then
+    log "stopping the emulator"
+    timeout 20 adb -s "$SERIAL" emu kill >/dev/null 2>&1
+    for _ in $(seq 1 15); do
+      kill -0 "$emulator_pid" 2>/dev/null || break
+      sleep 2
+    done
+    kill -9 "$emulator_pid" 2>/dev/null
+    wait "$emulator_pid" 2>/dev/null
+  fi
+  avdmanager delete avd -n "$AVD_NAME" >/dev/null 2>&1 \
+    || rm -rf "$ANDROID_AVD_HOME/$AVD_NAME.avd" "$ANDROID_AVD_HOME/$AVD_NAME.ini"
+  exit "$status"
+}
+trap cleanup EXIT
+
+log "creating AVD $AVD_NAME from $PACKAGE ($PROFILE)"
+echo no | avdmanager create avd --force -n "$AVD_NAME" --package "$PACKAGE" --device "$PROFILE"
+printf 'hw.cpu.ncore=2\n' >> "$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
+
+log "starting the emulator on port $PORT; log at $EMULATOR_LOG"
+"$ANDROID_HOME/emulator/emulator" -port "$PORT" -avd "$AVD_NAME" "${EMULATOR_OPTIONS[@]}" \
+  >"$EMULATOR_LOG" 2>&1 &
+emulator_pid=$!
+
+boot_failed() {
+  echo "ci-android-emulator-run: $*" >&2
+  echo "--- last 50 lines of the emulator log ---" >&2
+  tail -n 50 "$EMULATOR_LOG" >&2 || true
+  exit 1
+}
+
+deadline=$(( SECONDS + BOOT_DEADLINE_SECONDS ))
+remaining() { echo $(( deadline - SECONDS > 1 ? deadline - SECONDS : 1 )); }
+
+timeout "$(remaining)" adb -s "$SERIAL" wait-for-device \
+  || boot_failed "$SERIAL never appeared within ${BOOT_DEADLINE_SECONDS}s"
+
+# --- Stable ADB: booted and online on consecutive polls -------------------
+stable=0
+while :; do
+  kill -0 "$emulator_pid" 2>/dev/null || boot_failed "the emulator exited during boot"
+  state="$(timeout 10 adb -s "$SERIAL" get-state 2>/dev/null || true)"
+  booted="$(timeout 10 adb -s "$SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+  if [ "$state" = device ] && [ "$booted" = 1 ]; then
+    stable=$(( stable + 1 ))
+  else
+    stable=0
+  fi
+  log "boot poll at ${SECONDS}s: state=${state:-none} sys.boot_completed=${booted:-none} stable=${stable}/${STABLE_POLLS}"
+  [ "$stable" -ge "$STABLE_POLLS" ] && break
+  [ "$SECONDS" -lt "$deadline" ] \
+    || boot_failed "ADB was not stable within ${BOOT_DEADLINE_SECONDS}s"
+  sleep "$POLL_SECONDS"
+done
+log "ADB stable after ${SECONDS}s"
+
+# Retry a shell command until it succeeds, waiting for ADB between attempts.
+adb_shell_until_ok() {
+  local attempt=1
+  until timeout 30 adb -s "$SERIAL" shell "$@"; do
+    [ "$SECONDS" -lt "$deadline" ] \
+      || boot_failed "'adb shell $*' kept failing until the ${BOOT_DEADLINE_SECONDS}s deadline"
+    log "'adb shell $*' failed (attempt $attempt); waiting for ADB"
+    attempt=$(( attempt + 1 ))
+    sleep "$POLL_SECONDS"
+    timeout "$(remaining)" adb -s "$SERIAL" wait-for-device || true
+  done
+}
+
+adb_shell_until_ok input keyevent 82
+for scale in window_animation_scale transition_animation_scale animator_duration_scale; do
+  adb_shell_until_ok settings put global "$scale" 0.0
+done
+
+# --- The suite: its failure is the step's failure, never retried ----------
+log "running the instrumented suite on $SERIAL"
+status=0
+EMULATOR_PORT="$PORT" ANDROID_SERIAL="$SERIAL" PLURX_ANDROID_SERIAL="$SERIAL" \
+  make android-instrumentation-run || status=$?
+exit "$status"

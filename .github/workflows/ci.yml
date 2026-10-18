@@ -1456,54 +1456,11 @@ jobs:
       - name: Build app and instrumentation APKs in the pinned toolchain
         run: make android-instrumentation-build
       - name: Run the Compose and TV focus suite on a disposable emulator
-        id: android_instrumentation
-        continue-on-error: true
-        uses: https://github.com/reactivecircus/android-emulator-runner@4c44018e59b437e86cdfc41da381398f93ed8808 # v2
-        with:
-          # Google's Android TV repository publishes API 36 for both x86 and
-          # x86_64 (and none for API 35). The x86_64 guest hangs its QEMU CPU
-          # threads under nested KVM on the lab runners; the x86 guest keeps
-          # the same TV/API contract without that broken boot path.
-          api-level: 36
-          target: android-tv
-          arch: x86
-          profile: tv_1080p
-          force-avd-creation: true
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: |
-            mkdir -p target/validation
-            touch target/validation/android-instrumentation-started
-            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
-      - name: Freeze whether the first instrumentation script started
-        id: android_instrumentation_first_attempt
-        if: always()
-        run: |
-          if [[ -f target/validation/android-instrumentation-started ]]; then
-            echo "started=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "started=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Retry a pre-test emulator boot failure once
-        if: steps.android_instrumentation.outcome == 'failure' && steps.android_instrumentation_first_attempt.outputs.started == 'false'
-        uses: https://github.com/reactivecircus/android-emulator-runner@4c44018e59b437e86cdfc41da381398f93ed8808 # v2
-        with:
-          # The upstream action checks boot completion and then sends one
-          # unretied unlock command. API 36 can briefly reconnect ADB between
-          # those commands. Retry the disposable AVD only when our script never
-          # started; an instrumentation failure is never retried or hidden.
-          api-level: 36
-          target: android-tv
-          arch: x86
-          profile: tv_1080p
-          force-avd-creation: true
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: |
-            mkdir -p target/validation
-            touch target/validation/android-instrumentation-started
-            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
-      - name: Propagate an instrumented-test failure without retrying it
-        if: steps.android_instrumentation.outcome == 'failure' && steps.android_instrumentation_first_attempt.outputs.started == 'true'
-        run: exit 1
+        # Our own boot, not the upstream emulator action: the action sends its
+        # unlock while ADB is still reconnecting on a slow runner and fails
+        # before any test runs. The script waits for stable ADB first. A test
+        # failure fails this step directly; nothing is retried.
+        run: scripts/ci-android-emulator-run
       - name: Upload Android test reports
         if: always()
         continue-on-error: true
@@ -1514,6 +1471,7 @@ jobs:
             clients/android/app/build/reports/androidTests
             clients/android/app/build/outputs/androidTest-results
             target/validation/android-instrumentation.txt
+            target/validation/android-emulator.log
           if-no-files-found: warn
           retention-days: 1
 

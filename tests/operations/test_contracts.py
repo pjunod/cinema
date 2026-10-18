@@ -3222,96 +3222,64 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('echo "ANDROID_HOME=$RUNNER_TEMP/android-sdk"', workflow)
         self.assertIn('echo "ANDROID_SDK_ROOT=$RUNNER_TEMP/android-sdk"', workflow)
         self.assertNotIn("name: Cache the AVD snapshot", workflow)
-        self.assertIn("force-avd-creation: true", workflow)
-        self.assertIn("-no-snapshot-save", workflow)
-        self.assertIn("api-level: 36", workflow)
-        self.assertIn("target: android-tv", workflow)
-        self.assertIn("arch: x86", workflow)
-        self.assertNotIn("arch: x86_64", workflow)
-        self.assertIn("profile: tv_1080p", workflow)
+        emulator_run = read("scripts/ci-android-emulator-run")
+        self.assertIn("avdmanager create avd --force", emulator_run)
+        self.assertIn("-no-snapshot-save", emulator_run)
+        self.assertIn("API_LEVEL=36\n", emulator_run)
+        self.assertIn("TARGET=android-tv\n", emulator_run)
+        self.assertIn("ARCH=x86\n", emulator_run)
+        self.assertNotIn("x86_64;", emulator_run)
+        self.assertIn("PROFILE=tv_1080p\n", emulator_run)
         self.assertNotIn("clients/android/**/*.gradle*", workflow)
         self.assertEqual(workflow.count("clients/android/app/build.gradle.kts"), 2)
         android_device = workflow.split("  android_device:", 1)[1].split(
             "\n  package_smoke:", 1
         )[0]
-        self.assertEqual(
-            android_device.count(
-                "uses: https://github.com/reactivecircus/android-emulator-runner@"
-                "4c44018e59b437e86cdfc41da381398f93ed8808"
-            ),
-            2,
-        )
-        android_steps = workflow_step_blocks(android_device)
-        first_attempt = android_steps[
+        # Main run 5325: the upstream emulator action unlocked the device
+        # while ADB was reconnecting, and its retry step re-ran the same race.
+        # One step runs our own boot; a failure is never retried or hidden.
+        self.assertNotIn("android-emulator-runner", android_device)
+        android_device_job = jobs["android_device"]
+        android_steps = workflow_step_blocks(android_device_job)
+        instrumentation = android_steps[
             "Run the Compose and TV focus suite on a disposable emulator"
         ]
-        freeze_attempt = android_steps[
-            "Freeze whether the first instrumentation script started"
-        ]
-        retry_attempt = android_steps["Retry a pre-test emulator boot failure once"]
-        propagate_failure = android_steps[
-            "Propagate an instrumented-test failure without retrying it"
-        ]
-
         self.assertEqual(
-            workflow_step_scalar(first_attempt, "id"), "android_instrumentation"
+            workflow_step_scalar(instrumentation, "run"),
+            "scripts/ci-android-emulator-run",
         )
+        self.assertNotIn("continue-on-error:", instrumentation)
         self.assertEqual(
-            workflow_step_scalar(first_attempt, "continue-on-error"), "true"
+            [name for name in android_steps if re.search(r"(?i)retry|freeze|propagate", name)],
+            [],
         )
-        first_script_marker = "          script: |\n"
-        self.assertEqual(first_attempt.count(first_script_marker), 1)
-        self.assertEqual(
-            first_attempt.split(first_script_marker, 1)[1],
-            "            mkdir -p target/validation\n"
-            "            touch target/validation/android-instrumentation-started\n"
-            '            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" '
-            "make android-instrumentation-run\n",
-        )
-        self.assertEqual(
-            workflow_step_scalar(freeze_attempt, "id"),
-            "android_instrumentation_first_attempt",
-        )
-        self.assertEqual(workflow_step_scalar(freeze_attempt, "if"), "always()")
-        freeze_script_marker = "        run: |\n"
-        self.assertEqual(freeze_attempt.count(freeze_script_marker), 1)
-        self.assertEqual(
-            freeze_attempt.split(freeze_script_marker, 1)[1],
-            "          if [[ -f "
-            "target/validation/android-instrumentation-started ]]; then\n"
-            '            echo "started=true" >> "$GITHUB_OUTPUT"\n'
-            "          else\n"
-            '            echo "started=false" >> "$GITHUB_OUTPUT"\n'
-            "          fi\n",
-        )
-        self.assertEqual(
-            workflow_step_scalar(retry_attempt, "if"),
-            "steps.android_instrumentation.outcome == 'failure' && "
-            "steps.android_instrumentation_first_attempt.outputs.started == 'false'",
-        )
-        self.assertNotIn("continue-on-error:", retry_attempt)
-        retry_script_marker = "          script: |\n"
-        self.assertEqual(retry_attempt.count(retry_script_marker), 1)
-        self.assertEqual(
-            retry_attempt.split(retry_script_marker, 1)[1],
-            "            mkdir -p target/validation\n"
-            "            touch target/validation/android-instrumentation-started\n"
-            '            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" '
-            "make android-instrumentation-run\n",
-        )
-        self.assertEqual(
-            workflow_step_scalar(propagate_failure, "if"),
-            "steps.android_instrumentation.outcome == 'failure' && "
-            "steps.android_instrumentation_first_attempt.outputs.started == 'true'",
-        )
-        self.assertEqual(workflow_step_scalar(propagate_failure, "run"), "exit 1")
-        self.assertNotIn(
-            "hashFiles('target/validation/android-instrumentation-started')",
-            android_device,
+        self.assertNotIn("android-instrumentation-started", android_device_job)
+        self.assertNotIn("steps.android_instrumentation", android_device_job)
+        script_path = ROOT / "scripts/ci-android-emulator-run"
+        self.assertTrue(os.access(script_path, os.X_OK))
+        self.assertIn("set -euo pipefail", emulator_run)
+        self.assertIn("BOOT_DEADLINE_SECONDS=\"${PLURX_EMULATOR_BOOT_DEADLINE:-600}\"", emulator_run)
+        self.assertIn("POLL_SECONDS=2\n", emulator_run)
+        self.assertIn("STABLE_POLLS=3\n", emulator_run)
+        self.assertIn('adb -s "$SERIAL" wait-for-device', emulator_run)
+        self.assertIn('adb -s "$SERIAL" get-state', emulator_run)
+        self.assertIn("getprop sys.boot_completed", emulator_run)
+        self.assertIn("trap cleanup EXIT", emulator_run)
+        self.assertIn("avdmanager delete avd", emulator_run)
+        # The unlock is sent, with retries, only after the stable-state loop.
+        self.assertLess(
+            emulator_run.index('[ "$stable" -ge "$STABLE_POLLS" ] && break'),
+            emulator_run.index("adb_shell_until_ok input keyevent 82"),
         )
         self.assertLess(
-            android_device.index("id: android_instrumentation_first_attempt"),
-            android_device.index("Retry a pre-test emulator boot failure once"),
+            emulator_run.index("adb_shell_until_ok input keyevent 82"),
+            emulator_run.index("make android-instrumentation-run"),
+        )
+        self.assertIn('PLURX_ANDROID_SERIAL="$SERIAL"', emulator_run)
+        self.assertRegex(
+            emulator_run,
+            r"EMULATOR_OPTIONS=\(-no-snapshot-save -no-window -gpu swiftshader_indirect "
+            r"-noaudio -no-boot-anim -camera-back none\)",
         )
         self.assertIn("uninstall tv.plurx.app.test", makefile)
         self.assertIn("uninstall tv.plurx.app", makefile)
