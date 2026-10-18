@@ -70,6 +70,22 @@ test = "clients/apple/Tests/MeridianTests.swift"
 test_anchor = "testStandardTVNativeTabsDisappearForPushedRoutes"
 
 [[fixes]]
+id = "apple.standard-meridian-framework-owned-tabview"
+commits = ["5e6bb62a58cd7026bb199fd58739cf637c4eff2b"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "TabView(selection: Binding(get: { selection }, set: selectionChanged)) {"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardNativeTabFullscreenRetainsContentAfterAnotherTabsPushedChoice"
+
+[[fixes]]
+id = "apple.native-tab-chrome-review-fixes"
+commits = ["0304492bc58167d1f1fd0c85e1c15d004d923e73"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "if appliedLayout == .standard || !capturedSidebar {"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLayouts"
+
+[[fixes]]
 id = "apple.standard-tv-theater-geometry-restoration"
 commits = []
 supplements = "apple.standard-native-tv-push-back-restoration"
