@@ -420,6 +420,25 @@ class MediaFactsTest {
         )
     }
 
+    @Test
+    fun theInfoRowSummaryNamesTheActiveBadgesOrSaysNoneActive() {
+        assertEquals("FEL · DYN", enhancementSummary(enhancement(requires = false)))
+        assertEquals(
+            "None active",
+            enhancementSummary(
+                tv.plurx.app.data.PlaybackEnhancement(
+                    active = emptyList(),
+                    details = listOf(
+                        tv.plurx.app.data.EnhancementDetail(tv.plurx.app.data.EnhancementBadge.FEL, false, "FEL is not in this source."),
+                    ),
+                ),
+            ),
+        )
+        assertNull(enhancementSummary(null))
+        // The summary follows the same report gate as the pills and the lines.
+        assertNull(enhancementSummary(enhancement(requires = true).shown(null, enhancementGeneration, DynamicRange.HDR10)))
+    }
+
     private companion object {
         /** `C.COLOR_TRANSFER_ST2084`, restated so the table reads as a table. */
         const val COLOR_TRANSFER_ST2084 = 6

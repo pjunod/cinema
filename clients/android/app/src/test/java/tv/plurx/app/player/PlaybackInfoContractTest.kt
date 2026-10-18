@@ -34,6 +34,7 @@ class PlaybackInfoContractTest {
         streamFrame = "1920×1080",
         playingAudio = "AAC · Stereo · English",
         dynamicRange = "HDR10",
+        enhancementSummary = "FEL · DYN",
         enhancement = listOf("The full enhancement layer is in the picture.", "Dynamic metadata reaches the display."),
         subtitles = "English · native",
         decoder = "c2.android.hevc.decoder",
@@ -134,15 +135,24 @@ class PlaybackInfoContractTest {
     }
 
     @Test
-    fun theEnhancementRowIsOneMutedLinePerDetailAndAbsentWithoutOne() {
+    fun theEnhancementRowLeadsWithTheSummaryThenOneMutedLinePerDetail() {
         val row = playbackInfoRows(details, emptyList()).single { it.id == "enhancement" }
         assertEquals("Enhancement", row.label)
+        assertEquals("FEL · DYN", row.value)
         assertEquals(
             listOf("The full enhancement layer is in the picture.", "Dynamic metadata reaches the display."),
-            row.value?.lines(),
+            row.note?.lines(),
         )
         assertEquals(PlaybackStatTone.Muted, row.tone)
-        assertEquals(null, playbackInfoRows(details.copy(enhancement = null), emptyList()).single { it.id == "enhancement" }.value)
+        val none = playbackInfoRows(details.copy(enhancementSummary = "None active", enhancement = null), emptyList())
+            .single { it.id == "enhancement" }
+        assertEquals("None active", none.value)
+        assertEquals(null, none.note)
+        assertEquals(
+            null,
+            playbackInfoRows(details.copy(enhancementSummary = null, enhancement = null), emptyList())
+                .single { it.id == "enhancement" }.value,
+        )
     }
 
     @Test

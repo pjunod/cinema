@@ -148,7 +148,18 @@ internal fun enhancementFacts(enhancement: tv.plurx.app.data.PlaybackEnhancement
         MediaFact(MediaFactKind.Enhancement, badge.name, enhancementSpokenName(badge), FactState.Active)
     }
 
-/** The info panel's "Enhancement" row: one line per server detail, or null. */
+/**
+ * The info panel's "Enhancement" row value, the same copy web and Apple show:
+ * the active badges joined by " · " ("FEL · RPU"), "None active" when the
+ * enhancement applies but nothing is active, or null when there is no
+ * enhancement to show (no row).
+ */
+internal fun enhancementSummary(enhancement: tv.plurx.app.data.PlaybackEnhancement?): String? =
+    enhancement?.let { shown ->
+        if (shown.active.isEmpty()) "None active" else shown.active.joinToString(" · ") { it.name }
+    }
+
+/** The info panel's "Enhancement" row detail lines: one per server detail, or null. */
 internal fun enhancementLines(enhancement: tv.plurx.app.data.PlaybackEnhancement?): List<String>? =
     enhancement?.details?.map { it.text }?.takeIf { it.isNotEmpty() }
 

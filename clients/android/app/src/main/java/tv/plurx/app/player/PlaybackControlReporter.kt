@@ -719,6 +719,13 @@ data class ControlAction(
     @SerialName("media_origin_ms") val mediaOriginMs: Long? = null,
     /** `prepare` only: what the successor will deliver, not what was asked. */
     @SerialName("effective_selection") val effectiveSelection: EffectiveSelection? = null,
+    /**
+     * `prepare` only, and optional: the successor's own Dolby Vision
+     * `enhancement`, in the shape a create response carries it. Kept raw and
+     * read through [tv.plurx.app.data.PlaybackEnhancement.fromJson] so a
+     * malformed or newer value can never invalidate the prepare action.
+     */
+    val enhancement: kotlinx.serialization.json.JsonElement? = null,
 ) {
     /**
      * `prepared_payload_is_valid` (`playback_control.rs:1776`), client side.

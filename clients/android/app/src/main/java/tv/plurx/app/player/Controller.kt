@@ -5476,9 +5476,10 @@ class Controller internal constructor(
         ).let {
             effectiveProcessing = null
             effectiveProcessingGeneration = null
-            // The successor is created server-side with no create response
-            // here, so nothing describes its enhancement yet.
-            enhancement = null
+            // The successor's own enhancement, as its prepare action carries it;
+            // null when the server sent none. Still gated by `shown`, so a
+            // processed delivery's pills wait for a current report.
+            enhancement = tv.plurx.app.data.PlaybackEnhancement.fromJson(action.enhancement)
             deliveredRange = it.range
             deliveredDolbyVisionProfile = it.dolbyVisionProfile
         }

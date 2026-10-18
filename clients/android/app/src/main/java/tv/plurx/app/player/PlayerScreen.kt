@@ -162,6 +162,7 @@ import tv.plurx.app.ui.components.TvButton
 import tv.plurx.app.ui.components.TvIconButton
 import tv.plurx.app.ui.components.dynamicRangeLabel
 import tv.plurx.app.ui.components.enhancementLines
+import tv.plurx.app.ui.components.enhancementSummary
 import tv.plurx.app.ui.components.formatTime
 import tv.plurx.app.ui.components.playerMediaFacts
 import tv.plurx.app.ui.components.sourceDynamicRange
@@ -2356,6 +2357,11 @@ private fun PlayerInfo(
     ).let { label ->
         controller.pgsOverlayStatus.label?.let { "$label · $it" } ?: label
     }
+    val shownEnhancement = controller.enhancement?.shown(
+        controller.effectiveProcessing,
+        controller.effectiveProcessingGeneration,
+        controller.deliveredRange,
+    )
     val videoFormat = player.videoFormat
     val source = plan.source
     val clientLoadedSeconds = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0) / 1_000.0
@@ -2406,13 +2412,8 @@ private fun PlayerInfo(
                 effectiveProcessing = controller.effectiveProcessing,
                 activeGeneration = controller.effectiveProcessingGeneration,
             ),
-            enhancement = enhancementLines(
-                controller.enhancement?.shown(
-                    controller.effectiveProcessing,
-                    controller.effectiveProcessingGeneration,
-                    controller.deliveredRange,
-                ),
-            ),
+            enhancementSummary = enhancementSummary(shownEnhancement),
+            enhancement = enhancementLines(shownEnhancement),
             subtitles = selectedSubtitle,
             decoder = videoFormat?.codecs ?: videoFormat?.sampleMimeType,
             stalls = "${controller.playbackStallCount} (${controller.playbackStallCount} supply · 0 decode)",
@@ -2506,6 +2507,8 @@ internal data class PlaybackInfoDetails(
     val streamPixelAspect: String? = null,
     val playingAudio: String? = null,
     val dynamicRange: String? = null,
+    /** Active enhancement badges ("FEL · RPU"), or "None active"; null hides the row. */
+    val enhancementSummary: String? = null,
     /** Server-computed Dolby Vision enhancement, one sentence per line. */
     val enhancement: List<String>? = null,
     val subtitles: String = "Off",
@@ -2691,7 +2694,8 @@ internal fun playbackInfoRows(
             "Enhancement",
             "NOW DECODING",
             StandardAndDebug,
-            details.enhancement?.joinToString("\n"),
+            details.enhancementSummary,
+            note = details.enhancement?.joinToString("\n"),
             placement = "notes",
             tone = PlaybackStatTone.Muted,
         ),
