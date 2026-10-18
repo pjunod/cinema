@@ -253,12 +253,14 @@ os = "macOS"
 arch = "ARM64"
 labels = ["lab", "apple", "xcode-27", "backup"]
 
+# This VM also runs a Forgejo runner carrying `release-arm64`: the release
+# image's arm64 leg builds there natively instead of under QEMU on X64.
 [[runners]]
 name = "gha-maca-linux-arm-01"
 host = "maca"
 os = "Linux"
 arch = "ARM64"
-labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "backup"]
+labels = ["lab", "ubuntu-26.04", "ci-arm64", "laptop-vm", "backup", "release-arm64"]
 
 [[runners]]
 name = "gha-macb-linux-arm-01"

@@ -410,4 +410,5 @@ reason = "Corrective commit a40c2068 (fix(release): stop the publisher refusing 
 
 [[errata]]
 commit = "28250ece1ea78bd41fba0a373049b462431fb768"
-reason = "Corrective commit 28250ece (fix(scripts): hand ship-physical's resolved Android SDK to the release signer) reached main through merge 926046d0d for PR #1165, whose subject uses the form 'Merge pull request #1165: ...' and is not recognized as a landing. It carries Regression-Test: tests/operations/test_android_credential_exposure.py::test_the_signer_gets_the_sdk_this_script_resolved. The progressive subtitle translation promotion (PR #1167, run 5376 on head 0c1bf4fe7) reported it as outside any landing. This permanent erratum records the unrecognized landing without rewriting history, moving the audit boundary, waiving future regression fields or claiming a new test run."
+reason = "Corrective commit 28250ece (fix(scripts): hand ship-physical's resolved Android SDK to the release signer) reached main outside a commit the history audit recognizes as a landing. PR #1166's fast lane reported it as outside any landing. This permanent erratum records the unrecognized landing without rewriting history, moving the audit boundary, waiving future regression fields or claiming a new test run."
+

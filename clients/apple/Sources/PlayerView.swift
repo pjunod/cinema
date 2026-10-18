@@ -869,7 +869,7 @@ struct PlayerView: View {
         .remoteScope(remoteScope)
         .background(RemoteOwnedPresentationProbe(navigation: remoteNavigation, token: remoteOwner, scope: remoteScope))
         .remoteRestricted(showStats && statsMode != .mini)
-        .remoteChoicePresentation(isPresented: Binding(get: { remoteTrackMenu != nil }, set: { if !$0 { remoteTrackMenu = nil } }), scope: remoteScope + ":tracks") {
+        .remoteChoicePresentation(isPresented: Binding(get: { remoteTrackMenu != nil }, set: { if !$0 { remoteTrackMenu = nil } }), scope: remoteScope + ":tracks", backdrop: .video) {
             if let kind = remoteTrackMenu {
                 RemoteChoicePanel(scope: remoteScope + ":tracks", title: kind.rawValue.capitalized, choices: remoteChoices(kind))
             }
@@ -4031,7 +4031,7 @@ struct SharedPlayerControls: View {
         .disabled(controller.busy && !controller.preparing)
         #endif
         #if os(tvOS)
-        .remoteChoicePresentation(isPresented: Binding(get: { choiceTitle != nil }, set: { if !$0 { choiceTitle = nil; ownedChoices = [] } }), scope: remoteScope + ":physical-choices") {
+        .remoteChoicePresentation(isPresented: Binding(get: { choiceTitle != nil }, set: { if !$0 { choiceTitle = nil; ownedChoices = [] } }), scope: remoteScope + ":physical-choices", backdrop: .video) {
             if let choiceTitle {
                 RemoteChoicePanel(scope: remoteScope + ":physical-choices", title: choiceTitle, choices: ownedChoices)
             }
