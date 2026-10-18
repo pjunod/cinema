@@ -90,6 +90,9 @@ fn publisher(platform: Platform) -> std::result::Result<Publisher, Box<dyn std::
     Ok(value)
 }
 fn attempt(platform: Platform) -> Attempt {
+    attempt_at(platform, now().expect("synthetic clock"))
+}
+fn attempt_at(platform: Platform, current: i64) -> Attempt {
     let installation = uuid::Uuid::new_v4();
     let mut invitation = installation.as_bytes().to_vec();
     invitation.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
@@ -106,7 +109,7 @@ fn attempt(platform: Platform) -> Attempt {
             consent_generation: 1,
             transport_generation: 1,
             invitation_id: URL_SAFE_NO_PAD.encode(invitation),
-            expires_at: now().expect("synthetic clock") + 120,
+            expires_at: current + 120,
         },
     }
 }
@@ -395,7 +398,7 @@ async fn durable_revoke_in_oauth_other_connection_fences_provider_effect() -> Te
         std::slice::from_ref(&record.id),
         current,
     )?;
-    let mut attempt = attempt(Platform::Android);
+    let mut attempt = attempt_at(Platform::Android, current);
     attempt.delivery.enrollment_id = ticket.ticket_id.clone();
     attempt.delivery.installation_id = ticket.installation_id.clone();
     let mut opaque = uuid::Uuid::parse_str(&ticket.installation_id)?
@@ -443,6 +446,73 @@ async fn durable_revoke_in_oauth_other_connection_fences_provider_effect() -> Te
         database.query_row("SELECT state FROM deliveries", [], |row| row
             .get::<_, String>(0))?,
         "denied"
+    );
+    Ok(())
+}
+
+#[test]
+fn durable_admission_fixture_uses_one_clock_and_preserves_expiry_bound() -> TestResult {
+    use crate::store::{Admission, Store};
+    use crate::wire::Ticket;
+    let current = 1_700_000_000;
+    let record = publisher(Platform::Android)?.record();
+    let generation = uuid::Uuid::new_v4().to_string();
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("broker.sqlite");
+    Store::initialize(
+        &path,
+        &generation,
+        &[7; 32],
+        crate::config::STORAGE_REALM,
+        std::slice::from_ref(&record),
+        current,
+    )?;
+    let mut store = Store::open(&path, &generation, &[7; 32], crate::config::STORAGE_REALM)?;
+    let mut delivery = attempt_at(Platform::Android, current).delivery;
+    assert_eq!(delivery.expires_at, current + 120);
+    let ticket = Ticket {
+        version: VERSION.into(),
+        ticket_id: delivery.enrollment_id.clone(),
+        ticket_secret_hash: "22".repeat(32),
+        server_instance_id: record.server.clone(),
+        installation_id: delivery.installation_id.clone(),
+        receiver_id: uuid::Uuid::new_v4().to_string(),
+        consent_id: uuid::Uuid::new_v4().to_string(),
+        phone_generation: 1,
+        consent_generation: 1,
+        transport_generation: 1,
+        platform: Platform::Android,
+    };
+    store.issue(&record.id, &ticket, current)?;
+    store.claim(
+        &ticket.ticket_id,
+        &[0x22; 32],
+        Platform::Android,
+        "synthetic-device-token",
+        std::slice::from_ref(&record.id),
+        current,
+    )?;
+    let database = rusqlite::Connection::open(&path)?;
+    delivery.expires_at = current + 121;
+    let invalid = store
+        .admit(&record.id, &delivery, current)
+        .err()
+        .ok_or("overlong expiry admitted")?;
+    assert_eq!((invalid.status, invalid.code), (400, "invalid"));
+    assert_eq!(
+        database.query_row("SELECT count(*) FROM deliveries", [], |row| row
+            .get::<_, i64>(0))?,
+        0
+    );
+    delivery.expires_at = current + 120;
+    assert!(matches!(
+        store.admit(&record.id, &delivery, current)?,
+        Admission::Attempt(_)
+    ));
+    assert_eq!(
+        database.query_row("SELECT count(*) FROM deliveries", [], |row| row
+            .get::<_, i64>(0))?,
+        1
     );
     Ok(())
 }
