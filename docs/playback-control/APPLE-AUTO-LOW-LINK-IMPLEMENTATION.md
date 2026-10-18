@@ -1,9 +1,10 @@
 # Apple Auto acceptance — preserve sign-in and identify acquisition failures
 
 **Status:** open for broader output continuity and the TV codec boundary;
-Apple 264 session/candidate and navigation safeguards are built, reviewed and
-development-gated · **Updated:** 2026-10-18 ·
-**Branch:** `effort/apple-auto-declared-costs`, PR #1156; tasks #1179 and #1183 merged
+Apple 264 safeguards and native/web/Rust fixture repairs are development-gated;
+controlled tar transport passes focused and complete-archive checks ·
+**Updated:** 2026-10-18 · **Parent:** PR #1156 owns exact qualification, landing
+and installation identities; tasks #1179, #1183, #1186 and #1187 merged
 
 Companion to [continuous-quality build §10.330](CONTINUOUS-QUALITY-BUILD.md)
 (the declared-cost correction) and the
@@ -19,7 +20,54 @@ Task #1179 merged as `8d169859d` after all eight Effort development gate
 jobs passed in run 5423 on `f29ea145b` / Apple 263. Task #1183 merged as
 `7dd231718` after all eight jobs passed in run 5433 on `9a2b6312` / Apple
 **264**. Both include main `efaf89152`. PR #1156 carries the final main-bound
-qualification receipt and landing record; the development gates do not replace it.
+qualification, landing and installation identities; development gates do not
+replace the parent receipt.
+
+**Fixture development records.** Task #1186 merged reviewed native/Android
+fixtures and the web structure golden as `df4d51e36`, after all eight jobs
+passed in run 5438 on `7f21f7428`. The unchanged web source passed 104/104
+route/viewport captures: 300 existing-layout DOM deltas match frame wrappers
+and translation controls, with zero existing focus/request drift; Meridian
+adds 26 captures. This structural result is not media-continuity evidence.
+
+Task #1187 merged as `1452a6c6d`, tree `369959827`, after all eight development
+gate jobs passed in run 5441 (internal 5467) on `27da0cde`. Its Rust source
+`35f237c5` passes 66 focused cases: 39 core, 21 contract and six daemon,
+covering 56 retained failing case IDs plus ten compiled instances of four new
+test definitions. Source manifests match before/after execution. Formatting, workspace Clippy, catalog and normal hooks
+pass. Source-ownership audits retain production/test shared inputs and refuse
+unsupported production contexts; guarded schema fixtures preserve production
+refusals. These are focused/development results, not a full-suite receipt.
+The finite 95-minute Rust envelope remains a planning cap without a measured
+full-suite completion guarantee.
+
+**Failed qualification and controlled export.** Original full run 5436
+(internal 5462), on `5a7b41928`, remains terminal and failed: 39 named Rust
+failures, 20 Store-lane failures and 3,440 announced daemon tests without
+outcomes at the 60-minute cutoff. Both amd64 release builds complete, but the
+second media-package export reaches the 90-minute limit, repeating the earlier
+hang on another host. Lane counts are not a unique-failure union.
+
+Two isolated local exports hit 120-second inactivity bounds; corresponding
+tar exports finish in 6.9 s and 8.4 s. The latter uses CI-style explicit
+attestation/metadata flags and completes metadata generation. Both tars have
+the same digest. Final validator `f212f2cd` passes all 38,755 raw-member
+path/type/mode/link/content checks and the focused archive regressions. Its
+source review is scoped to this finite CI transport; actual artifacts contain
+no links. Partial local output is missing/truncated and is not byte-equivalent.
+
+The completed transport task's dated development-gate and merge record is
+recorded in build ledger §10.332 before the candidate is frozen. PR #1156 is
+the live authority for exact qualification, landing and installation identities;
+source and development checks alone do not establish those outcomes.
+
+Probe limits: the earlier two-CPU producer attempt expires before export and
+provides no transport comparison. The isolated context omits `.git` and uses a
+different provenance URN; internal BuildKit cause remains unconfirmed. Build
+monitoring and bounded cleanup have separate deadlines. The original Python
+optimization environment was not recorded; later revalidation explicitly uses
+optimization zero. None of these probes establishes full package/runtime smoke
+acceptance.
 
 The physical quality and 79 focused-unit measurements remain bound to
 `ef33cc71cf89da900883d7ad5d2af5336aecffbc`, tree
@@ -36,7 +84,7 @@ or independent display/audio continuity is inferred from those software checks.
 | Exact `ef33cc71` local regression | 79/79 focused Apple units pass: 64 playback/binding/coordinator/PiP and 15 authentication/Home cases. |
 | Apple 262 recovery UI | Three unique journeys pass: iPad Sign in → server picker → reconnect/login; TV native server choice; TV Help/Back/Retry preserving the saved login. Whole result bundles retain screenshots and failed fixture attempts. |
 | Apple 264 navigation/reset | Four unique focused native cases pass across source-bound bundles. The new reset/opener regression fails before the fix and passes after; the existing account-reset security test still passes. The unchanged TV native journey passes 1/1 in 133.884 s, including Back, source changes and primary return. Its bundle retains an existing publishing-during-view-update warning. |
-| Development checks | Both task gates pass on their exact heads, including iOS/tvOS compilation. Measured 262 iOS/tvOS and iOS Release compilation remain earlier source-bound evidence. Normal hooks and final task paperwork pass; no development result is a main-promotion receipt. |
+| Development checks | Tasks #1179/#1183/#1186/#1187 pass their exact development gates. Rust #1187 additionally passes 66 focused cases, formatting, workspace Clippy and normal hooks. Measured 262 Apple compilation and later native compile evidence keep their exact source/toolchain identities; no development result is a main-promotion receipt. |
 | Controlled simulator comparison | Baseline `06235b181` plus the PiP startup repair reproduces the healthy-incumbent loss; fixed source `3a701ff14` retains its named 144p incumbent through 90 s at 3 Mb/s and 79 s at 25 Mb/s, with zero stalls in 239 probes. This comparison qualifies that source and simulator oracle. |
 | Physical iPad, Apple 262 | 294 SDK probes reach film position 598,677 ms through 1080p → 720p → 360p with zero reported stalls and zero black observations. One 104 ms surface pair remains unclassified; independent display continuity is unmeasured. This is scoped SDK evidence, not an uninterrupted-output verdict. |
 | Apple TV | The shared-AAC run reaches film position 488,356 ms in 240 probes through 1080p → 720p → 360p, 90 s at 3 Mb/s and recovery: zero sampled access stalls/black intervals, no unnamed controls or HTTP 410s. Two preparing indicators last 111 ms each while presenting at rate 1; frame/audio continuity is explicitly not measured. The actual Info panel reports Transcode · 360p and 640×360. The separate DTS-source E-AC-3 → AAC VOD boundary is rejected as `prepared_output_unsupported` and remains an open product finding. |

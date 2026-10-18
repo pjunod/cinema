@@ -1,7 +1,7 @@
 # Continuous quality — build uninterrupted resolution changes
 
 **Status:** implementation landed in PR #774; post-merge qualification resumed;
-Measured Apple 262 quality checks pass; Apple 264 navigation/reset repairs are reviewed and development-gated; final main qualification is recorded in PR #1156;
+Measured Apple 262 quality checks pass; Apple 264 and fixture tasks #1186/#1187 are development-gated; controlled tar transport passes focused/complete-archive checks; PR #1156 owns exact qualification, landing and installation identities;
 physical/native and independent output
 acceptance remain open; Firefox browser video passes on `89d790d2e` ·
 **Updated:** 2026-10-18 ·
@@ -14,7 +14,7 @@ acceptance remain open; Firefox browser video passes on `89d790d2e` ·
 
 - **What this is:** Implementation contract for changing video quality without a pause, flash or audio seam on every client, web first, then native.
 - **Where it stands:**
-  - Status (updated 2026-10-18): Apple 262 / `ef33cc71` retains its 79 focused units, three recovery journeys and scoped low-link evidence. Apple 264 task #1183 additionally passes the unchanged native panel Back/source/primary journey after preserving layout capability across account reset; both task development gates pass. PR #1156 carries final main qualification and landing. Independent display/audio continuity, the separate TV E-AC-3-to-AAC boundary and Safari iOS settings remain open; see §10.332.
+  - Status (updated 2026-10-18): Apple 262 / `ef33cc71` retains 79 focused units, three recovery journeys and scoped low-link evidence; Apple 264 navigation checks keep their separate source identity. Tasks #1186 and #1187 are development-gated; #1187 passes all eight jobs in run 5441/internal 5467 on `27da0cde`, plus 66 focused Rust cases. Controlled export comparisons isolate local transport failure and complete tar transport; the reviewed validator preserves the actual full archive. Original failed/incomplete evidence stays retained. The finite 95-minute Rust envelope is not a completion guarantee. PR #1156 owns exact qualification, landing and installation identities. Independent display/audio continuity, the separate TV codec boundary and Safari iOS user settings remain open; no Safari skip or physical 264 acceptance is claimed. See §10.332.
   - Per-milestone state lives in the evidence ledger (CQ0-CQ7 have partial results, CQ8 is "Not run"); empty rows are unfinished work. The tail of the file is a dated running log of review rounds and test repairs.
   - Execution order is CQ0, CQ2a, CQ1, CQ2, CQ3, CQ4, CQ5, CQ6, CQ7, CQ8.
 - **Read further only for:**
@@ -12154,7 +12154,81 @@ these timestamps alone cannot assign upstream production/network delay.
 Task #1179 merged as `8d169859d` after Effort development gate run 5423
 passed on `f29ea145b` / Apple 263. Task #1183 merged as `7dd231718` after
 run 5433 passed all eight jobs on `9a2b6312` / Apple **264**. PR #1156 is
-the authority for final main-bound qualification and landing.
+the authority for exact main-bound qualification, landing and installation
+identities.
+
+**Fixture development records.** Task #1186 merged native/Android test
+fixtures and the web structure golden as `df4d51e36`, after all eight jobs
+passed in run 5438 on `7f21f7428`. The unchanged production web source at
+`5a7b41928` passes 104/104 structural captures. All 300 existing-layout DOM
+deltas match frame wrappers/translation controls; existing focus/request facts
+are unchanged. Meridian adds 26 complete route/viewport captures. This oracle
+repair is not a browser media-continuity result.
+
+Task #1187 merged as `1452a6c6d22ecedb113b5411a5f13f85efe49b6f`, tree
+`3699598273300beace74eb651ec425a77c38776f`, after all eight jobs passed in
+run 5441 (internal 5467) on `27da0cde4f2c63eec7a85297eea52050d3822df6`.
+Rust source `35f237c5` passes 66 focused cases: 39 core, 21 contract and six
+daemon, covering 56 retained failing case IDs plus ten compiled instances of
+four new test definitions. Per-case raw logs and unchanged before/after
+manifests preserve their attribution. Formatting,
+workspace Clippy, catalog and normal hooks pass. Catalog ownership adds two
+literal shared-helper consumers without weakening check selection. Parsed
+source ownership retains production/test shared files and refuses unsupported
+production contexts; historical rewinds retain strict nonempty/shape guards.
+The finite 95-minute Rust envelope preserves the full suite; its complete
+execution duration is still unmeasured. Focused/development results do not
+replace a full qualification receipt.
+
+**Failed full qualification.** Original run 5436 (internal 5462) on
+`5a7b41928` remains terminal and failed. Rust reports 39 named failures and
+leaves 3,440 announced daemon tests without outcomes at its 60-minute cutoff.
+The Store cohort completes 350 passed, 20 failed and three ignored; these lane
+counts are not a unique-failure union. Both amd64 release builds complete,
+but the second media-package export stalls before the 90-minute package limit,
+repeating an earlier failure on another host. Original failures and absent
+outcomes remain retained; no full package/runtime smoke pass is inferred.
+
+**Controlled transport comparison.** Two isolated local-export attempts reach
+120-second inactivity bounds. Cached tar exports complete in 6.9 s and 8.4 s;
+the latter matches CI's explicit attestation and metadata flags and completes
+metadata generation. Both raw tars have SHA256
+`af0309e6b83979db3bc3831f7868d954349abaa1aa811313edf4b307f26192cd`.
+The 1,456,936,448-byte archive contains 38,755 members: 4,607 directories and
+34,148 regular files, totaling 1,428,110,983 expanded payload bytes, with no
+links. Incomplete local output is missing/truncated; it is not byte-equivalent.
+
+The final reviewed validator `f212f2cd` validates every header, payload,
+ancestor/link graph, mode and end marker before staging; it preserves read-only
+modes and publishes only a complete fresh directory. Six archive regressions
+and the existing publication-contract regression pass; the final actual-tar
+extraction has zero path/type/mode/link/content differences, manifest SHA256
+`59a9aabeb95abf0038c7fe114d6ea4d1a8375eb9313e0bc6a4963f70f8217543`.
+Only the second CI media output changes transport; binary/publication local
+exports, producer, audited assembler, context, smokes and caps are unchanged.
+
+**Transport development record — 2026-10-18.**
+
+Task #1188 merged as `b5d286f00db5194347f4dc0a77e63bc49845f872` after all
+eight first-attempt development-gate jobs passed in run 5444 (internal 5470)
+on `04672473ac820207acf331de292c049be869d693`. The tested head and merge
+share tree `0cb0ac80cc765eacdbe99d1140666c52d0e58d61`. This gate proves its
+policy, static contracts and affected compilation; the focused archive tests
+and complete actual-tar extraction remain separately attributed evidence.
+It is not a full qualification or package/runtime smoke receipt.
+
+PR #1156 is the live authority for exact final qualification, landing and
+installation identities. The task source, focused tests and development gates
+recorded here remain source-bound facts after main landing; they do not imply
+a particular qualification outcome or installed build.
+
+Probe limits: the earlier two-CPU producer deadline expires before export,
+so it supplies no local/tar comparison. The isolated source omits `.git` and
+uses a different provenance URN; exact internal BuildKit cause is unconfirmed.
+The common build-monitor deadline excludes bounded termination/log cleanup.
+The original probe's Python optimization environment was not recorded; both
+raw tars were later revalidated explicitly at optimization zero. These finite
+transport results are separate from full package/runtime smoke acceptance.
 
 The physical quality and focused 79-unit checkpoint remains
 `ef33cc71cf89da900883d7ad5d2af5336aecffbc`, tree
