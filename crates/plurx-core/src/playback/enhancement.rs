@@ -66,10 +66,11 @@ pub struct EnhancementFacts<'a> {
     /// Whether the source declares an enhancement layer.
     pub source_el_present: Option<bool>,
     pub route: EnhancementRoute,
-    /// Developer tab: "Process Dolby Vision for HDR output".
-    pub hdr_processing_enabled: bool,
+    /// Developer tab: "Process Dolby Vision for HDR output". `None` when the
+    /// caller does not hold the settings snapshot (a prepared successor).
+    pub hdr_processing_enabled: Option<bool>,
     /// Developer tab: FEL re-encode to Profile 8.1.
-    pub fel_reencode_enabled: bool,
+    pub fel_reencode_enabled: Option<bool>,
     /// Why processing was declined for this play, when it was.
     pub decline_reason: Option<&'a str>,
 }
@@ -87,11 +88,13 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
     use EnhancementBadge::{Dyn, Fel, Rpu};
     let profile = facts.source_profile?;
     let has_el = profile == 7 && facts.source_el_present != Some(false);
-    let not_used = |setting: bool, setting_name: &str| -> String {
+    let not_used = |setting: Option<bool>, setting_name: &str| -> String {
         match (setting, facts.decline_reason) {
-            (false, _) => format!("not used — {setting_name} is off in Settings → Developer"),
-            (true, Some(reason)) => format!("not used for this play — {reason}"),
-            (true, None) => "not used for this play".to_owned(),
+            (Some(false), _) => {
+                format!("not used — {setting_name} is off in Settings → Developer")
+            }
+            (_, Some(reason)) => format!("not used for this play — {reason}"),
+            (_, None) => "not used for this play".to_owned(),
         }
     };
     let mut details = Vec::new();
@@ -221,8 +224,8 @@ mod tests {
             source_profile: Some(7),
             source_el_present: Some(true),
             route,
-            hdr_processing_enabled: true,
-            fel_reencode_enabled: false,
+            hdr_processing_enabled: Some(true),
+            fel_reencode_enabled: Some(false),
             decline_reason: None,
         }
     }
@@ -271,11 +274,22 @@ mod tests {
         assert!(shown.details[0]
             .text
             .contains("not used for this play — the client"));
-        base.hdr_processing_enabled = false;
+        base.hdr_processing_enabled = Some(false);
         let shown = playback_enhancement(&base).expect("DV source");
         assert!(shown.details[0]
             .text
             .contains("is off in Settings → Developer"));
+    }
+
+    #[test]
+    fn unknown_settings_give_a_neutral_reason() {
+        let mut base = facts(EnhancementRoute::Hdr10Base);
+        base.hdr_processing_enabled = None;
+        let shown = playback_enhancement(&base).expect("DV source");
+        assert!(shown
+            .details
+            .iter()
+            .all(|detail| !detail.text.contains("Settings")));
     }
 
     #[test]

@@ -27,6 +27,7 @@ impl TranscodeManager {
                 processed_dv_profile: encoding
                     .filter(|encoding| encoding.preserves_processed_dv())
                     .map(|_| 8),
+                processed_fel: encoding.and_then(|encoding| encoding.processed_fel()),
                 degraded_processing: None,
                 retained_output: facts.response_owner.retained_output_facts(),
                 audio_delivery: facts.audio_delivery,
@@ -60,6 +61,7 @@ impl TranscodeManager {
         let encoder = *session.encoder_label.lock().await;
         Some(StartInfo {
             processed_dv_profile: None,
+            processed_fel: None,
             degraded_processing: None,
             retained_output: None,
             audio_delivery: session.audio_delivery.clone(),

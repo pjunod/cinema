@@ -1596,6 +1596,18 @@ impl Encoding {
                 if plurx_core::transcode::dv_processing::DvProductionRegistry.permits(plan)
                     && plan.destination() == plurx_core::transcode::dv_processing::DvDestination::Profile81)
     }
+    /// Whether the admitted processing plan reconstructs the FEL; `None`
+    /// when no plan is selected.
+    pub(crate) fn processed_fel(&self) -> Option<bool> {
+        match &self.dv_processing {
+            plurx_core::transcode::dv_processing::DvSelection::Selected(plan)
+                if plurx_core::transcode::dv_processing::DvProductionRegistry.permits(plan) =>
+            {
+                Some(plan.reconstructs_fel())
+            }
+            _ => None,
+        }
+    }
     pub(crate) fn processed_dv_supplemental(&self) -> Option<String> {
         if !self.preserves_processed_dv() {
             return None;

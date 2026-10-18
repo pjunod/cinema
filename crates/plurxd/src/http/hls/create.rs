@@ -1319,11 +1319,18 @@ fn session_delivered_processing_shape(
 }
 
 /// The FEL / RPU / DYN indicator for what this session actually delivers.
-fn session_enhancement(
+///
+/// The route comes from the selected processing plan (`processed_fel`), not
+/// from whether a window report has arrived yet: a late report must not leave
+/// an HDR10-E play described as the plain base. The FEL/RPU badges of a
+/// processed HDR10 delivery still wait for a current report on the client
+/// (`requires_effective_processing`).
+pub(super) fn session_enhancement(
     source: Option<&MediaFile>,
     kind: &crate::transcode::SessionKind,
     grade: plurx_core::transcode::OutputGrade,
     processed_dv_profile: Option<u8>,
+    processed_fel: Option<bool>,
     effective: Option<&plurx_core::transcode::dv_processing::DvEffectiveProcessingReport>,
     snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
     decline: Option<&str>,
@@ -1342,28 +1349,31 @@ fn session_enhancement(
         && matches!(kind, crate::transcode::SessionKind::Transcode { .. })
     {
         EnhancementRoute::ReconstructedProfile81 {
-            fel_contributed: profile == Some(7) && has_el,
+            fel_contributed: processed_fel.unwrap_or(profile == Some(7) && has_el),
         }
     } else {
         match delivered {
             Some("dolby_vision") if convert => EnhancementRoute::ConvertedProfile81,
             Some("dolby_vision") if preserve || !convert => EnhancementRoute::NativeDolbyVision,
-            Some("hdr10") => match effective {
-                Some(report) => EnhancementRoute::ProcessedHdr10 {
+            Some("hdr10") => match (effective, processed_fel) {
+                (Some(report), _) => EnhancementRoute::ProcessedHdr10 {
                     fel_contributed: report.fel_contributed(),
                 },
-                None => EnhancementRoute::Hdr10Base,
+                (None, Some(fel)) => EnhancementRoute::ProcessedHdr10 {
+                    fel_contributed: fel,
+                },
+                (None, None) => EnhancementRoute::Hdr10Base,
             },
             _ => EnhancementRoute::Other,
         }
     };
     let setting = |key: &str| {
-        plurx_core::store::stored_switch(
-            snapshot
-                .and_then(|snapshot| snapshot.settings.get(key))
-                .map(String::as_str),
-            false,
-        )
+        snapshot.map(|snapshot| {
+            plurx_core::store::stored_switch(
+                snapshot.settings.get(key).map(String::as_str),
+                false,
+            )
+        })
     };
     plurx_core::playback::enhancement::playback_enhancement(&EnhancementFacts {
         source_profile: profile,
@@ -4257,6 +4267,7 @@ async fn create_with_purpose_inner(
         &info.kind,
         info.grade,
         info.processed_dv_profile,
+        info.processed_fel,
         effective_processing.as_ref(),
         planning_snapshot.as_ref(),
         processing_decline.as_deref(),
@@ -5979,7 +5990,16 @@ impl PreparedSourcePlayback {
             info.playlist_url.clone()
         };
         Ok(StartResponse {
-            enhancement: None,
+            enhancement: session_enhancement(
+                Some(&self.file),
+                &info.kind,
+                info.grade,
+                info.processed_dv_profile,
+                info.processed_fel,
+                None,
+                None,
+                None,
+            ),
             effective_processing: None,
             delivered_audio: info.audio_delivery.clone(),
             measured_candidate_outputs: None,

@@ -356,6 +356,7 @@ fn a_switch_onto_media_that_never_published_aborts_the_preparation() {
     // survive to be acknowledged.
     let binding = || PreparedActionBinding {
         successor: PreparedSuccessorAction {
+            enhancement: None,
             control: None,
             staged_incarnation_id: staged.clone(),
             deadline_ms: i64::MAX,
@@ -365,6 +366,7 @@ fn a_switch_onto_media_that_never_published_aborts_the_preparation() {
             effective_selection: selection.clone(),
         },
         action: ControlAction::Prepare {
+            enhancement: None,
             control: None,
             action_id: action_id.clone(),
             session_id: "session".to_owned(),
@@ -2333,6 +2335,7 @@ fn a_commit_naming_an_origin_the_offer_did_not_is_refused() {
         let control = ControlState {
             prepared_action: Some(PreparedActionBinding {
                 successor: PreparedSuccessorAction {
+                    enhancement: None,
                     control: None,
                     staged_incarnation_id: staged.clone(),
                     deadline_ms: i64::MAX,
@@ -2351,6 +2354,7 @@ fn a_commit_naming_an_origin_the_offer_did_not_is_refused() {
                     },
                 },
                 action: ControlAction::Prepare {
+                    enhancement: None,
                     control: None,
                     action_id: action_id.clone(),
                     session_id: "session".to_owned(),
@@ -2601,6 +2605,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
     let session = uuid::Uuid::new_v4().to_string();
     let honest = ControlAction::Prepare {
         control: None,
+        enhancement: None,
         action_id: uuid::Uuid::new_v4().to_string(),
         session_id: session.clone(),
         playlist_url: format!("/api/v1/hls/{session}/master.m3u8"),
@@ -2625,6 +2630,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "a protocol-relative URL onto another host",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: session_id.clone(),
@@ -2636,6 +2642,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an absolute URL onto another host",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: session_id.clone(),
@@ -2647,6 +2654,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "no session at all",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: String::new(),
@@ -2658,6 +2666,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "no action id to fence the acknowledgement with",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: String::new(),
                 session_id: session_id.clone(),
@@ -2669,6 +2678,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an action id that acknowledgements cannot parse",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: "not-a-uuid".to_owned(),
                 session_id: session_id.clone(),
@@ -2680,6 +2690,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "a backslash-relative URL, which browsers treat as //",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: session_id.clone(),
@@ -2691,6 +2702,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "the session named only in a query parameter",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: session_id.clone(),
@@ -2702,6 +2714,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "the session named only in a fragment",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: session_id.clone(),
@@ -2713,6 +2726,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "a path that climbs out of the session's own",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: session_id.clone(),
@@ -2724,6 +2738,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "encoded dot segments normalized after validation",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: session_id.clone(),
@@ -2735,6 +2750,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an internal backslash normalized as a path separator",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: session_id.clone(),
@@ -2746,6 +2762,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an arbitrary same-origin route containing the session id",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: session_id.clone(),
@@ -2757,6 +2774,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "a session id that is not one",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: "a".to_owned(),
@@ -2768,6 +2786,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
         (
             "an origin before the start of the film",
             ControlAction::Prepare {
+                enhancement: None,
                 control: None,
                 action_id: action_id.clone(),
                 session_id: session_id.clone(),
@@ -2784,6 +2803,7 @@ fn a_relayed_preparation_cannot_point_a_client_anywhere() {
     invalid_selection.height = crate::transcode::MAX_HEIGHT + 1;
     let invalid_nested = ControlAction::Prepare {
         control: None,
+        enhancement: None,
         action_id,
         session_id: session_id.clone(),
         playlist_url: format!("/api/v1/hls/{session_id}/master.m3u8"),
@@ -2814,6 +2834,7 @@ fn a_relayed_preparation_needs_the_declared_vocabulary() {
     let session = uuid::Uuid::new_v4().to_string();
     let action = ControlAction::Prepare {
         control: None,
+        enhancement: None,
         action_id: uuid::Uuid::new_v4().to_string(),
         session_id: session.clone(),
         playlist_url: format!("/api/v1/hls/{session}/master.m3u8"),
@@ -2834,6 +2855,7 @@ fn a_relayed_preparation_needs_the_declared_vocabulary() {
 fn prepare_action() -> ControlAction {
     let session = uuid::Uuid::new_v4().to_string();
     ControlAction::Prepare {
+        enhancement: None,
         control: None,
         action_id: uuid::Uuid::new_v4().to_string(),
         session_id: session.clone(),
@@ -2941,6 +2963,7 @@ fn a_new_ask_in_the_same_packet_refuses_the_old_asks_commit() {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            enhancement: None,
             control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: i64::MAX,
@@ -3203,6 +3226,7 @@ fn a_refused_packet_cannot_advance_the_ask_and_strand_a_successor() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
         deadline_ms: i64::MAX,
@@ -3318,6 +3342,7 @@ fn a_successor_staged_without_a_recorded_ask_still_commits() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
         deadline_ms: i64::MAX,
@@ -3702,6 +3727,7 @@ fn a_prepared_successor_gets_one_action_identity_and_replays_it_exactly() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        enhancement: None,
         control: None,
         staged_incarnation_id,
         deadline_ms: i64::MAX,
@@ -3800,6 +3826,7 @@ fn preparation_acknowledgements_are_fenced_recorded_and_replayed() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
         deadline_ms: i64::MAX,
@@ -3964,6 +3991,7 @@ fn failed_preparation_acknowledgement_moves_the_slot_to_aborting() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
         deadline_ms: i64::MAX,
@@ -4053,6 +4081,7 @@ fn expired_or_abort_won_commit_acknowledgement_is_rejected_and_replayed() {
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
+            enhancement: None,
             control: None,
             staged_incarnation_id: staged_incarnation_id.clone(),
             deadline_ms: preparation_deadline,
@@ -4147,6 +4176,7 @@ fn settled_deadline_abort_still_rejects_its_late_commit_acknowledgement() {
     ));
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
         deadline_ms: preparation_deadline,
@@ -4296,6 +4326,7 @@ fn vocabulary_is_frozen_for_the_sequence_that_was_accepted() {
     ));
     let session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        enhancement: None,
         control: None,
         staged_incarnation_id,
         deadline_ms: i64::MAX,
@@ -4350,6 +4381,7 @@ fn a_changed_payload_cannot_consume_the_next_sequence() {
     ));
     let session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        enhancement: None,
         control: None,
         staged_incarnation_id,
         deadline_ms: i64::MAX,
@@ -4411,6 +4443,7 @@ fn owner_epoch_rollover_aborts_instead_of_reannouncing_old_staging() {
     ));
     let session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        enhancement: None,
         control: None,
         staged_incarnation_id,
         deadline_ms: i64::MAX,
@@ -4465,6 +4498,7 @@ fn an_expired_preparation_cannot_cross_the_acceptance_boundary() {
     ));
     let session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        enhancement: None,
         control: None,
         staged_incarnation_id,
         deadline_ms: 10_000,
@@ -5178,6 +5212,7 @@ async fn a_staged_successor_round_trips_through_the_actor_mailbox() {
     let request = request();
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        enhancement: None,
         control: None,
         staged_incarnation_id: "successor-1".to_owned(),
         deadline_ms: i64::MAX,
@@ -5265,6 +5300,7 @@ async fn preparation_ownership_transfers_before_a_dropped_actor_reply() {
     );
     let prepared_session_id = uuid::Uuid::new_v4().to_string();
     let successor = PreparedSuccessorAction {
+        enhancement: None,
         control: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
         deadline_ms: i64::MAX,
@@ -16711,6 +16747,7 @@ fn accept_step_rejection_order() {
     };
     let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
     let successor = |media_origin_ms: i64| PreparedSuccessorAction {
+        enhancement: None,
         staged_incarnation_id: staged_incarnation_id.clone(),
         deadline_ms: i64::MAX,
         session_id: "prepared".to_owned(),

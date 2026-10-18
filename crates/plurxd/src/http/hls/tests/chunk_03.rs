@@ -259,6 +259,7 @@
             control,
             media_origin_ms,
             effective_selection,
+            ..
         } = &first.action
         else {
             panic!("the next exchange must announce the staged successor");

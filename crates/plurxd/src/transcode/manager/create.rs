@@ -2971,6 +2971,9 @@ impl TranscodeManager {
             .as_ref()
             .filter(|encoding| encoding.preserves_processed_dv())
             .map(|_| 8);
+        let processed_fel = encoding
+            .as_ref()
+            .and_then(|encoding| encoding.processed_fel());
         let target_height = encoding
             .as_ref()
             .map_or(file.height.unwrap_or(0), |encoding| {
@@ -3136,6 +3139,7 @@ impl TranscodeManager {
         }
         Ok(StartInfo {
             processed_dv_profile,
+            processed_fel,
             degraded_processing,
             retained_output: response_facts
                 .as_ref()
