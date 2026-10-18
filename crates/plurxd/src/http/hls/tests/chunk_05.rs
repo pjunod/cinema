@@ -3402,3 +3402,40 @@ async fn negotiated_relay_uses_owner_local_acquisition_and_preserves_cached_mani
     assert_eq!(text.replace("#EXT-X-START:TIME-OFFSET=296.065,PRECISE=NO\n","").as_bytes(),baseline);
     assert_eq!(fixture.state.transcode.vod_playlist(session).await.expect("publication").result.expect("unchanged"),baseline);
 }
+
+/// The indicator's route comes from the selected processing plan, not from
+/// whether the first window's report has arrived: a create that beats its
+/// report must still describe HDR10-E, and a staged copy successor keeps the
+/// native DYN pill.
+#[test]
+fn the_enhancement_follows_the_selected_plan_before_any_report() {
+    use plurx_core::playback::enhancement::EnhancementBadge;
+    use plurx_core::transcode::OutputGrade;
+    let file = dolby_vision_p7_file();
+    let rung = crate::transcode::SessionKind::Transcode { height: 2160 };
+    let planned =
+        session_enhancement(Some(&file), &rung, OutputGrade::Hdr10, None, Some(true), None, None, None)
+            .expect("a Dolby Vision source");
+    assert!(planned.requires_effective_processing);
+    assert!(planned
+        .details
+        .iter()
+        .any(|detail| detail.badge == EnhancementBadge::Rpu && detail.active));
+    assert!(planned
+        .details
+        .iter()
+        .any(|detail| detail.badge == EnhancementBadge::Fel && detail.active));
+    let base = session_enhancement(Some(&file), &rung, OutputGrade::Hdr10, None, None, None, None, None)
+        .expect("a Dolby Vision source");
+    assert!(base.active.is_empty() && !base.requires_effective_processing);
+    // No settings snapshot (a prepared successor): never claims the setting is off.
+    assert!(base.details.iter().all(|detail| !detail.text.contains("Settings")));
+    let native = crate::transcode::SessionKind::Copy {
+        convert_dolby_vision: false,
+        aac: false,
+        preserve_dolby_vision: true,
+    };
+    let kept = session_enhancement(Some(&file), &native, OutputGrade::Sdr, None, None, None, None, None)
+        .expect("a Dolby Vision source");
+    assert_eq!(kept.active, [EnhancementBadge::Dyn]);
+}

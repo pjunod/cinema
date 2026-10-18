@@ -1589,6 +1589,27 @@ impl PrivateWindow {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod helper_decoder_tests {
+    use super::helper_decoder;
+    use plurx_core::transcode::DecodeBackend;
+
+    #[test]
+    fn the_helper_decoder_report_names_the_backend() {
+        for (mode, backend) in [
+            ("vaapi", DecodeBackend::Vaapi),
+            ("vaapi-host-copy", DecodeBackend::Vaapi),
+            ("vaapi-software-fallback", DecodeBackend::Software),
+            ("software", DecodeBackend::Software),
+        ] {
+            let row = serde_json::json!({"kind": "decoder", "mode": mode, "reason": ""});
+            assert_eq!(helper_decoder(&row), Ok(backend), "{mode}");
+        }
+        assert!(helper_decoder(&serde_json::json!({"kind": "decoder"})).is_err());
+        assert!(helper_decoder(&serde_json::json!({"kind": "decoder", "mode": "cuda"})).is_err());
+    }
+}
+
 #[cfg(test)]
 mod private_window_outcome_tests {
     use super::encoder_diagnostic_tail;
