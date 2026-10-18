@@ -7354,3 +7354,11 @@ source = "clients/apple/Sources/RemoteNavigationCoordinator.swift"
 source_anchor = "func resetIdentity() {"
 test = "clients/apple/Tests/MeridianTests.swift"
 test_anchor = "testIdentityResetKeepsCurrentMeridianOpenerAndClearsAccountActions"
+
+[[fixes]]
+id = "apple.navigation-destination-route-identity"
+commits = ["1f05563dabe6741ce31f18d3968859f17ed51fc6"]
+source = "clients/apple/Sources/HomeView.swift"
+source_anchor = ".id(RemoteNavigationCoordinator.routeScope(route))"
+test = "clients/apple/UITests/TVMeridianNavigationTests.swift"
+test_anchor = "testPanelOwnsNativeFocusAndBackPreservesLibraryRoute"

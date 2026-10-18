@@ -312,7 +312,8 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true'
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
-    timeout-minutes: 60
+    # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
+    timeout-minutes: 120
     concurrency:
       group: plurx-apple-silicon-heavy
       cancel-in-progress: false
