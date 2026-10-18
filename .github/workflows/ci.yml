@@ -1006,7 +1006,9 @@ jobs:
     if: needs.scope.outputs.cluster_auth == 'true'
     # Retained outcomes still require compiling the large current native targets.
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
-    timeout-minutes: 30
+    # Run 5447 passed 213 commands; the next feature target was still compiling
+    # at 30 minutes. Full completion time remains unmeasured.
+    timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "1"
     steps:
