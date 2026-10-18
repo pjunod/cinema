@@ -1,57 +1,31 @@
 # docs — where everything is, and what each file answers
 
 The front door is the repo [README](../README.md): what plurx is, how to run
-it, and the reading path for a newcomer. This page is the map of `docs/`
-itself — every file, the question it answers, and whether it is still live.
+it, and the reading path for a newcomer. This page is the router for `docs/`:
+the reference documents at this level, and one row per subject folder linking
+that folder's own index, which lists every file in it, the question it answers
+and its status. Read this page, then only the folder index you need.
 
-**Projects / to-do:** [Designed work and remaining acceptance](features/PROJECT-BACKLOG.md)
-is the cross-project queue for proposals that must not get lost. It separates
-unbuilt work, built work awaiting acceptance, unresolved older plans and
-explicitly deferred decisions. Update its row when a project's state changes.
+**Projects / to-do:** [the project backlog](features/PROJECT-BACKLOG.md) is the
+cross-project queue: unbuilt work, built work awaiting acceptance, unresolved
+older plans and deferred decisions. Update its row when a project's state
+changes.
 
 Three tiers, and only three:
 
-- **This directory** holds the reference set: the dozen-and-a-half documents
-  that describe plurx *as it is today*. They are maintained, and a change to
-  behavior is expected to change them in the same commit.
-- **Subject folders** hold everything written *about* a piece of work — the
-  plan, its reviews, the handoffs an agent executed, the status tracker, the
-  diagnoses. One subject, one folder, so the whole thread of a project reads
-  in one place.
-- **[`archive/`](archive/)** holds work that is finished and not part of a
-  live thread. Nothing is deleted; it is out of the way, not gone.
+- **This directory** holds the reference set: the documents that describe
+  plurx *as it is today*. A behavior change updates them in the same commit.
+- **Subject folders** hold everything written *about* a piece of work — plan,
+  reviews, handoffs, status tracker, diagnoses. One subject, one folder, one
+  index.
+- **[`archive/`](archive/README.md)** holds finished work outside any live
+  thread. Nothing is deleted; it is out of the way, not gone.
 
-Status words below mean exactly this: **live** — maintained, describes the
-current system · **open** — work in progress or awaiting a decision ·
-**built** — the work landed; the doc is the record of what and why ·
-**done** — closed out, kept for history. Accurate as of 2026-09-07; when a
-row and a doc's own `**Status:**` header disagree, the doc wins.
-
-Mobile UI work: [Apple build 159 notes](apple-builds/317-ui-usability.md) · [Mobile and TV usability audit](clients/MOBILE-UI-USABILITY-AUDIT.md) — **open**.
-
-Apple build 160: [Native Live TV and shelf layouts](apple-builds/320-native-layout-followup.md).
-
-Native follow-up: [Phone, tablet and TV layout fixes](clients/NATIVE-LAYOUT-FOLLOWUP.md) — **open**.
-
-Native Home restoration: [Original Apple Home screens](apple-builds/334-original-home.md) — **open**.
-
-Library-page revision: [Quiet Home and open media details](clients/CALM-LIBRARY-PAGES.md) — **built**; web Home and item page since restored to their originals.
-
-Apple Home clipping: [Featured movie content bounds](apple-builds/570-home-hero-clipping.md).
-
-Apple playback controls: [10 and 30 second seeking](apple-builds/689-playback-seek-controls.md).
-
-Apple seek icons: [Directional arrows for seek distances](apple-builds/694-seek-arrow-icons.md).
-
-Apple playback buffer: [944-playback-buffer-limit.md](apple-builds/944-playback-buffer-limit.md).
-
-Apple temporary serving fence: [962-temporary-serving-fence-control.md](apple-builds/962-temporary-serving-fence-control.md).
-
-Apple display wake: [818-display-wake.md](apple-builds/818-display-wake.md) — playback owns the display idle timer.
-
-Apple build 222: [Verified Dolby Vision processing reports](apple-builds/968-dv-processing-reports.md).
-
-Sharing activation: [Running-cluster activation and SQL transition safety](features/SHARING-LIVE-ACTIVATION.md) — **open**.
+Status words mean exactly this: **live** — maintained, describes the current
+system · **open** — in progress or awaiting a decision · **built** — landed;
+the doc records what and why · **done** — closed, kept for history ·
+**superseded** — replaced by a later document. When an index row and a doc's
+own `**Status:**` header disagree, the doc wins.
 
 ## Find it fast
 
@@ -83,6 +57,7 @@ Sharing activation: [Running-cluster activation and SQL transition safety](featu
 | What is being built right now? | [STATUS.html](STATUS.html) · [ROADMAP.md](ROADMAP.md) |
 | What did we decide about X, and when? | the subject folder for X — plans and reviews carry dated `**Status:**` headers |
 
+
 ## The reference set
 
 Maintained documents describing the current system. Everything here is
@@ -109,692 +84,47 @@ Maintained documents describing the current system. Everything here is
 | [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md) | Fast effort branches, deliberate qualification — how work reaches `main`. |
 | [STATUS.html](STATUS.html) | The pinned status page: what is deployed, on which nodes and clients. |
 
+
+A status record that also lives at this level:
+
+| File | Answers | |
+|---|---|---|
+| [DECODER_SELECTION_RECOVERY_STATUS.md](DECODER_SELECTION_RECOVERY_STATUS.md) | The live execution ledger for that plan: what is merged, what was tested, and what remains unsafe. | open |
+
 Assets and generated records also live at this level:
-[`img/`](img/) (README screenshots) · [`apple-builds/`](apple-builds/) (one
-note per Apple build, read by `validation/apple_build.py`) ·
+[`img/`](img/) (README screenshots) · [`apple-builds/`](apple-builds/README.md)
+(one note per Apple build, read by `validation/apple_build.py`) ·
 [`mockups/`](mockups/) · [`evidence/`](evidence/).
 
-Apple build 137: [Library channel startup and contrast](apple-builds/245-library-channel-start-and-contrast.md).
-Apple build 138: [Library channel playback decision](apple-builds/245-library-channel-playback-decision.md).
-Apple build 141: [Library channel buffering demand](apple-builds/245-library-channel-buffering-demand.md).
-Apple build 143: [Playback lifecycle recovery and prepared handoff](apple-builds/257-playback-lifecycle.md).
-Apple build 147: [The playback surface contract](apple-builds/278-playback-surface-contract.md).
-Apple build 151: [Playback surface reach](apple-builds/278-playback-surface-reach.md).
-Apple build 152: [Banner actions](apple-builds/278-banner-actions.md).
-Apple build 153: [Live TV stall and fullscreen surface](apple-builds/300-live-tv-surface.md).
+## Subject folders
 
-Previous: [Live TV playback method](apple-builds/245-live-tv-playback-method.md).
+One row per folder; the folder index lists every document in it. Counts are
+index rows by status as of 2026-10-17 — the folder index is authoritative.
 
----
-
-## playback-control/ — the playback control rewrite
-
-Explicit demand, one owner per stream, prepared handoffs. The largest single
-thread in the repo: a protocol plan, milestone contracts and implementation
-receipts. Start at the current rewrite remainder, then the lifecycle coverage
-map; older milestone files are historical contracts, not a fresh missing-work
-list.
-
-| File | Answers | |
+| Folder | What it holds | Rows |
 |---|---|---|
-| [STATUS-HISTORY.md](playback-control/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
-| [REPLACEMENT-GATE-SUPERSESSION-RCA.md](playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md) | Why an abandoned replacement held its player key forever, the lab6 evidence, and the supersedable gate that fixes it. | built |
-| [CALLBACK-ROOT-CAUSE-AND-FIX.md](playback-control/CALLBACK-ROOT-CAUSE-AND-FIX.md) | Why Safari cold resume lost frame callbacks, the lifecycle fix, controlled evidence, and questions for Fable review. | open |
-| [MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md](playback-control/MACOS-HDR-ACCEPTANCE-FOLLOWUPS-2026-10-12.md) | Seven retained Mac HDR follow-ups, completed bounded physical/current-owner evidence, reviewed repairs and task gates; final frozen-tree promotion remains pending and broader device/optical limits stay explicit. | open |
-| [F6 authority/media controls](playback-control/evidence/f6-authority-media-20261015.json) | Controlled real-media brief/sustained authority loss and current F3 owner regressions; physical accounting remains separate. | built |
-| [Paused VOD seek repair receipt](playback-control/evidence/paused-vod-seek-20261012.json) | F1 stopped-loader reproduction, failed first harness, actual paused forward/backward target frames, regressions and retained Air rolling-reopen failure; Ordinary Air hls.js HDR10-to-SDR rerun passes; native HLS and the broader matrix remain separate. | open |
-| [October 13 Air HDR paused-reopen receipt](playback-control/evidence/air-hdr-paused-20261013.json) | Actual Metal paused target/reopen proof, exact surface repair qualification/landing, 58½-minute CPU control, preserved failures and verified restoration. | done |
-| [F2 decoded-alignment repair receipt](playback-control/evidence/f2-decoded-alignment-20261013.json) | Original refusals, both qualified landings, installed HDR/SDR proofs, immutable archives and final zero-resume/clipboard restoration; broader audio/matrix remain separate. | done |
-| [F7 Hable reference-white repair receipt](playback-control/evidence/f7-reference-white-20261015.json) | Pinned 203-versus-100-nit diagnosis, neutral and nine held-film controls, bounded shader correction, unchanged HLG/default controls and verified private source/evidence archive; full shipping package and bounded physical Air comparison recorded separately, final promotion pending. | open |
-| [F4 compressed Matroska parser receipt](playback-control/evidence/f4-compressed-matroska-parser-20261015.json) | Why did unchanged compressed subtitle tracks refuse SDR startup, and what does the repaired sealed parser prove? | built |
-| [October 15 physical playback receipt](playback-control/evidence/hdr-physical-playback-20261015.json) | What did the corrected Air Metal/CPU and genuine AV1 cold/warm playback runs show, and which immutable archives preserve the failures and cleanup? | **built** |
-| [F3 current-owner lifecycle receipt](playback-control/evidence/f3-real-lifecycle-20261015.json) | Do owned family charges, scheduled pins, idle readers and browser teardown settle under the current lifecycle policy, and what remains unknown about the original incident? | built |
-| [PLAYBACK-LIFECYCLE-COVERAGE.md](playback-control/PLAYBACK-LIFECYCLE-COVERAGE.md) | Playback states and transitions, buffer handoffs, communication contracts, existing test anchors, and open acceptance gaps. | open |
-| [PLAYBACK-REWRITE-REMAINDER.md](playback-control/PLAYBACK-REWRITE-REMAINDER.md) | Executed Sol handoff: the finite B01–B05 remainder, its boundaries, and the work promoted through PR #263. | done |
-| [PLAYBACK-LIFECYCLE-IMPLEMENTATION.md](playback-control/PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) | Completed S01–S09 implementation contract: code entry points, lifecycle/buffer contracts, compiler commands, deferred regression coverage, advisory Developer settings and batched fast-lane delivery. | built |
-| [PLAYBACK-LIFECYCLE-STATUS.md](playback-control/PLAYBACK-LIFECYCLE-STATUS.md) | Completed execution ledger for the lifecycle implementation: package state, compilation, deferred tests, review, qualification, promotion and cleanup. | done |
-| [PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md](playback-control/PLAYBACK-BUFFER-OBSERVABILITY-STATUS.md) | Completed execution ledger and live measurement contract for playhead-anchored server readiness, HTTP delivery, client loaded ranges, and presentation progress. | built |
-| [Retained playback observations](evidence/playback-lifecycle-observation-2026-09-11.json) | Sanitized September 11 Apple TV observations used by the lifecycle audit; diagnostic evidence, not a runnable test fixture or acceptance result. | done |
-| [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-PLAN.md) | The whole design: explicit demand, one owner, prepared handoffs. | open |
-| [PLAYBACK-CONTROL-STATUS.md](playback-control/PLAYBACK-CONTROL-STATUS.md) | What is actually built and merged, milestone by milestone. | open |
-| [PLAYBACK-CONTROL-IMPLEMENTATION-HANDOFF.md](playback-control/PLAYBACK-CONTROL-IMPLEMENTATION-HANDOFF.md) | The numbered work items the milestones execute. | open |
-| [PLAYBACK-CONTROL-PROTOCOL-REVIEW.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-REVIEW.md) | Twelve contracts corrected before any code was written. | done |
-| [PLAYBACK-CONTROL-PROTOCOL-M1.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-M1.md) · [review](playback-control/PLAYBACK-CONTROL-PROTOCOL-M1-REVIEW.md) | M1: the fenced, observable control path. | built |
-| [PLAYBACK-CONTROL-PROTOCOL-M2-WEB.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-M2-WEB.md) · [review](playback-control/PLAYBACK-CONTROL-PROTOCOL-M2-WEB-REVIEW.md) | M2: the browser shadow reporter. | built |
-| [PLAYBACK-CONTROL-PROTOCOL-M3-ANALYSIS.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-M3-ANALYSIS.md) · [review](playback-control/PLAYBACK-CONTROL-PROTOCOL-M3-ANALYSIS-REVIEW.md) | M3: operator-facing analysis control and status. | built |
-| [PLAYBACK-CONTROL-PROTOCOL-M3-LEASE-ACTOR.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-M3-LEASE-ACTOR.md) | M3a: the rolling lease actor that replaced the split control mutex. | built |
-| [PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md) | M3b: explicit demand lease and producer pacing. | built |
-| [PLAYBACK-CONTROL-PROTOCOL-M3-DELIVERY-LEDGER.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-M3-DELIVERY-LEDGER.md) | M3c1: the attempt-fenced delivery ledger. | built |
-| [PLAYBACK-CONTROL-PROTOCOL-M3-PRODUCER-EVENTS.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-M3-PRODUCER-EVENTS.md) | M3c2: producer progress and process-exit events. | built |
-| [PLAYBACK-CONTROL-PROTOCOL-M3-TERMINAL-EVENTS.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-M3-TERMINAL-EVENTS.md) | M3c3: who owns the terminal event, and the orderly client release. | built |
-| [PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md) | M4: one producer deadline, and the watchdog it removes. | built |
-| [REMAINING-ROADMAP-HANDOFF.md](playback-control/REMAINING-ROADMAP-HANDOFF.md) | M5.5 through M9 — the rest of the rewrite, scoped. | open |
-| [M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md](playback-control/M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) | M5: moving recovery authority off the clients. | built |
-| [M5-FLEET-ACCEPTANCE.md](playback-control/M5-FLEET-ACCEPTANCE.md) | How to accept M5 on the real fleet rather than a branch. | open |
-| [M5-FLEET-RESULTS-18886477.md](playback-control/M5-FLEET-RESULTS-18886477.md) | M5 fleet run at `18886477` — protocol partially accepted. | done |
-| [M5-FLEET-RESULTS-943D8A9A.md](playback-control/M5-FLEET-RESULTS-943D8A9A.md) | M5 fleet run at `943d8a9a` — deployed, acceptance not established. | done |
-| [M5-FLEET-RESULTS-C571A50D.md](playback-control/M5-FLEET-RESULTS-C571A50D.md) | M5 fleet run at `c571a50d` — deployed, acceptance blocked. | done |
-| [M5.5-PREPARATION-FEASIBILITY-SPIKE.md](playback-control/M5.5-PREPARATION-FEASIBILITY-SPIKE.md) | Can a client hold two pipelines at once? The spike that decides. | open |
-| [M5.5-SPIKE-EXECUTION-HANDOFF.md](playback-control/M5.5-SPIKE-EXECUTION-HANDOFF.md) | Running that spike on real hardware, without Paul. | open |
-| [M5.5-STAGED-GENERATIONS-HANDOFF.md](playback-control/M5.5-STAGED-GENERATIONS-HANDOFF.md) | A successor stream that exists without being current. | open |
-| [M6-CALLER-HANDOFF.md](playback-control/M6-CALLER-HANDOFF.md) | Historical M6 caller design; its proof/headroom admission rules are superseded by the lifecycle implementation contract. | superseded |
-| [M6-IMPLEMENTATION-HANDOFF.md](playback-control/M6-IMPLEMENTATION-HANDOFF.md) | Historical M6 prepared-recipe contract and measurements; use the lifecycle contract for current policy. | superseded |
-| [M6-AXIS-CASE-HANDOFF.md](playback-control/M6-AXIS-CASE-HANDOFF.md) | The one measurement M6 waits on, and how to take it. | done |
-| [M6-AXIS-CASE-RESULTS.md](playback-control/M6-AXIS-CASE-RESULTS.md) | The 30 Mbit/s axis run, below the throughput floor and superseded the same day by a 40 Mbit/s re-run that admitted the pair. Read the correction at the top. | superseded |
-| [M6-CLIENT-REPLACEMENT-CONTRACT.md](playback-control/M6-CLIENT-REPLACEMENT-CONTRACT.md) | Historical v1 client-wire snapshot; the lifecycle contract supersedes its software proof and throughput gates. | superseded |
-| [CLIENT-PREPARED-SWITCH-CONTRACT.md](playback-control/CLIENT-PREPARED-SWITCH-CONTRACT.md) | The streaming-reliability prepared-switch adapter contract shared by Apple, Android, and web. | built |
-| [CLIENT-APPLE-HANDOFF.md](playback-control/CLIENT-APPLE-HANDOFF.md) | The implementation handoff for Apple prepared-switch message adaptation. | built |
-| [CLIENT-ANDROID-HANDOFF.md](playback-control/CLIENT-ANDROID-HANDOFF.md) | The implementation handoff for Android prepared-switch message adaptation. | built |
-| [CLIENT-WEB-HANDOFF.md](playback-control/CLIENT-WEB-HANDOFF.md) | The implementation handoff for web prepared-switch message adaptation. | built |
-| [M6-APPLE-CLIENT-BUILD.md](playback-control/M6-APPLE-CLIENT-BUILD.md) | Historical Apple M6 build brief; current enablement and retry policy lives in the lifecycle status. | superseded |
-| [M6-WEB-CLIENT-BUILD.md](playback-control/M6-WEB-CLIENT-BUILD.md) | Historical web M6 build brief; current enablement and first-frame fallback lives in the lifecycle status. | superseded |
-| [M6-ANDROID-CLIENT-BUILD.md](playback-control/M6-ANDROID-CLIENT-BUILD.md) | Historical Android M6 build brief; current enablement and retry policy lives in the lifecycle status. | superseded |
-| [M6-ANDROID-CLIENT-STATUS.md](playback-control/M6-ANDROID-CLIENT-STATUS.md) | Historical Android implementation record; its qualification prose is not current admission policy. | superseded |
-| [M6-APPLE-HARDWARE-ACCEPTANCE.md](playback-control/M6-APPLE-HARDWARE-ACCEPTANCE.md) | Historical hardware procedure; the lifecycle status contains the current finite sweep card. | superseded |
-| [M6-WEB-CLIENT.md](playback-control/M6-WEB-CLIENT.md) | Historical web implementation record; its throughput qualification prose is not current admission policy. | superseded |
-| [M6-SERVER-PRIME-HANDOFF.md](playback-control/M6-SERVER-PRIME-HANDOFF.md) | Phase 3 — the reserve/prime constraints and the implementation that now attaches the staged VOD worker. | built |
-| [CONTINUOUS-QUALITY-STATUS.html](playback-control/CONTINUOUS-QUALITY-STATUS.html) | Current continuous-quality build progress, retained evidence and ownership dependencies. | open |
-| [CONTINUOUS-FOREGROUND-ADMISSION.md](playback-control/CONTINUOUS-FOREGROUND-ADMISSION.md) | Why background indexing refused continuous starts, and the bounded foreground admission repair. | open |
-| [CONTINUOUS-QUALITY-BUILD.md](playback-control/CONTINUOUS-QUALITY-BUILD.md) | Merged continuous-quality implementation and source-bound acceptance: safe failed changes, shared audio, bounded JIT production, browser campaigns, Safari LAN verifier repair and remaining physical-device evidence. | open |
-| [CONTINUOUS-QUALITY-REVIEW.md](playback-control/CONTINUOUS-QUALITY-REVIEW.md) | Adversarial findings and dispositions for the continuous-quality build contract. | open |
-| [Native prepared playback correction](apple-builds/994-cadence-unavailable.md) | Full-width launch IDs, refused-transfer cleanup and resolving staged tracks before exposure; combined native qualification remains open. | open |
-| [CONTINUOUS-QUALITY-MATRIX.md](playback-control/CONTINUOUS-QUALITY-MATRIX.md) | Which source/lifecycle/pressure rows have current, older or missing evidence, and how to read the focused lifecycle helper. | open |
-| [QUALITY-SWITCH-CONTINUITY-PLAN.md](playback-control/QUALITY-SWITCH-CONTINUITY-PLAN.md) | Why every rung change is still a reopen although the prepared handoff is built and deployed on every side, and the plan (M0–M3) to make a quality change a handoff with the incumbent playing throughout. | open |
-| [QUALITY-SWITCH-CONTINUITY-BUILD.md](playback-control/QUALITY-SWITCH-CONTINUITY-BUILD.md) | The build plan for the executing agent: M0 server (`delivery.preparation`, supersession cancels the successor), M2 Apple/Android offer wait + rendezvous, M1 web owner + alignment, M3 measurement; Astra review disposition in §11. | open |
-| [QUALITY-SWITCH-CONTINUITY-RESULTS.md](playback-control/QUALITY-SWITCH-CONTINUITY-RESULTS.md) | The acceptance record for the prepared quality handoff: what each client measures around the commit, the twenty-change bar, the two measurements deliberately not taken and what they would cost, and empty result rows until a device run fills them. | open |
-| [M7-REMAINDER-HANDOFF.md](playback-control/M7-REMAINDER-HANDOFF.md) | M7: subtitle readiness, bounded materialization, seek coalescing, burn-join, prewarm. | open |
-| [M7-R-M3-CLAUDE-HANDOFF.md](playback-control/M7-R-M3-CLAUDE-HANDOFF.md) | Finish M2, then build seek coalescing. | open |
-| [M7-M1-LARGE-MKV-OBSERVATION.md](playback-control/M7-M1-LARGE-MKV-OBSERVATION.md) | Large-MKV readiness and bounded subtitle publication, observed. | done |
-| [M7-M1-M3-BLOCKER-REVIEW.md](playback-control/M7-M1-M3-BLOCKER-REVIEW.md) | Why the M7 remainder is not accepted yet. | open |
-| [M7-M4-BURN-JOIN-DESIGN-REVIEW.md](playback-control/M7-M4-BURN-JOIN-DESIGN-REVIEW.md) | The burn-join design: approve, with one contract correction. | done |
-| [MARKER-PREWARM-HANDOFF.md](playback-control/MARKER-PREWARM-HANDOFF.md) | Marker-destination prewarm — the consumer its metric waits for. | open |
-| [CONTENT-ANALYSIS-INDEX-HANDOFF.md](playback-control/CONTENT-ANALYSIS-INDEX-HANDOFF.md) | Exact skip markers, an explicit queue, and its instrumentation. | open |
-
----
-
-## streaming/ — delivery: VOD, Dolby Vision, capabilities, reliability
-
-Everything about what gets sent to a player and why: the VOD presentation
-programme, the capability negotiation that picks a grade, Dolby Vision
-conversion, decoder selection, and the stall/stutter investigations.
-
-| File | Answers | |
-|---|---|---|
-| [TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md](streaming/TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md) | Why TCL Auto rejects Android capability counts, the catalog read-budget failure, and the reviewed plan for one catalog per create with legacy-client compatibility. | open |
-| [TCL-CATALOG-REPAIR-STATUS.md](streaming/TCL-CATALOG-REPAIR-STATUS.md) | Implementation decisions, commit milestones, compile and review evidence, and remaining physical TCL acceptance. | open |
-| [PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md](streaming/PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md) | Bounded October 1 repair: periodic quorum-loss diagnosis, startup/retirement/recovery correctness, VOD delivery truth, agent/Opus review dispositions, and one fast-lane PR. | open |
-| [PLAYBACK-START-FAILURES-2026-10-13.md](streaming/PLAYBACK-START-FAILURES-2026-10-13.md) | Standalone reader contention, unpublished native attachment, stale inventory/error ownership and separate Apple TV audio evidence; fixes built, deployment and physical acceptance open. | open |
-| [BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md](streaming/BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md) | Why a 79.5 GB remux on the Apple TV was interrupted five times in 20 minutes: deploy restarts, two leader-caused quorum fences, a rolling retirement on resume, and the whole-file attestation that restarted from byte 0 on every preemption (fixed). | open |
-| [HEATED-RIVALRY-S1E5-QUORUM-RCA-AND-FIX.md](streaming/HEATED-RIVALRY-S1E5-QUORUM-RCA-AND-FIX.md) | S1E5 outage: WAL correlations and SQL reproduction establish the missing lookup index; reviewed proposal covers migrations, cadence, and web recovery. | open |
-| [Heated Rivalry quorum build status](streaming/HEATED-RIVALRY-S1E5-QUORUM-STATUS.html) | Current implementation phase, review, validation, PR, decisions, and cleanup for the quorum repair. | open |
-| [MEDIA-COMPATIBILITY-CATALOG.md](streaming/MEDIA-COMPATIBILITY-CATALOG.md) | Which 52 media-condition families have incident, reproduction or synthetic evidence, where their fixtures and regressions live, and which samples and player checks are still missing? | open |
-| [STATUS-HISTORY.md](streaming/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
-| [PREPARATION-BUFFER-PRESSURE-RCA-AND-IMPLEMENTATION.md](streaming/PREPARATION-BUFFER-PRESSURE-RCA-AND-IMPLEMENTATION.md) | October 8 Apple TV freeze: completed full-title preparation spills into the playback budget; evidence, merged ownership repair, adversarial review and focused postmerge unit closure; deployment/device acceptance remains open. | open |
-| [HONEST-MASTER-PLAYLIST.md](streaming/HONEST-MASTER-PLAYLIST.md) | Implementation plan from the 2026-09-20 architecture review: M1/M2 landed; bounded M3/M4, retained VOD M5 and automatic/manual-copy/encoded preparation implemented; rolling/PUT consumers and one bounded public Create/fetched-wire host control recorded; current independent review/integration, unseen-tail first-publication and fleet/device acceptance remain open. | open |
-| [MACOS-VIDEO-PROCESSING-DESIGN.md](streaming/MACOS-VIDEO-PROCESSING-DESIGN.md) | Proposed native Mac acceleration: shared-memory cost model, VideoToolbox/Metal processing, Jellyfin dependency preservation, P5 hardware-decode experiment, contracts and measured acceptance. | open |
-| [MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md](streaming/MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md) | Opus review and build handoff: baseline/package proof, processing milestones, code ownership, regression matrix, rollout and independent Dolby/Live TV/HEVC extensions. | open |
-| [MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md](streaming/MACOS-METAL-HDR-ACCEPTANCE-2026-10-12.md) | Accepted five-part HDR10 Metal/CPU comparison with exact source/installation/graph/presentation evidence; broader playback follow-ups remain open. | open |
-| [Metal HDR evidence manifest](streaming/evidence/macos-metal-hdr-20261012/evidence-manifest.json) · [all text receipts](streaming/evidence/macos-metal-hdr-20261012/text-receipts.tar.gz) | Checksum-indexed original captures and committed neutralized logs, API/CI/landing receipts, diagnostics and failures; screenshot archive retained privately on PR #1038. | done |
-| [MACOS-VIDEO-PROCESSING-STATUS.md](streaming/MACOS-VIDEO-PROCESSING-STATUS.md) | Completed supported implementation and hardware qualification; final QSV closeout PR, exact evidence, decisions and separate broader acceptance. | done |
-| [MACOS-VIDEO-PROCESSING-EVIDENCE.md](streaming/MACOS-VIDEO-PROCESSING-EVIDENCE.md) | Native processing experiments, eight complete GPU/CPU subtitle graphs, final release text/caption API delivery, font-identity diagnosis, Linux SDK/build evidence, shipping Linux image, AMD raw and normal-API strict-P5 qualification, exact Jellyfin identities, retained failures and qualification limits. | open |
-| [Active-font release and API evidence](streaming/evidence/macos-video-20261008/font-active-e9fd-evidence.tar.gz) | Matched release/symbols and actual native subtitle delivery while inactive font configuration changes; performance remains separate. | open |
-| [Linux SDK and compiler evidence](streaming/evidence/macos-video-20261008/linux-sdk-and-compile-evidence.tar.gz) | Hash-bound SDK generation, exact-source Linux compilation and isolated runtime dependency evidence; shipping and hardware acceptance remain open. | open |
-| [Linux producer and sealed-parser build evidence](streaming/evidence/macos-video-20261008/linux-producer-parser-build-evidence.tar.gz) | Full-featured Bookworm producer and matching static AC-4 parser build receipts; package and hardware/API acceptance remain open. | open |
-| [Linux package audit evidence](streaming/evidence/macos-video-20261008/linux-package-audit-evidence.tar.gz) | Preserved producer/parser identities, exact runtime-base package additions and complete ELF closure; hardware and daemon API qualification remain open. | open |
-| [Merged-source compiler evidence](streaming/evidence/macos-video-20261008/merged-c10-compile-evidence.tar.gz) | Exact current-main integration checks on Mac and Linux, with the bounded hook continuation retained; no unit or runtime qualification claim. | open |
-| [Merged Mac release and API evidence](streaming/evidence/macos-video-20261008/final-c10-release-api-evidence.tar.gz) | Exact merged release/symbols and focused subtitle/caption API delivery; interrupted timing results remain unqualified. | open |
-| [Complete subtitle performance evidence](streaming/evidence/macos-video-20261008/final-c10-subtitle-performance-evidence.tar.gz) | Eight uninterrupted CPU/GPU complete-graph comparisons with frame/timestamp validation, exact timing/child-CPU medians and measurement limits. | open |
-| [Intel strict-P5 evidence](streaming/evidence/macos-video-20261008/intel-strict-p5-evidence.tar.gz) | Intel raw strict graphs (VA-API and QSV encode), the foreign-Media-SDK and 64×64 QSV-proof findings, fixed-daemon normal-API windows on Intel and AMD, and the build record; no NVIDIA or deployment claim. | open |
-| [QSV shipping dependency evidence](streaming/evidence/macos-video-20261008/qsv-shipping-dependency-evidence.tar.gz) | Exact installer and both shipping-stage builds preserve audited providers while removing the competing Debian Media SDK; paired Intel hardware acceptance is retained below. | done |
-| [Intel QSV shipping qualification](streaming/evidence/macos-video-20261008/intel-qsv-shipping-qualification-evidence.tar.gz) | Corrected shipping image passes all 32 raw controls and forced-QSV ordinary-API delivery; exact historical-daemon control, runtime identities and cleanup retained. | done |
-| [MACOS-VIDEO-PROCESSING-REVIEW.md](streaming/MACOS-VIDEO-PROCESSING-REVIEW.md) | Original proposal review and active continuation implementation review: independent coverage, concrete findings, owner repairs and re-review disposition. | open |
-| [CODEC-AND-GPU-QUALIFICATION.md](streaming/CODEC-AND-GPU-QUALIFICATION.md) | Codec/GPU qualification: typed output contract, actual corpus acquisition, gradient VUI/scoring work, offline rolling-output census and private real-owner/headless-browser acquisition candidate, scoped family inventory, and separate graph/device acceptance. Organic-use week is supplementary, not M1/M2 eligibility. | open |
-| [S11-INTERNAL-ROLLING-CELLS-2026-10-02.md](streaming/S11-INTERNAL-ROLLING-CELLS-2026-10-02.md) | Sanitized exact-source/digest ledger for16 distinct internal rolling cells on four synthetic inputs: actual geometry, real presentation, packet/grid/key/equality and cleanup facts, preserved failed attempts and original public/film/NAL/device/fidelity qualification limits. | done |
-| [PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md](streaming/PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md) | Implementation plan from the 2026-09-20 architecture review: why DV Profile 5 was refused and the media-origin probe went dead after the Windows refactor; the fix to `output_job_owned` with a portable child test, the full caller audit, and a bounded, killable library scan probe. | built |
-| [MEDIA-BODY-BUFFERS.md](streaming/MEDIA-BODY-BUFFERS.md) | Storage-read sizing and implemented HLS batch coordination with unchanged 4 KiB delivery proof; ownership, regression contracts and remaining throughput evidence. | open |
-| [MEDIA-WRITE-STALL-GUARD.md](streaming/MEDIA-WRITE-STALL-GUARD.md) | Implementation plan from the 2026-09-26 Silo comparison: why the HLS pump's timers free a file handle but never the socket, one transport-level write-stall guard on every accepted connection, disabled by default with the client prerequisites listed in the Developer tab. | open |
-| [DV-STRIP-TRIAL-PROBE.md](streaming/DV-STRIP-TRIAL-PROBE.md) | Implementation plan from the 2026-09-26 Silo comparison: a two-second trial of `dovi_rpu=strip` per file before the strip is planned, a unit-type strip for files whose SEI the filter cannot read, the verdict grafted into `probe_json` and read by every argv builder through `CopyVideoOptions::from_probe`. | open |
-| [ENCODED-VOD-HOLD-AND-RELEASE.md](streaming/ENCODED-VOD-HOLD-AND-RELEASE.md) | Implementation plan from the 2026-09-20 architecture review: SIGSTOP instead of SIGKILL for encoded producers past the ahead horizon, a low-water mark, and the stopped→release transition driven by `Admissions::live_is_waiting`, proven in pure scheduler tests first. | open |
-| [FONT-ATTESTATION-AND-BLOCKING-IO.md](streaming/FONT-ATTESTATION-AND-BLOCKING-IO.md) | Implementation plan from the 2026-09-20 architecture review: moving the font/engine `stat` loops off the runtime, then freezing a burn recipe's fontconfig environment so per-segment `fc-list` becomes unnecessary because the inputs cannot change. | open |
-| [FFMPEG-SPAWN-UNIFICATION.md](streaming/FFMPEG-SPAWN-UNIFICATION.md) | Implementation plan from the 2026-09-20 architecture review: one producer spawn path for rolling HLS, VOD and progressive remux and one strict progress-line classifier, with the accidental differences closed by tests. | open |
-| [ENCODER-RATE-CONTROL-DEFAULTS.md](streaming/ENCODER-RATE-CONTROL-DEFAULTS.md) | Implementation plan from the 2026-09-20 architecture review: per-encoder-family CRF/QVBR vs ABR evidence with the bench harness before any default flips; HDR10's separate policy and VBV bounds kept. | open |
-| [TONE-MAP-CENSUS.md](streaming/TONE-MAP-CENSUS.md) | The operator-run tone-map census: every GPU graph a node can pair with its encoder, measured against the CPU chain on authored PQ signals (block distances and stills), how to run it from Settings → System, and that its output feeds ruling R2. | built |
-| [TONE-MAP-CHAIN-CORRECTIONS.md](streaming/TONE-MAP-CHAIN-CORRECTIONS.md) | Implementation plan from the 2026-09-20 architecture review: the hardware-download metadata test first, then MaxCLL at scan, explicit `peak=`, gamut before curve, and dither, with an image-comparison protocol. | open |
-| [INTERLACE-IN-THE-MEDIA-CONTRACT.md](streaming/INTERLACE-IN-THE-MEDIA-CONTRACT.md) | Implementation plan from the 2026-09-20 architecture review: field order carried into the media contract, deinterlace before scale with a deliberate frame/field policy, the Live TV field-rate bitrate fix, and the reproduced fixture as acceptance. | open |
-| [AUDIO-RESOLVED-INDEPENDENTLY.md](streaming/AUDIO-RESOLVED-INDEPENDENTLY.md) | Implementation plan from the 2026-09-20 architecture review: audio negotiated separately from video so a resolution change or burn no longer downmixes compatible multichannel audio, carried through recipe identity, manifests and handoffs. | open |
-| [AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md](streaming/AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md) | Shipped Jellyfin 8.1.3 per-side synthetic downmix measurements, clipping and AAC limiter margin; no real-content, listening, device or output enablement claim. | open |
-| [AUDIO-DOWNMIX-REAL-CONTENT-QUALIFICATION.md](streaming/AUDIO-DOWNMIX-REAL-CONTENT-QUALIFICATION.md) | Real-content stereo downmix measurement (nine film windows): the incumbent fold clipped and AC-3/E-AC-3 applied stored levels; the float matrix plus −4 dBFS limiter that ships, and its encoded-VOD join proof. | open |
-| [VOD-BFRAMES-TIMELINE-DESIGN.md](streaming/VOD-BFRAMES-TIMELINE-DESIGN.md) | Strict presentation-grid implementation and optional signed-offset software B-frames; no-reorder default, per-family/client qualification and remaining evidence. | open |
-| [DECODE-FACTS-GATE-AND-FALLBACK.md](streaming/DECODE-FACTS-GATE-AND-FALLBACK.md) | Implementation plan from the 2026-09-20 architecture review: instrumenting the decode-fact gate, amortising immutable-image validation without losing tamper checks, and classifying fallback reasons. | open |
-| [TRANSCODE-DECOMPOSITION-PLAN.md](streaming/TRANSCODE-DECOMPOSITION-PLAN.md) | Built extraction and all three removal consumers; delegated lifecycle/seam decisions and retained evidence. Optional registry evaluation is deferred; S-05 physical acceptance remains open. | built |
-| [ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md](streaming/ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md) | Why immersive AC-4 and delayed AC-3 broke live starts, what the fixes preserve, and why the 103.1 capture cannot initialize its decoder. | open |
-| [Live TV startup and captions repair status](clients/LIVE-TV-START-FEEDBACK-STATUS.html) | Review findings, final checks, merge and live acceptance for web startup feedback and captions controls. | open |
-| [ATSC 3.0 live audio repair status](streaming/ATSC3-AUDIO-STARTUP-STATUS.html) | Implementation, single adversarial review, final fast lane, merge and outstanding live acceptance. | open |
-| [LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md](streaming/LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md) | 2026-09-28: why Live TV said "all slots are busy" with every tuner idle — the subtitle backfill held the software pool while waiting out zombie claims, a live start refused after waiting for background work, and an encoder refusal labelled as a tuner one; the fix at each layer and the one reversed design ruling. | built |
-| [LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md) | 2026-09-24: why every ATSC 1.0 channel was encoded and every encode was stereo, the copy-first audio track selection, the sink-derived AAC channel claim, Android hardware MPEG-2, and the aspect-ratio report the server could not reproduce. | built |
-| [RESUME-ROLLING-PUBLICATION-RCA.md](streaming/RESUME-ROLLING-PUBLICATION-RCA.md) | Why resume stopped working on every client while starting from the beginning still did: which files fall back to the rolling engine, the web client whose MediaSource never opens, and the progress beat that erases a resume point once a startup fails. | open |
-| [PLAYBACK-STARTUP-LATENCY-M2-20261002.json](streaming/PLAYBACK-STARTUP-LATENCY-M2-20261002.json) | Candidate floor rejection arithmetic and bounded generated hls.js startup sweep; continuity/native qualification state. | open |
-| [PLAYBACK-STARTUP-LATENCY-M0-20261002.md](streaming/PLAYBACK-STARTUP-LATENCY-M0-20261002.md) | Native Safari preparation/publication incident and review-reported index backlog, with evidence limits. | done |
-| [PLAYBACK-STARTUP-LATENCY-M0-20261002.json](streaming/PLAYBACK-STARTUP-LATENCY-M0-20261002.json) | Sanitized retained phase receipt for the native Safari incident; no successful presentation claim. | done |
-| [PLAYBACK-STARTUP-LATENCY-REVIEW-20261002.md](streaming/PLAYBACK-STARTUP-LATENCY-REVIEW-20261002.md) | Supplied proposal review, single final implementation review and conservative admission disposition. | done |
-| [HDR-CONTENT-LIGHT-INDEX.md](streaming/HDR-CONTENT-LIGHT-INDEX.md) | Why changing HDR light-level metadata forced rolling startup, and the indexed-copy metadata repair. | open |
-| [PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md](streaming/PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md) | Monotonic phase origins, exact incident replay, repeated index/resource observations, transport measurement limits, and the A-M0 target/bootstrap startup lab with its decision rule. | open |
-| [PLAYBACK-STARTUP-LATENCY-BUILD.md](streaming/PLAYBACK-STARTUP-LATENCY-BUILD.md) | Sol execution handoff: isolated clone, latest user CI/CD rulings, milestone deliverables, one reviewed PR, fast lane, merge and cleanup. | open |
-| [PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md](streaming/PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md) | Reviewed runtime build contract for the measured 14.2-second start, index availability, qualified publication policy and cross-client acceptance. | open |
-| [STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](streaming/STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md) | Reviewed build handoff (rev 6): an 8 s target for encoded rolling sessions (Part A), fewer quorum reads on the create path (Part B), and an operator-run census of every tone-map graph against the CPU chain before any operator change (Part C). | open |
-| [PLAYBACK-STARTUP-PATH-FINDINGS.md](streaming/PLAYBACK-STARTUP-PATH-FINDINGS.md) | Where the seconds go between Play and the first frame on every route and client: the 40 ms delayed-ACK stall on every consistent read and the web scrim (both fixed), and the ranked waits that remain with their owners. | open |
-| [PLAYBACK-STARTUP-LATENCY-REVIEW.md](streaming/PLAYBACK-STARTUP-LATENCY-REVIEW.md) | Independent adversarial plan review, three findings and verified dispositions. | open |
-| [Playback startup build status](streaming/PLAYBACK-STARTUP-LATENCY-STATUS.html) | Live Sol build status: current phase, source, PR, evidence, review, fast lane and decisions. | open |
-| [SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md](streaming/SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md) | Why repeated seeks refuse playback and then reap the incumbent: retired streams retain a producer's whole reservation, and a refused destination poisons the incumbent's control snapshot. | open |
-| [WEB-SEEK-LATENCY-RCA-AND-FIX.md](streaming/WEB-SEEK-LATENCY-RCA-AND-FIX.md) | October 2 VOD loader deadlock, false seek-presentation evidence and native rolling reopen latency: controlled causal evidence, proposed repair and adversarial review. | open |
-| [Web seek Opus review](reviews/WEB-SEEK-LATENCY-OPUS-REVIEW.md) | Independent diagnosis approval and requested plan changes: MSE/MMS selection, required iPhone qualification, frame-proof defects and native successor startup. | done |
-| [Web seek incident evidence](evidence/web-seek-rca-2026-10-02.json) · [mechanism replay](evidence/web-seek-mechanism-replay.cjs) | Sanitized live seek traces, same-session loader intervention and executable incident-source mechanisms. | done |
-| [SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md](streaming/SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md) | The build order for that repair: one scratch ledger, a writer barrier, exact release grace, growing reservations, ownership boundaries and the evidence each unit owes. | open |
-| [Seek scratch reservations status](streaming/SEEK-SCRATCH-RESERVATIONS-STATUS.html) | Live ledger for the effort: unit state, base and compiler, evidence, review, fast lane and deployment. | open |
-| [Seek scratch reservations receipt](evidence/seek-scratch-reservations-receipt-2026-09-20.md) | Exact base and compiler, the accounting/release/mechanism proofs, which regression covers which acceptance row, what already failed before the change, and what is still owed. | open |
-| [FFmpeg HLS write boundary receipt](evidence/ffmpeg-hls-write-boundary-receipt-2026-09-24.md) | The last whole-ceiling reservation removed: FFmpeg's HLS muxer uploads through a loopback endpoint that grants every piece before it lands, the legacy copy hole, the inverted grant wait, and the proofs. | open |
-| [FFMPEG-SCRATCH-SINK-IMPLEMENTATION.md](streaming/FFMPEG-SCRATCH-SINK-IMPLEMENTATION.md) | Historical design proposal for the owned FFmpeg write boundary; use the receipt above for the implemented mechanism and proof. | done |
-| [MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md](streaming/MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md) | Why one valid MKV was denied immutable VOD, why its rolling fallback violated AVFoundation's playlist-update deadline, and the packet-duration plus sliding-HLS repair contracts. | open |
-| [MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md](streaming/MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md) | The build contract for the reviewed MKV-duration and sliding-HLS repair: startup admission, packet evidence, publication scheduling, object grace, and acceptance. | open |
-| [MKV-DURATION-AND-SLIDING-HLS-STATUS.md](streaming/MKV-DURATION-AND-SLIDING-HLS-STATUS.md) | Live package, compiler, review, qualification, and production-authorization ledger for the MKV-duration and sliding-HLS repair. | open |
-| [APPLE-TV-FORWARD-SKIPS-STATUS.md](streaming/APPLE-TV-FORWARD-SKIPS-STATUS.md) | Live implementation, review, focused-proof, fast-lane and merge ledger for cumulative rolling-publication pacing and Apple TV position continuity. | open |
-| [APPLE-TV-FORWARD-SKIPS-RCA.md](streaming/APPLE-TV-FORWARD-SKIPS-RCA.md) | Why rolling media advancing faster than playback made Apple TV skip forward, with production and AVPlayer replay evidence. | done |
-| [APPLE-TV-FORWARD-SKIPS-IMPLEMENTATION.md](streaming/APPLE-TV-FORWARD-SKIPS-IMPLEMENTATION.md) | Historical build contract for cumulative publication pacing, protected playback position and focused regressions; use the status above for actual delivery evidence. | done |
-| [CONTENT-ANALYSIS-REPAIR-STATUS.md](streaming/CONTENT-ANALYSIS-REPAIR-STATUS.md) | Live implementation ledger for selected-video completion, bounded retry, exact-identity repair, review, and promotion. | open |
-| [CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md](streaming/CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md) | Why complete video indexes were labelled incomplete: fleet evidence, selected-stream duration, timeout policy, and recovery constraints. | open |
-| [CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md](streaming/CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md) | Independent design review that found retry expiry and lost video identity before implementation. | done |
-| [CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md](streaming/CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md) | Build contract for selected-video completion, typed diagnostics, bounded retry cycles, exact-identity recovery, migrations, tests, and rollout. | open |
-| [HEVC-IN-BAND-PARAMETER-SETS.md](streaming/HEVC-IN-BAND-PARAMETER-SETS.md) | Why a chunk-encoded WEB-DL copies with pink and green blotches, why PR #535 never shipped, and the per-file census that keeps redefined parameter sets in band. | open |
-| [HEVC-SAMPLE-ENTRY-STATUS.md](streaming/HEVC-SAMPLE-ENTRY-STATUS.md) | Live execution ledger for the HEVC sample-entry admission repair: implementation, evidence, review, and promotion state. | open |
-| [SAFARI-DIAGNOSIS-AND-FIX.md](streaming/SAFARI-DIAGNOSIS-AND-FIX.md) | Why HEVC-in-MP4 admission fails on Safari, the decoder evidence behind the repair, and the accepted review findings. | open |
-| [HEVC-SAMPLE-ENTRY-IMPLEMENTATION.md](streaming/HEVC-SAMPLE-ENTRY-IMPLEMENTATION.md) | Executable contract for source sample-entry facts, compatible packaging, client admission, downgrade safety, and focused acceptance. | open |
-| [HEVC sample-entry qualification receipt](evidence/hevc-sample-entry-qualification-2026-09-16.md) | Exact reviewed head, focused commands and counts, F1–F10 disposition, rollout order, and physical-evidence limits for PR #337. | built |
-| [TCL-PROBE-MISMATCH-RCA-AND-FIX.md](streaming/TCL-PROBE-MISMATCH-RCA-AND-FIX.md) | Why one added E-AC-3 Atmos profile refused a whole movie, what shipped to admit it, and why report equality is the wrong source-verification contract. | built |
-| [Probe compatibility replay](evidence/probe-compatibility-replay.py) | Runs the deployed and shipped source-probe comparators side by side, on a synthetic pair or on two real FFprobe documents. | built |
-| [STREAMING-RELIABILITY-IMPLEMENTATION.md](streaming/STREAMING-RELIABILITY-IMPLEMENTATION.md) | Two-wave reliability effort: quality preservation, truthful recovery, first-play preparation, task ownership and finite qualification. | open |
-| [STREAMING-SHARED-INDEX-HANDOFF.md](streaming/STREAMING-SHARED-INDEX-HANDOFF.md) | Sol work package for exact shared Dolby Vision indexes and bounded first-play measurements. | open |
-| [STREAMING-WEB-RECOVERY-HANDOFF.md](streaming/STREAMING-WEB-RECOVERY-HANDOFF.md) | Sol work package for truthful web stall evidence, recipe-preserving recovery and native parity. | open |
-| [VOD-PRESENTATION-PLAN.md](streaming/VOD-PRESENTATION-PLAN.md) | Film-based VOD programme; §13 tracks the F1/N2 shared-zero, byte-fallback and entry-scoped landing repair separately from device/fleet acceptance. | open |
-| [VOD-PRESENTATION-PLAN-REVIEW.md](streaming/VOD-PRESENTATION-PLAN-REVIEW.md) · [response](streaming/VOD-PRESENTATION-PLAN-REVIEW-RESPONSE.md) | Six contracts that were not buildable, and the answers to them. | done |
-| [VOD-PRESENTATION-IMPLEMENTATION-HANDOFF.md](streaming/VOD-PRESENTATION-IMPLEMENTATION-HANDOFF.md) | How to build the plan without breaking the live path. | open |
-| [VOD-PRESENTATION-M0-REVIEW-BRIEF.md](streaming/VOD-PRESENTATION-M0-REVIEW-BRIEF.md) | Three normative sentences re-decided before M1. | done |
-| [VOD-M0-ISSUES.md](streaming/VOD-M0-ISSUES.md) | Every issue M0 found. | done |
-| [VOD-M2-QUESTIONS.md](streaming/VOD-M2-QUESTIONS.md) | The M2 questions and how each was ruled. | done |
-| [VOD-M3-HANDOFF.md](streaming/VOD-M3-HANDOFF.md) | Serving from the plan — the first code on the live path. | built |
-| [VOD-M4-HANDOFF.md](streaming/VOD-M4-HANDOFF.md) | Web adoption and release acceptance. | built |
-| [VOD-CUTOVER.md](streaming/VOD-CUTOVER.md) | Historical VOD-only cutover; superseded by the retained first-play fallback. | done |
-| [VOD-ENCODING.md](streaming/VOD-ENCODING.md) | How immutable transcode and subtitle-burn VOD produce and verify the bytes named by a playlist. | built |
-| [VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md](streaming/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md) | Restoring the seek-storm case that CI disabled 2026-08-26. | open |
-| [VOD-STALL-ACCEPTANCE-HANDOFF.md](streaming/VOD-STALL-ACCEPTANCE-HANDOFF.md) | Restoring the bandwidth-recovery case; blocked on a device measurement. | open |
-| [VOD-STEADY-ACCEPTANCE-HANDOFF.md](streaming/VOD-STEADY-ACCEPTANCE-HANDOFF.md) | Restoring the steady-play case that CI disabled 2026-08-26. | open |
-| [STREAMING-RELIABILITY-REVIEW.md](streaming/STREAMING-RELIABILITY-REVIEW.md) | Keeping the stream alive while its future changes. | done |
-| [STREAMING-RELIABILITY-STATUS.md](streaming/STREAMING-RELIABILITY-STATUS.md) | Review, repair and promotion status of that effort. | open |
-| [WEB-HLS-STARTUP-RECOVERY-STATUS.md](streaming/WEB-HLS-STARTUP-RECOVERY-STATUS.md) | Implementation, review, qualification, and promotion status for delayed-manifest web startup recovery. | open |
-| [WEB-HLS-STARTUP-RECOVERY-IMPLEMENTATION.md](streaming/WEB-HLS-STARTUP-RECOVERY-IMPLEMENTATION.md) | Build contract for unloaded-manifest recovery, bounded startup retries, and cause-correct decoder reporting. | open |
-| [WEB-PLAYBACK-FREEZE-RECOVERY-IMPLEMENTATION.md](streaming/WEB-PLAYBACK-FREEZE-RECOVERY-IMPLEMENTATION.md) | Free Fall playback repair: loader ownership, stable init identity and scoped drift verdicts, binary refusals, and causal Auto quality. | open |
-| [WEB-HELD-SEEK-STALL-RCA.md](streaming/WEB-HELD-SEEK-STALL-RCA.md) | Why one held Right Arrow became two client commits but one source change, how a refilled presentation wait spent recovery too early, and the live implementation status. | open |
-| [NATIVE-HLS-STARTUP-RCA.md](streaming/NATIVE-HLS-STARTUP-RCA.md) | Why native Safari turned a temporarily unavailable playlist into a codec failure and source-rescan refusal. | open |
-| [NATIVE-HLS-STARTUP-IMPLEMENTATION.md](streaming/NATIVE-HLS-STARTUP-IMPLEMENTATION.md) | Build contract for native-HLS readiness, bounded reload, joinable source preparation, and three-client parity. | open |
-| [SAFARI-SEEK-IMPLEMENTATION.md](streaming/SAFARI-SEEK-IMPLEMENTATION.md) | Build contract for native seek evidence, viewer preparation, shared I/O admission, reproducible runtime inputs, and bounded rolling coverage. | open |
-| [SAFARI-SEEK-STATUS.md](streaming/SAFARI-SEEK-STATUS.md) | Current Safari seek implementation, validation, review, and promotion state. | open |
-| [Native Safari seek fixture evidence](evidence/safari-seek-native-2026-09-29.json) | Served playlists, media generator identity, and native buffered/seekable/landing snapshots for four synthetic variants. | done |
-| [Native startup replay](evidence/native-startup-replay.cjs) | Replays the native-HLS startup controller against delayed publication without private media or a running server. | open |
-| [STREAMING-RELIABILITY-HANDOFF.md](streaming/STREAMING-RELIABILITY-HANDOFF.md) | The remaining work, for the next streaming agent. | open |
-| [STREAMING-CONTINUATION-HANDOFF.md](streaming/STREAMING-CONTINUATION-HANDOFF.md) | The continuation-session workflow, branch state, and integration queue for streaming reliability. | open |
-| [PLAYBACK-CAPS-V2-PLAN.md](streaming/PLAYBACK-CAPS-V2-PLAN.md) | Highest deliverable grade, negotiated rather than guessed. | open |
-| [PLAYBACK-CAPS-V2-M0.md](streaming/PLAYBACK-CAPS-V2-M0.md) | The M0 measurements taken on lab4, 2026-08-30. | done |
-| [MEDIA-BADGES-PLAN.md](streaming/MEDIA-BADGES-PLAN.md) | Making the play menu tell the truth about HDR and Dolby Vision. | built |
-| [M5A-CLIENT-BADGE-HANDOFF.md](streaming/M5A-CLIENT-BADGE-HANDOFF.md) | The `DV P7 → DV P8` badge in the Apple and Android clients. | built |
-| [M5A-VERIFICATION-ON-LAB4.md](streaming/M5A-VERIFICATION-ON-LAB4.md) | The container-truth check that has to run on real media. | open |
-| [M5B_STATUS.md](streaming/M5B_STATUS.md) | Permanent Dolby Vision Profile 7 conversion — what merged. | built |
-| [M5-VERIFICATION-PROMPT.md](streaming/M5-VERIFICATION-PROMPT.md) | Fleet verification: the first converted stream a browser ever plays. | open |
-| [ANDROID-DV-CONVERSION-RCA-AND-FIX.md](streaming/ANDROID-DV-CONVERSION-RCA-AND-FIX.md) | Why a capable Lenovo received the HDR base instead of converted Profile 8.1, and the bounded repair. | open |
-| [ANDROID-DV-CONVERSION-IMPLEMENTATION.md](streaming/ANDROID-DV-CONVERSION-IMPLEMENTATION.md) | Live build and acceptance record for request-scoped Profile 7 conversion, native-DV progressive packaging, and Android HLS retention. | open |
-| [HEVC-COLOR-FIX-STATUS.html](streaming/HEVC-COLOR-FIX-STATUS.html) | Current implementation, decision, review and merge status for the HEVC color repair. | open |
-| [HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md](streaming/HEVC-COLOR-CORRUPTION-RCA-AND-FIX.md) | Why copied HEVC turns pink and green, the matched-pixel reproduction, and the implemented proof-before-stripping containment with an unrestricted Developer override. | open |
-| [HEVC-COLOR-CORRUPTION-REVIEW.md](streaming/HEVC-COLOR-CORRUPTION-REVIEW.md) | Independent adversarial review of the HEVC color diagnosis and implementation, with objections, amendments and remaining delivery gates. | open |
-| [DV-P5-APPLE-START-REPAIR.md](streaming/DV-P5-APPLE-START-REPAIR.md) | Why a P5 Apple TV start fails before publication, the matching-tuple header repair, per-sample rolling guard, adversarial findings and qualification limits. | built |
-| [DV-DELIVERY-FINDINGS.md](streaming/DV-DELIVERY-FINDINGS.md) | Why Dolby Vision titles arrive as HDR10 or lower. | open |
-| [DV_HDR_PROCESSING_PLAN.md](streaming/DV_HDR_PROCESSING_PLAN.md) | FEL-aware DV to HDR10 and Profile 7 to 8.1 proposal: quality measurements, controls and fallbacks. | open |
-| [DV_HDR_PROCESSING_BUILD.md](streaming/DV_HDR_PROCESSING_BUILD.md) | Sol 6.1 implementation handoff: backend feasibility, integration contracts, benchmarks and qualification. | open |
-| [DV_HDR_PROCESSING_REVIEW.md](streaming/DV_HDR_PROCESSING_REVIEW.md) | Adversarial findings and dispositions for the DV processing proposal and build handoff; cleared for M0 feasibility only. | done |
-| [DV_HDR_PROCESSING_FEASIBILITY.md](streaming/DV_HDR_PROCESSING_FEASIBILITY.md) | Sol 6.1 M0 reuse findings: existing DV/FEL renderers, P8.1 recipe, metric checks and unproven boundaries. | open |
-| [DV_HDR_M1_CONTRACTS.md](streaming/DV_HDR_M1_CONTRACTS.md) | Approved additive M1 type, frame-coverage, graph and recovery-episode contracts; the initial slice kept the production registry empty. | open |
-| [DV_HDR_PROCESSING_STATUS.md](streaming/DV_HDR_PROCESSING_STATUS.md) | Implementation ledger: backend and serving integration, HDR10-E, resource measurements, reproducible acceptance fixtures, packaging and remaining qualification. | open |
-| [DV fixture recipes](evidence/dv-processing-2026-10-09/dv-fixture-reproduction.tar.gz) · [archive receipt](evidence/dv-processing-2026-10-09/fixture-archive-receipt.json) | Reproduce and verify the synthetic acceptance sources; generated movies and private media are excluded. | built |
-| [DV_HDR_BACKEND_CONTROLS.md](streaming/DV_HDR_BACKEND_CONTROLS.md) | Reproduce reviewed synthetic libplacebo and DoViBaker pixel controls; exact build evidence and limits. | open |
-| [Parsed metadata and authoring controls](streaming/DV_HDR_AUTHORING_CONTROLS.md) | Reproduce parsed-RPU rendering and synthetic reconstructed-base authoring; distinguish completed mechanics from timing, nonlinear metadata and conformance gaps. | open |
-| [DV_HDR_DECODED_LAYER_CONTROLS.md](streaming/DV_HDR_DECODED_LAYER_CONTROLS.md) | Reproduce reviewed encoded BL/EL/RPU association, B-frame timing, stale-metadata refusal and accepted-frame rendering controls. | open |
-| [DV_HDR_TIMELINE_CONTROLS.md](streaming/DV_HDR_TIMELINE_CONTROLS.md) | Reproduce bounded VFR, real seek/preroll and timestamp-epoch controls with stored-duration, lifecycle and failure-status evidence. | open |
-| [DV_HDR_RPU_REUSE_CONTROLS.md](streaming/DV_HDR_RPU_REUSE_CONTROLS.md) | Reviewed explicit mapping reuse, cache/reset refusals, input-bound execution and retained-prerequisite replay. | open |
-| [DV_HDR_COMBINED_CONTROLS.md](streaming/DV_HDR_COMBINED_CONTROLS.md) | Reviewed finite P7/FEL source-to-HDR10 chain, actual output/timing, numerical limits and remaining movie integration. | open |
-| [DV_PROCESSING_TOOLS.md](streaming/DV_PROCESSING_TOOLS.md) | Build and run the bounded streaming FEL reconstruction and P8.1 authoring helpers; remaining serving limits. | open |
-| [DV_HDR_NONIDENTITY_CONTROLS.md](streaming/DV_HDR_NONIDENTITY_CONTROLS.md) | Reproduce reviewed affine FEL reconstruction and P8.1 repeated-reshape controls, separate HDR10-base checks and exact replay provenance. | open |
-| [DV-DISK-CONVERSION-DIAGNOSIS.md](streaming/DV-DISK-CONVERSION-DIAGNOSIS.md) | Why the on-disk conversion never completes, and a proposal. | open |
-| [QUEUE-REPAIR-VERIFICATION-PROMPT.md](streaming/QUEUE-REPAIR-VERIFICATION-PROMPT.md) | Did the fragment-index queue come back, and stay back? | open |
-| [DECODER_SELECTION_AND_RECOVERY_PLAN.md](streaming/DECODER_SELECTION_AND_RECOVERY_PLAN.md) | An explicit decoder choice and recovery path for each producer. | open |
-| [DECODER_SELECTION_RECOVERY_STATUS.md](DECODER_SELECTION_RECOVERY_STATUS.md) | The live execution ledger for that plan: what is merged, what was tested, and what remains unsafe. | open |
-| [DECODER-EFFORT-HANDOFF.md](streaming/DECODER-EFFORT-HANDOFF.md) | Picking the decoder effort up: what blocks it, what is left, how to work here, and the traps it already fell into. | open |
-| [DECODER-M8-HANDOFF.md](streaming/DECODER-M8-HANDOFF.md) | Running the remaining hardware, workload, latency, concurrency, and three-client evidence after the decoder implementation merged. | open |
-| [AVI_VIDEOTOOLBOX_REVIEW_DECISION.md](streaming/AVI_VIDEOTOOLBOX_REVIEW_DECISION.md) | The VideoToolbox decode fix to build, and the follow-up it requires. | open |
-| [VideoToolbox live-TV repair status](streaming/LIVE-TV-VIDEOTOOLBOX-STATUS.html) | Current branch, implementation, review, validation and merge progress for the ATSC 1.0 caption repair. | open |
-| [ATSC 1.0 VideoToolbox root cause and repair](streaming/LIVE-TV-VIDEOTOOLBOX-ATSC1-ROOT-CAUSE-AND-FIX.md) | Reproduction, current-main implementation, review dispositions and final local validation for caption-triggered encoding failures. | built |
-| [VideoToolbox file-caption follow-up](streaming/VIDEOTOOLBOX-CAPTION-VOD-FOLLOWUP.md) | Caption SEI and held-clock root causes, corrected normal VOD preservation, the initial-padding oracle and remaining lifecycle qualification. | open |
-| [Fable's ATSC 1.0 review](reviews/LIVE-TV-VIDEOTOOLBOX-ATSC1-FABLE-REVIEW.md) | Supplied independent reproduction and blockers against the original stale-base candidate. | done |
-| [APPLE-PACING-HOLD-FREEZE-ROOT-CAUSE.md](streaming/APPLE-PACING-HOLD-FREEZE-ROOT-CAUSE.md) | Why Apple and web HLS froze on a pacing hold, and the repair contract. | built |
-| [STUTTER-4K.md](streaming/STUTTER-4K.md) | 4K copy-path stutter: what it is, what it isn't, what to try next. | open |
-| [SEGMENTER-PLAN.md](streaming/SEGMENTER-PLAN.md) | GOP-aware segmenting — zero boundary drops on the copy path. | built |
-| [DISPLAY-AWARE-AUTO-QUALITY-PLAN.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) | How Auto should preserve smooth original playback, choose display-appropriate intermediate transcodes, and recover quality safely across Android, Apple and web. | open |
-| [DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md) | Adversarial findings on the automatic-quality plan, their disposition, and remaining qualification risks. | open |
-| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md) | The independent Opus review request and the evidence it must challenge before implementation. | open |
-| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md) | Lifecycle wrapper for the independent Opus review; links to its byte-identical source artifact and reconciliation. | done |
-| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt](streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt) | Supplied independent Opus review, preserved byte-for-byte: four P1 and ten P2 findings and source evidence. | done |
-| [ADAPTIVE-QUALITY.md](streaming/ADAPTIVE-QUALITY.md) | The design for bandwidth-aware streaming. | live |
-
----
-
-## cluster/ — replication, membership, and recovery
-
-Durable cluster work: [implementation](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md) ·
-[build status](cluster/DURABLE-WORK-QUEUE-STATUS.md) — **built**; [Activity and subtitle-throughput follow-up](http://forge.lan:3000/noirr/plurx/pulls/588).
-
-Phase 4 and everything under it: the clustering transition, the performance
-and media-pool work built on top, and the diagnoses of specific replicated
-failures.
-
-| File | Answers | |
-|---|---|---|
-| [RAFT-FAULT-TESTING-IMPLEMENTATION.md](cluster/RAFT-FAULT-TESTING-IMPLEMENTATION.md) | The bounded proposal and build contract for three repeatable Raft fault scenarios, generated WAL regressions, and replay evidence, preserving the current CI/CD process and adding no product gates. | open |
-| [RAFT-FAULT-TESTING-REVIEW.md](cluster/RAFT-FAULT-TESTING-REVIEW.md) | Independent adversarial findings on the fault-testing proposal and the author's amendments for protocol timing, partition evidence, complete data comparison, and child cleanup. | done |
-| [STATUS-HISTORY.md](cluster/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
-| [CLUSTER-WORK-CAPACITY-IMPLEMENTATION.md](cluster/CLUSTER-WORK-CAPACITY-IMPLEMENTATION.md) | Activity tabs, exact worker/job visibility, and reviewed throughput improvements with playback and storage constraints. | open |
-| [CLOCK-SKEW-GUARD-DESIGN.md](cluster/CLOCK-SKEW-GUARD-DESIGN.md) | Accepted K-06 design and original review/gate receipt; runtime remains open through separately owned measurement and enforcement handoffs. | open |
-| [CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md](cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md) | K-06 measurement release, on `main` since 2026-10-04 (#793): exact signed timing, continuity/filter/roster facts and identified observations; the identified fleet receipt is still owed. | open |
-| [CLOCK-MEASUREMENT-OWNED-LAB.md](cluster/CLOCK-MEASUREMENT-OWNED-LAB.md) | Prepared owned four-host launcher, bounded idle/network-load collector, source-only artifact boundary and exact-ID cleanup; no build, launch or physical acceptance claimed. | open |
-| [CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md](cluster/CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md) | K-06 enforcement release, on `main` since 2026-10-04 (#793) behind a Settings → Cluster switch (default off; in Developer until 2026-10-10) the design does not allow: authority boundaries, safe target removal, readiness and controlled acceptance; measurement evidence still owed. | open |
-| [STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION.md](cluster/STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION.md) | Implementation plan from the 2026-09-20 architecture review: why ten store modules never run the three-voter lane, and what a `?N` validator plus a discarded-result audit would catch. | done |
-| [HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md](cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md) | Hiqlite fork ownership/dependency plan and current upstream inventory: eleven generic rows, two accepted mechanisms and nine pending dispositions; embedding-pool fleet acceptance remains separate. | open |
-| [CLUSTER-BACKUP-AND-RESTORE.md](cluster/CLUSTER-BACKUP-AND-RESTORE.md) | Implementation plan from the 2026-09-20 architecture review: a portable, verifiable backup of an activated cluster and a restore procedure that resets identity and fences the old cluster, with RPO/RTO measured and drills for one-node and majority loss. | open |
-| [RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT.md](cluster/RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT.md) | Accepted default-preserving snapshot path and October 7 real production-data build/publication receipt; future cadence tuning and restore/release qualification stay separate. | done |
-| [REPLICATED-WRITE-RATE-HYGIENE.md](cluster/REPLICATED-WRITE-RATE-HYGIENE.md) | Implementation plan from the 2026-09-20 architecture review: stopping the watched-outbox's unconditional 1 Hz raft write on every voter and the takeover loop's idle consistent reads while keeping the atomic replicated claim. | open |
-| [REPLICATED-WRITE-RATE-HYGIENE-M0.md](cluster/REPLICATED-WRITE-RATE-HYGIENE-M0.md) | K-03 M0 readout: the idle fleet's replicated proposals, authority reads and snapshot builds per voter over the one 12-hour-qualifying window, and which writers dominate the replicated log. | done |
-| [REPLICATED-WRITE-RATE-HYGIENE-II.md](cluster/REPLICATED-WRITE-RATE-HYGIENE-II.md) | K-10 plan: classification/offline loops, local hints and bounded forced checks; October 13 replaces the twelve-hour requirement with deployment-aware bounded qualification, without a fleet freeze. | open |
-| [BOUNDED-REPLICA-READS-ROLLOUT.md](cluster/BOUNDED-REPLICA-READS-ROLLOUT.md) | Implementation plan from the 2026-09-20 architecture review: flipping `bounded_replica_reads` as a consistency-policy change with per-route coverage, fewer consistent reads per request, and no ordinary-auth cache. | open |
-| [SQLITE-READ-PATH-AND-QUERY-PLANS.md](cluster/SQLITE-READ-PATH-AND-QUERY-PLANS.md) | Implementation plan from the 2026-09-20 architecture review: moving genuinely read-only store methods off the writer mutex, splitting `user_for_token`, `EXPLAIN QUERY PLAN`-justified indexes, keyset pagination, and the corrected search predicate. | open |
-| [CLUSTERING-PLAN.md](cluster/CLUSTERING-PLAN.md) | From one plurxd node to Phase 4, milestone by milestone. | open |
-| [CLUSTERING-PLAN-REVIEW.md](cluster/CLUSTERING-PLAN-REVIEW.md) | The right first slice, on top of eight contracts that did not hold. | done |
-| [PHASE3-SPIKE.md](cluster/PHASE3-SPIKE.md) | The decision gate: two HA risks spiked, one answer. | done |
-| [CLUSTER-PERFORMANCE-PLAN.md](cluster/CLUSTER-PERFORMANCE-PLAN.md) | Turning replicated correctness into useful capacity. | open |
-| [CLUSTER-MEDIA-POOL-PLAN.md](cluster/CLUSTER-MEDIA-POOL-PLAN.md) | Making every node improve playback rather than just hold state. | built |
-| [CLUSTER-PANEL-FOLLOWUPS.md](cluster/CLUSTER-PANEL-FOLLOWUPS.md) | Live status, a real module seam, one credential surface. | open |
-| [CLUSTER_TRANSPORT_RECOVERY_IMPLEMENTATION.md](cluster/CLUSTER_TRANSPORT_RECOVERY_IMPLEMENTATION.md) | Fixing buffered writes and bounding recovery end to end. | open |
-| [CLUSTER_TRANSPORT_RECOVERY_STATUS.md](cluster/CLUSTER_TRANSPORT_RECOVERY_STATUS.md) | Live implementation status of that effort. | open |
-| [CLUSTER-TRANSPORT-RECOVERY-POST-MERGE-HANDOFF.md](cluster/CLUSTER-TRANSPORT-RECOVERY-POST-MERGE-HANDOFF.md) | Finishing qualification and rollout after the merge. | open |
-| [TRANSPORT-RECOVERY-CI-STATUS.md](cluster/TRANSPORT-RECOVERY-CI-STATUS.md) | Which independent-role CI milestone is built, reviewed, and proved. | open |
-| [TRANSPORT-RECOVERY-CI-IMPLEMENTATION-HANDOFF.md](cluster/TRANSPORT-RECOVERY-CI-IMPLEMENTATION-HANDOFF.md) | Build order for independent voter and learner execution, durable diagnostics, phase timings, and separately reported CI roles. | open |
-| [TRANSPORT-RECOVERY-RESOURCE-BASELINE.md](cluster/TRANSPORT-RECOVERY-RESOURCE-BASELINE.md) | Why that lane never passed under the per-cycle ceiling: the measurement. | done |
-| [TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md](cluster/TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md) | The campaign-floor contract that replaced it, and the two options not taken. | built |
-| [CLUSTER_PAGE_LATENCY_REVIEW.md](cluster/CLUSTER_PAGE_LATENCY_REVIEW.md) | Evidence for why Home, Activity and Settings were slow in a cluster. | done |
-| [CLUSTER_PAGE_LATENCY_FIX_PLAN.md](cluster/CLUSTER_PAGE_LATENCY_FIX_PLAN.md) · [review](cluster/CLUSTER_PAGE_LATENCY_FIX_PLAN_REVIEW.md) | Restore quorum truth, then unblock first paint. | built |
-| [WAL_GENERATION_REPAIR_PLAN.md](cluster/WAL_GENERATION_REPAIR_PLAN.md) · [review](cluster/WAL_GENERATION_REPAIR_PLAN_REVIEW.md) | Making snapshot compaction invalidate every stale reader cache. | built |
-| [MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](cluster/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md) | Making admission an authorization decision. | open |
-| [LAB3_SNAPSHOT_CATCHUP_DIAGNOSIS.md](cluster/LAB3_SNAPSHOT_CATCHUP_DIAGNOSIS.md) | Why a live learner waited fifteen idle minutes. | open |
-| [ACTIVITY_PEER_READ_FIX_PLAN.md](cluster/ACTIVITY_PEER_READ_FIX_PLAN.md) | Coalescing peer-read bursts and reporting failures truthfully. | built |
-| [DVR-ACTIVITY-ZERO-GENERATION-STATUS.md](cluster/DVR-ACTIVITY-ZERO-GENERATION-STATUS.md) | Why remote Activity rejected a healthy recorder's initial serving epoch, and the repair's review and promotion state. | open |
-
----
-
-## clients/ — Apple, Android, and the web player
-
-The native clients and the web UI: parity trackers, the input contract every
-player obeys, subtitles and overlays, layouts and themes.
-
-| File | Answers | |
-|---|---|---|
-| [Android playback repair status](clients/ANDROID-PLAYBACK-REPAIR-STATUS.md) | Merged playback repairs, validation and remaining physical-device acceptance. | built |
-| [Ready-video recovery build note](apple-builds/888-ready-video-recovery.md) | Apple build claim and viewer-visible black-picture recovery changes for PR #888. | built |
-| [APPLE-BLACK-VIDEO-IMPLEMENTATION.md](clients/APPLE-BLACK-VIDEO-IMPLEMENTATION.md) | Avatar and HDR10 black-video investigation, verified false-frame evidence defects, item-bound presentation repair and physical acceptance limits. | open |
-| [Growing-resume preparation build note](apple-builds/914-growing-resume-preparation.md) | Apple build claim and bounded unpublished-session preparation repair for PR #914. | built |
-| [APPLE-GROWING-RESUME-PREPARATION.md](clients/APPLE-GROWING-RESUME-PREPARATION.md) | Why Naked Gun resumed through a premature preparation timeout, the exact server/client timing mismatch, bounded readiness repair, and remaining native-error evidence limits. | built |
-| [RASPBERRY-PI-IMPLEMENTATION.md](clients/RASPBERRY-PI-IMPLEMENTATION.md) | Build contract for existing Plurx server and web HDMI playback on Pi 5: request decoding, browser evidence, deployment and acceptance. | open |
-| [RASPBERRY-PI-INSTALLATION.md](clients/RASPBERRY-PI-INSTALLATION.md) | Implemented Docker-default Pi setup, selectable native/systemd, runtime/browser ownership and bounded acceptance; final CI pending. | built |
-| [RASPBERRY-PI-STATUS.md](clients/RASPBERRY-PI-STATUS.md) | Existing Plurx on Pi 5: completed software and bounded physical acceptance, retained history and pending final CI. | built |
-| [Native library index scrolling](apple-builds/823-ios-library-index-scroll.md) | Why index taps resolved to their own buttons, and the distinct row-target repair. | open |
-| [Native grouped library rows](apple-builds/821-native-library-rows.md) | Apple release note for native grouped browsing, jump navigation, and saved Rows/Grid. | built |
-| [GROUPED-LIBRARY-ROWS-STATUS.md](clients/GROUPED-LIBRARY-ROWS-STATUS.md) | Approved grouped library browsing contract, progress, review, and merge evidence. | open |
-| [Live TV cluster resource](apple-builds/537-live-tv-cluster-resource.md) | Apple build 193 durable cluster start intents and protocol negotiation; validation limits. | built |
-| [Native policy runners](apple-builds/634-native-policy-runners.md) | Apple 202 / Android 140 pure Auto-quality ports and shared JSON test runners; no native controller enablement or device acceptance. Removed 2026-10-04 (next row). | done |
-| [Remove native policy runners](apple-builds/634-remove-native-policy-runners.md) | Why the uncalled Swift/Kotlin `decideRung` ports, their runners and the Rust `decide_auto_transition` reducer were deleted, and why the shared fixture stays. | built |
-| [Native seek completion deadline](apple-builds/473-native-seek-deadline.md) | Apple recovery for seeks that never complete, cancellation and late-callback ownership. | built |
-| [Live TV station startup](apple-builds/568-live-tv-session-url.md) | Apple build 189 repair for valid station URLs rejected as expired sessions; regression and delivery limits. | built |
-| [STATUS-HISTORY.md](clients/STATUS-HISTORY.md) | Includes the 2026-09-24/25 sections moved on 2026-10-05. Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
-| [NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md](clients/NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md) | The build plan the adaptive-quality design produced: settle the four policy disagreements in the web first, type the reopen cause on the wire only in the change that first sends one, add the Swift and JVM runners of the shared fixture, then one adapter at a time — each one disabled until its own shaped-network trace beats its own baseline. | open |
-| [NATIVE-ADAPTIVE-QUALITY-DESIGN.md](clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md) | Implementation plan from the 2026-09-20 architecture review: what adaptive quality on the Apple and Android clients would have to be — one shared policy, five named kinds of evidence, and the shaped-network trace that would let it be switched on. | open |
-| [ANDROID-SHAPED-NETWORK-MEASUREMENT-PROTOCOL.md](clients/ANDROID-SHAPED-NETWORK-MEASUREMENT-PROTOCOL.md) | A-04's manual acquisition procedure for the four named Android clients and both profiles: real proxy controls, six-metric acquisition gaps, identity, bounded execution, restoration and honest incomplete receipts. | open |
-| [WEB-PLAYER-RECOVERY-AND-LOCAL-SEEK.md](clients/WEB-PLAYER-RECOVERY-AND-LOCAL-SEEK.md) | Implementation plan from the 2026-09-20 architecture review: hls.js worker on, `recoverMediaError` inside the existing attempt fences, a global error reporter with redaction, and local seeking for rolling HLS within the retained published range. | open |
-| [WEB-VOD-SEEK-MISSING-MEDIA-RCA-AND-FIX.md](clients/WEB-VOD-SEEK-MISSING-MEDIA-RCA-AND-FIX.md) | Why an unlanded Safari VOD seek hit the 8 s stall rule before its fragment retry, and the reviewed 20 s local-seek fallback proposal. | open |
-| [WEB-VOD-SEEK-IMPLEMENTATION-STATUS.md](clients/WEB-VOD-SEEK-IMPLEMENTATION-STATUS.md) | Current progress, evidence owed, and merge state for the web VOD seek deadline repair. | open |
-| [WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md](clients/WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md) | Implementation plan from the 2026-09-20 architecture review: `tsc --checkJs` ratcheted from a baseline over the served script order, then splitting `play()` and `attachHls()` along their seams, plus the small W9 fixes each with its guardrail. | open |
-| [APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION.md](clients/APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION.md) | Implementation plan from the 2026-09-20 architecture review: asset-derived display criteria through the active window on tvOS, interruption and route-change ownership in all three players, and the device tests that prove either. | open |
-| [APPLE-PLAYER-CONTROLLER-ATTEMPT-AND-OBSERVATION.md](clients/APPLE-PLAYER-CONTROLLER-ATTEMPT-AND-OBSERVATION.md) | Implementation plan from the 2026-09-20 architecture review: an immutable per-continuation `Attempt` snapshot that keeps the nine epochs' scopes, one typed item-event observer for all three stacks, poll-to-KVO conversions that keep their deadlines, and staged strict concurrency. | open |
-| [NATIVE-LIBRARY-PAGING.md](clients/NATIVE-LIBRARY-PAGING.md) | Implementation plan from the 2026-09-20 architecture review: paging large libraries on demand on Apple and Android while preserving merged multi-library order and defined search behaviour for unloaded titles. | open |
-| [ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md](clients/ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md) | Android TV display-mode selection, actual-granted-heap containment for every buffer role, isolated measurement provenance and the still-open three-device allocation/HDMI qualification. | open |
-| [ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION.md](clients/ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION.md) | Implementation plan from the 2026-09-20 architecture review: background pause and audio foreground service as one contract, one player builder with role overrides, live-window recovery, audio-sink error classification, and status-gated node failover. | open |
-| [ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md](clients/ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md) | D-03 plan and 2026-09-25 approval ruling: the server grant exists, external book handoff remains open, and the mobile clients use in-app readers; also covers backup exclusions, dispatcher evidence, and signed release deployment. | open |
-| [WATCH-AND-BROWSE-IMPLEMENTATION.md](clients/WATCH-AND-BROWSE-IMPLEMENTATION.md) | Approved movie/episode watch browser, retained web host, task ownership, tests and pending native/real-media gates. | open |
-| [WATCH-VIEW-LAYOUT.md](clients/WATCH-VIEW-LAYOUT.md) | What the web watch view shows beside and below the picture: the collapsible chapter rail with on-request thumbnails, the media ledger whose chips pick tracks, one Close, and the Playback switch behind the thumbnails (Developer until 2026-09-28). | built |
-| [APPLE-CLIENT-PARITY.md](clients/APPLE-CLIENT-PARITY.md) | What the Apple client has, what it lacks, and which build proved it. | live |
-| [ANDROID-CLIENT-PARITY.md](clients/ANDROID-CLIENT-PARITY.md) | The same, for Android. | live |
-| [ANDROID-DOUBLE-BACK-RCA-AND-FIX.md](clients/ANDROID-DOUBLE-BACK-RCA-AND-FIX.md) | Why rapid Back taps can empty Android navigation, the proposed entry ownership guard, emulator regression evidence, and review and release acceptance. | open |
-| [ANDROID-DOUBLE-BACK-IMPLEMENTATION-HANDOFF.md](clients/ANDROID-DOUBLE-BACK-IMPLEMENTATION-HANDOFF.md) | Sol's build and delivery contract: recover the rebased candidate, finish the Media3 lint opt-in, preserve six regressions, validate, and prepare review and landing evidence. | open |
-| [ANDROID-DOUBLE-BACK-STATUS.md](clients/ANDROID-DOUBLE-BACK-STATUS.md) | Current branch, milestones, validation, review, PR, and physical acceptance for the Android double-Back fix. | open |
-| [PLAYBACK-INFO-REDESIGN.md](clients/PLAYBACK-INFO-REDESIGN.md) | Playback info hierarchy, measurement semantics and qualification. | open |
-| [PLAYBACK-INFO-DIMENSIONS-STATUS.md](clients/PLAYBACK-INFO-DIMENSIONS-STATUS.md) | Live build ledger for frame, aspect and provenance repairs across web, Apple and Android. | live |
-| [PLAYBACK-INFO-DIMENSIONS.md](clients/PLAYBACK-INFO-DIMENSIONS.md) | Source handoff for the playback dimension and aspect repair, with evidence rules and acceptance cases. | open |
-| [PLAYBACK-INFO-MISSING-FIELDS-RCA.md](clients/PLAYBACK-INFO-MISSING-FIELDS-RCA.md) | Why clients omit output facts or display source dimensions for a converted stream, with reviewed provenance rules. | open |
-| [PLAYBACK-INFO-IMPLEMENTATION-HANDOFF.md](clients/PLAYBACK-INFO-IMPLEMENTATION-HANDOFF.md) | Build sequence for output metadata, safe client collectors, attachment fencing, package ownership, and acceptance. | open |
-| [330-calm-library-pages.md](apple-builds/330-calm-library-pages.md) | Apple build 162 quiet Home and open media details. | built |
-| [582-seek-observability.md](apple-builds/582-seek-observability.md) | Apple build194 seek terminal beacons and live viewing method. | open |
-| [590-acceptance-focus.md](apple-builds/590-acceptance-focus.md) | Apple build197 physical TV focus navigation correction and acceptance provenance. | open |
-| [465-library-filter-and-focus-regressions.md](apple-builds/465-library-filter-and-focus-regressions.md) | Query, watch-filter and page-arrival focus regression batch (written as Apple200 / Android137; Apple 206 on `main`); source and physical qualification. | open |
-| [602-native-live-tv-settings.md](apple-builds/602-native-live-tv-settings.md) | Apple200 and Android137 native Live TV server settings leave Developer for Settings → Live TV. | open |
-| [465-adaptive-library-prefetch.md](apple-builds/465-adaptive-library-prefetch.md) | Apple199 and Android136 native two-row prefetch, diagnostics and profile tooling batch; qualification and physical evidence. | open |
-| [594-live-tv-caption-and-capacity.md](apple-builds/594-live-tv-caption-and-capacity.md) | Apple198 and Android135 Live TV caption choices and explicit capacity alternatives; qualification and physical acceptance. | open |
-| [359-apple-pause-resume.md](apple-builds/359-apple-pause-resume.md) | Apple return-to-picture owner, deadline, and advisory enablement. | built |
-| [playback-info-redesign.md](apple-builds/playback-info-redesign.md) | Apple build 161 playback-info changes. | open |
-| [328-native-stall-parity.md](apple-builds/328-native-stall-parity.md) | Apple release note for recipe-preserving native stall recovery. | open |
-| [PLAYER-INPUT-CONTRACT.md](clients/PLAYER-INPUT-CONTRACT.md) | One routing table every client obeys — which key does what, in which state. | live |
-| [PLAYER-INPUT-CONTRACT-PLAN.md](clients/PLAYER-INPUT-CONTRACT-PLAN.md) | How that contract was implemented. | built |
-| [PLAYER-INPUT-PHYSICAL-VERIFICATION-2026-09-02.md](clients/PLAYER-INPUT-PHYSICAL-VERIFICATION-2026-09-02.md) | What the physical devices did on 2026-09-02. | done |
-| [PLAYBACK-SURFACE-CONTRACT.md](clients/PLAYBACK-SURFACE-CONTRACT.md) | Why an error overlay sits over a playing picture on every client, and the one fault contract that ends it (v2, ruled). | live |
-| [PLAYBACK-SURFACE-CONTRACT-REVIEW.md](clients/PLAYBACK-SURFACE-CONTRACT-REVIEW.md) | Adversarial review of PR #274: factual audit, recovery and ownership counterexamples, and acceptance gaps. | done |
-| [PLAYBACK-SURFACE-CONTRACT-REVIEW-RESPONSE.md](clients/PLAYBACK-SURFACE-CONTRACT-REVIEW-RESPONSE.md) | Finding-by-finding disposition of that review — what v2 of the contract changed and why. | done |
-| [PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md) | The six-PR build plan for the surface contract: exact interfaces, owner sites, fence, acceptance commands. | open |
-| [APPLE-PAUSE-RESUME-IMPLEMENTATION-HANDOFF.md](clients/APPLE-PAUSE-RESUME-IMPLEMENTATION-HANDOFF.md) · [design review](clients/APPLE-PAUSE-RESUME-HANDOFF-REVIEW.md) · [status](clients/APPLE-PAUSE-RESUME-STATUS.md) | Bounded return to a moving picture after Apple pause: incident evidence, reviewed contract, and live implementation/promotion ledger. | open |
-| [PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md](clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md) | Hand-off for a Mac: compile and test M2 and M5's Swift, which has never seen a compiler. | open |
-| [PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md](clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md) | The same for M3 and M5's Kotlin: Gradle, the mutations, the device runs. | open |
-| [PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md](clients/PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md) | M4: the four §7 recipes on an Apple TV, an iPhone and an Android TV, and what counts as a pass. | open |
-| [ANDROID-DV-LEVEL-CENSUS-PROMPT.md](clients/ANDROID-DV-LEVEL-CENSUS-PROMPT.md) | For the session with the Android devices: dump each decoder's Dolby Vision profile/level pairs so a server-side level check is built only if some device needs it. | open |
-| [PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md](clients/PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md) | M6's gate: the one measurement that decides whether the Android remux-seek landing gets built at all. | open |
-| [WEB-UI-USABILITY-AUDIT.md](clients/WEB-UI-USABILITY-AUDIT.md) | Approved twelve-part web usability audit and acceptance criteria. | open |
-| [WEB-UI-IMPLEMENTATION-STATUS.md](clients/WEB-UI-IMPLEMENTATION-STATUS.md) · [status page](clients/WEB-UI-STATUS.html) | Progress, decisions, review and final fast-lane evidence for the web UI implementation. | open |
-| [UI-NAVIGATION-AUDIT.md](clients/UI-NAVIGATION-AUDIT.md) | Why the player felt different on every client, anchored at `file:line`. | done |
-| [CLIENTS-CODE-REVIEW.md](clients/CLIENTS-CODE-REVIEW.md) · [assessment](clients/CLIENTS-CODE-REVIEW-ASSESSMENT.md) | Capable players that under-ask the server — findings, and what to trust. | done |
-| [CLIENTS-REMEDIATION-PLAN.md](clients/CLIENTS-REMEDIATION-PLAN.md) | Restoring trust, then raising the quality ceiling. | built |
-| [APPLE-NATIVE-SUBTITLES-PLAN.md](clients/APPLE-NATIVE-SUBTITLES-PLAN.md) · [handoff](clients/APPLE-NATIVE-SUBTITLES-HANDOFF.md) | Native text subtitles on Apple: the road, and what shipped. | built |
-| [PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md](clients/PGS-SUBTITLE-START-PATH-RCA-AND-PLAN.md) | Why a 79.5 GB read blocked a start when a title needed PGS burn-in, what the 2026-09-21 incident actually was, and the three merged fixes. The September 24 two-device overlay check passed; current evidence is reconciled in the subtitle completion ledger. | built |
-| [PGS-SUBTITLE-START-PATH-RCA-REVIEW.md](clients/PGS-SUBTITLE-START-PATH-RCA-REVIEW.md) | Adversarial review of the RCA at `5c605768`: §5.3's web regression refuted, the index pass proven to be one full demux (so Fix C rides on it for free), answers to all seven questions, six rulings. | done |
-| [SUBTITLE-CLUSTER-EXTRACTION-PLAN.md](clients/SUBTITLE-CLUSTER-EXTRACTION-PLAN.md) | v2 implementation contract and M0–M5 execution log for clustered text and PGS extraction, queueing, hydration and backfill; fleet evidence pending. | built |
-| [SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md](clients/SUBTITLE-CLUSTER-EXTRACTION-REVIEW.md) | Seven findings and dispositions that shaped the v2 contract. | done |
-| [PARALLEL-SUBTITLE-RANGES-STATUS.md](clients/PARALLEL-SUBTITLE-RANGES-STATUS.md) | Distributed playback text windows: bounded-seek evidence, implementation and verification status. | built |
-| [SUBTITLE-CLUSTER-EXTRACTION-STATUS.md](clients/SUBTITLE-CLUSTER-EXTRACTION-STATUS.md) | Current K-09 milestone, review and merge qualification status; fleet evidence pending. | built |
-| [SUBTITLE-RELIABILITY-COMPLETION.md](clients/SUBTITLE-RELIABILITY-COMPLETION.md) | Current cross-client subtitle defects, measured engine recovery, and reconciled remaining subtitle work. | built |
-| [Subtitle qualification receipts](clients/evidence/subtitles-20261009/final-qualification.tar.gz) | Sanitized local case/source hashes, initial failures and repaired app evidence, native compilation, and reproducible subtitle drivers; CI monitoring is recorded separately. | built |
-| [SUBTITLE-MAC-COMPOSITION-EVIDENCE.md](clients/SUBTITLE-MAC-COMPOSITION-EVIDENCE.md) | Bounded native-processing then CPU subtitle corpus, active-cue seek, EOF and cancellation observations, package/source identity and explicit reproducer. | done |
-| [Mac subtitle composition receipt](clients/SUBTITLE-MAC-COMPOSITION-EVIDENCE.json) | Sanitized package/input/driver hashes and analytic measurements for the bounded E2 graph acceptance. | done |
-| [SUBTITLE-RELIABILITY-ASSESSMENT.md](clients/SUBTITLE-RELIABILITY-ASSESSMENT.md) | Why subtitles still fail on every client after the rework landed — three symptoms root-caused at `c9e4edf4`, with confidence labels. | done |
-| [SUBTITLE-RELIABILITY-HANDOFF.md](clients/SUBTITLE-RELIABILITY-HANDOFF.md) | The build order for the repairs: six milestones, exact contracts, non-goals, acceptance. | built |
-| [SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md](clients/SUBTITLE-RELIABILITY-PHYSICAL-VERIFICATION-PROMPT.md) | Eight cases for the session that has the devices — the hardware evidence none of this has yet. | open |
-| [PGS_OVERLAY_PLAN.md](clients/PGS_OVERLAY_PLAN.md) | Dolby Vision-safe PGS subtitle overlay. | built |
-| [PGS-OVERLAY-M0-FEASIBILITY.md](clients/PGS-OVERLAY-M0-FEASIBILITY.md) | The feasibility evidence for M0. | open |
-| [PGS-OVERLAY-REVIEW-ASSESSMENT.md](clients/PGS-OVERLAY-REVIEW-ASSESSMENT.md) | Accepted findings, and the re-review requested. | done |
-| [APPLE-PGS-OVERLAY-ACCEPTANCE.md](clients/APPLE-PGS-OVERLAY-ACCEPTANCE.md) | One iPad Pro run, one decidable acceptance record. | open |
-| [UI-LAYOUTS-PLAN.md](clients/UI-LAYOUTS-PLAN.md) | Four layouts and five themes, proposed for review. | done |
-| [UI-LAYOUTS-REVIEW.md](clients/UI-LAYOUTS-REVIEW.md) | Ship a smaller, honest first slice. | done |
-| [UI-LAYOUTS-IMPLEMENTATION.md](clients/UI-LAYOUTS-IMPLEMENTATION.md) | The accepted slice, as built. | built |
-| [UI-LAYOUTS-STATUS.md](clients/UI-LAYOUTS-STATUS.md) | Ground truth for what of that slice is proven. | open |
-| [UI-LAYOUTS-G3-DECISION.md](clients/UI-LAYOUTS-G3-DECISION.md) | Did the layout abstraction pay for itself? | done |
-| [JELLYFIN-EMBY-COMPATIBILITY-OUTLINE.md](clients/JELLYFIN-EMBY-COMPATIBILITY-OUTLINE.md) | Whole Jellyfin/Emby effort: first clients, phased scope, estimates and exclusions. | open |
-| [TV-REMOTE-AND-COMPANION-PLAN.md](clients/TV-REMOTE-AND-COMPANION-PLAN.md) | TV remote and HDMI-CEC input, automatic phone/tablet remote discovery, pairing, cross-platform control, and the Linux/Pi, Mac, and Windows implementation sequence. | open |
-| [TV-REMOTE-AND-COMPANION-REVIEW.md](clients/TV-REMOTE-AND-COMPANION-REVIEW.md) | Independent adversarial review of the TV remote plan: controller authorization, command expiry, desktop CEC availability, and the tvOS feasibility gate. | open |
-| [TV-REMOTE-AND-COMPANION-IMPLEMENTATION.md](clients/TV-REMOTE-AND-COMPANION-IMPLEMENTATION.md) | Build-ready Sol 6.1 packets, file ownership, native/desktop/background delivery, parent review, and batched-merge handoff. | open |
-| [TV-REMOTE-NATIVE-INVITATIONS-BUILD.md](clients/TV-REMOTE-NATIVE-INVITATIONS-BUILD.md) | Native notification enrollment, cold-launch taps, existing reminder/service ownership, Android resident networking and focused acceptance. | open |
-| [TV-REMOTE-API.md](clients/TV-REMOTE-API.md) | Implemented v1 HTTP DTOs, header proofs, owner routing, pairing/control lifecycle, storage migration and limits for receiver and companion clients. | open |
-| [TV-REMOTE-INVITATIONS-API.md](clients/TV-REMOTE-INVITATIONS-API.md) | Exact opt-in phone consent, background poll/tap, broker ticket and durable invitation lifecycle contract; first storage slice implemented, transport qualification pending. | open |
-| [TV-REMOTE-PROTOCOL.md](clients/TV-REMOTE-PROTOCOL.md) | Exact remote authority, node ownership, command/state wire types, receiver freshness, pairing and endpoint contracts. | open |
-| [TV-REMOTE-AND-COMPANION-STATUS.md](clients/TV-REMOTE-AND-COMPANION-STATUS.md) | Packet progress, parent review, compilation and physical acceptance evidence, without treating docs as shipped functionality. | open |
-| [TV-REMOTE-OPERATIONS.md](clients/TV-REMOTE-OPERATIONS.md) | Set up a TV receiver and paired phone, recover control, and record physical acceptance without treating in-progress packets as shipped support. | open |
-| [JELLYFIN-SHARED-SERVICES.md](clients/JELLYFIN-SHARED-SERVICES.md) | J1 shared login/token authority, token-only revocation and complete native watch operations; remaining compatibility lifecycle work. | open |
-| [JELLYFIN-PLAY-BINDINGS.md](clients/JELLYFIN-PLAY-BINDINGS.md) | J1 bounded negotiation metadata, live source incarnations, native route references, terminal retention and remaining adapter fences. | open |
-| [JELLYFIN-COMPATIBILITY-BUILD.md](clients/JELLYFIN-COMPATIBILITY-BUILD.md) | Infuse/Android TV build contract after three reviews: protocol spike, player identity, VOD fallbacks, watch fencing and acceptance. | open |
-| [JELLYFIN-DURABLE-IDENTITIES.md](clients/JELLYFIN-DURABLE-IDENTITIES.md) | J1 permanent opaque mappings, deterministic deletion retirement, both-backend migrations and import proof. | open |
-| [JELLYFIN-PROTOCOL-FOUNDATION.md](clients/JELLYFIN-PROTOCOL-FOUNDATION.md) | J1 pure tick/ID/credential forms, source replacement guard and the remaining service/storage boundary. | open |
-| [JELLYFIN-COMPATIBILITY-REVIEW.md](clients/JELLYFIN-COMPATIBILITY-REVIEW.md) | Sanitized first Opus review and historical author disposition; amended by the re-review. | done |
-| [JELLYFIN-COMPATIBILITY-REREVIEW.md](clients/JELLYFIN-COMPATIBILITY-REREVIEW.md) | Opus approvals and R1–R8 / S1–S4 dispositions: duration, restart attestation, cold-node artwork and trigger coverage. | done |
-| [JELLYFIN-COMPATIBILITY-STATUS.md](clients/JELLYFIN-COMPATIBILITY-STATUS.md) | J0/J1 integration, pinned reference/client evidence, and J2 connection/catalog work with remaining qualification gates. | open |
-| [JELLYFIN-PASSIVE-VOD-ROUTE-LIFETIME.md](clients/JELLYFIN-PASSIVE-VOD-ROUTE-LIFETIME.md) | J0 physical idle-reap failure and proposed bounded passive route grant; recovery proof still required. | open |
-| [J0 baseline manifest](clients/jellyfin/baseline-manifest.json) | Pinned server/schema/client provenance and synthetic fixture hashes; physical acceptance tracked separately. | open |
-| [Docs publication evidence](clients/jellyfin/docs-publication-receipt.json) | PR #744 exact-head/base docs fast-lane outcomes; not implementation or final release qualification. | done |
-| [Android TV connection observation](clients/jellyfin/androidtv-connection-observation.json) | Physical Android reference playback, controlled VTT/fMP4 normalization and native delivery spike; production adapter acceptance remains open. | open |
-| [Infuse connection observation](clients/jellyfin/infuse-connection-observation.json) | Physical Apple TV reference login, direct MKV, explicit transcode, carrier/profile differences and long-pause seeking. | open |
-| [WEB-SHELL-LAYOUT.md](clients/WEB-SHELL-LAYOUT.md) | Where the web app's sixty-five files are, what each one holds, where its code used to be in `index.html`, and the rules a new file has to obey. | live |
-| [WEB-SHELL-SPLIT-PLAN.md](clients/WEB-SHELL-SPLIT-PLAN.md) | How the 23,901-line web `index.html` became a multi-file app with no build step, and the byte-identity gate that proved nothing else changed. | built |
-| [WEB_LAYOUT_CONTAINMENT_STATUS.md](clients/WEB_LAYOUT_CONTAINMENT_STATUS.md) | Live delivery status of web layout containment. | open |
-| [OFFLINE-VIEWING-PLAN.md](clients/OFFLINE-VIEWING-PLAN.md) · [review](clients/OFFLINE-VIEWING-REVIEW.md) | One-tap, app-managed downloads — the plan and its review. | built |
-| [EBOOK-READER-PLAN.md](clients/EBOOK-READER-PLAN.md) | plurx reads what Curator acquires. | open |
-| [CLIENT-DEPLOY-PROMPT.md](clients/CLIENT-DEPLOY-PROMPT.md) | Getting a merged build onto the phones and the Apple TVs. | live |
-| [DVR-HARDWARE-VERIFICATION-PROMPT.md](clients/DVR-HARDWARE-VERIFICATION-PROMPT.md) | Hand-off for the LAN: the guide tier, and the end-to-end recording pass no cloud session can run. | open |
-
----
-
-## server/ — the HTTP layer, scanning, images, auth and observability
-
-The daemon's request path and its background workers, as distinct from what
-is streamed (`streaming/`) and what is replicated (`cluster/`).
-
-| File | Answers | |
-|---|---|---|
-| [DETAIL-READS-AND-STORAGE-AVAILABILITY.md](server/DETAIL-READS-AND-STORAGE-AVAILABILITY.md) | Implementation plan from the 2026-09-20 architecture review: why an item-detail page stalls on an unmounted share, and how the index badge is decided without loading the index. | open |
-| [TELEMETRY-BACKPRESSURE.md](server/TELEMETRY-BACKPRESSURE.md) | Implementation plan from the 2026-09-20 architecture review: what bounds playback telemetry when the node-local writer is slow, and why the metrics survive retention being turned off. | open |
-| [PLEX-FACADE-PAGING.md](server/PLEX-FACADE-PAGING.md) | Implementation plan from the 2026-09-20 architecture review: how the Plex façade answers a 5,000-item section without an N+1, and what must be proven before the media-session route cache is touched. | open |
-| [OBSERVABILITY-BASELINE.md](server/OBSERVABILITY-BASELINE.md) | Implementation plan from the 2026-09-20 architecture review: what plurx publishes about its own HTTP surface and its panics, and which metric is each release-evidence number. | open |
-| [HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY.md](server/HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY.md) | Implementation plan from the 2026-09-20 architecture review: header-read and per-group handler deadlines the listener lacks, precompressed web assets with correct negotiation, hashed `hls.min.js` and sidecars, and the security headers — as three PRs. | built |
-| [SCAN-AND-ENRICHMENT-HYGIENE.md](server/SCAN-AND-ENRICHMENT-HYGIENE.md) | Implementation plan from the 2026-09-20 architecture review: a bounded blocking walker, provider/join deadlines, and the bounded AniList transient-retry follow-up; fleet acceptance remains separate. | built |
-| [IMAGE-SERVING-AND-DERIVATIVES.md](server/IMAGE-SERVING-AND-DERIVATIVES.md) | Implementation plan from the 2026-09-20 architecture review: verified digests instead of per-request hashing, separate local-read and peer-fetch permits, `ETag`s, and size variants added without reverting `original` backdrops. | open |
-| [AUTH-HARDENING.md](server/AUTH-HARDENING.md) | Implementation plan from the 2026-09-20 architecture review: bounded logout admission that keeps the two-phase revocation fence, a lockout-resistant login throttle, and token expiry as a product decision with its client consequences. | open |
-
-## performance/ — where the seconds go
-
-[Video quality programme](performance/VIDEO-QUALITY-PROGRAM.md) — approved calibration and performance build order; [execution ledger](performance/VIDEO-QUALITY-STATUS.md) — parallel ownership, actual measurements, merges and remaining evidence. **Built; remaining acceptance resumed October 8 in three parallel lanes.**
-
-[Video quality batch qualification](evidence/video-quality-2026-10-03/) — final review corrections, native content analysis, packaged scorer, Developer settings, isolated VAAPI output and retained per-check fast-lane receipts. **Qualified; landing and cleanup in PR #766.**
-
-[Video quality acceptance follow-up](evidence/video-quality-2026-10-08/) — retained source-local title scoring, actual Plurx browser/native playback, HDR cause isolation and matched latency controls. **Measured; acceptance limits and landing status in the [execution ledger](performance/VIDEO-QUALITY-STATUS.md).**
-
-[HDR sharp-edge and autonomous client follow-up](evidence/video-quality-2026-10-12/) — driver-feature ablations, source-matched rate/quality controls and retained Safari/native client validation; current integration and acceptance scope in the [execution ledger](performance/VIDEO-QUALITY-STATUS.md).
-
-Two rounds of performance work, each with its plan, review, and response.
-
-| File | Answers | |
-|---|---|---|
-| [HDR-REFERENCE-SCORING.md](performance/HDR-REFERENCE-SCORING.md) | Independent bounded PQ code-domain metrics/census and explicitly graded BT.709 reference provenance for SDR VMAF; diagnostic evidence does not close genuine corpus, GPU or physical acceptance. | open |
-| [TONEMAP-SEGMENT-CONSISTENCY.md](performance/TONEMAP-SEGMENT-CONSISTENCY.md) | Exact source-frame and rational-PTS comparison of continuous and restarted tone-map filters; separate from seek, encoded-HLS and display acceptance. | open |
-| [Tone-map reset receipt](performance/evidence/tonemap-reset-20261015.json) | Four authored CPU/Metal campaigns, exact raw-frame and rational-PTS results, the preserved fixture failure and metadata-only correction proof. | done |
-| [PERF-PLAN.md](performance/PERF-PLAN.md) | Round one: where the seconds go, and the plan to get them back. | built |
-| [PERF-PLAN-REVIEW.md](performance/PERF-PLAN-REVIEW.md) | What to correct before implementing it. | done |
-| [PERF-REVIEW-RESPONSE.md](performance/PERF-REVIEW-RESPONSE.md) | What the review got right, what already shipped, what changed. | done |
-| [PERF-REVIEW-ASSESSMENT.md](performance/PERF-REVIEW-ASSESSMENT.md) | What is resolved and what still needs a contract. | done |
-| [PERF2-PLAN.md](performance/PERF2-PLAN.md) | Round two: better starts, steadier streams, smarter bits. | open |
-| [PERF2-PLAN-REVIEW.md](performance/PERF2-PLAN-REVIEW.md) | The seam contracts are not implementation-ready. | done |
-| [PERF2-REVIEW-RESPONSE.md](performance/PERF2-REVIEW-RESPONSE.md) | All eight findings accepted. | done |
-| [PERF2-IMPLEMENTATION-HANDOFF.md](performance/PERF2-IMPLEMENTATION-HANDOFF.md) | How to build round two without breaking it. | open |
-| [CODE-QUALITY-PERFORMANCE-REVIEW.md](performance/CODE-QUALITY-PERFORMANCE-REVIEW.md) | A strong data plane with lifecycle gaps. | done |
-
----
-
-## ci/ — the build, the gate, and the agents that use it
-
-| File | Answers | |
-|---|---|---|
-| [DOCKER-HARDWARE-STATUS.md](ci/DOCKER-HARDWARE-STATUS.md) | Automatic Docker GPU passthrough, device groups, NVIDIA libraries, review and validation progress. | open |
-| [PYTHON-UNIT-PR-RECEIPTS.md](ci/PYTHON-UNIT-PR-RECEIPTS.md) | Once-per-PR Python successes: authenticated journals are adopted, anything else simply runs again — history never blocks a PR. | open |
-| [EFFORT-WEB-STATIC-CONTRACTS.md](ci/EFFORT-WEB-STATIC-CONTRACTS.md) | Current-source effort web lint, preserved shape obligations, and explicitly deferred behavioral qualification. | open |
-| [STATUS-HISTORY.md](ci/STATUS-HISTORY.md) | Includes the 2026-09-24/25 sections moved on 2026-10-05. Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
-| [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md) | Implementation plan from the 2026-09-20 architecture review: a PR-level regression field bound to the merged tree that replaces per-commit receipts without deleting one, the narrowed corrective rule, the text-contract pruning protocol, the STATUS.md split, and the release-tag restart with `sha-` images kept as deploy identity. | open |
-| [ARCHITECTURE-DOC-RECONCILIATION.md](ci/ARCHITECTURE-DOC-RECONCILIATION.md) | Implementation plan from the 2026-09-20 architecture review: every wrong number in ARCHITECTURE.md verified against its constant, the one PR that rewrites it with named constants, the DVR reversal as a dated decision, a `doc_versions.py` extension, and the 46 index rows whose doc header disagrees. | done |
-| [RUST-TEST-EXECUTION-POLICY.md](ci/RUST-TEST-EXECUTION-POLICY.md) | Current compile-only ready-Rust policy and recorded known-failure close-out; historical gaps, original failed receipts and source/environment adoption limits remain explicit. | done |
-| [SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md](ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md) | Implementation plan from the 2026-09-20 architecture review: systemd and Compose limits each with its validation step, child priorities and OOM adjustment, CI on the shipped ffmpeg 8, the corrected release profile, and parser fuzz targets. | open |
-| [RIPWIRE-PILOT.md](ci/RIPWIRE-PILOT.md) | Measured query cost, source/fixture omissions, and completed opt-in adoption verdict. | open |
-| [RIPWIRE.md](ci/RIPWIRE.md) | Explicit setup, bounded navigation, output meanings, and coverage limits. | live |
-| [RIPWIRE-STATUS.md](ci/RIPWIRE-STATUS.md) | Ripwire implementation, measured evidence, decisions, and promotion progress. | open |
-| [CI_TEST_OVERHAUL_PLAN.md](ci/CI_TEST_OVERHAUL_PLAN.md) | Fast failures, selective evidence, safe reuse. | open |
-| [APPLE-RUNNER-FAILOVER.md](ci/APPLE-RUNNER-FAILOVER.md) | The M4 Apple primary, M3 Max standby, outage detection and installation. | live |
-| [CI_EXECUTION_ACCELERATION_PLAN.md](ci/CI_EXECUTION_ACCELERATION_PLAN.md) · [review](ci/CI_EXECUTION_ACCELERATION_REVIEW.md) | Persistent caches, native packaging, exact sharding. | open |
-| [AGENT-COMPILE-LOOP.md](ci/AGENT-COMPILE-LOOP.md) | A compiler for a checkout that has none. | live |
-| [AI-HARNESS-ASSESSMENT.md](ci/AI-HARNESS-ASSESSMENT.md) | Why agent navigation and dependable feedback should precede new orchestration, and where Ripwire fits. | open |
-| [AI-HARNESS-FABLE-ASSESSMENT.md](ci/AI-HARNESS-FABLE-ASSESSMENT.md) | Fable's assessment: fix the compile loop, test evidence, and prompt drift before navigation tooling; positions on Gemini's and Codex's proposals. | open |
-| [AI-HARNESS-IMPLEMENTATION-PLAN.md](ci/AI-HARNESS-IMPLEMENTATION-PLAN.md) | Ten milestones, in that order, with exact contracts and acceptance checks: agent-check, tests out of the hotspots, prove-fix, fences, guides, swarm/ alignment, status fragments, PR ledger, Ripwire pilot, first extraction. | open |
-| [RIPWIRE-IMPLEMENTATION-HANDOFF.md](ci/RIPWIRE-IMPLEMENTATION-HANDOFF.md) | CLI-first build contract for bounded repository navigation, benchmark evidence, validation integration, and rollout limits. | open |
-| [FORGEJO-MAIN-IMAGE-HANDOFF.md](ci/FORGEJO-MAIN-IMAGE-HANDOFF.md) | Publishing the main image from Forgejo. | open |
-| [RUNNER-DISK.md](ci/RUNNER-DISK.md) | What fills a runner, what bounds it, how to reclaim it. | live |
-| [MEDIA1-RUNNER-ORPHANED-PROCESSES.md](ci/MEDIA1-RUNNER-ORPHANED-PROCESSES.md) | Why effort preflight leaked stopped children on media1, and how cleanup is proved. | open |
-| [MEDIA1-RUNNER-ORPHANED-SLEEP-PROCESSES.md](ci/MEDIA1-RUNNER-ORPHANED-SLEEP-PROCESSES.md) | Evidence for stopped orphaned sleeps in the media1 runner cgroups and the safe cleanup boundary. | open |
-
----
-
-## features/ — whole capabilities, planned end to end
-
-| File | Answers | |
-|---|---|---|
-| [PROJECT-BACKLOG.md](features/PROJECT-BACKLOG.md) | Cross-project to-do: designed but unbuilt work, remaining acceptance, reconciliations and deferred decisions. | live |
-| [REMOTE-DIAGNOSTICS-IMPLEMENTATION.md](features/REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) | Current archive-attachment contract and historical hosted-delivery design for web, Apple and Android diagnostic capture. | open |
-| [REMOTE-DIAGNOSTICS-STATUS.md](features/REMOTE-DIAGNOSTICS-STATUS.md) | Canonical ownership, archive qualification, deferred hosted delivery and promotion ledger for diagnostics. | open |
-| [REMOTE-DIAGNOSTICS-OPERATIONS.md](server/REMOTE-DIAGNOSTICS-OPERATIONS.md) | Retained operating instructions for the deferred support service; archive attachments do not require its deployment. | open |
-| [SHARED-LIBRARIES-DESIGN.md](features/SHARED-LIBRARIES-DESIGN.md) | Why Cinema shares selected libraries over private Tailscale; scope and deferred Plex/Watch Together work. | open |
-| [SHARED-LIBRARIES-IMPLEMENTATION.md](features/SHARED-LIBRARIES-IMPLEMENTATION.md) | Revised S0–S8 build contract, authority, deployment, playback integration and acceptance evidence. | open |
-| [SHARED-LIBRARIES-STATUS.md](features/SHARED-LIBRARIES-STATUS.md) | Shared-libraries integration, live promotion evidence, failed-only qualification and remaining acceptance. | open |
-| [SHARED-LIBRARIES-OPERATIONS.md](features/SHARED-LIBRARIES-OPERATIONS.md) | How to configure the implemented private listener, pair viewers, diagnose retirement and distinguish remaining Docker/cluster/device qualification. | open |
-| [SHARED-LIBRARIES-INGRESS-CUSTODY.md](features/SHARED-LIBRARIES-INGRESS-CUSTODY.md) | Why cluster forwarding needs durable ingress obligations and exact outer-writer closure acknowledgements, with schema and retry boundaries. | open |
-| [SHARED-LIBRARIES-HANDOFF.md](features/SHARED-LIBRARIES-HANDOFF.md) | Dated integration and agent snapshot, all remaining S2–S8 implementation/qualification work, compiler commands and promotion requirements. | open |
-| [SHARED-LIBRARIES-RE-REVIEW.md](features/SHARED-LIBRARIES-RE-REVIEW.md) | Opus re-review of the revised contract; SL-18–24 and links to their corrections. | open |
-| [SHARED-LIBRARIES-REVIEW.md](features/SHARED-LIBRARIES-REVIEW.md) | Opus's original S0 findings; links to the current dispositions and remaining qualification. | open |
-| [SHARED-LIBRARIES-COORDINATED-UPGRADE.md](features/SHARED-LIBRARIES-COORDINATED-UPGRADE.md) | How archived daemons qualify schema refusal, retention and topology restore; the unexecuted real Local HLS drain extension and remaining Shared rollout limits. | open |
-| [SHARED-LIBRARIES-UPGRADE-QUALIFICATION.md](features/SHARED-LIBRARIES-UPGRADE-QUALIFICATION.md) | Which historical production Store reads, writes and cleanup work against the candidate ownership rebuild; reproducible compatibility evidence and upgrade limits. | open |
-| [SHARED-LIBRARIES-PRINCIPAL-CENSUS.md](features/SHARED-LIBRARIES-PRINCIPAL-CENSUS.md) | Finite session method/key/decoder census, caller ownership audit, explicit refusal repairs and remaining Source admission evidence. | open |
-| [SHARED-LIBRARIES-REPLICATED-PRINCIPALS.md](features/SHARED-LIBRARIES-REPLICATED-PRINCIPALS.md) | Which replicated session writers/readers use complete canonical ownership, their actual voter regressions, and remaining S3 admission/migration work. | open |
-| [LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md](features/LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md) | Remove permanent tuner ownership with distributed admission, session recovery, recording claims and safe storage publication; merged as #537. | built |
-| [LIVE-TV-CLUSTER-RESOURCE-REVIEW.md](features/LIVE-TV-CLUSTER-RESOURCE-REVIEW.md) | Design review findings and accepted corrections for distributed tuner access. | done |
-| [LIVE-TV-CLUSTER-RESOURCE-STATUS.md](features/LIVE-TV-CLUSTER-RESOURCE-STATUS.md) | Current implementation progress, decisions, commits, review and fast-lane evidence. | live |
-| [SUBTITLE-DOWNLOADS-IMPLEMENTATION.md](features/SUBTITLE-DOWNLOADS-IMPLEMENTATION.md) | Online subtitle search, durable captions, playback integration and optional automatic acquisition. | built |
-| [SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md](features/SUBTITLE-GENERATION-USABILITY-IMPLEMENTATION.md) | Generation merged to main: managed model installation, immutable worker requests and web completion; exact-tree macOS primary passed, with post-merge CI/Linux and broader qualification explicitly pending. | built · acceptance open |
-| [SUBTITLE-RECOGNITION-QUALIFICATION.md](features/SUBTITLE-RECOGNITION-QUALIFICATION.md) | Which pinned speech, noise, silence and open-film cases measure recognition and CPU throughput, what failed, and which human/movie/service evidence remains missing. | open |
-| [PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md](features/PROGRESSIVE-SUBTITLE-TRANSLATION-PLAN.md) | Foreign-speech-to-English captions during playback. First route built and accepted 2026-10-17 (web direct, one audio stream, Settings → Playback setup, packaged first cue/Stop/seek/Off evidence in §9); native, multi-audio, encoded, long-film and broader human quality stay open. | built |
-| [STATUS-HISTORY.md](features/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
-| [DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md](features/DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md) | Implementation plan from the 2026-09-20 architecture review: why a series rule missed an airing ten days out and why one slow recording disk stalls the shared tuner; the scheduler's full-guide view and per-sink owned writers behind bounded queues. | open |
-| [LIVE-TV-SESSION-FENCE-PEER-TRANSPORT-AND-START.md](features/LIVE-TV-SESSION-FENCE-PEER-TRANSPORT-AND-START.md) | Implementation plan from the 2026-09-20 architecture review: one graced settings observation per node instead of a consistent read per session per second, one shared `PeerTransport`, warm start without the serial prefix wait, and a retry owner for failed cleanup. | open |
-| [LIVE-TV-SHARED-TRANSPORT.md](features/LIVE-TV-SHARED-TRANSPORT.md) | Shared tuner transport/caption contract, landed buffered-input fairness and the Stop-feedback follow-up after its sole review finding; pending promotion and remaining physical/runtime acceptance stay distinct. | open |
-| [SHOW-IDENTITY-SPLIT-RCA-AND-FIX.md](features/SHOW-IDENTITY-SPLIT-RCA-AND-FIX.md) | Why reference show S split and changed files can lose watch state; Fable-reviewed directory lookup proposal, movie coverage, hint correction and catalogue repair. | open |
-| [SCAN-IDENTITY-IMPLEMENTATION.md](features/SCAN-IDENTITY-IMPLEMENTATION.md) | Sol's three-PR build contract for scan ownership, directory matching, guarded series hints and atomic catalogue repair, with backend tests and release acceptance. | open |
-| [SCAN-IDENTITY-STATUS.md](features/SCAN-IDENTITY-STATUS.md) | Live base, branch, milestone, evidence, review and promotion ledger for the scan-identity effort. | open |
-| [SCREENSHOT-TOUR.md](features/SCREENSHOT-TOUR.md) | What do native phone, tablet, browser, Live TV, recording, and library layouts look like with public-safe demo data? | live |
-| [HDHOMERUN-LIVE-TV-PLAN.md](features/HDHOMERUN-LIVE-TV-PLAN.md) | One tuner, every plurx client. | open |
-| [HDHOMERUN-LIVE-TV-STATUS.md](features/HDHOMERUN-LIVE-TV-STATUS.md) | What is built and what is proved on a real FLEX 4K. | open |
-| [LIVE-TV-ORIGINAL-QUALITY-IMPLEMENTATION.md](features/LIVE-TV-ORIGINAL-QUALITY-IMPLEMENTATION.md) | Preserve the broadcast when the player can use it, convert only incompatible tracks, and track the effort to main. | built |
-| [LIVE-TV-DVR-AND-REMINDERS-OPTIONS.md](features/LIVE-TV-DVR-AND-REMINDERS-OPTIONS.md) | The eight decisions recording needed — guide horizon, series matching, tuner reserve, capture format, library kind, reminder channels, cell actions, webhook policy — each with what it costs and what it forecloses. | built |
-| [LIVE-TV-DVR-STATUS.md](features/LIVE-TV-DVR-STATUS.md) | What recording and reminders do, the four properties the design turns on, what they deliberately do not do, and the hardware pass that is still unproved. | live |
-| [LIVE-TV-DVR-IMPLEMENTATION.md](features/LIVE-TV-DVR-IMPLEMENTATION.md) | The executable plan for recording and reminders: transports and sinks, the ten-step owner loop, attempt-file recovery, the recordings library kind, and the reviewer's eleven findings with where each one landed. | built |
-| [LIVE-TV-DVR-AND-REMINDERS-REVIEW.md](features/LIVE-TV-DVR-AND-REMINDERS-REVIEW.md) | The eleven recorder, airing, transport, reminder, and recovery findings required before the DVR implementation. | done |
-| [LIVE-TV-DVR-VISIBILITY-STATUS.md](features/LIVE-TV-DVR-VISIBILITY-STATUS.md) | DVR foundation progress plus the web fidelity follow-up: programme recording panels, Activity cards/details, Saved cards and executable browser evidence. | open |
-| [DVR-VISIBILITY-IMPLEMENTATION.md](features/DVR-VISIBILITY-IMPLEMENTATION.md) | Build contract for programme recording indicators, authoritative Activity telemetry, event history, and Saved navigation. | open |
-| [DVR-VISIBILITY-REVIEW.md](features/DVR-VISIBILITY-REVIEW.md) | Adversarial review of DVR visibility, including the blank-list response defect and the design dispositions. | done |
-| [LIVE-TV-GUIDE-AND-UI-PLAN.md](features/LIVE-TV-GUIDE-AND-UI-PLAN.md) | The Live TV page rebuilt — list and grid views, the guide feed, fullscreen and picture-in-picture on every client. | open |
-| [LOCAL-LIBRARY-SEARCH.md](features/LOCAL-LIBRARY-SEARCH.md) | Default local search, reusable classification, optional embedded semantic search, and validation evidence. | open |
-| [LIBRARY-CHANNEL-SUBJECT-MATCHING-IMPLEMENTATION.md](features/LIBRARY-CHANNEL-SUBJECT-MATCHING-IMPLEMENTATION.md) | Subject matching implementation contract and live P1–P4 progress, compiler evidence, review and merge status. | open |
-| [LIBRARY-CHANNELS-IMPLEMENTATION.md](features/LIBRARY-CHANNELS-IMPLEMENTATION.md) | First-release contract for subject schedules, deterministic publication, finite-media playback, and authoring on every client. | open |
-| [Channel subject Apple notes](apple-builds/313-library-channel-subjects.md) | Built | What changed in Apple channel subject authoring? |
-| [LIBRARY-CHANNELS-STATUS.md](features/LIBRARY-CHANNELS-STATUS.md) | Where Library channels is, what is proved, and what remains before promotion. | open |
-| [LIBRARY-CHANNELS-PLAYBACK-REPAIR.md](features/LIBRARY-CHANNELS-PLAYBACK-REPAIR.md) | Repair progress, native-muxer diagnostic, and deployed channel acceptance evidence. | open |
-| [WEEKLY-REVIEW-REMEDIATION-STATUS.md](features/WEEKLY-REVIEW-REMEDIATION-STATUS.md) | Which September 3–9 security, recovery, and playback findings were fixed, and which remain separately scoped capabilities. | done |
-| [LIVE-TV-APPLE-TV-NAVIGATION.md](features/LIVE-TV-APPLE-TV-NAVIGATION.md) | 2026-09-27: the Apple TV Live TV focus graph — why Info/More did nothing in fullscreen, why Up from the guide skipped the stage and Left from the picture lost the row, the five rules the page now keeps, what is deliberately dead, and the physical checklist. | built |
-| [LIVE-TV-NATIVE-LAYOUTS-STATUS.md](features/LIVE-TV-NATIVE-LAYOUTS-STATUS.md) | Three native TV presentations, compact mobile browsing, and the exact implementation evidence. | open |
-| [LIVE-TV-NATIVE-LAYOUTS-IMPLEMENTATION.md](features/LIVE-TV-NATIVE-LAYOUTS-IMPLEMENTATION.md) | Build contract for three selectable TV presentations and the compact iOS and Android Live TV layout. | open |
-| [LIVE-TV-NATIVE-LAYOUTS-PROPORTIONS-REVIEW.md](features/LIVE-TV-NATIVE-LAYOUTS-PROPORTIONS-REVIEW.md) | Why the Apple TV, Google TV and phone Live TV screens have the wrong proportions — five causes with line anchors, the numbers that fix them, and the renders. | open |
-| [LIVE-TV-PROPORTIONS-IMPLEMENTATION.md](features/LIVE-TV-PROPORTIONS-IMPLEMENTATION.md) | The two-PR build plan for the approved TV and phone proportions — constants per platform, file ownership, acceptance screenshots. | open |
-| [LIVE-TV-GUIDE-AND-START-RELIABILITY.md](features/LIVE-TV-GUIDE-AND-START-RELIABILITY.md) | Why the guide is empty after every deploy and why Live TV says "wait 90 seconds" with the tuner idle — the diagnosis with fleet evidence, and the durable-guide + ask-the-server-instead-of-waiting fix. | open |
-| [LIVE-TV-RELIABILITY-IMPLEMENTATION.md](features/LIVE-TV-RELIABILITY-IMPLEMENTATION.md) | The plan Opus builds from Paul's four rulings — exact interfaces for the durable guide, the event-driven loop, `request_id`, retire/resume, stray eviction and the barrier removal on all three clients; milestones with acceptance checks and the reviewer's attack list. | open |
-| [LIVE-TV-RELIABILITY-STATUS.md](features/LIVE-TV-RELIABILITY-STATUS.md) | How far the reliability lane has got: milestone by milestone, the deviations from the plan and why, and the evidence recorded for each. | open |
-| [LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md](features/LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md) | Why every Live TV start plays a few seconds and then freezes on every client — the measured `-hls_init_time 1` cadence jump, the uniform-1 s-segment fix that keeps the start as fast as the tuner — and the tvOS fullscreen surface redesign: the reveal-layer focus trap, the new band, Info, waiting and paused states, renders, and the two-PR plan. | done |
-| [LIVE-TV-START-STALL-AND-TVOS-SURFACE-IMPLEMENTATION.md](features/LIVE-TV-START-STALL-AND-TVOS-SURFACE-IMPLEMENTATION.md) | The plan Sol builds, v2 after Astra's review — three PRs on one lane: uniform 1 s segments, the listed-media publish gate, progress as the newest listed segment, the rebuilt graph probe, one Android line, the `threshold + 1` lag budget, the controller's `waiting`/behind-live publishers, the band, focus rules, the Info ledger, tests, milestones with acceptance, and the reviewer's attack list. | built |
-| [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md) | What is built, reviewed, and proved for the settings navigation and Developer-page redesign. | open |
-| [SETTINGS-NAVIGATION-AND-DEVELOPER-IMPLEMENTATION.md](features/SETTINGS-NAVIGATION-AND-DEVELOPER-IMPLEMENTATION.md) | Approved build contract for settings navigation, advisory Developer requirements, and explicit feature controls. | open |
-| [HOMEVIDEO-PLAN.md](features/HOMEVIDEO-PLAN.md) | Home video and photos — the `home` libraries. | built |
-| [INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md) | plurx's side of the Curator pipeline. | built |
-| [WINDOWS-PORT-PLAN.md](features/WINDOWS-PORT-PLAN.md) | Decisions and acceptance contract used to build the native `plurxd.exe`. | built |
-| [WINDOWS-PORT-STATUS.md](features/WINDOWS-PORT-STATUS.md) | What is built, blocked, and proved for the native Windows server effort. | open |
-
----
-
-## reviews/ — pull-request review records
-
-| File | Answers | |
-|---|---|---|
-| [PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md](reviews/PREPARATION-BUFFER-PRESSURE-IMPLEMENTATION-REVIEW.md) | Actual storage-owner implementation review: seven findings corrected and final focused evidence approved. | done |
-| [PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md](reviews/PREPARATION-BUFFER-PRESSURE-PLAN-REVIEW.md) | Adversarial review of the October 8 playback-buffer repair: capacity handoff, early cancellation, restart and cleanup-failure ownership; findings and dispositions. | open |
-| [S11-GRAIN720-NAL-EVIDENCE-20261002.md](reviews/S11-GRAIN720-NAL-EVIDENCE-20261002.md) | One retained synthetic Grain720 header census: 35 first IDRs, two extras, reviewable historical parser/control/result/process/cleanup snapshots and private audit-byte retention; sanitized-not-raw and original S11 qualification limits. | done |
-| [S11-RETAINED-NAL-CONTINUATION-20261002.md](reviews/S11-RETAINED-NAL-CONTINUATION-20261002.md) | Sixteen-context retained-header ledger: thirteen Linux passes plus three retained Grain successes, preserved Grain720 extras, raw-private hash/metric/cleanup identities and historical route/local/pressure failures; reviewer local access, not portable raw evidence or original S11 qualification. | done |
-| [ARCHITECTURE-REVIEW-2026-09-20.md](reviews/ARCHITECTURE-REVIEW-2026-09-20.md) | The end-to-end architecture review of 2026-09-20, revision 3 (adversarial assessment applied, Astra's independent review merged) — ranked findings for performance, stability, video quality and design, ten verified do-first items, and the sequencing. | open |
-| [ARCHITECTURE-REVIEW-2026-09-20-APPENDIX.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-APPENDIX.md) | The nine full area reports behind that review, unrevised, with every finding's quoted evidence and each area's "already good" list; the main document wins where they disagree. | open |
-| [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md) | Checks all 82 consolidated entries and 128 appendix findings against the source, with corrections, per-finding verdicts and evidence limits; revision 2 of the review applies its dispositions. | done |
-| [ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) | The single shared status for every implementation plan from the review, across Claude, GPT and OpenRouter sessions — the claim protocol, the model/session identity rules, and one row per plan. | live |
-| [ARCHITECTURE-REVIEW-2026-09-20-CLOSEOUT.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-CLOSEOUT.md) | October 7 source reconciliation: integrated implementation, the facts-authoritative S-08 routing correction, conservative retained decisions and grouped physical/fleet, upstream and discretionary release acceptance; the workboard remains canonical. | open |
-| [ARCHITECTURE-REVIEW-GPT-BUILD-STATUS.md](reviews/ARCHITECTURE-REVIEW-GPT-BUILD-STATUS.md) | Queue, next action and evidence locations for the GPT architecture-review build and fleet pass, last audited 2026-09-28; superseded by the work board. | superseded |
-| [ARCHITECTURE-REVIEW-GPT-WORKBOARD-HISTORY-2026-09-28.md](reviews/ARCHITECTURE-REVIEW-GPT-WORKBOARD-HISTORY-2026-09-28.md) | Verbatim dated snapshots of the seven assigned rows before compacting current workboard notes; preserves original source and evidence scopes. | done |
-| [ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md](reviews/ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-09-24.md) | The four-node `f600d2823` deployment receipt, preliminary fleet readings, failed Chrome D3 trace and remaining evidence for each architecture-review workboard row. | open |
-| [ARCHITECTURE-REVIEW-FLEET-CLIENT-BASELINES-2026-09-25.md](reviews/ARCHITECTURE-REVIEW-FLEET-CLIENT-BASELINES-2026-09-25.md) | Read-only L-01, L-02, C-03, S-04, S-05 and K-06 baselines on the deployed fleet, with the exact acceptance gaps. | open |
-| [ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md](reviews/ARCHITECTURE-REVIEW-FLEET-READOUT-2026-09-25.md) | Dated read-only K-02, C-05, C-08, P-02 and S-11 fleet measurements, collector windows and exact acceptance limits on current main. | open |
-| [ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-10-11.md](reviews/ARCHITECTURE-REVIEW-FLEET-EVIDENCE-2026-10-11.md) | Read-only K-06, L-02, C-08, C-01, P-02, K-08 and K-05 observations on the four nodes in the first quarter-hour of the #983 `05bf60381` build, with what each does not establish. | open |
-| [Architecture review implementation status](reviews/ARCHITECTURE-REVIEW-2026-09-20-STATUS.html) | Live searchable view of the canonical architecture-review workboard, with a read-only same-origin Forgejo overlay for mapped open plan PRs and exact-head CI state; API failures leave every board row visible. | live |
-| [SECURITY-ASSESSMENT-2026-09-13.md](reviews/SECURITY-ASSESSMENT-2026-09-13.md) | Which trust boundaries need work across the server, cluster, clients, media supply chain, and delivery process. | open |
-| [WEEKLY-ARCHITECTURE-SECURITY-IMPLEMENTATION.md](reviews/WEEKLY-ARCHITECTURE-SECURITY-IMPLEMENTATION.md) | Bounded implementation handoff for the September architecture, security, recovery, and playback findings. | open |
-
-The remaining files are one record per reviewed PR, each naming the verdict
-and findings against a specific head commit. They are kept because other docs
-cite them; none describes current behavior.
-
-[PR #79](reviews/PR79-CINEMA-HANDOFF-REVIEW.md) ·
-[#80](reviews/PR80-ARTWORK-RETRY-REVIEW.md) ·
-[#81](reviews/PR81-ARTWORK-RETRY-RESPONSE-REVIEW.md) ·
-[#82](reviews/PR82-CLUSTERING-M0-REVIEW.md) ·
-[#83](reviews/PR83-CLUSTERING-M1A-REVIEW.md) ·
-[#84](reviews/PR84-CLUSTERING-M1B-REVIEW.md) ·
-[#88](reviews/PR88-CLUSTERING-M1C-REVIEW.md) ·
-[#89](reviews/PR89-IPAD-SYSTEM-CHROME-REVIEW.md) ·
-[#90](reviews/PR90-CLUSTERING-M1D-REVIEW.md) ·
-[#91](reviews/PR91-APPLE-HLS-AHEAD-WINDOW-REVIEW.md) ·
-[#92](reviews/PR92-SKIP-CREDITS-LAYOUT-REVIEW.md) ·
-[#94](reviews/PR94-ARTWORK-CACHE-REVIEW.md) ·
-[#98](reviews/PR98-CLUSTERING-IMPORT-BACKUP-REVIEW.md) ·
-[effort/live-tv-guide](reviews/EFFORT-LIVE-TV-GUIDE-REVIEW.md)
-
----
-
-## archive/ — finished, kept for history
-
-| File | Answers |
-|---|---|
-| [RETRO-REVIEW-2026-08-09.md](archive/RETRO-REVIEW-2026-08-09.md) | The retrospective for 2026-08-04 → 08-08, with its eleven work orders in [retro-2026-08-09/](archive/retro-2026-08-09/). |
-| [PERF-REVIEW-RESPONSE-ASSESSMENT.md](archive/PERF-REVIEW-RESPONSE-ASSESSMENT.md) | A byte-identical duplicate of [performance/PERF-REVIEW-ASSESSMENT.md](performance/PERF-REVIEW-ASSESSMENT.md), kept so older links resolve. |
+| [playback-control/](playback-control/README.md) | The playback control rewrite: explicit demand, one owner per stream, prepared handoffs. | 27 open · 22 built · 13 done · 10 superseded |
+| [streaming/](streaming/README.md) | Delivery: VOD presentation, capability negotiation, Dolby Vision, decoder selection, stall investigations. | 1 live · 121 open · 19 built · 25 done |
+| [cluster/](cluster/README.md) | Phase 4 clustering: replication, membership, recovery, and replicated-failure diagnoses. | 23 open · 5 built · 9 done |
+| [clients/](clients/README.md) | Apple, Android and the web player: parity, the input contract, subtitles, overlays, layouts. | 7 live · 70 open · 28 built · 19 done |
+| [server/](server/README.md) | The HTTP layer, scanning, images, auth and observability. | 7 open · 2 built |
+| [performance/](performance/README.md) | Where the seconds go: performance rounds and the video-quality programme. | 4 open · 1 built · 7 done |
+| [ci/](ci/README.md) | The build, the gate, and the agents that use it. | 4 live · 16 open · 3 done |
+| [features/](features/README.md) | Whole capabilities planned end to end, including the project backlog. | 4 live · 42 open · 11 built · 6 done |
+| [reviews/](reviews/README.md) | Pull-request and effort review records. | 2 live · 10 open · 7 done · 1 superseded |
+| [archive/](archive/README.md) | Finished work, kept for history. | 2 rows |
 
 ## Adding a document
 
-Put it in the subject folder its work belongs to, add a row here in the same
-commit, and give it the header the rest of the set uses — an H1 with an
-em-dash tagline, then a `**Status:**` line carrying an absolute date. A plan
-or handoff that an agent will execute also states what it executes and what
-it must not touch. If a document has no subject folder, it probably belongs
-in the reference set at the root — or it is a plan for something that does
-not exist yet, which is a reason to write the plan, not a reason to add a
-folder.
+Put it in the subject folder its work belongs to and add a row to that
+folder's `README.md` in the same commit — not here. This page changes only for
+a new reference document or a new subject folder. Give the document an H1
+with an em-dash tagline, then a `**Status:**` line carrying an absolute date.
+A plan or handoff that an agent will execute also states what it executes and
+what it must not touch.
 
 This index is kept honest by `tests/operations/test_docs_index.py`: every
-Markdown file under `docs/` must appear here, every link here must resolve,
-and no link anywhere in the repo may point at a `docs/` path that does not
-exist.
-
-DV final bounded serving evidence: [HTTP summary](evidence/dv-processing-2026-10-09/http-summary.json) and [artifact manifest](evidence/dv-processing-2026-10-09/http-manifest.json) — retained local synthetic results and failed attempts; full promotion evidence belongs to PR #968.
-
-| [Remote diagnostics Apple wire](apple-builds/remote-diagnostics-wire.md) | What is added to the Apple report format contract? | built |
-| [Remote diagnostics Apple capture](apple-builds/remote-diagnostics-capture.md) | What changes in native private report capture, share, send and TV approval? | open |
-| [remote-diagnostics-qualification.md](apple-builds/remote-diagnostics-qualification.md) | Qualifies offline phone ZIP export, native TV local downloads and same-incident relaunch recovery. | built |
-
-Apple growing playlist attachment: [preparation and failover correction](apple-builds/914-growing-playlist-attachment.md) — **built; physical acceptance open**.
+Markdown file under `docs/` is listed on this page or in its folder's index, a
+folder index lists only its own folder, this page links every folder index,
+every link resolves, and nothing in the repo points at a `docs/` path that
+does not exist.

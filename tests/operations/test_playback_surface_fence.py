@@ -307,14 +307,18 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         # regex, so it is caught by inventory: adding one is a visible diff
         # here, and the reviewer's question is "why does the player publish two
         # surfaces?".
-        source = (ROOT / "clients/apple/Sources/PlayerController.swift").read_text(encoding="utf-8")
-        # The file holds two controllers. Each one's published surface is
-        # pinned separately, so a field added to either is a visible diff.
-        shared_start = source.index("final class SharedPlayerController")
+        # Each controller lives in its own file (#1159) and each one's
+        # published surface is pinned separately, so a field added to either
+        # is a visible diff.
+        sources = ROOT / "clients/apple/Sources"
+        local = (sources / "PlayerController.swift").read_text(encoding="utf-8")
+        shared_source = (sources / "SharedPlayerController.swift").read_text(encoding="utf-8")
+        self.assertIn("final class SharedPlayerController", shared_source)
+        self.assertNotIn("final class SharedPlayerController", local)
         published = sorted(set(re.findall(
-            r"@Published\s+(?:private\(set\)\s+)?var\s+(\w+)", source[:shared_start])))
+            r"@Published\s+(?:private\(set\)\s+)?var\s+(\w+)", local)))
         shared = sorted(set(re.findall(
-            r"@Published\s+(?:private\(set\)\s+)?var\s+(\w+)", source[shared_start:])))
+            r"@Published\s+(?:private\(set\)\s+)?var\s+(\w+)", shared_source)))
         # The Shared player owns its own fixed state and never reaches Local
         # recovery. Whether its `failure` text should render through the one
         # PlaybackSurfaceModel instead is an open question for its lane.

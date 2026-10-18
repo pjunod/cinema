@@ -1,0 +1,13 @@
+#!/bin/sh
+# plurx pre-push hook — the paperwork checks (scripts/paperwork), in seconds.
+# Install with `make hooks`. Bypass a single push with `git push --no-verify`.
+#
+# It catches the bookkeeping CI would otherwise reject half an hour later: a
+# missing doc index row, a client change without a release-counter bump, a real
+# host name, a Regression-Test reminder for fix(/perf( commits. The fast lane's
+# `paperwork` job runs the same script first, so skipping the hook only moves
+# the failure to CI.
+set -e
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+exec python3 scripts/paperwork --hook

@@ -48,6 +48,7 @@ pub(super) fn auto_encode_fallback<'a>(
     fn encode(candidate: &plurx_core::playback::candidate::QualityCandidate) -> bool {
         candidate.decoder_compatible
             && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
+            && (!candidate.processed_hdr10 || candidate.playable())
     }
     fn at_height(
         list: &[plurx_core::playback::candidate::QualityCandidate],
@@ -69,6 +70,65 @@ pub(super) fn auto_encode_fallback<'a>(
     at_or_below(catalog).or_else(|| at_or_below(unnarrowed))
 }
 
+/// Cold ordinary output may acquire its first bounded window. Processed output
+/// still needs the complete executable HDR10 recipe and production proof.
+pub(super) fn auto_bootstrap_encode_fallback(
+    catalog: &[plurx_core::playback::candidate::QualityCandidate],
+    height: i64,
+) -> Option<&plurx_core::playback::candidate::QualityCandidate> {
+    catalog
+        .iter()
+        .filter(|candidate| {
+            candidate.decoder_compatible
+                && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
+                && (!candidate.processed_hdr10 || candidate.playable())
+                && i64::from(candidate.target_height) <= height
+        })
+        .max_by_key(|candidate| candidate.target_height)
+}
+
+/// Replace one local descriptive row with its admitted executable facts.
+/// A shortened-ID collision is never an implicit recipe substitution.
+pub(super) fn upsert_processed_worker_candidate(
+    catalog: &mut crate::media_pool::QualityCatalogResult,
+    qualified: crate::media_pool::WorkerQualityCandidate,
+) -> Result<(), &'static str> {
+    if catalog.candidates.iter().any(|entry| {
+        entry.candidate.id == qualified.candidate.id
+            && entry.candidate.recipe_digest != qualified.candidate.recipe_digest
+    }) {
+        return Err("processed candidate ID collides with another full recipe");
+    }
+    catalog.candidates.retain(|entry| {
+        !(entry.node_id == qualified.node_id
+            && entry.candidate.recipe_digest == qualified.candidate.recipe_digest)
+    });
+    catalog.candidates.push(qualified);
+    Ok(())
+}
+
+pub(super) fn eligible_quality_workers(
+    workers: &[crate::media_pool::WorkerQualityCandidate],
+    initial_auto: bool,
+    local_node: &str,
+) -> Vec<crate::media_pool::WorkerQualityCandidate> {
+    let has_complete_rows = workers.iter().any(|entry| {
+        entry.dispatch_supported
+            && !entry.partial
+            && entry.candidate.decoder_compatible
+            && (!entry.candidate.processed_hdr10 || entry.candidate.playable())
+    });
+    workers
+        .iter()
+        .filter(|entry| {
+            entry.dispatch_supported
+                && (!entry.partial
+                    || (!has_complete_rows && initial_auto && entry.node_id == local_node))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Codec preference only breaks a tie after the existing finite selection
 /// policy chose its route, grade, canvas and evidence. Explicit identities and
 /// AVC continuous families never reach this preference.
@@ -88,6 +148,7 @@ pub(super) fn prefer_equivalent_hevc<'a>(
                 other.identity_matches()
                     && other.decoder_compatible
                     && other.planned_codec.as_deref() == Some("hevc")
+                    && other.processed_hdr10 == chosen.processed_hdr10
                     && other.route == chosen.route
                     && other.grade == chosen.grade
                     && other.normalized_geometry == chosen.normalized_geometry
@@ -676,6 +737,13 @@ pub(crate) struct PlanReview {
     /// refusal (Paul, 2026-08-29: "I don't see a reason for it to prevent
     /// functionality").
     pub mismatched: bool,
+}
+
+/// The plan note a declined or degraded processed HDR candidate leaves on the
+/// start it fell back to: the decision is reported where the other Dolby
+/// Vision decisions of a create are, next to `delivered_dynamic_range`.
+pub(super) fn processing_declined_note(reason: &str) -> String {
+    format!("Dolby Vision processing declined: {reason}")
 }
 
 /// Put the reconciled plan onto the request that will actually be built, and
@@ -1509,19 +1577,8 @@ pub(super) fn preparation_catalog_workers(
                 && i64::from(entry.candidate.target_height) <= ceiling
         })
     };
-    let has_complete = workers.iter().filter(fits).any(|entry| {
-        entry.dispatch_supported && !entry.partial && entry.candidate.decoder_compatible
-    });
-    workers
-        .iter()
-        .filter(fits)
-        .filter(|entry| {
-            entry.dispatch_supported
-                && (!entry.partial
-                    || (!has_complete && initial_auto && entry.node_id == local_node))
-        })
-        .cloned()
-        .collect()
+    let fitting_workers = workers.iter().filter(fits).cloned().collect::<Vec<_>>();
+    eligible_quality_workers(&fitting_workers, initial_auto, local_node)
 }
 
 #[derive(Default)]
@@ -1909,7 +1966,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
                 }
             }
             if let Some(ceiling) = auto_bootstrap_ceiling {
-                tracing::debug!(target: "plurxd::auto_prepare", phase = "catalog",
+                tracing::debug!(target: "plurxd::http::hls", context = "auto_prepare", phase = "catalog",
                     catalog_count = worker_catalog.len(), safe_count = catalog.len(),
                     partial_count = worker_catalog.iter().filter(|entry| entry.partial).count(),
                     local_count = worker_catalog.iter().filter(|entry| entry.node_id == state.node_id).count(),
@@ -1940,15 +1997,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
                         // Cold first attachment has no production measurement.
                         // Ordinary Auto can stage an encoded route; actual
                         // admission still belongs to the preparation lifecycle.
-                        catalog
-                            .iter()
-                            .filter(|candidate| {
-                                candidate.decoder_compatible
-                                    && candidate.route
-                                        == plurx_core::playback::candidate::CandidateRoute::Encode
-                                    && i64::from(candidate.target_height) <= height.min(ceiling)
-                            })
-                            .max_by_key(|candidate| candidate.target_height)
+                        auto_bootstrap_encode_fallback(&catalog, height.min(ceiling))
                     } else {
                         auto_encode_fallback(&catalog, before_link_verdict.as_deref(), height)
                     }
@@ -2003,6 +2052,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
                 candidate.route != plurx_core::playback::candidate::CandidateRoute::Encode;
             height = i64::from(candidate.target_height);
             let mut context = crate::transcode::TranscodeManager::candidate_context(candidate);
+            context.catalog_query = Some(catalog_request.clone());
             context.owner_node_id = eligible_workers
                 .iter()
                 .find(|entry| entry.candidate.id == candidate.id)
@@ -3000,7 +3050,7 @@ async fn create_with_purpose_inner(
     )
     .await?;
     let candidate_auto_policy = resolved.candidate_auto_policy;
-    let candidate_route = resolved.candidate_route;
+    let mut candidate_route = resolved.candidate_route;
     // Retain the actual immutable artifact through the eventual dispatch, not
     // just its public rates or digest. Dispatch revalidates the exact facts.
     let _candidate_cost_proof = resolved.candidate_cost_proof;
@@ -3011,7 +3061,10 @@ async fn create_with_purpose_inner(
     // The pre-start half reuses the source fence this create's advisory reads
     // already took (one fence per request); the post-acceptance half below
     // fences the source again, because its whole point is to see a change.
-    let link_source_binding = if candidate_auto_policy {
+    // The ordinary candidate's link binding, kept while a processed candidate
+    // replaces it, so a dispatch that degrades back restores the right one.
+    let mut ordinary_link_source_binding = None;
+    let mut link_source_binding = if candidate_auto_policy {
         if let (Some(identity), Some(source), Some(context), Some(route)) = (
             identity.as_ref(),
             source.as_ref(),
@@ -3035,7 +3088,7 @@ async fn create_with_purpose_inner(
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
     }
-    let height = resolved.height;
+    let mut height = resolved.height;
     if burn_would_discard_this_session_hdr(
         &state,
         source.as_ref(),
@@ -3051,7 +3104,7 @@ async fn create_with_purpose_inner(
         })));
     }
     let fingerprint = purpose.bind_policy(&mut request, resolved.intent_fingerprint)?;
-    let plan_notes = resolved.plan_notes;
+    let mut plan_notes = resolved.plan_notes;
     let native_subtitles = resolved.native_subtitles;
     let native_subtitle = resolved.native_subtitle;
     let now_ms = unix_ms();
@@ -3292,6 +3345,260 @@ async fn create_with_purpose_inner(
         }
     }
 
+    // Every activation is a predecessor CAS, including an ordinary start.
+    // Capturing the exact route before worker placement gives a
+    // commit-unknown reconciler the identity it must terminalize; allowing an
+    // unfenced last-writer-wins activation loses that identity after the
+    // pointer moves to the successor.
+    let activation_predecessor = state
+        .store
+        .media_session_route_for_playback(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+            &request.playback_id,
+        )
+        .await
+        .map_err(|error| session_store_error("reading the predecessor route", error))?;
+    // One mint for this start, bound here rather than called twice.
+    //
+    // `recovery_epoch_for` is not a pure function: with no predecessor it
+    // draws a fresh UUID, which is the whole point of it — a deliberate new
+    // play is a new budget, and `recovery_epoch_for`'s own test asserts that
+    // two calls with `None` differ. So calling it once for the session and
+    // again for the activation would give a new play two epochs: the live
+    // session would believe in one that exists in no durable row, and the
+    // next continuation would inherit the other and find it unspent. That is
+    // one automatic recovery per attempt against a file that cannot be
+    // decoded, which is the loop the budget exists to close.
+    //
+    // Bound above placement because the session that carries it is built by
+    // the task the placement loop spawns, 268 lines before the activation
+    // literal is reached. The only input is the predecessor route, already
+    // read above, so this costs one binding and no store read.
+    let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());
+    if activation_predecessor
+        .as_ref()
+        .is_some_and(|route| route.state == "active" && route.publication_ready_at_ms != 0)
+    {
+        return Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "media_session_handoff_pending",
+            "the current session is still completing its predecessor handoff; retry shortly",
+        ));
+    }
+    // A seek storm asks for one session per destination. The control actor
+    // already knows which destination the client settled on, and the sequence
+    // on this request says where in that ordering this ask belongs -- so a
+    // restart for a target the viewer has since scrolled past can be refused
+    // before it spawns a producer.
+    //
+    // Refused, not deferred: waiting to see whether a newer exchange arrives
+    // would add latency to every honest seek, and the ordering is already
+    // decided. Only a strictly later exchange naming a different destination
+    // supersedes, so the honest seek arriving next is never the one skipped.
+    let settled_target = match activation_predecessor.as_ref() {
+        // No predecessor is a first play: there is no ordering for it to be
+        // stale against, and no session to ask.
+        Some(predecessor) => {
+            state
+                .transcode
+                .settled_target_for_session(&predecessor.session_id)
+                .await
+        }
+        None => None,
+    };
+    let admission = admit_restart(
+        settled_target,
+        request.control_sequence,
+        request.start_seconds,
+        activation_predecessor
+            .as_ref()
+            .map(|route| route.incarnation_id.as_str()),
+    )?;
+    let RestartAdmission {
+        expected_predecessor_incarnation_id,
+        fence_predecessor,
+    } = admission;
+    crate::media_pool::mark_create_phase("predecessor");
+    let pinned_owner = if let Some(previous_session_id) = request
+        .previous_session_id
+        .as_deref()
+        .filter(|value| uuid::Uuid::parse_str(value).is_ok())
+    {
+        if let Some(route) = activation_predecessor.as_ref() {
+            if route.session_id != previous_session_id
+                || route.principal.local_user_id() != Some(user.id)
+                || route.state != "active"
+                || route.lease_expires_at_ms <= unix_ms()
+            {
+                return Err(ApiError::typed(
+                    StatusCode::CONFLICT,
+                    "media_session_superseded",
+                    "the session being reopened is no longer current",
+                ));
+            }
+            Some(route.owner_node_id.clone())
+        } else if state
+            .transcode
+            .active_session_ids()
+            .await
+            .iter()
+            .any(|session_id| session_id == previous_session_id)
+        {
+            // A session created by the pre-P5 binary has no durable route.
+            // Its reopen state is nevertheless process-local, so pin that
+            // rolling-upgrade legacy predecessor to this node rather than
+            // ranking a peer that cannot possess it.
+            Some(state.node_id.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if candidate_auto_policy
+        && continuous.is_none()
+        && pinned_owner
+            .as_ref()
+            .is_none_or(|owner| owner == &state.node_id)
+    {
+        let recovery = crate::transcode::SessionRecoveryIdentity {
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
+            incarnation_id: incarnation_id.clone(),
+            recovery_epoch: recovery_epoch.clone(),
+        };
+        match state
+            .transcode
+            .qualify_processed_hdr10_auto(&request, &recovery, hdr10_requested)
+            .await
+        {
+            Ok(Some((mut processed, candidate))) => {
+                if let Some(source) = source.as_ref() {
+                    // A distinct, strict processed-recipe check stays inside
+                    // the original create deadline. Ordinary catalog/advisory
+                    // allowances are never renewed by qualification.
+                    let advisory =
+                        crate::media_pool::create_stage_deadline(Duration::from_millis(500));
+                    let recovered = super::candidate_recovery::processed_candidate_admissible(
+                        &state,
+                        identity.as_ref(),
+                        source,
+                        &request.playback_id,
+                        &candidate,
+                        activation_predecessor.as_ref(),
+                        advisory,
+                    )
+                    .await;
+                    let link_admitted = link_receipts::processed_candidate_admissible(
+                        &state,
+                        identity.as_ref(),
+                        source,
+                        &candidate,
+                        advisory,
+                    )
+                    .await;
+                    let mut admitted = if recovered && link_admitted {
+                        vec![candidate.clone()]
+                    } else {
+                        Vec::new()
+                    };
+                    admitted = link_receipts::link_starved_catalog(
+                        network_prior.as_ref(),
+                        admitted,
+                        unix_ms(),
+                    );
+                    if let Some(receipt) = link_receipts::requested_receipt(&headers) {
+                        admitted = link_receipts::positive_catalog(
+                            &state,
+                            identity.as_ref(),
+                            source,
+                            Some(receipt),
+                            Some(&request.playback_id),
+                            admitted,
+                            None,
+                            advisory,
+                        )
+                        .await;
+                    }
+                    // The processed candidate is an enhancement of the
+                    // ordinary start already resolved above. Whatever keeps it
+                    // from being adopted here leaves that start in place and
+                    // is reported with it, like every other declined
+                    // qualification.
+                    let adopted = if !admitted
+                        .iter()
+                        .any(|admitted| admitted.id == candidate.id && admitted.playable())
+                    {
+                        Err("the processed candidate was not admitted by the recovery \
+                             and link evidence of this playback"
+                            .to_owned())
+                    } else {
+                        let context = processed
+                            .candidate_context
+                            .as_ref()
+                            .ok_or_else(|| "qualified HDR context missing".to_owned());
+                        match context {
+                            Ok(context) => match quality_catalog.as_mut() {
+                                Some(catalog) => upsert_processed_worker_candidate(
+                                    catalog,
+                                    crate::media_pool::WorkerQualityCandidate {
+                                        node_id: state.node_id.clone(),
+                                        candidate: candidate.clone(),
+                                        binding: context.planning_binding.clone(),
+                                        partial: false,
+                                        dispatch_supported: true,
+                                    },
+                                )
+                                .map_err(|reason| {
+                                    format!("the quality catalog refused the candidate: {reason}")
+                                }),
+                                None => Ok(()),
+                            },
+                            Err(reason) => Err(reason),
+                        }
+                    };
+                    match adopted {
+                        Ok(()) => {
+                            processed.quality_catalog = quality_catalog
+                                .as_ref()
+                                .map(|catalog| Arc::new(catalog.clone()));
+                            state.transcode.remember_processed_candidate(&processed);
+                            height = i64::from(candidate.target_height);
+                            candidate_route = Some(candidate.route);
+                            ordinary_link_source_binding = link_source_binding.take();
+                            link_source_binding = if let Some(identity) = identity.as_ref() {
+                                link_receipts::request_binding_until(
+                                    identity,
+                                    source,
+                                    candidate.recipe_digest,
+                                    candidate.route,
+                                    advisory,
+                                )
+                                .await
+                            } else {
+                                None
+                            };
+                            request = processed;
+                        }
+                        Err(reason) => {
+                            tracing::warn!(target: "plurxd::http::hls", %reason,
+                                "processed Auto candidate not adopted; retaining ordinary candidate");
+                            plan_notes.push(processing_declined_note(&reason));
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                tracing::warn!(target: "plurxd::http::hls", %reason,
+                    "processed Auto qualification refused; retaining ordinary candidate");
+                plan_notes.push(processing_declined_note(&reason));
+            }
+        }
+        crate::media_pool::mark_create_phase("processed_qualification");
+    }
+
     let advertise_control = plurx_core::store::stored_switch(
         planning_snapshot
             .as_ref()
@@ -3437,116 +3744,6 @@ async fn create_with_purpose_inner(
     }
     let placement_deadline = crate::media_pool::create_stage_deadline(START_DEADLINE);
 
-    // Every activation is a predecessor CAS, including an ordinary start.
-    // Capturing the exact route before worker placement gives a
-    // commit-unknown reconciler the identity it must terminalize; allowing an
-    // unfenced last-writer-wins activation loses that identity after the
-    // pointer moves to the successor.
-    let activation_predecessor = state
-        .store
-        .media_session_route_for_playback(
-            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
-            &request.playback_id,
-        )
-        .await
-        .map_err(|error| session_store_error("reading the predecessor route", error))?;
-    // One mint for this start, bound here rather than called twice.
-    //
-    // `recovery_epoch_for` is not a pure function: with no predecessor it
-    // draws a fresh UUID, which is the whole point of it — a deliberate new
-    // play is a new budget, and `recovery_epoch_for`'s own test asserts that
-    // two calls with `None` differ. So calling it once for the session and
-    // again for the activation would give a new play two epochs: the live
-    // session would believe in one that exists in no durable row, and the
-    // next continuation would inherit the other and find it unspent. That is
-    // one automatic recovery per attempt against a file that cannot be
-    // decoded, which is the loop the budget exists to close.
-    //
-    // Bound above placement because the session that carries it is built by
-    // the task the placement loop spawns, 268 lines before the activation
-    // literal is reached. The only input is the predecessor route, already
-    // read above, so this costs one binding and no store read.
-    let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());
-    if activation_predecessor
-        .as_ref()
-        .is_some_and(|route| route.state == "active" && route.publication_ready_at_ms != 0)
-    {
-        return Err(ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "media_session_handoff_pending",
-            "the current session is still completing its predecessor handoff; retry shortly",
-        ));
-    }
-    // A seek storm asks for one session per destination. The control actor
-    // already knows which destination the client settled on, and the sequence
-    // on this request says where in that ordering this ask belongs -- so a
-    // restart for a target the viewer has since scrolled past can be refused
-    // before it spawns a producer.
-    //
-    // Refused, not deferred: waiting to see whether a newer exchange arrives
-    // would add latency to every honest seek, and the ordering is already
-    // decided. Only a strictly later exchange naming a different destination
-    // supersedes, so the honest seek arriving next is never the one skipped.
-    let settled_target = match activation_predecessor.as_ref() {
-        // No predecessor is a first play: there is no ordering for it to be
-        // stale against, and no session to ask.
-        Some(predecessor) => {
-            state
-                .transcode
-                .settled_target_for_session(&predecessor.session_id)
-                .await
-        }
-        None => None,
-    };
-    let admission = admit_restart(
-        settled_target,
-        request.control_sequence,
-        request.start_seconds,
-        activation_predecessor
-            .as_ref()
-            .map(|route| route.incarnation_id.as_str()),
-    )?;
-    let RestartAdmission {
-        expected_predecessor_incarnation_id,
-        fence_predecessor,
-    } = admission;
-    crate::media_pool::mark_create_phase("predecessor");
-    let pinned_owner = if let Some(previous_session_id) = request
-        .previous_session_id
-        .as_deref()
-        .filter(|value| uuid::Uuid::parse_str(value).is_ok())
-    {
-        if let Some(route) = activation_predecessor.as_ref() {
-            if route.session_id != previous_session_id
-                || route.principal.local_user_id() != Some(user.id)
-                || route.state != "active"
-                || route.lease_expires_at_ms <= unix_ms()
-            {
-                return Err(ApiError::typed(
-                    StatusCode::CONFLICT,
-                    "media_session_superseded",
-                    "the session being reopened is no longer current",
-                ));
-            }
-            Some(route.owner_node_id.clone())
-        } else if state
-            .transcode
-            .active_session_ids()
-            .await
-            .iter()
-            .any(|session_id| session_id == previous_session_id)
-        {
-            // A session created by the pre-P5 binary has no durable route.
-            // Its reopen state is nevertheless process-local, so pin that
-            // rolling-upgrade legacy predecessor to this node rather than
-            // ranking a peer that cannot possess it.
-            Some(state.node_id.clone())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
     let candidate_owner = request
         .candidate_context
         .as_ref()
@@ -3639,10 +3836,11 @@ async fn create_with_purpose_inner(
                     )
                     .await?;
                 let crate::transcode::ClusterSessionStart {
-                    info,
+                    mut info,
                     replacement,
                     created,
                 } = started;
+                let degraded_processing = info.degraded_processing.take();
                 let session_id = info.session_id.clone();
                 let response = RemoteStartResponse::from(info);
                 let guard = Some(if created {
@@ -3675,7 +3873,12 @@ async fn create_with_purpose_inner(
                         "the local worker lost authority before shared-cache pinning",
                     ));
                 }
-                Ok((response, guard, Some(admitted_serving_generation)))
+                Ok((
+                    response,
+                    guard,
+                    Some(admitted_serving_generation),
+                    degraded_processing,
+                ))
             });
             match tokio::time::timeout_at(placement_deadline, &mut start_task).await {
                 Ok(Ok(result)) => result.map_err(|error| session_start_error(id, error)),
@@ -3742,7 +3945,7 @@ async fn create_with_purpose_inner(
                             "media worker {candidate} did not return an activation generation"
                         )));
                     };
-                    Ok((started.info, guard, Some(target_generation)))
+                    Ok((started.info, guard, Some(target_generation), None))
                 }
                 Err(error) => Err(ApiError::ServiceUnavailable(format!(
                     "media worker {candidate} could not start the session: {error:?}"
@@ -3750,11 +3953,11 @@ async fn create_with_purpose_inner(
             }
         };
         match result {
-            Ok((info, guard, serving_generation)) if info.is_valid() => {
-                started = Some((candidate, info, guard, serving_generation));
+            Ok((info, guard, serving_generation, degraded)) if info.is_valid() => {
+                started = Some((candidate, info, guard, serving_generation, degraded));
                 break;
             }
-            Ok((_info, _guard, _serving_generation)) => {
+            Ok((_info, _guard, _serving_generation, _degraded)) => {
                 // The armed guard aborts an invalid local result just as the
                 // peer transport rejects and aborts an invalid remote result.
                 tracing::warn!(
@@ -3776,12 +3979,50 @@ async fn create_with_purpose_inner(
         }
     }
     crate::media_pool::mark_create_phase("dispatch");
-    let Some((owner_node_id, info, guard, local_serving_generation)) = started else {
+    let Some((owner_node_id, info, guard, local_serving_generation, degraded_processing)) = started
+    else {
         return Err(last_error.unwrap_or_else(|| {
             ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
         }));
     };
     request_guard.disarm();
+    if let Some(reason) = degraded_processing {
+        // The worker served the ordinary request the processed candidate
+        // enhanced. Everything written or answered from here describes that
+        // request: its candidate identity, its link binding and its recipe.
+        let ordinary = request
+            .candidate_context
+            .as_ref()
+            .and_then(|context| context.ordinary_request.as_deref())
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::Internal(
+                    "the worker degraded a processed start that carried no ordinary request"
+                        .to_owned(),
+                )
+            })?;
+        plan_notes.push(processing_declined_note(&reason));
+        request = ordinary;
+        candidate_route = request
+            .candidate_context
+            .as_ref()
+            .map(|context| context.selected_candidate.route);
+        link_source_binding = ordinary_link_source_binding.take();
+        remote_request.candidate_catalog = request.candidate_context.as_ref().and_then(|context| {
+            Some(crate::media_sessions::CandidateCatalogContext {
+                caps: context.canonical_caps.clone()?,
+                candidate: context.selected_candidate.clone(),
+                binding: context.planning_binding.clone()?,
+            })
+        });
+        remote_request.candidate_id = request
+            .candidate_context
+            .as_ref()
+            .map(|context| context.candidate_id);
+        let mut worker_request = request.clone();
+        worker_request.request_id = Some(incarnation_id.clone());
+        remote_request.request = worker_request;
+    }
     if !ingress_serving_authority.is_current(ingress_serving_generation) {
         return Err(ApiError::ServiceUnavailable(
             "the ingress node lost serving authority during worker placement".to_owned(),
@@ -5511,83 +5752,10 @@ fn session_store_error(operation: &'static str, error: plurx_core::error::StoreE
 }
 
 #[cfg(test)]
-mod processed_delivery_projection_tests {
-    use super::session_delivered_processing_shape;
-    use crate::transcode::SessionKind;
-    use plurx_core::transcode::OutputGrade;
-
-    #[test]
-    fn prepared_p81_marker_projects_dv_without_changing_physical_transcode() {
-        let kind = SessionKind::Transcode { height: 1080 };
-        assert_eq!(
-            session_delivered_processing_shape(None, &kind, OutputGrade::Hdr10, Some(8)),
-            (Some("dolby_vision"), Some(8))
-        );
-        assert_eq!(
-            session_delivered_processing_shape(None, &kind, OutputGrade::Hdr10, None),
-            (None, None)
-        );
-        assert_eq!(
-            session_delivered_processing_shape(None, &kind, OutputGrade::Sdr, Some(8)),
-            (None, None)
-        );
-        assert_eq!(
-            session_delivered_processing_shape(None, &kind, OutputGrade::Hdr10, Some(7)),
-            (None, None)
-        );
-    }
-}
+mod processed_delivery_projection_tests;
 
 #[cfg(test)]
-mod quorum_candidate_tests {
-    use super::candidate_refusal_reason;
-    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
-    #[test]
-    fn candidate_refusals_distinguish_authority_identity_decoder_and_route() {
-        let requested = CandidateId([1; 16]);
-        assert_eq!(
-            candidate_refusal_reason(&[], Some(requested), Some(1080), true),
-            "catalogue_authority_unavailable"
-        );
-        assert_eq!(
-            candidate_refusal_reason(&[], Some(requested), Some(1080), false),
-            "identity_absent"
-        );
-        assert_eq!(
-            candidate_refusal_reason(&[], None, Some(1080), false),
-            "encode_route_unavailable"
-        );
-        let row = QualityCandidate {
-            id: requested,
-            recipe_digest: [0; 32],
-            route: CandidateRoute::Encode,
-            planned_codec: None,
-            normalized_geometry: true,
-            width: 1920,
-            height: 1080,
-            target_height: 1080,
-            average_bps: None,
-            peak_bps: None,
-            grade: Default::default(),
-            decoder_compatible: false,
-            complete_cache: false,
-            sustainable: true,
-        };
-        assert_eq!(
-            candidate_refusal_reason(
-                std::slice::from_ref(&row),
-                Some(requested),
-                Some(1080),
-                true
-            ),
-            "decoder_incompatible"
-        );
-        assert_eq!(
-            candidate_refusal_reason(&[row], Some(CandidateId([2; 16])), Some(1080), true),
-            "catalogue_authority_unavailable"
-        );
-    }
-}
+mod quorum_candidate_tests;
 
 /// Full expected Source file identity. Construction does not authorize a read.
 #[allow(dead_code)]
@@ -5994,85 +6162,7 @@ fn source_playback_fingerprint(base: &str, native: bool, selected: Option<i64>) 
 }
 
 #[cfg(test)]
-mod source_fingerprint_tests {
-    use super::source_playback_fingerprint;
-    #[test]
-    fn source_fingerprint_freezes_native_choice_and_normalizes_disabled_choice() {
-        let base = "a".repeat(64);
-        let copy = source_playback_fingerprint(&base, false, None);
-        assert_eq!(copy, source_playback_fingerprint(&base, false, Some(0)));
-        let native = source_playback_fingerprint(&base, true, None);
-        let first = source_playback_fingerprint(&base, true, Some(0));
-        let second = source_playback_fingerprint(&base, true, Some(1));
-        assert_ne!(copy, native);
-        assert_ne!(native, first);
-        assert_ne!(first, second);
-        assert!(first.len() == 64 && first.bytes().all(|b| b.is_ascii_hexdigit()));
-    }
-}
+mod source_fingerprint_tests;
 
 #[cfg(test)]
-mod compatibility_service_policy_tests {
-    use super::*;
-    #[test]
-    fn compatibility_bitrate_policy_is_server_owned_and_changes_exact_claim_identity() {
-        let body: CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"compatibility-player", "request_id":"compatibility-request", "finite_bitrate_limit_bps":750000})).expect("native create body");
-        let mut request = body.into_request(1, 720);
-        assert_eq!(
-            request.finite_bitrate_limit_bps, None,
-            "ordinary HTTP cannot set the trusted policy"
-        );
-        let first =
-            bind_compatibility_vod_policy(&mut request, "native-intent".into(), Some(750_000))
-                .expect("service policy");
-        assert_eq!(request.finite_bitrate_limit_bps, Some(750_000));
-        assert_eq!(
-            first,
-            bind_compatibility_vod_policy(&mut request, "native-intent".into(), Some(750_000))
-                .expect("same attempt")
-        );
-        assert_ne!(
-            first,
-            bind_compatibility_vod_policy(&mut request, "native-intent".into(), Some(500_000))
-                .expect("changed ceiling")
-        );
-        assert!(bind_compatibility_vod_policy(&mut request, "intent".into(), Some(0)).is_err());
-    }
-    #[test]
-    fn compatibility_service_policy_binds_vod_only_and_passive_flags_before_native_claim() {
-        let body: CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"compatibility-player", "request_id":"compatibility-request"})).expect("create");
-        let mut request = body.into_request(1, 1080);
-        let native = ServiceCreatePurpose::Native
-            .bind_policy(&mut request, "native-intent".into())
-            .expect("native");
-        assert_eq!(native, "native-intent");
-        assert!(!request.vod_only);
-        assert!(!request.passive_vod);
-        let expected_fingerprint =
-            bind_compatibility_vod_policy(&mut request, native.clone(), None)
-                .expect("negotiated policy");
-        let policy = ServiceCreatePurpose::PassiveCompatibility {
-            bitrate_limit_bps: None,
-            expected_fingerprint,
-        };
-        let first = policy
-            .bind_policy(&mut request, native.clone())
-            .expect("compatibility");
-        assert_ne!(first, native);
-        assert_eq!(
-            first,
-            policy
-                .bind_policy(&mut request, native)
-                .expect("stable retry")
-        );
-        assert!(
-            policy
-                .bind_policy(&mut request, "changed-native-intent".into())
-                .is_err(),
-            "changed normalized body is refused before a claim"
-        );
-        assert!(request.vod_only && request.passive_vod);
-        request.request_id = None;
-        assert!(policy.bind_policy(&mut request, "intent".into()).is_err());
-    }
-}
+mod compatibility_service_policy_tests;

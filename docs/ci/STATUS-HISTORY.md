@@ -12,6 +12,23 @@ describes the state on the day it was written, and
 merged-pull-request rule it held in `STATUS.md`.
 
 
+## 2026-10-05 · Main-merge defects D1–D7 and the red gates: one batched PR
+
+**[PR #810](http://forge.lan:3000/noirr/plurx/pulls/810), branch `claude/main-merge-defects`; Android 146 source; not yet deployed or merged.**
+Builds `claude/main-merge-defects-rca-and-fix-2026-10-04.md` (rev 3). D1: the
+speculative and content-aware producers resolve audio with the canonical
+stereo-AAC claim, so stereo-route clients hit pre-transcodes again (policy
+generation moves: set `jobs.cache_produce_mins = 0` for the deploy, restore
+after). D4: a rolling start reads its settings in one snapshot. D2/D3:
+complete-output preparation and rolling retention are Developer switches,
+default off, with an executor that does not need the speculative schedule, a
+cancel-only drain, a disk free-space guard, prompt release and Activity rows
+with Stop. D5: a seek during a prepared switch is held, not dropped (Android,
+web; Apple waits on a device check). D6: the Fit Auto card names its
+network-priors prerequisite and priors get a switch (behaviour unchanged). D7
+and gates G1, G3–G6, G8 fixed; G2 (the UI golden) is regenerated separately.
+
+
 ## 2026-09-25 · P-02 M3: a priority class for every child process
 
 **Branch `plan/P-02-m3`, draft pull request; not merged, nothing deployed.**

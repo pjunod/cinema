@@ -280,7 +280,7 @@ def build_receipt(
             # Older authenticated retention proofs may still carry their
             # Windows waiver; Windows is no longer a required qualification job.
             assert set(retained['lanes']) <= {'rust', 'apple', 'android_jvm',
-                                              'android_device', 'windows_compile'}
+                                              'android_device', 'web_preflight', 'windows_compile'}
             assert all(row['mode'] == ('explicit-human-waiver' if lane == 'windows_compile'
                                       else 'retained-unit-evidence')
                        for lane, row in retained['lanes'].items())
@@ -379,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
                 api = retention.runner_api(environment)
                 raw = retention.attachment_bytes(api, live_binding['pull_request'],
                     prior_proof['attachment_id'], prior_proof['attachment_uuid'], prior_proof['sha256'])
-                refreshed = retention.verify(api, raw, prior_proof['sha256'], live_binding,
+                refreshed = retention.verify_enrollment(api, raw, prior_proof['sha256'], live_binding,
                     git_object(args.repository, 'HEAD^{commit}'), prior_proof['attachment_id'],
                     prior_proof['attachment_uuid'])
             except ReceiptError as exc:

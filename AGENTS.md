@@ -5,17 +5,73 @@ workflows. GitHub branch protection is unavailable on the current account
 plan, so every contributor and coding agent must enforce the merge convention
 below.
 
+## Working efficiently — read this first
+
+The tree is over a million lines and the docs run to 19 MB, so how you look
+decides what a session costs. Every agent working here, Claude or GPT:
+
+- **Navigate with Ripwire first.** `scripts/ripwire find '<words>'` returns
+  about a dozen candidate signatures with paths and lines (~4 KB);
+  `scripts/ripwire body '<file>:<symbol>'` prints one function;
+  `callers` / `impact` show who depends on it; `pr-context --base origin/main`
+  maps a diff for review (it refuses a dirty tree — commit or stash first).
+  Its first stderr line is a JSON receipt; refusals also arrive on stderr with
+  a nonzero exit, so don't discard stderr wholesale.
+  `make hooks` installs it (`scripts/ripwire setup` does it alone). Its graph
+  is heuristic — an empty answer does not prove absence — so confirm in
+  source before you conclude. [docs/ci/RIPWIRE.md](docs/ci/RIPWIRE.md).
+- **Then search, then outline, then read.** `rg -l <pattern>`, then
+  `rg -n -m 5 --max-columns 200 <pattern> <file>`; the root `.ignore` keeps
+  evidence, archives, vendored and minified files out (`--no-ignore-dot` to
+  include them). `scripts/outline <file>` (or `--top`) lists declarations with
+  line numbers; read only the range you need. Several source files exceed
+  10,000 lines — never read one whole.
+- **Docs: read the head, not the body.** A plan or status document's opening
+  section says where it stands; read past it only for the part you need.
+- **Keep command output small.** `git diff --stat` before `git diff`,
+  `git log --oneline -n 20`, `| head -c 4000` on anything unfamiliar, and
+  `scripts/quiet <command>` for builds, test suites, ansible and gradle — it
+  keeps the full log under `target/quiet/` and prints only failures and the tail.
+  For a red CI run, `scripts/ci-failures [<sha> | --pr N]` prints just the
+  failing jobs' failure lines instead of whole job logs; `--wait SECONDS`
+  waits quietly for running jobs and prints only the final state.
+- **Append without reading.** `STATUS.md` and the project backlog carry an
+  `<!-- … insert … -->` anchor line; add new entries just below it with an
+  edit instead of reading the whole file first. In `CHANGELOG.md` read only the
+  `## [Unreleased]` section (`sed -n '/^## \[Unreleased\]/,/^## \[[0-9]/p'`)
+  and add to its matching `###` list — an entry outside that section is never
+  released.
+- **Delegate exploration** that spans many files to a sub-agent that returns a
+  conclusion, and start a fresh session per pull request rather than carrying
+  one long context through several. Claude sessions run exploration and
+  mechanical sub-agents on Sonnet or Haiku and keep Opus or Fable for design
+  and adversarial review.
+- **Review the diff, not the repo.** An adversarial review gets the diff, the
+  touched files' outlines and the relevant plan's head.
+
+## Before you push: paperwork
+
+`make paperwork` (`scripts/paperwork`) checks, in about ten seconds, the
+bookkeeping rules CI enforces — doc index rows, Apple/Android release
+counters, infra names, `docs/API.md` routes, status-page shape, and the
+`Regression-Test:` lines a `fix(`/`perf(` commit needs in the pull request
+description — and prints the fix under each failure. `make hooks` runs it on
+every push. Forgejo runs it as the first job of every pull request, drafts
+included, and nothing else starts until it passes, so skipping it only costs
+you the wait. [docs/ci/PAPERWORK.md](docs/ci/PAPERWORK.md) lists the rules.
+
 ## Where the documents are
 
-[docs/README.md](docs/README.md) indexes every document under `docs/`: what
-question each one answers, and whether it is live, open, built, or done. Read
-it instead of listing the directory — the root holds the eighteen maintained
-reference documents, and everything else lives in the folder for the work it
-describes (`playback-control/`, `streaming/`, `server/`, `cluster/`, `clients/`,
-`performance/`, `ci/`, `features/`, `reviews/`, `archive/`).
+[docs/README.md](docs/README.md) is a short router: the reference documents
+that describe plurx as it is today, and one row per subject folder. Each
+folder keeps its own index, `docs/<area>/README.md` (`playback-control/`,
+`streaming/`, `server/`, `cluster/`, `clients/`, `performance/`, `ci/`,
+`features/`, `reviews/`, `archive/`), saying what question each document
+answers and whether it is live, open, built, or done. Read the router, then
+only the folder index for the area you are working in — never list `docs/`.
 
 A document you add or move belongs in the subject folder for its work and
-needs a row on that index **in the same commit**;
+needs a row on that folder's index **in the same commit**;
 `tests/operations/test_docs_index.py` fails the build otherwise, and the same
 test refuses any reference in the repo to a `docs/` path that does not exist.
 
@@ -66,25 +122,25 @@ card (and any temporary toggle) is removed and the feature is simply on.
 The rule and the current audit are in
 [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates).
 
-## Rust compile loop
+## Rust compile loop — do not use CI as a compiler
 
 At the start of any session that may change Rust, establish a working compiler
-loop before editing. If the checkout host cannot run the repository-pinned
-Rust 1.97.1 toolchain, use the source-only cloud loop in
-[docs/DEVELOPMENT_PIPELINE.md](docs/DEVELOPMENT_PIPELINE.md#4-compile-before-ci-send-source-to-the-compiler-never-credentials).
-Do not wait for CI to discover type errors, moved values, missing struct fields,
-test failures, or denied lints.
+loop before editing. A branch pushed to discover whether it builds costs
+fifteen to forty minutes and reports one error; checked locally it reports all
+of them at once. If the clone and `cargo` are on different machines — the usual
+shape for an agent here — use the source-only loop in
+[docs/ci/AGENT-COMPILE-LOOP.md](docs/ci/AGENT-COMPILE-LOOP.md) and
+[DEVELOPMENT_PIPELINE.md §4](docs/DEVELOPMENT_PIPELINE.md#4-compile-before-ci-send-source-to-the-compiler-never-credentials).
 
 - Archive committed source with `git archive`; transfer neither `.git` nor a
-  repository credential to the cloud container.
-- Keep the cloud `target/` warm and run check, clippy, formatting, and the
-  focused tests needed by the change before pushing.
-- After applying the verified patch to the current intended base, archive that
-  exact branch and run the loop again. Results against the older source snapshot
-  are not evidence for a branch whose base moved.
-- Verify `rustc --version` rather than trusting the default `cargo`; an unpinned
-  toolchain is not equivalent evidence. Remove stale source extractions when
-  the session's fixed writable allowance gets tight.
+  repository credential to the toolchain host.
+- Keep its `target/` warm and run check, clippy `-D warnings`, rustfmt and the
+  focused tests the change needs before pushing.
+- After porting the patch to the current intended base, archive that exact
+  branch and run the loop again; results against an older snapshot are not
+  evidence for a branch whose base moved.
+- Verify `rustc --version` (pinned 1.97.1) rather than trusting the default
+  `cargo`. Remove stale source extractions when disk gets tight.
 
 ## Large efforts
 
@@ -151,18 +207,3 @@ disagree.
 Ordinary independent changes may continue to target `main` and use its
 affected-surface validation. The complete commands and rationale live in
 [docs/DEVELOPMENT_PIPELINE.md](docs/DEVELOPMENT_PIPELINE.md).
-
-## Prove it locally before you push
-
-If your session has the clone on one machine and `cargo` on another — the
-usual shape for a coding agent here — set up the compile loop in
-[docs/ci/AGENT-COMPILE-LOOP.md](docs/ci/AGENT-COMPILE-LOOP.md) **before** writing
-Rust, not after a gate rejects something. `git archive` carries source to a
-toolchain without carrying a credential, and it puts `cargo check`, `clippy
--D warnings`, the unit suite and `rustfmt` inside ten minutes.
-
-The rule it exists to enforce: **do not use CI as a compiler.** A branch
-pushed to discover whether it builds costs fifteen to forty minutes and
-reports one error; the same branch checked locally reports all of them at
-once. Re-verify against current `main` after porting a change, or the suite
-you ran describes a snapshot rather than the branch.

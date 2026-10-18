@@ -2449,7 +2449,7 @@ catalog|player@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* ty
 catalog|player@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|player@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|player@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|player@1280x860|dom|dd > button.ghost.sm[type=button text]|4
+catalog|player@1280x860|dom|dd > button.ghost.sm[type=button text]|2
 catalog|player@1280x860|dom|dd > div.watch-trks|4
 catalog|player@1280x860|dom|dd > span.mode-chip[text]|2
 catalog|player@1280x860|dom|dd > span.mode-detail[text]|2
@@ -2575,7 +2575,6 @@ catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
-catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 catalog|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 catalog|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -2628,7 +2627,7 @@ catalog|player@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* typ
 catalog|player@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|player@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|player@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|player@390x780|dom|dd > button.ghost.sm[type=button text]|4
+catalog|player@390x780|dom|dd > button.ghost.sm[type=button text]|2
 catalog|player@390x780|dom|dd > div.watch-trks|4
 catalog|player@390x780|dom|dd > span.mode-chip[text]|2
 catalog|player@390x780|dom|dd > span.mode-detail[text]|2
@@ -2753,7 +2752,6 @@ catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > d
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
-catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 catalog|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 catalog|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -5924,7 +5922,7 @@ classic|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-labe
 classic|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|player@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|player@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
-classic|player@1280x860|dom|dd > button.ghost.sm[type=button text]|4
+classic|player@1280x860|dom|dd > button.ghost.sm[type=button text]|2
 classic|player@1280x860|dom|dd > div.watch-trks|4
 classic|player@1280x860|dom|dd > span.mode-chip[text]|2
 classic|player@1280x860|dom|dd > span.mode-detail[text]|2
@@ -6039,7 +6037,6 @@ classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
-classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 classic|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 classic|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -6078,7 +6075,7 @@ classic|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label
 classic|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
-classic|player@390x780|dom|dd > button.ghost.sm[type=button text]|4
+classic|player@390x780|dom|dd > button.ghost.sm[type=button text]|2
 classic|player@390x780|dom|dd > div.watch-trks|4
 classic|player@390x780|dom|dd > span.mode-chip[text]|2
 classic|player@390x780|dom|dd > span.mode-detail[text]|2
@@ -6192,7 +6189,6 @@ classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > d
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
-classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 classic|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 classic|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -9263,7 +9259,7 @@ theater|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-labe
 theater|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|player@1280x860|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|player@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
-theater|player@1280x860|dom|dd > button.ghost.sm[type=button text]|4
+theater|player@1280x860|dom|dd > button.ghost.sm[type=button text]|2
 theater|player@1280x860|dom|dd > div.watch-trks|4
 theater|player@1280x860|dom|dd > span.mode-chip[text]|2
 theater|player@1280x860|dom|dd > span.mode-detail[text]|2
@@ -9378,7 +9374,6 @@ theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
-theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 theater|player@1280x860|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 theater|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
@@ -9417,7 +9412,7 @@ theater|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label
 theater|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.pavatar[text]|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
-theater|player@390x780|dom|dd > button.ghost.sm[type=button text]|4
+theater|player@390x780|dom|dd > button.ghost.sm[type=button text]|2
 theater|player@390x780|dom|dd > div.watch-trks|4
 theater|player@390x780|dom|dd > span.mode-chip[text]|2
 theater|player@390x780|dom|dd > span.mode-detail[text]|2
@@ -9531,7 +9526,6 @@ theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > d
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > div.watch-stage|1
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-lower.watch-lower[aria-label=* hidden]|1
 theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-generation[aria-label=*]|1
-theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > section#watch-subtitle-translation[tabindex=-1 aria-label=* hidden]|1
 theater|player@390x780|dom|section#watch-subtitle-generation[aria-label=*] > div#subtitle-generate-4[role=status tabindex=-1 aria-live=polite]|1
 theater|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2

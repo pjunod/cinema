@@ -24,6 +24,8 @@ DAEMON_TRANSCODE = ROOT / "crates/plurxd/src/transcode.rs"
 LIVE_TV = ROOT / "crates/plurxd/src/live_tv.rs"
 DECODER_HEALTH = ROOT / "crates/plurxd/src/decoder_health.rs"
 PLAYBACK_CONTROL = ROOT / "crates/plurxd/src/playback_control.rs"
+# The module's unit tests live in their own file; the contract reads both.
+PLAYBACK_CONTROL_TESTS = ROOT / "crates/plurxd/src/playback_control/tests.rs"
 CORE_HEALTH = ROOT / "crates/plurx-core/src/transcode/health.rs"
 CORE_MANIFEST = ROOT / "crates/plurx-core/src/transcode/manifest.rs"
 FORGEJO_MAIN_LINEAGE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
@@ -76,6 +78,22 @@ WEB_SIDECARS = frozenset({
     "cluster-panel.js", "playback-policy.js", "playback-control.js", "reader.js",
     "hls.min.js", "live-tv.js", "library-channels.js",
 })
+
+
+def with_moved_tests(path: Path) -> str:
+    """A Rust source plus the `#[cfg(test)] mod name;` files split out of it.
+
+    Test modules moved out of the largest files into their own files on
+    2026-10-17, so a contract that reads test text must read those files too.
+    """
+    text = path.read_text(encoding="utf-8")
+    child = path.parent if path.name in ("mod.rs", "lib.rs", "main.rs") else path.with_suffix("")
+    for name in re.findall(r"#\[cfg\([^\n]*\btest\b[^\n]*\]\s*(?:#\[[^\n]*\]\s*)*mod (\w+);", text):
+        for candidate in (child / f"{name}.rs", path.parent / f"{name}.rs"):
+            if candidate.is_file():
+                text += "\n" + candidate.read_text(encoding="utf-8")
+                break
+    return text
 
 
 def web_body_script() -> str:
@@ -141,11 +159,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         with MEDIA.open("rb") as document:
             cls.media = tomllib.load(document)
         cls.harness = HARNESS.read_text(encoding="utf-8")
-        cls.core_decode = CORE_DECODE.read_text(encoding="utf-8")
-        cls.core_transcode = CORE_TRANSCODE.read_text(encoding="utf-8")
+        cls.core_decode = with_moved_tests(CORE_DECODE)
+        cls.core_transcode = with_moved_tests(CORE_TRANSCODE)
         cls.core_recipe = CORE_RECIPE.read_text(encoding="utf-8")
         cls.daemon_transcode = module_source(DAEMON_TRANSCODE)
-        cls.live_tv = LIVE_TV.read_text(encoding="utf-8")
+        cls.live_tv = with_moved_tests(LIVE_TV)
 
     def test_frozen_inventory_and_argument_claims_match_retained_artifacts(self) -> None:
         surfaces = self.inventory["surfaces"]
@@ -696,7 +714,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         unqualified name has to stay byte-identical or shipping the mechanism
         is itself a cache flush.
         """
-        decode = CORE_DECODE.read_text(encoding="utf-8")
+        decode = with_moved_tests(CORE_DECODE)
         selection = (ROOT / "crates/plurx-core/tests/decoder_selection.rs").read_text(
             encoding="utf-8"
         )
@@ -816,7 +834,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         # The qualified namespace names the receipt version it can read, so a
         # build that cannot read one never computes these keys.
-        decode = CORE_DECODE.read_text(encoding="utf-8")
+        decode = with_moved_tests(CORE_DECODE)
         self.assertIn('"decoder-plan-v1-health-qualified-r1"', decode)
         self.assertIn(
             "super::health::PRODUCER_HEALTH_RECEIPT_VERSION == 1", decode
@@ -1073,7 +1091,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         # The trait says what the two states mean, so a future implementer does
         # not default the parameter.
-        store = CORE_STORE.read_text(encoding="utf-8")
+        store = with_moved_tests(CORE_STORE)
         self.assertIn(
             "`manifest_digest` is `None` for a generation published without one",
             store,
@@ -1194,9 +1212,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         guarded by anything but a sentence in another test's failure message.
         """
         replicated = REPLICATED.read_text(encoding="utf-8")
-        hiqlite = HIQLITE.read_text(encoding="utf-8")
+        hiqlite = with_moved_tests(HIQLITE)
         dv_conversion = DV_CONVERSION.read_text(encoding="utf-8")
-        sqlite_store = SQLITE_STORE.read_text(encoding="utf-8")
+        sqlite_store = with_moved_tests(SQLITE_STORE)
         store_contract = STORE_CONTRACT.read_text(encoding="utf-8")
 
         # Both new boundaries are classified, and the third store method is
@@ -1283,10 +1301,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         legacy whole-node fact, and the path coverage separately.
         """
         daemon = module_source(DAEMON_TRANSCODE)
-        system = HTTP_SYSTEM.read_text(encoding="utf-8")
-        store = CORE_STORE.read_text(encoding="utf-8")
+        system = with_moved_tests(HTTP_SYSTEM)
+        store = with_moved_tests(CORE_STORE)
         web = web_body_script()
-        main = DAEMON_MAIN.read_text(encoding="utf-8")
+        main = with_moved_tests(DAEMON_MAIN)
 
         self.assertIn(
             '"playback.decoder_health_qualified_artifacts"', store
@@ -1443,7 +1461,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # Inventory and production share backend-to-FFmpeg argument mapping.
         # Keep the explicit hardware-frame contract pinned at its authority,
         # and pin both call sites so moving it cannot silently drop probe flags.
-        decode = CORE_DECODE.read_text(encoding="utf-8")
+        decode = with_moved_tests(CORE_DECODE)
         arguments = decode.split("pub fn input_args(", 1)[1].split(
             "/// Every backend", 1
         )[0]
@@ -1454,7 +1472,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertRegex(
             inventory, r"DecodeBackend::V4l2Request\s*\.input_args\(true\)"
         )
-        production = CORE_TRANSCODE.read_text(encoding="utf-8")
+        production = with_moved_tests(CORE_TRANSCODE)
         self.assertRegex(
             production,
             r"decode\.backend\(\)\.input_args\(\s*matches!\(\s*"
@@ -1544,7 +1562,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         it has no business naming: a retry the client can see, a producer that
         demonstrably decoded, or an outage on this node.
         """
-        control = PLAYBACK_CONTROL.read_text(encoding="utf-8")
+        control = PLAYBACK_CONTROL.read_text(
+            encoding="utf-8"
+        ) + PLAYBACK_CONTROL_TESTS.read_text(encoding="utf-8")
         health = DECODER_HEALTH.read_text(encoding="utf-8")
 
         # The reason exists, is permanent, and says so in prose rather than
@@ -1613,22 +1633,22 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         decoder that will never succeed.
         """
         hls = module_source(HTTP_HLS)
-        store = CORE_STORE.read_text(encoding="utf-8")
-        sqlite_sessions = SESSIONS_SQLITE.read_text(encoding="utf-8")
-        hiqlite_sessions = SESSIONS_HIQLITE.read_text(encoding="utf-8")
+        store = with_moved_tests(CORE_STORE)
+        sqlite_sessions = with_moved_tests(SESSIONS_SQLITE)
+        hiqlite_sessions = with_moved_tests(SESSIONS_HIQLITE)
 
         # The column, spelled once and shared by both backends.
         self.assertIn("MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA", store)
         self.assertIn("ADD COLUMN recovery_epoch TEXT NOT NULL DEFAULT ''", store)
         self.assertIn(
             "super::MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA",
-            SQLITE_STORE.read_text(encoding="utf-8"),
+            with_moved_tests(SQLITE_STORE),
         )
         self.assertIn(
             # v32 after the final main freeze: main's drain deadline owns v31,
             # so the recovery ledger and epoch follow it.
             "RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 32,",
-            HIQLITE.read_text(encoding="utf-8"),
+            with_moved_tests(HIQLITE),
         )
 
         # The decision, in one named place rather than inline at the seam.
@@ -1663,9 +1683,16 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
         self.assertEqual(
             production.count("recovery_epoch: recovery_epoch.clone(),"),
-            2,
-            "the session identity and the durable activation, and nothing else",
+            3,
+            "processed qualification, worker identity and durable activation share one epoch",
         )
+        # Processed Auto qualification borrows the same admitted identity;
+        # it must not mint a second recovery allowance before worker creation.
+        qualification = production.split(
+            "let recovery = crate::transcode::SessionRecoveryIdentity {", 1
+        )[1].split(".qualify_processed_hdr10_auto(", 1)[0]
+        self.assertIn("recovery_epoch: recovery_epoch.clone(),", qualification)
+        self.assertNotIn("recovery_epoch_for(", qualification)
         self.assertIn(
             "fn one_start_mints_one_recovery_epoch_for_both_the_session_and_the_row",
             module_tests(HTTP_HLS_TESTS),
