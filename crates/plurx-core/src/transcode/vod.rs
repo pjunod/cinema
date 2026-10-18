@@ -1510,8 +1510,11 @@ pub fn vod_completed_reconstructed_pipe_args(
     // The helper already delivers BT.2020 NCL limited 4:2:0 10-bit PQ at
     // the output raster: colour conversion and resampling happened on the
     // GPU. The encoder only repacks for its upload format and restamps.
+    // Raw NUT carries no colour description, so the frames are tagged here
+    // with what the helper produced; the encoder writes its VUI and the
+    // sample entry's colr from these frame properties.
     let mut filter = format!(
-        "format={pixel_format},settb=expr=1/{},setpts=N*{}+{origin}",
+        "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format={pixel_format},settb=expr=1/{},setpts=N*{}+{origin}",
         grid.numerator, grid.denominator,
     );
     if output.encoder() == super::Encoder::Vaapi {
@@ -1993,7 +1996,12 @@ mod tests {
         // The helper delivers BT.2020 NCL 10-bit YCbCr at the output raster;
         // the encoder converts nothing (no single-threaded zscale at 4K).
         assert!(!filter.contains("zscale"), "{filter}");
-        assert!(filter.starts_with("format=yuv420p10le,"), "{filter}");
+        assert!(
+            filter.starts_with(
+                "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format=yuv420p10le,"
+            ),
+            "{filter}"
+        );
         assert!(args
             .windows(2)
             .any(|p| p[0] == "-af" && p[1].contains("atrim=start_sample=")));
