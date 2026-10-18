@@ -772,6 +772,8 @@ impl RuntimeRecipe {
                 self.source_clock,
             )
             .map_err(str::to_owned)?;
+            tracing::debug!(target: "plurxd::dv", entry = entry.index, encoder = ?args,
+                "processed window encoder recipe");
             let deadline = crate::media_pool::create_stage_deadline(self.preparation_budget);
             let deadline = absolute_deadline.map_or(deadline, |absolute| deadline.min(absolute));
             let mut renderer_env = self.tools.renderer_env.clone();
