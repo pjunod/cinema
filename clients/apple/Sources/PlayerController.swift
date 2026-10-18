@@ -10600,7 +10600,10 @@ extension PlayerController: PreparedSuccessorHost {
         unprovenPreparedItem = item
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
-        playbackEnhancement = nil
+        // The successor's own answer, as its prepare action carries it (nil
+        // when the server sent none). A report-gated one still stays hidden
+        // until a current effective-processing report is held.
+        playbackEnhancement = action.enhancement
         adoptWarmPlayer(successor)
         player.volume = incumbentVolume
         player.isMuted = incumbentMuted

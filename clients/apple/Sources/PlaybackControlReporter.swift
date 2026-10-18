@@ -472,6 +472,11 @@ struct ControlAction: Codable, Equatable {
     /// The named successor's control owner. It is adopted only after the
     /// predecessor accepts the frame-proved committed acknowledgement.
     var control: ControlBootstrap? = nil
+    /// `prepare` only, and optional: the successor's own Dolby Vision
+    /// enhancement, in the shape a create response carries it. Decoded
+    /// leniently by `PlaybackEnhancement`, so a malformed or newer value shows
+    /// nothing and never makes the action a protocol violation.
+    var enhancement: PlaybackEnhancement? = nil
 }
 
 /// What a session delivers, in the server's own vocabulary.
@@ -602,6 +607,8 @@ struct PreparedReplacementAction: Equatable {
     let mediaOriginMs: Int
     let effectiveSelection: EffectiveSelection
     let control: ControlBootstrap?
+    /// The successor's own enhancement answer; nil when the server sent none.
+    let enhancement: PlaybackEnhancement?
 
     /// `/api/v1/hls/{sessionId}/index.m3u8` or `.../master.m3u8`, and nothing
     /// else — the exact rule `is_node_relative_playlist` applies, including
@@ -647,6 +654,7 @@ struct PreparedReplacementAction: Equatable {
         self.mediaOriginMs = mediaOriginMs
         self.effectiveSelection = effectiveSelection
         self.control = action.control
+        self.enhancement = action.enhancement
     }
 }
 

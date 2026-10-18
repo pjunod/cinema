@@ -238,4 +238,46 @@ final class EffectiveProcessingPresentationTests: XCTestCase {
         XCTAssertNil(controller.playbackEnhancement)
     }
 
+    private func decodePrepare(_ extra: String) throws -> ControlAction {
+        let id = "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01", session = "0a9b8c7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d"
+        return try PlaybackControl.decoder.decode(ControlAction.self, from: Data("""
+        {"type":"prepare","action_id":"\(id)","session_id":"\(session)",
+         "playlist_url":"/api/v1/hls/\(session)/index.m3u8","media_origin_ms":0,
+         "effective_selection":{"quality_auto":true,"height":1080,"audio_track":null,
+           "subtitle_burn":null,"audio_offset_ms":0,"codec":"server_selected","dynamic_range":"hdr10"}\(extra)}
+        """.utf8))
+    }
+
+    func testPreparedSuccessorCarriesItsOwnEnhancementAndFallsBackToNone() throws {
+        let withEnhancement = try XCTUnwrap(PreparedReplacementAction(try decodePrepare("""
+        ,"enhancement":{"active":["FEL","RPU"],"requires_effective_processing":true,
+          "details":[{"badge":"FEL","active":true,"text":"FEL: in the picture"}]}
+        """)))
+        XCTAssertEqual(withEnhancement.enhancement?.active, [.fel, .rpu])
+        XCTAssertEqual(withEnhancement.enhancement?.requiresEffectiveProcessing, true)
+        // The report gate is unchanged: without a current report nothing is shown.
+        XCTAssertNil(withEnhancement.enhancement?.presented(
+            effectiveProcessing: nil, activeGeneration: generation, delivered: "hdr10"))
+        XCTAssertNotNil(withEnhancement.enhancement?.presented(
+            effectiveProcessing: report(), activeGeneration: generation, delivered: "hdr10"))
+
+        let without = try XCTUnwrap(PreparedReplacementAction(try decodePrepare("")))
+        XCTAssertNil(without.enhancement)
+        // A malformed value is additive: the action stays valid and shows nothing.
+        let malformed = try XCTUnwrap(PreparedReplacementAction(try decodePrepare(",\"enhancement\":\"FEL\"")))
+        XCTAssertNil(malformed.enhancement?.presented(
+            effectiveProcessing: nil, activeGeneration: nil, delivered: "hdr10"))
+    }
+
+    func testCommitAdoptsTheSuccessorsEnhancementInsteadOfClearingIt() throws {
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().appendingPathComponent("../Sources/PlayerController.swift")
+            .standardizedFileURL, encoding: .utf8)
+        let commit = try XCTUnwrap(source.range(of: "func commitPreparedSuccessor("))
+        let body = source[commit.upperBound...]
+        let adopt = try XCTUnwrap(body.range(of: "playbackEnhancement = action.enhancement"))
+        let clear = try XCTUnwrap(body.range(of: "effectiveProcessingGeneration = nil"))
+        XCTAssertLessThan(clear.lowerBound, adopt.lowerBound, "the report is cleared first")
+    }
+
 }
