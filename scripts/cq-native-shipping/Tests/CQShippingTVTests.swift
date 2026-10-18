@@ -55,7 +55,20 @@ import Foundation
         remote.press(.menu); sleep(1)
         app.launch()
         let title = env["CQ_TITLE"] ?? ""
-        XCTAssertTrue(activate(app.tabBars.buttons["Libraries"]), "Libraries tab")
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30), "app not foreground")
+        sleep(3)
+        var onTab = false
+        for _ in 0..<4 { remote.press(.up) }
+        for _ in 0..<12 {
+            let f = app.descendants(matching: .any).matching(NSPredicate(format: "hasFocus == true")).firstMatch
+            let label = f.exists ? f.label : ""
+            if label == "Libraries" { onTab = true; break }
+            log("tab_focus", ["label": label])
+            remote.press(label.isEmpty ? .up : .right)
+        }
+        if !onTab { log("buttons", ["labels": Array(labels(app.buttons).prefix(40))]) }
+        XCTAssertTrue(onTab, "Libraries tab")
+        remote.press(.select)
         sleep(2)
         let movies = app.buttons["library-open-category:movie"]
         if movies.waitForExistence(timeout: 10) { XCTAssertTrue(activate(movies), "movies") }

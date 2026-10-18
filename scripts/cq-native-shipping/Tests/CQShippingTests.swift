@@ -32,7 +32,8 @@ final class CQShippingTests: XCTestCase {
         app.launch()
         let title = env["CQ_TITLE"] ?? ""
         let libs = app.tabBars.buttons["Libraries"].exists ? app.tabBars.buttons["Libraries"] : app.buttons["Libraries"].firstMatch
-        XCTAssertTrue(libs.waitForExistence(timeout: 30), "home did not load")
+        if !libs.waitForExistence(timeout: 30) { log("home_missing", ["buttons": Array(labels(app.buttons).prefix(40)), "texts": Array(labels(app.staticTexts).prefix(20))]) }
+        XCTAssertTrue(libs.exists, "home did not load")
         libs.tap()
         let movies = app.buttons["library-open-category:movie"]
         if movies.waitForExistence(timeout: 15) { movies.tap() }
