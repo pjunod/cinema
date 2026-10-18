@@ -917,6 +917,7 @@ impl RuntimeRecipe {
                 .zip(plan.output_contract().effective_height())
                 .ok_or("no immutable output raster")?;
             let trace = observed.source_trace.clone();
+            let decoder = observed.decoder;
             let mut verified = private
                 .finalize(
                     observed,
@@ -952,6 +953,7 @@ impl RuntimeRecipe {
                 raster,
                 export_policy,
                 source_trace: trace,
+                decoder,
                 observed_at: i64::try_from(
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -1151,6 +1153,7 @@ struct RenderRow {
     pts: String,
     duration: String,
     rgb_sha256: Option<String>,
+    yuv10_sha256: Option<String>,
     width: u32,
     height: u32,
     el_bound: bool,
@@ -1217,6 +1220,34 @@ pub(crate) struct ObservedWindow {
     pub(crate) source_trace: DvDigest,
     pub(crate) source_tick: (u32, u32),
     pub(crate) runtime_device: DvDigest,
+    /// The helper's own account of how it decoded the source pictures.
+    pub(crate) decoder: plurx_core::transcode::DecodeBackend,
+}
+/// Read the helper's decoder report. A GPU decode that fell back (no device,
+/// no HEVC Main10 decode, surfaces the Vulkan device could not import) is
+/// still a valid window; the reason is logged so the fallback is visible.
+#[cfg(target_os = "linux")]
+fn helper_decoder(
+    value: &serde_json::Value,
+) -> Result<plurx_core::transcode::DecodeBackend, String> {
+    use plurx_core::transcode::DecodeBackend;
+    let mode = value
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("decoder report has no mode")?;
+    let reason = value
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let backend = match mode {
+        "vaapi" | "vaapi-host-copy" => DecodeBackend::Vaapi,
+        "software" | "vaapi-software-fallback" => DecodeBackend::Software,
+        _ => return Err("decoder report names an unknown mode".into()),
+    };
+    if mode != "vaapi" && reason != "no-decode-device" {
+        tracing::debug!(target: "plurxd::dv", mode, reason, "processed window decoder fallback");
+    }
+    Ok(backend)
 }
 #[cfg(target_os = "linux")]
 fn rational(value: &str) -> Result<(i64, u32), String> {
@@ -1276,6 +1307,7 @@ impl PrivateWindow {
         let mut segment = None;
         let mut gpu = None;
         let mut base_complete = None;
+        let mut decoder = None;
         for line in events
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
@@ -1322,6 +1354,11 @@ impl PrivateWindow {
                             .map_err(|e| e.to_string())?,
                     );
                 }
+                Some("decoder") => {
+                    if decoder.replace(helper_decoder(&value)?).is_some() {
+                        return Err("duplicate decoder report".into());
+                    }
+                }
                 Some("segment_complete") => {
                     if segment.replace(value).is_some() {
                         return Err("duplicate renderer completion".into());
@@ -1338,6 +1375,7 @@ impl PrivateWindow {
         }
         let complete = complete.ok_or("no source window completion")?;
         let segment = segment.ok_or("no renderer completion")?;
+        let decoder = decoder.ok_or("no decoder report")?;
         if mode == DvProcessingMode::BaseRpu {
             let base = base_complete
                 .as_ref()
@@ -1530,6 +1568,7 @@ impl PrivateWindow {
             optional_digest(pair.bl_sha256)?;
             optional_digest(pair.el_sha256)?;
             optional_digest(rendered.rgb_sha256)?;
+            optional_digest(rendered.yuv10_sha256)?;
         }
         if observed_timing != expected_timing
             || pictures.first().map(|frame| frame.key.pts)
@@ -1545,6 +1584,7 @@ impl PrivateWindow {
             source_trace: digest(&trace)?,
             source_tick: tick,
             runtime_device,
+            decoder,
         })
     }
 }

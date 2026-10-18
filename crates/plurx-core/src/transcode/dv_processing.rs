@@ -84,11 +84,19 @@ pub struct DvEffectiveProcessingReport {
     hdr10_enhanced: bool,
     fel_contributed: bool,
     applied_operations: Vec<DvOperation>,
+    /// The source pictures were decoded on the GPU (VA-API). Omitted when
+    /// they were decoded in software.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    gpu_decoded: bool,
 }
 impl DvEffectiveProcessingReport {
     /// Whether the full enhancement layer's residual is in the served picture.
     pub fn fel_contributed(&self) -> bool {
         self.fel_contributed
+    }
+    /// Whether the served window's source pictures were decoded on the GPU.
+    pub fn gpu_decoded(&self) -> bool {
+        self.gpu_decoded
     }
     /// Bounded advisory transfer from the current control owner. The daemon
     /// calls this on an owner response, never on a request or durable replay.
@@ -104,6 +112,8 @@ impl DvEffectiveProcessingReport {
             hdr10_enhanced: bool,
             fel_contributed: bool,
             applied_operations: Vec<DvOperation>,
+            #[serde(default)]
+            gpu_decoded: bool,
         }
         if bytes.len() > 4096
             || delivered != Some("hdr10")
@@ -128,6 +138,7 @@ impl DvEffectiveProcessingReport {
             hdr10_enhanced: true,
             fel_contributed: wire.fel_contributed,
             applied_operations: wire.applied_operations,
+            gpu_decoded: wire.gpu_decoded,
         })
     }
 }
@@ -526,8 +537,8 @@ pub enum DvMetadataSubset {
     SyntheticP7IdentityLinearNlqV1,
     SyntheticP7AffineLumaLinearNlqV1,
     SyntheticP81IdentityV1,
-    RuntimeP7MasterDomainLinearDzV1,
-    RuntimeBaseRpuMasterDomainV1,
+    RuntimeP7MasterDomainLinearDzV2,
+    RuntimeBaseRpuMasterDomainV2,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -828,6 +839,11 @@ impl DvProcessingPlan {
     pub fn destination(&self) -> DvDestination {
         self.destination
     }
+    /// Whether this plan reconstructs the full enhancement layer into the
+    /// picture (FEL to HDR10 or to Profile 8.1), not only the base reshaping.
+    pub fn reconstructs_fel(&self) -> bool {
+        self.graph.strategy != DvStrategy::BaseRpuToHdr10
+    }
     pub fn profile81_level(&self) -> Option<u8> {
         (self.destination == DvDestination::Profile81 && self.capability.completed_window_checked)
             .then(|| {
@@ -850,7 +866,10 @@ impl DvProcessingPlan {
             self.capability.schema,
             &self.capability.identity,
             self.capability.subset,
-            self.capability.decoder,
+            // Not the decoder: HEVC decoding is bit-exact, so a window decoded
+            // on the GPU and one decoded in software are the same pixel policy
+            // and a mid-playback fallback must not invalidate the frozen plan.
+            // The receipt and the effective report record which one ran.
             encoder_token(self.capability.encoder),
             self.capability.raster,
             self.capability.bl_shape,
@@ -1282,6 +1301,8 @@ pub struct DvCompletedWindowInput<'a> {
     pub export_policy: DvExportPolicy,
     pub source_trace: DvDigest,
     pub observed_at: i64,
+    /// How the helper actually decoded this window's source pictures.
+    pub decoder: DecodeBackend,
 }
 
 pub fn dv_plan_completed_window(
@@ -1295,6 +1316,11 @@ pub fn dv_plan_completed_window(
     ) {
         return Err(invalid(
             "completed DV window: encoder has no reconstructed output contract",
+        ));
+    }
+    if !matches!(input.decoder, DecodeBackend::Software | DecodeBackend::Vaapi) {
+        return Err(invalid(
+            "completed DV window: decoder has no processed-window contract",
         ));
     }
     let full_fel = input.mode == DvProcessingMode::Fel;
@@ -1470,11 +1496,11 @@ pub fn dv_plan_completed_window(
         identity: input.backend,
         schema: DV_CONTRACT_VERSION,
         subset: if full_fel {
-            DvMetadataSubset::RuntimeP7MasterDomainLinearDzV1
+            DvMetadataSubset::RuntimeP7MasterDomainLinearDzV2
         } else {
-            DvMetadataSubset::RuntimeBaseRpuMasterDomainV1
+            DvMetadataSubset::RuntimeBaseRpuMasterDomainV2
         },
-        decoder: DecodeBackend::Software,
+        decoder: input.decoder,
         encoder: input.encoder,
         raster: input.raster,
         bl_shape,
@@ -2061,18 +2087,18 @@ impl DvParsedMetadata {
     }
 
     fn supported(&self, subset: DvMetadataSubset) -> bool {
-        if subset == DvMetadataSubset::RuntimeBaseRpuMasterDomainV1 {
+        if subset == DvMetadataSubset::RuntimeBaseRpuMasterDomainV2 {
             return false;
         }
-        if subset == DvMetadataSubset::RuntimeP7MasterDomainLinearDzV1 {
+        if subset == DvMetadataSubset::RuntimeP7MasterDomainLinearDzV2 {
             return self.runtime_supported();
         }
         let curve = match subset {
             DvMetadataSubset::SyntheticP7IdentityLinearNlqV1
             | DvMetadataSubset::SyntheticP81IdentityV1 => ([0, 1], [0, 0]),
             DvMetadataSubset::SyntheticP7AffineLumaLinearNlqV1 => ([0, 0], [524_288, 6_291_456]),
-            DvMetadataSubset::RuntimeP7MasterDomainLinearDzV1
-            | DvMetadataSubset::RuntimeBaseRpuMasterDomainV1 => {
+            DvMetadataSubset::RuntimeP7MasterDomainLinearDzV2
+            | DvMetadataSubset::RuntimeBaseRpuMasterDomainV2 => {
                 unreachable!("handled runtime subset")
             }
         };
@@ -2177,6 +2203,8 @@ pub struct DvProcessingReceipt {
     attempt: DvDigest,
     object_shape: DvDigest,
     backend: DvBackendIdentity,
+    /// The decoder that produced this window's source pictures.
+    decoder: DecodeBackend,
     observed_source: DecodeSourceIdentity,
     epoch: u64,
     expected_interval: DvIntervalExpectation,
@@ -2236,6 +2264,7 @@ impl DvProcessingReceipt {
             hdr10_enhanced: true,
             fel_contributed,
             applied_operations: common.into_iter().collect(),
+            gpu_decoded: self.decoder != DecodeBackend::Software,
         }))
     }
 
@@ -2345,6 +2374,7 @@ pub fn dv_receipt_completed_window(
         attempt: binding.clone(),
         object_shape: binding.clone(),
         backend: plan.capability.identity.clone(),
+        decoder: plan.capability.decoder,
         observed_source: plan.source.observed_source.clone(),
         epoch: keys[0].continuity_epoch,
         expected_interval: DvIntervalExpectation {
@@ -2780,6 +2810,7 @@ impl DvIntervalObserver {
             attempt,
             object_shape,
             backend: self.plan.capability.identity.clone(),
+            decoder: self.plan.capability.decoder,
             observed_source: self.plan.source.observed_source.clone(),
             epoch: self.epoch,
             expected_interval: self.expectation.clone(),

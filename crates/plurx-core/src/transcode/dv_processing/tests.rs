@@ -1205,7 +1205,7 @@ fn completed_window_report_binds_publication_without_pixel_checksum_authority() 
     let mut plan = plan(DvDestination::Hdr10);
     plan.capability.scope = DvEvidenceScope::ProductionRoute;
     plan.capability.completed_window_checked = true;
-    plan.capability.subset = DvMetadataSubset::RuntimeP7MasterDomainLinearDzV1;
+    plan.capability.subset = DvMetadataSubset::RuntimeP7MasterDomainLinearDzV2;
     let mut receipt = dv_receipt_completed_window(&plan, &[key(0)], &[duration()], &[raw])
         .expect("completed receipt");
     let session = "00000000-0000-0000-0000-000000000001";
