@@ -14,7 +14,7 @@ acceptance remain open; Firefox browser video passes on `89d790d2e` ·
 
 - **What this is:** Implementation contract for changing video quality without a pause, flash or audio seam on every client, web first, then native.
 - **Where it stands:**
-  - Status (updated 2026-10-18): Apple 262 at `ef33cc71` passes 79 focused units, three recovery UI journeys, affected compilation and paperwork. Valid simulator comparison repairs the retained-incumbent failure; physical iPad SDK evidence still has one unclassified 104 ms surface pair, shared AAC TV is running, a separate E-AC-3-to-AAC VOD boundary finding is open, and Safari awaits user settings. Task #1179 gate, physical/independent-output acceptance and parent #1156 promotion remain pending. Firefox retains its old-source browser-video scope; see §10.332.
+  - Status (updated 2026-10-18): Apple 262 at `ef33cc71` passes 79 focused units, three recovery UI journeys, affected compilation and paperwork. Valid simulator comparison repairs the retained-incumbent failure; physical iPad SDK evidence still has one unclassified 104 ms surface pair, shared-AAC TV SDK playback completes with zero sampled access stalls; independent output continuity remains unmeasured, a separate E-AC-3-to-AAC VOD boundary finding is open, and Safari awaits user settings. Task #1179 gate, physical/independent-output acceptance and parent #1156 promotion remain pending. Firefox retains its old-source browser-video scope; see §10.332.
   - Per-milestone state lives in the evidence ledger (CQ0-CQ7 have partial results, CQ8 is "Not run"); empty rows are unfinished work. The tail of the file is a dated running log of review rounds and test repairs.
   - Execution order is CQ0, CQ2a, CQ1, CQ2, CQ3, CQ4, CQ5, CQ6, CQ7, CQ8.
 - **Read further only for:**
@@ -12191,12 +12191,12 @@ probes. The acquisition timeout's producer/network cause remains separate;
 the reproduced fallback seam and its retention repair are established.
 Earlier direct and missing-bound-FFprobe trials remain invalid.
 
-**Physical scopes.** Apple 262 on the iPad completes a 598,677 ms SDK run
-with 1080p → 720p → 360p, zero reported stalls and zero black observations.
+**Physical scopes.** Apple 262 on the iPad reaches film position 598,677 ms in 294 SDK probes
+through 1080p → 720p → 360p, zero reported stalls and zero black observations.
 A 104 ms surface pair is still unclassified; independent display continuity
 is unmeasured, so an uninterrupted-output verdict remains open. The shared-AAC
-TV run completes 488,356 ms through 1080p → 720p → 360p, 90 s at 3 Mb/s and
-recovery: 240 probes, zero sampled access stalls/black intervals, no unnamed
+TV run reaches film position 488,356 ms in 240 probes through 1080p → 720p → 360p,
+90 s at 3 Mb/s and recovery: zero sampled access stalls/black intervals, no unnamed
 controls or HTTP 410s. Two 111 ms preparing indicators occur while presenting
 at rate 1. The Info panel reports Transcode · 360p and 640×360; frame/audio/tap
 continuity explicitly reads Not measured. The separate DTS-source E-AC-3 → AAC
