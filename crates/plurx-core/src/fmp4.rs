@@ -4171,6 +4171,45 @@ pub enum EncodedGridError {
     PresentationGrid,
 }
 
+impl EncodedGridError {
+    /// The fixed reason, for refusals that carry only static text.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::MissingVideo => "encoded DV window timing: missing selected video track",
+            Self::Timescale => "encoded DV window timing: video timescale differs from the plan",
+            Self::EditList => "encoded DV window timing: video track contains edit metadata",
+            Self::RandomAccess => {
+                "encoded DV window timing: fragment does not begin with clean random access"
+            }
+            Self::DecodeAnchor => {
+                "encoded DV window timing: decode anchor differs from the planned entry"
+            }
+            Self::PresentationAnchor => {
+                "encoded DV window timing: first picture does not present at the entry boundary"
+            }
+            Self::PlanDuration => {
+                "encoded DV window timing: invalid planned frame duration or entry size"
+            }
+            Self::SampleCount => {
+                "encoded DV window timing: sample count differs from the planned frame count"
+            }
+            Self::SampleDuration => {
+                "encoded DV window timing: sample duration differs from the output cadence"
+            }
+            Self::CompositionShape => {
+                "encoded DV window timing: composition offset lacks the signed version-1 shape"
+            }
+            Self::Overflow => "encoded DV window timing: timestamp arithmetic overflow",
+            Self::PresentationInterval => {
+                "encoded DV window timing: presentation timestamp outside the planned interval"
+            }
+            Self::PresentationGrid => {
+                "encoded DV window timing: presentation slots missing, duplicated or off-grid"
+            }
+        }
+    }
+}
+
 /// Prove the exact presentation multiset, independently of decode order. The
 /// frame duration comes from the frozen encoder recipe, never the output.
 pub fn validate_encoded_grid(

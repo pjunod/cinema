@@ -983,7 +983,7 @@ pub fn dv_validate_encoded_window(
             .checked_mul(track.sample_count() as u64)
             .ok_or_else(|| invalid("encoded DV window: fragment duration overflow"))?;
         fmp4::validate_encoded_grid(&fragment, &init, timescale, position, duration, frame_ticks)
-            .map_err(|_| invalid("encoded DV window: fragment timing is off the frame grid"))?;
+            .map_err(|error| invalid(error.reason()))?;
         for run in &track.runs {
             let mut offset = run.data_offset;
             for sample in &run.samples {
