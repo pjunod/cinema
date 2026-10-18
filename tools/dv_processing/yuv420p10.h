@@ -73,7 +73,6 @@ static bool dv_yuv10_export(pl_renderer renderer, pl_gpu gpu, pl_tex rgb) {
   params.color_map_params = &cmap;
   params.upscaler = params.downscaler = &pl_filter_nearest;
   params.plane_upscaler = params.plane_downscaler = &pl_filter_bilinear;
-  params.skip_anti_aliasing = true;
   params.disable_linear_scaling = true;
   params.dither_params = NULL;
   params.peak_detect_params = NULL;

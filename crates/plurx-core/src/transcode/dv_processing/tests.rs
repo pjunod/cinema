@@ -1178,6 +1178,73 @@ fn base_rpu_accepts_signalled_bounded_curve_extents_without_replacing_them() {
     }
 }
 
+/// The master reconstruction applies none of the display metadata (L2, L8,
+/// L9, L10, L11, L254, L255), so every version of it that a real title carries
+/// is accepted. The Uprising's first refused window carried an L8 trim of a
+/// length the old subset refused.
+#[test]
+fn every_display_metadata_version_the_master_reconstruction_ignores_is_accepted() {
+    use dolby_vision::rpu::dovi_rpu::DoviRpu;
+    use dolby_vision::rpu::extension_metadata::blocks::{
+        ExtMetadataBlock, ExtMetadataBlockLevel11, ExtMetadataBlockLevel8, ExtMetadataBlockLevel9,
+    };
+    use dolby_vision::rpu::extension_metadata::{CmV40DmData, DmData};
+    fn widen(fixture: &[u8]) -> Vec<u8> {
+        let mut rpu = DoviRpu::parse_unspec62_nalu(fixture).expect("fixture RPU");
+        let dm = rpu.vdr_dm_data.as_mut().expect("display metadata");
+        if dm.cmv40_metadata.is_none() {
+            dm.cmv40_metadata = Some(DmData::V40(CmV40DmData::new_with_l254_402()));
+        }
+        for block in [
+            ExtMetadataBlock::Level8(ExtMetadataBlockLevel8 {
+                length: 13,
+                target_display_index: 1,
+                ..Default::default()
+            }),
+            ExtMetadataBlock::Level9(ExtMetadataBlockLevel9 {
+                length: 1,
+                source_primary_index: 2,
+                ..Default::default()
+            }),
+            ExtMetadataBlock::Level11(ExtMetadataBlockLevel11 {
+                content_type: 1,
+                reference_mode_flag: true,
+                ..Default::default()
+            }),
+        ] {
+            dm.replace_metadata_block(block).expect("CM v4.0 block");
+        }
+        rpu.modified = true;
+        let raw = rpu.write_hevc_unspec62_nalu().expect("widened RPU");
+        let reread = DoviRpu::parse_unspec62_nalu(&raw).expect("widened RPU parses");
+        let dm = reread.vdr_dm_data.expect("display metadata");
+        match dm.get_block(8) {
+            Some(ExtMetadataBlock::Level8(level8)) => assert_eq!(level8.length, 13),
+            other => panic!("no L8 trim: {other:?}"),
+        }
+        assert!(matches!(dm.get_block(9), Some(ExtMetadataBlock::Level9(level9))
+            if level9.source_primary_index == 2));
+        assert!(dm.get_block(11).is_some());
+        raw
+    }
+    let fel = widen(include_bytes!(
+        "../../../tests/fixtures/dv-runtime/frame-000.nal"
+    ));
+    let parsed = DvParsedMetadata::from_raw_rpu(&fel).expect("FEL RPU parses");
+    for level in [10, 255] {
+        assert!(
+            parsed.other_metadata_levels.contains(&level)
+                || parsed.creative_trim_levels.contains(&level),
+            "fixture keeps L{level}: {parsed:?}"
+        );
+    }
+    assert!(parsed.runtime_supported(), "{parsed:?}");
+    let base = widen(include_bytes!(
+        "../../../tests/fixtures/dv-runtime/p8-piecewise.nal"
+    ));
+    DvBaseMetadata::from_raw_rpu(&base, (64, 64)).expect("base RPU with every trim version");
+}
+
 #[test]
 fn completed_window_report_binds_publication_without_pixel_checksum_authority() {
     let mut raw = dolby_vision::rpu::dovi_rpu::DoviRpu::parse_unspec62_nalu(include_bytes!(

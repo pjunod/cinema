@@ -123,9 +123,11 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         verified.observed.pictures.len(),
         usize::try_from(encoding.grid.frames_per_segment).expect("bounded frame count")
     );
+    let luma = processed_window_luma(&verified.bytes, false);
     println!(
         "{}",
         serde_json::json!({"entry":0,"elapsed_ms":started.elapsed().as_millis(),
+        "decoder":format!("{:?}", verified.observed.decoder),"luma":luma,
         "bytes":verified.bytes.len(),"plan":selected.semantic_digest(),"receipt_frames":verified.receipt.as_ref().map(|receipt| receipt.served_frames().len()),
         "fel_frames":verified.receipt.as_ref().map(|receipt| receipt.counts().el_accepted)})
     );
@@ -180,13 +182,51 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
                 .iter()
                 .all(|picture| picture.el_shape.0 > 0));
         }
+        // Twelve minutes in is picture, not an opening fade.
+        let luma = processed_window_luma(&verified.bytes, at == 360);
         println!(
             "{}",
             serde_json::json!({"entry":at,"elapsed_ms":started.elapsed().as_millis(),
+            "decoder":format!("{:?}", verified.observed.decoder),"luma":luma,
             "bytes":verified.bytes.len(),"plan":plan.semantic_digest(),"receipt_frames":verified.receipt.as_ref().map(|receipt| receipt.served_frames().len()),
         "fel_frames":verified.receipt.as_ref().map(|receipt| receipt.counts().el_accepted)})
         );
     }
+}
+
+/// Decode a processed window and check its luma is a limited-range picture:
+/// inside 64..=940 and, where the film has picture, not flat. A wrong matrix,
+/// range or bit shift in the export leaves the range or collapses the spread.
+fn processed_window_luma(window: &[u8], expect_picture: bool) -> serde_json::Value {
+    let directory = crate::test_tempdir().expect("window decode directory");
+    let path = directory.path().join("window.mp4");
+    std::fs::write(&path, window).expect("window bytes");
+    let output = std::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+        .args(["-nostdin", "-v", "error", "-i"])
+        .arg(&path)
+        .args(["-pix_fmt", "gray10le", "-f", "rawvideo", "pipe:1"])
+        .output()
+        .expect("decode the processed window");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let codes: Vec<u16> = output
+        .stdout
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    assert!(!codes.is_empty(), "the window decodes to a picture");
+    let (low, high) = codes
+        .iter()
+        .fold((u16::MAX, 0), |(low, high), code| (low.min(*code), high.max(*code)));
+    let mean = codes.iter().map(|code| u64::from(*code)).sum::<u64>() / codes.len() as u64;
+    assert!(
+        (64..=940).contains(&low) && (64..=940).contains(&high),
+        "luma {low}..{high} leaves the limited range"
+    );
+    assert!(
+        !expect_picture || high - low >= 64,
+        "luma {low}..{high} is a flat picture"
+    );
+    serde_json::json!({"min":low,"max":high,"mean":mean})
 }
 
 #[tokio::test]

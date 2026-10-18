@@ -9,7 +9,8 @@ dovi=$3
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$work/tools" "$work/generator/src" "$work/tags"
 cp "$source_dir/../"*.c "$source_dir/../"*.h "$source_dir/../build.sh" "$work/tools/"
-cp "$source_dir/make_movie.c" "$source_dir/run_base_controls.py" "$source_dir/"*.mkv "$work/"
+cp "$source_dir/make_movie.c" "$source_dir/run_base_controls.py" \
+  "$source_dir/compare_yuv420p10_export.py" "$source_dir/"*.mkv "$work/"
 cp "$source_dir/generator/Cargo.toml" "$source_dir/generator/Cargo.lock" "$work/generator/"
 cp "$source_dir/generator/src/main.rs" "$source_dir/generator/src/base_profiles.rs" "$work/generator/src/"
 cp "$source_dir/tags/"*.nal "$work/tags/"
