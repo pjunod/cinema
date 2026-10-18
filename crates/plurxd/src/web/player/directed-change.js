@@ -1154,6 +1154,9 @@ function attachSession(v, t, info, wantSec){
   // so it is written unconditionally where the range beside it is not: a
   // session that stripped must clear a profile an earlier decision reported.
   if(info.delivered_dynamic_range) t.deliveredDvProfile=info.delivered_dolby_vision_profile||null;
+  // The enhancement belongs to this session, so a replacement never inherits
+  // its predecessor's: absent is "no Dolby Vision enhancement here".
+  t.enhancement=playbackEnhancementFromWire(info.enhancement);
   // …and repaint, or the chip keeps its pre-session HTML forever while the
   // one-second stats panel follows the new truth. That is how "DV P7 → HDR10"
   // sat beside "Dynamic range: SDR" on a tone-mapped reference episode I: both
@@ -1210,7 +1213,7 @@ function attachSharedDirect(v,t,info,wantSec){
   t.fileContext=bound;
   t.meta={...(t.meta||{}),fileContext:bound};
   t.sessionId=null; t.streamId=null; t.vod=false; t.offset=0;
-  t.method='direct_play'; t.copyHls=false; t.started=false;
+  t.method='direct_play'; t.copyHls=false; t.started=false; t.enhancement=null;
   t.directUrl=info.url; t.probeUrl=info.url;
   if(t===PLAYER) renderPlayerInfo();
   resetMediaSource(v);

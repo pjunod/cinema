@@ -136,6 +136,8 @@ function stopPlayerForExhaustion(){
 function retireHlsTerminalAttempt(p){
   clearEffectiveProcessing(p);
   if(!p) return;
+  // The retired session's enhancement is not the fallback's.
+  p.enhancement=null;
   const mediaAttachment=p.mediaAttachment||null;
   const episode=p.hlsStartup;
   const ownsEpisode=!!(episode&&p.hls===episode.hls&&episode.attachment.current());

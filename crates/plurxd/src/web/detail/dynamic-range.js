@@ -122,6 +122,51 @@ function clearEffectiveProcessing(p){
   p.effectiveProcessing=null;
   if(changed&&typeof PLAYER!=='undefined'&&p===PLAYER&&typeof renderPlayerInfo==='function') renderPlayerInfo();
 }
+// The Dolby Vision enhancement the server says this session's picture carries
+// (StartResponse.enhancement, crates/plurx-core/src/playback/enhancement.rs).
+// The server computes it so every client renders the same pills and lines
+// rather than reconstructing the delivery route; this only refuses what it
+// cannot render. Absent (no Dolby Vision, SDR output, an old server) is null.
+function playbackEnhancementFromWire(raw){
+  const known=['FEL','RPU','DYN'];
+  if(!raw||typeof raw!=='object'||!Array.isArray(raw.active)||!Array.isArray(raw.details)) return null;
+  const active=[...new Set(raw.active.filter(badge=>known.includes(badge)))];
+  const details=raw.details.filter(d=>d&&known.includes(d.badge)&&typeof d.text==='string'
+    &&d.text.length>0&&d.text.length<=240).map(d=>({badge:d.badge,active:d.active===true,text:d.text}));
+  return {active,details,requires_effective_processing:raw.requires_effective_processing===true};
+}
+// The current, generation-matching HDR10-E report — the same reading
+// playerRangeBadge makes, for a caller that is not painting the range chip.
+function playerEffectiveProcessing(p){
+  if(!p) return null;
+  const stream=typeof statsStreamFormat==="function"?statsStreamFormat(p):null;
+  return effectiveHdrProcessing(p.effectiveProcessing,p.controlReporter?.bootstrap?.generation,
+    stream?.dynamic_range||p.deliveredRange);
+}
+// What the player may show now. A processed-HDR10 delivery's FEL/RPU claim is
+// only true while the report proving it is current: a seek, fallback or
+// replacement clears the report, and with it every pill and the details row.
+function playerEnhancement(p){
+  const enhancement=p&&p.enhancement;
+  if(!enhancement) return null;
+  if(enhancement.requires_effective_processing&&!playerEffectiveProcessing(p)) return null;
+  return enhancement;
+}
+// The Playback info row: the active badges, then one neutral line per
+// enhancement — active or not — exactly as the server wrote it.
+function playerEnhancementRow(p){
+  const enhancement=playerEnhancement(p);
+  if(!enhancement) return null;
+  return {value:enhancement.active.length?enhancement.active.join(' · '):'None active',
+    note:enhancement.details.length?enhancement.details.map(d=>d.text).join('\n'):null};
+}
+function enhancementPills(enhancement){
+  if(!enhancement||!enhancement.active.length) return '';
+  return enhancement.active.map(badge=>{
+    const detail=enhancement.details.find(d=>d.badge===badge&&d.active);
+    return `<span class="vbadge enh" title="${esc(detail?detail.text:badge)}">${esc(badge)}</span>`;
+  }).join('');
+}
 function playerRangeBadge(f){
   const stream=typeof statsStreamFormat==="function"?statsStreamFormat(PLAYER):null;
   const delivered=stream?.dynamic_range||PLAYER.deliveredRange;
@@ -179,6 +224,10 @@ function playerFactBadges(){
   if(h) b.push(`<span class="vbadge ${h.cls}${h.off?' off':''}" title="${esc(h.full||h.text)}" aria-label="${
     esc(h.aria||h.text)}">${mediaIcon('dynamic')}<span class="vsrc">${esc(h.base)}</span>${
     h.arrow?`<span class="varrow">→ ${esc(h.arrow)}</span>`:''}</span>`);
+  // Active Dolby Vision enhancements only, right after the range chip they
+  // qualify; the reasons for the inactive ones live in the details panel.
+  const enhancement=enhancementPills(playerEnhancement(PLAYER));
+  if(enhancement) b.push(enhancement);
   const au=playbackAudioChip(PLAYER.audio&&PLAYER.audio[PLAYER.curAudio]);
   if(au) b.push(`<span class="vbadge audio" title="${esc(au.full)}">${mediaIcon('audio')}${esc(au.text)}</span>`);
   return b.join('');

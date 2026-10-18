@@ -1670,7 +1670,7 @@ and they are reported by `GET /api/v1/system`.
 The response carries `session_id`, `playlist_url`, `duration_ms`,
 `start_seconds`, `media_origin_ms`, `height`, `encoder`, `vod`, `ladder`,
 `prior_kbps`, `delivered_dynamic_range`, `delivered_dolby_vision_profile`,
-`control`, `plan_notes`.
+`control`, `plan_notes`, `enhancement`.
 
 - `media_origin_ms` is the source-timeline timestamp represented by
   player-local zero. A copy session can start on the keyframe *before*
@@ -1690,6 +1690,20 @@ The response carries `session_id`, `playlist_url`, `duration_ms`,
 - `plan_notes` says why this session's plan is not the one the client asked
   for — a named override, or a `plan_mismatch:` line naming the field, the
   client's value and the server's. Empty and omitted on every agreeing create.
+- `enhancement` is the server-computed Dolby Vision enhancement the
+  delivered picture carries (`crates/plurx-core/src/playback/enhancement.rs`):
+  `{active: ["FEL","RPU","DYN"], details: [{badge, active, text}],
+  requires_effective_processing?: true}`. `active` lists the badges of the
+  active enhancements only, in display order; `details` has one plain sentence
+  per enhancement that applies to the source — what it is when active, why it
+  is unused when not. Clients render it rather than reconstructing the route:
+  one pill per `active` badge after the dynamic-range badge, and an
+  `Enhancement` info row listing each `details[].text` (neutral styling).
+  `requires_effective_processing` (omitted when false) marks a processed-HDR10
+  delivery whose pills and row are shown only while the client holds a
+  current, generation-matching `effective_processing` report; they clear with
+  it on seek, fallback or replacement. Omitted for non-Dolby-Vision sources and
+  SDR output, and a replacement session never inherits its predecessor's.
 
 | Status | Code | When |
 |---|---|---|

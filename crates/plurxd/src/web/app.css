@@ -8,6 +8,9 @@
     --text:#e8eaf0; --muted:#9aa2b4; --accent:#6ea8fe; --accent2:#8b7cf6;
     --good:#4ade80; --bad:#f87171; --warn:#fbbf24; --radius:12px; --poster:120px;
     --btn-ink:#07101f; --prose:#cdd2df;
+    /* Dolby Vision enhancement pills (FEL / RPU / DYN): one teal for "active";
+       the text mixes toward --text so it holds contrast in light and dark. */
+    --enhance:#14a89c;
     --font:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
     --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;
   }
@@ -1462,6 +1465,7 @@
   .vbadge.hdr{color:#12b3a6;border-color:color-mix(in srgb,#12b3a6 48%,transparent);background:color-mix(in srgb,#12b3a6 14%,transparent)}
   .vbadge.dv{color:#c99a2b;border-color:color-mix(in srgb,#c99a2b 52%,transparent);background:color-mix(in srgb,#c99a2b 15%,transparent)}
   .vbadge.audio{color:#7f8fe0;border-color:color-mix(in srgb,#7f8fe0 46%,transparent);background:color-mix(in srgb,#7f8fe0 14%,transparent)}
+  .vbadge.enh{color:color-mix(in srgb,var(--enhance) 74%,var(--text));border-color:color-mix(in srgb,var(--enhance) 50%,transparent);background:color-mix(in srgb,var(--enhance) 14%,transparent)}
   /* Downgraded: the source grade named on the chip is NOT what is on screen.
      Keeps the coloured border so it still reads as the same badge, drops the
      tint, and dims the icon and the source half — the "→ SDR" suffix stays
@@ -3233,7 +3237,7 @@
 .pi-group{border-bottom:1px solid #343d4d}.pi-group summary{cursor:pointer;font-weight:600;padding:16px 0;min-height:48px}
 .pi-group summary:focus-visible{outline:2px solid #8bb8ff;outline-offset:2px}
 .pi-row{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px;padding:12px 0;border-top:1px solid #343d4d;overflow-wrap:anywhere}
-.pi-row b{font-weight:500}.pi-row small{display:block;font-size:12px;color:#acb7c9;margin-top:4px}.pi-row>.v{text-align:right;font-variant-numeric:tabular-nums}
+.pi-row b{font-weight:500}.pi-row small{display:block;font-size:12px;color:#acb7c9;margin-top:4px}.pi-row small[data-stats-note="enhancement"]{white-space:pre-line}.pi-row>.v{text-align:right;font-variant-numeric:tabular-nums}
 .pi-compact{display:flex;flex-wrap:wrap;gap:12px 24px}.pi-compact .pi-fact{flex:1 1 140px;min-width:0;overflow-wrap:anywhere}.pi-compact strong{font-size:19px}
 @container(max-width:520px){.pi-hero,.pi-tracks,.pi-metrics,.pi-row{grid-template-columns:minmax(0,1fr);gap:14px}.pi-hero>.pi-fact+ .pi-fact{border-left:0;border-top:1px solid #343d4d;padding:14px 0 0}.pi-row>.v{text-align:left}.statsov .statsbody{padding:18px 16px}.statsov .statshd{padding:12px 16px}.statsov .statsmodes button{padding:8px;font-size:13px}}
 

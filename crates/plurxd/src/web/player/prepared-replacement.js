@@ -1070,13 +1070,16 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     probeUrl:p.probeUrl,offset:p.offset,wantsPlayback:p.wantsPlayback,
     method:p.method,copyHls:p.copyHls,autoHeight:p.autoHeight,encoder:p.encoder,
     qualityCandidateId:p.qualityCandidateId,deliveredRange:p.deliveredRange,
-    health:p.health,healthObservedAt:p.healthObservedAt,
+    enhancement:p.enhancement||null,health:p.health,healthObservedAt:p.healthObservedAt,
     presentationAdvancedAt:p.presentationAdvancedAt,
     muted:intent.muted,volume:intent.volume,playbackRate:intent.playbackRate,
     defaultPlaybackRate:intent.defaultPlaybackRate};
   // Authoritative before visible, so anything that reads PLAYER.hls during the
   // swap reads the instance that owns the picture.
   clearEffectiveProcessing(p);
+  // The successor's session was never created through StartResponse, so it
+  // carries no enhancement claim; the predecessor's is kept for a rollback.
+  p.enhancement=null;
   p.hls=state.hls;
   p.sessionId=state.sessionId;
   p.probeUrl=state.playlistUrl;
