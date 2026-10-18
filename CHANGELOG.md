@@ -8,6 +8,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- Web Meridian layout and independent theme, with collapsible source navigation, responsive phone destinations and cinematic Home/detail presentation. Layout changes retain the current page, library controls and playback session.
+
 ## [0.7.0] — 2026-10-17
 
 ### Added

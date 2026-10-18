@@ -99,6 +99,7 @@ function cinemaRemoteRestrictedOverlay(){
 function cinemaRemoteVod(){ return !!document.getElementById("modal")?.classList.contains("open"); }
 function cinemaRemoteLive(){ return !!(LIVE_TV_LEASE.current&&cinemaRemoteVisible(liveTvHost())); }
 function cinemaRemoteGuard(){
+  if(typeof meridianPanelActive==="function"&&(meridianPanelActive()||meridianSafeChromeActive())) return !!(TOKEN&&ME&&!document.getElementById("diagnostic-dialog"));
   if(document.getElementById("diagnostic-dialog"))return true;
   return !!(TOKEN&&ME&&!cinemaRemoteRestrictedOverlay()&&
     (cinemaRemoteSafeRoute(location.hash||"#/")||location.hash==="#/live-tv"));
@@ -119,6 +120,7 @@ function cinemaRemoteBind(){
   if(typeof cinemaDiagnosticsRemoteBind==="function"&&cinemaDiagnosticsRemoteBind())return;
   if(CINEMA_REMOTE_CHOICE&&cinemaRemoteBindChoice())return;
   if(CINEMA_REMOTE_PRESENTATION&&cinemaRemoteBindPresentation())return;
+  if(typeof meridianBindRestrictedChrome==="function"&&meridianBindRestrictedChrome())return;
   const route=location.hash||"#/";
   const menu=document.getElementById("pmenu"),vod=cinemaRemoteVod(),live=cinemaRemoteLive();
   const watch=vod&&typeof watchBrowserMounted==="function"&&watchBrowserMounted()&&WATCH.mode!=="full";
@@ -146,6 +148,7 @@ function cinemaRemoteBind(){
     }});
   if(vod){ cinemaRemoteBindPlayer(root,root===menu);if(watch&&root!==menu)cinemaRemoteBindWatch(document.getElementById("watch-browser")); return; }
   if(live){ cinemaRemoteBindLive(root);return; }
+  if(layoutId()==="meridian"&&typeof meridianBindChrome==="function")meridianBindChrome();
   if(!cinemaRemoteSafeRoute(route)&&route!=="#/live-tv") return;
   if(route==="#/live-tv")cinemaRemoteBindLiveBrowse(root);
   // Only this explicit href grammar registers navigation: handlers are never read.
@@ -154,7 +157,7 @@ function cinemaRemoteBind(){
     const href=el.getAttribute("href");
     if(!cinemaRemoteSafeRoute(href)&&href!=="#/live-tv") continue;
     const count=counts.get(href)||0;counts.set(href,count+1);
-    cinemaRemoteRegister(`route:${href}:${count}`,el,el.textContent.trim(),()=>cinemaRemoteGo(href));
+    cinemaRemoteRegister(`route:${href}:${count}`,el,el.textContent.trim(),()=>el.hasAttribute("data-meridian-destination")?meridianNavigate(null,el):cinemaRemoteGo(href));
   }
   if(typeof cinemaRemoteBindLocalPairEntry==="function")cinemaRemoteBindLocalPairEntry(root);
   const itemIds=new Set();

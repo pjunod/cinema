@@ -25,12 +25,8 @@ function layoutMenuHtml(){
   }).map(id=>`<button class="${cur===id?'sel':''}" onclick="setLayout('${id}')">${esc(LAYOUTS[id].name)}</button>`).join("");
   return `<div class="amsec">Layout</div><div class="amseg">${btns}</div>`;
 }
-// A layout change repaints everything, chrome included — unlike a theme, which
-// only swaps CSS variables on an already-painted page. render() is the honest
-// way to do that: it re-runs the current route through the new layout.
-// Where the reader was, carried across a re-render that is not a navigation.
-// Consume-once: a scroll position restored on a route the user actually
-// navigated to would be worse than the reset it replaces.
+// Route loads consume a saved scroll position; layout changes keep the mounted
+// page owner and restore directly without re-entering its loader.
 let PENDING_SCROLL=null;
 function restoreScroll(){
   if(PENDING_SCROLL===null) return;
@@ -40,13 +36,11 @@ function restoreScroll(){
   requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo(0,y)));
 }
 function setLayout(id){
+  const previous=layoutId();
   try{ localStorage.setItem("plurx_layout",id); }catch(e){}
-  // A layout switch is a change of clothes, not a change of place: the same
-  // route with the same content is about to be rebuilt from scratch, and
-  // dumping the reader at the top of a 200-item library is a real loss.
-  PENDING_SCROLL=window.scrollY||0;
   applyLayout();
-  render();
+  if(layoutId()!==previous) recomposeLayoutPresentation();
+  repaintLookMenu();
 }
 function appMenuHtml(){
   let app="auto"; try{ app=localStorage.getItem("plurx_appearance")||"auto"; }catch(e){}

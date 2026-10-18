@@ -62,6 +62,7 @@ async function viewHome(generation=++PAGE_RENDER_GENERATION){
     soon:{configured:false,entries:[]},libs:[],group:homeGroup(),sections:[],
     hubsPending:true,previewsPending:true,soonPending:true,
     hubsError:false,previewsError:false,soonError:false};
+  registerLayoutPresentation(()=>recomposeHomePresentation(page),()=>!page.hubsPending||!page.previewsPending);
   const current=()=>generation===PAGE_RENDER_GENERATION&&location.hash===route;
   const commit=(name,content=false)=>{
     if(!current()) return;
