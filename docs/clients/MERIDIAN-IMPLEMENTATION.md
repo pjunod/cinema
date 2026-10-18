@@ -1,16 +1,12 @@
 # Meridian — a selectable Cinema layout and theme across web, Apple and Android
 
-**Status:** open; M0 design/state evidence prepared for coordinating review;
-product implementation not started. Adversarial plan findings were corrected
-and rechecked 2026-10-17; M0 remains the internal release checkpoint.
+**Status:** open; web M1/M2 delivered and reviewed; Apple/Android implementation
+and native acceptance remain in progress. M0 design direction is approved.
 **Written:** 2026-10-17 · **Source baseline:** `e586725544f0`.
-**Owner:** coordinating chat; implementation by GPT-6.1 Sol chat
-`01a14cba-e609-7f71-93af-db0b2b797db3`.
+**Owner:** coordinating chat; implementation will be assigned to GPT-6.1 Sol.
 **Integration branch:** `effort/meridian`.
 
 This is the canonical implementation and acceptance ledger for Meridian.
-[M0 evidence and state inventory](MERIDIAN-M0.md) records the source audit,
-frozen design tokens, reproducible prototype gallery and native migration gaps.
 Read this head, then the milestone being executed. The user requested the
 current Plex layout/navigation/theme, named **Meridian**, on the web and native
 Apple/Android clients, rendered previews, an adversarial plan review, and a
@@ -239,8 +235,8 @@ contrast trap. Preserve all other palettes' behavior and player black surfaces.
 
 ## 4. Build packets and review checkpoints
 
-Use one effort and sequential reviewable task branches based on its current
-head. Shared owners above make the independent-main exception inapplicable.
+Use one effort with reviewable task branches based on its current head.
+Shared owners above make the independent-main exception inapplicable.
 No production code changes before plan findings are addressed and coordinator
 dispatches Sol. Each packet ends with a compact review handoff: exact commit,
 diff stat, affected outlines, regression commands/results and limitations.
@@ -255,10 +251,16 @@ diff stat, affected outlines, regression commands/results and limitations.
 | M5 — integrated review | Complete cross-layout/theme/settings matrix and gallery, review diff adversarially, address findings, run affected integrated checks. | Coordinator verifies exact commit and independently inspects renders/tests; no unresolved P1/P2 correctness issue. |
 | M6 — promotion | Freeze task merges, integrate current main, requalify resulting candidate and prepare main-bound PR under repository rules. | Required current-candidate promotion gate and qualification receipt; implemented, merged, simulator-qualified and physical-accepted states reported separately. |
 
-M2/M3/M4 may not concurrently mutate common preferences/docs/release counters.
-The requested implementer is one GPT-6.1 Sol chat. It may use read-only research
-or explicit review agents under repository rules; it does not delegate product
-implementation to a different model without user instruction.
+The coordinator authorized concurrent GPT-6.1 Sol implementation for M2/M3/M4
+on isolated `codex/meridian-web`, `codex/meridian-apple` and
+`codex/meridian-android` branches and worktrees. Each native worker owns its
+platform files, tests and release counters; web owns web files and the current
+shared document changes. The coordinator integrates the shared ledger. This
+supersedes the original sequential packet policy without allowing concurrent
+edits to a shared file. Fresh GPT-6 Astra review examines each actual PR head
+and findings are repaired before integration. Implementation does not wait for
+CI; workers provide native screenshots and evidence at checkpoints. Required
+merge and promotion gates still apply.
 
 ## 5. Tests and rendered evidence
 
@@ -389,20 +391,10 @@ Developer switch. Acceptance status belongs in this ledger.
 
 ## 7. Review dispositions and delivery ledger
 
-**User-directed PR/review policy (2026-10-17):** M0 is a proper draft pull
-request into `effort/meridian`. The coordinator dispatches GPT-6 Astra for
-adversarial PR review; Sol addresses findings and waits at the checkpoint.
-Validation is lint/syntax and UI-related tests, including applicable UI
-preference/navigation units, plus required bookkeeping. Do not run unrelated
-full backend unit suites. Report any required hook/gate conflict with this
-narrowed scope rather than silently broadening it or claiming a pass.
-
 Independent adversarial review completed 2026-10-17 by
 `meridian_adversarial_review`; verdict was request changes with three P2
 findings. The coordinator accepted all three and amended the plan before
-dispatch. The original reviewer independently rechecked R1–R3 and explicitly
-cleared starting M0. No product code or native acceptance is claimed by this
-disposition.
+dispatch. No product code or native acceptance is claimed by this disposition.
 
 | Finding | Disposition / contract correction | Verification required |
 |---|---|---|
@@ -413,8 +405,22 @@ disposition.
 
 | Packet | State | Commit / evidence / remaining work |
 |---|---|---|
-| Plan | Reviewed; corrections rechecked; M0 cleared | Coordinator authored against `e586725544f0`, committed as `85ae74eb6`; original adversarial reviewer rechecked R1–R3 and explicitly cleared starting M0. |
-| M0 | Evidence prepared; coordinator review pending | `codex/meridian-m0` from `85ae74eb6`; [evidence/state inventory](MERIDIAN-M0.md), reviewable render harness and candidate tokens. Fourteen labeled design captures, 126 prototype contrast checks and 50/50 repository candidate pairs pass. Native host/branch migrations remain implementation work; no native qualification or product change. Implementer chat `01a14cba-e609-7f71-93af-db0b2b797db3`. |
-| M1–M4 | Not started | All platform implementation and preference tests owed. |
+| Plan | Reviewed; findings addressed | Coordinator authored against `e586725544f0`; R1–R3 accepted and corrected; M0 checkpoint still owed. |
+| M0 | Delivered; Astra approved | [Visual contract](MERIDIAN-M0.md), [Apple state inventory](MERIDIAN-APPLE-STATE.md) and [Android state inventory](MERIDIAN-ANDROID-STATE.md) arrive through PR #1170 at `3e04ef30471a588d3214f4f2de594303bb4b37cd`, reviewed by GPT-6 Astra with no actionable P1/P2 findings; coordinator approved the rendered direction. Remote lint run 5391 timed out after 601 seconds during dependency/crate checking; local pinned lint and UI checks passed. The broader Effort gate remains unsatisfied. |
+| M1 web + M2 | Delivered; Astra approved | PR #1172 merged into the effort at `addde63e0`. GPT-6 Astra approved exact product head `5839b8235`: phone search and companion source-history findings resolved, no remaining actionable findings. Eleven browser journeys and 43 focused UI units passed; 22 clean-head shipping-asset captures live under `target/meridian/web/`. Main integration preserves current subtitle playback assets. |
+| M1 native + M3/M4 | Parallel native owners | Coordinating chat dispatches separate Apple and Android workers; web worker does not edit native files/counters. Native host/state/focus proofs and platform PR reviews remain required. |
 | M5 | Not started | Integrated screenshots, interaction evidence and code review owed. |
-| M6 | Not started | Main integration, promotion and qualification owed. |
+| M6 | Web delivery; native pending | The user authorized web main integration after lint/syntax and UI checks without waiting for broader CI. Native delivery and physical qualification remain separate; no broad promotion-gate success is claimed. |
+
+
+### Web checkpoint validation policy
+
+The human requested prompt product delivery, proper PRs and GPT-6 Astra review,
+with lint/syntax and UI-related checks only plus required bookkeeping. No
+unrelated full backend unit suite or broad compiler/unit CI lane is dispatched.
+Web's retained shell/main seam keeps current page generation and mounted library,
+preplay, reader and playback owners while updating navigation. Other palettes
+retain their original tokens; Meridian resolves safe action/muted roles from
+the active palette, including a derived accent shade when an existing mid-tone
+accent has no safe text ink. The temporary M0 dependency does not satisfy a
+merge gate or claim native qualification.

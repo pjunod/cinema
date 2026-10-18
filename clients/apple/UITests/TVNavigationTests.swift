@@ -24,14 +24,14 @@ final class TVNavigationTests: TVNavigationTestCase {
         defer { app.terminate() }
         let view = app.buttons["library:view"]
         assertFocus(view, in: app, context: "Small library View remains reachable")
-        remote.press(.down)
+        remote.press(.right)
         let sort = app.buttons["library:sort"]
         assertFocus(sort, in: app, context: "Small library Sort")
         remote.press(.select)
         assertFocus(app.buttons["choice:title"], in: app, context: "Small library selected Title sort")
         remote.press(.menu)
         assertFocus(sort, in: app, context: "Small library Sort Back")
-        remote.press(.down)
+        remote.press(.right)
         let filter = app.buttons["library:filter"]
         assertFocus(filter, in: app, context: "Small library Filter")
         remote.press(.select)
@@ -42,8 +42,10 @@ final class TVNavigationTests: TVNavigationTestCase {
             XCTAssertFalse(app.buttons["library:jump"].isEnabled)
             XCTAssertTrue(app.staticTexts["This library is empty"].exists)
         } else {
-            remote.press(.right)
+            remote.press(.down)
             assertFocus(app.buttons["item:1"], in: app, context: "Single movie content return")
+            remote.press(.menu)
+            assertFocus(view, in: app, context: "Single movie Back reaches the toolbar")
         }
         remote.press(.menu)
         XCTAssertTrue(app.buttons["library-open-category:movie"].waitForExistence(timeout: 5), app.debugDescription)
@@ -87,6 +89,10 @@ final class TVNavigationTests: TVNavigationTestCase {
         var previousGroup = (letter: "A", index: 0)
         for (letter, groupIndex) in [("A", 0), ("M", 12), ("Z", 25), ("M", 12)] {
             let jump = app.buttons["library:jump"]
+            // From content, one Back reaches the toolbar.
+            if app.buttons.matching(NSPredicate(format: "hasFocus == true AND identifier BEGINSWITH %@", "item:")).firstMatch.exists {
+                remote.press(.menu)
+            }
             reachForSetup(jump, in: app, limit: 8)
             assertFocus(jump, in: app, context: "Jump opener")
             remote.press(.select)
@@ -102,32 +108,24 @@ final class TVNavigationTests: TVNavigationTestCase {
             let item = app.buttons["item:\(index + 1)"]
             assertFocus(item, in: app, context: "Jump \(letter) focuses first item")
             let tools = ["view", "sort", "filter", "jump"].map { app.buttons["library:" + $0] }
-            var bookmarkID = item.identifier
-            for _ in 0..<6 {
-                if tools.contains(where: { $0.hasFocus }) { break }
-                let focusedItem = app.buttons.matching(NSPredicate(format: "hasFocus == true AND identifier BEGINSWITH %@", "item:")).firstMatch
-                if focusedItem.exists { bookmarkID = focusedItem.identifier }
-                remote.press(.left)
-            }
-            guard let reachedTool = tools.first(where: { $0.hasFocus }) else {
-                XCTFail("Tools must receive native focus within six Left presses: \(app.debugDescription)")
-                return
-            }
-            assertFocus(reachedTool, in: app, context: "Tools within six Left presses")
-            let view = tools[0]
-            for _ in 0..<3 where !view.hasFocus { remote.press(.up) }
-            assertFocus(view, in: app, context: "View within three Up presses inside tools")
+            // Leave the jump target so the bookmark is a title the viewer chose.
+            remote.press(.right)
+            let focusedItem = app.buttons.matching(NSPredicate(format: "hasFocus == true AND identifier BEGINSWITH %@", "item:")).firstMatch
+            XCTAssertTrue(focusedItem.waitForExistence(timeout: 5), app.debugDescription)
+            let bookmarkID = focusedItem.identifier
+            remote.press(.menu)
+            assertFocus(tools[0], in: app, context: "One Back from deep content reaches the toolbar")
             for tool in tools.dropFirst() {
-                remote.press(.down)
-                assertFocus(tool, in: app, context: "Down reaches " + tool.identifier)
+                remote.press(.right)
+                assertFocus(tool, in: app, context: "Right reaches " + tool.identifier)
             }
             for tool in tools.dropLast().reversed() {
-                remote.press(.up)
-                assertFocus(tool, in: app, context: "Up reaches " + tool.identifier)
+                remote.press(.left)
+                assertFocus(tool, in: app, context: "Left reaches " + tool.identifier)
             }
-            remote.press(.right)
+            remote.press(.down)
             let bookmark = app.buttons[bookmarkID]
-            assertFocus(bookmark, in: app, context: "Right restores exact content entry bookmark")
+            assertFocus(bookmark, in: app, context: "Down restores exact content entry bookmark")
             let bookmarkLetter = String(bookmark.label.prefix(1))
             previousGroup = (bookmarkLetter, Int(bookmarkLetter.unicodeScalars.first!.value) - 65)
         }

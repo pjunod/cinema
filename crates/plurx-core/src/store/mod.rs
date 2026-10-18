@@ -70,6 +70,11 @@ pub use invitations::InvitationStore;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_invitations;
 pub mod remote;
+pub mod subtitle_translation;
+pub mod subtitle_translation_mutation;
+pub mod subtitle_translation_publication;
+pub mod subtitle_translation_read;
+pub mod subtitle_translation_settings;
 pub use remote::RemoteStore;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_remote;
@@ -246,6 +251,7 @@ pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
 mod subtitle_managed_schema;
+mod subtitle_translation_schema;
 pub mod watched_drain;
 
 #[cfg(feature = "hiqlite-contract-tests")]

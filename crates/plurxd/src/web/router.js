@@ -55,6 +55,8 @@ function setPageTimer(fn,ms,generation=PAGE_RENDER_GENERATION){
   PAGE_TIMER=timer;
 }
 async function render(){
+  LAYOUT_PRESENTATION=null;
+  if(typeof meridianClosePanel==="function")meridianClosePanel(false);
   cancelNextEpisodePreparation(PLAYER);
   if(AUTOPLAY_NEXT_PREPARED&&location.hash!==`#/item/${AUTOPLAY_NEXT_PREPARED.page.id}`)
     clearAutoplayNextPreparation();

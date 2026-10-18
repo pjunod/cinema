@@ -99,6 +99,7 @@ function cinemaRemoteRestrictedOverlay(){
 function cinemaRemoteVod(){ return !!document.getElementById("modal")?.classList.contains("open"); }
 function cinemaRemoteLive(){ return !!(LIVE_TV_LEASE.current&&cinemaRemoteVisible(liveTvHost())); }
 function cinemaRemoteGuard(){
+  if(typeof meridianPanelActive==="function"&&(meridianPanelActive()||meridianSafeChromeActive())) return !!(TOKEN&&ME&&!document.getElementById("diagnostic-dialog"));
   if(document.getElementById("diagnostic-dialog"))return true;
   return !!(TOKEN&&ME&&!cinemaRemoteRestrictedOverlay()&&
     (cinemaRemoteSafeRoute(location.hash||"#/")||location.hash==="#/live-tv"));
@@ -106,8 +107,8 @@ function cinemaRemoteGuard(){
 function cinemaRemoteRegister(id,element,label,activate){
   if(element) CinemaRemote.registerAction({id,element,label,activate});
 }
-function cinemaRemoteGo(route,returnItem=null,remember=true){
-  if(!cinemaRemoteSafeRoute(route)&&route!=="#/live-tv") return "restricted_surface";
+// Route adapters validate their destinations before sharing the history owner.
+function cinemaRemoteRouteIntent(route,returnItem=null,remember=true){
   if(remember&&route!==(location.hash||"#/")){
     const state=CinemaRemote.snapshot();
     CINEMA_REMOTE_HISTORY.push({route:location.hash||"#/",id:returnItem||state.focused_id,page:LIB_PAGE_AT});
@@ -115,10 +116,15 @@ function cinemaRemoteGo(route,returnItem=null,remember=true){
   }
   CinemaRemote.invalidate("route_intent"); location.hash=route; return "applied";
 }
+function cinemaRemoteGo(route,returnItem=null,remember=true){
+  if(!cinemaRemoteSafeRoute(route)&&route!=="#/live-tv") return "restricted_surface";
+  return cinemaRemoteRouteIntent(route,returnItem,remember);
+}
 function cinemaRemoteBind(){
   if(typeof cinemaDiagnosticsRemoteBind==="function"&&cinemaDiagnosticsRemoteBind())return;
   if(CINEMA_REMOTE_CHOICE&&cinemaRemoteBindChoice())return;
   if(CINEMA_REMOTE_PRESENTATION&&cinemaRemoteBindPresentation())return;
+  if(typeof meridianBindRestrictedChrome==="function"&&meridianBindRestrictedChrome())return;
   const route=location.hash||"#/";
   const menu=document.getElementById("pmenu"),vod=cinemaRemoteVod(),live=cinemaRemoteLive();
   const watch=vod&&typeof watchBrowserMounted==="function"&&watchBrowserMounted()&&WATCH.mode!=="full";
@@ -146,6 +152,7 @@ function cinemaRemoteBind(){
     }});
   if(vod){ cinemaRemoteBindPlayer(root,root===menu);if(watch&&root!==menu)cinemaRemoteBindWatch(document.getElementById("watch-browser")); return; }
   if(live){ cinemaRemoteBindLive(root);return; }
+  if(typeof meridianBindChrome==="function"&&layoutId()==="meridian")meridianBindChrome();
   if(!cinemaRemoteSafeRoute(route)&&route!=="#/live-tv") return;
   if(route==="#/live-tv")cinemaRemoteBindLiveBrowse(root);
   // Only this explicit href grammar registers navigation: handlers are never read.
@@ -154,7 +161,7 @@ function cinemaRemoteBind(){
     const href=el.getAttribute("href");
     if(!cinemaRemoteSafeRoute(href)&&href!=="#/live-tv") continue;
     const count=counts.get(href)||0;counts.set(href,count+1);
-    cinemaRemoteRegister(`route:${href}:${count}`,el,el.textContent.trim(),()=>cinemaRemoteGo(href));
+    cinemaRemoteRegister(`route:${href}:${count}`,el,el.textContent.trim(),()=>el.hasAttribute("data-meridian-destination")?meridianNavigate(null,el,true):cinemaRemoteGo(href));
   }
   if(typeof cinemaRemoteBindLocalPairEntry==="function")cinemaRemoteBindLocalPairEntry(root);
   const itemIds=new Set();
@@ -163,9 +170,12 @@ function cinemaRemoteBind(){
     itemIds.add(id);
     cinemaRemoteRegister("item:"+id,el,el.querySelector(".t,.eptitle")?.textContent||"Open title",()=>cinemaRemoteGo("#/item/"+id,"item:"+id));
   }
+  // First and Previous can share a target; each button owns a stable action.
+  const pageTargets=new Map();
   for(const el of /** @type {NodeListOf<HTMLElement>} */ (root.querySelectorAll("[data-remote-page]"))){
-    const page=Number(el.dataset.remotePage);
-    cinemaRemoteRegister("page:"+page,el,el.textContent,()=>{CinemaRemote.invalidate("page");libGoPage(page);return "applied";});
+    const page=Number(el.dataset.remotePage),occurrence=pageTargets.get(page)||0;
+    pageTargets.set(page,occurrence+1);
+    cinemaRemoteRegister("page:"+page+(occurrence?":"+occurrence:""),el,el.textContent,()=>{CinemaRemote.invalidate("page");libGoPage(page);return "applied";});
   }
   cinemaRemoteRegister("search",q,"Search",()=>{q.focus();return "applied";});
   if(route.startsWith("#/item/")&&WATCH_ITEM_PAGE&&String(exactWireId(WATCH_ITEM_PAGE.item))===route.split("/")[2]){

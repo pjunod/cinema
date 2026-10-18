@@ -215,6 +215,24 @@ test("subtitle setup belongs to Maintenance without a temporary Developer card",
   assert.doesNotMatch(card,/devGraduation|Leaves Developer when/);
 });
 
+test("English translation setup graduates to Playback and preserves legacy links", () => {
+  for(const route of ["#/settings/playback/enable-subtitle-translation","#/settings/developer/enable-subtitle-translation"]){
+    const r=routing(memoryStorage(),route);
+    assert.equal(r.settingsRouteTab(route),"playback");
+    assert.equal(r.settingsTab(),"playback");
+  }
+  const panels=developerPanels(),settings={},readiness={features:[]};
+  assert.doesNotMatch(panels.developerPanel(settings,readiness),/Configure English translation/);
+  const html=panels.playbackPanel(settings,readiness);
+  assert.match(html,/Configure English translation/);
+  assert.match(html,/id="subtitle-translation-form"/);
+  assert.match(html,/one audio stream/);
+  const card=shippedSource("subtitleTranslationCard");
+  assert.match(card,/Experimental accuracy/);
+  assert.doesNotMatch(card,/devGraduation|Qualification pending|Leaves Developer when/);
+  assert.match(shippedSource("translationOpen"),/#\/settings\/playback\/enable-subtitle-translation/);
+});
+
 test("every section is a route, grouped in the rail's order", () => {
   const r = routing(memoryStorage(), "#/settings/playback");
   assert.deepEqual(r.SET_GROUPS.map(([group]) => group), ["Content", "Playback", "Server", "Outside", "Developer"]);
@@ -632,6 +650,7 @@ function developerPanels(){
       // preparation and rolling retention arrived with their Developer cards.
       shippedSource("outputPreparationCard"), shippedSource("rollingRetentionCard"),
       shippedSource("subtitleTranscriptionCard"),
+      shippedSource("subtitleTranslationCard"),
       shippedSource("clusterClockCard"),
       shippedSource("pgsOverlayCard"),
       shippedSource("subtitleStoredSourcesCard"),
@@ -1154,7 +1173,18 @@ test("a section repaint carries kept settings cards across as live nodes", () =>
   assert.equal(setupReplacement.replaced.unsavedLanguage,"sv");
   assert.equal(setup.child.focused,1);
 
-  assert.deepEqual(keep.capture("playback").nodes,[],"other sections redraw everything, as before");
+  const translation=make("enable-subtitle-translation");
+  translation.savedEnabled=false;translation.draft={enabled:true,profile:"saved-model-choice",language:"de"};
+  dom={"enable-subtitle-translation":translation};active=translation.child;
+  const translationKeep=keep.capture("playback");
+  const translationReplacement=make("enable-subtitle-translation");dom={"enable-subtitle-translation":translationReplacement};
+  keep.restore(translationKeep);
+  assert.equal(translationReplacement.replaced,translation,"Playback keeps the live translation setup across aggregate repaint");
+  assert.equal(translationReplacement.replaced.savedEnabled,false);
+  assert.deepEqual(translationReplacement.replaced.draft,{enabled:true,profile:"saved-model-choice",language:"de"});
+  assert.equal(translation.child.focused,1,"translation focus survives the repaint");
+
+  assert.deepEqual(keep.capture("integrations").nodes,[],"unowned sections redraw everything, as before");
   const render=shippedSource("renderSettings");
   assert.ok(render.indexOf("captureSettingsMounts(tab)")<render.indexOf('innerHTML=`<div class="setlayout">'),"captured before the repaint");
   assert.ok(render.indexOf("restoreSettingsMounts(keep)")>render.indexOf('innerHTML=`<div class="setlayout">'),"restored after it");
@@ -1729,7 +1759,7 @@ test("password reset is a form with a confirm field, not two prompt() dialogs", 
 });
 
 test("the viewer's four appearance choices share one popover", () => {
-  assert.equal((SHIPPED_UI.match(/id="lookmenu"/g) || []).length, 3, "one menu per layout chrome");
+  assert.equal((SHIPPED_UI.match(/id="lookmenu"/g) || []).length, 4, "one menu per layout chrome");
   assert.equal((SHIPPED_UI.match(/id="thememenu"|id="appmenu"|id="sizemenu"/g) || []).length, 0);
   const menu = shippedSource("lookMenuHtml");
   assert.match(menu, /themeMenuHtml\(\)/); assert.match(menu, /appMenuHtml\(\)/); assert.match(menu, /sizeMenuHtml\(\)/);

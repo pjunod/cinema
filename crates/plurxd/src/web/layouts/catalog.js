@@ -259,8 +259,8 @@ function catalogChrome(active, inner){
   // attribute still says "plurx" here; that is a bug this layout does not copy.
   const getapp = installAvailable()
     ? `<button class="ghost sm getappbtn" onclick="showInstall()" title="Install the ${APP_NAME} app">Get app</button>` : "";
-  document.getElementById("app").innerHTML=`
-   <div class="px-shell" id="pxshell">
+  mountLayoutFrame(`
+   <div class="px-shell" id="pxshell" data-layout-shell>
      <aside class="px-side">
        <div class="px-head">
          <div class="px-brand"><a href="#/" class="logo">${APP_NAME}</a></div>
@@ -298,7 +298,7 @@ function catalogChrome(active, inner){
      </aside>
      <main id="main">${inner}</main>
      ${catalogTabsHtml(active, homeOn)}
-   </div>`;
+   </div>`);
   // Synchronous fill from whatever is cached; the home body calls it again
   // with the real thing a moment later.
   catalogFillNav();
@@ -306,7 +306,7 @@ function catalogChrome(active, inner){
   wireSearchInput(q);
   restoreSearchFocus(searchFocus);
   catalogWireOnce();
-  pollActivity();
+  if(!LAYOUT_RECOMPOSING) pollActivity();
 }
 
 // ---- home -----------------------------------------------------------------
@@ -330,8 +330,8 @@ function catalogHomeBody(p){
   let hubs=installBannerHtml(), soon="", previews="";
   // watchCtx on the first two rails: those rows are about where you are in
   // something, so the card carries "23m left · ends ~10:45 PM".
-  if(hub("continue_watching").length) hubs+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""));
-  if(hub("next_up").length)           hubs+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""));
+  if(hub("continue_watching").length) hubs+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""),"watch");
+  if(hub("next_up").length)           hubs+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""),"watch");
   if(hub("recently_added").length)    hubs+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
   if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
 

@@ -1476,7 +1476,7 @@ cinema-remote-browser-check: ## Run Cinema browser contracts with provisioned Pl
 	@export PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}"; \
 		node="$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}"; \
 		if [ "$$(uname -s)" = Linux ]; then set -- xvfb-run -a "$$node"; else set -- "$$node"; fi; \
-		"$$@" --test tests/web/cinema-remote-direction.browser.cjs tests/web/cinema-remote.browser.cjs tests/web/cinema-remote-live.browser.cjs tests/web/cinema-remote-couch.browser.cjs
+		"$$@" --test tests/web/cinema-remote-direction.browser.cjs tests/web/cinema-remote.browser.cjs tests/web/cinema-remote-live.browser.cjs tests/web/cinema-remote-couch.browser.cjs tests/web/meridian.browser.cjs
 
 .PHONY: library-rows-browser-check
 library-rows-browser-check: ## Test grouped library rows with the provisioned Playwright browser
@@ -1498,8 +1498,8 @@ subtitle-generation-browser-check: ## Run subtitle setup and attached playback r
 		command -v ffmpeg >/dev/null 2>&1 || { echo 'subtitle browser check requires provisioned FFmpeg with the libx264 encoder' >&2; exit 2; }; \
 		fixture_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/plurx-subtitle-browser.XXXXXX")"; \
 		trap 'rm -rf "$$fixture_dir"' EXIT HUP INT TERM; \
-		ffmpeg -nostdin -v error -f lavfi -i 'color=c=black:s=640x360:r=24:d=120' -an -c:v libx264 -preset ultrafast -pix_fmt yuv420p -movflags +faststart "$$fixture_dir/watch.mp4" || { echo 'subtitle browser check could not generate its bounded H.264 fixture' >&2; exit 2; }; \
-		PLAYWRIGHT_MODULE="$$pw_module" WATCH_MEDIA="$$fixture_dir/watch.mp4" "$$pw_node" --test tests/web/subtitle-generation.browser.cjs tests/web/watch-subtitle-generation.browser.cjs
+		ffmpeg -nostdin -v error -f lavfi -i 'color=c=black:s=640x360:r=24:d=120' -f lavfi -i 'anullsrc=r=48000:cl=stereo' -shortest -t 120 -c:a aac -threads 2 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -movflags +faststart "$$fixture_dir/watch.mp4" || { echo 'subtitle browser check could not generate its bounded H.264 fixture' >&2; exit 2; }; \
+		PLAYWRIGHT_MODULE="$$pw_module" WATCH_MEDIA="$$fixture_dir/watch.mp4" "$$pw_node" --test --test-concurrency=1 tests/web/subtitle-generation.browser.cjs tests/web/watch-subtitle-generation.browser.cjs tests/web/subtitle-translation.browser.cjs
 
 # Regenerating the golden is a deliberate act that shows up in a git diff, never
 # a side effect of a normal run — a golden that rewrites itself asserts nothing.
@@ -1579,6 +1579,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node tests/web/page-read-budget.test.js
 	@node --test tests/web/media-preparation.test.js
 	@node tests/web/theme-family.test.js
+	@node tests/web/meridian.test.js
 	@node tests/web/activity-node-names.test.js
 	# Every child process is listed with its priority class and a stop (P-02 §3.2).
 	@node tests/web/activity-processes.test.js
@@ -1586,7 +1587,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/analysis-reconciliation.test.js
 	@node --test tests/web/analysis-coverage.test.js
 	@node tests/web/settings-sections.test.js
-	@node --test tests/web/subtitle-generation.test.js
+	@node --test tests/web/subtitle-generation.test.js tests/web/subtitle-translation.test.js
 	# HDR10-E appears only for an accepted current-generation processing report.
 	@node --test tests/web/dv-processing-badge.test.js
 	@node --test tests/web/subtitle-downloads.test.js

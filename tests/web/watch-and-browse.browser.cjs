@@ -113,6 +113,13 @@ test('watch browser folds episodes without disrupting playback',async()=>{
    if(output&&[390,600,1440].includes(width))await page.screenshot({path:path.join(output,`series-${width}.png`),fullPage:!process.env.WATCH_COARSE});
   }
   await page.setViewportSize({width:1440,height:1000});
+  const layoutDecisions=decisions.length;
+  await page.evaluate(()=>{window.layoutOwner={watch:WATCH,player:PLAYER,slot:document.getElementById('watch-slot'),video:document.getElementById('video'),session:PLAYER.sessionId,generation:PAGE_RENDER_GENERATION};});
+  for(const layout of ['meridian','catalog','theater','classic']){
+   await page.evaluate(layout=>setLayout(layout),layout);
+   assert.equal(await page.evaluate(()=>WATCH===layoutOwner.watch&&PLAYER===layoutOwner.player&&document.getElementById('watch-slot')===layoutOwner.slot&&document.getElementById('video')===layoutOwner.video&&PLAYER.sessionId===layoutOwner.session&&PAGE_RENDER_GENERATION===layoutOwner.generation),true,layout+' preserves the active playback/UI owners');
+  }
+  assert.equal(decisions.length,layoutDecisions,'layout switching never starts another playback decision');
   let releaseOld,oldRequested;
   const requested=new Promise(r=>{oldRequested=r;});
   delayItem={id:'3',wait:new Promise(r=>{releaseOld=r;}),entered:oldRequested};
