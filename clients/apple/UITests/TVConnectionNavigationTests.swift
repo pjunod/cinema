@@ -17,7 +17,7 @@ final class TVConnectionNavigationTests: TVNavigationTestCase {
         assertFocus(manual, in: app, context: "Server picker remains reachable after leaving Sign in")
         connectManually(origin: origin, in: app)
         signInToFixture(in: app)
-        XCTAssertTrue(app.tabBars.buttons["Home"].waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.viewerTab("Home").waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertEqual(server.requestCount("POST /api/v1/auth/login"), 1)
     }
 

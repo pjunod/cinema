@@ -204,6 +204,7 @@ targets:
     sources:
       - path: UITests/LibraryRowsNavigationTests.swift
       - path: UITests/DiagnosticReportingTests.swift
+      - path: UITests/ViewerNavigationQueries.swift
     dependencies:
       - target: plurx-iOS
     settings:
