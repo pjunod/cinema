@@ -7146,3 +7146,28 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "private func realizeFocusDestination(in channelId: String)"
 test = "clients/apple/UITests/TVLiveNavigationTests.swift"
 test_anchor = "func testGuide77ChannelsKeepsNativeFocusVisibleAndResponsive()"
+
+[[fixes]]
+id = "apple.tv-library-toolbar-back-and-down-return"
+commits = ["3c507ce8f0601ffbd55ab87507e41d6fd83577fb"]
+source = "clients/apple/Sources/PlayerRemoteAdapter.swift"
+source_anchor = "func remoteContentReturn(to target: String?, consumed: @escaping () -> Void = {}) -> some View"
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "One Back from deep content reaches the toolbar"
+
+[[fixes]]
+id = "apple.tv-choice-cards-house-style"
+commits = ["dc73a03f53ce56876cbe21c8af5552b12e229895"]
+source = "clients/apple/Sources/RemoteNavigationViews.swift"
+source_anchor = "enum RemoteChoiceBackdrop { case page, video }"
+test = "clients/apple/UITests/TVSharedPlaybackNavigationTests.swift"
+test_anchor = "func testSharedPlaybackRevealQualityReportAndBackRetainSession()"
+
+[[fixes]]
+id = "apple.tv-choice-row-ios-touch-style"
+commits = ["4dfc68ae09107a1b85a7083290551cf82b064f69"]
+source = "clients/apple/Sources/RemoteNavigationViews.swift"
+source_anchor = "// iPhone/iPad keep a plain touch row; the TV house style is tvOS-only."
+test = "clients/apple/UITests/TVNavigationTests.swift"
+test_anchor = "func testViewModalOwnsFocusAndBackRestoresOpener416()"
+
