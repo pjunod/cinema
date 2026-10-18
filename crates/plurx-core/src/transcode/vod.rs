@@ -1422,6 +1422,13 @@ pub fn vod_completed_reconstructed_pipe_args(
             "1".into(),
             "-threads".into(),
             "1".into(),
+            // Raw NUT has no per-packet duration, so the last picture of
+            // every window would reach the muxer one tick long and fail the
+            // window's own grid check. The input rate is exactly the grid's;
+            // every picture keeps one frame of duration (setpts below still
+            // restamps the presentation clock).
+            "-r".into(),
+            format!("{}/{}", grid.numerator, grid.denominator),
             "-i".into(),
             source_fd.into(),
         ],
@@ -1985,6 +1992,10 @@ mod tests {
             ["/dev/fd/3", "/dev/fd/4"]
         );
         assert!(args.windows(2).any(|p| p == ["-map", "0:v:0"]));
+        // The reconstructed input carries the grid rate so the last picture
+        // has its full frame duration.
+        let input = args.iter().position(|a| a == "/dev/fd/3").expect("video input");
+        assert_eq!(args[input - 3..input - 1], ["-r", "24/1"]);
         assert!(args.windows(2).any(|p| p == ["-c:v", "libx265"]));
         assert!(args.windows(2).any(|p| p == ["-threads:a", "1"]));
         let filter = &args[args
