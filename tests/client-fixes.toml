@@ -75,7 +75,7 @@ test_anchor = "reopenedStoreRetainsIndependentLayoutThemeAndSiblingFields"
 id = "apple.standard-native-adaptive-ipad-restoration"
 commits = ["2b9b537017cee617de6e86518767bff19db48351"]
 source = "clients/apple/Sources/ViewerDestinationHost.swift"
-source_anchor = "tabs.mode = .tabSidebar"
+source_anchor = "tabs.tabViewStyle(.sidebarAdaptable)"
 test = "clients/apple/Tests/MeridianTests.swift"
 test_anchor = "testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLayouts"
 
@@ -83,9 +83,25 @@ test_anchor = "testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLay
 id = "apple.standard-native-tv-push-back-restoration"
 commits = ["339f4b0563389de774b287437a49ea8fe8522665"]
 source = "clients/apple/Sources/ViewerDestinationHost.swift"
-source_anchor = "let hidden = layout == .meridian || standardNavigationIsPushed"
+source_anchor = "hideBar: layout == .meridian || hidesStandardBar"
 test = "clients/apple/Tests/MeridianTests.swift"
 test_anchor = "testStandardTVNativeTabsDisappearForPushedRoutes"
+
+[[fixes]]
+id = "apple.standard-meridian-framework-owned-tabview"
+commits = ["5e6bb62a58cd7026bb199fd58739cf637c4eff2b"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "TabView(selection: Binding(get: { selection }, set: selectionChanged)) {"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardNativeTabFullscreenRetainsContentAfterAnotherTabsPushedChoice"
+
+[[fixes]]
+id = "apple.native-tab-chrome-review-fixes"
+commits = ["0304492bc58167d1f1fd0c85e1c15d004d923e73"]
+source = "clients/apple/Sources/ViewerDestinationHost.swift"
+source_anchor = "if appliedLayout == .standard || !capturedSidebar {"
+test = "clients/apple/Tests/MeridianTests.swift"
+test_anchor = "testStandardRestoresAdaptiveNativeTabsAndRetainsSettingsAcrossLayouts"
 
 [[fixes]]
 id = "apple.standard-tv-theater-geometry-restoration"

@@ -4,7 +4,7 @@ Build: 262
 Issue: #1178
 Restoration PR: #1180
 
-**Status:** built and simulator-verified; physical acceptance pending.
+**Status:** built; simulator results below; current-head gate and physical acceptance pending.
 
 Standard on iOS/tvOS 18 and later again uses the system tab bar: adaptive
 floating tabs/sidebar on iPad, bottom tabs on iPhone, and top tabs on Apple

@@ -206,7 +206,7 @@ final class MeridianTests: XCTestCase {
         tabs.sidebar.isHidden = false
         settle()
         model.layout = .meridian
-        settle()
+        settle(until: { tabs.isTabBarHidden && tabs.sidebar.isHidden })
         XCTAssertTrue(tabs.isTabBarHidden)
         XCTAssertTrue(tabs.sidebar.isHidden)
         XCTAssertEqual(model.theme, theme)
@@ -218,7 +218,7 @@ final class MeridianTests: XCTestCase {
         model.layout = .standard
         window.frame.size.width = 1024
         hosting.view.setNeedsLayout(); hosting.view.layoutIfNeeded()
-        settle()
+        settle(until: { !tabs.isTabBarHidden && !tabs.sidebar.isHidden })
         XCTAssertTrue(tabs.selectedViewController === settings)
         XCTAssertTrue(findTabs(hosting) === tabs)
         XCTAssertEqual(tabs.mode, .tabSidebar)
@@ -448,6 +448,14 @@ final class MeridianTests: XCTestCase {
     }
     private func settle(_ seconds: TimeInterval = 0.2) {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+    }
+    /// Layout changes reach the native chrome after a SwiftUI update and one
+    /// main-queue hop; wait for the asserted state instead of a fixed delay.
+    private func settle(until condition: () -> Bool, timeout: TimeInterval = 5) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
     }
     private func findNavigation(_ controller: UIViewController) -> UINavigationController? {
         if let navigation = controller as? UINavigationController { return navigation }
