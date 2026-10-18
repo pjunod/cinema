@@ -125,7 +125,25 @@ function translationRenderStatus(state){
   const resume=/** @type {HTMLButtonElement|null} */(panel.querySelector("[data-translation-resume]"));if(resume)resume.hidden=!ME?.is_admin||!state.options.permissions?.resume||!state.operation||!(state.operation.state==="stopped"||state.operation.state==="failed"&&state.operation.retryable);
   const failures=panel.querySelector("[data-translation-failures]");
   const failureSignature=JSON.stringify([state.operation?.failed_ranges||[],state.operation?.failed_ranges_next_cursor,translationLeaseCurrent(state)]);
-  if(failures&&state.failureSignature!==failureSignature){state.failureSignature=failureSignature;failures.replaceChildren();for(const range of state.operation?.failed_ranges||[]){if(!range.retryable||!ME?.is_admin||!state.options.permissions?.demand)continue;const button=document.createElement("button");button.className="ghost sm";button.textContent=`Retry range ${range.core_index+1}`;button.addEventListener("click",()=>translationRetryRange(state,range));failures.appendChild(button);}const cursor=state.operation?.failed_ranges_next_cursor;if(cursor&&translationLeaseCurrent(state)){const more=document.createElement("button");more.className="ghost sm";more.textContent="More failed ranges";more.addEventListener("click",()=>translationFailurePage(state,cursor,more));failures.appendChild(more);}}
+  if(!failures||state.failureSignature===failureSignature)return;
+  state.failureSignature=failureSignature;
+  failures.replaceChildren();
+  for(const range of state.operation?.failed_ranges||[]){
+    if(!range.retryable||!ME?.is_admin||!state.options.permissions?.demand)continue;
+    failures.appendChild(translationActionButton(`Retry range ${range.core_index+1}`,()=>translationRetryRange(state,range)));
+  }
+  const cursor=state.operation?.failed_ranges_next_cursor;
+  if(cursor&&translationLeaseCurrent(state)){
+    const more=translationActionButton("More failed ranges",()=>translationFailurePage(state,cursor,more));
+    failures.appendChild(more);
+  }
+}
+function translationActionButton(label,onClick){
+  const button=document.createElement("button");
+  button.className="ghost sm";
+  button.textContent=label;
+  button.addEventListener("click",onClick);
+  return button;
 }
 function translationAmbiguous(error){return error.status==null||error.status===408||error.status>=500;}
 function translationRejectIntent(state,key,error){if(!translationAmbiguous(error))state[key]=null;}
