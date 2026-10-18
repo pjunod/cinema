@@ -2,6 +2,7 @@
 
 Build: 262
 Issue: #1181
+PR: #1182
 
 **Status:** built; physical iPad acceptance remains pending.
 
