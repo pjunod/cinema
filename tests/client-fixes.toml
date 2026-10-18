@@ -1,6 +1,24 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Resume repair: current source/test anchors; execution evidence is in PR #1182.
+[[fixes]]
+id = "apple.resume-preserves-native-seek-completion"
+commits = ["2899fd60c5"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "if await prepare(player, ms) { return true }"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testPreparedResumeRetriesAnInterruptedNativeSeekAtTheSavedPosition"
+
+[[fixes]]
+id = "apple.resume-failure-retains-saved-position"
+commits = []
+supplements = "apple.resume-preserves-native-seek-completion"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func positionForPlaybackStop() -> Int"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testFailedVODResumeStopsAndRetainsTheSavedPosition"
+
 # Historical Meridian source/test mappings; execution receipts are separate.
 [[fixes]]
 id = "android.meridian-retained-primary-graph"

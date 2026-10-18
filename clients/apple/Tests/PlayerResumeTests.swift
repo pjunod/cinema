@@ -532,7 +532,7 @@ final class PlayerResumeTests: XCTestCase {
         let controller = PlayerController(player: player,
             requestPlaybackDecision: { _, _, _, _ in (decision, caps) },
             mediaSelectionPreparation: selection,
-            itemPreparation: .init(ready: { _, _ in }, seek: { _, _ in }),
+            itemPreparation: .init(ready: { _, _ in }, seek: { _, _ in true }),
             nativeSeek: { _, target in nativeSeeks.append(target); return true },
             requestHlsSession: { _, _, _ in
                 creates += 1
@@ -741,8 +741,10 @@ final class PausedRetirementTests: XCTestCase {
             "guard let retired = pausedRetirement, retired.sessionId == sessionId else { return nil }"
         ))
         let stop = try body(of: "    func stop(deactivateAudioSession: Bool = true) {", in: source)
-        XCTAssertTrue(stop.contains(
-            "let position = currentPausedRetirement?.positionMs ?? realPositionMs()"
+        XCTAssertTrue(stop.contains("let position = positionForPlaybackStop()"))
+        let position = try body(of: "    func positionForPlaybackStop() -> Int {", in: source)
+        XCTAssertTrue(position.contains(
+            "currentPausedRetirement?.positionMs ?? positionForPlaybackIntent()"
         ))
         XCTAssertTrue(stop.contains("pausedRetirement = nil"))
     }
