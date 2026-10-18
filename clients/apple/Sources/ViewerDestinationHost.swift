@@ -8,7 +8,7 @@ import UIKit
 final class ViewerDestinationController: UIViewController {
     private(set) var hosts: [HomeTab: UIHostingController<AnyView>] = [:]
     private(set) var activeTab: HomeTab?
-    private var chrome: UIHostingController<AnyView>?
+    private(set) var chrome: UIHostingController<AnyView>?
     private var header: UIHostingController<AnyView>?
     var layout: ViewerLayout = .standard
     var expanded = false
@@ -87,11 +87,11 @@ final class ViewerDestinationController: UIViewController {
         let railWidth: CGFloat = expanded ? 232 : 88
         let barHeight: CGFloat = 80
         #else
-        let rail = layout == .meridian && bounds.width >= 600
-        let railWidth: CGFloat = bounds.width >= 1100 ? 232 : 88
+        let rail = bounds.width >= 600
+        let railWidth: CGFloat = layout == .standard ? 288 : (bounds.width >= 1100 ? 232 : 88)
         let barHeight: CGFloat = accessibilityNavigation ? 96 : 72
         #endif
-        header?.view.isHidden = !rail
+        header?.view.isHidden = !rail || layout == .standard
         header?.view.isUserInteractionEnabled = !expanded
         header?.view.accessibilityElementsHidden = expanded
         if rail {
@@ -191,11 +191,15 @@ struct ViewerNavigationChrome: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var navigation: RemoteNavigationCoordinator
     let expanded: Bool
+    let recordingsAttention: Int
     let togglePanel: () -> Void
     let select: (HomeTab) -> Void
     let selectSource: (LibraryCollection) -> Void
 
-    @ObservedObject private var dvr = DvrController.shared
+    private var attention: Int { model.features.recordings ? max(0, recordingsAttention) : 0 }
+    private func menuTitle(_ tab: HomeTab) -> String {
+        tab == .recordings && attention > 0 ? "Recordings · \(attention) need attention" : tab.title
+    }
     private var tabs: [HomeTab] { HomeTab.viewerTabs.filter { $0.isVisible(model.features) } }
     var body: some View {
         GeometryReader { geometry in
@@ -206,6 +210,29 @@ struct ViewerNavigationChrome: View {
             #endif
             Group {
                 if rail {
+                    if model.layout == .standard {
+                        List {
+                            Section("Cinema") {
+                                ForEach(tabs, id: \.self) { tab in
+                                    Button { select(tab) } label: {
+                                        HStack {
+                                            Label(tab.title, systemImage: tab.symbol)
+                                            Spacer()
+                                            if tab == .recordings && attention > 0 { RecordingAttentionBadge(count: attention).frame(width: 28, height: 22) }
+                                        }.frame(minHeight: 44)
+                                    }
+                                    .accessibilityIdentifier("viewer-tab-" + tab.title)
+                                    .accessibilityAddTraits(navigation.selectedTab == tab ? .isSelected : [])
+                                    .listRowBackground(navigation.selectedTab == tab ? Palette.accent.opacity(0.15) : Palette.surface)
+                                }
+                            }
+                        }
+                        #if os(iOS)
+                        .listStyle(.sidebar)
+                        .scrollContentBackground(.hidden)
+                        #endif
+                        .accessibilityIdentifier("standard-native-sidebar")
+                    } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 12) {
                             #if os(tvOS)
@@ -242,13 +269,15 @@ struct ViewerNavigationChrome: View {
                             }
                         }.padding(12)
                     }
+                    }
                 } else {
                     HStack(spacing: 4) {
                         if model.layout == .meridian {
                             ForEach([HomeTab.home, .libraries, .search], id: \.self) { destination($0, labels: true, compact: true) }
                             Menu {
                                 ForEach(tabs.filter { ![.home, .libraries, .search].contains($0) }, id: \.self) { tab in
-                                    Button { select(tab) } label: { Label(tab.title, systemImage: tab.symbol) }
+                                    Button { select(tab) } label: { Label(menuTitle(tab), systemImage: tab.symbol) }
+                                        .accessibilityLabel(menuTitle(tab))
                                 }
                             } label: {
                                 VStack(spacing: 4) {
@@ -256,7 +285,12 @@ struct ViewerNavigationChrome: View {
                                     Text("More").font(.caption2.weight(.semibold)).lineLimit(1)
                                 }
                                 .frame(maxWidth: .infinity, minHeight: 56)
-                            }.accessibilityIdentifier("meridian-more")
+                            }
+                            .overlay(alignment: .topTrailing) {
+                                if attention > 0 { RecordingAttentionBadge(count: attention).frame(width: 24, height: 20) }
+                            }
+                            .accessibilityLabel(attention > 0 ? "More, \(attention) recordings need attention" : "More")
+                            .accessibilityIdentifier("meridian-more")
                         } else {
                             #if os(tvOS)
                             ForEach(tabs, id: \.self) { destination($0, labels: true) }
@@ -264,7 +298,8 @@ struct ViewerNavigationChrome: View {
                             ForEach(tabs.prefix(4), id: \.self) { destination($0, labels: true) }
                             Menu {
                                 ForEach(Array(tabs.dropFirst(4)), id: \.self) { tab in
-                                    Button { select(tab) } label: { Label(tab.title, systemImage: tab.symbol) }
+                                    Button { select(tab) } label: { Label(menuTitle(tab), systemImage: tab.symbol) }
+                                        .accessibilityLabel(menuTitle(tab))
                                 }
                             } label: { Label("More", systemImage: "ellipsis").frame(minWidth: 48, minHeight: 48) }
                             #endif
@@ -318,10 +353,8 @@ struct ViewerNavigationChrome: View {
             .foregroundStyle(navigation.selectedTab == tab ? Palette.selectedInk : Palette.onBg)
             .background(navigation.selectedTab == tab ? Palette.selectedFill : Palette.surface, in: RoundedRectangle(cornerRadius: 14))
             .overlay(alignment: .topTrailing) {
-                if tab == .recordings, let count = dvr.overview?.counts.attention, count > 0 {
-                    Text(String(count)).font(.caption.bold()).padding(4)
-                        .foregroundStyle(Palette.buttonInk).background(Palette.accent, in: Capsule())
-                        .accessibilityLabel("\(count) recordings need attention")
+                if tab == .recordings && attention > 0 {
+                    RecordingAttentionBadge(count: attention).frame(width: 24, height: 20)
                 }
             }
         }
@@ -350,5 +383,27 @@ struct ViewerNavigationHeader: View {
         }
         .padding(.horizontal, 24).frame(maxHeight: .infinity)
         .foregroundStyle(Palette.onBg).background(Palette.surface)
+    }
+}
+
+/// A native badge keeps its visible count and VoiceOver announcement together
+/// on the rail, native sidebar and compact More opener.
+struct RecordingAttentionBadge: UIViewRepresentable {
+    let count: Int
+    func makeUIView(context: Context) -> UILabel {
+        let label = UILabel()
+        label.textAlignment = .center
+        label.font = .preferredFont(forTextStyle: .caption2)
+        label.adjustsFontForContentSizeCategory = true
+        label.layer.cornerRadius = 10
+        label.clipsToBounds = true
+        label.accessibilityIdentifier = "viewer-recording-attention-badge"
+        return label
+    }
+    func updateUIView(_ label: UILabel, context: Context) {
+        label.text = String(count)
+        label.accessibilityLabel = "\(count) recordings need attention"
+        label.backgroundColor = UIColor(Palette.accent)
+        label.textColor = UIColor(Palette.buttonInk)
     }
 }

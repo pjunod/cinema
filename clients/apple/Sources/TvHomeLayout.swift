@@ -149,7 +149,11 @@ struct TvTheaterHero: View {
                     .background(Palette.accent, in: Capsule())
                 }
                 .disabled(presentation.requestedItemID != nil)
+                #if os(tvOS)
+                .buttonStyle(TVReadableButtonStyle(prominent: true))
+                #else
                 .buttonStyle(.plain)
+                #endif
                 .accessibilityIdentifier("theater-play")
                 .remoteControl("home-feature:play", label: resumeMs > 0 ? "Resume" : "Play") { presentation.requestedItemID = item.id }
                 Button("Details") { navigation.navigate(to: .item(item.id)) }
