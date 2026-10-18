@@ -33,3 +33,9 @@ refresh, the TV runner requires both new navigation journeys, and the physical
 scheme excludes the Meridian fixture. Viewer panel Menu handling now uses the
 existing platform adapter boundary; two bounded web navigation regions preserve
 the same Escape/Left behavior while leaving neighboring handlers fenced.
+
+The qualification journey also found that the collapsed Meridian host preferred
+content while the coordinator requested the navigation opener. On tvOS Meridian,
+the host now follows that explicit current opener request; later content requests
+clear the preference. Native focus acknowledgment and modal identity remain owned
+by the existing coordinator.

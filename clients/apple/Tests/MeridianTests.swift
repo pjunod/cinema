@@ -94,7 +94,28 @@ final class MeridianTests: XCTestCase {
         XCTAssertEqual(navigation.paths, current)
         XCTAssertEqual(navigation.selectedTab, .home)
         XCTAssertFalse(navigation.hasOwnedModal)
+        XCTAssertEqual(navigation.requestedFocus, RemoteNavigationCoordinator.viewerNavigationOpener)
     }
+
+    #if os(tvOS)
+    func testMeridianOpenerFocusPrefersChromeUntilContentIsRequested() {
+        let controller = ViewerDestinationController()
+        controller.loadViewIfNeeded()
+        controller.makeRoot = { _ in AnyView(Text("Content")) }
+        controller.select(.libraries)
+        controller.updateChrome(AnyView(Text("Navigation")), header: AnyView(EmptyView()))
+        controller.layout = .meridian
+        controller.chromeFocusRequested = true
+        XCTAssertTrue(controller.preferredFocusEnvironments.first === controller.chrome)
+        controller.chromeFocusRequested = false
+        XCTAssertTrue(controller.preferredFocusEnvironments.first === controller.hosts[.libraries])
+        controller.layout = .standard
+        controller.chromeFocusRequested = true
+        XCTAssertTrue(controller.preferredFocusEnvironments.first === controller.hosts[.libraries])
+        controller.expanded = true
+        XCTAssertTrue(controller.preferredFocusEnvironments.first === controller.chrome)
+    }
+    #endif
 
     func testRetiredPanelCompletionCannotDismissAReopenedPanel() throws {
         let navigation = RemoteNavigationCoordinator()

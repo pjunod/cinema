@@ -97,6 +97,7 @@ struct HomeView: View {
     private var shell: some View {
         ViewerDestinationHost(
             selection: selectedTab, layout: model.layout, expanded: navigationExpanded,
+            chromeFocusRequested: viewerNavigationFocusRequested,
             accessibilityNavigation: dynamicTypeSize.isAccessibilitySize,
             panelDismissed: { [identity = navigationPanelIdentity] in remoteNavigation.modalPresentationDismissed(scope: RemoteNavigationCoordinator.viewerNavigationScope, identity: identity) },
             root: { tab in AnyView(destinationRoot(tab)
@@ -161,6 +162,16 @@ struct HomeView: View {
         .preferredColorScheme(model.appearance.preferredColorScheme)
         .fontDesign(model.theme.fontDesign)
         .tint(Palette.accent)
+    }
+
+    private var viewerNavigationFocusRequested: Bool {
+        #if os(tvOS)
+        return model.layout == .meridian
+            && remoteNavigation.activeScope == remoteNavigation.rootScope
+            && remoteNavigation.requestedFocus == RemoteNavigationCoordinator.viewerNavigationOpener
+        #else
+        return false
+        #endif
     }
 
     private func toggleNavigation() {
