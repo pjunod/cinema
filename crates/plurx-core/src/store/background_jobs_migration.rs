@@ -420,9 +420,23 @@ mod tests {
             }
         }
         assert_eq!(remaining, 0, "freed the overflow capacity");
-        for _ in 0..16 {
+        // Each page also budgets duplicated SQL bytes. SQL growth may reduce
+        // rows per page; require progress until every accepted overflow drains,
+        // with at most one page per pending job rather than a guessed page count.
+        let mut pending = full.awaiting_import;
+        for _ in 0..full.awaiting_import {
             store.import_legacy_jobs(3_000).await.expect("drain");
+            let progress = store.job_migration_status().await.expect("drain progress");
+            assert!(
+                progress.awaiting_import < pending,
+                "drain must make progress"
+            );
+            pending = progress.awaiting_import;
+            if pending == 0 {
+                break;
+            }
         }
+        assert_eq!(pending, 0, "bounded drain exhausted all accepted overflow");
         let done = store.job_migration_status().await.expect("done");
         assert_eq!(
             (
