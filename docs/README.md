@@ -649,6 +649,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [RIPWIRE-IMPLEMENTATION-HANDOFF.md](ci/RIPWIRE-IMPLEMENTATION-HANDOFF.md) | CLI-first build contract for bounded repository navigation, benchmark evidence, validation integration, and rollout limits. | open |
 | [FORGEJO-MAIN-IMAGE-HANDOFF.md](ci/FORGEJO-MAIN-IMAGE-HANDOFF.md) | Publishing the main image from Forgejo. | open |
 | [RUNNER-DISK.md](ci/RUNNER-DISK.md) | What fills a runner, what bounds it, how to reclaim it. | live |
+| [MAIN-5325-CI-REPAIRS-IMPLEMENTATION.md](ci/MAIN-5325-CI-REPAIRS-IMPLEMENTATION.md) | Measured root causes and exact edits for the four full-sweep jobs main 5325 could not pass: topology parallelism/cache, `check` placement, Android emulator boot, amd64 package export. | open |
 | [MEDIA1-RUNNER-ORPHANED-PROCESSES.md](ci/MEDIA1-RUNNER-ORPHANED-PROCESSES.md) | Why effort preflight leaked stopped children on media1, and how cleanup is proved. | open |
 | [MEDIA1-RUNNER-ORPHANED-SLEEP-PROCESSES.md](ci/MEDIA1-RUNNER-ORPHANED-SLEEP-PROCESSES.md) | Evidence for stopped orphaned sleeps in the media1 runner cgroups and the safe cleanup boundary. | open |
 
