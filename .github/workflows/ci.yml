@@ -1744,9 +1744,12 @@ jobs:
           file: Dockerfile
           target: linux-dolby-package-export
           platforms: linux/amd64
-          outputs: type=local,dest=linux-dolby-export
+          outputs: type=tar,dest=linux-dolby-export.tar
           cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,scope=package-media-amd64' || '' }}
           cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && 'type=gha,mode=max,scope=package-media-amd64' || '' }}
+      - name: Validate and unpack the complete audited media export
+        if: matrix.arch == 'amd64'
+        run: python3 -m validation.media_export linux-dolby-export.tar linux-dolby-export
       - name: Build the runtime from only the verified binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
