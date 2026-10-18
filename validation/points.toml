@@ -1351,6 +1351,7 @@ id = "operations.packaging"
 title = "Build, deploy, and release artifacts"
 contract = "Every supported installation path builds the same stamped server and keeps its runtime configuration explicit, from base images pinned by digest rather than by a moving tag, with pin drift reported on a schedule and gating nothing."
 paths = [
+  "validation/media_export.py",
   ".dockerignore",
   ".github/actions/**",
   ".github/workflows/**",
