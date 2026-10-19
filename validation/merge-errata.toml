@@ -412,3 +412,7 @@ reason = "Corrective commit a40c2068 (fix(release): stop the publisher refusing 
 commit = "28250ece1ea78bd41fba0a373049b462431fb768"
 reason = "Corrective commit 28250ece (fix(scripts): hand ship-physical's resolved Android SDK to the release signer) reached main outside a commit the history audit recognizes as a landing. PR #1166's fast lane reported it as outside any landing. This permanent erratum records the unrecognized landing without rewriting history, moving the audit boundary, waiving future regression fields or claiming a new test run."
 
+
+[[errata]]
+commit = "98c224c59085bfb51228472df7c9d5a7c91532b1"
+reason = "Landing commit 98c224c59 of PR #1198 (test-harness and clippy repairs after #1197) carries two Regression-Test lines that name a file without a test: 'tests/web/calm-library.test.js' and 'tests/web/shared-artwork.test.js'. The repaired checks are the library harness's top-level incremental-grid cases in tests/web/calm-library.test.js, which are not a named test, and tests/web/shared-artwork.test.js::actual logout and route entry retire artwork before current authority changes; its third line, crates/plurxd/src/transcode/tests/seam_census.rs::seam_census_of_the_workspace, resolves. The fast lane on #1198's head f81360a68 passed with these checks. This permanent erratum records the malformed lines without rewriting history, moving the audit boundary, waiving future regression fields or claiming a new test run."
