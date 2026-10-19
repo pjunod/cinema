@@ -50,6 +50,39 @@ def packages(path: Path) -> list[tuple[str, str, str]]:
 
 
 class VendorAuditLockCase(unittest.TestCase):
+    def test_every_vendored_dependency_retains_exact_registry_checksum(self):
+        script = load_script()
+        evidence = script.merge_package_inventories(
+            (ROOT / "spikes/hiqlite-m0/Cargo.lock").read_text(),
+            [(ROOT / "vendor/gemm-common/registry-provenance.lock").read_text()],
+        )
+        expected = {
+            (package["name"], package["version"]): package
+            for package in tomllib.loads(evidence)["package"]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "audit.lock"
+            subprocess.run([str(SCRIPT), "--output", str(output)], cwd=ROOT, check=True)
+            actual = tomllib.loads(output.read_text())["package"]
+        for name, version in script.VENDORED:
+            candidates = [p for p in actual if p["name"] == name and p["version"] == version]
+            self.assertEqual(len(candidates), 1, (name, version))
+            self.assertEqual(candidates[0]["source"], expected[name, version]["source"])
+            self.assertEqual(candidates[0]["checksum"], expected[name, version]["checksum"])
+            self.assertEqual(len(candidates[0]["checksum"]), 64)
+        self.assertEqual(
+            expected["gemm-common", "0.19.0"]["checksum"],
+            "88027625910cc9b1085aaaa1c4bc46bb3a36aad323452b33c25b5e4e7c8e2a3e",
+        )
+
+    def test_missing_registry_checksum_refuses_synthesis(self):
+        script = load_script()
+        root = lock_text(*(block(name, version) for name, version in script.VENDORED))
+        registry = lock_text(*(block(name, version, REGISTRY) for name, version in script.VENDORED))
+        registry = registry.replace('checksum = "' + "0" * 64 + '"\n', "", 1)
+        with self.assertRaisesRegex(ValueError, "has no source/checksum"):
+            script.synthesize(root, registry)
+
     def test_additional_lock_is_completely_deduplicated_into_one_inventory(self):
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)

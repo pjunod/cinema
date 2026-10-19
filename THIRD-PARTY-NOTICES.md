@@ -117,11 +117,12 @@ changed — only which file to open.
 
 ## 3. Vendored Rust crates — upstream sources, locally modified
 
-Six crates are vendored under `vendor/` rather than pulled from crates.io.
+Seven crates are vendored under `vendor/` rather than pulled from crates.io.
 Each carries a `PLURX-PATCH.md` recording what plurx changed and why.
 
 | Crate | Version | License | Upstream | Changes |
 |---|---|---|---|---|
+| `gemm-common` | 0.19.0 | MIT | Sarah Ek · [sarah-ek/gemm](https://github.com/sarah-ek/gemm) | [four function-local ARM FP16 requirements](vendor/gemm-common/PLURX-PATCH.md) |
 | `hiqlite` | 0.14.0 | Apache-2.0 | Sebastian Dobe · [sebadob/hiqlite](https://github.com/sebadob/hiqlite) | [23 clustering patches](vendor/hiqlite/PLURX-PATCH.md) |
 | `hiqlite-wal` | 0.14.0 | Apache-2.0 | Sebastian Dobe · [sebadob/hiqlite](https://github.com/sebadob/hiqlite) | [3 restart-recovery patches and 1 K-06 startup patch](vendor/hiqlite-wal/PLURX-PATCH.md) |
 | `s3-simple` | 0.8.0 | Apache-2.0 | Sebastian Dobe · [sebadob/s3-simple](https://github.com/sebadob/s3-simple) | [quick-xml bump for RUSTSEC-2026-0194/0195 and four unreferenced edges dropped](vendor/s3-simple/PLURX-PATCH.md) |
@@ -147,7 +148,7 @@ such requirement applies.
 
 ## 4. Rust dependencies
 
-563 source-bearing crates resolve into a plurx build, excluding the eight
+562 source-bearing crates resolve into a plurx build, excluding the eight
 first-party crates and the vendored ones above (`s3-simple` resolves only in
 the fork's optional backup graph, never in this one). The independently built support service adds five MPL-2.0 libraries for
 passkey validation; the other selected license terms are permissive:
@@ -155,7 +156,7 @@ passkey validation; the other selected license terms are permissive:
 | License expression | Crates |
 |---|---:|
 | `MIT OR Apache-2.0` | 279 |
-| `MIT` | 116 |
+| `MIT` | 115 |
 | `Apache-2.0 OR MIT` | 28 |
 | `Apache-2.0 WITH LLVM-exception` | 27 |
 | `MIT/Apache-2.0` | 21 |
@@ -406,7 +407,6 @@ but they are not covered by the table above.
 | `gemm` | 0.19.0 | MIT |
 | `gemm-c32` | 0.19.0 | MIT |
 | `gemm-c64` | 0.19.0 | MIT |
-| `gemm-common` | 0.19.0 | MIT |
 | `gemm-f16` | 0.19.0 | MIT |
 | `gemm-f32` | 0.19.0 | MIT |
 | `gemm-f64` | 0.19.0 | MIT |
