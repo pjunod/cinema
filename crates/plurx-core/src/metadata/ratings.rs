@@ -116,7 +116,10 @@ pub async fn fetch_item_ratings(
                     ratings.extend(scores);
                 }
                 Err(error) => {
+                    // Keep its scores, but say this fetch did not reach it,
+                    // so the shorter OMDb retry applies rather than the TTL.
                     ratings.extend(carried(&omdb_sources));
+                    omdb_consulted = false;
                     failures += 1;
                     failed = Some(error);
                 }
@@ -281,7 +284,10 @@ mod tests {
             second.ratings, first.ratings,
             "OMDb's scores survive its refusal"
         );
-        assert!(second.omdb_consulted);
+        assert!(
+            !second.omdb_consulted,
+            "a refusal earns the one-hour retry, not the TTL"
+        );
         assert_eq!(second.fetched_at_ms, 9_000);
 
         let only_omdb = RatingProviders {

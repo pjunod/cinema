@@ -130,14 +130,19 @@ impl AnnotationStore for SqliteStore {
     ) -> Result<ItemListFlags, StoreError> {
         self.with_conn(move |conn| {
             let mut statement = conn.prepare(
-                "SELECT list FROM library_annotations_lists WHERE user_id = ?1 AND item_id = ?2",
+                "SELECT list, added_at_ms FROM library_annotations_lists \
+                 WHERE user_id = ?1 AND item_id = ?2",
             )?;
             let mut flags = ItemListFlags::default();
-            for list in
-                statement.query_map(params![user_id, item_id], |row| row.get::<_, String>(0))?
-            {
-                match ItemList::parse(&list?) {
-                    Some(ItemList::Watchlist) => flags.watchlist = true,
+            for row in statement.query_map(params![user_id, item_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })? {
+                let (list, added) = row?;
+                match ItemList::parse(&list) {
+                    Some(ItemList::Watchlist) => {
+                        flags.watchlist = true;
+                        flags.watchlist_added_at_ms = Some(added);
+                    }
                     Some(ItemList::Favorite) => flags.favorite = true,
                     None => {}
                 }

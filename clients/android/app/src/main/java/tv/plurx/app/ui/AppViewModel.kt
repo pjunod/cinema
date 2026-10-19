@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import retrofit2.HttpException
 import java.net.URI
+import tv.plurx.app.data.ItemAnnotations
 import tv.plurx.app.data.PresentationTarget
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.CapabilitySnapshot

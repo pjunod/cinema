@@ -30,6 +30,8 @@ use crate::state::AppState;
 const FETCH_WAIT: Duration = Duration::from_secs(8);
 /// The longest list a client is handed in one read.
 const LIST_MAX: i64 = 500;
+/// Stored entries read per step while collecting the visible ones.
+const LIST_PAGE: i64 = 100;
 
 /// Items whose scores are being fetched on this node right now, so a page
 /// opened twice asks the providers once.
@@ -158,30 +160,53 @@ async fn stored_or_fetched_ratings(state: &AppState, item: &Item) -> Result<Vec<
     } else {
         None
     };
-    let Some(_claim) = claim else {
+    let Some(claim) = claim else {
         return Ok(cached.map(|c| c.ratings).unwrap_or_default());
     };
-    let tmdb = tmdb_key.map(|k| state.provider_endpoints.tmdb(k));
-    let omdb = omdb_key.map(|k| state.provider_endpoints.omdb(k));
-    let providers = RatingProviders {
-        tmdb: tmdb.as_ref(),
-        omdb: omdb.as_ref(),
-    };
-    let fetched = tokio::time::timeout(
-        FETCH_WAIT,
-        fetch_item_ratings(item.into(), providers, cached.as_ref(), now),
-    )
-    .await;
-    match fetched {
-        Ok(Ok(fresh)) => {
-            state.store.put_item_ratings(item.id, &fresh).await?;
-            Ok(fresh.ratings)
+    // The fetch runs in its own task holding the claim, so a slow provider
+    // costs the page only its wait: the answer is still stored when it lands.
+    let task_state = state.clone();
+    let title = item.clone();
+    let previous = cached.clone();
+    let task = tokio::spawn(async move {
+        let _claim = claim;
+        let tmdb = tmdb_key.map(|k| task_state.provider_endpoints.tmdb(k));
+        let omdb_configured = omdb_key.is_some();
+        let omdb = omdb_key.map(|k| task_state.provider_endpoints.omdb(k));
+        let providers = RatingProviders {
+            tmdb: tmdb.as_ref(),
+            omdb: omdb.as_ref(),
+        };
+        match fetch_item_ratings((&title).into(), providers, previous.as_ref(), now).await {
+            Ok(fresh) => {
+                task_state.store.put_item_ratings(title.id, &fresh).await?;
+                Ok(fresh.ratings)
+            }
+            Err(error) => {
+                tracing::info!(item_id = title.id, %error, "ratings fetch failed; serving stored scores");
+                // Every provider asked failed. With OMDb configured, record
+                // the attempt (scores kept, OMDb not consulted) so the next
+                // try waits the OMDb retry instead of every page view asking.
+                let kept = previous.map(|p| p.ratings).unwrap_or_default();
+                if omdb_configured {
+                    let attempt = plurx_core::annotations::ItemRatings {
+                        fetched_at_ms: now,
+                        omdb_consulted: false,
+                        ratings: kept.clone(),
+                    };
+                    task_state
+                        .store
+                        .put_item_ratings(title.id, &attempt)
+                        .await?;
+                }
+                Ok::<_, plurx_core::error::StoreError>(kept)
+            }
         }
-        Ok(Err(error)) => {
-            tracing::info!(item_id = item.id, %error, "ratings fetch failed; serving stored scores");
-            Ok(cached.map(|c| c.ratings).unwrap_or_default())
-        }
-        Err(_) => {
+    });
+    match tokio::time::timeout(FETCH_WAIT, task).await {
+        Ok(Ok(Ok(ratings))) => Ok(ratings),
+        Ok(Ok(Err(error))) => Err(error.into()),
+        Ok(Err(_)) | Err(_) => {
             tracing::info!(
                 item_id = item.id,
                 "ratings fetch outlasted the page; serving stored scores"
@@ -204,13 +229,7 @@ pub async fn item_annotations(
         .ok_or(ApiError::NotFound("item"))?;
     let flags = state.store.item_list_flags(user.id, id).await?;
     let watchlist = if flags.watchlist {
-        let added = state
-            .store
-            .listed_items(user.id, ItemList::Watchlist, LIST_MAX, 0)
-            .await?
-            .into_iter()
-            .find(|entry| entry.item_id == id)
-            .map_or(0, |entry| entry.added_at_ms);
+        let added = flags.watchlist_added_at_ms.unwrap_or(i64::MAX);
         let (watch, rollup) = progress_of(&state, user.id, std::slice::from_ref(&item)).await?;
         !finished_since(item.kind, added, watch.get(&id), rollup.get(&id))
     } else {
@@ -342,35 +361,47 @@ pub async fn list_items(
 ) -> Result<Json<ListResponse>, ApiError> {
     let list = parse_list(&list)?;
     let limit = q.limit.unwrap_or(LIST_MAX).clamp(1, LIST_MAX);
-    let entries = state.store.listed_items(user.id, list, LIST_MAX, 0).await?;
-    let mut items = Vec::with_capacity(entries.len());
-    for entry in &entries {
-        if let Some(item) = state.catalogue.get_item(entry.item_id).await? {
-            items.push((item, entry.added_at_ms));
+    // Finished watchlist entries are kept, so visibility is applied page by
+    // page before the limit: the newest stored rows may all be finished.
+    let wanted = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut visible = Vec::new();
+    let mut offset = 0;
+    loop {
+        let entries = state
+            .store
+            .listed_items(user.id, list, LIST_PAGE, offset)
+            .await?;
+        let exhausted = (entries.len() as i64) < LIST_PAGE;
+        offset += LIST_PAGE;
+        let mut page = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            if let Some(item) = state.catalogue.get_item(entry.item_id).await? {
+                page.push((item, entry.added_at_ms));
+            }
+        }
+        let plain: Vec<Item> = page.iter().map(|(item, _)| item.clone()).collect();
+        let (watch, rollups) = progress_of(&state, user.id, &plain).await?;
+        for (item, added) in page {
+            if list == ItemList::Watchlist
+                && finished_since(item.kind, added, watch.get(&item.id), rollups.get(&item.id))
+            {
+                continue;
+            }
+            let id = item.id;
+            visible.push(
+                ItemDto::from(item)
+                    .with_watch(watch.get(&id).copied())
+                    .with_rollup(rollups.get(&id).copied()),
+            );
+            if visible.len() >= wanted {
+                break;
+            }
+        }
+        if exhausted || visible.len() >= wanted {
+            break;
         }
     }
-    let plain: Vec<Item> = items.iter().map(|(item, _)| item.clone()).collect();
-    let (watch, rollups) = progress_of(&state, user.id, &plain).await?;
-    let items = items
-        .into_iter()
-        .filter(|(item, added)| {
-            list != ItemList::Watchlist
-                || !finished_since(
-                    item.kind,
-                    *added,
-                    watch.get(&item.id),
-                    rollups.get(&item.id),
-                )
-        })
-        .take(usize::try_from(limit).unwrap_or(usize::MAX))
-        .map(|(item, _)| {
-            let id = item.id;
-            ItemDto::from(item)
-                .with_watch(watch.get(&id).copied())
-                .with_rollup(rollups.get(&id).copied())
-        })
-        .collect();
-    Ok(Json(ListResponse { items }))
+    Ok(Json(ListResponse { items: visible }))
 }
 
 #[cfg(test)]

@@ -31796,6 +31796,11 @@ async fn annotation_contract_runs_through_dyn_store() {
         );
         let flags = store.item_list_flags(user.id, tide).await.expect("flags");
         assert!(flags.watchlist && flags.favorite, "{backend}");
+        assert_eq!(
+            flags.watchlist_added_at_ms,
+            Some(20),
+            "the membership carries its own time on {backend}"
+        );
         let flags = store
             .item_list_flags(other.id, tide)
             .await

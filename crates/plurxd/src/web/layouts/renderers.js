@@ -93,6 +93,7 @@ function recomposeItemPresentation(page){
     if(replacement&&replacement!==node)replacement.replaceWith(node);
   }
   main.replaceChildren(template.content);
+  if(page.annotations&&page.item) paintAnnotationSlots(page.item.id,page.annotations);
 }
 function layoutChrome(active, inner){
   LAYOUT_ACTIVE=active;

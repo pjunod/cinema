@@ -52,8 +52,12 @@ impl OmdbClient {
             .query(&[("i", imdb_id), ("apikey", self.api_key.as_str())])
             .send()
             .await
+            // The request URL carries the API key: strip it from every error
+            // before it can be formatted into a log line.
             .map_err(|error| {
-                if error.is_timeout() {
+                let timeout = error.is_timeout();
+                let error = error.without_url();
+                if timeout {
                     MetadataError::Timeout(format!("OMDb: {error}"))
                 } else {
                     MetadataError::Http(format!("OMDb: {error}"))
@@ -63,24 +67,32 @@ impl OmdbClient {
         let bytes = response
             .bytes()
             .await
-            .map_err(|error| MetadataError::Http(format!("OMDb body: {error}")))?;
+            .map_err(|error| MetadataError::Http(format!("OMDb body: {}", error.without_url())))?;
         if bytes.len() > BODY_MAX_BYTES {
             return Err(MetadataError::BodyBound(BODY_MAX_BYTES as u64));
         }
         let body: Value = serde_json::from_slice(&bytes)
             .map_err(|error| MetadataError::Parse(format!("OMDb: {error}")))?;
-        // OMDb answers a bad key with 401 and a JSON error, so read the body
-        // first and let its sentence decide.
-        match parse_scores(&body) {
-            Err(error) if status.is_success() => Err(error),
-            Err(_) => Err(MetadataError::Status(status.as_u16())),
-            Ok(scores) => Ok(scores),
+        // OMDb answers a bad key with 401 and a JSON error. Any non-success
+        // status is a failure whatever the body says: an empty proxy answer
+        // must never replace stored scores with nothing.
+        if !status.is_success() {
+            return Err(MetadataError::Status(status.as_u16()));
         }
+        parse_scores(&body)
     }
 }
 
 /// Scores from one OMDb title record. `"N/A"` means the source has none.
 pub(crate) fn parse_scores(body: &Value) -> Result<Vec<Rating>, MetadataError> {
+    match body.get("Response").and_then(Value::as_str) {
+        Some("True" | "False") => {}
+        _ => {
+            return Err(MetadataError::Parse(
+                "OMDb answered without its Response envelope".into(),
+            ))
+        }
+    }
     if body.get("Response").and_then(Value::as_str) == Some("False") {
         let error = body
             .get("Error")
@@ -179,6 +191,44 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_body_without_the_omdb_envelope_is_a_failure_not_an_empty_answer() {
+        assert!(parse_scores(&json!({})).is_err());
+        assert!(parse_scores(&json!({"imdbRating": "8.1"})).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_never_carries_the_key_and_a_bad_status_is_an_error() {
+        let client = OmdbClient::new("secret-key-123").with_base("http://127.0.0.1:9/");
+        let error = client
+            .scores("tt1")
+            .await
+            .expect_err("nothing listens on port 9")
+            .to_string();
+        assert!(!error.contains("secret-key-123"), "{error}");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/",
+                axum::routing::get(|| async {
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(json!({})),
+                    )
+                }),
+            );
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = OmdbClient::new("secret-key-123").with_base(format!("http://{addr}/"));
+        assert!(matches!(
+            client.scores("tt1").await,
+            Err(MetadataError::Status(503))
+        ));
     }
 
     #[test]

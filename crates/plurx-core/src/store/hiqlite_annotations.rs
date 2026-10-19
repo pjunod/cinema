@@ -57,12 +57,14 @@ impl From<&mut Row<'_>> for ListRow {
 
 struct ListNameRow {
     list: String,
+    added_at_ms: i64,
 }
 
 impl From<&mut Row<'_>> for ListNameRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
             list: row.get("list"),
+            added_at_ms: row.get("added_at_ms"),
         }
     }
 }
@@ -194,7 +196,7 @@ impl AnnotationStore for HiqliteAuthStore {
         user_id: i64,
         item_id: i64,
     ) -> Result<ItemListFlags, StoreError> {
-        let sql = "SELECT list FROM library_annotations_lists WHERE user_id = $1 AND item_id = $2";
+        let sql = "SELECT list, added_at_ms FROM library_annotations_lists WHERE user_id = $1 AND item_id = $2";
         validate_sql(sql)?;
         let mut flags = ItemListFlags::default();
         for row in self
@@ -205,7 +207,10 @@ impl AnnotationStore for HiqliteAuthStore {
             .map_err(database_error)?
         {
             match ItemList::parse(&row.list) {
-                Some(ItemList::Watchlist) => flags.watchlist = true,
+                Some(ItemList::Watchlist) => {
+                    flags.watchlist = true;
+                    flags.watchlist_added_at_ms = Some(row.added_at_ms);
+                }
                 Some(ItemList::Favorite) => flags.favorite = true,
                 None => {}
             }

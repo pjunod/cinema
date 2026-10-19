@@ -151,14 +151,22 @@ function listTogglesHtml(id,a){
   return `<button class="ghost sm listtoggle${on?" on":""}" aria-pressed="${on}" onclick="setListed(${id},'watchlist',${on?0:1})">${mark}${on?"On watchlist":"Watchlist"}</button>`+
     `<button class="ghost sm listtoggle fav${fav?" on":""}" aria-pressed="${fav}" aria-label="${fav?"Remove from favorites":"Add to favorites"}" title="${fav?"Remove from favorites":"Add to favorites"}" onclick="setListed(${id},'favorite',${fav?0:1})">${heart}</button>`;
 }
+// Only the newest annotations read may paint: a toggle starts a fresh read,
+// and an older response arriving after it must not undo the button.
+let ANNOTATION_READS=0;
+function paintAnnotationSlots(id,a){
+  for(const el of document.querySelectorAll(`[data-annotation-ratings="${id}"]`)) el.innerHTML=ratingsHtml(a.ratings);
+  for(const el of document.querySelectorAll(`[data-annotation-lists="${id}"]`)) el.innerHTML=listTogglesHtml(id,a);
+}
 async function paintItemAnnotations(id,generation=PAGE_RENDER_GENERATION){
-  const route=location.hash;
+  const route=location.hash, read=++ANNOTATION_READS;
   if(!document.querySelector(`[data-annotation-lists="${id}"],[data-annotation-ratings="${id}"]`)) return;
   let a;
   try{ a=await api(`/items/${id}/annotations`); }catch(e){ return; }
-  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
-  for(const el of document.querySelectorAll(`[data-annotation-ratings="${id}"]`)) el.innerHTML=ratingsHtml(a.ratings);
-  for(const el of document.querySelectorAll(`[data-annotation-lists="${id}"]`)) el.innerHTML=listTogglesHtml(id,a);
+  if(read!==ANNOTATION_READS||generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
+  // Kept on the page model so a layout change repaints without asking again.
+  if(typeof WATCH_ITEM_PAGE!=="undefined"&&WATCH_ITEM_PAGE&&WATCH_ITEM_PAGE.item&&String(WATCH_ITEM_PAGE.item.id)===String(id)) WATCH_ITEM_PAGE.annotations=a;
+  paintAnnotationSlots(id,a);
 }
 async function setListed(id,list,on){
   try{

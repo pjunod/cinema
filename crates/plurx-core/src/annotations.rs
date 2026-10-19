@@ -96,6 +96,8 @@ impl ItemList {
 pub struct ItemListFlags {
     pub watchlist: bool,
     pub favorite: bool,
+    /// When the item went on the watchlist, if it is on it.
+    pub watchlist_added_at_ms: Option<i64>,
 }
 
 /// One entry of a person's list.
