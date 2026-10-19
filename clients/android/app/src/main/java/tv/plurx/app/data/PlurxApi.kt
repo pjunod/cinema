@@ -22,6 +22,10 @@ interface PlurxApi {
     @GET("server")
     suspend fun server(): Server
 
+    /** Signed in: the answering node's hostname and the server's label. */
+    @GET("server/node")
+    suspend fun serverNode(): ServerNode
+
     /** Signed-in only: the other ingresses a stream may be retried through. */
     @GET("cluster/ingress")
     suspend fun clusterIngress(): ClusterIngress

@@ -768,6 +768,10 @@ pub struct AppState {
     pub(crate) live_tv_peers: Arc<crate::http::live_tv::LiveTvPeers>,
     pub(crate) subtitle_models: Arc<crate::subtitle_models::Runtime>,
     pub server_name: String,
+    /// This node's short hostname, resolved once from membership at
+    /// construction (the name the roster shows for it); `None` when the
+    /// machine has no usable name.
+    pub node_hostname: Option<String>,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
     /// Whether LAN discovery must distinguish this node from cluster peers.
@@ -1274,6 +1278,7 @@ impl AppState {
             membership_status_cache: Default::default(),
             serving,
             clock_observer: crate::clock_offset::ClockObserver::new(membership.clone()),
+            node_hostname: membership.local_hostname(),
             membership,
             media_pool,
             media_sessions,

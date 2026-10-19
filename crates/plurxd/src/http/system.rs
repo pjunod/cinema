@@ -69,11 +69,7 @@ pub struct ServerInfo {
 /// are therefore not here — see `GET /api/v1/cluster/ingress`.
 pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiError> {
     let instance_id = state.store.instance_id().await?;
-    let name = state
-        .store
-        .get_setting(keys::SERVER_NAME)
-        .await?
-        .unwrap_or_else(|| state.server_name.clone());
+    let name = configured_server_name(&state).await?;
     let setup_required = state.store.count_users().await? == 0;
     let android_app = super::web::android_apk_path(&state.system.data_dir).is_some();
     let playback_auto_abr = state
@@ -110,6 +106,46 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         playback_auto_abr,
         playback_display_aware_auto,
         display_mode_match,
+    }))
+}
+
+/// The server name an operator configured (Settings first, then config).
+async fn configured_server_name(state: &AppState) -> Result<String, ApiError> {
+    Ok(state
+        .store
+        .get_setting(keys::SERVER_NAME)
+        .await?
+        .unwrap_or_else(|| state.server_name.clone()))
+}
+
+/// Which machine a signed-in client is talking to.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct ServerNodeDto {
+    /// The answering node's short hostname (`lab6`): the name the cluster
+    /// roster shows for it. Absent when the machine has no usable name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    /// What to call this server: the operator's chosen name when one is set,
+    /// otherwise the hostname — the LAN picker's rule — and the configured
+    /// name only when neither exists. Clients show this as is.
+    pub display_name: String,
+}
+
+/// GET /api/v1/server/node — any signed-in user.
+///
+/// Settings used to name every server "plurx": clients could only show
+/// `/api/v1/server`'s `name`, the shipped default shared by every node. The
+/// machine name lives here rather than there because `/server` is answered to
+/// anyone who can reach the port, and a hostname is not a stranger's business.
+pub async fn server_node(
+    AuthUser(_user): AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<ServerNodeDto>, ApiError> {
+    let name = configured_server_name(&state).await?;
+    let hostname = state.node_hostname.clone();
+    Ok(Json(ServerNodeDto {
+        display_name: plurx_core::config::server_display_name(&name, hostname.as_deref()),
+        hostname,
     }))
 }
 
@@ -220,6 +256,11 @@ pub struct SystemDto {
     pub hwaccel_restart_required: bool,
     pub transcoder_optimization: crate::transcoder_optimization::Status,
     pub name: String,
+    /// This node's short hostname; see [`ServerInfo::hostname`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    /// See [`ServerInfo::display_name`].
+    pub display_name: String,
     pub version: &'static str,
     pub build: &'static str,
     pub built_at: &'static str,
@@ -379,12 +420,15 @@ pub async fn system_info(
         .get_setting(keys::SERVER_NAME)
         .await?
         .unwrap_or_else(|| state.server_name.clone());
+    let hostname = state.node_hostname.clone();
     Ok(Json(SystemDto {
         node_id: state.node_id.clone(),
         hwaccel_requested: hwaccel_requested.unwrap_or_else(|| state.system.hwaccel_pref.clone()),
         hwaccel_restart_required,
         transcoder_optimization: optimization,
+        display_name: plurx_core::config::server_display_name(&name, hostname.as_deref()),
         name,
+        hostname,
         version: crate::version::SEMVER,
         build: crate::version::BUILD,
         built_at: crate::version::BUILT_AT,
