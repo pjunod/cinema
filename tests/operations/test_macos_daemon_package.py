@@ -3,6 +3,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 import subprocess
 import struct
@@ -152,6 +153,27 @@ class MacosDaemonPackageCase(unittest.TestCase):
         manifest.write_text(json.dumps(self.native_manifest))
         with self.assertRaisesRegex(ValueError, "pinned recipe"):
             TOOL.validate_native_package(self.package)
+
+    def test_universal_media_combines_verified_slices_with_distinct_host_provenance(self):
+        intel = self.root / "intel"
+        shutil.copytree(self.package, intel)
+        parser = intel / "provenance/source-parser/manifest.json"
+        value = json.loads(parser.read_text())
+        value["sdk_url"] = "https://fixture.invalid/host-specific-sdk"
+        parser.write_text(json.dumps(value))
+        original = {path: path.read_bytes() for package in [self.package, intel] for path in package.rglob("*") if path.is_file()}
+        def arch(command, **kwargs):
+            return b"x86_64\n" if str(intel) in command[-1] else b"arm64\n"
+        def native(command, **kwargs):
+            if command[:2] == ["/usr/bin/lipo", "-create"]:
+                Path(command[-1]).write_bytes(b"universal native fixture")
+            return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+        with mock.patch.object(TOOL.subprocess, "check_output", side_effect=arch), mock.patch.object(TOOL.subprocess, "run", side_effect=native):
+            TOOL.combine_ffmpeg_packages(self.package, intel, self.output)
+        TOOL.validate_native_package(self.output)
+        self.assertEqual({path: path.read_bytes() for path in original}, original)
+        self.assertTrue((self.output / "provenance/slices/arm64.json").is_file())
+        self.assertTrue((self.output / "provenance/slices/x86_64.json").is_file())
 
     def test_symbol_uuid_mismatch_cannot_publish_a_candidate(self):
         symbols = self.root / "plurxd.dSYM"

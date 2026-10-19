@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=plurx Server
+Comment=Manage the local plurx media server
+Exec=/usr/bin/plurx-tray --window
+TryExec=/usr/bin/plurx-tray
+Icon=tv.plurx.Server
+Terminal=false
+Categories=AudioVideo;Settings;
+StartupNotify=false
