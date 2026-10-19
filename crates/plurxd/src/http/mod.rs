@@ -1507,6 +1507,17 @@ pub(crate) fn prometheus_handler_deadlines() -> String {
     out
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn desktop_auth_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/v1/auth/login",
+            post(auth::login).layer(DefaultBodyLimit::max(auth::MAX_LOGIN_BODY_BYTES)),
+        )
+        .route("/api/v1/auth/logout", post(auth::logout))
+        .route("/api/v1/me", get(auth::me))
+}
+
 pub fn router(state: AppState) -> Router {
     // A route belongs to exactly one deadline group. The grouping is applied
     // before the shared serving gate so media bodies and blocked GETs remain
@@ -2403,6 +2414,10 @@ pub fn router(state: AppState) -> Router {
         ))
         // Outside the Store attribution, and therefore outside the capacity
         // gate, so a 503 the gate produces is still counted as a request.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            desktop_http_admission_gate,
+        ))
         .layer(axum::middleware::from_fn(http_request_metrics))
         // Outermost: every layer inside reads the id back out of the request
         // headers, so this one has to have written it first.
@@ -2929,6 +2944,93 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn desktop_http_admission_gate(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    // The legacy prepare/maintenance HTTP request cannot count itself as
+    // work it must drain. These read-only observations also keep cluster
+    // diagnostics and authenticated clock sampling usable while fenced.
+    let control_plane = path.starts_with("/api/v1/cluster/")
+        || path == cluster_operations::INTERNAL_PATH
+        || path == internal_clock::PATH
+        || matches!(
+            path,
+            "/healthz" | "/readyz" | "/metrics" | "/api/v1/server" | "/api/v1/server/node"
+        );
+    if control_plane {
+        return next.run(request).await;
+    }
+    let Some(admission) = state.serving.try_desktop_http_admission().await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::RETRY_AFTER, "5"),
+            ],
+            crate::serving_fence::RESTART_DRAIN_JSON,
+        )
+            .into_response();
+    };
+    next.run(request)
+        .await
+        .map(|body| axum::body::Body::new(RestartAdmissionBody::new(body, Some(admission))))
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn desktop_http_admission_gate(
+    State(_state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    next.run(request).await
+}
+
+/// Direct response bodies (including Range reconnects) own admission until
+/// delivery finishes or the connection closes, rather than merely to headers.
+struct RestartAdmissionBody {
+    body: axum::body::Body,
+    _admission: Option<crate::serving_fence::RestartAdmission>,
+}
+impl RestartAdmissionBody {
+    fn new(
+        body: axum::body::Body,
+        mut admission: Option<crate::serving_fence::RestartAdmission>,
+    ) -> Self {
+        if http_body::Body::is_end_stream(&body) {
+            admission.take();
+        }
+        Self {
+            body,
+            _admission: admission,
+        }
+    }
+}
+impl http_body::Body for RestartAdmissionBody {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let polled = std::pin::Pin::new(&mut self.body).poll_frame(cx);
+        if matches!(&polled, std::task::Poll::Ready(None | Some(Err(_))))
+            || http_body::Body::is_end_stream(&self.body)
+        {
+            self._admission.take();
+        }
+        polled
+    }
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
 async fn mutable_media_serving_gate(
     State(state): State<AppState>,
     request: Request<axum::body::Body>,
@@ -2938,7 +3040,7 @@ async fn mutable_media_serving_gate(
         request.method().as_str(),
         request.uri().path(),
     );
-    let _restart_admission = if starts_media {
+    let restart_admission = if starts_media {
         match state.serving.try_restart_admission().await {
             Some(admission) => Some(admission),
             None => {
@@ -2958,7 +3060,9 @@ async fn mutable_media_serving_gate(
         None
     };
     let Some(policy) = state.serving.http_policy(request.uri().path()) else {
-        return next.run(request).await;
+        let response = next.run(request).await;
+        return response
+            .map(|body| axum::body::Body::new(RestartAdmissionBody::new(body, restart_admission)));
     };
 
     let mut response = (
