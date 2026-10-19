@@ -1702,8 +1702,9 @@ The response carries `session_id`, `playlist_url`, `duration_ms`,
   `requires_effective_processing` (omitted when false) marks a processed-HDR10
   delivery whose pills and row are shown only while the client holds a
   current, generation-matching `effective_processing` report; they clear with
-  it on seek, fallback or replacement. Omitted for non-Dolby-Vision sources and
-  SDR output. A replacement session never inherits its predecessor's; it
+  it on seek, fallback or replacement. Omitted for non-Dolby-Vision sources. A
+  tone-mapped SDR play has no `active` badges, but its `details` still say what
+  the source carries and that none of it reaches an SDR picture. A replacement session never inherits its predecessor's; it
   carries its own, in its create response and in the `prepare` control action
   that announces it. The route comes from the selected processing plan, so a
   processed-HDR10 play is described as one before its first window report.

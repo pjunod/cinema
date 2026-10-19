@@ -1368,6 +1368,7 @@ pub(super) fn session_enhancement(
                 },
                 (None, None) => EnhancementRoute::Hdr10Base,
             },
+            Some("sdr") => EnhancementRoute::ToneMappedSdr,
             _ => EnhancementRoute::Other,
         }
     };
