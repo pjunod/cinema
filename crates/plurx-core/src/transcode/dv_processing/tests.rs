@@ -821,6 +821,59 @@ fn semantic_identity_excludes_observations_revision_and_continuity() {
     assert_ne!(original, changed.semantic_digest());
 }
 #[test]
+fn display_target_semantic_digest_separates_all_buckets_and_title_constants() {
+    use crate::scan::dv_title::*;
+    let stats = DvTitleStats {
+        schema: SCHEMA,
+        complete: true,
+        decoded_frames: 1,
+        valid_l1_frames: 1,
+        missing_l1_frames: 0,
+        invalid_l1_frames: 0,
+        max_l1_pq: Some(4095),
+        mastering_luminance: TitleConstant::Unknown,
+        mastering_primaries: TitleConstant::Unknown,
+    };
+    let mut master = plan(DvDestination::Hdr10);
+    let master_export = DvExportPolicy::PqBilinearYuv420p10V1 { raster: (64, 64) };
+    master.capability.target.parameters = master_export.target_parameters();
+    let mut digests = std::collections::BTreeSet::new();
+    for nits in DISPLAY_TARGET_BUCKETS {
+        let (export, _) = DvExportPolicy::for_display_target((64, 64), nits, Some(stats)).unwrap();
+        let mut target = master.clone();
+        target.capability.target.parameters = export.target_parameters();
+        assert_ne!(master.semantic_digest(), target.semantic_digest());
+        assert!(digests.insert(target.semantic_digest().as_str().to_owned()));
+        let (other, _) = DvExportPolicy::for_display_target(
+            (64, 64),
+            nits,
+            Some(DvTitleStats {
+                mastering_luminance: TitleConstant::Consistent(MasteringLuminance {
+                    min_1e4_nits: 10,
+                    max_nits: 1000,
+                }),
+                ..stats
+            }),
+        )
+        .unwrap();
+        let mut changed = target.clone();
+        changed.capability.target.parameters = other.target_parameters();
+        assert_ne!(target.semantic_digest(), changed.semantic_digest());
+        let (elided, _) = DvExportPolicy::for_display_target(
+            (64, 64),
+            nits,
+            Some(DvTitleStats {
+                max_l1_pq: Some(0),
+                ..stats
+            }),
+        )
+        .unwrap();
+        let mut same = master.clone();
+        same.capability.target.parameters = elided.target_parameters();
+        assert_eq!(master.semantic_digest(), same.semantic_digest());
+    }
+}
+#[test]
 fn successor_generations_do_not_reset_recovery_episode() {
     let mut episode = DvRecoveryEpisode::default();
     episode

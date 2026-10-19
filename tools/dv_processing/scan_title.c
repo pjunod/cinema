@@ -7,6 +7,7 @@
 #include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavutil/opt.h>
+#include <libavutil/parseutils.h>
 #include <libdovi/rpu_parser.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -22,6 +23,7 @@ struct title_stats {
   uint16_t xy[8];
 };
 static struct title_stats stats;
+static int64_t first_pts = AV_NOPTS_VALUE, last_end = AV_NOPTS_VALUE;
 static void need(bool ok, const char *why) {
   if (!ok) {
     fprintf(stderr, "DV title scan refused: %s\n", why);
@@ -35,6 +37,15 @@ static void unknown_constants(void) {
 static void observe(AVFrame *frame) {
   need(!(frame->flags & AV_FRAME_FLAG_CORRUPT) && !frame->decode_error_flags,
        "corrupt decoded display frame");
+  need(frame->pts >= 0 && frame->duration > 0 &&
+       frame->pts < INT64_MAX - frame->duration,
+       "observed complete display-frame timing");
+  if (first_pts == AV_NOPTS_VALUE) first_pts = frame->pts;
+  // At most one source tick of packet-clock rounding, never a missing frame.
+  if (last_end != AV_NOPTS_VALUE)
+    need(frame->pts >= last_end - 1 && frame->pts <= last_end + 1,
+         "contiguous decoded title coverage");
+  last_end = frame->pts + frame->duration;
   need(stats.frames < 100000000, "bounded title display-frame count");
   stats.frames++;
   AVFrameSideData *side = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_RPU_BUFFER);
@@ -178,6 +189,7 @@ int main(int argc, char **argv) {
   need(decoder && avcodec_parameters_to_context(decoder, split->par_out) >= 0,
        "decoder parameters");
   decoder->thread_count = 1;
+  decoder->pkt_timebase = stream->time_base;
   decoder->max_pixels = 4096 * 2160;
   decoder->err_recognition = AV_EF_CAREFUL | AV_EF_EXPLODE;
   need(avcodec_open2(decoder, codec, NULL) >= 0, "software decoder open");
@@ -201,6 +213,32 @@ int main(int argc, char **argv) {
        receive(decoder, frame) == AVERROR_EOF, "complete decoder drain");
   need(stats.frames > 0 && (stream->nb_frames <= 0 ||
        (uint64_t)stream->nb_frames == stats.frames), "complete declared frame coverage");
+  need(stream->start_time != AV_NOPTS_VALUE && first_pts == stream->start_time &&
+       last_end < INT64_MAX, "observed declared video origin");
+  // Demuxers can return EOF for a truncated container without pb->error.
+  // Require independent selected-video count/duration, never container/audio
+  // duration, before EOF can establish a complete-title aggregate.
+  bool endpoint_known = stream->nb_frames > 0;
+  if (stream->duration > 0 && stream->duration != AV_NOPTS_VALUE) {
+    need(stream->start_time < INT64_MAX - stream->duration,
+         "bounded declared video end");
+    int64_t end = stream->start_time + stream->duration;
+    need(last_end >= end - 1 && last_end <= end + 1, "complete selected video duration");
+    endpoint_known = true;
+  }
+  const AVDictionaryEntry *duration = av_dict_get(stream->metadata, "DURATION", NULL, 0);
+  if (duration) {
+    int64_t duration_us;
+    need(av_parse_time(&duration_us, duration->value, 1) >= 0 && duration_us > 0,
+         "selected video duration tag");
+    need(av_compare_ts(last_end + 1 - first_pts, stream->time_base,
+                      duration_us, AV_TIME_BASE_Q) >= 0 &&
+         av_compare_ts(last_end - 1 - first_pts, stream->time_base,
+                      duration_us, AV_TIME_BASE_Q) <= 0,
+         "complete selected video duration tag");
+    endpoint_known = true;
+  }
+  need(endpoint_known, "independent complete selected-video endpoint unavailable");
   printf("{\"schema\":1,\"complete\":true,\"decoded_frames\":%"PRIu64
          ",\"valid_l1_frames\":%"PRIu64",\"missing_l1_frames\":%"PRIu64
          ",\"invalid_l1_frames\":%"PRIu64",\"max_l1_pq\":",

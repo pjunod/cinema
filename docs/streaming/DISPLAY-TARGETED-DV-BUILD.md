@@ -13,14 +13,23 @@
   existing source/publication fence. Unknown versions, partial scans and old
   documents cannot establish eligibility. L6/L9 are constant, unknown or
   inconsistent; a missing observation is not silently replaced by the last one.
-- Scanner checkpoint `6b060987` compiled all four helpers successfully; the
-  original three retained their baseline hashes. Its Rust check failed E0433
-  (wrong runtime module path), fixed in `01d21106`; corrected checking is pending.
-  This is compilation evidence, not numerical or title-scan qualification.
-- Unit cases are authored but intentionally not executed before the complete
-  candidate's independent adversarial review. Targeted shader/independent oracle
-  implementation is underway. Policy identity, reports, controls, candidate
-  compilation, exact B landing and draft paperwork remain.
+- Checkpoint `883b40fe` passed pinned Rust all-target checking and API 374 helper
+  compilation. Checkpoint `37112e73` compiled the control driver and fixture muxer;
+  its Rust check failed E0624 (example calling a private identity method), corrected
+  by removing the unnecessary call, not widening production visibility. Original
+  E0433 remains preserved as a failure, corrected by `01d21106`. Later source
+  changes need fresh affected compilation. None are numerical qualification.
+- Explicit title-qualified policies, semantic bucket/endpoints/title identity,
+  helper arguments, report operation and exact request-bound runtime trace checks
+  are implemented. Production constructors still select master. Real synthetic
+  scan/window/elision controls and an independent shader oracle are authored.
+  No units or controls have run: complete independent review/fixes precede their
+  single affected batch. Final compilation/static checks, actual FEL-catalog B
+  landing reconciliation and draft paperwork remain.
+- The scanner requires contiguous observed display-frame timing, clean decoder
+  drain and an independent selected-video count/duration. Unknown endpoints or
+  truncated containers returning clean EOF cannot claim completeness. Negative
+  or unknown origins remain unqualified; no container/audio-duration proxy.
 - Actual upstream API 374 inspection found a design conflict with the helper
   recipe below. `hybrid_mix` is removed, and its ST 2094-10 function uses a modified
   PQ-space knee selector. The shader also applies an adaptive virtual target and
@@ -166,9 +175,13 @@ fixed rule. One title therefore never mixes master and targeted windows.
     by Gaussian elimination, not this coefficient expression or libplacebo code.
     Nondegenerate controls retain the two-code bound; edge controls separately
     disclose the extension, zero-black, peak and monotonicity requirements.
-  - RGB-component mapping can change saturated-highlight hue. Fire/neon hue
-    comparison and the gamut-policy disposition remain acceptance work; there is
-    no claim of a measured perceptual improvement or calibrated display accuracy.
+  - RGB-component mapping can change saturated-highlight hue. The coordinator's
+    accepted RGB method supersedes the old clip-versus-perceptual choice for PR A:
+    use clip, with saturated-highlight, negative and out-of-range controls. No
+    inactive perceptual flag or second color-volume implementation is added.
+    The old fire/neon comparison has NOT been performed; a perceptual experiment
+    is separately specified future work. No hue-optimal, perceptual-equivalence
+    or calibrated-accuracy claim.
 - **Invalid L1 on a frame of an eligible title** cannot happen (the scan
   excluded such titles). If it does anyway, the window refuses and the
   daemon falls back to the master recipe for the **whole session**, with
@@ -299,6 +312,48 @@ segments). This works with every encoder. The other options are ruled out:
 
 ## Tests
 
+### PR A executable qualification inventory (authored, not yet run)
+
+The coordinator runs these only after complete independent review and fixes.
+Use native Linux, pinned Rust 1.97.1 and the verified API 374 dependency image.
+Do not use historical ARM scripts or reuse an output directory. Every receipt
+binds source archive, binary/dependency hashes, exit status and nonzero matched
+cases/samples. A compile is not a run.
+
+- Core units: title eligibility/old JSON, exact bucket/elision, and
+  `display_target_semantic_digest_separates_all_buckets_and_title_constants`.
+- Daemon units: `display_target_trace_binds_exact_bucket_endpoints_and_raw_l1`
+  and `title_scan_selects_the_catalogue_video_not_an_attached_cover`.
+- Build qualification adapters with `cargo build --locked -p plurx-core --example
+  dv_target_policy --example dv_target_fixtures`. They use the real pure policy
+  and public RPU writer, not a playback route or feature toggle.
+- Build controls with `sh tools/dv_processing/controls/build_target_controls.sh`
+  and the same four explicit dependency/output arguments as the helper build.
+- Run `python3 tools/dv_processing/controls/compare_display_target.py --shader
+  "$CONTROL_BIN/display_target_shader" --output "$EVIDENCE/shader"`. Every Y/U/V
+  code uses the independent Gaussian-anchor oracle (two-code bound): six buckets,
+  L1 sensitivity, monotonic grayscale, zero black, peak, explicit edge extensions
+  and saturated/out-of-range samples.
+- Run `python3 tools/dv_processing/controls/run_display_target_windows.py
+  --helper "$HELPER_BIN/segment_decode_render" --scanner "$HELPER_BIN/scan_title"
+  --policy "$RUST_BIN/dv_target_policy" --fixtures "$RUST_BIN/dv_target_fixtures"
+  --mux "$CONTROL_BIN/make_movie" --ffmpeg "$FFMPEG" --output "$EVIDENCE/windows"`.
+  It encodes bounded P7/P8 sources; checks title accounting, final-frame missing
+  L1, missing/corrupt RPU, inconsistent L6 and truncation; uses actual Rust policy
+  for master elision; checks independent pixels, identical master/different L1
+  targeted output and overlapping-window byte/hash identity. MaxCLL is misleading
+  deliberately, never used to elide the high title.
+- Source changes during either probe invalidate publication under the existing
+  admitted probe/source-revision fence. Fresh scans replace rather than merge
+  title objects. Existing source-fence/probe-publication regressions remain
+  affected final-batch coverage.
+
+The programme-wide table below also includes later metadata/routing/client
+phases. PR A does not write MDCV/CLL, offer a setting or establish real-title/device
+acceptance. Runtime-invalid L1 refuses the private window with a whole-session
+master reason; later session selection owns the whole-session transition, never
+a per-window target/master mix.
+
 | Level | Test | Proves |
 |---|---|---|
 | Core unit | bucket mapping, including elision; caps parsing of `min_nits`/`source` | mapping is total, rounds down, refuses junk |
@@ -319,8 +374,9 @@ The control fails if the helper ignores the target (peak above PQ(1000)).
 
 ## Cost and performance
 
-- **GPU:** one LUT lookup per pixel in the existing render pass. Measure it
-  with the `DVT` timing method from #1202 (expected under 1 ms per 4K frame).
+- **GPU:** an additional native float shader pass (PQ decode, rational RGB curve,
+  PQ encode) precedes existing export. The old one-LUT/under-1-ms expectation is
+  superseded, not measured. Source-bound `DVT` evidence is needed for throughput.
 - **Cache:** one rendition per bucket in use. Elision covers titles whose
   content already fits.
 - **First-window qualification:** unchanged, one trial per start.

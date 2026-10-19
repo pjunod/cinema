@@ -48,6 +48,8 @@ def run(shader, root):
         'colors': [(oetf(8000), oetf(150), oetf(1)),
                    (oetf(1), oetf(6000), oetf(100)),
                    (oetf(200), oetf(1), oetf(9000)), (0., 0., 0.)] * 1024,
+        'out-of-range': [(-0.1, 0., 1.1), (1.5, -1., 0.5),
+                         (-1., -1., -1.), (2., 2., 2.)] * 1024,
     }
     for name, pixels in patterns.items():
         values = [v for pixel in pixels for v in (*pixel, 1.)]
@@ -92,7 +94,7 @@ def run(shader, root):
                 assert len(actual) == len(reference) == 6144
                 worst = max(abs(a - b) for a, b in zip(actual, reference, strict=True))
                 assert worst <= 2, (name, worst)
-                assert max(actual[:4096]) <= math.ceil(64 + 876 * oetf(nits)) + 1
+                assert max(actual[:4096]) <= 64 + 876 * oetf(nits) + 1
                 if pattern == 'ramp':
                     assert actual[0] == 64, (name, 'zero black shifted')
                     assert all(a <= b for a, b in zip(actual[:4095], actual[1:4096]))

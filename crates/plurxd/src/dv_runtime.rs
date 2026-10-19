@@ -721,6 +721,52 @@ impl RuntimeRecipe {
         ),
         String,
     > {
+        self.execute_policy_until(
+            file,
+            plan,
+            options,
+            grid,
+            entry,
+            encoder,
+            admission,
+            producer,
+            cancel,
+            registration_hook,
+            absolute_deadline,
+            None,
+        )
+        .await
+    }
+
+    /// Explicit internal control policy; ordinary production entrypoints above
+    /// always pass None. No environment/caps/settings selection occurs here.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn execute_policy_until(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        plan: &plurx_core::transcode::ResolvedTranscode,
+        options: &plurx_core::transcode::TranscodeOptions,
+        grid: plurx_core::transcode::VodFrameGrid,
+        entry: &plurx_core::segplan::PlanEntry,
+        encoder: &Path,
+        admission: crate::dv_segment::SegmentAdmission,
+        producer: Arc<crate::prodrun::ProducerSlot>,
+        cancel: tokio_util::sync::CancellationToken,
+        registration_hook: Option<RegistrationHook>,
+        absolute_deadline: Option<tokio::time::Instant>,
+        display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    ) -> Result<
+        (
+            VerifiedWindow,
+            plurx_core::transcode::dv_processing::DvProcessingPlan,
+        ),
+        String,
+    > {
+        if display_target.is_some()
+            && self.destination != plurx_core::transcode::dv_processing::DvDestination::Hdr10
+        {
+            return Err("display targeting is HDR10-only".into());
+        }
         if episode_failed(&self.failure_episode) {
             return Err(
                 "DV processing previously failed for this playback/source/settings/backend".into(),
@@ -769,10 +815,11 @@ impl RuntimeRecipe {
                 .ok_or("no immutable output raster")?;
             // Both destinations leave the GPU as 10-bit YCbCr at the output
             // raster: the encoder only uploads it, it never converts colour.
-            let export_policy =
-                plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearYuv420p10V1 {
-                    raster,
-                };
+            use plurx_core::transcode::dv_processing::DvExportPolicy;
+            let export_policy = display_target
+                .map_or(DvExportPolicy::PqBilinearYuv420p10V1 { raster }, |target| {
+                    DvExportPolicy::DisplayTargetYuv420p10V1 { raster, target }
+                });
             let export_raster = export_policy
                 .raster(self.native_bl)
                 .map_err(|e| e.to_string())?;
@@ -807,9 +854,7 @@ impl RuntimeRecipe {
             let request = crate::dv_segment::StreamingSegmentRequest {
                 mode: self.mode,
                 export_raster: Some(export_raster),
-                // Viewer/caps selection remains a later PR. This preserves the
-                // current master route while the explicit control API develops.
-                display_target: None,
+                display_target: export_policy.display_target(),
                 request: crate::dv_segment::SegmentRequest {
                     renderer: self.tools.renderer.clone(),
                     renderer_env,

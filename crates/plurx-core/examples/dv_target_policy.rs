@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::json!({
             "output_policy": policy.output_policy(),
             "endpoints": policy.display_target().map(|target| target.endpoint_args()),
-            "target_parameters": policy.target_parameters(),
+
             "decline": reason.map(|reason| reason.reason()),
         })
     );

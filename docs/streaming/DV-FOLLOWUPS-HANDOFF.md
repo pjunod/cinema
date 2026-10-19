@@ -63,6 +63,15 @@ written but are not run during preparation.
 
 ## C. Display-targeted HDR10-E — PR A of [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md)
 
+**Implementation update (2026-10-19):** Sol/Astra owns source on
+`codex/cinema-display-target-a`; coordinator owns publication. The build plan's
+current checkpoint and accepted explicit Annex B.2/B.3 RGB shader supersede the
+original built-in-libplacebo recipe below. API 374 inspection proved modified
+knee/adaptive/LMS behavior; no built-in ST2094-10 execution is claimed. Clip is
+explicit, without perceptual-equivalence claims. Scanner/policy/report/runtime
+and controls are authored, not qualified. Complete review/fixes and the once-only
+affected batch remain. Metadata/settings/client selection stay later PRs.
+
 1. **Title L1 scan,** stored with the DV facts:
    - L1-max maximum;
    - whether every frame has valid L1;

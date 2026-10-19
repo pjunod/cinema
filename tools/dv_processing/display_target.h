@@ -110,6 +110,7 @@ static const char dv_target_shader[] =
   " return pow((3424.0/4096.0+2413.0/128.0*p)/(1.0+2392.0/128.0*p),vec3(2523.0/32.0));\n"
   "}\n"
   "vec3 target_rgb(vec3 pq) {\n"
+  " pq=clamp(pq,0.0,1.0);\n"
   " vec3 x=decode_pq(pq);\n"
   " if (limits.w>0.5) return min(pq,encode_pq(vec3(limits.z)));\n"
   " vec3 t=clamp((x-limits.x)/(limits.y-limits.x),0.0,1.0);\n"
