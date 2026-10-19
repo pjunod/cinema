@@ -11,7 +11,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 
 | File | Answers | |
 |---|---|---|
-| [BROWSER-HDR-RESTART-LIFECYCLE-RCA.md](BROWSER-HDR-RESTART-LIFECYCLE-RCA.md) | Reproduced same-tab Close/Resume HDR downgrade, the lost DV cancellation outcome, the existing lifecycle ownership contract, and separate unresolved Safari/stale-session observations. | open |
+| [BROWSER-HDR-RESTART-LIFECYCLE-RCA.md](BROWSER-HDR-RESTART-LIFECYCLE-RCA.md) | Close/Resume HDR downgrade, lost DV cancellation, Safari startup intent corruption, lifecycle ownership and remaining stale-session evidence. | open |
 | [TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md) | Why TCL Auto rejects Android capability counts, the catalog read-budget failure, and the reviewed plan for one catalog per create with legacy-client compatibility. | open |
 | [TCL-CATALOG-REPAIR-STATUS.md](TCL-CATALOG-REPAIR-STATUS.md) | Implementation decisions, commit milestones, compile and review evidence, and remaining physical TCL acceptance. | open |
 | [PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md](PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md) | Bounded October 1 repair: periodic quorum-loss diagnosis, startup/retirement/recovery correctness, VOD delivery truth, agent/Opus review dispositions, and one fast-lane PR. | open |

@@ -355,8 +355,8 @@ function playbackProgressTick(v,p,frameSample=false){
   }
   const key=`${p._seekToken||0}:${p.controlIntentGeneration||0}:${pending?.sequence||0}:${frameSource}`;
   let watch=p.progressWatch;
-  if(!watch||watch.key!==key){
-    watch=p.progressWatch={key,clock,frames,at:now,startedAt:now,fired:false};
+  if(!watch||watch.key!==key||watch.attachment!==p.mediaAttachment||watch.element!==v){
+    watch=p.progressWatch={key,attachment:p.mediaAttachment,element:v,clock,frames,at:now,startedAt:now,fired:false};
   }
   const moved=clock>watch.clock+0.01 && (frames==null||frames>watch.frames);
   if(frameSample){
@@ -384,6 +384,7 @@ function playbackProgressTick(v,p,frameSample=false){
   // decoder emits both and can still present nothing.
   playbackSurfaceStep({presenting:moved,attached:playbackSurfaceGeneration(p)});
   if(moved){
+    p.transportPresentation={attachment:p.mediaAttachment,element:v};
     watch.clock=clock; watch.frames=frames; watch.at=now;
     p.presentationAdvancedAt=now;
     // The assigned element clock and cumulative callback count cannot prove
@@ -791,26 +792,9 @@ function closeVodForPageHide(){
   if(!(document.getElementById("modal")?.classList.contains("open")
     ||p?.sessionId||p?.sharedDirect||p?.mediaPredecessor
     ||hasPendingPlaybackOpen(p)||preparation.active)) return;
-  const preparedSessions=new Set();
-  // A full open owns at most one outgoing player; each player owns at most
-  // one preparation in each phase. Capture before close drains those owners.
-  for(const owner of [p,p?.mediaPredecessor]){
-    if(!owner) continue;
-    for(const state of [owner.prepared,owner.preparedCommitting,
-      owner.preparedRetiring,owner.preparedControlPending]){
-      if(state?.sessionId) preparedSessions.add(state.sessionId);
-      if(state?.predecessor?.sessionId) preparedSessions.add(state.predecessor.sessionId);
-    }
-  }
   // Close tears down every decoder synchronously, before its keepalive
   // DELETEs. Its progress/detail refresh must not delay unload cleanup.
   closePlayer({routeLeave:true}).catch(()=>{});
-  // Prepared settlements normally travel on the reporter. A document that
-  // is going away cannot depend on that exchange surviving, so retire any
-  // staged/hidden handle through the same keepalive release path. A first-frame
-  // rollback can change which handle Close releases; repeating an idempotent
-  // DELETE is safer than assuming the pre-close session is the one it ended.
-  for(const id of preparedSessions) releaseSession(id);
 }
 // Attach the persistent listeners once; they read live PLAYER state each fire.
 function wirePlayer(){

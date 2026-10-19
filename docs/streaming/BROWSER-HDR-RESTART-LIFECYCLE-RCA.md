@@ -7,7 +7,7 @@ deployment and acceptance open.
 Companion to [DV processing contracts](DV_HDR_M1_CONTRACTS.md) and
 [terminal-event ownership](../playback-control/PLAYBACK-CONTROL-PROTOCOL-M3-TERMINAL-EVENTS.md).
 This record distinguishes reproduced browser failures from the unresolved
-Safari startup and stale Activity observations. It does not replace the
+original stale Activity observation. It does not replace the
 [processing project ledger](DV_HDR_PROCESSING_STATUS.md).
 
 ## The same-tab Close and Resume sequence reproduces the HDR downgrade
@@ -143,16 +143,85 @@ identity. Regressions check both current handleless faults and late outgoing
 faults, as well as successful cleanup remaining quiet. A recovered playback
 keeps its original warning, and failed recovery adds its own error.
 
-## Safari startup and the original stale entry remain separate evidence gaps
+## Safari startup mistakes an unowned pause for viewer intent
 
 The original Safari attempt selected native HLS with Profile 7 to Profile 8.1
-conversion. Its playlists passed readiness checks, but no first frame was
-logged. A later same-title Resume produced a first frame in 2.6 seconds and
-Close released it cleanly. That does not diagnose the original hang.
+conversion. Persisted playback-event transport fields supplied evidence absent
+from the abbreviated journal text:
+
+| Time (UTC) | Observation |
+|---|---|
+| 19:56:43.310 | Playlists ready; an internal Play requests playback. |
+| 19:56:43.316 | Native Play event reports the element unpaused. |
+| 19:56:43.417 | Unmatched native Pause, before a first frame, changes desired playback from true to false. |
+| 19:56:43.425 | A second unmatched Pause leaves desired playback false. |
+| 19:56:43.970 onward | Control reports Hold / Seeking at the same resume position, with no runway. |
+
+The shared transport handler infers viewer intent from an unowned media event.
+That moves startup to `paused`, where both the native startup deadline and
+stall diagnosis intentionally abstain. The result is indefinite Preparing.
+No internal Pause command or user Pause appears between Play and those events.
+The initial metadata-driven resume seek occurs in that interval; the evidence
+does not identify why WebKit paused. A later same-rendition Resume produced a
+first frame in 2.6 seconds and Close released it cleanly.
+
+The [input contract](../clients/PLAYER-INPUT-CONTRACT.md) already distinguishes
+viewer intent from an element paused during open or reattachment. Apply that
+boundary to the shared handler: explicit UI, keyboard and MediaSession commands
+remain authoritative throughout startup. Unmatched native events before proven
+presentation by the current attachment remain observations, retaining the
+original intent and bounded startup owner. Native/PiP event compatibility after
+presentation remains supported. This rule depends on attachment ownership and
+presentation, not browser name or a grace-period guess. A rejected `play()` call
+must retain its causal diagnostic rather than silently becoming viewer Pause.
+Its originating invocation remains identifiable after replacement. An
+`AbortError` is normal cancellation only when an owned pause or source change
+explicitly cancelled that exact pending invocation; a changed player identity
+alone does not prove cancellation. Other rejections remain faults, including
+late ones. Cause and disposition must use fields retained by server ingestion.
+
+## The original stale Activity entry still lacks a release outcome
 
 The original enhanced Chrome session eventually expired through the idle
-reaper. Its missing terminal log does not establish whether DELETE was absent
-or refused. The explicit-Close reproduction above did release successfully.
-The independent missing `pagehide` cleanup fixed in `c8cf1ee76` is useful, but
-does not explain an operator who remained in the document and used Close.
-Neither original observation is declared fixed by this lifecycle change.
+reaper at 19:59:55, five minutes after its last client activity. It has no
+terminal event, while neighboring sessions have `client_released` outcomes.
+Available logs show neither a DELETE rejection nor a successfully applied
+release. They cannot distinguish a dropped/unsent request from release of
+another handle. Activity polling did not extend its lifetime; the idle cleanup
+worked as designed. The explicit-Close reproduction above released cleanly.
+
+Source tracing identified an independently reproducible handle-loss path:
+Close snapshots `sessionId`, then `teardownHls` can cancel an unproven prepared
+switch and restore its predecessor. Close clears that restored ID while
+releasing only the previously captured successor. The predecessor survives
+until idle retirement. The common Close lifecycle must capture its bounded
+owned session set before cancellation/rollback, drain the decoders through
+their existing owners, then release those handles. Page exit delegates to
+that lifecycle rather than owning a special second drain. This addresses the
+ownership defect for both player Close and document exit; available original
+telemetry does not prove that the reported stale session took this path.
+
+## Local qualification and remaining acceptance
+
+The affected browser suites pass: **191 tests**, covering web control, native
+startup, surface policy, Close/pagehide, diagnostics and file context. Run with:
+
+```sh
+node --test tests/playback/web-control.test.js tests/playback/native-hls-startup.test.js tests/playback/web-policy.test.js tests/web/cinema-remote.test.js tests/web/file-context.test.js
+```
+
+The original transport handler fails the startup pause regression, and the
+original Close fails the prepared-rollback drain regression. The Linux process
+suite passes all eight private-window outcome tests plus the Source generation
+registration/Close/cancel resource-retention regression. Pinned Rust 1.97.1
+formatting and all-target Clippy pass on the source-only compiler copy;
+workspace/all-target Clippy also passes on the native development host.
+Static web checks pass with the existing type baseline unchanged.
+
+Deployment and physical acceptance remain open. Recheck same-tab enhanced
+Close/Resume, Safari resume-to-first-frame and Close during a prepared switch.
+Verify session release and diagnostic causes, not just the visible picture:
+normal shutdown must not exclude processing, genuine failed recovery must
+retain its originating fault, and no closed session should await idle expiry
+when its release succeeds. The original WebKit pause cause and historical
+stale-session release outcome remain unproven.

@@ -135,7 +135,8 @@ test("actual VOD desired pause remains local while progress reporting cannot rea
   Object.assign(h.context,{endWait:()=>{},supersedePlaybackControlIntent:()=>{},queuePlaybackTransportCommand:()=>{},
     PLAY_OPEN_GATE:{current:()=>false},play:()=>{},playerActivity:()=>{},reportProgress:()=>new Promise(()=>{}),notifyPlaybackControl:()=>{},
     pauseHlsStartup:()=>{},resumeHlsStartup:()=>{},playbackTransportMarker:()=>({}),PlaybackPolicy:policy});
-  for(const name of ["playbackTransportEvents","pausePlaybackInternally","rememberPlaybackTransportIntent","applyPlaybackTransportIntent"])
+  for(const name of ["playbackTransportEvents","prunePlaybackPlayInvocations","cancelPlaybackPlayInvocation",
+    "pausePlaybackInternally","rememberPlaybackTransportIntent","applyPlaybackTransportIntent"])
     vm.runInContext(shipped(name,"player/decode-margin.js"),h.context);
   for(const name of ["playerWantsPlayback","togglePlay","setPlayerPlaying"])vm.runInContext(shipped(name,"player/transport.js"),h.context);
   h.context.setPlayerPlaying(false);assert.equal(video.paused,true);assert.equal(h.context.PLAYER.wantsPlayback,false);
@@ -150,7 +151,8 @@ test("actual VOD close pauses and removes local source before pending progress o
     clearPlayerMediaSession:noop,supersedePlaybackControlIntent:noop,teardownHls:noop,releaseSession:()=>new Promise(()=>{}),
     finishPlaybackSeekTelemetry:noop,stopPlayerTimers:noop,clearInterval:noop,STATS_TIMER:null,resetPlaybackSurface:noop,
     cancelHlsStartup:noop,playbackTransportMarker:()=>({})});
-  for(const name of ["playbackTransportEvents","pausePlaybackInternally","rememberPlaybackTransportIntent","resetPlaybackTransportEvents","resetMediaSource"])
+  for(const name of ["playbackTransportEvents","prunePlaybackPlayInvocations","cancelPlaybackPlayInvocation",
+    "pausePlaybackInternally","rememberPlaybackTransportIntent","resetPlaybackTransportEvents","resetMediaSource"])
     vm.runInContext(shipped(name,"player/decode-margin.js"),h.context);
   vm.runInContext(shipped("closePlayer","player/stats.js"),h.context);
   h.context.closePlayer();assert.equal(video.paused,true);assert.equal(video.sourceRemoved,true);assert.equal(h.modal.classList.contains("open"),false);
@@ -181,7 +183,8 @@ function vodPageHideHarness(){
       return new Promise(()=>{});
     }});
   h.context.window.addEventListener=(event,fn)=>events.set(event,fn);
-  for(const name of ["playbackTransportEvents","pausePlaybackInternally","rememberPlaybackTransportIntent",
+  for(const name of ["playbackTransportEvents","prunePlaybackPlayInvocations","cancelPlaybackPlayInvocation",
+    "pausePlaybackInternally","rememberPlaybackTransportIntent",
     "resetPlaybackTransportEvents","resetMediaSource","destroyHlsInstance","teardownHls","retirePlaybackPredecessor"])
     vm.runInContext(shipped(name,"player/decode-margin.js"),h.context);
   vm.runInContext(shipped("releaseSession","player/directed-change.js"),h.context);
@@ -213,10 +216,11 @@ test("a bfcache VOD pagehide restores a closed player instead of a retired sessi
   assert.equal(h.video.sourceRemoved,true);assert.equal(h.modal.classList.contains("open"),false);
   assert.ok(h.calls.includes("release:cached"));
 });
-test("VOD pagehide releases both committing sessions when cancellation rolls back before Close captures its handle",()=>{
+function committingCloseHarness(){
   const h=vodPageHideHarness(),p=h.session("successor"),predecessor=h.session("predecessor");
   const retired=h.node("video-retired","VIDEO");
-  retired.pause=()=>{};retired.play=()=>Promise.resolve();retired.removeAttribute=()=>{};retired.load=()=>{};
+  retired.pause=()=>{retired.paused=true;};retired.play=()=>Promise.resolve();
+  retired.removeAttribute=name=>{if(name==="src")retired.sourceRemoved=true;};retired.load=()=>{};
   p.preparedCommitting={sessionId:"successor",hls:p.hls,
     predecessor:{sessionId:"predecessor",hls:predecessor.hls,element:retired}};
   h.context.PLAYER=p;
@@ -229,19 +233,59 @@ test("VOD pagehide releases both committing sessions when cancellation rolls bac
     }});
   for(const name of ["rollbackPreparedReplacement","cancelPreparedFirstFrame"])
     vm.runInContext(shipped(name,"player/prepared-switch-measurement.js"),h.context);
+  return {h,p,retired,noop};
+}
+test("VOD pagehide uses the common session drain when preparation cancellation rolls back",()=>{
+  const {h,p,noop}=committingCloseHarness();
   // A preparation's synchronous cancellation may restore the predecessor
-  // before Close snapshots sessionId. Exercise the shipped rollback, not a
-  // stub that assumes which of the two handles Close will release.
+  // during Close. Exercise the shipped rollback, not a stub that assumes
+  // which handle remains authoritative after cancellation.
   h.context.beginPlaybackPreparation.active={cancel:()=>h.context.cancelPreparedFirstFrame(p),finish:noop};
   h.hide(false);
   for(const id of ["successor","predecessor"]){
     assert.ok(h.calls.includes("release:"+id));
     assert.ok(h.calls.indexOf("destroy:"+id)<h.calls.indexOf("release:"+id));
   }
-  // The captured preparation is bounded to two handles; its predecessor can
-  // already have been released by Close, so a second idempotent DELETE is OK.
-  assert.equal(h.calls.filter(call=>call==="release:predecessor").length,2);
+  assert.equal(h.calls.filter(call=>call==="release:predecessor").length,1);
   assert.equal(p.sessionId,null);assert.equal(p.hls,null);assert.equal(p.preparedCommitting,null);
+});
+test("normal Close drains both committing sessions and the restored authoritative media source after rollback",()=>{
+  const {h,p,retired}=committingCloseHarness();
+  h.context.closePlayer();
+  for(const id of ["successor","predecessor"]){
+    assert.equal(h.calls.filter(call=>call==="release:"+id).length,1,id+" was not released exactly once");
+    assert.ok(h.calls.indexOf("destroy:"+id)<h.calls.indexOf("release:"+id));
+  }
+  assert.equal(retired.paused,true);assert.equal(retired.sourceRemoved,true);
+  assert.equal(p.sessionId,null);assert.equal(p.hls,null);assert.equal(p.preparedCommitting,null);
+});
+test("normal Close clears native session identity restored by timer teardown's committing rollback",()=>{
+  const {h,p,retired,noop}=committingCloseHarness();
+  p.hls=null;p.preparedCommitting.hls=null;p.preparedCommitting.predecessor.hls=null;
+  Object.assign(h.context,{clearPlaybackControlWaiters:noop,clearPendingSeekTimer:noop,clearTimeout:noop});
+  vm.runInContext(shipped("stopPlaybackControl","player/prepared-switch-measurement.js"),h.context);
+  vm.runInContext(shipped("stopPlayerTimers","player/decode-margin.js"),h.context);
+  h.context.closePlayer();
+  assert.equal(p.sessionId,null,"timer teardown restored an already released native session identity");
+  assert.equal(p.sharedDirect,null);assert.equal(p.preparedCommitting,null);
+  assert.equal(retired.paused,true);assert.equal(retired.sourceRemoved,true);
+  for(const id of ["successor","predecessor"])
+    assert.equal(h.calls.filter(call=>call==="release:"+id).length,1);
+});
+test("normal Close clears the Shared direct source before releasing its captured capability",()=>{
+  const h=vodPageHideHarness(),fetch=h.context.fetch;
+  const p={fileId:1,sessionId:null,sharedDirect:{session_id:"direct"},method:"direct_play"};
+  const outgoing={fileId:1,sessionId:null,sharedDirect:{session_id:"outgoing-direct"},method:"direct_play"};
+  p.mediaPredecessor=outgoing;
+  h.context.PLAYER=p;
+  h.context.fetch=(url,options)=>{
+    assert.equal(h.video.paused,true);assert.equal(h.video.sourceRemoved,true);
+    return fetch(url,options);
+  };
+  h.context.closePlayer();
+  assert.equal(p.sharedDirect,null);assert.equal(h.calls.filter(call=>call==="release:direct").length,1);
+  assert.equal(outgoing.sharedDirect,null);assert.equal(p.mediaPredecessor,null);
+  assert.equal(h.calls.filter(call=>call==="release:outgoing-direct").length,1);
 });
 test("VOD pagehide cancels an initial open before its session returns",()=>{
   const h=vodPageHideHarness();h.context.PLAYER=null;h.modal.classList.remove("open");

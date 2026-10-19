@@ -42,7 +42,7 @@ function qualityResourceTimingSources(){
   return source.slice(begin,end);
 }
 function transportTelemetrySources(){
-  return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker"].map(shippedSource).join("\n");
+  return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker","prunePlaybackPlayInvocations","cancelPlaybackPlayInvocation"].map(shippedSource).join("\n");
 }
 
 // Extracted intent owners retain the real next-episode invalidation edge.
@@ -1876,11 +1876,11 @@ async function main() {
     const next=fullPlayer();next.internalMediaReset=true;h.attach(next);
     assert.equal(h.video._plurxTransportEvents.pause.length,0,'load cancels the old queued pause expectation');
     h.handlePlaybackTransportEvent(h.video,next,'pause');
-    assert.equal(next.wantsPlayback,false,'native Pause during preparation remains a real command');
-    assert.equal(next.controlIntentGeneration,1);
+    assert.equal(next.wantsPlayback,true,'unowned preparation Pause cannot withdraw requested playback');
+    assert.equal(next.controlIntentGeneration||0,0);
     h.video.paused=false;
     h.handlePlaybackTransportEvent(h.video,next,'play');
-    assert.equal(next.wantsPlayback,true);assert.equal(next.controlIntentGeneration,2);
+    assert.equal(next.wantsPlayback,true);assert.equal(next.controlIntentGeneration||0,0);
     h.video.paused=true;h.applyPlaybackTransportIntent(h.video,next);
     next.wantsPlayback=false;
     h.handlePlaybackTransportEvent(h.video,next,'play');
@@ -1890,9 +1890,9 @@ async function main() {
     // Model HTML's queued media tasks: load/src remove old event tasks, while
     // pending play promise rejections can arrive after the new load has begun.
     const h=new PlaybackContextFunction([
-      "let PLAYER={wantsPlayback:true},queue=[];const plays=[];",
+      "let PLAYER={wantsPlayback:true,mediaAttachment:{}},queue=[];const plays=[];",
       "const v={paused:false,ended:false,removeAttribute(){},load(){queue=[];this.paused=true;},pause(){if(!this.paused){this.paused=true;queue.push('pause');}},play(){if(this.paused){this.paused=false;queue.push('play');}return new Promise((resolve,reject)=>plays.push({resolve,reject}));}};",
-      "Object.defineProperty(v,'src',{set(){v.load();}});",
+      "const document={getElementById:()=>v};PLAYER.transportPresentation={attachment:PLAYER.mediaAttachment,element:v};Object.defineProperty(v,'src',{set(){v.load();}});",
       "function supersedePlaybackControlIntent(p){p.generation=(p.generation||0)+1;}function endWait(){}",
       "function cancelHlsStartup(){}function pauseHlsStartup(){}function resumeHlsStartup(){}",
       // §3.1: the viewer's own transport intent is what tells the presenter a
@@ -1902,9 +1902,9 @@ async function main() {
       shippedSource("playbackTransportEvents"),shippedSource("resetPlaybackTransportEvents"),
       shippedSource("setPlaybackMediaSource"),shippedSource("resetMediaSource"),
       shippedSource("applyPlaybackTransportIntent"),shippedSource("handlePlaybackTransportEvent"),
-      "return {p:PLAYER,v,plays,surfaceEvents,reset:()=>resetMediaSource(v),source:()=>setPlaybackMediaSource(v,'new'),apply:()=>applyPlaybackTransportIntent(v,PLAYER),flush(){while(queue.length)handlePlaybackTransportEvent(v,PLAYER,queue.shift());}};",
+      "return {p:PLAYER,v,plays,surfaceEvents,reset:()=>resetMediaSource(v),source:()=>setPlaybackMediaSource(v,'new'),apply:()=>applyPlaybackTransportIntent(v,PLAYER),present(){PLAYER.mediaAttachment={};PLAYER.transportPresentation={attachment:PLAYER.mediaAttachment,element:v};},flush(){while(queue.length)handlePlaybackTransportEvent(v,PLAYER,queue.shift());}};",
     ].join("\n"))();
-    h.reset();h.apply();h.flush();
+    h.reset();h.apply();h.flush();h.present();
     h.v.pause();h.flush();
     assert.equal(h.p.wantsPlayback,false,'load-canceled internal pause cannot consume the next native Pause');
     h.p.wantsPlayback=true;h.apply();const old=h.plays.at(-1);
@@ -6946,12 +6946,12 @@ function establishedHlsResumeTests(){
     "const player={hls,mediaAttachment:attachment,wantsPlayback:true,controlIntentGeneration:1};PLAYER=player;",
     "const episode={player,attachment,hls,state:'presenting',establishedSuspension:null,retry:{state:'unused',timer:null}};player.hlsStartup=episode;",
     "const video={paused:false,ended:false,error:null,currentTime:44,pause(){this.paused=true;},play(){this.paused=false;return Promise.resolve();}};",
-    "const document={getElementById:id=>id==='video'?video:null};",
+    "const document={getElementById:id=>id==='video'?video:null};player.transportPresentation={attachment,element:video};",
     shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
     shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
     transportTelemetrySources(),shippedSource("pausePlaybackInternally"),shippedSource("rememberPlaybackTransportIntent"),
     shippedSource("applyPlaybackTransportIntent"),shippedSource("handlePlaybackTransportEvent"),
-    transportTelemetrySources(),shippedSource("togglePlay"),
+    transportTelemetrySources(),shippedSource("playerWantsPlayback"),shippedSource("togglePlay"),
     "return {calls,player,episode,video,toggle:togglePlay,native:event=>handlePlaybackTransportEvent(video,player,event),reset(){calls.length=0;episode.establishedSuspension=null;player.wantsPlayback=true;player.controlIntentGeneration=1;video.paused=false;resetPlaybackTransportEvents(video);}};",
   ].join("\n"))();
   edges.toggle();
@@ -7632,7 +7632,9 @@ test("native Pause/Play keeps a pending manual continuous choice and a fenced on
   const owner=continuousChangeOwner();
   for(const [edge,paused] of [["pause",true],["play",false]]){
     const h=continuousChangeHarness(owner),change=h.p.directedChange;
-    owner.handlePlaybackTransportEvent({paused,ended:false,error:null},h.p,edge);
+    h.p.transportPresentation={attachment:h.p.mediaAttachment,element:owner.video};
+    owner.video.paused=paused;owner.handlePlaybackTransportEvent(owner.video,h.p,edge);
+    assert.equal(h.p.controlIntentGeneration,5,`native ${edge} advances actual intent`);
     assert.equal(change.intentGeneration,h.p.controlIntentGeneration,`native ${edge} carries the pending manual choice`);
     h.release();
     assert.equal(await h.running,"continuous",`native ${edge} does not abandon the chosen rung`);

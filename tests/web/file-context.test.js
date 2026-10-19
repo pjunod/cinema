@@ -390,8 +390,6 @@ test("Shared direct attachment polls no status, starts no control, DELETEs its B
   const local={fileId:"7",fileContext:t.local("7"),meta:{}};t.set(local);assert.throws(()=>t.attach(v,local,info(sid),0));
   assert.equal(t.deletes.length,2);
   // Every owner that ends a player or its media releases the direct session.
-  assert.match(shippedFunction("player/stats.js","closePlayer"),/releaseSharedDirect\(PLAYER\)/);
-  assert.match(shippedFunction("player/decode-margin.js","retirePlaybackPredecessor"),/releaseSharedDirect\(predecessor\)/);
   assert.match(shippedFunction("player/decode-tiers.js","preparePlayOutgoing"),/releaseSharedDirect\(outgoing\)/);
 });
 test("Shared next episode dispatches to the Source-order resolver and a fresh authorized start, never a Local route",async()=>{

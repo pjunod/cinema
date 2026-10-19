@@ -671,6 +671,18 @@ async function reportProgress(fileId, ended, attachedOwner){
 function closePlayer(options={}){
   if(typeof translationRetire==="function")translationRetire("player closed");
   if(WATCH_CLOSE_PROMISE)return WATCH_CLOSE_PROMISE;
+  // Cancellation and first-frame rollback can change the authoritative
+  // handle. Capture every bounded owner before any teardown clears it.
+  const closingSessions=new Set();
+  const queueRelease=id=>{if(id)closingSessions.add(id);};
+  for(const owner of [PLAYER,PLAYER?.mediaPredecessor]){
+    if(!owner) continue;
+    queueRelease(owner.sessionId);queueRelease(owner.sharedDirect?.session_id);
+    for(const state of [owner.prepared,owner.preparedCommitting,
+      owner.preparedRetiring,owner.preparedControlPending]){
+      queueRelease(state?.sessionId);queueRelease(state?.predecessor?.sessionId);
+    }
+  }
   const closingWatch=watchDetach();
   const closingGeneration=WATCH_GENERATION;
   const closingRoute=location.hash;
@@ -691,8 +703,8 @@ function closePlayer(options={}){
   beginPlaybackPreparation.active?.finish();
   play.failedPreparation=null;
   play.pendingIntent=null;
-  retirePlaybackPredecessor(PLAYER);
-  const video=document.getElementById("video");
+  retirePlaybackPredecessor(PLAYER,queueRelease);
+  let video=document.getElementById("video");
   const player=document.getElementById("player");
   const opener=PLAYER&&PLAYER._opener;
   const openerClick=PLAYER&&PLAYER._openerClick;
@@ -715,19 +727,11 @@ function closePlayer(options={}){
   // the user has already closed. Closing doesn't replace PLAYER, so the
   // identity check alone would have let it through.
   if(PLAYER) PLAYER._seekToken=(PLAYER._seekToken||0)+1;
-  // Hand the encoder back now rather than letting the idle reaper find it a
-  // minute later. An AirPlay target fetching this same session keeps it alive
-  // by fetching; a browser that has closed the player is not going to.
-  // Destroy before releasing, as every other release site does. Both
-  // statements are in one synchronous turn so nothing could observe the old
-  // order, but a client that declares the hls.js release class is claiming
-  // destroy-before-DELETE at *every* one of its release sites, and a claim
-  // that happens to be true by scheduling is not one worth making.
-  const closingSessionId=PLAYER&&PLAYER.sessionId;
+  // Destroy before releasing. Rollback here may restore another session and
+  // media element; both handles already belong to the drain captured above.
   if(PLAYER&&PLAYER.hls) teardownHls();
   if(PLAYER) PLAYER.sessionId=null;
-  if(closingSessionId) releaseSession(closingSessionId);
-  if(PLAYER&&PLAYER.sharedDirect) releaseSharedDirect(PLAYER);
+  if(PLAYER) PLAYER.sharedDirect=null;
   // Disarm the pending seek as well as clearing it: a skip's self-commit is a
   // timer, and PLAYER survives the close, so an armed one would have fired
   // seekTo on a player the viewer had already left.
@@ -746,6 +750,14 @@ function closePlayer(options={}){
   stopPlayerTimers();
   if(PLAYER&&PLAYER.controlFrameCancel) PLAYER.controlFrameCancel();
   clearInterval(STATS_TIMER); STATS_TIMER=null; teardownHls();
+  // Native pipelines have no hls.js instance, so timer/control teardown may
+  // perform the first rollback and restore a handle after the early clear.
+  if(PLAYER){PLAYER.sessionId=null;PLAYER.sharedDirect=null;}
+  // First-frame rollback can have replaced #video since Close began. Clear
+  // the restored authoritative source, rather than its disposed successor.
+  video=document.getElementById("video")||video;
+  resetMediaSource(video);
+  for(const id of closingSessions) releaseSession(id);
   // The attempt is over, so every fault about it is about nothing. §3.6: the
   // model resets with the player.
   resetPlaybackSurface();
@@ -756,7 +768,6 @@ function closePlayer(options={}){
   const sk=document.getElementById("pskip"); if(sk){ sk.innerHTML=""; sk.dataset.k=""; }
   const pl=document.getElementById("player"); if(pl) pl.classList.remove("idle","statson");
   [...video.querySelectorAll("track")].forEach(t=>t.remove());
-  resetMediaSource(video);
   document.getElementById("modal").classList.remove("open");
   const app=document.getElementById("app"); if(app) app.inert=false;
   const restoreFocus=()=>{
