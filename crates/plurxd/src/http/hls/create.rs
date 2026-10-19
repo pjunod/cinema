@@ -1369,10 +1369,7 @@ pub(super) fn session_enhancement(
     };
     let setting = |key: &str| {
         snapshot.map(|snapshot| {
-            plurx_core::store::stored_switch(
-                snapshot.settings.get(key).map(String::as_str),
-                false,
-            )
+            plurx_core::store::stored_switch(snapshot.settings.get(key).map(String::as_str), false)
         })
     };
     plurx_core::playback::enhancement::playback_enhancement(&EnhancementFacts {
@@ -3586,8 +3583,8 @@ async fn create_with_purpose_inner(
                             unix_ms(),
                         );
                     }
-                    if let Some(receipt) = link_receipts::requested_receipt(&headers)
-                        .filter(|_| candidate_auto_policy)
+                    if let Some(receipt) =
+                        link_receipts::requested_receipt(&headers).filter(|_| candidate_auto_policy)
                     {
                         admitted = link_receipts::positive_catalog(
                             &state,

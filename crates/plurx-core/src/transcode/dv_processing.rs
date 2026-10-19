@@ -1318,7 +1318,10 @@ pub fn dv_plan_completed_window(
             "completed DV window: encoder has no reconstructed output contract",
         ));
     }
-    if !matches!(input.decoder, DecodeBackend::Software | DecodeBackend::Vaapi) {
+    if !matches!(
+        input.decoder,
+        DecodeBackend::Software | DecodeBackend::Vaapi
+    ) {
         return Err(invalid(
             "completed DV window: decoder has no processed-window contract",
         ));

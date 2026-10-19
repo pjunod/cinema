@@ -1222,8 +1222,10 @@ fn every_display_metadata_version_the_master_reconstruction_ignores_is_accepted(
             Some(ExtMetadataBlock::Level8(level8)) => assert_eq!(level8.length, 13),
             other => panic!("no L8 trim: {other:?}"),
         }
-        assert!(matches!(dm.get_block(9), Some(ExtMetadataBlock::Level9(level9))
-            if level9.source_primary_index == 2));
+        assert!(
+            matches!(dm.get_block(9), Some(ExtMetadataBlock::Level9(level9))
+            if level9.source_primary_index == 2)
+        );
         assert!(dm.get_block(11).is_some());
         raw
     }
