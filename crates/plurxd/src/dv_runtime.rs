@@ -1624,7 +1624,12 @@ mod private_window_outcome_tests {
         );
         assert_eq!(encoder_diagnostic_tail(b"frame=1\nprogress=end\n"), None);
         let long = "x".repeat(1000);
-        assert_eq!(encoder_diagnostic_tail(long.as_bytes()).unwrap().len(), 300);
+        assert_eq!(
+            encoder_diagnostic_tail(long.as_bytes())
+                .expect("a long line is kept, bounded")
+                .len(),
+            300
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1635,14 +1640,19 @@ mod private_window_outcome_tests {
         let ok = std::process::ExitStatus::from_raw(0);
         let failed = std::process::ExitStatus::from_raw(1 << 8);
         let stderr = b"Impossible to convert between the formats\nprogress=end\n";
-        let error = private_window_outcome(Vec::new(), stderr, ok).unwrap_err();
+        let error =
+            private_window_outcome(Vec::new(), stderr, ok).expect_err("an empty output is refused");
         assert!(error.contains("no output"), "{error}");
         assert!(error.contains("Impossible to convert"), "{error}");
         assert!(!error.contains("bound exceeded"), "{error}");
-        let error = private_window_outcome(vec![1], stderr, failed).unwrap_err();
+        let error = private_window_outcome(vec![1], stderr, failed)
+            .expect_err("a failed encoder is refused");
         assert!(error.starts_with("DV encoder failed:"), "{error}");
         assert!(error.contains("Impossible to convert"), "{error}");
-        assert_eq!(private_window_outcome(vec![7], b"", ok).unwrap(), vec![7]);
+        assert_eq!(
+            private_window_outcome(vec![7], b"", ok).expect("a successful output is kept"),
+            vec![7]
+        );
     }
 }
 

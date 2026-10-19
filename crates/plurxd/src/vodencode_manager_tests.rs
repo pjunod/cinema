@@ -225,7 +225,7 @@ fn processed_window_luma(
     let luma_bytes = width as usize * height as usize * 2;
     let frame_bytes = luma_bytes * 3 / 2;
     assert!(
-        !output.stdout.is_empty() && output.stdout.len() % frame_bytes == 0,
+        !output.stdout.is_empty() && output.stdout.len().is_multiple_of(frame_bytes),
         "{} decoded bytes for a {width}x{height} window",
         output.stdout.len()
     );
