@@ -123,10 +123,15 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         verified.observed.pictures.len(),
         usize::try_from(encoding.grid.frames_per_segment).expect("bounded frame count")
     );
-    let luma = processed_window_luma(&verified.bytes, false);
+    let raster = (
+        encoding.plan.output_contract().effective_width().expect("raster width"),
+        encoding.plan.output_contract().effective_height().expect("raster height"),
+    );
+    let elapsed = started.elapsed();
+    let luma = processed_window_luma(&verified.bytes, raster, false);
     println!(
         "{}",
-        serde_json::json!({"entry":0,"elapsed_ms":started.elapsed().as_millis(),
+        serde_json::json!({"entry":0,"elapsed_ms":elapsed.as_millis(),
         "decoder":format!("{:?}", verified.observed.decoder),"luma":luma,
         "bytes":verified.bytes.len(),"plan":selected.semantic_digest(),"receipt_frames":verified.receipt.as_ref().map(|receipt| receipt.served_frames().len()),
         "fel_frames":verified.receipt.as_ref().map(|receipt| receipt.counts().el_accepted)})
@@ -183,10 +188,11 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
                 .all(|picture| picture.el_shape.0 > 0));
         }
         // Twelve minutes in is picture, not an opening fade.
-        let luma = processed_window_luma(&verified.bytes, at == 360);
+        let elapsed = started.elapsed();
+        let luma = processed_window_luma(&verified.bytes, raster, at == 360);
         println!(
             "{}",
-            serde_json::json!({"entry":at,"elapsed_ms":started.elapsed().as_millis(),
+            serde_json::json!({"entry":at,"elapsed_ms":elapsed.as_millis(),
             "decoder":format!("{:?}", verified.observed.decoder),"luma":luma,
             "bytes":verified.bytes.len(),"plan":plan.semantic_digest(),"receipt_frames":verified.receipt.as_ref().map(|receipt| receipt.served_frames().len()),
         "fel_frames":verified.receipt.as_ref().map(|receipt| receipt.counts().el_accepted)})
@@ -195,32 +201,59 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
 }
 
 /// Decode a processed window and check its luma is a limited-range picture:
-/// inside 64..=940 and, where the film has picture, not flat. A wrong matrix,
-/// range or bit shift in the export leaves the range or collapses the spread.
-fn processed_window_luma(window: &[u8], expect_picture: bool) -> serde_json::Value {
+/// legal codes only, nominally 64..=940, and, where the film has picture, not
+/// flat. A wrong range or bit shift in the export fails these.
+fn processed_window_luma(
+    window: &[u8],
+    (width, height): (u32, u32),
+    expect_picture: bool,
+) -> serde_json::Value {
     let directory = crate::test_tempdir().expect("window decode directory");
     let path = directory.path().join("window.mp4");
     std::fs::write(&path, window).expect("window bytes");
+    if let Some(dump) = std::env::var_os("PLURX_DV_WINDOW_DUMP") {
+        let _ = std::fs::copy(&path, std::path::Path::new(&dump).join(format!("{expect_picture}-{}.mp4", window.len())));
+    }
+    // The decoder's own yuv420p10le, so no conversion touches the codes.
     let output = std::process::Command::new(crate::ffmpeg::ffmpeg_bin())
         .args(["-nostdin", "-v", "error", "-i"])
         .arg(&path)
-        .args(["-pix_fmt", "gray10le", "-f", "rawvideo", "pipe:1"])
+        .args(["-pix_fmt", "yuv420p10le", "-f", "rawvideo", "pipe:1"])
         .output()
         .expect("decode the processed window");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let luma_bytes = width as usize * height as usize * 2;
+    let frame_bytes = luma_bytes * 3 / 2;
+    assert!(
+        !output.stdout.is_empty() && output.stdout.len() % frame_bytes == 0,
+        "{} decoded bytes for a {width}x{height} window",
+        output.stdout.len()
+    );
     let codes: Vec<u16> = output
         .stdout
-        .chunks_exact(2)
+        .chunks_exact(frame_bytes)
+        .flat_map(|frame| frame[..luma_bytes].chunks_exact(2))
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
     assert!(!codes.is_empty(), "the window decodes to a picture");
     let (low, high) = codes
         .iter()
-        .fold((u16::MAX, 0), |(low, high), code| (low.min(*code), high.max(*code)));
+        .fold((u16::MAX, 0), |(low, high), code| {
+            (low.min(*code), high.max(*code))
+        });
     let mean = codes.iter().map(|code| u64::from(*code)).sum::<u64>() / codes.len() as u64;
+    // Encoded pictures may ring into the footroom near black, so the hard
+    // bound is the legal 10-bit range; the picture itself must sit in the
+    // nominal 64..=940 range. A full-range or bit-shifted export fails both.
+    let nominal = codes.iter().filter(|code| (64..=940).contains(*code)).count();
     assert!(
-        (64..=940).contains(&low) && (64..=940).contains(&high),
-        "luma {low}..{high} leaves the limited range"
+        (4..=1019).contains(&low) && (4..=1019).contains(&high),
+        "luma {low}..{high} uses reserved codes"
+    );
+    assert!(
+        nominal * 100 >= codes.len() * 98,
+        "only {nominal} of {} luma codes are in the nominal range ({low}..{high})",
+        codes.len()
     );
     assert!(
         !expect_picture || high - low >= 64,
