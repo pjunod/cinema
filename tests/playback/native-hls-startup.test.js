@@ -11,9 +11,13 @@ const policy=require('../../crates/plurxd/src/web/playback-policy.js');
 const master='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200000\nindex.m3u8\n';
 const media='#EXTM3U\n#EXT-X-TARGETDURATION:16\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:8,\nseg_0000.m4s\n#EXTINF:8,\nseg_0001.m4s\n#EXTINF:8,\nseg_0002.m4s\n';
 async function flush(){for(let i=0;i<16;i++)await new Promise(resolve=>setImmediate(resolve));}
-function harness({pendingOpen=false,pendingChange=false}={}){
- let now=0,ordinal=0;const timers=new Map(),answers=[],requests=[],sources=[],rescues=[],diagnoses=[],positions=[],listeners=new Map(),reopens=[],surfaces=[],stops=[];
- const video={readyState:0,videoWidth:0,currentTime:0,paused:true,currentSrc:'/session/master.m3u8',getAttribute:()=>'/session/master.m3u8',addEventListener(event,fn){listeners.set(event,fn);},removeEventListener(event,fn){if(listeners.get(event)===fn)listeners.delete(event);},removeAttribute(){},load(){},pause(){},play(){return Promise.resolve();}};
+function harness({pendingOpen=false,pendingChange=false,realTransport=false}={}){
+ let now=0,ordinal=0;const timers=new Map(),answers=[],requests=[],sources=[],rescues=[],diagnoses=[],positions=[],listeners=new Map(),reopens=[],surfaces=[],stops=[],logs=[];
+ const listenerSets=new Map();
+ const video={readyState:0,videoWidth:0,currentTime:0,paused:true,currentSrc:'/session/master.m3u8',getAttribute:()=>'/session/master.m3u8',
+  addEventListener(event,fn){let callbacks=listenerSets.get(event);if(!callbacks){callbacks=new Set();listenerSets.set(event,callbacks);}callbacks.add(fn);listeners.set(event,(...args)=>Promise.all([...callbacks].map(callback=>callback(...args))));},
+  removeEventListener(event,fn){const callbacks=listenerSets.get(event);callbacks?.delete(fn);if(!callbacks?.size)listeners.delete(event);},
+  removeAttribute(){},load(){},pause(){},play(){return Promise.resolve();}};
  const player={hls:null,wantsPlayback:true,method:'remux',sessionId:'retired',stallRecoveries:0,mediaAttachment:{},controlIntentGeneration:0,qualityCandidates:[],abr:{}};
  if(pendingOpen) player.pendingOpenAttempt={};
  if(pendingChange) player.pendingMediaChange={};
@@ -23,7 +27,7 @@ function harness({pendingOpen=false,pendingChange=false}={}){
   fetch:async(url,options)=>{requests.push({url,options});const answer=answers.shift();if(!answer)throw Error('No scripted answer');return typeof answer==='function'?answer(options):answer;},
   bufferTargets:()=>({}),parseSegTimes:text=>text.split('\n').filter(line=>line.startsWith('#EXTINF:')).map((_,i)=>(i+1)*8),
   setPlaybackMediaSource:(_,url)=>sources.push(url),applyPlaybackTransportIntent(){},applyPlaybackAttachmentPosition(){positions.push(true);},pausePlaybackInternally(){},resetPlaybackTransportEvents(){},
-  qualityCatalogSelectionCurrent:()=>true,notifyPlaybackControl(){},clearStall(){},playbackContext:()=>({}),clientLog(){},tok:x=>x,
+  qualityCatalogSelectionCurrent:()=>true,notifyPlaybackControl(){},clearStall(){},playbackContext:()=>({}),clientLog:row=>logs.push(row),tok:x=>x,
   pbTick(){},pbSyncPlayIcon(){},endWait(){},positionForPlaybackIntent:()=>42,stallRecoverySnapshot:(_p,_v,facts)=>facts,seekTo:(...args)=>reopens.push(args),showStallRecoveryFailure(){throw Error('unexpected recovery exhaustion');},playbackIsReal:()=>false,playbackSurfaceSourceIsBlocking:()=>true,stopPlayerForExhaustion:()=>stops.push(true),raisePlaybackSurface:(source,facts)=>surfaces.push(policy.presentSurface(policy.initialSurfaceState(),{raise:source,...facts,now_ms:now})),toast(){},
   startTranscodeFallback:(...args)=>rescues.push(args),stallDiagnose:()=>{diagnoses.push(true);return Promise.resolve();}});
  vm.runInContext(source,ctx);
@@ -32,11 +36,23 @@ function harness({pendingOpen=false,pendingChange=false}={}){
  vm.runInContext(shippedFunction("stall-diagnosis.js","playbackOwnsAttachedMedia"),ctx);
  vm.runInContext(shippedFunction("measurements.js","recoverServingFencedAttachment"),ctx);
  vm.runInContext(shippedFunction("transport.js","wirePlayerMedia"),ctx);
+ if(realTransport){
+  Object.assign(ctx,{playerActivity(){},reportTtff(){},settlePlaybackControlSeek(){},samplePlaybackPresentationClock(){},samplePreparedSwitchFrames(){},
+   playbackSurfaceStep(){},playbackSurfaceGeneration:()=>player.mediaAttachment,finishStallRecovery(){},streamHasVideo:()=>true,
+   supersedePlaybackControlIntent:p=>++p.controlIntentGeneration});
+  for(const name of ['resetPlaybackTransportEvents','playbackTransportEvents','playbackTransportRecord','logPlaybackTransportRecord',
+   'queuePlaybackTransportCommand','playbackTransportMarker','prunePlaybackPlayInvocations','cancelPlaybackPlayInvocation','pausePlaybackInternally','rememberPlaybackTransportIntent',
+   'applyPlaybackTransportIntent','handlePlaybackTransportEvent']) vm.runInContext(shippedFunction('decode-margin.js',name),ctx);
+  for(const name of ['playerWantsPlayback','togglePlay','playbackProgressTick','playbackWaitNeedsProgress','handlePlaybackPlaying'])
+   vm.runInContext(shippedFunction('transport.js',name),ctx);
+  video.pause=()=>{video.paused=true;};
+  video.play=()=>{video.paused=false;ctx.handlePlaybackTransportEvent(video,player,'play');return Promise.resolve();};
+ }
  ctx.wirePlayerMedia(video);
  const response=(text,status=200,type='application/vnd.apple.mpegurl')=>new Response(text,{status,headers:{'Content-Type':type}});
  ctx.attachNativeHls(video,'http://fixture.invalid/session/master.m3u8?token=fixture',0,player,{current:()=>ctx.current!==false});
  if(!pendingOpen&&!pendingChange){for(const [id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}}
- return {ctx,player,video,answers,requests,sources,rescues,diagnoses,positions,listeners,response,reopens,surfaces,stops,
+ return {ctx,player,video,answers,requests,sources,rescues,diagnoses,positions,listeners,response,reopens,surfaces,stops,logs,
   advance(ms){now+=ms;for(const [id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}},
   retry(){ctx.runNativeHlsReadiness(video,player,player.hlsStartup);},
   stop(){ctx.cancelHlsStartup(player,'test_done');},
@@ -64,6 +80,111 @@ test('native pause and expired resume retain the original readiness deadline',as
  h.player.wantsPlayback=true;h.player.controlIntentGeneration++;h.ctx.resumeHlsStartup(h.video,h.player);await flush();
  assert.equal(episode.deadlineMs,deadline);assert.equal(episode.state,'exhausted');assert.equal(h.sources.length,0);h.stop();
 });
+test('unowned startup pause is an observation and the original native deadline still diagnoses',async()=>{
+ const h=harness({realTransport:true});await flush();
+ h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();
+ const episode=h.player.hlsStartup,deadline=episode.deadlineMs,generation=h.player.controlIntentGeneration;
+ assert.equal(h.video.paused,false,'the owned startup Play was dispatched');
+ h.video.paused=true;h.listeners.get('pause')();h.listeners.get('pause')();
+ assert.equal(h.player.wantsPlayback,true);assert.equal(h.player.controlIntentGeneration,generation);
+ assert.equal(episode.state,'active');assert.equal(episode.deadlineMs,deadline);
+ const observed=h.logs.filter(row=>row.transport?.reason==='native_observation_before_presentation');
+ assert.equal(observed.length,2);assert.ok(observed.every(row=>row.transport.desired_after===true));
+ h.advance(deadline+1);await flush();h.advance(0);await flush();
+ assert.equal(episode.state,'exhausted');assert.equal(h.diagnoses.length,1);h.stop();
+});
+test('explicit Pause owns preparation and an unknown play cannot undo it',async()=>{
+ const h=harness({realTransport:true});await flush();h.ctx.togglePlay();
+ assert.equal(h.player.wantsPlayback,false);assert.equal(h.player.hlsStartup.state,'paused');
+ const generation=h.player.controlIntentGeneration;
+ h.video.paused=false;h.ctx.handlePlaybackTransportEvent(h.video,h.player,'play');
+ assert.equal(h.player.wantsPlayback,false);assert.equal(h.player.controlIntentGeneration,generation);
+ assert.equal(h.player.hlsStartup.state,'paused');h.stop();
+});
+test('native controls require presentation of this attachment and this element',async()=>{
+ const h=harness({realTransport:true});await flush();
+ h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();
+ let frames=0;h.video.getVideoPlaybackQuality=()=>({totalVideoFrames:frames});
+ h.ctx.handlePlaybackPlaying(h.video,h.player);h.ctx.playbackProgressTick(h.video,h.player,true);
+ frames++;h.video.currentTime=0.1;h.ctx.playbackProgressTick(h.video,h.player,true);
+ assert.equal(h.player.hlsStartup.state,'presenting');
+ h.video.paused=true;h.ctx.handlePlaybackTransportEvent(h.video,h.player,'pause');
+ assert.equal(h.player.wantsPlayback,false,'native/PiP Pause remains supported after actual presentation');
+ h.video.paused=false;h.ctx.handlePlaybackTransportEvent(h.video,h.player,'play');
+ assert.equal(h.player.wantsPlayback,true);
+ const generation=h.player.controlIntentGeneration;
+ h.ctx.handlePlaybackTransportEvent(h.video,h.player,'pause');
+ assert.equal(h.player.controlIntentGeneration,generation,'a queued Pause superseded by Play is only an observation');
+ assert.equal(h.logs.at(-1).transport.desired_after,true);
+ assert.equal(h.logs.at(-1).transport.reason,'native_observation_superseded');
+ h.ctx.handlePlaybackTransportEvent({...h.video,paused:true},h.player,'pause');
+ assert.equal(h.player.wantsPlayback,true,'a retired element cannot borrow current proof');
+ const lookup=h.ctx.document.getElementById,successor={...h.video};
+ h.ctx.document.getElementById=id=>id==='video'?successor:lookup(id);
+ h.video.paused=true;h.ctx.handlePlaybackTransportEvent(h.video,h.player,'pause');
+ assert.equal(h.player.wantsPlayback,true,'the actually proven predecessor cannot change successor intent after a DOM swap');
+ h.ctx.document.getElementById=lookup;
+ h.player.mediaAttachment={};h.video.paused=true;h.ctx.handlePlaybackTransportEvent(h.video,h.player,'pause');
+ assert.equal(h.player.wantsPlayback,true,'presentation from the predecessor cannot authorize a replacement Pause');h.stop();
+});
+test('play rejection retains original invocation identity and does not invent viewer Pause',async()=>{
+ const h=harness({realTransport:true});await flush();
+ h.player.attemptId='original';h.player.sessionId='original-session';
+ let reject;h.video.play=()=>new Promise((_resolve,no)=>{reject=no;});
+ h.ctx.applyPlaybackTransportIntent(h.video,h.player);
+ reject(Object.assign(new Error('secret source URL'),{name:'NotAllowedError',code:0}));await flush();
+ const failed=h.logs.find(row=>row.event==='transport_play_rejected');
+ assert.equal(failed.level,'warn');assert.equal(failed.session_id,'original-session');
+ assert.equal(h.player.wantsPlayback,true);
+ assert.match(failed.detail,/^rejected:NotAllowedError:code=0:status=none$/,'the accepted persisted detail retains the cause');
+ assert.equal(h.player.hlsStartup.state,'active');assert.equal(h.rescues.length,0);
+ assert.ok(!JSON.stringify(failed).includes('secret source URL'));
+ h.ctx.applyPlaybackTransportIntent(h.video,h.player);
+ h.player.mediaAttachment={};h.player.sessionId='replacement';h.player.attemptId='incoming';
+ reject(Object.assign(new Error('old abort'),{name:'AbortError'}));await flush();
+ const late=h.logs.filter(row=>row.event==='transport_play_rejected').at(-1);
+ assert.equal(late.level,'warn');assert.equal(late.session_id,'original-session');
+ assert.equal(late.attempt,'original');assert.match(late.detail,/^late_rejection:AbortError:/);h.stop();
+});
+test('owned pause and source commands cancel only their exact pending play invocations',async()=>{
+ for(const command of ['pause','reset','replace']){
+  const h=harness({realTransport:true});await flush();h.player.sessionId='original-session';
+  for(const name of ['resetMediaSource','setPlaybackMediaSource'])vm.runInContext(shippedFunction('decode-margin.js',name),h.ctx);
+  const pending=[];h.video.play=()=>new Promise((resolve,reject)=>pending.push({resolve,reject}));
+  h.ctx.applyPlaybackTransportIntent(h.video,h.player);h.ctx.applyPlaybackTransportIntent(h.video,h.player);
+  if(command==='pause')h.ctx.pausePlaybackInternally(h.video,'viewer_pause');
+  else if(command==='reset')h.ctx.resetMediaSource(h.video);
+  else h.ctx.setPlaybackMediaSource(h.video,'/replacement.m3u8');
+  assert.equal(h.player.transportPlayInvocation,null,'owned cancellation releases its pending invocation chain');
+  for(const request of pending)request.reject(Object.assign(new Error('cancelled'),{name:'AbortError'}));
+  await flush();
+  const cancelled=h.logs.filter(row=>row.event==='transport_play_cancelled');
+  assert.equal(cancelled.length,2,`${command} proves cancellation of both outstanding Play calls`);
+  assert.ok(cancelled.every(row=>row.level==='info'&&row.session_id==='original-session'&&/^cancelled:.*:AbortError:/.test(row.detail)));
+  assert.equal(h.logs.some(row=>row.event==='transport_play_rejected'),false);
+  assert.equal(h.player.hlsStartup.playRejection,null);h.stop();
+ }
+ const h=harness({realTransport:true});await flush();let reject;
+ h.video.play=()=>new Promise((_resolve,no)=>{reject=no;});h.ctx.applyPlaybackTransportIntent(h.video,h.player);
+ h.ctx.pausePlaybackInternally(h.video,'viewer_pause');
+ reject(Object.assign(new Error('actual failure'),{name:'NotSupportedError'}));await flush();
+ assert.equal(h.logs.at(-1).level,'warn','owned cancellation never hides a non-cancellation browser failure');h.stop();
+});
+test('direct outgoing teardown cancels Play before source replacement loses its owner',async()=>{
+ const h=harness({realTransport:true});await flush();h.player.method='direct';h.player.hls=null;
+ h.player.sessionId='outgoing-direct';h.player.attemptId='outgoing-attempt';
+ Object.assign(h.ctx,{abandonPreparedReplacement(){},supersedeDirectedChange(){},cancelPreparedFirstFrame(){}});
+ for(const name of ['teardownHls','setPlaybackMediaSource'])vm.runInContext(shippedFunction('decode-margin.js',name),h.ctx);
+ let reject;h.video.play=()=>new Promise((_resolve,no)=>{reject=no;});h.ctx.applyPlaybackTransportIntent(h.video,h.player);
+ h.ctx.teardownHls();assert.equal(h.video.paused,true,'retirement issues a real owned pause for direct media too');
+ vm.runInContext("PLAYER={sessionId:'incoming',mediaAttachment:{},wantsPlayback:true}",h.ctx);
+ h.ctx.setPlaybackMediaSource(h.video,'/incoming.mp4');
+ reject(Object.assign(new Error('old command aborted'),{name:'AbortError'}));await flush();
+ const cancelled=h.logs.find(row=>row.event==='transport_play_cancelled');
+ assert.equal(cancelled.session_id,'outgoing-direct');assert.equal(cancelled.attempt,'outgoing-attempt');
+ assert.match(cancelled.detail,/^cancelled:source_teardown:AbortError:/);
+ assert.equal(h.logs.some(row=>row.event==='transport_play_rejected'),false);h.stop();
+});
 test('native persistent rejection reloads once and refuses an absent encode route without rescue',async()=>{
  const h=harness();await flush();h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();
  const init=Buffer.from([0,0,0,16,102,116,121,112,105,115,111,109,0,0,0,0]);
@@ -86,9 +207,9 @@ test('native readiness metadata ownership survives pause and is retired on cance
  const h=harness();await flush();h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();
  const metadata=h.listeners.get('loadedmetadata');assert.equal(typeof metadata,'function');
  h.ctx.pauseHlsStartup(h.player);assert.equal(h.listeners.get('loadedmetadata'),metadata);
- metadata();assert.equal(h.positions.length,1);assert.equal(h.listeners.has('loadedmetadata'),false);h.stop();
+ metadata();assert.equal(h.positions.length,1);assert.equal(h.player.hlsStartup.native.metadataListener,null);h.stop();
  const stale=harness();await flush();stale.answers.push(stale.response(master),stale.response(media));stale.advance(1000);await flush();
- const old=stale.listeners.get('loadedmetadata');stale.stop();assert.equal(stale.listeners.has('loadedmetadata'),false);
+ const old=stale.listeners.get('loadedmetadata');stale.stop();assert.equal(stale.player.hlsStartup.native.metadataListener,null);
  old();assert.equal(stale.positions.length,0);
 });
 test('native persistent refusal admits one verified encode fallback with an unverified cause',async()=>{

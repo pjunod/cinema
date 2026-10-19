@@ -9,6 +9,18 @@ require("./prepared-frame-rendezvous.test.js");
 const fs = require("node:fs");
 const path = require("node:path");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
+const PREPARE_SESSION = "44444444-4444-4444-8444-444444444444";
+const PREPARE_ACTION_ID = "33333333-3333-4333-8333-333333333333";
+const PREPARE_FIXTURE = JSON.parse(`{
+  "type":"prepare",
+  "action_id":"${PREPARE_ACTION_ID}",
+  "session_id":"${PREPARE_SESSION}",
+  "playlist_url":"/api/v1/hls/${PREPARE_SESSION}/index.m3u8",
+  "media_origin_ms":0,
+  "effective_selection":{"quality_auto":true,"height":1080,
+    "audio_track":null,"subtitle_burn":null,"audio_offset_ms":0,
+    "codec":"server_selected","dynamic_range":"sdr"}}`);
+
 const TEST_CAPTURE_OWNER=Object.freeze({lifecycleId:"test-player",attachmentGeneration:1});
 const captureSnapshot=(value,intentGeneration=0,owner=TEST_CAPTURE_OWNER)=>
   control.capture(value,intentGeneration,owner);
@@ -42,7 +54,7 @@ function qualityResourceTimingSources(){
   return source.slice(begin,end);
 }
 function transportTelemetrySources(){
-  return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker"].map(shippedSource).join("\n");
+  return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker","prunePlaybackPlayInvocations","cancelPlaybackPlayInvocation"].map(shippedSource).join("\n");
 }
 
 // Extracted intent owners retain the real next-episode invalidation edge.
@@ -361,6 +373,31 @@ async function flushDeep() {
 }
 
 async function main() {
+  await test("Close and pagehide retain an unacknowledged commit's predecessor after decoder retirement",()=>{
+    for(const pagehide of [false,true]){
+      const h=preparedHarness();
+      const incumbent={destroyed:false,destroy(){this.destroyed=true;}};
+      const p=h.set({offset:0,vod:true,prepared:null,priorKbps:0,pendingMediaChange:null,wantsPlayback:true,sessionId:"accepted-predecessor",attemptId:"a1",hls:incumbent});
+      const state=h.handle({...PREPARE_FIXTURE});
+      h.instances[0].events.manifest();h.spare.ranges=[[0,30]];h.instances[0].events.append();
+      h.provePrepared();
+      assert.equal(h.queue().at(-1).state,"committed");
+      h.fireAll();
+      assert.equal(incumbent.destroyed,true);assert.equal(p.preparedRetiring,null);assert.equal(state.predecessor,null);
+      assert.equal(p.preparedControlPending.predecessorSessionId,"accepted-predecessor",
+        "decoder retirement erased the still-accepted predecessor's cleanup owner");
+      // No commit acknowledgement was accepted. Its predecessor still owns
+      // server playback even though the successor owns the visible decoder.
+      if(pagehide) h.pagehide();else h.close({routeLeave:true});
+      assert.equal(h.released.filter(id=>id==="accepted-predecessor").length,1);
+      assert.equal(h.released.filter(id=>id===PREPARE_SESSION).length,1);
+      assert.equal(h.instances[0].destroyed,true);
+      for(const release of h.releaseStates){assert.equal(release.paused,true);assert.equal(release.src,null);assert.equal(release.hls,null);}
+      assert.equal(p.sessionId,null);
+    }
+  });
+
+
   assert.equal(control.validBootstrap(bootstrap()), true);
   assert.equal(control.validBootstrap(Object.assign(bootstrap(), { control_epoch: 0 })), false);
   assert.equal(control.validBootstrap(Object.assign(bootstrap(), { url: "https://attacker/control" })), false);
@@ -1876,11 +1913,11 @@ async function main() {
     const next=fullPlayer();next.internalMediaReset=true;h.attach(next);
     assert.equal(h.video._plurxTransportEvents.pause.length,0,'load cancels the old queued pause expectation');
     h.handlePlaybackTransportEvent(h.video,next,'pause');
-    assert.equal(next.wantsPlayback,false,'native Pause during preparation remains a real command');
-    assert.equal(next.controlIntentGeneration,1);
+    assert.equal(next.wantsPlayback,true,'unowned preparation Pause cannot withdraw requested playback');
+    assert.equal(next.controlIntentGeneration||0,0);
     h.video.paused=false;
     h.handlePlaybackTransportEvent(h.video,next,'play');
-    assert.equal(next.wantsPlayback,true);assert.equal(next.controlIntentGeneration,2);
+    assert.equal(next.wantsPlayback,true);assert.equal(next.controlIntentGeneration||0,0);
     h.video.paused=true;h.applyPlaybackTransportIntent(h.video,next);
     next.wantsPlayback=false;
     h.handlePlaybackTransportEvent(h.video,next,'play');
@@ -1890,9 +1927,9 @@ async function main() {
     // Model HTML's queued media tasks: load/src remove old event tasks, while
     // pending play promise rejections can arrive after the new load has begun.
     const h=new PlaybackContextFunction([
-      "let PLAYER={wantsPlayback:true},queue=[];const plays=[];",
+      "let PLAYER={wantsPlayback:true,mediaAttachment:{}},queue=[];const plays=[];",
       "const v={paused:false,ended:false,removeAttribute(){},load(){queue=[];this.paused=true;},pause(){if(!this.paused){this.paused=true;queue.push('pause');}},play(){if(this.paused){this.paused=false;queue.push('play');}return new Promise((resolve,reject)=>plays.push({resolve,reject}));}};",
-      "Object.defineProperty(v,'src',{set(){v.load();}});",
+      "const document={getElementById:()=>v};PLAYER.transportPresentation={attachment:PLAYER.mediaAttachment,element:v};Object.defineProperty(v,'src',{set(){v.load();}});",
       "function supersedePlaybackControlIntent(p){p.generation=(p.generation||0)+1;}function endWait(){}",
       "function cancelHlsStartup(){}function pauseHlsStartup(){}function resumeHlsStartup(){}",
       // §3.1: the viewer's own transport intent is what tells the presenter a
@@ -1902,9 +1939,9 @@ async function main() {
       shippedSource("playbackTransportEvents"),shippedSource("resetPlaybackTransportEvents"),
       shippedSource("setPlaybackMediaSource"),shippedSource("resetMediaSource"),
       shippedSource("applyPlaybackTransportIntent"),shippedSource("handlePlaybackTransportEvent"),
-      "return {p:PLAYER,v,plays,surfaceEvents,reset:()=>resetMediaSource(v),source:()=>setPlaybackMediaSource(v,'new'),apply:()=>applyPlaybackTransportIntent(v,PLAYER),flush(){while(queue.length)handlePlaybackTransportEvent(v,PLAYER,queue.shift());}};",
+      "return {p:PLAYER,v,plays,surfaceEvents,reset:()=>resetMediaSource(v),source:()=>setPlaybackMediaSource(v,'new'),apply:()=>applyPlaybackTransportIntent(v,PLAYER),present(){PLAYER.mediaAttachment={};PLAYER.transportPresentation={attachment:PLAYER.mediaAttachment,element:v};},flush(){while(queue.length)handlePlaybackTransportEvent(v,PLAYER,queue.shift());}};",
     ].join("\n"))();
-    h.reset();h.apply();h.flush();
+    h.reset();h.apply();h.flush();h.present();
     h.v.pause();h.flush();
     assert.equal(h.p.wantsPlayback,false,'load-canceled internal pause cannot consume the next native Pause');
     h.p.wantsPlayback=true;h.apply();const old=h.plays.at(-1);
@@ -2246,17 +2283,6 @@ async function main() {
   // and eight sites read `action_id`, and `playlist_url`, `media_origin_ms`
   // and `effective_selection` are asserted nowhere. This fixture is what
   // catches the `prepare` / `prepare_replacement` trap in both directions.
-  const PREPARE_SESSION = "44444444-4444-4444-8444-444444444444";
-  const PREPARE_ACTION_ID = "33333333-3333-4333-8333-333333333333";
-  const PREPARE_FIXTURE = JSON.parse(`{
-    "type":"prepare",
-    "action_id":"${PREPARE_ACTION_ID}",
-    "session_id":"${PREPARE_SESSION}",
-    "playlist_url":"/api/v1/hls/${PREPARE_SESSION}/index.m3u8",
-    "media_origin_ms":0,
-    "effective_selection":{"quality_auto":true,"height":1080,
-      "audio_track":null,"subtitle_burn":null,"audio_offset_ms":0,
-      "codec":"server_selected","dynamic_range":"sdr"}}`);
   assert.equal(PREPARE_FIXTURE.type, "prepare", "the wire tag is `prepare`");
   assert.equal(control.PREPARE_REPLACEMENT_ACTION, "prepare_replacement",
     "the DECLARED name is `prepare_replacement` — the two differ, and only here");
@@ -4083,6 +4109,7 @@ async function main() {
       pause() { this.paused = true; },
       load() { this.loads += 1; },
       removeAttribute(name) { if (name === "src") this.src = null; delete this.attributes[name]; },
+      querySelectorAll() { return []; },
       setAttribute(name, value) { this.attributes[name] = value; },
       addEventListener(name, fn) { (this.listeners[name] = this.listeners[name] || []).push(fn); },
       removeEventListener(name, fn) {
@@ -4098,6 +4125,8 @@ async function main() {
     // leaves the page with its listeners.
     const created = [];
     const attached = [live];
+    const closeNodes = new Map(["modal", "player", "app"].map(id => [id,
+      { style: {}, classList: { contains: value => value === "open", remove() {} } }]));
     const parent = {
       appendChild(node) { node.parentNode = parent; attached.push(node); },
       removeChild(node) {
@@ -4109,7 +4138,7 @@ async function main() {
     };
     live.parentNode = parent;
     const document = {
-      getElementById: (id) => attached.find((node) => node.id === id) || null,
+      getElementById: (id) => attached.find((node) => node.id === id) || closeNodes.get(id) || null,
       createElement: () => {
         const node = element("");
         node.buffered.owner = node;
@@ -4147,6 +4176,13 @@ async function main() {
       "handleEnded", "renderPlayerInfo", "pbTick", "pbSyncPlayIcon", "SHARED_DECISION",
       [
         "let PLAYER=null; let quality='auto';const localStorage={getItem:()=>quality,setItem:(key,value)=>{quality=value;}};",
+        "let WATCH_CLOSE_PROMISE=null,WATCH_GENERATION=0,WATCH=null,STATS_TIMER=null; const location={hash:'#/'};",
+        "const beginPlaybackPreparation={};const released=[],releaseStates=[];",
+        "const PLAY_OPEN_GATE={invalidate(){},current(){return false;}};",
+        "function watchDetach(){return null;}function reportProgress(){return Promise.resolve();}",
+        "function exitPresentationModes(){}function clearPlayerMediaSession(){}function cancelPendingSeek(){}function resetPlaybackSurface(){}",
+        "function stopPlayerTimers(){stopPlaybackControl(PLAYER);}",
+        "function releaseSession(id){released.push(id);const v=document.getElementById('video');releaseStates.push({id,paused:v.paused,src:v.src,hls:PLAYER.hls});}",
         "function playbackContext(){return {};}",
         "function cancelHlsStartup(){}",
         // The sampling tick refreshes the wait sentence before each presenter
@@ -4228,6 +4264,8 @@ async function main() {
         transportTelemetrySources(),shippedSource("pausePlaybackInternally"),
         shippedSource("settleDirectedChange"),qualityCancellationSources(), shippedSource("supersedeDirectedChange"),
         shippedSource("teardownHls"),
+        shippedSource("retirePlaybackPredecessor"),shippedSource("resetMediaSource"),
+        shippedSource("stopPlaybackControl"),shippedSource("closePlayer"),shippedSource("closeVodForPageHide"),
         // ---- the directed change, end to end -----------------------------
         "let PENDING_ATTEMPT_REASON=null; const plays=[],mediaChanges=[];",
         "function playbackSurfaceStep(){return null;}",
@@ -4289,7 +4327,7 @@ async function main() {
         " selection(){return playbackControlSelection(PLAYER);},",
         " requestedRung(){return PLAYER&&PLAYER.autoRequestedHeight;},",
         " commit(){return commitPreparedReplacement(PLAYER,preparedState(PLAYER));},",
-        " plays, mediaChanges,",
+        " plays, mediaChanges,released,releaseStates,close:closePlayer,pagehide:closeVodForPageHide,",
         " surfaceRaised};",
       ].join("\n"),
     );
@@ -4376,6 +4414,7 @@ async function main() {
 
   await test("prepared HLS buffer readiness follows incumbent clock and releases listener ownership",
     ()=>preparedBufferObservationTests(preparedHarness,preparedPlayer,prepareAction));
+
 
   // A warmed successor remains under the incumbent until aligned advancing
   // successor frames meet a fresh incumbent frame.
@@ -6946,12 +6985,12 @@ function establishedHlsResumeTests(){
     "const player={hls,mediaAttachment:attachment,wantsPlayback:true,controlIntentGeneration:1};PLAYER=player;",
     "const episode={player,attachment,hls,state:'presenting',establishedSuspension:null,retry:{state:'unused',timer:null}};player.hlsStartup=episode;",
     "const video={paused:false,ended:false,error:null,currentTime:44,pause(){this.paused=true;},play(){this.paused=false;return Promise.resolve();}};",
-    "const document={getElementById:id=>id==='video'?video:null};",
+    "const document={getElementById:id=>id==='video'?video:null};player.transportPresentation={attachment,element:video};",
     shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
     shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
     transportTelemetrySources(),shippedSource("pausePlaybackInternally"),shippedSource("rememberPlaybackTransportIntent"),
     shippedSource("applyPlaybackTransportIntent"),shippedSource("handlePlaybackTransportEvent"),
-    transportTelemetrySources(),shippedSource("togglePlay"),
+    transportTelemetrySources(),shippedSource("playerWantsPlayback"),shippedSource("togglePlay"),
     "return {calls,player,episode,video,toggle:togglePlay,native:event=>handlePlaybackTransportEvent(video,player,event),reset(){calls.length=0;episode.establishedSuspension=null;player.wantsPlayback=true;player.controlIntentGeneration=1;video.paused=false;resetPlaybackTransportEvents(video);}};",
   ].join("\n"))();
   edges.toggle();
@@ -7632,7 +7671,9 @@ test("native Pause/Play keeps a pending manual continuous choice and a fenced on
   const owner=continuousChangeOwner();
   for(const [edge,paused] of [["pause",true],["play",false]]){
     const h=continuousChangeHarness(owner),change=h.p.directedChange;
-    owner.handlePlaybackTransportEvent({paused,ended:false,error:null},h.p,edge);
+    h.p.transportPresentation={attachment:h.p.mediaAttachment,element:owner.video};
+    owner.video.paused=paused;owner.handlePlaybackTransportEvent(owner.video,h.p,edge);
+    assert.equal(h.p.controlIntentGeneration,5,`native ${edge} advances actual intent`);
     assert.equal(change.intentGeneration,h.p.controlIntentGeneration,`native ${edge} carries the pending manual choice`);
     h.release();
     assert.equal(await h.running,"continuous",`native ${edge} does not abandon the chosen rung`);
@@ -8038,6 +8079,66 @@ test("cached captions follow the attached local or shared owner namespace and fe
   }
 });
 
+
+function processedCatalogRefreshFixture(){
+  const processed={id:"a".repeat(32),recipe_digest:Array(32).fill(10),route:"encode",
+    processed_hdr10:true,planned_codec:"hevc",grade:"hdr10",decoder_compatible:true,
+    sustainable:true,complete_cache:false,width:3840,height:2160,target_height:2160,peak_bps:30000000};
+  const player={mediaAttachment:{},controlIntentGeneration:1,sessionId:"processed-session",
+    qualityProtocol:"route-v1",qualityCandidateId:processed.id,qualityCandidates:[processed],
+    curSub:-1,burnedSub:null,aoffset:0,audio:0,
+    abr:{requestedCandidateId:processed.id,catalogSelectionKey:JSON.stringify([0,-1,null,0])}};
+  const h=new Function("PLAYER",[
+    "const SERVER={playback_display_aware_auto:true,display_aware_auto_protocol:'route-v1'};",
+    "let answer={quality_candidates:PLAYER.qualityCandidates.map(row=>({...row,recipe_digest:[...row.recipe_digest]}))},quality='auto';",
+    "function currentCapsDocument(){return {video:[],display:{}};}function selectedAudioIndex(p){return p.audio;}",
+    "function playQuality(){return quality;}function qualityForce(){return quality;}function playbackFileContextForPlayer(){return {};}",
+    "async function askDecision(){return answer;}function continuousQualityBoundCatalog(rows){return rows;}",
+    ...["qualityCatalogSelectionKey","qualityCatalogSelectionCurrent","playbackControlSelection",
+      "candidateQualityContext","refreshQualityCandidates"].map(shippedSource),
+    "return {player:PLAYER,answer,refresh:()=>refreshQualityCandidates(PLAYER),selection:()=>playbackControlSelection(PLAYER,true),setQuality:value=>quality=value};",
+  ].join("\n"))(player);
+  return {...h,processed};
+}
+
+test("processed Auto catalog refresh retains exact running recipe in the next control selection",async()=>{
+  const h=processedCatalogRefreshFixture();
+  const before=h.selection();
+  assert.equal(await h.refresh(),true);
+  assert.deepEqual(h.selection(),before,"a capability catalog refresh must not ask the owner to replace HDR10-E with unnamed Auto");
+  assert.deepEqual(h.selection().quality,{mode:"auto",candidate_id:h.processed.id,height:2160});
+});
+
+test("processed Auto catalog refresh clears a missing, changed or incompatible recipe and a changed track selection",async()=>{
+  for(const change of [h=>{h.answer.quality_candidates=[];},
+    h=>{h.answer.quality_candidates[0].recipe_digest[31]++;},
+    h=>{h.answer.quality_candidates[0].decoder_compatible=false;},
+    h=>{h.player.audio=1;}]){
+    const h=processedCatalogRefreshFixture();change(h);
+    assert.equal(await h.refresh(),true);
+    assert.deepEqual(h.selection().quality,{mode:"auto"});
+  }
+});
+
+test("processed Auto catalog refresh still permits pressure downshift and preserves manual quality",async()=>{
+  const h=processedCatalogRefreshFixture();
+  const lower={...h.processed,id:"b".repeat(32),recipe_digest:Array(32).fill(11),
+    processed_hdr10:false,width:1920,height:1080,target_height:1080,peak_bps:10000000};
+  h.answer.quality_candidates.push(lower);
+  await h.refresh();
+  const policy=require("../../crates/plurxd/src/web/playback-policy.js");
+  const decision=policy.decideCandidateTransition({state:{},candidates:h.player.qualityCandidates,
+    currentId:h.selection().quality.candidate_id,sample:{now_ms:1000,automatic:true,presenting:true,
+      cause:"link",cause_age_ms:0,stalled:true,runway_ms:1000,
+      transfer:{completed:true,from_cache:false,producer_paced:false,bytes:1500000,elapsed_ms:1000,age_ms:0}}});
+  assert.equal(decision.candidate.id,lower.id,"retaining the request identity must not lock Auto at its current rung");
+  h.setQuality("720");
+  assert.deepEqual(h.selection().quality,{mode:"manual",height:720});
+  const ordinary=processedCatalogRefreshFixture();
+  ordinary.player.qualityCandidates[0].processed_hdr10=false;
+  await ordinary.refresh();
+  assert.deepEqual(ordinary.selection().quality,{mode:"auto"},"ordinary Auto keeps its existing refresh behavior");
+});
 
 test("paused subtitle selection projects ordinal zero and Off immediately", async () => {
   const policy=require("../../crates/plurxd/src/web/playback-policy.js");

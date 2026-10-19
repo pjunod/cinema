@@ -8,6 +8,10 @@ a document to this folder.
 | File | Answers | |
 |---|---|---|
 | [PROJECT-BACKLOG.md](PROJECT-BACKLOG.md) | Cross-project to-do: designed but unbuilt work, remaining acceptance, reconciliations and deferred decisions. | live |
+| [DESKTOP-TRAY-IMPLEMENTATION.md](DESKTOP-TRAY-IMPLEMENTATION.md) | macOS/Linux desktop server controls, separate startup policies, signed GitHub release upgrades, task ownership and native/package acceptance. | open |
+| [DESKTOP-TRAY-QUALIFICATION.md](DESKTOP-TRAY-QUALIFICATION.md) | Complete tray cohort, retained focused evidence, native qualification, review and promotion gaps. | open |
+| [DESKTOP-UPGRADE-TRANSACTION.md](DESKTOP-UPGRADE-TRANSACTION.md) | Desktop tray plan §6: standalone/cluster shutdown, package lock/cohort rules, pre-start recovery and migration-aware rollback. | open |
+| [DESKTOP-TRAY-REVIEW.md](DESKTOP-TRAY-REVIEW.md) | Independent Astra plan review, R1–R8 dispositions and exact-candidate approval. | done |
 | [REMOTE-DIAGNOSTICS-IMPLEMENTATION.md](REMOTE-DIAGNOSTICS-IMPLEMENTATION.md) | Current archive-attachment contract and historical hosted-delivery design for web, Apple and Android diagnostic capture. | open |
 | [REMOTE-DIAGNOSTICS-STATUS.md](REMOTE-DIAGNOSTICS-STATUS.md) | Canonical ownership, archive qualification, deferred hosted delivery and promotion ledger for diagnostics. | open |
 | [SHARED-LIBRARIES-DESIGN.md](SHARED-LIBRARIES-DESIGN.md) | Why Cinema shares selected libraries over private Tailscale; scope and deferred Plex/Watch Together work. | open |

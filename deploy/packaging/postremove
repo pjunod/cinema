@@ -2,6 +2,11 @@
 # plurxd package post-removal. The library database, caches and the plurx
 # user stay: removing the package never deletes a server's state.
 set -e
+if [ -x /usr/lib/plurx-control/plurx-install-helper ]; then
+  joined=0
+  /usr/lib/plurx-control/plurx-install-helper package-script postremove server -- "$@" || joined=$?
+  case $joined in 0) ;; 10) exit 0 ;; *) exit "$joined" ;; esac
+fi
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload >/dev/null 2>&1 || true
 fi

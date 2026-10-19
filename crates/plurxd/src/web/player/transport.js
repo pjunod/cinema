@@ -355,8 +355,8 @@ function playbackProgressTick(v,p,frameSample=false){
   }
   const key=`${p._seekToken||0}:${p.controlIntentGeneration||0}:${pending?.sequence||0}:${frameSource}`;
   let watch=p.progressWatch;
-  if(!watch||watch.key!==key){
-    watch=p.progressWatch={key,clock,frames,at:now,startedAt:now,fired:false};
+  if(!watch||watch.key!==key||watch.attachment!==p.mediaAttachment||watch.element!==v){
+    watch=p.progressWatch={key,attachment:p.mediaAttachment,element:v,clock,frames,at:now,startedAt:now,fired:false};
   }
   const moved=clock>watch.clock+0.01 && (frames==null||frames>watch.frames);
   if(frameSample){
@@ -384,6 +384,7 @@ function playbackProgressTick(v,p,frameSample=false){
   // decoder emits both and can still present nothing.
   playbackSurfaceStep({presenting:moved,attached:playbackSurfaceGeneration(p)});
   if(moved){
+    p.transportPresentation={attachment:p.mediaAttachment,element:v};
     watch.clock=clock; watch.frames=frames; watch.at=now;
     p.presentationAdvancedAt=now;
     // The assigned element clock and cumulative callback count cannot prove
@@ -782,11 +783,25 @@ function handlePlaybackPlaying(v,p){
   playerActivity(); settlePlaybackControlSeek(v,p); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl();
   if(first&&!hlsStartupIncomplete(p)) reportTtff();
 }
+// A reload or tab close does not pass through the player's Close button.
+// End even a page entering bfcache: restoring it restores the closed modal,
+// rather than a decoder whose server session was retired while it was frozen.
+function closeVodForPageHide(){
+  const p=PLAYER;
+  const preparation=/** @type {typeof beginPlaybackPreparation & {active?:unknown}} */ (beginPlaybackPreparation);
+  if(!(document.getElementById("modal")?.classList.contains("open")
+    ||p?.sessionId||p?.sharedDirect||p?.mediaPredecessor
+    ||hasPendingPlaybackOpen(p)||preparation.active)) return;
+  // Close tears down every decoder synchronously, before its keepalive
+  // DELETEs. Its progress/detail refresh must not delay unload cleanup.
+  closePlayer({routeLeave:true}).catch(()=>{});
+}
 // Attach the persistent listeners once; they read live PLAYER state each fire.
 function wirePlayer(){
   if(PLAYER_WIRED) return; PLAYER_WIRED=true;
   const p=document.getElementById("player"), v=document.getElementById("video");
   if(!p||!v) return;
+  window.addEventListener("pagehide",closeVodForPageHide);
   // Deliberately no "keydown": a second listener that reveals the chrome is a
   // second answer to what a key does, and it made every `ignore` row in the
   // routing table have an effect anyway. The adapter reveals where the

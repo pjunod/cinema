@@ -5,6 +5,9 @@
 # The marker in the kept state directory tells a later install that the
 # package is arriving again, so it re-enables the service (see post-install).
 set -e
+joined=0
+/usr/lib/plurx-control/plurx-install-helper package-script preremove server -- "$@" || joined=$?
+case $joined in 0) ;; 10) exit 0 ;; *) exit "$joined" ;; esac
 case "${1:-}" in
   remove|0)
     if [ -d /var/lib/plurx ]; then
