@@ -58,7 +58,7 @@ function buildHomeSections(batch,group=homeGroup()){
 async function viewHome(generation=++PAGE_RENDER_GENERATION){
   const route=location.hash;
   const page={kind:"home",
-    hubs:{continue_watching:[],next_up:[],recently_added:[]},
+    hubs:{continue_watching:[],next_up:[],recently_added:[]},lists:{watchlist:[],favorite:[]},
     soon:{configured:false,entries:[]},libs:[],group:homeGroup(),sections:[],
     hubsPending:true,previewsPending:true,soonPending:true,
     hubsError:false,previewsError:false,soonError:false};
@@ -104,7 +104,32 @@ async function viewHome(generation=++PAGE_RENDER_GENERATION){
       return true; // even an empty roster paints the useful "No libraries" state
     }),
     region("soon",api("/coming-soon"),value=>{ page.soon=value; return !!(value.entries||[]).length; }),
+    // The reader's lists paint into the hubs region, so a person with none
+    // sees exactly the Home they always did.
+    Promise.all([api("/lists/watchlist?limit=20"),api("/lists/favorite?limit=20")]).then(([w,f])=>{
+      if(!current()) return;
+      page.lists={watchlist:w.items||[],favorite:f.items||[]};
+      if(page.lists.watchlist.length||page.lists.favorite.length) commit("hubs",!page.hubsPending);
+    }).catch(()=>{ /* Home stays whole without the lists. */ }),
   ]);
   if(!current()) return;
   setPagePhase(route,generation,"settled");
+}
+
+// #/list/watchlist · #/list/favorite — one of the reader's lists, whole.
+async function viewList(list){
+  const generation=PAGE_RENDER_GENERATION,route=location.hash;
+  const title=list==="favorite"?"Favorites":"Watchlist";
+  layoutChrome("home",`<div class="empty">Loading…</div>`);
+  let r;
+  try{ r=await api(`/lists/${encodeURIComponent(list)}`); }
+  catch(e){ if(generation===PAGE_RENDER_GENERATION&&location.hash===route) document.getElementById("main").innerHTML=`<div class="empty">${esc(e.message)}</div>`; return; }
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
+  setOrigin(route,title);
+  const items=r.items||[];
+  const head=pageHead([{href:"#/",label:"Home"},{label:title}],title);
+  const empty=list==="favorite"
+    ? "Nothing here yet. Use the heart on a movie or show to add it."
+    : "Nothing here yet. Add movies and shows with Watchlist on their page; a movie leaves once you have watched it.";
+  document.getElementById("main").innerHTML=head+(items.length?grid(items):`<div class="empty">${empty}</div>`);
 }

@@ -172,6 +172,8 @@ pub(crate) fn replicated_media_sessions_schema() -> &'static str {
 #[doc(hidden)]
 pub use hiqlite::validation_time_http_store_operation;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_annotations;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_background_jobs;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_catalog;
@@ -247,6 +249,7 @@ mod background_jobs_tests;
 pub mod background_jobs_transcode;
 pub mod background_jobs_transcription;
 pub mod classification_schedule;
+mod library_annotations_schema;
 pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
@@ -3693,6 +3696,57 @@ pub trait WatchStore: Send + Sync + 'static {
     ) -> Result<(), StoreError>;
 }
 
+/// Review-site scores per item, and the lists (watchlist, favorites) each
+/// person keeps. Neither is catalogue metadata: scores are a provider cache
+/// refetched on their own clock, and lists belong to one person.
+#[async_trait]
+pub trait AnnotationStore: Send + Sync + 'static {
+    /// The scores stored for an item, or `None` when none were ever fetched.
+    async fn item_ratings(
+        &self,
+        item_id: i64,
+    ) -> Result<Option<crate::annotations::ItemRatings>, StoreError>;
+    /// Replace an item's scores with one fetch's answer: a source missing from
+    /// `ratings` is gone. Writes nothing for an item deleted meanwhile.
+    async fn put_item_ratings(
+        &self,
+        item_id: i64,
+        ratings: &crate::annotations::ItemRatings,
+    ) -> Result<(), StoreError>;
+    /// Put an item on, or take it off, one of a person's lists. Idempotent;
+    /// putting it on again moves it to the front. Writes nothing for an item
+    /// that does not exist.
+    async fn set_item_listed(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        list: crate::annotations::ItemList,
+        listed: bool,
+        at_ms: i64,
+    ) -> Result<(), StoreError>;
+    /// Which of a person's lists one item is on.
+    async fn item_list_flags(
+        &self,
+        user_id: i64,
+        item_id: i64,
+    ) -> Result<crate::annotations::ItemListFlags, StoreError>;
+    /// One of a person's lists, most recently added first.
+    async fn listed_items(
+        &self,
+        user_id: i64,
+        list: crate::annotations::ItemList,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<crate::annotations::ListedItem>, StoreError>;
+    /// Which of `item_ids` are on a person's list, ascending.
+    async fn items_on_list(
+        &self,
+        user_id: i64,
+        list: crate::annotations::ItemList,
+        item_ids: &[i64],
+    ) -> Result<Vec<i64>, StoreError>;
+}
+
 /// Per-user text-publication state. It is separate from [`WatchStore`]
 /// because a reflowable locator is not timed playback and completion is an
 /// explicit reader action rather than a 95% threshold.
@@ -5743,6 +5797,7 @@ pub trait Store:
     + ClassificationStore
     + WatchStore
     + ReadingStore
+    + AnnotationStore
     + TraktStore
     + WatchedOutboxStore
     + TranscodeCacheStore
@@ -5802,6 +5857,7 @@ impl<T> Store for T where
         + ClassificationStore
         + WatchStore
         + ReadingStore
+        + AnnotationStore
         + TraktStore
         + WatchedOutboxStore
         + TranscodeCacheStore

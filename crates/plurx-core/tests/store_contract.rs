@@ -515,6 +515,14 @@ const READING_METHODS: &[&str] = &[
     "put_reading_state",
     "delete_reading_state",
 ];
+const ANNOTATION_METHODS: &[&str] = &[
+    "item_ratings",
+    "put_item_ratings",
+    "set_item_listed",
+    "item_list_flags",
+    "listed_items",
+    "items_on_list",
+];
 const TRAKT_METHODS: &[&str] = &[
     "get_trakt_auth",
     "list_trakt_auth",
@@ -20254,6 +20262,7 @@ fn contract_inventory_matches_every_store_method() {
         CLASSIFICATION_METHODS,
         WATCH_METHODS,
         READING_METHODS,
+        ANNOTATION_METHODS,
         TRAKT_METHODS,
         API_KEY_METHODS,
         OUTBOX_METHODS,
@@ -20406,7 +20415,13 @@ fn contract_inventory_matches_every_store_method() {
     // +7: bounded progressive translation settings, mutation, source binding,
     // immutable publication, lease/read observations and cache maintenance.
     // All are exercised by progressive_translation_source_bind_publication_* .
-    assert_eq!(declared.len(), 497, "review the Store method count");
+    //
+    // 497 -> 503 for `AnnotationStore`, a new supertrait of `Store` with six
+    // methods: item ratings (read and replace) and per-person item lists
+    // (set, flags, a page of a list, membership of a batch). All six are named
+    // in `ANNOTATION_METHODS` and covered on both backends by
+    // `annotation_contract_runs_through_dyn_store`.
+    assert_eq!(declared.len(), 503, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -31613,6 +31628,223 @@ async fn home_preview_contract_runs_through_dyn_store() {
             BTreeSet::from(["book", "audiobook"]),
             "book roots drifted on {backend}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn annotation_contract_runs_through_dyn_store() {
+    use plurx_core::annotations::{ItemList, ItemRatings, Rating, RatingSource};
+    use plurx_core::store::AnnotationStore;
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("annotation-contract", "hash", false)
+            .await
+            .expect("user");
+        let other = store
+            .create_user("annotation-other", "hash", false)
+            .await
+            .expect("other user");
+        let movies = store
+            .create_library(&NewLibrary {
+                name: "Annotation Contract Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/annotation/movies")],
+                anime: false,
+            })
+            .await
+            .expect("movies");
+        let mut ids = Vec::new();
+        for title in ["Harbor Lights", "Night Tide", "Salt Harvest"] {
+            ids.push(
+                store
+                    .insert_item(&NewItem {
+                        library_id: movies.id,
+                        kind: ItemKind::Movie,
+                        parent_id: None,
+                        title: title.into(),
+                        year: Some(2024),
+                        season_number: None,
+                        episode_number: None,
+                    })
+                    .await
+                    .expect("movie"),
+            );
+        }
+        let (harbor, tide, salt) = (ids[0], ids[1], ids[2]);
+
+        // Ratings: absent until fetched, then replaced whole by each fetch.
+        assert_eq!(
+            store.item_ratings(harbor).await.expect("none"),
+            None,
+            "{backend}"
+        );
+        let first = ItemRatings {
+            fetched_at_ms: 1_000,
+            omdb_consulted: true,
+            ratings: vec![
+                Rating {
+                    source: RatingSource::Tmdb,
+                    value: 78.0,
+                    scale: 100,
+                    votes: Some(3_900),
+                },
+                Rating {
+                    source: RatingSource::Imdb,
+                    value: 8.1,
+                    scale: 10,
+                    votes: Some(214_000),
+                },
+                Rating {
+                    source: RatingSource::RottenTomatoes,
+                    value: 94.0,
+                    scale: 100,
+                    votes: None,
+                },
+            ],
+        };
+        store
+            .put_item_ratings(harbor, &first)
+            .await
+            .expect("put ratings");
+        let read = store
+            .item_ratings(harbor)
+            .await
+            .expect("read")
+            .expect("stored");
+        assert_eq!(read.fetched_at_ms, 1_000, "{backend}");
+        assert!(read.omdb_consulted, "{backend}");
+        assert_eq!(
+            read.ratings.iter().map(|r| r.source).collect::<Vec<_>>(),
+            vec![
+                RatingSource::Imdb,
+                RatingSource::RottenTomatoes,
+                RatingSource::Tmdb
+            ],
+            "ratings come back in display order on {backend}"
+        );
+        assert_eq!(read.ratings[0].votes, Some(214_000), "{backend}");
+        let second = ItemRatings {
+            fetched_at_ms: 2_000,
+            omdb_consulted: false,
+            ratings: vec![Rating {
+                source: RatingSource::Tmdb,
+                value: 80.0,
+                scale: 100,
+                votes: None,
+            }],
+        };
+        store
+            .put_item_ratings(harbor, &second)
+            .await
+            .expect("replace ratings");
+        assert_eq!(
+            store.item_ratings(harbor).await.expect("read"),
+            Some(second),
+            "{backend}"
+        );
+        // An item that does not exist gets nothing written, and no error.
+        store
+            .put_item_ratings(9_999_999, &first)
+            .await
+            .expect("missing item is a no-op");
+        assert_eq!(
+            store.item_ratings(9_999_999).await.expect("read"),
+            None,
+            "{backend}"
+        );
+
+        // Lists: per person, newest first, idempotent, re-adding moves to front.
+        for (item, at) in [(harbor, 10), (tide, 20), (salt, 30)] {
+            store
+                .set_item_listed(user.id, item, ItemList::Watchlist, true, at)
+                .await
+                .expect("list");
+        }
+        store
+            .set_item_listed(user.id, harbor, ItemList::Watchlist, true, 40)
+            .await
+            .expect("re-add");
+        store
+            .set_item_listed(user.id, tide, ItemList::Favorite, true, 50)
+            .await
+            .expect("favorite");
+        store
+            .set_item_listed(user.id, 9_999_999, ItemList::Favorite, true, 60)
+            .await
+            .expect("missing item is a no-op");
+        let page = store
+            .listed_items(user.id, ItemList::Watchlist, 10, 0)
+            .await
+            .expect("watchlist");
+        assert_eq!(
+            page.iter().map(|e| e.item_id).collect::<Vec<_>>(),
+            vec![harbor, salt, tide],
+            "newest first on {backend}"
+        );
+        assert_eq!(page[0].added_at_ms, 40, "{backend}");
+        assert_eq!(
+            store
+                .listed_items(user.id, ItemList::Watchlist, 1, 1)
+                .await
+                .expect("second page")
+                .iter()
+                .map(|e| e.item_id)
+                .collect::<Vec<_>>(),
+            vec![salt],
+            "{backend}"
+        );
+        let flags = store.item_list_flags(user.id, tide).await.expect("flags");
+        assert!(flags.watchlist && flags.favorite, "{backend}");
+        let flags = store
+            .item_list_flags(other.id, tide)
+            .await
+            .expect("other flags");
+        assert!(
+            !flags.watchlist && !flags.favorite,
+            "lists are per person on {backend}"
+        );
+        assert_eq!(
+            store
+                .items_on_list(user.id, ItemList::Favorite, &[harbor, tide, salt])
+                .await
+                .expect("batch"),
+            vec![tide],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .items_on_list(user.id, ItemList::Favorite, &[])
+                .await
+                .expect("empty batch"),
+            Vec::<i64>::new(),
+            "{backend}"
+        );
+        store
+            .set_item_listed(user.id, salt, ItemList::Watchlist, false, 70)
+            .await
+            .expect("remove");
+        store
+            .set_item_listed(user.id, salt, ItemList::Watchlist, false, 80)
+            .await
+            .expect("remove again");
+        assert_eq!(
+            store
+                .listed_items(user.id, ItemList::Watchlist, 10, 0)
+                .await
+                .expect("after removal")
+                .len(),
+            2,
+            "{backend}"
+        );
+
+        // A person's lists go with them.
+        assert!(store.delete_user(user.id).await.expect("delete user"));
+        assert!(store
+            .listed_items(user.id, ItemList::Watchlist, 10, 0)
+            .await
+            .expect("after delete")
+            .is_empty());
     })
     .await;
 }

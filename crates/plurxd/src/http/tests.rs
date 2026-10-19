@@ -2794,6 +2794,227 @@ async fn setup_admin(app: &Router) -> String {
     body["token"].as_str().expect("token").to_owned()
 }
 
+/// A person's watchlist and favorites: per item flags, the list read, and a
+/// finished movie leaving the watchlist without anyone deleting it.
+#[tokio::test]
+async fn a_watchlist_and_favorites_belong_to_the_reader_and_a_finished_movie_leaves_the_watchlist()
+{
+    let state = test_state_without_router();
+    let app = router(state.clone());
+    let seed = seed_content(&state).await;
+    let token = setup_admin(&app).await;
+    let annotations = |id: i64| format!("/api/v1/items/{id}/annotations");
+
+    let (status, empty) = call(&app, get(&annotations(seed.movie), Some(&token))).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(
+        empty,
+        json!({"ratings": [], "watchlist": false, "favorite": false})
+    );
+
+    for uri in [
+        format!("/api/v1/items/{}/watchlist", seed.movie),
+        format!("/api/v1/items/{}/watchlist", seed.show),
+        format!("/api/v1/items/{}/favorite", seed.show),
+    ] {
+        let (status, body) = call(&app, put(&uri, Some(&token), json!({}))).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{uri}: {body}");
+    }
+    let (status, _) = call(
+        &app,
+        put(
+            &format!("/api/v1/items/{}/favorite", seed.ep),
+            Some(&token),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an episode is not listable"
+    );
+    assert_eq!(
+        call(
+            &app,
+            put(
+                &format!("/api/v1/items/{}/favorite", 9_999_999),
+                Some(&token),
+                json!({})
+            )
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+
+    let (_, flags) = call(&app, get(&annotations(seed.show), Some(&token))).await;
+    assert_eq!(
+        (flags["watchlist"].clone(), flags["favorite"].clone()),
+        (json!(true), json!(true))
+    );
+    let ids = |body: &Value| -> Vec<i64> {
+        body["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|i| i["id"].as_i64().expect("id"))
+            .collect()
+    };
+    let (status, watchlist) = call(&app, get("/api/v1/lists/watchlist", Some(&token))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ids(&watchlist), vec![seed.show, seed.movie], "newest first");
+    let (_, favorites) = call(&app, get("/api/v1/lists/favorites", Some(&token))).await;
+    assert_eq!(ids(&favorites), vec![seed.show]);
+    assert_eq!(
+        call(&app, get("/api/v1/lists/wishlist", Some(&token)))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Another person sees none of it.
+    let other = state
+        .store
+        .create_user("household", "hash", false)
+        .await
+        .expect("user");
+    let other_token = "household-reader-token".to_owned();
+    state
+        .store
+        .create_token(&plurx_core::auth::hash_token(&other_token), other.id, None)
+        .await
+        .expect("token");
+    let (_, theirs) = call(&app, get("/api/v1/lists/watchlist", Some(&other_token))).await;
+    assert!(ids(&theirs).is_empty());
+
+    // Finishing the movie takes it off the watchlist, without a delete.
+    let (status, _) = call(
+        &app,
+        post(
+            &format!("/api/v1/items/{}/scrobble", seed.movie),
+            Some(&token),
+            json!({}),
+        ),
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    let (_, watchlist) = call(&app, get("/api/v1/lists/watchlist", Some(&token))).await;
+    assert_eq!(ids(&watchlist), vec![seed.show]);
+    let (_, movie) = call(&app, get(&annotations(seed.movie), Some(&token))).await;
+    assert_eq!(movie["watchlist"], false);
+
+    let (status, _) = call(
+        &app,
+        delete(
+            &format!("/api/v1/items/{}/favorite", seed.show),
+            Some(&token),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, favorites) = call(&app, get("/api/v1/lists/favorite", Some(&token))).await;
+    assert!(ids(&favorites).is_empty());
+}
+
+/// Scores come from TMDB and OMDb once, are stored, and are served from the
+/// store on the next read; without provider keys there are none.
+#[tokio::test]
+async fn item_scores_are_fetched_once_from_tmdb_and_omdb_then_served_from_the_store() {
+    use axum::routing::get as route_get;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let tmdb_calls = Arc::clone(&calls);
+    let omdb_calls = Arc::clone(&calls);
+    let providers = axum::Router::new()
+        .route(
+            "/movie/{id}",
+            route_get(move || {
+                tmdb_calls.fetch_add(1, Ordering::SeqCst);
+                async { axum::Json(json!({"vote_average": 7.8, "vote_count": 3900, "imdb_id": "tt0000042"})) }
+            }),
+        )
+        .route(
+            "/omdb",
+            route_get(move || {
+                omdb_calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    axum::Json(json!({"Response": "True", "imdbRating": "8.1", "imdbVotes": "214,000",
+                        "Metascore": "81", "Ratings": [{"Source": "Rotten Tomatoes", "Value": "94%"}]}))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, providers).await;
+    });
+
+    let mut state = test_state_without_router();
+    state.provider_endpoints =
+        crate::http::annotations::ProviderEndpoints::at(&base, &format!("{base}/omdb"));
+    let app = router(state.clone());
+    let seed = seed_content(&state).await;
+    let token = setup_admin(&app).await;
+    state
+        .store
+        .apply_metadata(
+            seed.movie,
+            &plurx_core::domain::MetadataPatch {
+                tmdb_id: Some(42),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("tmdb id");
+    let uri = format!("/api/v1/items/{}/annotations", seed.movie);
+
+    let (_, unkeyed) = call(&app, get(&uri, Some(&token))).await;
+    assert_eq!(unkeyed["ratings"], json!([]), "no provider keys, no scores");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    for (key, value) in [
+        (plurx_core::store::keys::TMDB_API_KEY, "tmdb-key"),
+        (plurx_core::store::keys::OMDB_API_KEY, "omdb-key"),
+    ] {
+        state.store.put_setting(key, value).await.expect("key");
+    }
+    let expected = json!([
+        {"source": "imdb", "value": 8.1, "scale": 10, "votes": 214000},
+        {"source": "rotten_tomatoes", "value": 94.0, "scale": 100},
+        {"source": "metacritic", "value": 81.0, "scale": 100},
+        {"source": "tmdb", "value": 78.0, "scale": 100, "votes": 3900}
+    ]);
+    let (status, fetched) = call(&app, get(&uri, Some(&token))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["ratings"], expected);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "one TMDB and one OMDb request"
+    );
+
+    let (_, stored) = call(&app, get(&uri, Some(&token))).await;
+    assert_eq!(stored["ratings"], expected);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the second read is the store's"
+    );
+
+    let (_, episode) = call(
+        &app,
+        get(
+            &format!("/api/v1/items/{}/annotations", seed.ep),
+            Some(&token),
+        ),
+    )
+    .await;
+    assert_eq!(episode["ratings"], json!([]), "episodes carry no scores");
+}
+
 #[tokio::test]
 async fn local_classification_refresh_preserves_corrections_and_discards_old_identity_keywords() {
     use plurx_core::{metadata::classification, store::classification::Record};
