@@ -371,7 +371,7 @@ pub(super) fn copy_candidate_grade(file: &plurx_core::domain::MediaFile) -> Outp
 /// Catalog and dispatch share the exact pre-existing canonical copy identity.
 /// This is a recipe equality check, not measured-output authority.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn copy_candidate_recipe_digest(
+pub(crate) fn copy_candidate_recipe_digest(
     file: &plurx_core::domain::MediaFile,
     audio: Option<i64>,
     audio_offset_ms: i64,

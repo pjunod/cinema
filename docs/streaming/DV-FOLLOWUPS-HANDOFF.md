@@ -42,10 +42,16 @@ or regression bodies. The sole merge conflict was changelog prose, resolved by
 retaining both topics and removing duplicate Pixel bullets. Draft publication
 `fdc6d3ed` passed pinned formatting/all-target Clippy, but the complete independent
 Astra review required F1: real ingress saved no conversion provenance, and Encode
-normalization lost P81 eligibility. Sol's isolated source repair now captures the
-service-reviewed original catalog scope before normalization and resolves the
-qualification trial from that scope. Corrected compilation/publication and the
-same independent reviewer's exact-head closure remain required; no approval yet.
+normalization lost P81 eligibility. The F1 repair at `418467db` compiled (pinned
+formatting/all-target Clippy and linked daemon) and was published. Same-review
+recheck found F2: catalog Copy audio retained the raw AAC echo, while actual
+execution re-resolved canonical audio. Sol's narrow repair freezes only original
+reviewed DV provenance, then constructs the query after canonical track selection
+using the same Progressive track/offset resolver as actual Copy reconciliation.
+P81 scope survives geometry/Encode normalization; original intent fingerprinting,
+strict admission equality and ordinary fallback remain unchanged. Corrected F2
+compilation/publication and the same independent reviewer's closure remain
+required; no approval yet.
 
 **Retained evidence:** exact pre-integration `f931f603` formatting and all-target
 Clippy passed after repairing the baseline helper visibility and one range-style
@@ -83,6 +89,11 @@ to physical playback evidence. Final review can invalidate changed closures only
   drives the shared production ingress/normalization helpers into qualification
   inputs and remembered-description lookup, including FEL-only, HDR, native,
   numeric and disabled-policy cases. Written for F1; execution awaits review.
+- `chunk_06.rs::ordinary_copy_catalog_audio_matches_reconciled_execution`
+  compares production query and normalized/reconciled ordinary Copy tuples and
+  recipe digests: both stale AAC directions, nondefault track, offset, native,
+  DV-declined, failed optional preparation and legacy no-claim behavior. Written
+  for F2; execution and compile-compatible old-418 sensitivity await review.
 
 **Resolved design risk; still a review focus:** the original Encode-route/Copy-kind
 trial violated retained-kind/audio invariants. The accepted explicit optional
@@ -112,7 +123,8 @@ incident and general remote processed requalification remain out of B scope.
    adopted receipts. Retain them where test/defect closures are unchanged;
    no repeat merely for history or docs. The quick draft-paperwork
    operations-test exception remains in effect.
-2. Close F1 in the existing independent frontier review of the complete PR,
+2. Close F2 in the existing independent frontier review (F1 conversion provenance
+   is accepted in source),
    then run new/invalidated affected tests and the remaining fast lane once.
    Retry only failed or genuinely invalidated checks, including sensitivity
    only if its test/defect closure changed.
