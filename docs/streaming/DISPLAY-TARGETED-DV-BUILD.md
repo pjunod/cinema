@@ -1,10 +1,32 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** PR A implementation in progress; not qualified · **Updated:** 2026-10-19 · **Owner:** Sol 6.1 (current source; prior Astra authorship retained), coordinator (publication) ·
+**Status:** PR A independent-review F1 repair; not qualified · **Updated:** 2026-10-19 · **Owner:** Sol 6.1 (current source; prior Astra authorship retained), coordinator (publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 ## PR A implementation checkpoint
 
+- Independent Astra reviewed the complete `0d47bc6ac` candidate: one blocking F1,
+  unrelated chapters/HEVC/content-encoding grafts invalidating title generations.
+  The full source pass is retained; only F1 and its repair delta need independent
+  closure. That candidate's pinned native all-target check, Clippy and replicated
+  store-contract compilation all exited zero; these were not functional tests.
+- **F1 repair authored:** all four direct/fenced ordinary upserts and admitted
+  `ApplyProbeJob` explicitly write `files.scanned_at`. Its `UPDATE OF` is the
+  ordinary-publication intent, even with identical facts and timestamp. Document
+  decorations and metadata backfills never write it and preserve title state.
+  Source changes delete old demand in BEFORE without modifying the target file
+  row; AFTER source cleanup only removes the aggregate. AFTER ordinary publication
+  resets/reseeds demand. This is independent of AFTER trigger order when a single
+  write carries fresh source and fresh facts, including recursive triggers.
+  No JSON inequality, decoration whitelist, new wire command or feature gate.
+- New authored controls parameterize the real stores over all three grafts and
+  queued/running/published/manually cancelled states; stale-source grafts, direct
+  and fenced identical/fresh-source upserts, admitted command publication and
+  refused-coordinator/worker replay. A raw-schema control reverses AFTER trigger
+  creation order in both recursive modes. None have run. Actual pinned local
+  all-target Clippy with the replicated-contract feature exited zero. Native
+  repair compilation, independent targeted closure and once-only functional
+  qualification remain; B landing is not a review or test prerequisite.
 - Draft PR #1216 is published at `59d23e4674d8`; the ignored physical harness
   continuation is being prepared separately. It reads the test-only
   `PLURX_DV_WINDOW_TARGET_NITS` strictly as 1000 or 1600, requires an actual
@@ -54,11 +76,12 @@
   Explicit-path local Rust 1.97.1 all-target checking, core Clippy and
   Hiqlite-contract-feature compilation passed. These macOS checks exclude the
   Linux-only runtime. Earlier native checkpoint failure remains a failure; a new
-  exact-source controller Linux receipt is still required. Early local checks
+  exact-source controller Linux receipt for the F1 repair is still required.
+  The later `0d47bc6ac` checkpoint passed native compilation. Early local checks
   that selected Homebrew subcommands are diagnostic only, not pinned evidence.
-- Remaining: complete-candidate pinned controller compilation/static checks,
-  actual B integration/schema reconciliation, independent review/fixes and the
-  once-only qualification batch. This checkpoint is not ready for final review.
+- Remaining: pinned controller compilation of the F1 repair, independent targeted
+  finding closure and the once-only qualification batch. Actual B/main/schema
+  integration later needs only review/checks invalidated by its real delta.
 - Baseline Rust 1.97.1 all-target checking and helper compilation against the
   pinned libplacebo API 374 succeeded; these are baseline, not candidate receipts.
 - Complete-title scan groundwork is being implemented: one software base decoder,

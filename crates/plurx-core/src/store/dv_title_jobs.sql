@@ -46,23 +46,41 @@ BEGIN
  INSERT INTO dv_title_jobs_demand(file_id) VALUES(NEW.id);
 END;
 -- next statement
-CREATE TRIGGER IF NOT EXISTS dv_title_jobs_file_update
-AFTER UPDATE OF path,size,mtime,probe_json ON files
-WHEN NOT EXISTS(SELECT 1 FROM background_job_commands command
- WHERE ((command.operation='publish_dv_title' AND json_extract(command.result_json,'$.outcome')='published')
- OR (command.operation='bind_dv_title' AND json_extract(command.result_json,'$.bound')=1))
- AND json_extract(command.result_json,'$.file_id')=NEW.id)
+CREATE TRIGGER IF NOT EXISTS dv_title_jobs_source_change
+BEFORE UPDATE OF path,size,mtime ON files
+WHEN NEW.path IS NOT OLD.path OR NEW.size IS NOT OLD.size OR NEW.mtime IS NOT OLD.mtime
 BEGIN
- -- Remove first so the outer invalidation also removes nested demand when
- -- recursive_triggers is enabled. Source-only changes await fresh probe facts.
+ -- Invalidate OLD demand before the write. Do not modify the target files row
+ -- in BEFORE, or delete fresh demand from an unordered AFTER source trigger.
+ DELETE FROM dv_title_jobs_demand WHERE file_id=OLD.id;
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS dv_title_jobs_file_update
+AFTER UPDATE OF path,size,mtime ON files
+WHEN NEW.path IS NOT OLD.path OR NEW.size IS NOT OLD.size OR NEW.mtime IS NOT OLD.mtime
+BEGIN
+ -- Source-only changes cannot retain an aggregate. This idempotent cleanup is
+ -- safe before OR after ordinary publication in a fresh-source/fresh-probe write.
+ UPDATE files SET probe_json=json_remove(probe_json,'$.plurx_dv_title_v1')
+ WHERE id=NEW.id AND json_valid(probe_json)
+  AND json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL;
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS dv_title_jobs_probe_published
+AFTER UPDATE OF scanned_at ON files
+BEGIN
+ -- Explicit ordinary-publication intent: all direct/fenced upserts and the
+ -- admitted ApplyProbeJob write scanned_at. Grafts/backfills do not. UPDATE OF
+ -- is deliberate: identical facts/timestamps still establish a new generation.
+ -- Nested title attachment and scanner cleanup write only probe_json, not this
+ -- intent column. No JSON inequality or decoration-specific exemptions.
  UPDATE files SET probe_json=json_remove(probe_json,'$.plurx_dv_title_v1')
  WHERE id=NEW.id AND json_valid(probe_json)
   AND json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL;
  DELETE FROM dv_title_jobs_demand WHERE file_id=NEW.id;
  INSERT INTO dv_title_jobs_demand(file_id)
  SELECT NEW.id WHERE NEW.video_codec='hevc' AND NEW.dv_profile IN (5,7,8)
-  AND NEW.dv_rpu_present=1 AND json_valid(NEW.probe_json)
-  AND NEW.path IS OLD.path AND NEW.size IS OLD.size AND NEW.mtime IS OLD.mtime;
+  AND NEW.dv_rpu_present=1 AND json_valid(NEW.probe_json);
 END;
 -- next statement
 CREATE TRIGGER IF NOT EXISTS dv_title_jobs_file_delete

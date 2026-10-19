@@ -1,4 +1,6 @@
 //! The same source/attempt-fenced title lifecycle on every store backend.
+#[path = "dv_title_probe_provenance.rs"]
+mod probe_provenance;
 use super::{for_each_backend, seed_file};
 use plurx_core::{
     domain::{DolbyVisionFacts, MediaFile, ProbeResult},

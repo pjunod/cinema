@@ -72,9 +72,15 @@ explicit, without perceptual-equivalence claims. Scanner/policy/report/runtime
 and controls are authored, not qualified. Durable title jobs now retain monotonic
 source/scanner generations, manual-cancel suppression and bounded ordinary-probe
 priority handoff; lifecycle/backend/reap regressions are authored, not executed.
-Prior Astra authorship is retained. Explicit-path local compiler/static checks
-do not establish Linux or numerical acceptance. Complete review/fixes and the once-only
-affected batch remain. Metadata/settings/client selection stay later PRs.
+Prior Astra authorship is retained. Full independent Astra review of `0d47bc6ac`
+found one blocking F1: ordinary probe publication must be distinguished from
+chapters/HEVC/content-encoding grafts. The authored repair uses explicit
+`scanned_at` publication intent with order-independent source invalidation;
+identical facts rotate, decorations preserve current/terminal title state.
+Native baseline compilation passed; repair compilation and targeted independent
+F1 closure precede the once-only affected batch. New regressions are authored,
+not executed; B landing is not a review/test prerequisite. Metadata/settings/client
+selection stay later PRs.
 
 1. **Title L1 scan,** stored with the DV facts:
    - L1-max maximum;

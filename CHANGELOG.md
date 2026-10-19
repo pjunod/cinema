@@ -25,6 +25,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Internal complete-title scan state survives chapter, HEVC-parameter-set and
+  content-encoding probe decorations, including repeated identical writes and
+  manually cancelled generations. Only actual source changes or fresh ordinary
+  probe publication invalidate it; identical ordinary reprobes still rotate.
+
 - Settings names the server you are signed in to by its machine name. A server still on the default name `plurx` used to show `plurx` on every node. A new signed-in route, `GET /api/v1/server/node`, gives the answering node's `hostname` and a `display_name` (a chosen name, else the hostname, the same rule as the LAN picker, which now resolves the hostname the same way the roster does). iOS, tvOS and Android Settings show it, adding the hostname after a chosen name, and the web System tab heads with it and lists the Host.
 - HDR10-E at 4K is produced faster. The processing helper renders into 16-bit rather than 32-bit float textures, converts to 10-bit Y'CbCr in one compute pass, and queues each frame's download so the GPU finishes one frame while the next is decoded. On an Intel Alder Lake test node a 2-second 4K window takes 0.9–1.1 s in the helper instead of 1.7 s, and 1.75 s instead of 2.2 s with the hardware encoder (Profile 7 FEL); Profile 8 takes 2.1 s instead of 2.55 s, still short of real time there.
 - Dolby Vision HDR10-E (server-processed HDR10) plays at every resolution. The processing helper decodes on the GPU (VA-API, mapped zero-copy into the renderer, with a software or host-copy fallback it reports) and converts to 10-bit Y'CbCr on the GPU. Reconstructed frames carry their frame duration and BT.2020 PQ colour description, every display-metadata version is accepted, and the 720p cap, the speed qualification, the Auto-only rule and the other silent gates are gone. Every decline after the Developer setting is named in the plan notes, and an explicitly chosen rung is no longer filtered by Auto's link evidence. Receipts and the effective-processing report record whether the window was GPU-decoded.

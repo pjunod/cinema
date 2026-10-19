@@ -51,8 +51,8 @@ ORDER BY d.revision LIMIT 128
     rows.iter().map(|row| decode(row)).collect()
 }
 
-/// Bind a trusted installed scanner to this revision. The marker lets the
-/// atomic aggregate invalidation differ from an ordinary re-probe write.
+/// Bind a trusted installed scanner to this revision. The command atomically
+/// invalidates old scanner work without publishing fresh ordinary probe facts.
 pub(super) async fn bind<T: QueueSql>(
     store: &T,
     revision: i64,
