@@ -14,6 +14,58 @@ impl VodServe {
         let sessions = self.shared.sessions.lock().await;
         let id = request.previous_session_id.as_deref()?;
         let session = sessions.get(id)?;
+        Self::capture_session_processed_root(
+            session,
+            id,
+            request,
+            supersession_user,
+            scope,
+            deadline,
+        )
+    }
+
+    /// Called only with the manager's verified staged-ledger predecessor.
+    /// Capture descriptive provenance and physical custody atomically. The
+    /// caller re-derives scope from current authoritative inputs before attach.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) async fn capture_staged_processed_root(
+        &self,
+        request: &SessionRequest,
+        predecessor: &StagedProcessedPredecessor,
+        supersession_user: &str,
+        deadline: Instant,
+    ) -> Option<(ProcessedReuseSeed, PreparedRootAdmission)> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(&predecessor.session_id)?;
+        let seed = session.processed_reuse_seed.clone()?;
+        if seed.request_incarnation_id != predecessor.incarnation_id
+            || seed.owner_node_id != predecessor.owner_node_id
+            || request.request_id.as_deref() != Some(predecessor.successor_incarnation_id.as_str())
+            || predecessor.session_id == predecessor.successor_session_id
+            || predecessor.incarnation_id == predecessor.successor_incarnation_id
+        {
+            return None;
+        }
+        let root = Self::capture_session_processed_root(
+            session,
+            &predecessor.session_id,
+            request,
+            supersession_user,
+            session.processed_reuse_scope?,
+            deadline,
+        )?;
+        Some((seed, root))
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn capture_session_processed_root(
+        session: &Session,
+        id: &str,
+        request: &SessionRequest,
+        supersession_user: &str,
+        scope: [u8; 32],
+        deadline: Instant,
+    ) -> Option<PreparedRootAdmission> {
         if !session.renewable()
             || session.supersession_user != supersession_user
             || session.playback_id != request.playback_id

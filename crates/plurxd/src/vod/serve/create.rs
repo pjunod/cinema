@@ -1367,6 +1367,10 @@ impl VodServe {
             .root_admission
             .as_ref()
             .and_then(|root| root.reuse_scope);
+        let attachment_owner = fences
+            .release_fence
+            .as_ref()
+            .and_then(|fence| fence.attachment_owner);
         let mut reused_parent = None;
         let root_admission = prepared
             .root_admission
@@ -1467,6 +1471,8 @@ impl VodServe {
             children: Vec::new(),
             root_admission,
             processed_reuse_scope,
+            processed_reuse_seed: processed_reuse_scope
+                .and_then(|_| ProcessedReuseSeed::from_request(req)),
             preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
                 req.start_seconds,
                 duration_ms,
@@ -1688,6 +1694,9 @@ impl VodServe {
             .get_mut(&session_id)
             .map(|session| std::mem::take(&mut session.children))
             .unwrap_or_default();
+        if let Some(sink) = attachment_owner {
+            *sink.lock().expect("first preparation owner") = Some(replacement.response_owner());
+        }
         sessions.insert(session_id.clone(), replacement);
         {
             let mut observation = self
@@ -2305,6 +2314,7 @@ impl VodServe {
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
+            processed_reuse_seed: None,
             preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
                 req.start_seconds,
                 duration_ms,

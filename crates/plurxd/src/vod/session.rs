@@ -783,6 +783,7 @@ pub(super) struct Session {
     /// A running worker retains its own clone until physical reap.
     pub(super) root_admission: Option<crate::vodencode::EncodePermit>,
     pub(super) processed_reuse_scope: Option<[u8; 32]>,
+    pub(super) processed_reuse_seed: Option<ProcessedReuseSeed>,
 
     /// Immutable acquisition hint from this attachment's authorized create.
     /// It never changes the rendition timeline or follows control progress.

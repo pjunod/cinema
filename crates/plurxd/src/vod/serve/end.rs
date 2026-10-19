@@ -164,6 +164,7 @@ impl VodServe {
                                 .is_some_and(|current| Arc::ptr_eq(current, &rendition))
                     })
                     .map(|session| {
+                        session.processed_reuse_seed = None;
                         (
                             std::mem::take(&mut session.children),
                             session.root_admission.take(),

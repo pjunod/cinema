@@ -2531,6 +2531,7 @@ mod tests {
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
+            processed_reuse_seed: None,
 
             preferred_start_ms: None,
             passive_grant: None,

@@ -845,6 +845,46 @@ pub(crate) struct PreparedRootAdmission {
     pub(crate) permit: crate::vodencode::EncodePermit,
 }
 
+/// Descriptive provenance retained only by an actual processed attachment.
+/// It contains no lease, fallback request, executable or resource authority.
+/// A staged successor must capture this together with the exact live root;
+/// neither a serialized catalog row nor this seed alone admits any work.
+#[derive(Clone)]
+pub(crate) struct ProcessedReuseSeed {
+    pub(crate) query: crate::media_pool::QualityCatalogRequest,
+    pub(crate) caps: plurx_core::playback::DeviceCaps,
+    pub(crate) binding: crate::media_pool::PlanningBinding,
+    pub(crate) selected: plurx_core::playback::candidate::QualityCandidate,
+    pub(crate) owner_node_id: String,
+    pub(crate) request_incarnation_id: String,
+}
+
+impl ProcessedReuseSeed {
+    fn from_request(request: &SessionRequest) -> Option<Self> {
+        let context = request.candidate_context.as_ref()?;
+        context.selected_candidate.processed_hdr10.then_some(())?;
+        Some(Self {
+            query: context.catalog_query.clone()?,
+            caps: context.canonical_caps.clone()?,
+            binding: context.planning_binding.clone()?,
+            selected: context.selected_candidate.clone(),
+            owner_node_id: context.owner_node_id.clone()?,
+            request_incarnation_id: request.request_id.clone()?,
+        })
+    }
+}
+
+/// Constructed only by the manager after validating a pending staged ledger.
+/// Deserialization, catalog restoration and ordinary recovery cannot mint it.
+pub(crate) struct StagedProcessedPredecessor {
+    pub(crate) session_id: String,
+    pub(crate) incarnation_id: String,
+    pub(crate) owner_node_id: String,
+    pub(crate) owner_epoch: i64,
+    pub(crate) successor_session_id: String,
+    pub(crate) successor_incarnation_id: String,
+}
+
 /// Exact process-private predecessor, never a recipe-key lookup capability.
 pub(crate) struct ProcessedRootReuse {
     session_id: String,
@@ -996,6 +1036,7 @@ impl VodServingAdmission {
 pub(crate) struct VodReleaseFence<'a> {
     transition: Arc<tokio::sync::Mutex<()>>,
     released: &'a AtomicBool,
+    attachment_owner: Option<&'a StdMutex<Option<ResponseOwner>>>,
 }
 
 impl<'a> VodReleaseFence<'a> {
@@ -1003,7 +1044,18 @@ impl<'a> VodReleaseFence<'a> {
         Self {
             transition,
             released,
+            attachment_owner: None,
         }
+    }
+
+    /// First-preparation cleanup is armed with registry commit, before any
+    /// post-attachment await can lose its caller to cancellation.
+    pub(crate) fn with_attachment_owner(
+        mut self,
+        owner: Option<&'a StdMutex<Option<ResponseOwner>>>,
+    ) -> Self {
+        self.attachment_owner = owner;
+        self
     }
 }
 
