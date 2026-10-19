@@ -1074,6 +1074,7 @@
         previous_session_id: &str,
     ) -> SessionRequest {
         SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,

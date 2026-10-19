@@ -164,6 +164,7 @@ pub(crate) struct RestartPreparationRequest {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DirectPlayConnectionStatus {
     UnknownRequiresProxy,
+    AccountedInAdmissions,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1256,6 +1257,7 @@ pub(crate) async fn local_owned_media_sessions(state: &AppState) -> usize {
     hls.saturating_add(state.streams.active_count())
         .saturating_add(offline)
         .saturating_add(state.live_tv.activities().len())
+        .saturating_add(state.live_tv.recording_activities().len())
 }
 
 fn media_drain_status(
@@ -1269,6 +1271,9 @@ fn media_drain_status(
         new_admissions_blocked: drain.new_admissions_blocked,
         admissions_in_flight: drain.admissions_in_flight,
         preparation_expires_at_unix_ms: drain.expires_at_unix_ms,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        direct_play_connections: DirectPlayConnectionStatus::AccountedInAdmissions,
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         direct_play_connections: DirectPlayConnectionStatus::UnknownRequiresProxy,
         restart_commands: ready_for_supervisor
             .then(restart_commands)
@@ -2022,6 +2027,33 @@ fn sanitize_transport(
         observation.age_uncertainty_ms = age_uncertainty_ms;
     }
     Some(transport)
+}
+
+/// Revalidate a native shutdown against fresh cluster evidence while excluding
+/// only this process's already-owned local preparation from "second outage".
+/// Other members' fences, compatibility, quorum and role checks stay intact.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) async fn recheck_desktop_preparation(
+    state: &AppState,
+    token: crate::serving_fence::PlannedOutageFenceToken,
+) -> Result<ClusterOperationsAggregate, ApiError> {
+    let mut aggregate = collect_current_aggregate(state).await?;
+    if !state.serving.planned_outage_is_current(token).await {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "restart_preparation_expired",
+            "the exact local preparation is no longer current",
+        ));
+    }
+    for observation in &mut aggregate.nodes {
+        if observation.membership.node_id == state.node_id {
+            if let Some(status) = &mut observation.status {
+                status.media.new_admissions_blocked = false;
+            }
+        }
+    }
+    aggregate.verdict = rollout_verdict(&aggregate.membership, &aggregate.nodes);
+    Ok(aggregate)
 }
 
 fn rollout_verdict(

@@ -1,9 +1,33 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** PR A independent-review F1 repair; not qualified · **Updated:** 2026-10-19 · **Owner:** Sol 6.1 (current source; prior Astra authorship retained), coordinator (publication) ·
+**Status:** PR A post-review qualification and landed-B integration; not fully qualified · **Updated:** 2026-10-19 · **Owner:** Sol 6.1 (current source; prior Astra authorship retained), coordinator (publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 ## PR A implementation checkpoint
+
+- Full independent Astra review of `0d47bc6ac` is retained. Targeted independent
+  review APPROVED the sole F1 repair at `43cce364a9e8`; its pinned native Clippy
+  and Hiqlite-contract compilation passed. Post-review Rust qualification runs
+  against that immutable source; no Rust pass is inferred from compilation.
+- Actual source-bound Intel GPU shader qualification passed: 141 cases, 866,304
+  Y/U/V samples, worst independent-oracle error one code (required at most two),
+  all six buckets, black/peak/monotonic/edge checks and four exact L1 witnesses.
+  This is synthetic post-reconstruction acceptance, not full-helper, real-title
+  or display accuracy. The initial output-directory permission refusal occurred
+  before any case; corrected execution changed no shader/oracle source.
+- Actual FEL-catalog PR #1211 landed as `9753284ef7dd`. Integration preserves its
+  typed cancellation/supervised-helper lifecycle while forwarding C's explicit
+  target through the completed private window. The ignored physical harness
+  unwraps `WindowOutcome::Completed` and still checks every target/L1/operation.
+  Ordinary production entrypoints remain master-only. Main still ends at schema
+  113, so this additive title migration remains 114 without renumbering.
+- Remaining: real affected Rust/backend results, full-helper/window controls,
+  real-source P7 FEL/P8 1000/1600 harness matrix, pinned integration compilation,
+  independent targeted conflict/interface closure, fast lane and API merge.
+  Preserve unchanged passing shader, policy/store and prior B evidence; check
+  only actual changed surfaces, not whole suites or reviews for base motion.
+
+### Historical source checkpoints (not current acceptance)
 
 - Independent Astra reviewed the complete `0d47bc6ac` candidate: one blocking F1,
   unrelated chapters/HEVC/content-encoding grafts invalidating title generations.

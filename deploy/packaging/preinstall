@@ -1,0 +1,13 @@
+#!/bin/sh
+# Before unpacking: outside package transactions must never race an active
+# authenticated update worker. Never wait for an application lock here.
+set -e
+helper=/usr/lib/plurx-control/plurx-install-helper
+if [ -x "$helper" ]; then
+  joined=0
+  "$helper" package-script preinstall server -- "$@" || joined=$?
+  case $joined in 0|10) ;; *) exit "$joined" ;; esac
+elif [ -e /etc/plurx/installation.json ]; then
+  echo 'plurxd: managed installation has no trusted package guard; repair it before unpacking' >&2
+  exit 1
+fi

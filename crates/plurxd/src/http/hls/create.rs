@@ -577,6 +577,61 @@ struct ContinuousFamilyStart {
 }
 
 impl CreateSession {
+    /// Freeze only original service-reviewed video provenance. Audio depends on
+    /// the canonical selected track and is resolved when the query is built.
+    pub(crate) fn reviewed_copy_scope(&self, review: Option<&PlanReview>) -> Option<(bool, bool)> {
+        (self.copy == Some(true)).then(|| {
+            (
+                review.map_or(self.preserve_dolby_vision == Some(true), |r| {
+                    r.preserve_dolby_vision
+                }),
+                review.is_some_and(|r| r.convert_dolby_vision),
+            )
+        })
+    }
+
+    /// Capture the service-reviewed original route, not a selected candidate's
+    /// later physical carrier. This describes discovery without normalizing
+    /// the client's request before its intent fingerprint is taken.
+    pub(crate) fn selection_catalog_request(
+        &self,
+        source: &MediaFile,
+        caps: &plurx_core::playback::DeviceCaps,
+        copy_scope: Option<(bool, bool)>,
+    ) -> crate::media_pool::QualityCatalogRequest {
+        let audio_claim = plurx_core::playback::audio::AudioClaim::from_caps(caps)
+            .ok()
+            .flatten();
+        let copy_audio = audio_claim.as_ref().map(|claim| {
+            selected_audio_delivery(
+                source,
+                claim,
+                self.audio,
+                self.audio_offset_ms.unwrap_or(0),
+                plurx_core::playback::audio::AudioRoute::Progressive,
+            )
+        });
+        crate::media_pool::QualityCatalogRequest {
+            audio_claim,
+            audio_delivery: None,
+            copy_contract: copy_scope.map(|(preserve, convert)| {
+                (
+                    copy_audio.map_or(self.aac == Some(true), |delivery| delivery.transcodes()),
+                    preserve,
+                    convert,
+                )
+            }),
+            file_id: source.id,
+            source_size: source.size,
+            source_mtime: source.mtime,
+            caps: caps.clone(),
+            audio_index: self.audio,
+            audio_offset_ms: self.audio_offset_ms.unwrap_or(0),
+            subtitle_burn: self.subtitle_burn,
+            presentation: crate::transcode::Presentation::Vod,
+        }
+    }
+
     pub(super) fn candidate_auto_policy(&self) -> bool {
         use plurx_core::playback::DesiredQuality;
         if self.height == Some(1440) {
@@ -623,6 +678,7 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
@@ -801,6 +857,79 @@ pub(super) fn apply_plan_review(
     }
     request.hdr10 = review.hdr10;
     review.notes
+}
+
+/// Run only after the original intent fingerprint and service plan review.
+/// Keep the original catalog query even when Encode replaces the Copy carrier.
+pub(crate) fn normalize_catalog_selection(
+    request: &mut crate::transcode::SessionRequest,
+    height: i64,
+    candidate_copy: bool,
+) -> Result<(), ApiError> {
+    if let Some(context) = request.candidate_context.as_ref() {
+        if !candidate_copy {
+            request.hdr10 = context.grade == plurx_core::transcode::OutputGrade::Hdr10;
+        }
+        request.kind = if candidate_copy {
+            match request.kind {
+                crate::transcode::SessionKind::Copy { .. } => request.kind,
+                _ => {
+                    return Err(ApiError::Conflict(
+                        "candidate_copy_no_longer_compatible".to_owned(),
+                    ))
+                }
+            }
+        } else {
+            crate::transcode::SessionKind::Transcode { height }
+        };
+    }
+    Ok(())
+}
+
+/// One selected-track/offset resolver for catalog Copy identity and execution.
+fn selected_audio_delivery(
+    file: &MediaFile,
+    claim: &plurx_core::playback::audio::AudioClaim,
+    audio_index: Option<i64>,
+    audio_offset_ms: i64,
+    route: plurx_core::playback::audio::AudioRoute,
+) -> plurx_core::playback::audio::AudioDelivery {
+    let selected = audio_index.map_or_else(
+        || file.audio_streams.first(),
+        |index| {
+            file.audio_streams
+                .iter()
+                .find(|stream| stream.index == index)
+        },
+    );
+    plurx_core::playback::audio::resolve_audio(selected, &claim.profile(), route, audio_offset_ms)
+}
+
+/// Run after intent fingerprinting and candidate normalization. Copy has its
+/// final route; transcode audio remains provisional until the producer answers.
+pub(crate) fn reconcile_request_audio(
+    source: Option<&MediaFile>,
+    request: &mut crate::transcode::SessionRequest,
+) {
+    if let (Some(file), Some(claim)) = (source, request.audio_claim.as_ref()) {
+        let route = match request.kind {
+            crate::transcode::SessionKind::Copy { .. } => {
+                plurx_core::playback::audio::AudioRoute::Progressive
+            }
+            _ => plurx_core::playback::audio::AudioRoute::EncodedVod,
+        };
+        let delivery = selected_audio_delivery(
+            file,
+            claim,
+            request.audio_index,
+            request.audio_offset_ms,
+            route,
+        );
+        if let crate::transcode::SessionKind::Copy { aac, .. } = &mut request.kind {
+            *aac = delivery.transcodes();
+            request.audio_delivery = Some(delivery);
+        }
+    }
 }
 
 /// The plan for a build that sends no caps document: its echo, plus the one
@@ -1326,16 +1455,15 @@ pub(super) fn session_delivered_dolby_vision_profile(
 /// The prepared processing result may author P81 while still physically
 /// re-encoding a PQ base. Only the owner-projected marker overrides the ordinary
 /// route; requests, source tags and saved processing preferences do not.
-fn session_delivered_processing_shape(
+pub(super) fn session_delivered_processing_shape(
     source: Option<&MediaFile>,
     kind: &crate::transcode::SessionKind,
     grade: plurx_core::transcode::OutputGrade,
     processed_dv_profile: Option<u8>,
 ) -> (Option<&'static str>, Option<u8>) {
-    if processed_dv_profile == Some(8)
-        && grade == plurx_core::transcode::OutputGrade::Hdr10
-        && matches!(kind, crate::transcode::SessionKind::Transcode { .. })
-    {
+    // The completed processing plan, not source tags or a request flag,
+    // authors the reconstructed Profile 8.1 output.
+    if processed_dv_profile == Some(8) && grade == plurx_core::transcode::OutputGrade::Hdr10 {
         return (Some("dolby_vision"), Some(8));
     }
     (
@@ -1375,9 +1503,7 @@ pub(super) fn session_enhancement(
     let (delivered, _) =
         session_delivered_processing_shape(source, kind, grade, processed_dv_profile);
     let (_, preserve, convert) = session_delivery_shape(kind);
-    let route = if processed_dv_profile == Some(8)
-        && matches!(kind, crate::transcode::SessionKind::Transcode { .. })
-    {
+    let route = if processed_dv_profile == Some(8) {
         EnhancementRoute::ReconstructedProfile81 {
             fel_contributed: processed_fel.unwrap_or(profile == Some(7) && has_el),
         }
@@ -1842,6 +1968,8 @@ async fn resolve_plan_for_principal_with_local_evidence(
     let mut selected_candidate = None;
     let mut retained_catalog = None;
     let mut candidate_copy = false;
+    // Freeze provenance before even the geometry fallback can change body.copy.
+    let original_copy_scope = body.reviewed_copy_scope(review.as_ref());
     if body.copy == Some(true) {
         if let (Some(source), Some(caps)) = (
             source,
@@ -1951,21 +2079,7 @@ async fn resolve_plan_for_principal_with_local_evidence(
                     .candidate_audio_index(source, body.audio)
                     .await
             };
-            let catalog_request = crate::media_pool::QualityCatalogRequest {
-                audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
-                    .ok()
-                    .flatten(),
-                audio_delivery: None,
-                copy_contract: None,
-                file_id: source.id,
-                source_size: source.size,
-                source_mtime: source.mtime,
-                caps: caps.clone(),
-                audio_index: body.audio,
-                audio_offset_ms: body.audio_offset_ms.unwrap_or(0),
-                subtitle_burn: body.subtitle_burn,
-                presentation: crate::transcode::Presentation::Vod,
-            };
+            let catalog_request = body.selection_catalog_request(source, caps, original_copy_scope);
             let catalogue_result = state
                 .media_pool
                 .quality_catalog(state, catalog_request.clone())
@@ -2321,55 +2435,8 @@ async fn resolve_plan_for_principal_with_local_evidence(
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
     };
-    if let Some(context) = request.candidate_context.as_ref() {
-        if !candidate_copy {
-            request.hdr10 = context.grade == plurx_core::transcode::OutputGrade::Hdr10;
-        }
-        request.kind = if candidate_copy {
-            match request.kind {
-                crate::transcode::SessionKind::Copy { .. } => request.kind,
-                _ => {
-                    return Err(ApiError::Conflict(
-                        "candidate_copy_no_longer_compatible".to_owned(),
-                    ))
-                }
-            }
-        } else {
-            crate::transcode::SessionKind::Transcode { height }
-        };
-    }
-    if let (Some(file), Some(claim)) = (source, request.audio_claim.as_ref()) {
-        let selected = request.audio_index.map_or_else(
-            || file.audio_streams.first(),
-            |index| {
-                file.audio_streams
-                    .iter()
-                    .find(|stream| stream.index == index)
-            },
-        );
-        let route = match request.kind {
-            crate::transcode::SessionKind::Copy { .. } => {
-                plurx_core::playback::audio::AudioRoute::Progressive
-            }
-            _ => plurx_core::playback::audio::AudioRoute::EncodedVod,
-        };
-        let delivery = plurx_core::playback::audio::resolve_audio(
-            selected,
-            &claim.profile(),
-            route,
-            request.audio_offset_ms,
-        );
-        if let crate::transcode::SessionKind::Copy { aac, .. } = &mut request.kind {
-            *aac = delivery.transcodes();
-        }
-        // The transcode route is provisional here: encoded VOD may fall back
-        // to rolling HLS. Its actual producer resolves the canonical claim.
-        // Only copy has selected its final route; retained transcode answers
-        // arrive later from the producer's StartResponse.
-        if matches!(request.kind, crate::transcode::SessionKind::Copy { .. }) {
-            request.audio_delivery = Some(delivery);
-        }
-    }
+    normalize_catalog_selection(&mut request, height, candidate_copy)?;
+    reconcile_request_audio(source, &mut request);
     // Observational retained-output override follows the original intent hash
     // and full route/audio reconciliation. Advisory JSON cannot construct it.
     let candidate_cost_proof = if candidate_auto_policy && incumbent_receipt.is_some() {

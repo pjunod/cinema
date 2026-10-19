@@ -12,6 +12,34 @@ use std::{
 #[cfg(target_os = "linux")]
 type RegistrationHook = Box<dyn FnOnce(&crate::prodrun::ProducerRegistration) + Send>;
 
+#[derive(Debug)]
+pub(crate) enum WindowOutcome<T> {
+    Completed(T),
+    Cancelled,
+}
+
+/// Capture retirement before our own cleanup retires this same registration.
+/// A deliberate stop/restart is not evidence that this backend failed.
+fn private_window_result<T>(
+    result: Result<T, String>,
+    cancel: &tokio_util::sync::CancellationToken,
+    retirement: &tokio_util::sync::CancellationToken,
+    helper: Option<crate::dv_segment::HelperOutcome>,
+) -> Result<WindowOutcome<T>, String> {
+    match helper {
+        Some(crate::dv_segment::HelperOutcome::Failed(cause)) => {
+            return Err(cause);
+        }
+        Some(crate::dv_segment::HelperOutcome::Cancelled) => return Ok(WindowOutcome::Cancelled),
+        _ => {}
+    }
+    if cancel.is_cancelled() || retirement.is_cancelled() {
+        Ok(WindowOutcome::Cancelled)
+    } else {
+        result.map(WindowOutcome::Completed)
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Artifact {
@@ -682,10 +710,10 @@ impl RuntimeRecipe {
         cancel: tokio_util::sync::CancellationToken,
         registration_hook: Option<RegistrationHook>,
     ) -> Result<
-        (
+        WindowOutcome<(
             VerifiedWindow,
             plurx_core::transcode::dv_processing::DvProcessingPlan,
-        ),
+        )>,
         String,
     > {
         self.execute_until(
@@ -719,10 +747,10 @@ impl RuntimeRecipe {
         registration_hook: Option<RegistrationHook>,
         absolute_deadline: Option<tokio::time::Instant>,
     ) -> Result<
-        (
+        WindowOutcome<(
             VerifiedWindow,
             plurx_core::transcode::dv_processing::DvProcessingPlan,
-        ),
+        )>,
         String,
     > {
         self.execute_policy_until(
@@ -760,10 +788,10 @@ impl RuntimeRecipe {
         absolute_deadline: Option<tokio::time::Instant>,
         display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     ) -> Result<
-        (
+        WindowOutcome<(
             VerifiedWindow,
             plurx_core::transcode::dv_processing::DvProcessingPlan,
-        ),
+        )>,
         String,
     > {
         if display_target.is_some()
@@ -776,7 +804,8 @@ impl RuntimeRecipe {
                 "DV processing previously failed for this playback/source/settings/backend".into(),
             );
         }
-        let result = async {
+        let cancellation = cancel.clone();
+        let result: Result<_, String> = async {
             use plurx_core::transcode::dv_processing::{
                 dv_plan_completed_window, DvCompletedWindowInput, DvPlaneRepresentation,
                 DvPlaneShape, DvRpuState, DvSourceCoverage, DvSourceFacts,
@@ -885,7 +914,10 @@ impl RuntimeRecipe {
                 renderer_deadline: deadline,
                 window: Some(window),
             };
-            let private = run_private_window(request, registration_hook).await?;
+            let private = match run_private_window(request, registration_hook).await? {
+                WindowOutcome::Completed(private) => private,
+                WindowOutcome::Cancelled => return Ok(WindowOutcome::Cancelled),
+            };
             let first_frame = entry.start_ticks / u64::from(grid.denominator);
             let observed = private.observe(
                 &window,
@@ -1045,15 +1077,16 @@ impl RuntimeRecipe {
                 )
                 .map_err(|e| e.to_string())?,
             );
-            Ok((verified, selected))
+            Ok(WindowOutcome::Completed((verified, selected)))
         }
         .await;
-        // Record before the caller wakes failed waiters: a rapid fresh create
-        // must already see the ordinary-route exclusion.
-        if result.is_err() {
-            self.refuse_episode();
+        // Return observations to the owner. Only its current generation or
+        // admitted preparation can make a backend failure episode-wide.
+        if cancellation.is_cancelled() {
+            Ok(WindowOutcome::Cancelled)
+        } else {
+            result
         }
-        result
     }
 }
 
@@ -1065,10 +1098,7 @@ impl RuntimeRecipe {
 pub(crate) async fn run_private_window(
     mut request: crate::dv_segment::StreamingSegmentRequest,
     registration_hook: Option<RegistrationHook>,
-) -> Result<PrivateWindow, String> {
-    use std::time::Duration;
-    use tokio::io::AsyncReadExt;
-    const OUTPUT_LIMIT: u64 = 64 * 1024 * 1024;
+) -> Result<WindowOutcome<PrivateWindow>, String> {
     let slot = request.request.producer.clone();
     let cancel = request.request.cancel.child_token();
     let _cancel_on_drop = cancel.clone().drop_guard();
@@ -1086,6 +1116,44 @@ pub(crate) async fn run_private_window(
     if let Some(registered) = registration_hook {
         registered(&registration);
     }
+    match capture_private_output(
+        &slot,
+        &registration,
+        writers,
+        stdout,
+        stderr,
+        helper,
+        &cancel,
+        deadline,
+    )
+    .await?
+    {
+        WindowOutcome::Completed(encoded) => Ok(WindowOutcome::Completed(PrivateWindow {
+            encoded,
+            evidence,
+            registration,
+            display_target,
+        })),
+        WindowOutcome::Cancelled => Ok(WindowOutcome::Cancelled),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_private_output(
+    slot: &crate::prodrun::ProducerSlot,
+    registration: &crate::prodrun::ProducerRegistration,
+    writers: crate::prodrun::ProducerWriters,
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    helper: crate::dv_segment::HelperCompletion,
+    cancel: &tokio_util::sync::CancellationToken,
+    deadline: tokio::time::Instant,
+) -> Result<WindowOutcome<Vec<u8>>, String> {
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+    const OUTPUT_LIMIT: u64 = 64 * 1024 * 1024;
+    let retirement = registration.retirement();
+    let observed_helper = helper.clone();
     let result = {
         let capture = async {
             let output = async {
@@ -1116,14 +1184,18 @@ pub(crate) async fn run_private_window(
                 Ok(text)
             };
             let completed_helper = async {
-                helper
-                    .await
-                    .map_err(|_| "DV helper completion owner lost".to_owned())?
+                match helper.wait().await {
+                    crate::dv_segment::HelperOutcome::Completed => Ok(()),
+                    crate::dv_segment::HelperOutcome::Cancelled => {
+                        Err("DV helper cancelled".into())
+                    }
+                    crate::dv_segment::HelperOutcome::Failed(cause) => Err(cause),
+                }
             };
             let exit = async {
                 loop {
                     if let Some(status) = slot
-                        .try_wait_registered(&registration)
+                        .try_wait_registered(registration)
                         .await
                         .map_err(|e| e.to_string())?
                     {
@@ -1140,20 +1212,27 @@ pub(crate) async fn run_private_window(
         tokio::select! {
             result = &mut capture => result,
             _ = cancel.cancelled() => Err("DV private window cancelled".into()),
+            _ = retirement.cancelled() => Err("DV private window retired".into()),
             _ = tokio::time::sleep_until(deadline) => Err("DV private window deadline expired".into()),
         }
     };
+    let result = private_window_result(result, cancel, &retirement, observed_helper.outcome());
     writers.settled();
-    slot.request_registered_retirement(&registration)
+    let cleanup = slot
+        .request_registered_retirement(registration)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string());
+    // External retirement may have taken the exact child between capture and
+    // cleanup. Keep the typed cancellation rather than reporting its missing
+    // child as a fresh backend failure.
+    if let Err(cause) = cleanup {
+        if !matches!(&result, Ok(WindowOutcome::Cancelled)) {
+            return Err(cause);
+        }
+    }
     registration.wait_confirmed_reap().await;
-    Ok(PrivateWindow {
-        encoded: result?,
-        evidence,
-        registration,
-        display_target,
-    })
+    let _ = observed_helper.wait().await;
+    result
 }
 
 /// Decide a completed private window from its encoder outcome. The helper's
@@ -1817,6 +1896,210 @@ mod helper_decoder_tests {
 mod private_window_outcome_tests {
     use super::encoder_diagnostic_tail;
 
+    async fn capture_owned_graph(
+        encoder_fails: bool,
+        helper_fails: bool,
+        externally_retire: bool,
+        timeout: bool,
+        caller_cancel: bool,
+    ) -> Result<super::WindowOutcome<Vec<u8>>, String> {
+        use std::process::Stdio;
+        use tokio_util::sync::CancellationToken;
+        let slot = std::sync::Arc::new(crate::prodrun::ProducerSlot::new());
+        let mut encoder = tokio::process::Command::new(if encoder_fails {
+            "/bin/false"
+        } else {
+            "/bin/sleep"
+        });
+        if !encoder_fails {
+            encoder.arg("30");
+        }
+        let mut child = encoder
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("actual encoder");
+        let stdout = child.stdout.take().expect("encoder output");
+        let stderr = child.stderr.take().expect("encoder diagnostic");
+        let job = crate::process_control::ChildJob::attach(&child).expect("child job");
+        let (registration, writers) = slot.attach_registered_job_owned(child, job, 0, None).await;
+        let helper_cancel = CancellationToken::new();
+        let helper_work_cancel = helper_cancel.clone();
+        let cancel = CancellationToken::new();
+        let encoder_retirement = registration.retirement();
+        let mut helper_command = tokio::process::Command::new(if helper_fails {
+            "/bin/false"
+        } else if encoder_fails {
+            "/bin/true"
+        } else {
+            "/bin/sleep"
+        });
+        if !helper_fails && !encoder_fails {
+            helper_command.arg("30");
+        }
+        let mut helper_child = helper_command.spawn().expect("actual renderer helper");
+        let helper = async move {
+            let status = tokio::select! {
+                status = helper_child.wait() => status.map_err(|error| error.to_string())?,
+                _ = helper_work_cancel.cancelled() => {
+                    if caller_cancel { encoder_retirement.cancelled().await; }
+                    let _ = helper_child.start_kill();
+                    helper_child.wait().await.map_err(|error| error.to_string())?;
+                    return Err("renderer interrupted".into());
+                }
+            };
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("renderer helper failed: {status}"))
+            }
+        };
+        let completion = crate::dv_segment::supervise_streaming_helper(
+            helper,
+            helper_cancel,
+            cancel.clone(),
+            std::sync::Arc::downgrade(&slot),
+            registration.clone(),
+        );
+        let observed = completion.clone();
+        if caller_cancel {
+            cancel.cancel();
+        }
+        let close = externally_retire.then(|| {
+            let slot = slot.clone();
+            let registration = registration.clone();
+            tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                slot.request_registered_retirement(&registration)
+                    .await
+                    .expect("explicit Close retires exact encoder");
+            })
+        });
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(if timeout { 30 } else { 2000 });
+        let result = super::capture_private_output(
+            &slot,
+            &registration,
+            writers,
+            stdout,
+            stderr,
+            completion,
+            &cancel,
+            deadline,
+        )
+        .await;
+        if let Some(close) = close {
+            close.await.expect("Close owner completes");
+        }
+        assert!(
+            registration.confirmed_reap().is_some(),
+            "capture settles the original process owner"
+        );
+        assert!(
+            observed.outcome().is_some(),
+            "helper supervisor settles before capture returns"
+        );
+        result
+    }
+
+    #[tokio::test]
+    async fn explicit_close_is_normal_graph_cancellation() {
+        assert!(matches!(
+            capture_owned_graph(false, false, true, false, false).await,
+            Ok(super::WindowOutcome::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn helper_failure_retirement_preserves_backend_cause() {
+        let error = capture_owned_graph(false, true, false, false, false)
+            .await
+            .expect_err("failed helper graph");
+        assert!(error.contains("renderer helper failed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn encoder_failure_preserves_backend_cause() {
+        let error = capture_owned_graph(true, false, false, false, false)
+            .await
+            .expect_err("failed encoder graph");
+        assert!(error.starts_with("DV encoder failed:"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn graph_timeout_is_a_failure_and_reaps_both_children() {
+        let error = capture_owned_graph(false, false, false, true, false)
+            .await
+            .expect_err("bounded graph");
+        assert_eq!(error, "DV private window deadline expired");
+    }
+
+    #[tokio::test]
+    async fn caller_cancel_retires_encoder_before_joining_blocked_helper() {
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            capture_owned_graph(false, false, false, false, true),
+        )
+        .await
+        .expect("cancellation cannot deadlock helper join");
+        assert!(matches!(outcome, Ok(super::WindowOutcome::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn helper_supervisor_cancellation_does_not_wait_for_encoder_backpressure() {
+        use tokio_util::sync::CancellationToken;
+        let slot = std::sync::Arc::new(crate::prodrun::ProducerSlot::new());
+        let child = tokio::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("encoder");
+        let job = crate::process_control::ChildJob::attach(&child).expect("child job");
+        let (registration, writers) = slot.attach_registered_job_owned(child, job, 0, None).await;
+        let helper_cancel = CancellationToken::new();
+        let work_cancel = helper_cancel.clone();
+        let retirement = registration.retirement();
+        let mut helper_child = tokio::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("blocked renderer");
+        let helper = async move {
+            work_cancel.cancelled().await;
+            // Model a renderer whose write cannot settle while its encoder
+            // still owns the pipe. Only supervisor retirement can unblock it.
+            retirement.cancelled().await;
+            let _ = helper_child.start_kill();
+            helper_child
+                .wait()
+                .await
+                .map_err(|error| error.to_string())?;
+            Err("renderer interrupted".into())
+        };
+        let cancel = CancellationToken::new();
+        let completed = crate::dv_segment::supervise_streaming_helper(
+            helper,
+            helper_cancel,
+            cancel.clone(),
+            std::sync::Arc::downgrade(&slot),
+            registration.clone(),
+        );
+        let settled = completed.clone();
+        cancel.cancel();
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_secs(2), completed.wait()).await;
+        // Cleanup after the bounded assertion also prevents a failed
+        // regression from retaining either actual child.
+        slot.request_registered_retirement(&registration)
+            .await
+            .expect("retire encoder");
+        writers.settled();
+        registration.wait_confirmed_reap().await;
+        let _ = settled.wait().await;
+        assert!(matches!(
+            outcome.expect("supervisor must retire before helper join"),
+            crate::dv_segment::HelperOutcome::Cancelled
+        ));
+    }
+
     #[test]
     fn diagnostic_tail_skips_progress_lines_and_is_bounded() {
         let stderr = b"[hevc_vaapi @ 0x1] Failed to create encode pipeline\n\
@@ -1895,6 +2178,26 @@ mod processed_selection_has_no_software_gates {
             .expect("setting check")
             .1;
         assert!(!after_setting.contains("Ok(None)"), "{after_setting}");
+    }
+
+    /// A Dolby Vision display's converted Profile 7 copy never reached the
+    /// reconstructed 8.1: the entry point returned for every DV copy before
+    /// reading FEL re-encode. Only a native (unconverted) DV copy is silent.
+    #[test]
+    fn a_converted_dv_copy_is_offered_the_reconstructed_profile81() {
+        let body = entry_body();
+        let silent = body
+            .split_once("let Some(original) = request.candidate_context")
+            .expect("candidate context read")
+            .0;
+        assert!(silent.contains("convert_dolby_vision: false"), "{silent}");
+        assert!(
+            silent.contains("processed_qualification_destination(request)?"),
+            "{silent}"
+        );
+        assert!(include_str!("transcode/manager/candidates.rs")
+            .contains("request.dv_processing_route()?"));
+        assert!(body.contains("preferences.fel_reencode"), "{body}");
     }
 
     #[test]

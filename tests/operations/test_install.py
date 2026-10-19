@@ -253,6 +253,20 @@ class InstallerCase(unittest.TestCase):
         self.assertNotIn("useradd", "\n".join(calls))
         self.assertNotIn("enable --now", "\n".join(calls), "an upgrade restarts; it does not re-enable")
 
+    def test_linux_upgrade_preserves_disabled_and_stopped_service(self):
+        self.host.stub("systemctl", 'case "$1" in is-active) exit 3 ;; show) echo loaded ;; esac\n')
+        self.host.stub("getent", "exit 0\n")
+        unit = self.host.destdir / "etc/systemd/system/plurxd.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text("[Service]\nExecStart=/usr/local/bin/plurxd run\n")
+        result = self.host.run("linux", "--binary", str(self.host.fake_binary))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = "\n".join(self.host.calls())
+        self.assertNotIn("systemctl enable", calls)
+        self.assertNotIn("systemctl start", calls)
+        self.assertNotIn("readyz", calls)
+        self.assertIn("existing service stays stopped", result.stdout)
+
     def test_linux_upgrade_keeps_the_operators_unit_and_data_directory(self):
         self.host.stub("systemctl", 'case "$1" in is-active) exit 0 ;; esac\n')
         self.host.stub("getent", "")
@@ -448,7 +462,7 @@ class InstallerCase(unittest.TestCase):
             "install -m 0755",
             f"launchctl bootstrap gui/{uid} {plist_path}",
             f"launchctl enable gui/{uid}/com.plurx.plurxd",
-            f"launchctl kickstart -k gui/{uid}/com.plurx.plurxd",
+            f"launchctl kickstart gui/{uid}/com.plurx.plurxd",
             "curl",
         )
         self.assertNotIn("sudo", "\n".join(self.host.calls()), "a user-owned prefix needs no sudo")
@@ -649,6 +663,32 @@ class InstallerCase(unittest.TestCase):
         self.assertEqual((agents / "com.plurx.plurxd.plist").read_text(), edited)
         self.assertIn("keeping the existing", result.stdout)
 
+    def test_macos_upgrade_preserves_disabled_and_stopped_agent(self):
+        self.host.stub("launchctl", 'case "$1" in print) echo "state = not running" ;; esac\n')
+        agents = self.host.home / "Library/LaunchAgents"
+        agents.mkdir(parents=True)
+        (agents / "com.plurx.plurxd.plist").write_bytes(plistlib.dumps({"Label": "com.plurx.plurxd", "RunAtLoad": False}))
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(self.tmp / "hb"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = "\n".join(self.host.calls())
+        self.assertNotIn("launchctl bootstrap", calls)
+        self.assertNotIn("launchctl enable", calls)
+        self.assertNotIn("launchctl kickstart", calls)
+        self.assertNotIn("readyz", calls)
+        self.assertIn("existing agent stays stopped", result.stdout)
+
+    def test_native_archive_uses_shipped_bootstrap_without_source_tools(self):
+        archive = self.tmp / "native-release"
+        archive.mkdir()
+        shutil.copy2(INSTALL, archive / "install")
+        (archive / "control").mkdir()
+        (archive / "runtime-closure-v1.json").write_text("{}")
+        write_executable(archive / "control/plurx-control", '#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        result = self.host.run("--no-start", installer=archive / "install", subtitle_fixture=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["bootstrap", "macos", "--package", str(archive), "--no-start"])
+        self.assertEqual(self.host.calls(), [])
+
     def test_macos_uninstall_boots_the_agent_out_and_keeps_application_support(self):
         self.host.stub("launchctl", "")
         prefix = self.tmp / "homebrew"
@@ -802,7 +842,8 @@ class InstallerCase(unittest.TestCase):
         self.assertNotIn(f"sudo chown -R 4242:4242 {agents}", calls)
         self.assertOrdered(calls, f"sudo chown -R 4242:4242 {target}", "cargo build --locked --release -p plurxd")
         self.assertOrdered(calls, f"sudo chown -R 4242:4242 {prefix / 'libexec/plurx'}", f"install -m 0755 {target}/release/plurxd")
-        self.assertOrdered(calls, f"sudo chown -R 4242:4242 {plist_path}", f"launchctl bootstrap gui/4242 {plist_path}")
+        self.assertIn(f"sudo chown -R 4242:4242 {plist_path}", calls)
+        self.assertNotIn(f"launchctl bootstrap gui/4242 {plist_path}", calls, "an existing stopped agent stays stopped")
 
         # Uninstall claims the prefix's pieces before removing them, so a
         # root-owned engine cannot leave it half done.
@@ -1063,6 +1104,8 @@ class InstallerCase(unittest.TestCase):
                 self.assertIn(f"would repoint PLURX_FFMPEG in {plist_path}", result.stdout)
             if mode == "binary":
                 self.assertIn("plurxd run", result.stdout, mode)
+            elif mode == "macos":
+                self.assertIn("existing agent stays stopped", result.stdout)
             else:
                 self.assertIn("would wait for http://127.0.0.1:32400/readyz", result.stdout, mode)
         after = sorted(str(p) for p in self.host.destdir.rglob("*"))

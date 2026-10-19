@@ -407,6 +407,76 @@ class CatalogCase(unittest.TestCase):
         self.assertTrue(all(executable_scope))
         self.assertFalse(fallback["docs_only"])
 
+    def test_desktop_macos_sources_select_tray_without_mobile_counters(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        for path in (
+            "clients/server-tray/macos/Package.swift",
+            "clients/server-tray/macos/build",
+            "clients/server-tray/macos/Sources/PlurxServerTray/main.swift",
+            "clients/server-tray/macos/Tests/PlurxTrayUITests/AppKitTests.swift",
+        ):
+            with self.subTest(path=path):
+                scope = scope_for_paths(catalog, (path,))
+                self.assertTrue(scope["desktop_macos"])
+                for other in ("apple", "mobile_version", "rust", "android_jvm",
+                              "android_device", "release_build", "web_layout"):
+                    self.assertFalse(scope[other], other)
+                checks = {check.id for check in selected_checks(
+                    catalog, select_points(catalog, (path,)), profile="ci")}
+                self.assertIn("desktop-macos", checks)
+                self.assertNotIn("mobile-version", checks)
+                self.assertNotIn("apple-simulators", checks)
+
+    def test_desktop_controller_changes_select_rust_and_native_tray(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        scope = scope_for_paths(catalog, (
+            "crates/plurx-desktop-control/src/protocol.rs",))
+        self.assertTrue(scope["rust"])
+        self.assertTrue(scope["desktop_macos"])
+        self.assertFalse(scope["apple"])
+        self.assertFalse(scope["mobile_version"])
+
+    def test_desktop_macos_build_routing_selects_native_tray(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        for path in ci_scope.DESKTOP_MACOS_PATHS:
+            if "*" in path:
+                continue
+            with self.subTest(path=path):
+                self.assertTrue(scope_for_paths(catalog, (path,))["desktop_macos"])
+        self.assertTrue(all_scope()["desktop_macos"])
+        self.assertFalse(scope_for_paths(catalog, ("docs/README.md",))["desktop_macos"])
+
+    def test_mobile_and_linux_tray_changes_do_not_select_macos_tray(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        for path in (
+            "clients/apple/Sources/PlayerSurface.swift",
+            "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt",
+            "crates/plurx-tray/src/main.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(scope_for_paths(catalog, (path,))["desktop_macos"])
+
+    def test_desktop_macos_check_is_optional_off_platform_and_without_toolchain(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        check = catalog.check_map["desktop-macos"]
+        self.assertEqual(check.platforms, ("darwin",))
+        self.assertTrue({"swift", "xcodebuild", "xcrun"} <= set(check.requires))
+        self.assertEqual(check.missing, "skip")
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(validation_runner.sys, "platform", "linux"), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                results = execute_checks((check,), Path(directory),
+                    Path(directory) / "artifacts", strict=False, fail_fast=False)
+        self.assertEqual(results[0].status, "skipped")
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(validation_runner.sys, "platform", "darwin"), \
+                 mock.patch("validation.runner.shutil.which", return_value=None), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                results = execute_checks((check,), Path(directory),
+                    Path(directory) / "artifacts", strict=False, fail_fast=False)
+        self.assertEqual(results[0].status, "skipped")
+        self.assertIn("missing", results[0].message)
+
     def test_client_only_diffs_skip_the_cargo_lane_but_keep_their_own(self):
         catalog = load_catalog(ROOT / "validation/points.toml")
 
@@ -542,6 +612,8 @@ class CatalogCase(unittest.TestCase):
             with self.subTest(scheduler_path=scheduler_path):
                 scheduler_scope = scope_for_paths(catalog, (scheduler_path,))
                 expected = {"rust", "cluster_auth"}
+                if scheduler_path in ci_scope.DESKTOP_MACOS_PATHS:
+                    expected.add("desktop_macos")
                 if scheduler_path in (
                     ".github/workflows/ci.yml",
                     "validation/ci_scope.py",

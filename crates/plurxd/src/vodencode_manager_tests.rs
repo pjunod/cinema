@@ -254,7 +254,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         .await
         .expect("actual graph resources");
         let started = Instant::now();
-        let (verified, plan) = runtime
+        let (verified, plan) = match runtime
             .execute_policy_until(
                 &file,
                 &encoding.plan,
@@ -270,7 +270,13 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
                 display_target,
             )
             .await
-            .expect("actual verified window");
+            .expect("actual verified window")
+        {
+            crate::vodencode::dv_runtime::WindowOutcome::Completed(window) => window,
+            crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
+                panic!("actual graph was cancelled instead of verifying its window")
+            }
+        };
         if let Some(target) = display_target {
             assert_ne!(
                 plan.semantic_digest(),
@@ -326,6 +332,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             );
             assert!(verified.observed.display_target_rows.is_empty());
         }
+
         assert_eq!(
             verified.observed.pictures.len(),
             usize::try_from(encoding.grid.frames_per_segment).expect("bounded frame count")
@@ -360,6 +367,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
 /// Decode a processed window and check its luma is a limited-range picture:
 /// legal codes only, nominally 64..=940, and, where the film has picture, not
 /// flat. A wrong range or bit shift in the export fails these.
+#[cfg(target_os = "linux")]
 fn processed_window_luma(
     window: &[u8],
     (width, height): (u32, u32),
@@ -369,7 +377,10 @@ fn processed_window_luma(
     let path = directory.path().join("window.mp4");
     std::fs::write(&path, window).expect("window bytes");
     if let Some(dump) = std::env::var_os("PLURX_DV_WINDOW_DUMP") {
-        let _ = std::fs::copy(&path, std::path::Path::new(&dump).join(format!("{expect_picture}-{}.mp4", window.len())));
+        let _ = std::fs::copy(
+            &path,
+            std::path::Path::new(&dump).join(format!("{expect_picture}-{}.mp4", window.len())),
+        );
     }
     // The decoder's own yuv420p10le, so no conversion touches the codes.
     let output = std::process::Command::new(crate::ffmpeg::ffmpeg_bin())
@@ -378,7 +389,11 @@ fn processed_window_luma(
         .args(["-pix_fmt", "yuv420p10le", "-f", "rawvideo", "pipe:1"])
         .output()
         .expect("decode the processed window");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let luma_bytes = width as usize * height as usize * 2;
     let frame_bytes = luma_bytes * 3 / 2;
     assert!(
@@ -393,16 +408,17 @@ fn processed_window_luma(
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
     assert!(!codes.is_empty(), "the window decodes to a picture");
-    let (low, high) = codes
-        .iter()
-        .fold((u16::MAX, 0), |(low, high), code| {
-            (low.min(*code), high.max(*code))
-        });
+    let (low, high) = codes.iter().fold((u16::MAX, 0), |(low, high), code| {
+        (low.min(*code), high.max(*code))
+    });
     let mean = codes.iter().map(|code| u64::from(*code)).sum::<u64>() / codes.len() as u64;
     // Encoded pictures may ring into the footroom near black, so the hard
     // bound is the legal 10-bit range; the picture itself must sit in the
     // nominal 64..=940 range. A full-range or bit-shifted export fails both.
-    let nominal = codes.iter().filter(|code| (64..=940).contains(*code)).count();
+    let nominal = codes
+        .iter()
+        .filter(|code| (64..=940).contains(*code))
+        .count();
     assert!(
         (4..=1019).contains(&low) && (4..=1019).contains(&high),
         "luma {low}..{high} uses reserved codes"
@@ -459,6 +475,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -476,6 +493,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         ..reopen_request(file_id, "encoded-manager", "unused", "unused")
     };
     let missing = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -682,6 +700,7 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
@@ -824,6 +843,7 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -922,6 +942,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -970,6 +991,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let plain = manager
         .prepare_vod_encoding(
             &SessionRequest {
+                dv_processing_destination: None,
                 sdr_master_codecs: None,
                 continuous_media: None,
                 quality_catalog: None,
@@ -1010,6 +1032,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let burned = manager
         .prepare_vod_encoding(
             &SessionRequest {
+                dv_processing_destination: None,
                 sdr_master_codecs: None,
                 continuous_media: None,
                 quality_catalog: None,
@@ -1119,6 +1142,7 @@ async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extractio
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -1209,6 +1233,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     )
     .with_dovi_reshape(true);
     let req = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -1306,6 +1331,7 @@ async fn encoding_shipped_shape() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -1392,6 +1418,7 @@ async fn an_encode_the_software_budget_can_never_admit_is_refused_at_create() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -1520,6 +1547,7 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     )
     .with_decode_probe(Some(decode_probe));
     let mut request = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: Some(Box::new(ContinuousMediaRequest {
             controlled: false,
@@ -1708,7 +1736,8 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         .expect("audio-only capacity");
     // An oversized family may own an idle pool exclusively. Make this
     // refusal phase genuinely non-idle without changing the family budget.
-    let unrelated_live = video.admissions
+    let unrelated_live = video
+        .admissions
         .try_admit_software(3, 1, crate::admission::Priority::Live)
         .expect("unrelated live CPU credit");
     let refused = create(&manager, &request)
@@ -1876,7 +1905,11 @@ async fn rolling_fallback_starts_from_a_source_replaced_after_the_vod_attempt() 
         .put_setting(keys::VOD_LIVE_RECOVERY, "true")
         .await
         .expect("recovery on");
-    let before = store.get_file(file_id).await.expect("file").expect("seeded");
+    let before = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("seeded");
     let manager = Arc::new(TranscodeManager::new(
         Arc::clone(&store),
         base.path().join("manager"),
@@ -1950,8 +1983,15 @@ async fn rolling_fallback_starts_from_a_source_replaced_after_the_vod_attempt() 
         )
         .await
         .expect("rescan");
-    let after = store.get_file(file_id).await.expect("file").expect("rescanned");
-    assert_ne!(after.size, before.size, "the replacement is a different file");
+    let after = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("rescanned");
+    assert_ne!(
+        after.size, before.size,
+        "the replacement is a different file"
+    );
     assert_ne!(after.duration_ms, before.duration_ms);
     assert_ne!(after.height, before.height);
     held.release();
@@ -1959,7 +1999,10 @@ async fn rolling_fallback_starts_from_a_source_replaced_after_the_vod_attempt() 
         .await
         .expect("create task")
         .expect("the index miss falls back to a rolling start");
-    assert!(!started.vod, "the VOD attempt refused and the rolling engine served");
+    assert!(
+        !started.vod,
+        "the VOD attempt refused and the rolling engine served"
+    );
     assert_eq!(
         started.duration_ms, after.duration_ms,
         "the rolling start took the replaced row's probe facts, not the ones the VOD attempt read"
@@ -2203,12 +2246,7 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
         .await;
     let copy = rows
         .iter()
-        .find(|row| {
-            matches!(
-                row.route,
-                CandidateRoute::Remux | CandidateRoute::Original
-            )
-        })
+        .find(|row| matches!(row.route, CandidateRoute::Remux | CandidateRoute::Original))
         .unwrap_or_else(|| panic!("a copy candidate: {rows:?}"));
     // The ordinary request: the bound copy candidate, exactly as the
     // candidate fallback test above dispatches it.
@@ -2237,8 +2275,7 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
         Some(&engine.digest),
         raster,
     );
-    ordinary_context.candidate_id =
-        CandidateId::for_recipe_digest(ordinary_context.recipe_digest);
+    ordinary_context.candidate_id = CandidateId::for_recipe_digest(ordinary_context.recipe_digest);
     ordinary_context.canonical_caps = Some(caps.clone());
     ordinary_context.planning_binding =
         Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
@@ -2288,6 +2325,8 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
         height: i64::from(raster.1),
     };
     processed.hdr10 = true;
+    processed.dv_processing_destination =
+        Some(plurx_core::transcode::dv_processing::DvDestination::Profile81);
     processed.candidate_context = Some(Box::new(processed_context.clone()));
 
     // The rolling engine never serves a processed candidate, whoever hands
@@ -2310,7 +2349,10 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
     let started = create_local_vod(&manager, &processed, "test")
         .await
         .expect("the ordinary request the processed candidate enhanced is served");
-    assert!(!started.vod, "the copy has no VOD index; the rolling engine served it");
+    assert!(
+        !started.vod,
+        "the copy has no VOD index; the rolling engine served it"
+    );
     assert!(
         matches!(started.kind, SessionKind::Copy { .. }),
         "the ordinary copy, not the processed transcode: {:?}",
@@ -2464,7 +2506,15 @@ async fn create_local_vod(
     };
     let scope = serde_json::json!(["username", user_name]).to_string();
     Box::pin(manager.create_session_inner(
-        request, user_name, &scope, Some(&identity), None, None, None,
+        request,
+        user_name,
+        &scope,
+        Some(&identity),
+        None,
+        None,
+        None,
         (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
-    )).await.map(|creation| creation.info)
+    ))
+    .await
+    .map(|creation| creation.info)
 }

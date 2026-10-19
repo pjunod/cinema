@@ -65,7 +65,7 @@ function shippedSource(name) {
   return sliceDeclaration(start);
 }
 function transportTelemetrySources(){
-  return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker"].map(shippedSource).join("\n");
+  return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker","prunePlaybackPlayInvocations","cancelPlaybackPlayInvocation"].map(shippedSource).join("\n");
 }
 
 

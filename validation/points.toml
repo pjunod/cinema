@@ -218,6 +218,16 @@ missing = "skip"
 timeout_seconds = 1800
 
 [[checks]]
+id = "desktop-macos"
+title = "Native macOS server tray build and unit contracts"
+command = "make desktop-macos-check"
+profiles = ["ci", "full", "nightly"]
+platforms = ["darwin"]
+requires = ["make", "swift", "xcodebuild", "xcrun", "codesign"]
+missing = "skip"
+timeout_seconds = 900
+
+[[checks]]
 id = "apple-simulators"
 title = "Shared iOS and tvOS XCTest suite"
 command = "make apple-test"
@@ -838,6 +848,7 @@ paths = [
   "crates/plurxd/src/http/test_agents.rs",
   "crates/plurxd/src/http/tests.rs",
   "crates/plurxd/src/startup_tests.rs",
+  "crates/plurxd/src/desktop_control.rs",
   "crates/plurxd/src/state/analysis_rate_tests.rs",
   "crates/plurxd/src/state/tests.rs",
   "crates/plurxd/src/telemetry/tests.rs",
@@ -1018,6 +1029,7 @@ paths = [
   "scripts/fuzz-campaign",
   "scripts/fuzz-seeds",
   "vendor/dolby_vision/**",
+  "vendor/gemm-common/**",
   "vendor/bitvec_helpers/**",
   "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dv_segment,dvpipe,ffmpeg,fontenv,fontenv_tests,fragindex,fragment_index_cluster,hevc_census,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,rolling_output,rolling_provenance,scratch_ledger,scratch_put,seam_hooks,subtitle_ride_along,subtitle_ranges,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
   "crates/plurxd/src/playback_control/**",
@@ -1349,6 +1361,13 @@ paths = [
 checks = ["mobile-version", "operations-contract"]
 
 [[points]]
+id = "desktop.macos"
+title = "Native macOS server tray"
+contract = "The independently built macOS server tray preserves controller protocol and menu state, compiles for Apple Silicon and Intel, and executes its Swift and AppKit contracts on the native runner without changing login or server startup policy."
+paths = ["clients/server-tray/macos/**"]
+checks = ["desktop-macos"]
+
+[[points]]
 id = "apple.client"
 title = "Native iOS and tvOS clients"
 contract = "The Apple clients preserve the shared API, navigation, preferences, and playback policies on both platforms."
@@ -1422,6 +1441,7 @@ paths = [
   "scripts/release-package-candidate",
   "scripts/package-windows",
   "scripts/package-linux",
+  "scripts/create-desktop-update-manifest",
   "scripts/{bench,codec-qualification-corpus.json,codec-hdr-score,dv-evidence,gop-census,rolling-grid-census,rolling-grid-acquire,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/bench-macos-video",
   "scripts/qualify-tonemap-segments",
@@ -1438,6 +1458,7 @@ paths = [
   "scripts/release-cut",
   "scripts/sign-android-release",
   "tests/operations/**",
+  "tests/desktop/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract", "container-runtime", "resource-bounds"]
 depends_on = ["server.api"]
@@ -1663,3 +1684,19 @@ paths = [
 ]
 checks = ["operations-contract", "rust-gate", "rust-gate-ci", "web-static"]
 depends_on = ["core.media", "server.api"]
+
+[[points]]
+id = "desktop.control"
+title = "Native desktop control and authenticated upgrades"
+contract = "Native owners manage only the identified local installation. Shutdown requires a connection-bound generation and a clean durable receipt; signed complete release cohorts install under exclusive coordination, preserve startup policy, and recover or hold before any later service start. Headless operation needs no desktop libraries."
+paths = ["crates/plurx-desktop-control/**"]
+checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
+depends_on = ["server.api", "identity.access"]
+
+[[points]]
+id = "desktop.linux"
+title = "Linux desktop tray and control window"
+contract = "An eligible local graphical session exposes native server status, lifecycle, startup preferences and authenticated upgrades through the fixed controller protocol. Automatic login and qualification reject headless, remote and container sessions; the explicitly opened control window explains unsupported desktop state, and quitting the tray leaves the server running."
+paths = ["crates/plurx-tray/**"]
+checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
+depends_on = ["desktop.control"]

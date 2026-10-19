@@ -886,6 +886,7 @@ async fn source_start_budget_uses_actual_vod_settings_and_admission_policy() {
     );
     let request = SessionRequest {
         continuous_media: None,
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         vod_only: false,
         passive_vod: false,

@@ -880,6 +880,8 @@ pub(crate) struct RollingRetentionFacts {
 mod manager_cache;
 #[path = "transcode/manager/candidates.rs"]
 mod manager_candidates;
+#[cfg(test)]
+pub(crate) use manager_candidates::copy_candidate_recipe_digest;
 pub(crate) use manager_candidates::{planning_hwaccel_preference, QUALITY_PLANNING_KEYS};
 #[path = "transcode/content_encoding.rs"]
 mod content_encoding;
