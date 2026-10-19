@@ -33,6 +33,7 @@ struct Manifest {
 #[derive(Clone)]
 pub(crate) struct ToolSet {
     pub(crate) renderer: PathBuf,
+    pub(crate) scanner: PathBuf,
     pub(crate) renderer_env: Vec<(String, std::ffi::OsString)>,
     pub(crate) identity: DvBackendIdentity,
     artifacts: Arc<Vec<(PathBuf, String)>>,
@@ -41,7 +42,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 9] = [
+    let inputs: [(&str, &[u8]); 10] = [
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -69,6 +70,10 @@ fn renderer_source_identity() -> String {
         (
             "rgb48.h",
             include_bytes!("../../../tools/dv_processing/rgb48.h"),
+        ),
+        (
+            "scan_title.c",
+            include_bytes!("../../../tools/dv_processing/scan_title.c"),
         ),
         (
             "segment_decode_render.c",
@@ -206,7 +211,8 @@ impl ToolSet {
                     .iter()
                     .all(|key| manifest.abi.get(*key).is_some_and(|major| *major > 0))
                 || !manifest.tools.contains_key("renderer")
-                || manifest.tools.len() > 3
+                || !manifest.tools.contains_key("scanner")
+                || manifest.tools.len() > 4
                 || manifest.libraries.is_empty()
                 || manifest.libraries.len() > 32
             {
@@ -215,12 +221,12 @@ impl ToolSet {
             let mut artifacts = Vec::new();
             let mut tools = BTreeMap::new();
             for (name, artifact) in &manifest.tools {
-                if !matches!(name.as_str(), "renderer" | "muxer" | "author") {
+                if !matches!(name.as_str(), "renderer" | "muxer" | "author" | "scanner") {
                     return Err("unknown DV helper".into());
                 }
                 // Optional standalone tools do not participate in the actual
                 // streaming renderer + daemon packet-authoring graph.
-                if name != "renderer" {
+                if !matches!(name.as_str(), "renderer" | "scanner") {
                     continue;
                 }
                 let path = contained(&root, &artifact.path)?;
@@ -287,6 +293,7 @@ impl ToolSet {
             artifacts.push((root.join("build-identity.json"), hash(&bytes)));
             Ok(Some(Arc::new(Self {
                 renderer: tools.remove("renderer").ok_or("missing renderer")?,
+                scanner: tools.remove("scanner").ok_or("missing scanner")?,
                 renderer_env: environment,
                 identity,
                 artifacts: Arc::new(artifacts),

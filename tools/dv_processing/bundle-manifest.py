@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 INPUTS = ("base_dv_renderer.h", "dv_trace.h", "fel_renderer.h", "hevc-rasl-frame-thread.patch", "nlq_clipping.h",
-          "nut_timing.h", "rgb48.h", "segment_decode_render.c", "yuv420p10.h")
+          "nut_timing.h", "rgb48.h", "scan_title.c", "segment_decode_render.c", "yuv420p10.h")
 GRAPH = "p7-fel-linear-dz-bt2020-pq-master-clip-v1"
 
 
@@ -22,7 +22,7 @@ def build(source, root):
         raise ValueError("unsupported installed helper ABI")
     manifest = {"schema": 1, "graph": GRAPH, "abi": abi,
         "tools": {name: {"path": "bin/" + filename, "sha256": sha(root / "bin" / filename)}
-                  for name, filename in (("renderer", "segment_decode_render"), ("muxer", "mux_rgb"), ("author", "author_p81"))},
+                  for name, filename in (("renderer", "segment_decode_render"), ("muxer", "mux_rgb"), ("author", "author_p81"), ("scanner", "scan_title"))},
         "libraries": [{"path": "lib/libplacebo.so.374", "sha256": sha(root / "lib/libplacebo.so.374")}],
         "parser_sha256": sha(root / "sources/libdovi.a"),
         "source_sha256": source_digest.hexdigest(),

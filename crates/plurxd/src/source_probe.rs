@@ -1,4 +1,6 @@
 //! Admitted leaf workers never mutate catalogue identity or scan completion.
+mod dv_title;
+
 use crate::state::AppState;
 use plurx_core::store::background_jobs_probe::{ProbeOutput, MAX_PROBE_RESULT_BYTES};
 use plurx_core::{
@@ -231,7 +233,7 @@ async fn execute(
         &cancel,
         shutdown,
         progress.as_ref(),
-        probe::probe_single_threaded(&file.path),
+        dv_title::probe(&file),
     )
     .await;
     // Bounded process cancellation kills and reaps before returning above.

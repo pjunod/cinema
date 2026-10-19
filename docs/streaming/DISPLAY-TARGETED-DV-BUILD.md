@@ -1,7 +1,34 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** planned · **Updated:** 2026-10-19 · **Owner:** Claude, for Paul ·
+**Status:** PR A implementation in progress; not qualified · **Updated:** 2026-10-19 · **Owner:** Sol/Astra (source), coordinator (publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
+
+## PR A implementation checkpoint
+
+- Baseline Rust 1.97.1 all-target checking and helper compilation against the
+  pinned libplacebo API 374 succeeded; these are baseline, not candidate receipts.
+- Complete-title scan groundwork is being implemented: one software base decoder,
+  no GPU or render, exact decoded-frame accounting and clean EOF/drain. Typed
+  aggregates live in `probe_json.plurx_dv_title_v1` under the admitted probe job's
+  existing source/publication fence. Unknown versions, partial scans and old
+  documents cannot establish eligibility. L6/L9 are constant, unknown or
+  inconsistent; a missing observation is not silently replaced by the last one.
+- Unit cases are authored but intentionally not executed before the complete
+  candidate's independent adversarial review. Scanner integration, renderer and
+  policy identity, controls, candidate compilation and draft paperwork remain.
+- Actual upstream API 374 inspection found a design conflict with the helper
+  recipe below. `hybrid_mix` is removed, and its ST 2094-10 function uses a modified
+  PQ-space knee selector. The shader also applies an adaptive virtual target and
+  LMS/film response independently of peak detection. Setting contrast recovery
+  and hybrid mix to zero therefore does not establish Annex B.2 equivalence.
+  The required independent two-code bound is retained. A supported explicit
+  post-reconstruction shader is under coordinator consideration; no numerical
+  implementation change or equivalence claim has been approved at this checkpoint.
+- The numerical reference is the published
+  [SMPTE ST 2094-10:2021 Annex B.2](https://pub.smpte.org/latest/st2094-10/st2094-10-2021.pdf),
+  not a translation of libplacebo's implementation. No private LUT research or
+  proprietary output is part of this work. Metadata writing and viewer selection
+  remain later PRs; targeting is not exposed to playback here.
 
 ## Goal
 

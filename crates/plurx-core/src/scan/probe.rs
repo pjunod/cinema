@@ -50,12 +50,14 @@ pub async fn self_check() -> bool {
 /// The version names what a probe *concludes*, not only which FFprobe ran:
 /// v2 classifies a stream whose transfer the container left unsignalled from
 /// its first decoded frame, so a v1 worker would publish an SDR verdict a v2
-/// scanner no longer reaches for the same bytes.
+/// scanner no longer reaches for the same bytes. v3 adds the admitted daemon's
+/// complete-title Dolby Vision scan to the probe document. Old facts remain
+/// unknown until a fresh source-bound probe publishes that aggregate.
 pub async fn pipeline_digest() -> Option<String> {
     use sha2::{Digest, Sha256};
     let reporter = reporter_identity_of(&ffprobe_bin()).await?;
     Some(hex::encode(Sha256::digest(format!(
-        "leaf-probe-v2:{reporter}"
+        "leaf-probe-v3:{reporter}"
     ))))
 }
 

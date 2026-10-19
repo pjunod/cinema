@@ -10,6 +10,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Internal complete-title Dolby Vision scan groundwork: typed L1 frame coverage
+  and consistent L6/L9 facts for future display-targeted HDR10-E. No display
+  selection or targeted playback is exposed by this groundwork.
+
 - Item pages show review-site scores: IMDb, Rotten Tomatoes and Metacritic (through the OMDb key in Settings, unused until now) and TMDB's user score, each with its own mark. They are fetched on first view and kept for two weeks.
 - A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
 
