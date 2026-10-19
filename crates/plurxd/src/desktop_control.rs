@@ -287,7 +287,7 @@ impl DesktopControl {
             node_id: state.node_id.clone(),
             instance_id: state.store.instance_id().await?,
             version: crate::version::SEMVER.into(),
-            build: crate::version::BUILD.into(),
+            build: crate::version::SOURCE_COMMIT.into(),
             browser_origin,
             supervisor: self.supervisor.clone(),
             ready: state.serving.is_ready(),
@@ -1200,6 +1200,8 @@ mod tests {
         let identity: DaemonIdentityV1 =
             serde_json::from_slice(&bytes).expect("desktop control fixture");
         assert_eq!(identity.process, control.process);
+        assert_eq!(identity.build, crate::version::SOURCE_COMMIT);
+        assert_eq!(identity.version, crate::version::SEMVER);
         let response = sender
             .send_request(
                 Request::builder()

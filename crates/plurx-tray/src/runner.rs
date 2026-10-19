@@ -4,6 +4,7 @@
 //! UI calls it from worker threads only; nothing here touches GTK or D-Bus.
 use crate::command::Command;
 use crate::protocol::{decode_response, ControlFailure, ControlResult, MAX_RESPONSE_BYTES};
+use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -50,21 +51,24 @@ impl Runner {
 /// What the controller may inherit. It needs the user's identity and the
 /// session bus (polkit's agent and systemd's D-Bus authorization are
 /// per-session); it must not inherit proxies or an injected library path.
-pub fn controller_environment(
-    parent: impl Iterator<Item = (String, String)>,
-) -> Vec<(String, String)> {
-    const KEEP: [&str; 8] = [
+pub fn controller_environment<T: AsRef<OsStr>>(
+    parent: impl Iterator<Item = (T, T)>,
+) -> Vec<(OsString, OsString)> {
+    const KEEP: [&str; 9] = [
         "HOME",
         "USER",
         "LOGNAME",
         "LANG",
         "LC_ALL",
         "XDG_RUNTIME_DIR",
+        "XDG_CONFIG_HOME",
         "DBUS_SESSION_BUS_ADDRESS",
         "XDG_SESSION_ID",
     ];
-    let mut kept: Vec<(String, String)> =
-        parent.filter(|(k, _)| KEEP.contains(&k.as_str())).collect();
+    let mut kept: Vec<(OsString, OsString)> = parent
+        .filter(|(key, _)| key.as_ref().to_str().is_some_and(|key| KEEP.contains(&key)))
+        .map(|(key, value)| (key.as_ref().to_owned(), value.as_ref().to_owned()))
+        .collect();
     kept.push(("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()));
     kept.sort();
     kept
@@ -73,11 +77,18 @@ pub fn controller_environment(
 impl Control for Runner {
     fn run(&self, command: &Command) -> Result<ControlResult, ControlFailure> {
         let argv = self.argv(command)?;
-        execute(
+        execute_controller(
             &self.executable,
             &argv,
             Duration::from_secs(command.timeout_secs()),
             !command.is_mutation(),
+            matches!(
+                command,
+                Command::Status
+                    | Command::StartupGet
+                    | Command::StartupSetTray(_)
+                    | Command::UpdatesStatus(_)
+            ),
         )
     }
 }
@@ -92,10 +103,28 @@ pub fn execute(
     timeout: Duration,
     kill_on_timeout: bool,
 ) -> Result<ControlResult, ControlFailure> {
+    execute_controller(executable, argv, timeout, kill_on_timeout, false)
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "fixed controller subprocess with bounded output; never a daemon child"
+)]
+fn execute_controller(
+    executable: &Path,
+    argv: &[String],
+    timeout: Duration,
+    kill_on_timeout: bool,
+    unprivileged: bool,
+) -> Result<ControlResult, ControlFailure> {
     let mut child = std::process::Command::new(executable)
         .args(argv)
         .env_clear()
-        .envs(controller_environment(std::env::vars()))
+        // User configuration belongs only to commands that cannot enter pkexec.
+        // Preserve even invalid values there so the controller can reject them.
+        .envs(controller_environment(
+            std::env::vars_os().filter(|(key, _)| unprivileged || key != "XDG_CONFIG_HOME"),
+        ))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

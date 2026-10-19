@@ -470,8 +470,11 @@ fn package_identity_refresh_covers_external_upgrade_and_desktop_add_remove() {
         source_commit: "b".repeat(40),
         architecture: Architecture::Amd64,
     };
-    let inv = package_script::parse_deb_inventory(
-        "plurxd\t1:0.7.10-2\tamd64\tinstalled\nplurx-desktop\t1:0.7.10-2\tamd64\tinstalled\n",
+    let inv = package_script::parse_deb_inventory_for_hook(
+        "plurxd\t1:0.7.10-2\tamd64\tinstalled\nplurx-desktop\t1:0.7.10-2\tamd64\thalf-configured\n",
+        "plurx-desktop",
+        "postinstall",
+        &["configure".into()],
     )
     .expect("inventory");
     let fresh = package_script::refreshed(i.clone(), &release, &inv).expect("refresh");
@@ -479,8 +482,11 @@ fn package_identity_refresh_covers_external_upgrade_and_desktop_add_remove() {
     assert!(fresh.desktop_installed);
     assert_eq!(fresh.installation_id, i.installation_id);
     assert_eq!(fresh.paths.config, i.paths.config);
-    let removed = package_script::parse_deb_inventory(
-        "plurxd\t1:0.7.10-2\tamd64\tinstalled\nplurx-desktop\t1:0.7.10-2\tamd64\tconfig-files\n",
+    let removed = package_script::parse_deb_inventory_for_hook(
+        "plurxd\t1:0.7.10-2\tamd64\tinstalled\nplurx-desktop\t1:0.7.10-2\tamd64\thalf-installed\n",
+        "plurx-desktop",
+        "postremove",
+        &["remove".into()],
     )
     .expect("desktop removed");
     assert!(
@@ -1086,4 +1092,298 @@ fn bounded_journal_logs_require_the_narrow_helper_not_global_journal_membership(
     );
     assert!(Cli::try_parse_from(["plurx-control", "logs", "--lines", "1001"]).is_err());
     assert!(Cli::try_parse_from(["plurx-control", "logs", "--unit", "other.service"]).is_err());
+}
+
+#[test]
+fn debian_postinst_accepts_only_the_exact_configuring_package() {
+    let configure = vec!["configure".into()];
+    let fresh_server = "plurxd\t1:0.7.10-2\tamd64\thalf-configured\n";
+    let inv = package_script::parse_deb_inventory_for_hook(
+        fresh_server,
+        "plurxd",
+        "postinstall",
+        &configure,
+    )
+    .expect("fresh server postinst before dpkg marks installed");
+    assert!(!inv.desktop_installed);
+    assert_eq!(inv.server_package_version, "1:0.7.10-2");
+    assert!(package_script::parse_deb_inventory(fresh_server).is_err());
+    for (package, phase, args) in [
+        ("plurx-desktop", "postinstall", configure.clone()),
+        ("plurxd", "preinstall", configure.clone()),
+        ("plurxd", "postinstall", vec!["abort-upgrade".into()]),
+        ("plurxd", "postinstall", vec![]),
+        (
+            "plurxd",
+            "postinstall",
+            vec!["configure".into(), "0.7.9-1".into(), "extra".into()],
+        ),
+    ] {
+        assert!(
+            package_script::parse_deb_inventory_for_hook(fresh_server, package, phase, &args)
+                .is_err()
+        );
+    }
+    let desktop_add =
+        "plurxd\t1:0.7.10-2\tamd64\tinstalled\nplurx-desktop\t1:0.7.10-2\tamd64\thalf-configured\n";
+    let added = package_script::parse_deb_inventory_for_hook(
+        desktop_add,
+        "plurx-desktop",
+        "postinstall",
+        &configure,
+    )
+    .expect("separate desktop configure hook");
+    assert!(added.desktop_installed);
+    assert!(package_script::parse_deb_inventory_for_hook(
+        desktop_add,
+        "plurxd",
+        "postinstall",
+        &configure
+    )
+    .is_err());
+    assert!(package_script::parse_deb_inventory(desktop_add).is_err());
+    // A second, unrelated incomplete member remains a conflict during server configure.
+    let both = desktop_add.replace("amd64\tinstalled", "amd64\thalf-configured");
+    assert!(package_script::parse_deb_inventory_for_hook(
+        &both,
+        "plurxd",
+        "postinstall",
+        &configure
+    )
+    .is_err());
+    assert!(package_script::parse_deb_inventory_for_hook(
+        &both,
+        "plurx-desktop",
+        "postinstall",
+        &configure
+    )
+    .is_err());
+}
+
+#[test]
+fn debian_desktop_postremove_records_absence_without_blessing_other_incomplete_packages() {
+    let removing =
+        "plurxd\t1:0.7.10-2\tamd64\tinstalled\nplurx-desktop\t1:0.7.10-2\tamd64\thalf-installed\n";
+    for action in ["remove", "purge"] {
+        let inv = package_script::parse_deb_inventory_for_hook(
+            removing,
+            "plurx-desktop",
+            "postremove",
+            &[action.into()],
+        )
+        .expect("desktop removal is still in its postrm transitional state");
+        assert!(!inv.desktop_installed);
+    }
+    assert!(package_script::parse_deb_inventory(removing).is_err());
+    assert!(package_script::parse_deb_inventory_for_hook(
+        removing,
+        "plurx-desktop",
+        "postremove",
+        &["upgrade".into()]
+    )
+    .is_err());
+    let server_incomplete = removing.replace("amd64\tinstalled", "amd64\thalf-configured");
+    assert!(package_script::parse_deb_inventory_for_hook(
+        &server_incomplete,
+        "plurx-desktop",
+        "postremove",
+        &["remove".into()]
+    )
+    .is_err());
+    let finalized = removing.replace("half-installed", "config-files");
+    assert!(
+        !package_script::parse_deb_inventory(&finalized)
+            .expect("final removed inventory")
+            .desktop_installed
+    );
+}
+
+#[test]
+fn final_candidate_validation_still_rejects_half_configured_debian_packages() {
+    let i = installed();
+    let plan = package::PackagePlan {
+        program: "/usr/bin/apt-get",
+        args: vec![],
+        packages: vec![("plurxd".into(), "1:0.7.10-2".into())],
+        paths: vec![],
+    };
+    let pending = "plurxd\t1:0.7.10-2\tamd64\thalf-configured\n";
+    assert!(package::validate_installed(&i, &plan, pending).is_err());
+    assert!(package::validate_installed(
+        &i,
+        &plan,
+        &pending.replace("half-configured", "installed")
+    )
+    .is_ok());
+}
+
+#[test]
+fn changed_package_unit_reloads_before_policy_readback_and_preserves_operator_policy() {
+    use plurx_desktop_control::{controller, supervisor};
+    let scratch = Scratch::new();
+    let unit = scratch.0.join("plurxd.service");
+    let old = b"[Service]\nTimeoutStartSec=60\n".to_vec();
+    let candidate = b"[Service]\nTimeoutStartSec=120\n".to_vec();
+    std::fs::write(&unit, &old).expect("old unit");
+    let i = installed();
+    let plan = package::PackagePlan {
+        program: "/usr/bin/apt-get",
+        args: vec![],
+        packages: vec![("plurxd".into(), "1:0.7.10-2".into())],
+        paths: vec![],
+    };
+    let inventory = "plurxd\t1:0.7.10-2\tamd64\tinstalled\n";
+    let fragment = "/usr/lib/systemd/system/plurxd.service";
+    let drop_ins = vec![(
+        "/etc/systemd/system/plurxd.service.d/operator.conf".to_string(),
+        b"[Service]\nNice=5\n".to_vec(),
+    )];
+    for startup in ["enabled", "disabled"] {
+        std::fs::write(&unit, &old).expect("loaded old package unit");
+        let initial = supervisor::systemd_policy_revision(startup, fragment, "no", &drop_ins);
+        let mut loaded = old.clone();
+        // The verified candidate really changes the on-disk package unit.
+        std::fs::write(&unit, &candidate).expect("candidate unit");
+        assert_ne!(std::fs::read(&unit).expect("disk unit"), loaded);
+        assert_ne!(
+            supervisor::systemd_policy_revision(startup, fragment, "yes", &drop_ins),
+            initial
+        );
+        let mut reloads = 0;
+        controller::finalize_package_install_with(&i, &plan, 0, inventory, |i| {
+            supervisor::reload_after_package_install_with(i, |program, args, timeout| {
+                assert_eq!(program, supervisor::SYSTEMCTL);
+                assert_eq!(args, ["--no-ask-password", "daemon-reload"]);
+                assert_eq!(timeout, std::time::Duration::from_secs(10));
+                reloads += 1;
+                loaded = std::fs::read(&unit).expect("systemd loads changed unit");
+                Ok((0, String::new()))
+            })
+        })
+        .expect("strict cohort followed by bounded reload");
+        assert_eq!(reloads, 1);
+        assert_eq!(loaded, candidate);
+        // The expected package-owned base-unit replacement is accepted, while
+        // the unchanged startup choice and external drop-ins remain fenced.
+        assert_eq!(
+            supervisor::systemd_policy_revision(startup, fragment, "no", &drop_ins),
+            initial
+        );
+        let mut edited = drop_ins.clone();
+        edited[0]
+            .1
+            .extend_from_slice(b"Environment=OUTSIDE_EDIT=1\n");
+        assert_ne!(
+            supervisor::systemd_policy_revision(startup, fragment, "no", &edited),
+            initial
+        );
+        assert_ne!(
+            supervisor::systemd_policy_revision(startup, fragment, "no", &[]),
+            initial
+        );
+        let mut added = drop_ins.clone();
+        added.push((
+            "/etc/systemd/system/plurxd.service.d/new.conf".into(),
+            b"[Service]\nNice=10\n".to_vec(),
+        ));
+        assert_ne!(
+            supervisor::systemd_policy_revision(startup, fragment, "no", &added),
+            initial
+        );
+        let changed_startup = if startup == "enabled" {
+            "disabled"
+        } else {
+            "enabled"
+        };
+        assert_ne!(
+            supervisor::systemd_policy_revision(changed_startup, fragment, "no", &drop_ins),
+            initial
+        );
+    }
+}
+
+#[test]
+fn worker_never_reloads_failed_or_incomplete_package_cohorts() {
+    use plurx_desktop_control::controller;
+    let i = installed();
+    let plan = package::PackagePlan {
+        program: "/usr/bin/apt-get",
+        args: vec![],
+        packages: vec![("plurxd".into(), "1:0.7.10-2".into())],
+        paths: vec![],
+    };
+    let complete = "plurxd\t1:0.7.10-2\tamd64\tinstalled\n";
+    for (exit, inventory) in [
+        (1, complete.to_string()),
+        (0, complete.replace("installed", "half-configured")),
+        (0, complete.replace("0.7.10", "0.7.9")),
+    ] {
+        let mut reloads = 0;
+        assert!(
+            controller::finalize_package_install_with(&i, &plan, exit, &inventory, |_| {
+                reloads += 1;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(reloads, 0);
+    }
+    let error = controller::finalize_package_install_with(&i, &plan, 0, complete, |_| {
+        Err(plurx_desktop_control::Error::new(
+            ErrorCode::Unavailable,
+            "bounded reload failed",
+        ))
+    })
+    .expect_err("reload failure prevents restoration");
+    assert_eq!(error.code, ErrorCode::Unavailable);
+}
+
+#[test]
+fn debian_server_first_configuration_keeps_unpacked_desktop_absent_until_its_own_hook() {
+    let pending =
+        "plurxd\t1:0.7.10-2\tamd64\thalf-configured\nplurx-desktop\t1:0.7.10-2\tamd64\tunpacked\n";
+    let server = package_script::parse_deb_inventory_for_hook(
+        pending,
+        "plurxd",
+        "postinstall",
+        &["configure".into(), "1:0.7.9-1".into()],
+    )
+    .expect("apt server dependency configures before the already-unpacked desktop");
+    assert!(!server.desktop_installed);
+    assert!(package_script::parse_deb_inventory(pending).is_err());
+    for state in ["half-configured", "half-installed"] {
+        assert!(package_script::parse_deb_inventory_for_hook(
+            &pending.replace("unpacked", state),
+            "plurxd",
+            "postinstall",
+            &["configure".into()]
+        )
+        .is_err());
+    }
+    let desktop_phase = pending
+        .replace("amd64\thalf-configured", "amd64\tinstalled")
+        .replace("unpacked", "half-configured");
+    let desktop = package_script::parse_deb_inventory_for_hook(
+        &desktop_phase,
+        "plurx-desktop",
+        "postinstall",
+        &["configure".into()],
+    )
+    .expect("desktop becomes present in its own subsequent configure hook");
+    assert!(desktop.desktop_installed);
+    let complete = desktop_phase.replace("half-configured", "installed");
+    assert!(
+        package_script::parse_deb_inventory(&complete)
+            .expect("completed transaction")
+            .desktop_installed
+    );
+    let unrelated_pending = pending.replace("half-configured", "installed");
+    assert!(package_script::parse_deb_inventory(&unrelated_pending).is_err());
+    assert!(package_script::parse_deb_inventory_for_hook(
+        &unrelated_pending,
+        "plurx-desktop",
+        "postinstall",
+        &["configure".into()]
+    )
+    .is_err());
 }

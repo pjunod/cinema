@@ -14,7 +14,55 @@ pub struct SystemInventory {
     pub architecture: Architecture,
     pub desktop_installed: bool,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DebianLifecycle {
+    ConfigureServer,
+    ConfigureDesktop,
+    RemoveDesktop,
+}
+impl DebianLifecycle {
+    fn from_hook(package: &str, phase: &str, args: &[String]) -> Option<Self> {
+        match (package, phase, args.first().map(String::as_str)) {
+            ("plurxd", "postinstall", Some("configure")) if args.len() <= 2 => {
+                Some(Self::ConfigureServer)
+            }
+            ("plurx-desktop", "postinstall", Some("configure")) if args.len() <= 2 => {
+                Some(Self::ConfigureDesktop)
+            }
+            ("plurx-desktop", "postremove", Some("remove" | "purge")) if args.len() == 1 => {
+                Some(Self::RemoveDesktop)
+            }
+            _ => None,
+        }
+    }
+    fn configuring(self, package: &str) -> bool {
+        matches!(
+            (self, package),
+            (Self::ConfigureServer, "plurxd") | (Self::ConfigureDesktop, "plurx-desktop")
+        )
+    }
+}
+/// Final inventory has no maintainer-script exception.
 pub fn parse_deb_inventory(text: &str) -> Result<SystemInventory> {
+    parse_deb_inventory_context(text, None)
+}
+/// The caller must establish the native root package-hook authority first.
+/// Only the exact dpkg configure/removal hook can explain its own transient state.
+pub fn parse_deb_inventory_for_hook(
+    text: &str,
+    package: &str,
+    phase: &str,
+    original_args: &[String],
+) -> Result<SystemInventory> {
+    parse_deb_inventory_context(
+        text,
+        DebianLifecycle::from_hook(package, phase, original_args),
+    )
+}
+fn parse_deb_inventory_context(
+    text: &str,
+    lifecycle: Option<DebianLifecycle>,
+) -> Result<SystemInventory> {
     let mut server = None;
     let mut desktop = false;
     for line in text.lines() {
@@ -26,8 +74,25 @@ pub fn parse_deb_inventory(text: &str) -> Result<SystemInventory> {
             ));
         }
         let name = p[0].split(':').next().unwrap_or("");
-        if p[3] != "installed" {
-            continue;
+        if !matches!(name, "plurxd" | "plurx-desktop") {
+            return Err(Error::new(
+                ErrorCode::PolicyConflict,
+                "unexpected package inventory member",
+            ));
+        }
+        let configuring = lifecycle.is_some_and(|hook| hook.configuring(name));
+        let removing = lifecycle == Some(DebianLifecycle::RemoveDesktop) && name == "plurx-desktop";
+        match p[3] {
+            "installed" => {},
+            "half-configured" if configuring => {}
+            // apt unpacks the optional desktop before configuring its server
+            // dependency. It is not installed yet; only its own postinst may
+            // later record it as present.
+            "unpacked" if lifecycle == Some(DebianLifecycle::ConfigureServer) && name == "plurx-desktop" => continue,
+            "not-installed" | "config-files" => continue,
+            "half-installed" if removing => continue,
+            state => return Err(Error::new(ErrorCode::PolicyConflict,
+                format!("incomplete {name} package state {state} outside its authenticated lifecycle hook"))),
         }
         match name {
             "plurxd" => {
@@ -121,6 +186,9 @@ pub fn parse_rpm_inventory(text: &str) -> Result<SystemInventory> {
     })
 }
 pub fn inventory() -> Result<SystemInventory> {
+    inventory_with_hook(None)
+}
+fn inventory_with_hook(hook: Option<(&str, &str, &[String])>) -> Result<SystemInventory> {
     if Path::new("/usr/bin/dpkg-query").exists() {
         let (_, server) = supervisor::output(
             "/usr/bin/dpkg-query",
@@ -140,7 +208,13 @@ pub fn inventory() -> Result<SystemInventory> {
             ],
             Duration::from_secs(5),
         )?;
-        parse_deb_inventory(&format!("{server}{desktop}"))
+        let text = format!("{server}{desktop}");
+        match hook {
+            Some((package, phase, args)) => {
+                parse_deb_inventory_for_hook(&text, package, phase, args)
+            }
+            None => parse_deb_inventory(&text),
+        }
     } else {
         let (_, server) = supervisor::output(
             "/usr/bin/rpm",
@@ -233,7 +307,7 @@ pub fn run(package: &str, phase: &str, original_args: &[String]) -> Result<bool>
     if phase == "postremove" && package == "plurxd" {
         return Ok(false);
     }
-    let inventory = inventory()?;
+    let inventory = inventory_with_hook(Some((package, phase, original_args)))?;
     let release: ReleaseIdentityV1 =
         secure_fs::read_json(Path::new("/usr/lib/plurx-control/release.json"), 0)?;
     release.validate()?;

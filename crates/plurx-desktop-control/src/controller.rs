@@ -605,10 +605,13 @@ fn perform_update(i: &InstallationV1, store: &TransactionStore, j: &mut JournalV
         let after = package::inventory(i, &plan.packages)?;
         j.package_inventory_after = Some(after.clone());
         store.save(j)?;
-        if exit != 0 {
-            return Err(Error::new(ErrorCode::RecoveryRequired, format!("package manager exited {exit}; preserve stopped daemon and inspect exact package inventory; never automatically restore DB/Raft")));
-        }
-        package::validate_installed(i, &plan, &after)?;
+        finalize_package_install_with(
+            i,
+            &plan,
+            exit,
+            &after,
+            supervisor::reload_after_package_install,
+        )?;
     } else {
         let extracted = i
             .paths
@@ -648,6 +651,23 @@ fn perform_update(i: &InstallationV1, store: &TransactionStore, j: &mut JournalV
     j.transition(Phase::Committed)?;
     store.save(j)
 }
+/// The worker owns systemd reload after its exact signed package cohort commits.
+/// Keep the executor injectable for file-only regression fixtures; production
+/// always supplies the fixed bounded native reload operation above.
+pub fn finalize_package_install_with(
+    i: &InstallationV1,
+    plan: &package::PackagePlan,
+    exit: i32,
+    after: &str,
+    reload: impl FnOnce(&InstallationV1) -> Result<()>,
+) -> Result<()> {
+    if exit != 0 {
+        return Err(Error::new(ErrorCode::RecoveryRequired, format!("package manager exited {exit}; preserve stopped daemon and inspect exact package inventory; never automatically restore DB/Raft")));
+    }
+    package::validate_installed(i, plan, after)?;
+    reload(i)
+}
+
 pub fn save_installation(i: &InstallationV1) -> Result<()> {
     i.validate()?;
     let path = default_record()?;

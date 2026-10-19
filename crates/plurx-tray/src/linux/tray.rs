@@ -46,10 +46,11 @@ impl ksni::Tray for SniTray {
         post(&self.events, Event::MenuShown);
     }
     fn watcher_online(&self) {
-        post(&self.events, Event::HostOnline(true));
+        // Watcher ownership alone says nothing about a registered tray host.
+        post(&self.events, Event::HostProbeTick);
     }
     fn watcher_offline(&self, _reason: ksni::OfflineReason) -> bool {
-        post(&self.events, Event::HostOnline(false));
+        post(&self.events, Event::WatcherOffline);
         // Keep the service: ksni re-registers when a watcher returns.
         true
     }

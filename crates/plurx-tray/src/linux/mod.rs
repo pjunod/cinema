@@ -32,7 +32,9 @@ pub enum Event {
     Action(Action),
     Confirmed(Pending, bool),
     Completed(Purpose, Result<ControlResult, ControlFailure>),
-    HostOnline(bool),
+    WatcherOffline,
+    HostProbeTick,
+    HostObserved(u64, dbus::HostProbe),
     MenuShown,
     WindowClosed,
     PollTick,
@@ -70,6 +72,9 @@ struct Shell {
     menu_visible_until: Option<Instant>,
     poll_source: Option<glib::SourceId>,
     controller_calls: u32,
+    host_probe_generation: u64,
+    host_probe_pending: Option<u64>,
+    host_poll_source: Option<glib::SourceId>,
     smoke: Option<(Smoke, SmokeState)>,
     facts: SessionFacts,
     eligibility: Eligibility,
@@ -160,6 +165,9 @@ pub fn run(options: Options) -> i32 {
             menu_visible_until: None,
             poll_source: None,
             controller_calls: 0,
+            host_probe_generation: 0,
+            host_probe_pending: None,
+            host_poll_source: None,
             smoke: smoke.clone().map(|s| {
                 (
                     s,
@@ -191,6 +199,18 @@ pub fn run(options: Options) -> i32 {
             }
             let effects = s.core.poll();
             s.apply(effects);
+            // Host state is independent of daemon/status polling: a watcher can
+            // retain its bus name while its panel host disappears or returns.
+            let host_events = tx.clone();
+            s.host_poll_source = Some(glib::timeout_add_local(Duration::from_secs(2), move || {
+                if matches!(
+                    host_events.try_send(Event::HostProbeTick),
+                    Err(async_channel::TrySendError::Closed(_))
+                ) {
+                    return glib::ControlFlow::Break;
+                }
+                glib::ControlFlow::Continue
+            }));
         }
         let shell_rx = Rc::clone(&shell);
         let exit_rx = Rc::clone(&exit_in);
@@ -409,7 +429,23 @@ impl Shell {
         }
     }
 
+    fn probe_host(&mut self) {
+        if self.host_probe_pending.is_some() {
+            return;
+        }
+        let generation = self.host_probe_generation;
+        self.host_probe_pending = Some(generation);
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            // A full UI queue must not lose the completion and wedge pending probes.
+            let _ = events.send_blocking(Event::HostObserved(generation, dbus::probe_host()));
+        });
+    }
+
     fn shutdown(&mut self) {
+        if let Some(source) = self.host_poll_source.take() {
+            source.remove();
+        }
         if let Some(tray) = self.tray.take() {
             tray.shutdown().wait();
         }
@@ -439,14 +475,35 @@ impl Shell {
                 self.apply(effects);
                 self.smoke_observe(poll, action_result);
             }
-            Event::HostOnline(online) => {
-                let host = if online {
-                    TrayHost::Present
-                } else {
-                    TrayHost::Absent
-                };
-                let effects = self.core.set_tray_host(host);
-                self.apply(effects);
+            Event::WatcherOffline => {
+                // Do not let an in-flight pre-disappearance probe resurrect a
+                // vanished host. The independent timer observes its return.
+                self.host_probe_generation = self.host_probe_generation.wrapping_add(1);
+                if self.core.snapshot.tray_host != TrayHost::Absent {
+                    let effects = self.core.set_tray_host(TrayHost::Absent);
+                    self.apply(effects);
+                }
+            }
+            Event::HostProbeTick => self.probe_host(),
+            Event::HostObserved(generation, probe) => {
+                if self.host_probe_pending == Some(generation) {
+                    self.host_probe_pending = None;
+                }
+                if generation != self.host_probe_generation {
+                    return None;
+                }
+                let host = core::tray_host_for_session(&self.eligibility, probe.state());
+                // A failed query is not confirmed host loss; keep the last
+                // observed state until a conclusive watcher/property response.
+                if probe.state() != TrayHost::Unknown {
+                    if host != self.core.snapshot.tray_host {
+                        let effects = self.core.set_tray_host(host);
+                        self.apply(effects);
+                    }
+                    if host == TrayHost::Present && self.tray.is_none() {
+                        self.spawn_tray();
+                    }
+                }
             }
             Event::MenuShown => {
                 self.menu_visible_until = Some(Instant::now() + Duration::from_secs(10));

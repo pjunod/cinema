@@ -281,7 +281,7 @@ fn controller_environment_drops_proxies_and_injected_libraries() {
     ]
     .map(|(k, v)| (k.to_string(), v.to_string()));
     let env = controller_environment(parent.into_iter());
-    let keys: Vec<_> = env.iter().map(|(k, _)| k.as_str()).collect();
+    let keys: Vec<_> = env.iter().map(|(k, _)| k.to_str().unwrap()).collect();
     assert_eq!(
         keys,
         [
@@ -324,6 +324,152 @@ mod process {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
+    }
+
+    // Run the real Runner in a subprocess so no test mutates the test suite's
+    // shared environment. The controller child then crosses env_clear/allowlist.
+    #[test]
+    #[ignore = "subprocess entry used by the XDG runner regressions"]
+    fn xdg_runner_child() {
+        let controller = std::env::var_os("PLURX_TRAY_TEST_CONTROLLER").unwrap();
+        let installation = std::env::var_os("PLURX_TRAY_TEST_INSTALLATION").unwrap();
+        let command = if std::env::var_os("PLURX_TRAY_HELPER_ROUTE").is_some() {
+            Command::Start
+        } else {
+            Command::StartupSetTray(Choice::Off)
+        };
+        let result = Runner::new(controller, Some(installation.into())).run(&command);
+        if std::env::var_os("PLURX_TRAY_EXPECT_INVALID").is_some() {
+            assert!(matches!(result, Err(ControlFailure::Controller(error))
+                if error.code == ErrorCode::PolicyConflict));
+        } else if std::env::var_os("PLURX_TRAY_REAL_CONTROLLER").is_none() {
+            assert!(matches!(result.unwrap(), ControlResult::Status(_)));
+        }
+    }
+
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-only subprocess isolates the real Runner environment from parallel tests"
+    )]
+    fn run_xdg_child(
+        controller: &std::path::Path,
+        installation: &std::path::Path,
+        value: &std::ffi::OsStr,
+        home: &std::path::Path,
+        real: bool,
+        invalid: bool,
+    ) {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--ignored",
+                "--exact",
+                "tests::process::xdg_runner_child",
+                "--nocapture",
+            ])
+            .env("PLURX_TRAY_TEST_CONTROLLER", controller)
+            .env("PLURX_TRAY_TEST_INSTALLATION", installation)
+            .env("XDG_CONFIG_HOME", value)
+            .env("HOME", home)
+            .env_remove("PLURX_TRAY_REAL_CONTROLLER")
+            .env_remove("PLURX_TRAY_EXPECT_INVALID");
+        if real {
+            child.env("PLURX_TRAY_REAL_CONTROLLER", "1");
+        }
+        if invalid {
+            child.env("PLURX_TRAY_EXPECT_INVALID", "1");
+        }
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-only child verifies privilege-route environment exclusion"
+    )]
+    fn runner_preserves_absolute_relative_empty_and_non_utf8_xdg_values() {
+        use std::os::unix::ffi::OsStrExt;
+        let _fixtures = PROCESS_FIXTURES.lock().unwrap();
+        let (dir, controller) = stub(&format!(
+            "printf '%s' \"$XDG_CONFIG_HOME\" > \"$2\"; printf '%s' '{}'",
+            STATUS
+        ));
+        let captured = dir.join("received-xdg");
+        for value in [
+            std::ffi::OsStr::new("/alternate/config"),
+            std::ffi::OsStr::new("relative-config"),
+            std::ffi::OsStr::new(""),
+            std::ffi::OsStr::from_bytes(b"bad-\xff"),
+        ] {
+            run_xdg_child(&controller, &captured, value, &dir, false, false);
+            assert_eq!(std::fs::read(&captured).unwrap(), value.as_bytes());
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "tests::process::xdg_runner_child"])
+            .env("PLURX_TRAY_TEST_CONTROLLER", &controller)
+            .env("PLURX_TRAY_TEST_INSTALLATION", &captured)
+            .env("PLURX_TRAY_HELPER_ROUTE", "1")
+            .env("XDG_CONFIG_HOME", "/must-not-reach-helper")
+            .status()
+            .unwrap();
+        assert!(output.success());
+        assert!(std::fs::read(&captured).unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires an explicitly supplied real controller and root-owned disposable installation record"]
+    fn real_controller_runner_writes_effective_xdg_and_refuses_invalid_values() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_ne!(
+            unsafe { libc::geteuid() },
+            0,
+            "tray preferences are unprivileged"
+        );
+        let _fixtures = PROCESS_FIXTURES.lock().unwrap();
+        let controller = PathBuf::from(std::env::var_os("PLURX_TRAY_TEST_CONTROLLER").unwrap());
+        let installation = PathBuf::from(std::env::var_os("PLURX_TRAY_TEST_INSTALLATION").unwrap());
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "xdg-controller-{}-{}",
+                std::process::id(),
+                rand_suffix()
+            ));
+        let home = dir.join("home");
+        let xdg = dir.join("effective-config");
+        std::fs::create_dir_all(&home).unwrap();
+        run_xdg_child(
+            &controller,
+            &installation,
+            xdg.as_os_str(),
+            &home,
+            true,
+            false,
+        );
+        let entry = xdg.join("autostart").join(ENTRY_NAME);
+        assert!(std::fs::read_to_string(&entry)
+            .unwrap()
+            .contains("Hidden=true"));
+        let original = std::fs::read(&entry).unwrap();
+        for invalid in [
+            std::ffi::OsStr::new("relative-config"),
+            std::ffi::OsStr::new(""),
+            std::ffi::OsStr::from_bytes(b"bad-\xff"),
+        ] {
+            run_xdg_child(&controller, &installation, invalid, &home, true, true);
+            assert_eq!(std::fs::read(&entry).unwrap(), original);
+            assert!(!home.join(".config/autostart").join(ENTRY_NAME).exists());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1058,4 +1204,22 @@ fn manual_window_keeps_fallback_without_registering_tray_or_starting_server() {
         crate::core::tray_host_for_session(&local, TrayHost::Unknown),
         TrayHost::Absent
     );
+}
+
+#[test]
+fn confirmed_host_loss_exposes_fallback_and_return_never_mutates_server() {
+    let mut core = Core::new("0.7.0", Management::Supported, "pjunod/cinema");
+    assert_eq!(core.set_tray_host(TrayHost::Present), [Effect::Render]);
+    assert_eq!(core.set_tray_host(TrayHost::Unknown), [Effect::Render]);
+    assert_eq!(
+        core.set_tray_host(TrayHost::Absent),
+        [Effect::Render, Effect::ShowWindow]
+    );
+    assert_eq!(core.set_tray_host(TrayHost::Absent), [Effect::Render]);
+    assert_eq!(core.set_tray_host(TrayHost::Present), [Effect::Render]);
+    assert_eq!(
+        core.set_tray_host(TrayHost::Absent),
+        [Effect::Render, Effect::ShowWindow]
+    );
+    assert!(core.snapshot.busy.is_none());
 }

@@ -1,12 +1,11 @@
 # Desktop tray — native server controls and GitHub release upgrades
 
-**Status:** open · **Updated:** 2026-10-19 · implementation in progress;
-Astra approved revision 2 on 2026-10-19 after R1–R8 were resolved.
-Draft PR #1213 tracks promotion; the complete cohort receives one task PR
-and post-PR Astra review. Native/release qualification remains outstanding.
-[The qualification ledger](DESKTOP-TRAY-QUALIFICATION.md) records evidence and gaps.
-This is the canonical implementation and acceptance ledger for project P31.
-[The Astra review record](DESKTOP-TRAY-REVIEW.md) tracks R1–R8 and their disposition.
+**Status:** open · **Updated:** 2026-10-19 · source built; Astra's PR #1220
+review is complete. Root owns fixes, passing unit tests and repository merge gates.
+PR #1213 tracks promotion; distribution acceptance remains open in
+[the qualification ledger](DESKTOP-TRAY-QUALIFICATION.md). This is P31's canonical
+implementation and acceptance ledger. [The plan review](DESKTOP-TRAY-REVIEW.md)
+records revision 2 approval and the earlier design findings.
 
 Companion to [the release contract](../RELEASING.md),
 [macOS installation](../../deploy/MACOS.md), and
@@ -437,8 +436,9 @@ shared manifests, release workflow, documentation and acceptance ledger when
 parallel branches would otherwise conflict. Task gates do not qualify a release.
 
 M1–M5 integrate as one cohort task PR into the effort, preserving their owned
-commits and focused regressions. This supersedes partial component PRs; complete
-review, the native transaction batch and the effort gate still precede its merge.
+commits and focused regressions. The owner clarified the finish sequence: Astra
+reviews the PR only; root fixes it, runs passing units and the repository gates,
+then merges. Native distribution qualification stays explicit, separate work.
 
 | Task | Owns / delivers | Depends on | Acceptance before task merge |
 |---|---|---|---|
@@ -447,8 +447,8 @@ review, the native transaction batch and the effort gate still precede its merge
 | M2 · process identity and safe shutdown | Daemon local IPC/peer binding, standalone-vs-cluster preparation, direct-read/recording accounting, atomic commit-to-shutdown and final receipt; controller integration in a coordinated task branch. | M0, then M1 controller integration | One-voter success, unknown/multi-voter refusal, nonce/peer reuse, expiring-fence handoff and clean/unclean drain regressions. No desktop screenshot substitutes for these. |
 | M3 · macOS app and migration | Swift app, stable bundle/login registration, canonical plist migration, native logs and per-user runtime adapter. | M1 + M2 for lifecycle integration | Build/static/UI contracts; focused migration/startup regressions. Actual Intel/ARM login/transcode/upgrade acceptance is retained for M6. |
 | M4 · Linux desktop app | ksni/GTK UI, logind session detection, desktop/autostart/icons, helper/auth frontend; server package keeps non-GUI helper/recovery ownership. | M1 + M2 for lifecycle integration | Compile/static/UI contracts and focused session/authorization regressions; integrated privilege/multi-user/package behavior is M5/M6. |
-| M5 · artifacts, worker and boot recovery | Offline macOS closure; selected Linux package cohorts; signed publication; immutable active worker/capsule and pre-start recovery; repair scriptlet state behavior. Integration writer owns shared packaging/workflow paths. | M0–M4 | Independent complete-change review/fixes, then focused native transaction/package batch: real old-artifact → new-artifact and recovery, including no-tray boot, lock conflicts and helper replacement. |
-| M6 · final qualification and promotion | Docs/ledger, evidence inventory, independent final integrated review, affected batch and current-main promotion. | M0–M5 | Required native/session/release matrix on final tree. Reuse unchanged valid evidence; rerun only failed/invalidated checks. Main promotion gate and qualification receipt. |
+| M5 · artifacts, worker and boot recovery | Offline macOS closure; selected Linux package cohorts; signed publication; immutable active worker/capsule and pre-start recovery; repair scriptlet state behavior. Integration writer owns shared packaging/workflow paths. | M0–M4 | Independent PR review, root fixes and passing focused transaction/package unit tests. The native artifact/recovery matrix gates distribution. |
+| M6 · final qualification and promotion | Docs/ledger, evidence inventory, independent final integrated review, affected batch and current-main promotion. | M0–M5 | Post-review affected unit tests, current-main Main promotion gate and qualification receipt. Native distribution acceptance remains separately recorded. |
 
 Do not add a Developer switch to the daemon for tray infrastructure. Tray
 visibility, startup and update-check preferences are useful permanent local

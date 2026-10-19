@@ -60,6 +60,20 @@ impl ReleaseIdentityV1 {
         Ok(())
     }
 }
+/// Fresh installs may start by default; an identified legacy or recorded
+/// installation preserves its prior stopped state unless explicitly started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapDisposition {
+    Fresh,
+    AdoptedStopped,
+    ExistingRecord,
+}
+impl BootstrapDisposition {
+    pub fn starts_initial_daemon(self, no_start: bool) -> bool {
+        self == Self::Fresh && !no_start
+    }
+}
+
 pub fn bootstrap_package(root: &Path, no_start: bool) -> Result<InstallationV1> {
     if !cfg!(target_os = "macos") || native_uid() == 0 || !root.is_absolute() {
         return Err(Error::new(ErrorCode::AuthorizationDenied,"macOS package bootstrap requires ordinary native owning UID and absolute extracted package directory"));
@@ -114,7 +128,7 @@ pub fn bootstrap_package(root: &Path, no_start: bool) -> Result<InstallationV1> 
         store.save(&j)?;
         return Ok(installed);
     }
-    let installed = bootstrap(
+    let (installed, disposition) = bootstrap_with_disposition(
         InstallMethod::MacosNative,
         &release.version,
         &release.source_commit,
@@ -122,7 +136,7 @@ pub fn bootstrap_package(root: &Path, no_start: bool) -> Result<InstallationV1> 
         "http://127.0.0.1:32400",
         Some(root),
     )?;
-    if !no_start {
+    if disposition.starts_initial_daemon(no_start) {
         supervisor::start(&installed)?;
     }
     Ok(installed)
@@ -490,7 +504,15 @@ pub fn daemon_path(i: &InstallationV1) -> Result<PathBuf> {
         verify_closure(&version_root, &closure.version)?;
         Ok(version_root.join("runtime/plurxd"))
     } else {
-        Ok(PathBuf::from("/usr/bin/plurxd"))
+        // /usr/bin/plurxd is the package convenience symlink. The managed
+        // launcher validates the real immutable package leaf with O_NOFOLLOW.
+        if matches!(i.method, InstallMethod::LinuxDeb | InstallMethod::LinuxRpm) {
+            Ok(PathBuf::from("/usr/lib/plurx/plurxd"))
+        } else {
+            Err(invalid(
+                "daemon path requires a managed native installation",
+            ))
+        }
     }
 }
 /// The replacement's compiled roots, not downloaded metadata, define its next bridge.
@@ -528,6 +550,24 @@ pub fn bootstrap(
     browser_origin: &str,
     package_root: Option<&Path>,
 ) -> Result<InstallationV1> {
+    bootstrap_with_disposition(
+        method,
+        version,
+        commit,
+        desktop,
+        browser_origin,
+        package_root,
+    )
+    .map(|(installed, _)| installed)
+}
+fn bootstrap_with_disposition(
+    method: InstallMethod,
+    version: &str,
+    commit: &str,
+    desktop: bool,
+    browser_origin: &str,
+    package_root: Option<&Path>,
+) -> Result<(InstallationV1, BootstrapDisposition)> {
     semver::Version::parse(version).map_err(|_| invalid("invalid bootstrap semver"))?;
     if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(invalid("invalid bootstrap source commit"));
@@ -554,7 +594,7 @@ pub fn bootstrap(
         if i.method != method {
             return Err(invalid("existing installation uses a different method"));
         }
-        return Ok(i);
+        return Ok((i, BootstrapDisposition::ExistingRecord));
     }
     let (service_uid, paths, service, architecture) = if mac {
         let home = home_for(uid)?;
@@ -644,12 +684,14 @@ pub fn bootstrap(
         service,
         browser_origin: browser_origin.into(),
     };
-    if mac {
+    let disposition = if mac {
         bootstrap_macos(
             &mut i,
             package_root.ok_or_else(|| invalid("native bootstrap package root absent"))?,
-        )?;
-    }
+        )?
+    } else {
+        BootstrapDisposition::Fresh
+    };
     private_dir(
         record.parent().ok_or_else(|| invalid("record parent"))?,
         uid,
@@ -693,14 +735,29 @@ pub fn bootstrap(
         &serde_json::to_vec(&i)?,
         if mac { 0o600 } else { 0o644 },
     )?;
-    Ok(i)
+    Ok((i, disposition))
 }
-fn bootstrap_macos(i: &mut InstallationV1, root: &Path) -> Result<()> {
+fn bootstrap_macos(i: &mut InstallationV1, root: &Path) -> Result<BootstrapDisposition> {
     if !cfg!(target_os = "macos") {
         return Err(invalid("macOS bootstrap on other platform"));
     }
+    let home = home_for(i.owner_uid)?;
+    bootstrap_macos_with(i, root, &home, supervisor::output)
+}
+
+/// Staged bootstrap seam: the production wrapper supplies the account-database
+/// home and fixed bounded executor; fixtures supply only their owned paths.
+pub fn bootstrap_macos_with<F>(
+    i: &mut InstallationV1,
+    root: &Path,
+    home: &Path,
+    mut execute: F,
+) -> Result<BootstrapDisposition>
+where
+    F: FnMut(&str, &[String], Duration) -> Result<(i32, String)>,
+{
     let system = format!("system/{LAUNCH_LABEL}");
-    let (system_code, _) = supervisor::output(
+    let (system_code, _) = execute(
         "/bin/launchctl",
         &["print".into(), system],
         Duration::from_secs(2),
@@ -709,7 +766,7 @@ fn bootstrap_macos(i: &mut InstallationV1, root: &Path) -> Result<()> {
         return Err(invalid("system-domain service exists or cannot be excluded; explicit authorized bootstrap cleanup is required"));
     }
     let target = format!("{}/{}", i.service.domain, LAUNCH_LABEL);
-    let (code, info) = supervisor::output(
+    let (code, info) = execute(
         "/bin/launchctl",
         &["print".into(), target.clone()],
         Duration::from_secs(2),
@@ -725,13 +782,24 @@ fn bootstrap_macos(i: &mut InstallationV1, root: &Path) -> Result<()> {
         .login_plist
         .clone()
         .ok_or_else(|| invalid("login plist"))?;
-    let mut plist = if login.exists() {
+    let legacy_login = match std::fs::symlink_metadata(&login) {
+        Ok(meta) if meta.is_file() => true,
+        Ok(_) => return Err(invalid("legacy login registration must be a regular file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    let disposition = if code == 0 || legacy_login {
+        BootstrapDisposition::AdoptedStopped
+    } else {
+        BootstrapDisposition::Fresh
+    };
+    let mut plist = if legacy_login {
         let parent = secure_fs::open_dir(
             login.parent().ok_or_else(|| invalid("login parent"))?,
             i.owner_uid,
         )?;
         parent.read("com.plurx.plurxd.plist", 1024 * 1024)?;
-        let (status, json) = supervisor::output(
+        let (status, json) = execute(
             "/usr/bin/plutil",
             &[
                 "-convert".into(),
@@ -767,7 +835,7 @@ fn bootstrap_macos(i: &mut InstallationV1, root: &Path) -> Result<()> {
         i.paths.log = log.into();
     }
     if code == 0 {
-        let (status, _) = supervisor::output(
+        let (status, _) = execute(
             "/bin/launchctl",
             &["bootout".into(), target],
             Duration::from_secs(5),
@@ -791,7 +859,6 @@ fn bootstrap_macos(i: &mut InstallationV1, root: &Path) -> Result<()> {
             0o500,
         )?;
     }
-    let home = home_for(i.owner_uid)?;
     let apps = home.join("Applications");
     private_dir(&apps, i.owner_uid)?;
     let app = apps.join("Plurx Server.app");
@@ -822,7 +889,7 @@ fn bootstrap_macos(i: &mut InstallationV1, root: &Path) -> Result<()> {
     let temp = i.paths.state.join("canonical-plist.json");
     i.state_dir()?
         .write("canonical-plist.json", &serde_json::to_vec(&plist)?, 0o600)?;
-    let (status, _) = supervisor::output(
+    let (status, _) = execute(
         "/usr/bin/plutil",
         &[
             "-convert".into(),
@@ -839,12 +906,12 @@ fn bootstrap_macos(i: &mut InstallationV1, root: &Path) -> Result<()> {
     std::fs::set_permissions(canonical, std::fs::Permissions::from_mode(0o600))?;
     std::fs::File::open(canonical)?.sync_all()?;
     // Preserve login policy: replace only an existing positively identified managed registration.
-    if login.exists() {
+    if legacy_login {
         secure_fs::open_dir(
             login.parent().ok_or_else(|| invalid("login parent"))?,
             i.owner_uid,
         )?
         .write("com.plurx.plurxd.plist", &std::fs::read(canonical)?, 0o600)?;
     }
-    Ok(())
+    Ok(disposition)
 }

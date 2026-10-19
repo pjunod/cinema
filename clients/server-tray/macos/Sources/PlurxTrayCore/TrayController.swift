@@ -284,7 +284,7 @@ public final class TrayController {
         let current = snapshot.status?.version ?? "the installed version"
         guard await confirm(
             "Upgrade plurx to \(version)?",
-            "plurx \(version) was downloaded and its signature verified. Upgrading from \(current) stops the server once playback and recordings can stop safely, installs \(version) and starts it again. If the new version fails its checks, a compatible previous version is restored; a release that changed the database cannot be rolled back automatically and will ask for recovery instead.",
+            "plurx \(version) was downloaded and its signature verified. Upgrading from \(current) stops the server once playback and recordings can stop safely, installs \(version) and starts it again. If installation or readiness checks fail, plurx reports Recovery required and keeps the transaction evidence. Recovery may offer a compatible previous version; database or Raft data is never restored automatically.",
             "Upgrade to \(version)") else {
             _ = await control.run(.updatesCancel(transaction: transaction))
             await refresh()

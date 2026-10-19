@@ -8,6 +8,7 @@ use crate::{
 use std::{
     collections::BTreeMap,
     io::Read,
+    path::Path,
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
@@ -89,6 +90,99 @@ fn fixed(program: &str, args: &[String]) -> Result<String> {
 fn s(args: &[&str]) -> Vec<String> {
     args.iter().map(|s| (*s).to_string()).collect()
 }
+/// The authenticated package worker owns this reload after exact-cohort
+/// installation and before reading back policy. It never changes startup.
+pub fn reload_after_package_install(i: &InstallationV1) -> Result<()> {
+    i.managed()?;
+    reload_after_package_install_with(i, output)
+}
+
+/// Executor seam for staging package-owned unit changes without a live service.
+/// The production entry point checks native platform authority first.
+pub fn reload_after_package_install_with<F>(i: &InstallationV1, mut execute: F) -> Result<()>
+where
+    F: FnMut(&str, &[String], Duration) -> Result<(i32, String)>,
+{
+    match i.method {
+        InstallMethod::MacosNative => return Ok(()),
+        InstallMethod::LinuxDeb | InstallMethod::LinuxRpm
+            if i.service.kind == crate::protocol::SupervisorKind::Systemd
+                && i.service.name == SYSTEM_UNIT
+                && i.service.domain == "system" => {}
+        _ => {
+            return Err(Error::new(
+                ErrorCode::Unsupported,
+                "package reload requires a managed native installation",
+            ))
+        }
+    }
+    let (code, _) = execute(
+        SYSTEMCTL,
+        &s(&["--no-ask-password", "daemon-reload"]),
+        Duration::from_secs(10),
+    )?;
+    if code != 0 {
+        return Err(Error::new(
+            ErrorCode::AuthorizationRequired,
+            format!("systemd daemon-reload failed (exit {code})"),
+        ));
+    }
+    Ok(())
+}
+
+/// Include drop-in names, order and bytes so a package-triggered reload cannot
+/// conceal an outside drop-in edit. The packaged main fragment may change.
+pub fn systemd_policy_revision(
+    unit_file_state: &str,
+    fragment_path: &str,
+    need_reload: &str,
+    drop_ins: &[(String, Vec<u8>)],
+) -> String {
+    use sha2::Digest;
+    let mut hash = sha2::Sha256::new();
+    for (path, bytes) in drop_ins {
+        hash.update((path.len() as u64).to_be_bytes());
+        hash.update(path.as_bytes());
+        hash.update((bytes.len() as u64).to_be_bytes());
+        hash.update(bytes);
+    }
+    format!(
+        "{unit_file_state}|{fragment_path}|{need_reload}|{}",
+        hex::encode(hash.finalize())
+    )
+}
+
+fn systemd_drop_ins(paths: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut files = Vec::new();
+    let mut total = 0;
+    for name in paths.split_whitespace() {
+        if files.len() >= 32 {
+            return Err(Error::new(
+                ErrorCode::PolicyConflict,
+                "systemd drop-in count exceeds limit",
+            ));
+        }
+        let path = Path::new(name);
+        let parent = path
+            .parent()
+            .ok_or_else(|| Error::new(ErrorCode::PolicyConflict, "invalid systemd drop-in path"))?;
+        let leaf = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| Error::new(ErrorCode::PolicyConflict, "invalid systemd drop-in name"))?;
+        let bytes = crate::secure_fs::open_dir(parent, 0)?.read(leaf, 256 * 1024)?;
+        total += bytes.len();
+        if total > 1024 * 1024 {
+            return Err(Error::new(
+                ErrorCode::PolicyConflict,
+                "systemd drop-in bytes exceed limit",
+            ));
+        }
+        files.push((name.to_owned(), bytes));
+    }
+    Ok(files)
+}
+
 impl Observation {
     pub fn stopped(&self) -> bool {
         self.state == ServiceState::Stopped && self.process.is_none()
@@ -103,7 +197,7 @@ pub fn observe(i: &InstallationV1) -> Result<Observation> {
     }
 }
 fn observe_systemd(i: &InstallationV1) -> Result<Observation> {
-    let (code, text) = output(SYSTEMCTL, &s(&["show", SYSTEM_UNIT, "--no-pager", "--property=LoadState,ActiveState,SubState,MainPID,InvocationID,UnitFileState,FragmentPath,NeedDaemonReload,Job"]), Duration::from_secs(2))?;
+    let (code, text) = output(SYSTEMCTL, &s(&["show", SYSTEM_UNIT, "--no-pager", "--property=LoadState,ActiveState,SubState,MainPID,InvocationID,UnitFileState,FragmentPath,NeedDaemonReload,Job,DropInPaths"]), Duration::from_secs(2))?;
     if code != 0 {
         return Err(Error::new(
             ErrorCode::Unavailable,
@@ -154,11 +248,17 @@ fn observe_systemd(i: &InstallationV1) -> Result<Observation> {
             "missing systemd invocation identity",
         ));
     }
-    let revision = format!(
-        "{}|{}|{}",
+    let drop_in_paths = props.get("DropInPaths").ok_or_else(|| {
+        Error::new(
+            ErrorCode::PolicyConflict,
+            "systemd drop-in policy cannot be established",
+        )
+    })?;
+    let revision = systemd_policy_revision(
         get("UnitFileState"),
         get("FragmentPath"),
-        get("NeedDaemonReload")
+        get("NeedDaemonReload"),
+        &systemd_drop_ins(drop_in_paths)?,
     );
     if get("NeedDaemonReload") == "yes" || (get("Job") != "0" && !get("Job").is_empty()) {
         return Err(Error::new(
@@ -178,6 +278,91 @@ fn observe_systemd(i: &InstallationV1) -> Result<Observation> {
         policy_revision: revision,
     })
 }
+fn canonical_launchd_bytes(i: &InstallationV1) -> Result<Vec<u8>> {
+    let path = i
+        .paths
+        .canonical_plist
+        .as_ref()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidInstallation, "canonical plist absent"))?;
+    crate::secure_fs::open_dir(
+        path.parent()
+            .ok_or_else(|| Error::new(ErrorCode::InvalidInstallation, "canonical parent"))?,
+        i.owner_uid,
+    )?
+    .read("com.plurx.plurxd.plist", 1024 * 1024)
+}
+
+fn launchd_login_parent(
+    i: &InstallationV1,
+    create: bool,
+) -> Result<Option<crate::secure_fs::SecureDir>> {
+    let login = i
+        .paths
+        .login_plist
+        .as_ref()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidInstallation, "login plist absent"))?;
+    let agents = login
+        .parent()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidInstallation, "login parent"))?;
+    if login.file_name().and_then(|n| n.to_str()) != Some("com.plurx.plurxd.plist")
+        || agents.file_name().and_then(|n| n.to_str()) != Some("LaunchAgents")
+    {
+        return Err(Error::new(
+            ErrorCode::InvalidInstallation,
+            "noncanonical login registration",
+        ));
+    }
+    let library = crate::secure_fs::open_dir(
+        agents
+            .parent()
+            .ok_or_else(|| Error::new(ErrorCode::InvalidInstallation, "Library parent"))?,
+        i.owner_uid,
+    )?;
+    match library.child("LaunchAgents", create) {
+        Ok(parent) => Ok(Some(parent)),
+        Err(error) if !create && error.os_error == Some(libc::ENOENT) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Readback never creates LaunchAgents and never follows a registration link.
+pub fn launchd_login_registered(i: &InstallationV1) -> Result<bool> {
+    let canonical = canonical_launchd_bytes(i)?;
+    let Some(parent) = launchd_login_parent(i, false)? else {
+        return Ok(false);
+    };
+    let bytes = match parent.read("com.plurx.plurxd.plist", 1024 * 1024) {
+        Ok(bytes) => bytes,
+        Err(error) if error.os_error == Some(libc::ENOENT) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if bytes != canonical {
+        return Err(Error::new(
+            ErrorCode::PolicyConflict,
+            "login registration differs from managed canonical plist; explicit migration required",
+        ));
+    }
+    Ok(true)
+}
+
+/// Changes only the owner's future login registration. The canonical record is
+/// validated by the caller; all traversed directories/files remain no-follow.
+pub fn set_launchd_login_registration(i: &InstallationV1, enabled: bool) -> Result<()> {
+    let registered = launchd_login_registered(i)?;
+    if enabled {
+        let source = canonical_launchd_bytes(i)?;
+        let parent = launchd_login_parent(i, true)?
+            .ok_or_else(|| Error::new(ErrorCode::InvalidInstallation, "login parent absent"))?;
+        parent.write("com.plurx.plurxd.plist", &source, 0o600)?;
+    } else if registered {
+        let parent = launchd_login_parent(i, false)?.ok_or_else(|| {
+            Error::new(ErrorCode::PolicyConflict, "login registration disappeared")
+        })?;
+        parent.remove("com.plurx.plurxd.plist")?;
+    }
+    Ok(())
+}
+
 fn observe_launchd(i: &InstallationV1) -> Result<Observation> {
     let target = format!("{}/{}", i.service.domain, i.service.name);
     let (code, text) = output(LAUNCHCTL, &s(&["print", &target]), Duration::from_secs(2))?;
@@ -188,27 +373,8 @@ fn observe_launchd(i: &InstallationV1) -> Result<Observation> {
     )?;
     let disabled_key = format!("\"{}\" => true", i.service.name);
     let external_disabled = disabled.contains(&disabled_key);
-    let canonical = i
-        .paths
-        .canonical_plist
-        .as_ref()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidInstallation, "canonical plist absent"))?;
-    let login = i
-        .paths
-        .login_plist
-        .as_ref()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidInstallation, "login plist absent"))?;
-    let canonical_bytes = std::fs::read(canonical)?;
-    let registered = match std::fs::symlink_metadata(login) {
-        Ok(m) => {
-            if !m.is_file() || std::fs::read(login)? != canonical_bytes {
-                return Err(Error::new(ErrorCode::PolicyConflict, "login registration differs from managed canonical plist; explicit migration required"));
-            }
-            true
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => return Err(e.into()),
-    };
+    let canonical_bytes = canonical_launchd_bytes(i)?;
+    let registered = launchd_login_registered(i)?;
     let startup = StartupStateV1::new(if external_disabled {
         StartupState::PolicyManaged
     } else if registered {
@@ -318,36 +484,7 @@ pub fn set_startup(i: &InstallationV1, enabled: bool) -> Result<Observation> {
         return Err(Error::new(ErrorCode::PolicyConflict, "startup is externally disabled, masked, static or unknown; explicit administrator repair required"));
     }
     if i.method == InstallMethod::MacosNative {
-        let canonical =
-            i.paths.canonical_plist.as_ref().ok_or_else(|| {
-                Error::new(ErrorCode::InvalidInstallation, "canonical plist missing")
-            })?;
-        let login = i
-            .paths
-            .login_plist
-            .as_ref()
-            .ok_or_else(|| Error::new(ErrorCode::InvalidInstallation, "login plist missing"))?;
-        let parent = crate::secure_fs::open_dir(
-            login
-                .parent()
-                .ok_or_else(|| Error::new(ErrorCode::InvalidInstallation, "login parent"))?,
-            i.owner_uid,
-        )?;
-        if enabled {
-            let source = crate::secure_fs::open_dir(
-                canonical.parent().ok_or_else(|| {
-                    Error::new(ErrorCode::InvalidInstallation, "canonical parent")
-                })?,
-                i.owner_uid,
-            )?;
-            parent.write(
-                "com.plurx.plurxd.plist",
-                &source.read("com.plurx.plurxd.plist", 1024 * 1024)?,
-                0o600,
-            )?;
-        } else if before.startup.state == StartupState::Enabled {
-            parent.remove("com.plurx.plurxd.plist")?;
-        }
+        set_launchd_login_registration(i, enabled)?;
         // Do not bootout, enable or disable the loaded job. This changes only future login registration.
     } else {
         fixed(

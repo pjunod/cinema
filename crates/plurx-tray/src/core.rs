@@ -93,8 +93,13 @@ impl Core {
     }
 
     pub fn set_tray_host(&mut self, host: TrayHost) -> Vec<Effect> {
+        let previous = self.snapshot.tray_host;
         self.snapshot.tray_host = host;
-        vec![Effect::Render]
+        let mut effects = vec![Effect::Render];
+        if host == TrayHost::Absent && previous != TrayHost::Absent {
+            effects.push(Effect::ShowWindow);
+        }
+        effects
     }
 
     /// One status poll; a poll already running absorbs the request.
@@ -370,7 +375,7 @@ impl Core {
                                 transaction,
                             },
                             title: format!("Upgrade plurx to {version}?"),
-                            message: format!("plurx {version} was downloaded and its signature verified. Upgrading from {from} stops the server once playback and recordings can stop safely, installs {version} and starts it again. If the new version fails its checks, a compatible previous version is restored; a release that changed the database cannot be rolled back automatically and asks for recovery instead."),
+                            message: format!("plurx {version} was downloaded and its signature verified. Upgrading from {from} stops the server once playback and recordings can stop safely, installs {version} and starts it again. If installation or the new version fails its checks, plurx reports that recovery is required. It does not automatically restore the previous version."),
                             proceed: format!("Upgrade to {version}"),
                         });
                         return effects;
