@@ -29344,6 +29344,20 @@ async fn scan_identity_repair_contract() {
             .put_progress(copy_user.id, second.2, 4_000, Some(10_000))
             .await
             .expect("copy-source watch");
+        {
+            use plurx_core::annotations::ItemList;
+            use plurx_core::store::AnnotationStore;
+            for (show, list, at) in [
+                (first.0, ItemList::Favorite, 5),
+                (second.0, ItemList::Watchlist, 7),
+                (second.0, ItemList::Favorite, 9),
+            ] {
+                store
+                    .set_item_listed(copy_user.id, show, list, true, at)
+                    .await
+                    .expect("list membership before repair");
+            }
+        }
         let snapshot = store
             .identity_repair_snapshot(library.id, &[first.0, second.0])
             .await
@@ -29434,6 +29448,26 @@ async fn scan_identity_repair_contract() {
                 .expect("idempotent repair retry"),
             IdentityRepairOutcome::AlreadyApplied
         );
+        {
+            // Memberships of the retired duplicate follow it onto the
+            // survivor; the later add time wins where both were listed.
+            use plurx_core::annotations::ItemList;
+            use plurx_core::store::AnnotationStore;
+            for (list, at) in [(ItemList::Watchlist, 7), (ItemList::Favorite, 9)] {
+                let entries = store
+                    .listed_items(copy_user.id, list, 10, 0)
+                    .await
+                    .expect("lists after repair");
+                assert_eq!(
+                    entries
+                        .iter()
+                        .map(|e| (e.item_id, e.added_at_ms))
+                        .collect::<Vec<_>>(),
+                    vec![(first.0, at)],
+                    "{backend}: {list:?} survives the repair on the surviving show"
+                );
+            }
+        }
 
         let third = tree(
             store.as_ref(),
