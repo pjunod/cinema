@@ -62,6 +62,7 @@ jobs:
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
       apple: ${{ steps.scope.outputs.apple }}
+      desktop_macos: ${{ steps.scope.outputs.desktop_macos }}
       android_jvm: ${{ steps.scope.outputs.android_jvm }}
       web_layout: ${{ steps.scope.outputs.web_layout }}
       mobile_version: ${{ steps.scope.outputs.mobile_version }}
@@ -310,7 +311,7 @@ jobs:
   apple_compile:
     name: Apple compile and native TV navigation
     needs: [scope, preflight]
-    if: needs.scope.outputs.apple == 'true'
+    if: needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true'
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
     # 32 native journeys take 81-163 s each (about 60 min, up to 87) after the compile.
     timeout-minutes: 120
@@ -329,8 +330,29 @@ jobs:
           xcode_version="$(xcodebuild -version)"
           grep -Fxq "Xcode 27.0" <<< "$xcode_version"
           grep -Fxq "Build version 27A266a" <<< "$xcode_version"
+          xcrun --find swift
+      - name: Build and test native macOS server tray
+        if: needs.scope.outputs.desktop_macos == 'true'
+        # Keep desktop XCTest namespaces out of mobile unit receipt parsing.
+        # The complete native output is preserved independently, including failures.
+        run: |
+          mkdir -p target/validation
+          make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
+          echo "Native macOS server tray build and unit checks passed."
+      - name: Preserve native macOS server tray check output
+        if: always() && needs.scope.outputs.desktop_macos == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: desktop-macos-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/validation/desktop-macos-check.log
+          if-no-files-found: error
+          retention-days: 14
+      - name: Verify the pinned mobile Apple toolchain
+        if: needs.scope.outputs.apple == 'true'
+        run: |
           test "$(xcodegen --version)" = "Version: 2.46.0"
       - name: Cache DerivedData
+        if: needs.scope.outputs.apple == 'true'
         uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: clients/apple/build/DerivedData
@@ -340,13 +362,15 @@ jobs:
             effort-apple-dd-
             apple-dd-
       - name: Compile iOS and tvOS without running simulator tests
+        if: needs.scope.outputs.apple == 'true'
         run: make apple-build
       - name: Require native TV navigation journeys
+        if: needs.scope.outputs.apple == 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
         run: make apple-tv-navigation-test
       - name: Preserve TV navigation evidence including failures
-        if: always()
+        if: always() && needs.scope.outputs.apple == 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}

@@ -20274,3 +20274,144 @@ async fn facts_skip_photos_and_folders() {
         "an SDR home video should carry no hdr key at all"
     );
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn desktop_drain_holds_direct_response_bodies_and_refuses_range_reconnects() {
+    use tower::ServiceExt;
+    let state = test_state_without_router();
+    let fence = state.serving.clone();
+    let app = Router::new()
+        .route(
+            "/items/one/direct",
+            axum::routing::get(|| async {
+                axum::body::Body::from_stream(futures_util::stream::pending::<
+                    Result<bytes::Bytes, std::io::Error>,
+                >())
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ))
+        .with_state(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/items/one/direct")
+                .body(Body::empty())
+                .expect("desktop direct-read fixture"),
+        )
+        .await
+        .expect("desktop direct-read fixture");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 1);
+    let token = fence
+        .begin_desktop_preparation_until(crate::media_sessions::unix_ms() as u64 + 10_000)
+        .await
+        .expect("desktop direct-read fixture");
+    assert!(!fence.commit_desktop_shutdown(token, 0).await);
+    let reconnect = app
+        .oneshot(
+            Request::builder()
+                .uri("/items/one/direct")
+                .header("Range", "bytes=1024-")
+                .body(Body::empty())
+                .expect("desktop direct-read fixture"),
+        )
+        .await
+        .expect("desktop direct-read fixture");
+    assert_eq!(reconnect.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(response);
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 0);
+    assert!(fence.commit_desktop_shutdown(token, 0).await);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn desktop_drain_accounts_internal_proxy_and_post_relay_bodies() {
+    use tower::ServiceExt;
+    let state = test_state_without_router();
+    let fence = state.serving.clone();
+    let app = Router::new()
+        .route(
+            "/internal/media/fragment-index/key",
+            axum::routing::get(|| async {
+                Body::from_stream(futures_util::stream::pending::<
+                    Result<bytes::Bytes, std::io::Error>,
+                >())
+            }),
+        )
+        .route(
+            "/internal/cluster/media/sessions/relay",
+            axum::routing::post(|| async {
+                Body::from_stream(futures_util::stream::pending::<
+                    Result<bytes::Bytes, std::io::Error>,
+                >())
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            desktop_http_admission_gate,
+        ))
+        .with_state(state);
+    let read = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/internal/media/fragment-index/key")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("internal read");
+    let relay = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/cluster/media/sessions/relay")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("internal relay");
+    assert_eq!(fence.restart_drain_status(0).await.admissions_in_flight, 2);
+    let legacy = fence
+        .begin_restart_preparation_until(crate::media_sessions::unix_ms() as u64 + 10_000)
+        .await
+        .expect("legacy token");
+    let continued = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/internal/media/fragment-index/key")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("legacy read");
+    assert_eq!(continued.status(), StatusCode::OK);
+    drop(continued);
+    fence.cancel_planned_outage_preparation(legacy, 0).await;
+    let token = fence
+        .begin_desktop_preparation_until(crate::media_sessions::unix_ms() as u64 + 10_000)
+        .await
+        .expect("desktop token");
+    assert!(!fence.commit_desktop_shutdown(token, 0).await);
+    let reconnect = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/cluster/media/sessions/relay")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("refused relay");
+    assert_eq!(reconnect.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(read);
+    drop(relay);
+    assert!(fence.commit_desktop_shutdown(token, 0).await);
+}

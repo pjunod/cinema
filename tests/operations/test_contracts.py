@@ -26,7 +26,10 @@ FLEET_REGISTRY_EXPR = "${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid'
 # held to that boundary below; these are held to their own contract instead
 # (test_github_only_workflows_never_reach_the_fleet), which is what makes the
 # exemption safe rather than a hole.
-GITHUB_ONLY_WORKFLOWS = frozenset({".github/workflows/github-release.yml"})
+GITHUB_ONLY_WORKFLOWS = frozenset({
+    ".github/workflows/github-release.yml",
+    ".github/workflows/desktop-qualification.yml",
+})
 GITHUB_HOSTED_RUNNERS = frozenset(
     {"ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "macos-15-intel", "windows-2022"}
 )
@@ -2205,6 +2208,118 @@ assert.equal(context.ACT_TIMER, null);
         for path in (".github/workflows/ci.yml", ".github/workflows/main-fast-lane.yml"):
             self.assertNotIn("compile_only", read(path), "main qualification has no task-unit bypass")
 
+    def test_native_macos_tray_is_independent_of_retained_mobile_evidence(self):
+        def enabled(expression, *, apple, desktop, retained):
+            values = {"apple": apple, "desktop_macos": desktop, "retain_apple": retained}
+            expression = re.sub(
+                r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple) (==|!=) 'true'",
+                lambda match: str(values[match[1]] if match[2] == "==" else not values[match[1]]),
+                expression)
+            expression = expression.replace("always()", "True").replace("&&", " and ").replace("||", " or ")
+            self.assertRegex(expression, r"^[ ()TrueFalsandor]+$")
+            return eval(expression, {"__builtins__": {}}, {})
+
+        for path, job_name in (
+            (".github/workflows/effort-ci.yml", "apple_compile"),
+            (".github/workflows/main-fast-lane.yml", "apple_compile"),
+            (".github/workflows/ci.yml", "apple"),
+        ):
+            with self.subTest(path=path):
+                jobs = workflow_job_blocks(path)
+                self.assertIn("desktop_macos: ${{ steps.scope.outputs.desktop_macos }}", jobs["scope"])
+                job = jobs[job_name]
+                condition = re.search(r"(?m)^    if: (.+)$", job)[1]
+                steps = workflow_step_blocks(job)
+                desktop_name = ("Compile native macOS server tray" if "effort-ci" in path
+                                else "Build and test native macOS server tray")
+                desktop = steps[desktop_name]
+                # Even retained mobile units must never suppress a selected tray check.
+                self.assertTrue(enabled(condition, apple=False, desktop=True, retained=True))
+                self.assertTrue(enabled(workflow_step_scalar(desktop, "if"),
+                                        apple=False, desktop=True, retained=True))
+                self.assertFalse(enabled(condition, apple=False, desktop=False, retained=False))
+                self.assertTrue(enabled(condition, apple=True, desktop=False, retained=False))
+                self.assertFalse(enabled(workflow_step_scalar(desktop, "if"),
+                                         apple=True, desktop=False, retained=False))
+                self.assertNotIn("xcodegen", steps["Verify the pinned Apple toolchain"])
+                for name, step in steps.items():
+                    if name == "Preserve native macOS server tray check output":
+                        self.assertTrue(enabled(workflow_step_scalar(step, "if"),
+                                                apple=False, desktop=True, retained=True))
+                        self.assertFalse(enabled(workflow_step_scalar(step, "if"),
+                                                 apple=True, desktop=False, retained=False))
+                        continue
+                    if name in {"Verify the pinned Apple toolchain", desktop_name}:
+                        continue
+                    # Existing mobile work and its always-run artifacts/cleanup are
+                    # conditional, so a tray-only selection creates no simulators.
+                    guard = workflow_step_scalar(step, "if")
+                    self.assertFalse(enabled(guard, apple=False, desktop=True, retained=True), name)
+                    self.assertTrue(enabled(guard, apple=True, desktop=False, retained=False), name)
+                    if path.endswith("/ci.yml"):
+                        self.assertFalse(enabled(guard, apple=True, desktop=True, retained=True), name)
+
+    def test_native_macos_tray_unit_output_does_not_pollute_mobile_receipts(self):
+        case_line = "Test Case '-[PlurxTrayCoreTests.ProtocolTests testFixture]' passed (0.001 seconds)."
+        for path, name in ((".github/workflows/main-fast-lane.yml", "apple_compile"),
+                           (".github/workflows/ci.yml", "apple")):
+            step = workflow_step_blocks(workflow_job_blocks(path)[name])[
+                "Build and test native macOS server tray"]
+            commands = "\n".join(workflow_step_literal(step, "run"))
+            for status in (0, 7):
+                with self.subTest(path=path, status=status), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    fake_make = root / "make"
+                    fake_make.write_text("#!/bin/sh\nprintf '%s\\n' \"" + case_line +
+                                         "\"\nexit \"$NATIVE_TRAY_FAKE_EXIT\"\n", encoding="utf-8")
+                    fake_make.chmod(0o755)
+                    completed = subprocess.run(
+                        ["/bin/sh", "-eu", "-c", commands], cwd=root,
+                        env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                             "NATIVE_TRAY_FAKE_EXIT": str(status)},
+                        capture_output=True, text=True, check=False)
+                    self.assertEqual(completed.returncode, status)
+                    self.assertNotIn("Test Case", completed.stdout + completed.stderr)
+                    self.assertEqual((root / "target/validation/desktop-macos-check.log").read_text().strip(), case_line)
+                    if status == 0:
+                        self.assertIn("checks passed", completed.stdout)
+                    else:
+                        self.assertNotIn("checks passed", completed.stdout)
+
+    def test_effort_native_macos_tray_compiles_without_running_units(self):
+        effort = workflow_job_blocks(".github/workflows/effort-ci.yml")["apple_compile"]
+        steps = workflow_step_blocks(effort)
+        desktop = steps["Compile native macOS server tray"]
+        self.assertEqual(workflow_step_scalar(desktop, "run"), "make desktop-macos-build")
+        self.assertNotIn("compile_only", desktop)
+        self.assertNotIn("desktop-macos-check", effort)
+        self.assertNotIn("desktop-macos-test", effort)
+        self.assertNotIn("swift test", effort)
+
+    def test_native_macos_tray_checks_build_both_architectures_and_run_swift_tests(self):
+        makefile = read("Makefile")
+        build = makefile.split("\ndesktop-macos-build:", 1)[1].split("\ndesktop-macos-test:", 1)[0]
+        test = makefile.split("\ndesktop-macos-test:", 1)[1].split("\ndesktop-macos-check:", 1)[0]
+        self.assertIn("for arch in arm64 x86_64", build)
+        self.assertIn("clients/server-tray/macos/build --configuration release", build)
+        self.assertIn('--arch "$$arch"', build)
+        self.assertIn('--scratch "$(CURDIR)/target/desktop-macos/scratch/$$arch"', build)
+        self.assertNotIn("swift test", build)
+        self.assertIn("swift test --package-path clients/server-tray/macos", test)
+        self.assertNotIn("--arch", test, "tests execute only on the actual runner architecture")
+        self.assertIn("desktop-macos-check: desktop-macos-build desktop-macos-test", makefile)
+        for path, name in ((".github/workflows/main-fast-lane.yml", "apple_compile"),
+                           (".github/workflows/ci.yml", "apple")):
+            steps = workflow_step_blocks(workflow_job_blocks(path)[name])
+            desktop = steps["Build and test native macOS server tray"]
+            commands = workflow_step_literal(desktop, "run")
+            self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
+            self.assertFalse(any("tee " in command or "cat " in command for command in commands),
+                             "desktop XCTest records must not enter the mobile receipt log")
+            artifact = steps["Preserve native macOS server tray check output"]
+            self.assertIn("path: target/validation/desktop-macos-check.log", artifact)
+            self.assertIn("if-no-files-found: error", artifact)
+
     def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
         fast_lane = read(".github/workflows/main-fast-lane.yml")
@@ -4312,21 +4427,29 @@ assert.equal(context.ACT_TIMER, null);
                 on = re.search(r"(?m)^on:\n((?:(?:  .*)?\n)*)", code)
                 self.assertIsNotNone(on, path)
                 triggers = re.findall(r"(?m)^  ([a-z_]+):", on.group(1))
-                self.assertEqual(["push", "workflow_dispatch"], triggers, path)
-                push = on.group(1).split("  workflow_dispatch:", 1)[0]
-                self.assertEqual(["tags"], re.findall(r"(?m)^    ([a-z_]+):", push), path)
+                qualification = path == ".github/workflows/desktop-qualification.yml"
+                if qualification:
+                    self.assertEqual(["workflow_dispatch", "workflow_call"], triggers, path)
+                else:
+                    self.assertEqual(["push", "workflow_dispatch"], triggers, path)
+                    push = on.group(1).split("  workflow_dispatch:", 1)[0]
+                    self.assertEqual(["tags"], re.findall(r"(?m)^    ([a-z_]+):", push), path)
                 self.assertEqual(
-                    ["  contents: read\n"],
+                    ["  contents: read\n  actions: read\n"],
                     re.findall(r"(?m)^permissions:\n((?:  .*\n)*)", code),
                     path,
                 )
+                if qualification:
+                    self.assertNotRegex(code, r"(?m)^\s+(?:environment|secrets):")
+                    self.assertNotIn("secrets.", code)
                 for forbidden in ("self-hosted", "pull_request", "workflow_run"):
                     self.assertFalse(forbidden in code, f"{path} names {forbidden}")
                 self.assertIsNone(re.search(r"(?m)^\s+(?:container|services):", code), path)
                 for action in re.findall(r"(?m)^\s*(?:-\s+)?uses:\s+(\S+)", code):
                     self.assertTrue(
                         action.startswith("./.github/actions/")
-                        or artifact_action.fullmatch(action),
+                        or artifact_action.fullmatch(action)
+                        or (path == ".github/workflows/github-release.yml" and action == "./.github/workflows/desktop-qualification.yml"),
                         f"{path} uses {action}",
                     )
                 jobs = workflow_job_blocks(path)
@@ -4334,7 +4457,26 @@ assert.equal(context.ACT_TIMER, null);
                 writers = []
                 for name, block in jobs.items():
                     conditions = re.findall(r"(?m)^    if: (.+)$", block)
-                    self.assertEqual([gate], conditions, f"{path}:{name}")
+                    # Production metadata signing must be skipped entirely on
+                    # dry runs so fixture qualification never enters a protected
+                    # environment or requests owner signing credentials.
+                    expected_gate = gate
+                    if path == ".github/workflows/github-release.yml":
+                        if name in ("desktop_signing", "publish"):
+                            expected_gate += " && needs.resolve.outputs.mode == 'release'"
+                        elif name == "desktop_qualification":
+                            expected_gate += " && needs.resolve.outputs.mode == 'qualification'"
+                        elif name != "resolve":
+                            self.assertIn(name, {"linux", "macos_build", "macos", "windows", "windows_smoke", "desktop_metadata"})
+                            expected_gate += " && needs.resolve.outputs.mode != 'qualification'"
+                    self.assertEqual([expected_gate], conditions, f"{path}:{name}")
+                    if path == ".github/workflows/github-release.yml" and name == "desktop_qualification":
+                        self.assertIn("    needs: resolve\n", block)
+                        self.assertIn("    uses: ./.github/workflows/desktop-qualification.yml\n", block)
+                        self.assertIn("      candidate_sha: ${{ github.sha }}\n", block)
+                        self.assertIn("      run_local_fixture_updates: true\n", block)
+                        self.assertNotRegex(block, r"(?m)^    (?:permissions|runs-on|steps|environment|secrets):")
+                        continue
                     self.assertIn("\n    timeout-minutes:", block, f"{path}:{name}")
                     runs_on = re.search(r"(?m)^    runs-on: (.+)$", block).group(1)
                     if runs_on == "${{ matrix.runner }}":
@@ -4345,6 +4487,7 @@ assert.equal(context.ACT_TIMER, null);
                     self.assertLessEqual(runners, GITHUB_HOSTED_RUNNERS, f"{path}:{name}")
                     grants = re.findall(r"(?m)^    permissions:(.*)\n((?:      .*\n)*)", block)
                     if grants:
+                        self.assertFalse(qualification, f"{path}:{name} may not hold job permission overrides")
                         self.assertEqual([("", "      contents: write\n")], grants, f"{path}:{name}")
                         writers.append(name)
                         # The writer runs nothing it was handed: no build, and

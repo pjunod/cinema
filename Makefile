@@ -1872,6 +1872,25 @@ hooks: ## Install the pre-commit (lint) and pre-push (paperwork) hooks, and Ripw
 	  else echo "Ripwire setup failed or took over 30 s (offline?); run scripts/ripwire setup when online."; fi
 	@echo "Bypass one run with 'git commit --no-verify' or 'git push --no-verify'."
 
+## ---- native macOS server tray ------------------------------------------
+
+.PHONY: desktop-macos-build desktop-macos-test desktop-macos-check
+# Cross-architecture slices prove compilation; unit tests execute only on the
+# runner's actual architecture. Separate scratch roots allow parallel make.
+desktop-macos-build: ## Compile both macOS server tray architectures without executing tests
+	@set -e; for arch in arm64 x86_64; do \
+	  clients/server-tray/macos/build --configuration release \
+	    --version "$(VERSION)" --arch "$$arch" \
+	    --scratch "$(CURDIR)/target/desktop-macos/scratch/$$arch" \
+	    --output "$(CURDIR)/target/desktop-macos/$$arch/Plurx Server.app"; \
+	done
+
+desktop-macos-test: ## Run native server tray Swift and AppKit unit contracts
+	swift test --package-path clients/server-tray/macos \
+	  --scratch-path "$(CURDIR)/target/desktop-macos/tests"
+
+desktop-macos-check: desktop-macos-build desktop-macos-test ## Build both slices and test on the native macOS architecture
+
 ## ---- apple clients -----------------------------------------------------
 
 .PHONY: apple-build-bump

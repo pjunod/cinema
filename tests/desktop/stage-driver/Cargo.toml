@@ -1,0 +1,12 @@
+[package]
+name = "plurx-qualification-stage"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# This is an independent test workspace: never a shipping member or CLI flag.
+[workspace]
+
+[dependencies]
+plurx-desktop-control = { path = "../../../crates/plurx-desktop-control" }
+serde_json = "1"

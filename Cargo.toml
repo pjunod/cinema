@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/plurx-desktop-control",
+    "crates/plurx-tray",
     "crates/plurx-core",
     "crates/plurx-cluster-check",
     "crates/plurx-compat-plex",

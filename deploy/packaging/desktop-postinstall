@@ -1,0 +1,13 @@
+#!/bin/sh
+# Only the fixed root helper can join/refresh a managed package transaction.
+set -e
+helper=/usr/lib/plurx-control/plurx-install-helper
+if [ -x "$helper" ]; then
+  joined=0
+  "$helper" package-script postinstall desktop -- "$@" || joined=$?
+  case $joined in 0|10) ;; *) exit "$joined" ;; esac
+else
+  # preinstall can precede unpack of its exact-version server dependency.
+  # Later phases require that dependency's helper, except final removal.
+  case postinstall in preinstall|postremove) ;; *) exit 1 ;; esac
+fi

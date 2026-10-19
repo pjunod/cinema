@@ -1,0 +1,71 @@
+# Optional GUI package: none of these dependencies enter the server package.
+name: plurx-desktop
+arch: ${PLURX_PKG_ARCH}
+platform: linux
+version: ${PLURX_PKG_VERSION}
+release: 1
+section: video
+priority: optional
+maintainer: ${PLURX_PKG_MAINTAINER}
+vendor: noirr cinema
+homepage: ${PLURX_PKG_HOMEPAGE}
+license: Apache-2.0
+description: Local desktop controls for the plurx media server
+overrides:
+  deb:
+    depends:
+      - plurxd (= ${PLURX_PKG_VERSION}-1)
+      - libgtk-4-1 (>= 4.0)
+      - libglib2.0-0 (>= 2.66)
+      - polkitd
+      - pkexec
+      - xdg-utils
+  rpm:
+    depends:
+      - plurxd = ${PLURX_PKG_VERSION}-1
+      - gtk4 >= 4.0
+      - glib2 >= 2.66
+      - polkit
+      - xdg-utils
+contents:
+  - src: ./plurx-tray
+    dst: /usr/bin/plurx-tray
+    file_info:
+      mode: 0755
+  - src: ./tv.plurx.Server.desktop
+    dst: /usr/share/applications/tv.plurx.Server.desktop
+    file_info:
+      mode: 0644
+  - src: ./tv.plurx.Server-autostart.desktop
+    dst: /etc/xdg/autostart/tv.plurx.Server-autostart.desktop
+    file_info:
+      mode: 0644
+  - src: ./tv.plurx.Server.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/tv.plurx.Server.svg
+    file_info:
+      mode: 0644
+  - src: ./tv.plurx.Server-running-symbolic.svg
+    dst: /usr/share/icons/hicolor/symbolic/apps/tv.plurx.Server-running-symbolic.svg
+    file_info:
+      mode: 0644
+  - src: ./tv.plurx.Server-starting-symbolic.svg
+    dst: /usr/share/icons/hicolor/symbolic/apps/tv.plurx.Server-starting-symbolic.svg
+    file_info:
+      mode: 0644
+  - src: ./tv.plurx.Server-stopped-symbolic.svg
+    dst: /usr/share/icons/hicolor/symbolic/apps/tv.plurx.Server-stopped-symbolic.svg
+    file_info:
+      mode: 0644
+  - src: ./tv.plurx.Server-unhealthy-symbolic.svg
+    dst: /usr/share/icons/hicolor/symbolic/apps/tv.plurx.Server-unhealthy-symbolic.svg
+    file_info:
+      mode: 0644
+  - src: ./tv.plurx.Server-unknown-symbolic.svg
+    dst: /usr/share/icons/hicolor/symbolic/apps/tv.plurx.Server-unknown-symbolic.svg
+    file_info:
+      mode: 0644
+scripts:
+  preinstall: ./desktop-preinstall
+  postinstall: ./desktop-postinstall
+  preremove: ./desktop-preremove
+  postremove: ./desktop-postremove

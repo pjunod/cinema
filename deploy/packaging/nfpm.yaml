@@ -71,7 +71,44 @@ contents:
     file_info:
       mode: 0644
 
+  - src: ./plurx-control
+    dst: /usr/lib/plurx-control/plurx-control
+    file_info:
+      mode: 0755
+  - src: /usr/lib/plurx-control/plurx-control
+    dst: /usr/bin/plurx-control
+    type: symlink
+  - src: ./plurx-update-worker
+    dst: /usr/lib/plurx-control/plurx-update-worker
+    file_info:
+      mode: 0755
+  - src: ./plurx-install-helper
+    dst: /usr/lib/plurx-control/plurx-install-helper
+    file_info:
+      mode: 0755
+  - src: ./plurx-service-launch
+    dst: /usr/lib/plurx-control/plurx-service-launch
+    file_info:
+      mode: 0755
+  - src: ./plurx-recovery
+    dst: /usr/lib/plurx-control/plurx-recovery
+    file_info:
+      mode: 0755
+  - src: ./plurx-recovery.service
+    dst: /usr/lib/systemd/system/plurx-recovery.service
+    file_info:
+      mode: 0644
+  - src: ./release.json
+    dst: /usr/lib/plurx-control/release.json
+    file_info:
+      mode: 0644
+  - src: ./tv.plurx.install.policy
+    dst: /usr/share/polkit-1/actions/tv.plurx.install.policy
+    file_info:
+      mode: 0644
+
 scripts:
+  preinstall: ./preinstall
   postinstall: ./postinstall
   preremove: ./preremove
   postremove: ./postremove
