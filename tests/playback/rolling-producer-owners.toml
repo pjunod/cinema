@@ -1,3 +1,20 @@
+# Desktop native control ownership review (PR #1220, 2026-10-19):
+# +6 namespaced task sites in desktop_control.rs: DesktopServer retains the
+# listener JoinHandle and cancels/joins it in finish; prepare/commit retain
+# the planned-outage operation guard through caller disconnection and finish
+# their bounded replicated lease transition; three test-only drivers (HTTP,
+# metrics and serving) are stopped and awaited before fixture teardown.
+# +1 method-spawn is the listener's bounded (32) JoinSet of IPC connections;
+# cancellation requests graceful HTTP closure with IPC_DRAIN, then joins all
+# connections before removing the socket. It starts no operating-system child.
+# +8 timers: three awaited production IPC/admission/topology bounds, the
+# daemon's 30s native store-close bound (timeout records failure, never clean
+# closure), two finite sole-voter fixture waits and two fence-expiry sleeps.
+# +10 launch-shaped matches: the same JoinSet spawn, membership.status(),
+# four desktop HTTP status assertions and four drain HTTP status assertions.
+# Nine are readback/assertions, with no process or producer authority. Process
+# constructors/lifecycle counts, patterns, module roots and equality stay intact.
+
 # CQ #1192 Linux isolated subtitle reap fixture (runtime.rs, cfg(test) only):
 # +1 method-spawn, +1 process constructor and +1 launch-shaped method are the
 # same exact-filter self-exec child in isolated_reaper_process. A fresh 0700
@@ -3084,7 +3101,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # dv_runtime::capture_owned_graph. It retires the exact registered encoder
 # and its JoinHandle is awaited after capture; no detached production task.
 # supervise_streaming_helper retains the existing run_streaming task site.
-expected_occurrences = 976
+expected_occurrences = 982
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3319,7 +3336,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # regression creates a second pair. Existing ProducerSlot registrations own
 # encoder retirement/reap; helper futures await their children, killing on
 # cancellation.
-expected_occurrences = 75
+expected_occurrences = 76
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4735,7 +4752,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # bound caller-cancel capture and helper-supervisor backpressure completion.
 # Neither supplies settlement: tests await original registered reap and helper
 # completion, including cleanup before asserting the backpressure bound.
-expected_occurrences = 1813
+expected_occurrences = 1821
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5819,7 +5836,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # encoder/helper pairs reviewed under method-spawn and command-construction.
 # Existing ProducerSlot reaps encoders; helper futures await their own
 # children (killing on cancellation) before retained completion is observed.
-expected_occurrences = 770
+expected_occurrences = 780
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
