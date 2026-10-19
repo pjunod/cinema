@@ -11,12 +11,6 @@ import Foundation
 struct ServerInfo: Codable {
     var setupRequired: Bool?
     var name: String?
-    /// The answering node's machine name (`lab6`); absent on servers that
-    /// predate it or have no usable hostname.
-    var hostname: String?
-    /// The server's own choice of what to call it: an operator-set name, else
-    /// the hostname. Older servers omit it, so `label` falls back to `name`.
-    var displayName: String?
     var version: String?
     var build: String?
     var instanceId: String?
@@ -25,9 +19,12 @@ struct ServerInfo: Codable {
     var displayAwareAutoProtocol: String?
 }
 
-extension ServerInfo {
-    /// What to call this server anywhere a person reads it.
-    var label: String? { displayName ?? name }
+/// `GET /api/v1/server/node` (signed in): which machine this client is
+/// talking to. `displayName` is the server's own label for itself — a chosen
+/// name, else the hostname — so the client never re-derives it.
+struct ServerNode: Codable {
+    var hostname: String?
+    var displayName: String?
 }
 
 /// The Settings "Server" value: the server's label, with the answering node's

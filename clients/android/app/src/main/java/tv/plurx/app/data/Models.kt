@@ -16,10 +16,6 @@ data class Server(
     val decoder_compaction_contract: String? = null,
     val setup_required: Boolean = false,
     val name: String? = null,
-    /** The answering node's machine name (`lab6`); absent on older servers. */
-    val hostname: String? = null,
-    /** The server's own label: an operator-set name, else the hostname. */
-    val display_name: String? = null,
     val version: String? = null,
     val instance_id: String? = null,
     val display_mode_match: Boolean = false,
@@ -28,8 +24,13 @@ data class Server(
     val display_aware_auto_protocol: String? = null,
 )
 
-/** What to call this server anywhere a person reads it; older servers send only `name`. */
-val Server.label: String? get() = display_name ?: name
+/** `GET /api/v1/server/node` (signed in): which machine this client is talking to. */
+@Serializable
+data class ServerNode(
+    val hostname: String? = null,
+    /** The server's own label: a chosen name, else the hostname. */
+    val display_name: String? = null,
+)
 
 /**
  * The Settings "Server" value: the server's label, with the answering node's

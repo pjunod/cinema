@@ -356,6 +356,7 @@ families. No `/api/v1/cluster/*` path matches either.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/api/v1/server` | public | Identity, version, and whether first-run setup is required |
+| GET | `/api/v1/server/node` | bearer | The answering node's `hostname` and the `display_name` clients show for this server |
 | POST | `/api/v1/setup` | public, only while zero users exist | Creates the first admin and returns a token |
 | POST | `/api/v1/auth/login` | public | Verifies credentials, mints a token |
 | POST | `/api/v1/auth/logout` | bearer | Deletes this token's digest, cluster-wide |
@@ -388,6 +389,12 @@ switch; missing storage is `false`). Also `decoder_compaction_contract`,
 `display_aware_auto_protocol` (always `"route-v1"` on this build) and
 `playback_display_aware_auto` (the Developer switch; missing storage is
 `false`) — see §7.4.
+
+`GET /api/v1/server/node` (signed in) names the machine: `hostname` (the
+answering node's short hostname, the name the cluster roster shows; absent
+when it has none) and `display_name` — the operator's chosen name, else the
+hostname, else `name`. It is a separate route because a hostname is not for
+an unauthenticated caller. `GET /api/v1/system` (admin) carries both too.
 
 ### 4.2 `POST /api/v1/setup`
 

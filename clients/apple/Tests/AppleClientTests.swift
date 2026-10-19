@@ -12601,22 +12601,22 @@ private struct PGSOverlayCasesFixture: Decodable {
 }
 
 final class ServerLabelTests: XCTestCase {
-    private func decode(_ json: String) throws -> ServerInfo {
+    private func decode(_ json: String) throws -> ServerNode {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(ServerInfo.self, from: Data(json.utf8))
+        return try decoder.decode(ServerNode.self, from: Data(json.utf8))
     }
 
-    func testTheServerLabelIsTheServersDisplayNameNotTheSharedDefault() throws {
-        let info = try decode(#"{"name":"plurx","hostname":"lab6","display_name":"lab6"}"#)
-        XCTAssertEqual(info.label, "lab6")
-        XCTAssertEqual(serverSettingsLabel(name: info.label, hostname: info.hostname), "lab6")
+    func testTheServerNodeCarriesTheMachineNameAndTheServersLabel() throws {
+        let node = try decode(#"{"hostname":"lab6","display_name":"lab6"}"#)
+        XCTAssertEqual(node.displayName, "lab6")
+        XCTAssertEqual(serverSettingsLabel(name: node.displayName, hostname: node.hostname), "lab6")
     }
 
-    func testAnOlderServerWithoutADisplayNameStillShowsItsName() throws {
-        let info = try decode(#"{"name":"plurx"}"#)
-        XCTAssertEqual(info.label, "plurx")
-        XCTAssertEqual(serverSettingsLabel(name: info.label, hostname: info.hostname), "plurx")
+    func testANodeWithoutAMachineNameShowsTheLabelAlone() throws {
+        let node = try decode(#"{"display_name":"plurx"}"#)
+        XCTAssertNil(node.hostname)
+        XCTAssertEqual(serverSettingsLabel(name: node.displayName, hostname: node.hostname), "plurx")
     }
 
     func testAChosenNameKeepsTheAnsweringNodeVisible() {

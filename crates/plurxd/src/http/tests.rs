@@ -6611,6 +6611,50 @@ async fn an_unknown_request_id_is_a_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// Settings used to call every server "plurx": the shipped default name, the
+/// same on every node. A signed-in reader is now told the node's hostname and
+/// a label built from it; the public identity route still carries neither.
+#[tokio::test]
+async fn a_signed_in_reader_is_told_the_node_hostname_and_a_label_from_it() {
+    let mut state = test_state_without_router();
+    state.server_name = "plurx".into();
+    state.node_hostname = Some("lab6".into());
+    let app = router(state);
+
+    let (_, public) = call(&app, get("/api/v1/server", None)).await;
+    assert!(public.get("hostname").is_none(), "{public}");
+    assert_eq!(
+        call(&app, get("/api/v1/server/node", None)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let token = setup_admin(&app).await;
+    let (status, node) = call(&app, get("/api/v1/server/node", Some(&token))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(node, json!({"hostname": "lab6", "display_name": "lab6"}));
+
+    // A chosen name is kept; the hostname still says which machine.
+    let (status, _) = call(
+        &app,
+        put(
+            "/api/v1/settings",
+            Some(&token),
+            json!({"server_name": "Living Room"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, node) = call(&app, get("/api/v1/server/node", Some(&token))).await;
+    assert_eq!(
+        node,
+        json!({"hostname": "lab6", "display_name": "Living Room"})
+    );
+
+    let (_, system) = call(&app, get("/api/v1/system", Some(&token))).await;
+    assert_eq!(system["hostname"], "lab6");
+    assert_eq!(system["display_name"], "Living Room");
+}
+
 #[tokio::test]
 async fn setup_then_login_flow() {
     let app = test_app();
@@ -6618,18 +6662,6 @@ async fn setup_then_login_flow() {
     // Fresh server reports setup_required.
     let (_, info) = call(&app, get("/api/v1/server", None)).await;
     assert_eq!(info["setup_required"], true);
-    // The node's own machine name rides along, and the label clients show is
-    // derived from it rather than being the shipped default.
-    let hostname =
-        plurx_core::cluster::membership::MembershipManager::unavailable().local_hostname();
-    assert_eq!(info["hostname"].as_str(), hostname.as_deref());
-    assert_eq!(
-        info["display_name"],
-        plurx_core::config::server_display_name(
-            info["name"].as_str().unwrap(),
-            hostname.as_deref()
-        )
-    );
 
     // Setup creates the admin and returns a working token.
     let token = setup_admin(&app).await;

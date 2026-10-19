@@ -360,6 +360,8 @@ struct PlurxAPI {
         ])
     }
 
+    /// Signed in: the answering node's hostname and the server's label.
+    func serverNode() async throws -> ServerNode { try await get("server/node") }
     func hubs() async throws -> Hubs { try await get("hubs") }
     func comingSoon() async throws -> ComingSoonResponse { try await get("coming-soon") }
     func item(_ id: Int) async throws -> ItemDetail { try await get("items/\(id)") }

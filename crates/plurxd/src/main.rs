@@ -4133,26 +4133,10 @@ fn primary_lan_address() -> Option<IpAddr> {
     (!address.is_loopback() && !address.is_unspecified()).then_some(address)
 }
 
-#[cfg(unix)]
+/// The machine name the picker shows: the same resolution the cluster roster
+/// and `/api/v1/server` use, so a picker row and Settings name a node alike.
 fn system_hostname() -> Option<String> {
-    let mut buffer = [0_u8; 256];
-    // SAFETY: `buffer` is writable for exactly the length passed to libc, and
-    // it remains alive until the returned bytes are copied into a Rust String.
-    if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
-        return None;
-    }
-    let end = buffer
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(buffer.len());
-    normalized_hostname(&String::from_utf8_lossy(&buffer[..end]))
-}
-
-#[cfg(not(unix))]
-fn system_hostname() -> Option<String> {
-    std::env::var("COMPUTERNAME")
-        .ok()
-        .and_then(|value| normalized_hostname(&value))
+    plurx_core::cluster::membership::system_short_hostname()
 }
 
 #[derive(Deserialize)]

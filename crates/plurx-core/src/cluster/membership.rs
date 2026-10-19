@@ -14358,8 +14358,11 @@ fn reverse_hostname(_address: IpAddr) -> Option<String> {
     None
 }
 
+/// This machine's short hostname: `PLURX_NODE_HOSTNAME` when set, else the OS
+/// hostname, reduced to its first label. A container id, an IP address or
+/// `localhost` is not a name, so those give `None`.
 #[cfg(unix)]
-pub(crate) fn system_short_hostname() -> Option<String> {
+pub fn system_short_hostname() -> Option<String> {
     if let Some(configured) = std::env::var("PLURX_NODE_HOSTNAME")
         .ok()
         .and_then(|hostname| short_hostname(&hostname))
@@ -14380,7 +14383,7 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn system_short_hostname() -> Option<String> {
+pub fn system_short_hostname() -> Option<String> {
     std::env::var("PLURX_NODE_HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .ok()

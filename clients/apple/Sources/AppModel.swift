@@ -322,8 +322,8 @@ final class AppModel: ObservableObject {
             guard generation == authenticationGeneration else { return }
             origin = normalized
             api = a
-            serverName = info.label
-            serverHostname = info.hostname
+            serverName = info.name
+            serverHostname = nil
             displayAwareAuto = info.playbackDisplayAwareAuto == true
             autoAbr = info.playbackAutoAbr == true
             displayAwareAutoProtocol = info.displayAwareAutoProtocol
@@ -621,7 +621,7 @@ final class AppModel: ObservableObject {
         guard generation == authenticationGeneration else { return }
         origin = recovered.origin
         serverName = recovered.name
-        serverHostname = recovered.hostname
+        serverHostname = nil
         displayAwareAuto = false
         autoAbr = false
         displayAwareAutoProtocol = nil
@@ -677,8 +677,7 @@ final class AppModel: ObservableObject {
             return RecoveredServer(
                 origin: candidateOrigin,
                 instanceId: info.instanceId,
-                name: info.label,
-                hostname: info.hostname
+                name: info.name
             )
         }
         return nil
@@ -688,8 +687,12 @@ final class AppModel: ObservableObject {
         guard let info = try? await requireAPI().serverInfo() else { return }
         guard generation == authenticationGeneration else { return }
         if !transientAuthentication, settings.instanceId == nil { settings.instanceId = info.instanceId }
-        serverName = info.label
-        serverHostname = info.hostname
+        serverName = info.name
+        serverHostname = nil
+        if let node = try? await requireAPI().serverNode(), generation == authenticationGeneration {
+            serverName = node.displayName ?? info.name
+            serverHostname = node.hostname
+        }
         displayAwareAuto = info.playbackDisplayAwareAuto == true
         autoAbr = info.playbackAutoAbr == true
         displayAwareAutoProtocol = info.displayAwareAutoProtocol
@@ -1355,5 +1358,4 @@ private struct RecoveredServer {
     let origin: String
     let instanceId: String?
     let name: String?
-    let hostname: String?
 }

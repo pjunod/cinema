@@ -2,23 +2,24 @@ package tv.plurx.app.data
 
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class ServerLabelTest {
     private val json = Json { ignoreUnknownKeys = true }
 
     @Test
-    fun theServerLabelIsTheServersDisplayNameNotTheSharedDefault() {
-        val info = json.decodeFromString<Server>("""{"name":"plurx","hostname":"lab6","display_name":"lab6"}""")
-        assertEquals("lab6", info.label)
-        assertEquals("lab6", serverSettingsLabel(info.label, info.hostname))
+    fun theServerNodeCarriesTheMachineNameAndTheServersLabel() {
+        val node = json.decodeFromString<ServerNode>("""{"hostname":"lab6","display_name":"lab6"}""")
+        assertEquals("lab6", node.display_name)
+        assertEquals("lab6", serverSettingsLabel(node.display_name, node.hostname))
     }
 
     @Test
-    fun anOlderServerWithoutADisplayNameStillShowsItsName() {
-        val info = json.decodeFromString<Server>("""{"name":"plurx"}""")
-        assertEquals("plurx", info.label)
-        assertEquals("plurx", serverSettingsLabel(info.label, info.hostname))
+    fun aNodeWithoutAMachineNameShowsTheLabelAlone() {
+        val node = json.decodeFromString<ServerNode>("""{"display_name":"plurx"}""")
+        assertNull(node.hostname)
+        assertEquals("plurx", serverSettingsLabel(node.display_name, node.hostname))
     }
 
     @Test
