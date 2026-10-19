@@ -3424,6 +3424,7 @@ dependencies = [
  "plurx-compat-jellyfin",
  "plurx-compat-plex",
  "plurx-core",
+ "plurx-desktop-control",
  "plurx-notification-broker",
  "plurx-pgs",
  "qrcode",

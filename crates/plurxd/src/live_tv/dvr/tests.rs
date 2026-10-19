@@ -353,6 +353,7 @@ fn test_sink_attempt_at(
 ) -> Arc<DvrSink> {
     let now = unix_seconds();
     let sink = Arc::new(DvrSink {
+        _restart_admission: None,
         recording_id: id.to_owned(),
         channel_id: "7.1".to_owned(),
         airing_start: now,

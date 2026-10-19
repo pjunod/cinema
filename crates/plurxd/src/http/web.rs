@@ -602,7 +602,7 @@ pub async fn download_android(State(state): State<AppState>) -> Response {
 /// but return a JSON 404 for anything under `/api` so API clients get a clean
 /// error instead of a page of HTML.
 pub async fn fallback(uri: axum::http::Uri) -> Response {
-    if uri.path().starts_with("/api") {
+    if uri.path().starts_with("/api") || uri.path().starts_with("/local/") {
         (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "application/json")],

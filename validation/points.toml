@@ -828,6 +828,7 @@ paths = [
   "crates/plurxd/src/http/test_agents.rs",
   "crates/plurxd/src/http/tests.rs",
   "crates/plurxd/src/startup_tests.rs",
+  "crates/plurxd/src/desktop_control.rs",
   "crates/plurxd/src/state/analysis_rate_tests.rs",
   "crates/plurxd/src/state/tests.rs",
   "crates/plurxd/src/telemetry/tests.rs",

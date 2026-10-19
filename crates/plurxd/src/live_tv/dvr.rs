@@ -828,6 +828,9 @@ impl ViewerConsumer {
 
 /// One recording's file within a transport.
 pub(crate) struct DvrSink {
+    // Remains owned by the sink/writer/transport through fsync and worker exit,
+    // including after the activity row has disappeared from the registry.
+    _restart_admission: Option<crate::serving_fence::RestartAdmission>,
     pub(crate) recording_id: String,
     pub(crate) channel_id: String,
     pub(crate) airing_start: i64,
@@ -2404,6 +2407,16 @@ impl LiveTvManager {
         attempt: i64,
         generation: i64,
     ) -> Result<(), LiveTvError> {
+        // Scheduled recordings do not enter through HTTP. Serialize their
+        // complete capture admission with the native shutdown fence as well.
+        let admission = self
+            .serving
+            .serving
+            .try_restart_admission()
+            .await
+            .ok_or_else(|| {
+                LiveTvError::OwnerUnavailable("this node is preparing for restart".to_owned())
+            })?;
         if dvr.root.trim().is_empty() {
             return Err(LiveTvError::InvalidConfig(
                 "no DVR root is configured, so a recording has nowhere to go".to_owned(),
@@ -2593,6 +2606,7 @@ impl LiveTvManager {
             }
         };
         let sink = Arc::new(DvrSink {
+            _restart_admission: Some(admission),
             recording_id: row.id.clone(),
             channel_id: row.channel_id.clone(),
             airing_start: row.airing_start,
@@ -3088,6 +3102,14 @@ impl LiveTvManager {
         reason: &str,
         _generation: i64,
     ) -> Result<(), LiveTvError> {
+        let _admission = self
+            .serving
+            .serving
+            .try_restart_admission()
+            .await
+            .ok_or_else(|| {
+                LiveTvError::OwnerUnavailable("this node is preparing for restart".to_owned())
+            })?;
         let (_, dvr) = self.dvr_configs().await?;
         let finalizer_deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(plurx_core::live_tv_resource::LEASE_MS as u64);

@@ -28,6 +28,8 @@ mod copyseg;
 mod decode_facts;
 mod decoder_health;
 mod delivery;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod desktop_control;
 mod diagnostics;
 mod diagnostics_delivery;
 mod dv_disk;
@@ -1772,6 +1774,8 @@ async fn run(config: Config) -> anyhow::Result<()> {
     // lets the startup stages below answer a signal instead of finishing every
     // one of them first.
     let shutdown = ShutdownWatch::observing(shutdown_signal());
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let desktop = desktop_control::DesktopControl::from_environment()?;
 
     let observation = Arc::new(StartupObservationHttp::new(config.server.bind));
     let mut selected =
@@ -1853,15 +1857,38 @@ async fn run(config: Config) -> anyhow::Result<()> {
             start_mdns_advertiser,
             shutdown.signalled(),
             Some(Arc::clone(&observation)),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            desktop.clone(),
         )
         .await
     };
     let result = serving.await;
     observation.stop_and_drain().await;
-    let shutdown = selected
-        .shutdown()
-        .await
-        .context("stopping local Hiqlite voter");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let native_commit = if let Some(desktop) = &desktop {
+        desktop.is_committed().await
+    } else {
+        false
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let native_commit = false;
+    let shutdown = if native_commit {
+        match tokio::time::timeout(Duration::from_secs(30), selected.shutdown()).await {
+            Ok(result) => result.context("stopping local Hiqlite voter"),
+            Err(_) => Err(anyhow::anyhow!(
+                "local Hiqlite store close timed out during committed native shutdown"
+            )),
+        }
+    } else {
+        selected
+            .shutdown()
+            .await
+            .context("stopping local Hiqlite voter")
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(desktop) = desktop {
+        desktop.finish(shutdown.is_ok()).await?;
+    }
     result.and(shutdown)
 }
 
@@ -2164,7 +2191,16 @@ async fn boot(
     advertiser: MdnsAdvertiser,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    boot_observing(config, parts, advertiser, shutdown, None).await
+    boot_observing(
+        config,
+        parts,
+        advertiser,
+        shutdown,
+        None,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        None,
+    )
+    .await
 }
 
 async fn boot_observing(
@@ -2173,6 +2209,9 @@ async fn boot_observing(
     advertiser: MdnsAdvertiser,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     observation: Option<Arc<StartupObservationHttp>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))] desktop: Option<
+        Arc<desktop_control::DesktopControl>,
+    >,
 ) -> anyhow::Result<()> {
     let observation = match observation {
         Some(owner) if owner.tasks.lock().await.is_some() => Some(owner),
@@ -2304,6 +2343,31 @@ async fn boot_observing(
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
     let jellyfin_standard_port = Arc::clone(&state.jellyfin_standard_port);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let desktop_server = if let Some(desktop) = &desktop {
+        let bind = config.server.bind;
+        let ip = match bind.ip() {
+            std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            }
+            std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
+                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+            }
+            ip => ip,
+        };
+        Some(
+            desktop
+                .serve(
+                    state.clone(),
+                    format!("http://{}", SocketAddr::new(ip, bind.port())),
+                )
+                .await?,
+        )
+    } else {
+        None
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let desktop_shutdown = desktop.clone();
     let app = http::router(state);
     tokio::task::spawn_blocking(http::web::warm_static_assets)
         .await
@@ -2331,7 +2395,7 @@ async fn boot_observing(
         tokio::select! {
             () = shutdown => {}
             () = leave_shutdown.cancelled() => {
-                tracing::info!("cluster leave committed, draining");
+                tracing::info!("local shutdown requested, draining");
             }
         }
         // One drain token for both causes: owners that must hand work back
@@ -2350,6 +2414,10 @@ async fn boot_observing(
             .await;
         crate::telemetry::drain_for_shutdown(&telemetry_store).await;
         if let Err(error) = live_tv_shutdown.shutdown().await {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let Some(desktop) = &desktop_shutdown {
+                desktop.record_auxiliary_failure();
+            }
             tracing::warn!(%error, "Live TV shutdown could not confirm complete cleanup");
         }
         // The main listener stops accepting when this future completes;
@@ -2383,6 +2451,20 @@ async fn boot_observing(
     // them, so both write an unclean final record and the next start counts an
     // unclean stop. A failed write is read the same way, which is honest too.
     let clean = matches!(served, Ok(HttpDrain::Complete));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        if let Some(server) = desktop_server {
+            if let Err(error) = server.finish().await {
+                if let Some(desktop) = &desktop {
+                    desktop.record_auxiliary_failure();
+                }
+                tracing::warn!(%error, "native IPC did not drain cleanly");
+            }
+        }
+        if let Some(desktop) = &desktop {
+            desktop.record_http_drain(clean);
+        }
+    }
     if let Err(error) = plex_census
         .flush_durable(http::plex_census::unix_now_s(), clean)
         .await
