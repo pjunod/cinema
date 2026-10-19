@@ -301,6 +301,11 @@ mod process {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
+    // A concurrent fork can briefly inherit another fixture's writable script
+    // descriptor before exec closes it, making Linux exec return ETXTBSY.
+    // Serialize only these shell fixtures; production runner calls are unchanged.
+    static PROCESS_FIXTURES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn stub(body: &str) -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "plurx-tray-stub-{}-{}",
@@ -323,6 +328,7 @@ mod process {
 
     #[test]
     fn argv_arrives_as_one_vector_and_stderr_stays_diagnostic() {
+        let _fixtures = PROCESS_FIXTURES.lock().unwrap();
         let (dir, path) = stub(
             r#"printf '{"schema_version":1,"ok":true,"result":{"kind":"update","state":"cancelled","version":null,"transaction_id":"%s","detail":"argc=%s"},"error":null}' "$4" "$#"; echo diag >&2"#,
         );
@@ -343,6 +349,7 @@ mod process {
 
     #[test]
     fn structured_error_with_nonzero_exit_keeps_its_code() {
+        let _fixtures = PROCESS_FIXTURES.lock().unwrap();
         let (dir, path) = stub(
             r#"printf '{"schema_version":1,"ok":false,"result":null,"error":{"code":"authorization_denied","message":"cancelled","retryable":false}}'; exit 3"#,
         );
@@ -353,6 +360,7 @@ mod process {
 
     #[test]
     fn success_body_with_failing_exit_and_crashes_are_not_trusted() {
+        let _fixtures = PROCESS_FIXTURES.lock().unwrap();
         let (dir, path) = stub(
             r#"printf '{"schema_version":1,"ok":true,"result":{"kind":"operation","operation":"start","service_state":"starting"},"error":null}'; exit 1"#,
         );
@@ -373,6 +381,7 @@ mod process {
 
     #[test]
     fn oversized_output_missing_binary_and_hung_read_are_bounded() {
+        let _fixtures = PROCESS_FIXTURES.lock().unwrap();
         let (dir, path) = stub("head -c 1100000 /dev/zero | tr '\\0' a");
         assert_eq!(
             Runner::new(&path, None).run(&Command::Status),
