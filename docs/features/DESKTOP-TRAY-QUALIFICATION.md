@@ -1,7 +1,8 @@
 # Desktop tray — qualification and promotion ledger
 
 **Status:** open · **Updated:** 2026-10-19 · source built; Astra PR review completed,
-R1–R8 fixes integrated; final unit/gate evidence and promotion in progress. Nothing deployed or published.
+R1–R8 fixes integrated; unit/merge evidence belongs to the linked PRs.
+Native distribution qualification remains open. Nothing deployed or published.
 
 [The implementation plan](DESKTOP-TRAY-IMPLEMENTATION.md) is the canonical P31
 contract. [The operating guide](../server/DESKTOP-CONTROL.md) explains the CLI,
@@ -17,7 +18,7 @@ by implication. Astra reviewed [PR #1220](http://forge.lan:3000/noirr/plurx/pull
 was created, as requested. The owner then clarified: Astra only reviews; root
 addresses findings, obtains passing unit tests and merges. The mandatory Effort
 development and current-main promotion gates remain in force. Native distribution
-qualification stays explicit below. Draft
+qualification stays explicit below.
 [PR #1213](http://forge.lan:3000/noirr/plurx/pulls/1213) promotes the qualified
 current-main effort only after the Main promotion gate and receipt.
 
@@ -43,8 +44,8 @@ wording observation; Astra did not own, fix, test or merge the PR.
 
 Both native confirmations now describe Recovery required and compatible recovery
 options, without promising automatic rollback after failed health checks. Focused
-remediation results and the final exact-source merge receipts are recorded on the
-PR; unchanged component evidence below remains valid. This report's original
+remediation results and exact-source merge evidence are recorded on the PR as
+each check completes; unchanged component evidence below remains valid. This report's original
 SHA-256 is `5a76a7d2a50e4e18ab28d951c9bfc5e37bda3c4dab5a39f85427c3f321b40436`.
 
 ## Retained focused evidence
