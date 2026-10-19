@@ -1660,3 +1660,11 @@ contract = "Native owners manage only the identified local installation. Shutdow
 paths = ["crates/plurx-desktop-control/**"]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
 depends_on = ["server.api", "identity.access"]
+
+[[points]]
+id = "desktop.linux"
+title = "Linux desktop tray and control window"
+contract = "An eligible local graphical session exposes native server status, lifecycle, startup preferences and authenticated upgrades through the fixed controller protocol. Headless, remote and container sessions refuse the desktop companion; quitting the tray leaves the server running."
+paths = ["crates/plurx-tray/**"]
+checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
+depends_on = ["desktop.control"]
