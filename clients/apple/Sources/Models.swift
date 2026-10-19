@@ -19,6 +19,23 @@ struct ServerInfo: Codable {
     var displayAwareAutoProtocol: String?
 }
 
+/// `GET /api/v1/server/node` (signed in): which machine this client is
+/// talking to. `displayName` is the server's own label for itself — a chosen
+/// name, else the hostname — so the client never re-derives it.
+struct ServerNode: Codable {
+    var hostname: String?
+    var displayName: String?
+}
+
+/// The Settings "Server" value: the server's label, with the answering node's
+/// hostname added when the label is a name an operator chose — so every node of
+/// a custom-named cluster still says which machine this client is talking to.
+func serverSettingsLabel(name: String?, hostname: String?) -> String? {
+    guard let name, !name.isEmpty else { return hostname }
+    guard let hostname, !hostname.isEmpty, hostname.caseInsensitiveCompare(name) != .orderedSame else { return name }
+    return "\(name) · \(hostname)"
+}
+
 struct ClusterIngress: Codable {
     var nodeUrls: [String]?
 }

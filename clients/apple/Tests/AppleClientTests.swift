@@ -12599,3 +12599,29 @@ private struct PGSOverlayCasesFixture: Decodable {
     let tickCases: [TickCase]
     let manifestResponses: [ManifestResponse]
 }
+
+final class ServerLabelTests: XCTestCase {
+    private func decode(_ json: String) throws -> ServerNode {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(ServerNode.self, from: Data(json.utf8))
+    }
+
+    func testTheServerNodeCarriesTheMachineNameAndTheServersLabel() throws {
+        let node = try decode(#"{"hostname":"lab6","display_name":"lab6"}"#)
+        XCTAssertEqual(node.displayName, "lab6")
+        XCTAssertEqual(serverSettingsLabel(name: node.displayName, hostname: node.hostname), "lab6")
+    }
+
+    func testANodeWithoutAMachineNameShowsTheLabelAlone() throws {
+        let node = try decode(#"{"display_name":"plurx"}"#)
+        XCTAssertNil(node.hostname)
+        XCTAssertEqual(serverSettingsLabel(name: node.displayName, hostname: node.hostname), "plurx")
+    }
+
+    func testAChosenNameKeepsTheAnsweringNodeVisible() {
+        XCTAssertEqual(serverSettingsLabel(name: "Living Room", hostname: "lab6"), "Living Room · lab6")
+        XCTAssertEqual(serverSettingsLabel(name: nil, hostname: "lab6"), "lab6")
+        XCTAssertEqual(serverSettingsLabel(name: "Living Room", hostname: nil), "Living Room")
+    }
+}
