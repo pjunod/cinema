@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-19, plurx has 382 routes declared by the ordinary listener's
+As of 2026-10-19, plurx has 386 routes declared by the ordinary listener's
 assembled router. The ordinary listener (`:32400` by default) serves the five
 surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
@@ -37,7 +37,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 382 routes across the registered routers.
+plurx has 386 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -2443,6 +2443,10 @@ valid URL, the only way forward is to release and start over.
 | GET | `/api/v1/items/{id}/reading-state?file_id=` | bearer | `{state, stale}` |
 | PUT | `/api/v1/items/{id}/reading-state` | bearer | Saves a revision-bound locator; body ≤ 64 KiB |
 | DELETE | `/api/v1/items/{id}/reading-state?file_id=` | bearer | Clears it. 204 |
+| GET | `/api/v1/items/{id}/annotations` | bearer | `{ratings, watchlist, favorite}`. `ratings` holds `{source, value, scale, votes?}` per source with a score (`imdb` /10, `rotten_tomatoes`, `metacritic`, `tmdb` /100), in that order, movies and shows only. It is fetched from TMDB and OMDb on first read and kept 14 days. `watchlist` is false once a listed movie is watched (or every episode of a listed show is) |
+| PUT / DELETE | `/api/v1/items/{id}/watchlist` | bearer | Put a movie or show on, or take it off, the reader's watchlist. 204; 400 for other kinds |
+| PUT / DELETE | `/api/v1/items/{id}/favorite` | bearer | The same for the reader's favorites |
+| GET | `/api/v1/lists/{list}` | bearer | `{items}` (optional `limit`): the reader's list, newest first, at most 500. Finished watchlist entries are left out |
 
 `POST …/publication` requires a `book` item and a `.epub` file, then parses
 synchronously: verify the file's size and mtime still match the row, then walk

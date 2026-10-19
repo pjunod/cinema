@@ -768,6 +768,10 @@ pub struct AppState {
     pub(crate) live_tv_peers: Arc<crate::http::live_tv::LiveTvPeers>,
     pub(crate) subtitle_models: Arc<crate::subtitle_models::Runtime>,
     pub server_name: String,
+    /// Items whose review-site scores this node is fetching right now.
+    pub(crate) rating_fetches: crate::http::annotations::RatingFetches,
+    /// Where review-site score providers are reached (overridden in tests).
+    pub(crate) provider_endpoints: crate::http::annotations::ProviderEndpoints,
     /// This node's short hostname, resolved once from membership at
     /// construction (the name the roster shows for it); `None` when the
     /// machine has no usable name.
@@ -1287,6 +1291,8 @@ impl AppState {
             live_tv_peers,
             subtitle_models,
             server_name,
+            rating_fetches: Default::default(),
+            provider_endpoints: Default::default(),
             node_id,
             cluster_advertisement,
             snapshot_recovery_budgets,

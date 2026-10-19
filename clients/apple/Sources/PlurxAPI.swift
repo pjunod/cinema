@@ -363,6 +363,20 @@ struct PlurxAPI {
     /// Signed in: the answering node's hostname and the server's label.
     func serverNode() async throws -> ServerNode { try await get("server/node") }
     func hubs() async throws -> Hubs { try await get("hubs") }
+    /// Scores and list flags, read beside the item page rather than inside it.
+    func annotations(itemId: Int) async throws -> ItemAnnotations { try await get("items/\(itemId)/annotations") }
+    /// `list` is `watchlist` or `favorite`.
+    func setListed(itemId: Int, list: String, listed: Bool) async throws {
+        if listed {
+            try await putNoContent("items/\(itemId)/\(list)", body: [String: String]())
+        } else {
+            try await deleteNoContent("items/\(itemId)/\(list)")
+        }
+    }
+    func list(_ list: String, limit: Int = 20) async throws -> [Item] {
+        let response: ItemListResponse = try await get("lists/\(list)", query: [URLQueryItem(name: "limit", value: String(limit))])
+        return response.items ?? []
+    }
     func comingSoon() async throws -> ComingSoonResponse { try await get("coming-soon") }
     func item(_ id: Int) async throws -> ItemDetail { try await get("items/\(id)") }
 

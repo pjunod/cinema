@@ -914,6 +914,22 @@ fn apply_identity_repair(
         }
     }
 
+    // A person's watchlist and favorites follow a retired duplicate show
+    // onto its survivor (the later add time wins), before the retired
+    // rows' cascade would drop them.
+    if let Some(survivor) = plan.survivor_show_id {
+        let retired = serde_json::to_string(&plan.retired_item_ids)
+            .map_err(|error| StoreError::Task(format!("encode retired item IDs: {error}")))?;
+        conn.execute(
+            "INSERT INTO library_annotations_lists(user_id, list, item_id, added_at_ms)
+             SELECT user_id, list, ?1, MAX(added_at_ms) FROM library_annotations_lists
+              WHERE item_id IN (SELECT value FROM json_each(?2)) AND item_id <> ?1
+              GROUP BY user_id, list
+             ON CONFLICT(user_id, list, item_id)
+             DO UPDATE SET added_at_ms = max(added_at_ms, excluded.added_at_ms)",
+            params![survivor, retired],
+        )?;
+    }
     for kind in ["episode", "season", "show"] {
         for item_id in &plan.retired_item_ids {
             if snapshot

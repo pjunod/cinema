@@ -36,7 +36,7 @@ test("episode item labels include their number across all layouts", () => {
     pageHead: () => "", artHtml: () => "", bookByline: () => "", bookEditionSection: () => "",
   });
   const renderers = ["classicItemBody", "catalogItemBody", "theaterItemBody"];
-  for (const name of ["itemKindLabel", ...renderers]) vm.runInContext(declaration(name), context);
+  for (const name of ["itemKindLabel", "ratingsSlot", ...renderers]) vm.runInContext(declaration(name), context);
   for (const renderer of renderers) {
     for (const [kind, number, expected] of [
       ["episode", 10, "episode 10"], ["episode", 0, "episode 0"],

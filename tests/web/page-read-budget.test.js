@@ -626,7 +626,7 @@ test("Home render generations refuse out-of-order route completions", async () =
   const current = harness.viewHome();
   assert.deepEqual(phases, [{ generation: 1, phase: "shell" }],
     "the shell phase commits before any delayed endpoint resolves");
-  assert.deepEqual(requests.map((request) => request.url), ["/hubs", "/home/previews", "/coming-soon"]);
+  assert.deepEqual(requests.map((request) => request.url), ["/hubs", "/home/previews", "/coming-soon", "/lists/watchlist?limit=20", "/lists/favorite?limit=20"]);
   requests[1].resolve({ libraries: [{ library: { id: 7 }, items: [], total: 0 }] });
   await nextTurn();
   assert.match(main.innerHTML, /\"id\":7/);
@@ -636,6 +636,8 @@ test("Home render generations refuse out-of-order route completions", async () =
   assert.match(main.innerHTML, /\"id\":9/,
     "a later region commit preserves the preview region already received");
   requests[2].reject(new Error("optional dependency unavailable"));
+  requests[3].resolve({ items: [] });
+  requests[4].resolve({ items: [] });
   await current;
   assert.deepEqual(phases, [
     { generation: 1, phase: "shell" },
@@ -648,17 +650,19 @@ test("Home render generations refuse out-of-order route completions", async () =
   harness.navigate("#/settings");
   harness.navigate("#/");
   const latest = harness.viewHome();
-  requests.slice(6, 9).forEach((request) => request.resolve(
+  requests.slice(10, 15).forEach((request) => request.resolve(
     request.url === "/home/previews" ? { libraries: [{ library: { id: 42 }, items: [], total: 0 }] }
       : request.url === "/hubs" ? { continue_watching: [{ id: 43 }], next_up: [], recently_added: [] }
-        : { configured: false, entries: [] },
+        : request.url.startsWith("/lists/") ? { items: [] }
+          : { configured: false, entries: [] },
   ));
   await latest;
   const latestHtml = main.innerHTML;
-  requests.slice(3).forEach((request) => request.resolve(
+  requests.slice(5).forEach((request) => request.resolve(
     request.url === "/home/previews" ? { libraries: [] }
       : request.url === "/hubs" ? { continue_watching: [], next_up: [], recently_added: [] }
-        : { configured: false, entries: [] },
+        : request.url.startsWith("/lists/") ? { items: [] }
+          : { configured: false, entries: [] },
   ));
   await stale;
   assert.equal(main.innerHTML, latestHtml,
@@ -669,12 +673,13 @@ test("Home render generations refuse out-of-order route completions", async () =
   requests.slice(before).forEach((request) => request.resolve(
     request.url === "/home/previews" ? {libraries:cohort}
       : request.url === "/hubs" ? {continue_watching:[],next_up:[],recently_added:[]}
-        : {configured:false,entries:[]},
+        : request.url.startsWith("/lists/") ? {items:[]}
+          : {configured:false,entries:[]},
   ));
   await fifty;
   assert.deepEqual(requests.slice(before).map((request)=>request.url),
-    ["/hubs","/home/previews","/coming-soon"],
-    "fifty libraries retain the same three-request Home budget as one library");
+    ["/hubs","/home/previews","/coming-soon","/lists/watchlist?limit=20","/lists/favorite?limit=20"],
+    "fifty libraries retain the same fixed Home budget as one library (the two list reads are per person, not per library)");
 });
 
 test("Live TV issues exactly two authoritative reads, and the guide never gates the first", async () => {

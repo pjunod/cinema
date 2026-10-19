@@ -20,6 +20,9 @@ final class AppModel: ObservableObject {
     @Published var authError: String?
 
     @Published var hubs = Hubs()
+    /// The reader's lists, newest first; empty hides their Home rows.
+    @Published var watchlist: [Item] = []
+    @Published var favorites: [Item] = []
     @Published var comingSoon: [ComingSoonEntry] = []
     @Published var libraries: [Library] = []
     @Published var libraryPreviews: [Int: [Item]] = [:]
@@ -436,11 +439,21 @@ final class AppModel: ObservableObject {
             // Shared libraries or Library channels reaches the tab bar on the
             // next launch, sign-in, foreground or pull-to-refresh.
             async let loadedFeatures = api.features()
+            // The reader's lists never cost Home its load.
+            async let loadedWatchlist = try? api.list("watchlist")
+            async let loadedFavorites = try? api.list("favorite")
             let loadedHubs = try await h
             let loadedLibraries = try await l
+            // Awaited before the ownership check so nothing suspends between
+            // the check and publishing: a late answer for another sign-in
+            // never lands.
+            let ownWatchlist = await loadedWatchlist ?? []
+            let ownFavorites = await loadedFavorites ?? []
             guard ownsHomeLoad(owner) else { return }
             hubs = loadedHubs
             libraries = loadedLibraries
+            watchlist = ownWatchlist
+            favorites = ownFavorites
             // Paint as soon as the responses that make a home screen useful
             // have arrived, not once the last shelf preview has.
             homeLoading = false
@@ -583,6 +596,9 @@ final class AppModel: ObservableObject {
         if !transientAuthentication { settings.userId = nil }
         AuthImageCache.shared.clear()
         hubs = Hubs()
+        // A person's lists are theirs: never shown to whoever signs in next.
+        watchlist = []
+        favorites = []
         comingSoon = []
         libraries = []
         libraryPreviews = [:]
@@ -593,8 +609,22 @@ final class AppModel: ObservableObject {
         phase = .needLogin
     }
 
+    /// Re-read the reader's lists after a toggle so Home matches on return.
+    func refreshLists() async {
+        let generation = authenticationGeneration
+        let api = requireAPI()
+        async let w = try? api.list("watchlist")
+        async let f = try? api.list("favorite")
+        let (newWatchlist, newFavorites) = await (w, f)
+        guard generation == authenticationGeneration else { return }
+        if let newWatchlist { watchlist = newWatchlist }
+        if let newFavorites { favorites = newFavorites }
+    }
+
     func changeServer() {
         beginAuthentication()
+        watchlist = []
+        favorites = []
         transientAuthentication = false
         busy = false
         authError = nil

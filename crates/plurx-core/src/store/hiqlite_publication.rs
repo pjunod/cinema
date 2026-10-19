@@ -573,6 +573,34 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 statement_params,
             ));
         }
+        {
+            // A person's watchlist and favorites follow a retired duplicate show
+            // onto its survivor (the later add time wins), before the retired
+            // rows' cascade would drop them.
+            let mut statement_params = params!(
+                survivor,
+                retired_json.as_str(),
+                survivor,
+                survivor,
+                lease.resource.as_str(),
+                lease.owner_node_id.as_str(),
+                lease_i64("fence", lease.fence)?,
+                lease_i64("revision", lease.revision)?,
+                lease.expires_at_unix_ms
+            );
+            statement_params[2] = Param::StmtOutputNamed(1, "id".into());
+            statements.push((
+                "INSERT INTO library_annotations_lists(user_id,list,item_id,added_at_ms) \
+                 SELECT user_id,list,$1,MAX(added_at_ms) FROM library_annotations_lists \
+                 WHERE item_id IN (SELECT value FROM json_each($2)) AND item_id<>$1 AND $3=$4 \
+                 AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$5 AND owner_node_id=$6 \
+                   AND fence=$7 AND revision=$8 AND expires_at_ms=$9) \
+                 GROUP BY user_id,list \
+                 ON CONFLICT(user_id,list,item_id) DO UPDATE SET added_at_ms=max(added_at_ms,excluded.added_at_ms)"
+                    .to_owned(),
+                statement_params,
+            ));
+        }
         for kind in ["episode", "season", "show"] {
             for item_id in &plan.retired_item_ids {
                 if snapshot

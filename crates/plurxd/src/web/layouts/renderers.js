@@ -93,6 +93,7 @@ function recomposeItemPresentation(page){
     if(replacement&&replacement!==node)replacement.replaceWith(node);
   }
   main.replaceChildren(template.content);
+  if(page.annotations&&page.item) paintAnnotationSlots(page.item.id,page.annotations);
 }
 function layoutChrome(active, inner){
   LAYOUT_ACTIVE=active;
@@ -134,6 +135,7 @@ function classicHomeBody(p){
   // something, so the card carries "23m left" / "watched Tuesday".
   if(p.hubs.continue_watching.length){ hubs+=rail("Continue watching", p.hubs.continue_watching.map(i=>card(i,true)).join(""),"watch"); }
   if(p.hubs.next_up && p.hubs.next_up.length){ hubs+=rail("Next up", p.hubs.next_up.map(i=>card(i,true)).join(""),"watch"); }
+  hubs+=listRails(p);
   if(p.hubs.recently_added.length){ hubs+=rail("Recently added", p.hubs.recently_added.map(i=>card(i)).join("")); }
   // Coming soon: what Curator expects. Absent entirely when nothing is paired
   // or Curator had nothing to say — an empty rail is worse than no rail.
@@ -158,6 +160,18 @@ function classicHomeBody(p){
   return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
     `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
     `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
+}
+// The reader's watchlist and favorites, newest first; a list with nothing on
+// it is no rail at all. The last tile opens the whole list.
+function listRails(p){
+  const lists=p.lists||{};
+  let out="";
+  for(const [key,heading] of [["watchlist","Watchlist"],["favorite","Favorites"]]){
+    const items=lists[key]||[];
+    if(!items.length) continue;
+    out+=rail(heading, items.map(i=>card(i)).join("")+`<a class="seeall" href="#/list/${key}">See all</a>`, "list");
+  }
+  return out;
 }
 // One rail: a heading, and a strip with an arrow at each end.
 //

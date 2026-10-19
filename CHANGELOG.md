@@ -8,6 +8,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- Item pages show review-site scores: IMDb, Rotten Tomatoes and Metacritic (through the OMDb key in Settings, unused until now) and TMDB's user score, each with its own mark. They are fetched on first view and kept for two weeks.
+- A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
+
 ### Fixed
 
 - Settings names the server you are signed in to by its machine name. A server still on the default name `plurx` used to show `plurx` on every node. A new signed-in route, `GET /api/v1/server/node`, gives the answering node's `hostname` and a `display_name` (a chosen name, else the hostname, the same rule as the LAN picker, which now resolves the hostname the same way the roster does). iOS, tvOS and Android Settings show it, adding the hostname after a chosen name, and the web System tab heads with it and lists the Host.
