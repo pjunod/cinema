@@ -13,7 +13,7 @@ use std::{
 /// suite never changes UID or creates a root-owned fixture. Accounts must already
 /// exist; this test never creates accounts, services, or startup configuration.
 #[test]
-#[ignore = "requires disposable Linux root, PLURX_TEST_SERVICE_UID and PLURX_TEST_OTHER_UID"]
+#[ignore = "requires disposable Linux root and explicit service UID/GID and unrelated UID fixtures"]
 fn linux_launch_lock_allows_only_the_service_group_and_root() {
     assert_eq!(unsafe { libc::geteuid() }, 0, "explicit root fixture only");
     let account = |name| {
@@ -24,6 +24,11 @@ fn linux_launch_lock_allows_only_the_service_group_and_root() {
     };
     let service_uid = account("PLURX_TEST_SERVICE_UID");
     let other_uid = account("PLURX_TEST_OTHER_UID");
+    let service_gid = account("PLURX_TEST_SERVICE_GID");
+    assert_ne!(
+        service_uid, service_gid,
+        "fixture must prove UID-to-GID lookup, not UID equality"
+    );
     assert_ne!(service_uid, 0);
     assert_ne!(other_uid, 0);
     assert_ne!(service_uid, other_uid);
@@ -68,6 +73,11 @@ fn linux_launch_lock_allows_only_the_service_group_and_root() {
     let path = root.join("launch.lock");
     let metadata = std::fs::metadata(&path).expect("initialized lock");
     assert_eq!(metadata.uid(), 0);
+    assert_eq!(
+        metadata.gid(),
+        service_gid,
+        "must use the account primary GID, never its UID"
+    );
     assert_eq!(metadata.mode() & 0o7777, 0o440);
     assert_ne!(
         metadata.gid(),
