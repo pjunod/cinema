@@ -39,6 +39,10 @@ into the output beyond static HDR10 metadata.
 - Prove it on one HDR10+ display per client family (the narrow real check,
   not a matrix).
 
+**Planned:** the display-targeted variant (per-shot L1, then L2/L8 trims,
+mapped on the server for the viewer's display peak) has a build plan:
+[DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md).
+
 ## 2. Dolby Vision → SDR using the RPU's own trims
 
 **What the viewer gets:** on an SDR display, the colourist's SDR grade (the
@@ -51,6 +55,8 @@ clients get the ordinary tone-mapped path.
 L1/L2/L8 trim for a 100-nit target through libplacebo's DV display mapping
 in the helper, with a BT.709 export. Same pipeline and qualification as
 HDR10-E. This is where "DV metadata at render time" pays off most.
+
+**Planned:** phase 3 of [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md).
 
 ## 3. FEL vs MEL known at scan time
 

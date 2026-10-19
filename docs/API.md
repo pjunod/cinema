@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-19, plurx has 385 routes declared by the ordinary listener's
+As of 2026-10-19, plurx has 386 routes declared by the ordinary listener's
 assembled router. The ordinary listener (`:32400` by default) serves the five
 surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
@@ -37,7 +37,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 385 routes across the registered routers.
+plurx has 386 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -356,6 +356,7 @@ families. No `/api/v1/cluster/*` path matches either.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/api/v1/server` | public | Identity, version, and whether first-run setup is required |
+| GET | `/api/v1/server/node` | bearer | The answering node's `hostname` and the `display_name` clients show for this server |
 | POST | `/api/v1/setup` | public, only while zero users exist | Creates the first admin and returns a token |
 | POST | `/api/v1/auth/login` | public | Verifies credentials, mints a token |
 | POST | `/api/v1/auth/logout` | bearer | Deletes this token's digest, cluster-wide |
@@ -388,6 +389,12 @@ switch; missing storage is `false`). Also `decoder_compaction_contract`,
 `display_aware_auto_protocol` (always `"route-v1"` on this build) and
 `playback_display_aware_auto` (the Developer switch; missing storage is
 `false`) — see §7.4.
+
+`GET /api/v1/server/node` (signed in) names the machine: `hostname` (the
+answering node's short hostname, the name the cluster roster shows; absent
+when it has none) and `display_name` — the operator's chosen name, else the
+hostname, else `name`. It is a separate route because a hostname is not for
+an unauthenticated caller. `GET /api/v1/system` (admin) carries both too.
 
 ### 4.2 `POST /api/v1/setup`
 

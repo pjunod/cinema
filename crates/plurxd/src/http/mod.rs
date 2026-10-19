@@ -500,6 +500,7 @@ fn http_route_group(path: &str) -> usize {
         // Configuration, diagnostics, scans, public shell and maintenance.
         "/"
         | "/api/v1/server"
+        | "/api/v1/server/node"
         | "/api/v1/settings"
         | "/api/v1/subtitle-transcription"
         | "/api/v1/subtitle-translation"
@@ -1515,6 +1516,7 @@ pub fn router(state: AppState) -> Router {
         .merge(shared_library::viewer_router(state.clone()))
         .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
+        .route("/server/node", get(system::server_node))
         .route("/me", get(auth::me))
         .route("/features", get(system::features))
         .route("/settings", get(system::get_settings))
@@ -2425,6 +2427,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             || matches!(
                 path,
                 "/api/v1/me"
+                    | "/api/v1/server/node"
                     | "/api/v1/features"
                     | "/api/v1/auth/login"
                     | "/api/v1/auth/logout"

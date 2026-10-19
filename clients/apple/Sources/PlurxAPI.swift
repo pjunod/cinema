@@ -360,6 +360,8 @@ struct PlurxAPI {
         ])
     }
 
+    /// Signed in: the answering node's hostname and the server's label.
+    func serverNode() async throws -> ServerNode { try await get("server/node") }
     func hubs() async throws -> Hubs { try await get("hubs") }
     /// Scores and list flags, read beside the item page rather than inside it.
     func annotations(itemId: Int) async throws -> ItemAnnotations { try await get("items/\(itemId)/annotations") }
