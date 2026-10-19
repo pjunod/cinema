@@ -12,7 +12,8 @@ what order, and on the files the script actually wrote.
 
 `DESTDIR` roots every absolute install path (the standard convention), so the
 Linux path installs into a temporary tree instead of the machine running the
-tests. The macOS path is rooted by `HOME` and `--prefix`. The Windows path is
+tests. The explicit server-only macOS path is rooted by `HOME` and `--prefix`.
+The default desktop installation has its own stage/bootstrap integration tests. The Windows path is
 PowerShell and cannot execute here; its bash dispatcher is exercised with a
 stub `pwsh`, and the script itself is held to the recipe the runbook prints.
 """
@@ -182,6 +183,10 @@ class Host:
             "LC_ALL": "C",
         }
         merged.update(env or {})
+        # These legacy service/media fixtures intentionally cover the explicit
+        # daemon-only route; default tray installation is exercised separately.
+        if not any(mode in args for mode in ("linux", "docker", "binary", "windows", "--uninstall")) and not (installer.parent / "runtime-closure-v1.json").exists():
+            args = (*args, "--server-only")
         if subtitle_fixture and not any(mode in args for mode in ["linux", "docker", "binary", "windows", "--uninstall"]):
             args = (*args, "--subtitle-engine-package", str(self.subtitle_engine))
         return subprocess.run(
@@ -687,7 +692,7 @@ class InstallerCase(unittest.TestCase):
         result = self.host.run("--no-start", installer=archive / "install", subtitle_fixture=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["bootstrap", "macos", "--package", str(archive), "--no-start"])
-        self.assertEqual(self.host.calls(), [])
+        self.assertTrue(all(call.startswith(("uname -s", "id -u", "launchctl print gui/")) for call in self.host.calls()), self.host.calls())
 
     def test_macos_uninstall_boots_the_agent_out_and_keeps_application_support(self):
         self.host.stub("launchctl", "")
@@ -1094,7 +1099,7 @@ class InstallerCase(unittest.TestCase):
         for mode in ("linux", "macos", "docker", "binary"):
             installer = str(fake_root / "deploy" / "install") if mode == "docker" else str(INSTALL)
             result = subprocess.run(
-                [installer, mode, "--dry-run", "--binary", str(self.host.fake_binary), "--prefix", str(self.tmp / "p")],
+                [installer, mode, *(["--server-only"] if mode == "macos" else []), "--dry-run", "--binary", str(self.host.fake_binary), "--prefix", str(self.tmp / "p")],
                 cwd=self.tmp, env={"PATH": f"{self.host.bin}:{self.host.sysbin}", "HOME": str(self.host.home), "DESTDIR": str(self.host.destdir), "TMPDIR": str(self.tmp)},
                 capture_output=True, text=True, timeout=60,
             )

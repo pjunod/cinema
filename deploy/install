@@ -26,6 +26,7 @@
 #   --subtitle-engine-package DIR
 #                   macOS: verified pinned whisper.cpp bundle; release archives
 #                   supply it, and source installs build it automatically
+#   --server-only   macOS: legacy daemon-only install, without the tray app
 #   --uninstall     remove the service and the binary; keep data and config
 #   --dry-run       print every command instead of running it
 #
@@ -43,7 +44,16 @@ root=$(cd -P -- "$here/.." && pwd -P)
 # Its shipped native bootstrap verifies the closure and uses fixed per-user
 # destinations; it needs no checkout, Python, Homebrew, Rust or downloads.
 if [ -f "$here/runtime-closure-v1.json" ] && [ -x "$here/control/plurx-control" ]; then
-  exec "$here/control/plurx-control" bootstrap macos --package "$here" "$@"
+  "$here/control/plurx-control" bootstrap macos --package "$here" "$@"
+  show_tray=1
+  for argument in "$@"; do
+    case "$argument" in --dry-run|--help|-h|--version|--uninstall) show_tray=0 ;; esac
+  done
+  if [ "$show_tray" = 1 ] && [ "$(uname -s)" = Darwin ] \
+      && launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
+    /usr/bin/open "$HOME/Applications/Plurx Server.app"
+  fi
+  exit 0
 fi
 
 mode=auto
@@ -54,6 +64,7 @@ source_parser=
 subtitle_engine_package=
 uninstall=0
 dry_run=0
+server_only=0
 
 usage() {
   sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
@@ -189,6 +200,7 @@ while [ $# -gt 0 ]; do
     --source-parser=*) source_parser=${1#--source-parser=} ;;
     --subtitle-engine-package) shift; [ $# -gt 0 ] || die "--subtitle-engine-package needs a path"; subtitle_engine_package=$1 ;;
     --subtitle-engine-package=*) subtitle_engine_package=${1#--subtitle-engine-package=} ;;
+    --server-only) server_only=1 ;;
     --uninstall) uninstall=1 ;;
     --dry-run) dry_run=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -790,7 +802,100 @@ macos_render_plist() {
   fi
 }
 
-macos_install() {
+# A legacy daemon predates the durable controller protocol. Ask it to exit
+# cleanly, then prove launchd reports no PID before native migration. Never use
+# bootout while it is running: launchd can escalate that operation to SIGKILL.
+macos_stop_legacy_for_native() {
+  local state code target pid tries=0 plist
+  macos_legacy_was_running=0
+  macos_native_expect_ready=0
+  target="gui/$(id -u)/$macos_agent_label"
+  if state=$(launchctl print "$target" 2>/dev/null); then code=0; else code=$?; fi
+  [ "$code" = 0 ] || [ "$code" = 113 ] || die 'cannot establish legacy launchd state; existing server kept'
+  if [ "$code" = 113 ]; then
+    if [ ! -e "$HOME/Library/Application Support/plurx/installation.json" ] \
+        && [ ! -e "$HOME/Library/LaunchAgents/$macos_agent_label.plist" ]; then
+      macos_native_expect_ready=1
+    fi
+    return 0
+  fi
+  pid=$(printf '%s\n' "$state" | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)[[:space:]]*$/\1/p')
+  [ -n "$pid" ] || return 0
+  macos_native_expect_ready=1
+  [ ! -e "$HOME/Library/Application Support/plurx/installation.json" ] || return 0
+  plist="$HOME/Library/LaunchAgents/$macos_agent_label.plist"
+  python3 - "$plist" <<'VERIFY_LEGACY'
+import os, pathlib, plistlib, sys
+path = pathlib.Path(sys.argv[1])
+if path.is_symlink() or not path.is_file() or path.stat().st_uid != os.getuid():
+    sys.exit("install: cannot identify an owned legacy LaunchAgent; existing server kept")
+with path.open("rb") as stream:
+    value = plistlib.load(stream)
+arguments = value.get("ProgramArguments", [])
+if value.get("Label") != "com.plurx.plurxd" or not arguments or pathlib.Path(arguments[0]).name != "plurxd":
+    sys.exit("install: unrelated legacy LaunchAgent; existing server kept")
+VERIFY_LEGACY
+  say "waiting for legacy plurxd ($pid) to exit cleanly before installing the tray"
+  launchctl kill SIGTERM "$target" || die 'legacy daemon did not accept graceful shutdown; no force-stop attempted'
+  while :; do
+    if state=$(launchctl print "$target" 2>/dev/null); then code=0; else code=$?; fi
+    [ "$code" = 0 ] || [ "$code" = 113 ] || die 'cannot prove legacy shutdown; no force-stop attempted'
+    if [ "$code" = 113 ] || ! printf '%s\n' "$state" | grep -q '^[[:space:]]*pid = '; then break; fi
+    tries=$((tries + 1))
+    [ "$tries" -lt 60 ] || die 'legacy daemon did not stop within 60 seconds; no force-stop attempted'
+    sleep 1
+  done
+  macos_legacy_was_running=1
+}
+
+macos_native_source_install() {
+  local package uid app port
+  macos_refuse_root
+  [ -z "$prefix" ] || die "macOS tray installs use the fixed per-user runtime and ~/Applications/Plurx Server.app; use --server-only for custom service prefixes"
+  command -v python3 >/dev/null 2>&1 || die 'source tray installation requires Python 3, Rust and Swift; use a complete release archive without developer tools'
+  package=$root/target/macos-source-runtime-$(date +%Y%m%d%H%M%S)-$$
+  set -- --output "$package"
+  [ -z "$binary" ] || set -- "$@" --binary "$binary"
+  [ -z "$ffmpeg_archive" ] || set -- "$@" --ffmpeg-archive "$ffmpeg_archive"
+  [ -z "$source_parser" ] || set -- "$@" --source-parser "$source_parser"
+  [ -z "$subtitle_engine_package" ] || set -- "$@" --subtitle-engine-package "$subtitle_engine_package"
+  if [ "$dry_run" = 1 ]; then
+    run python3 "$root/scripts/build-macos-source-runtime" "$@"
+  else
+    # Finish every build and integrity check before bootstrap can touch service
+    # state. The native controller preserves stopped/running and startup policy.
+    python3 "$root/scripts/build-macos-source-runtime" "$@"
+  fi
+  if [ "$dry_run" != 1 ]; then macos_stop_legacy_for_native; fi
+  run "$package/control/plurx-control" bootstrap macos-source --package "$package"
+  if [ "$dry_run" != 1 ] && [ "${macos_legacy_was_running:-0}" = 1 ]; then
+    # Bootstrap succeeded. A previously stopped legacy daemon stays stopped;
+    # only the daemon which was running before migration is started again.
+    run "$package/control/plurx-control" start
+  fi
+  if [ "$dry_run" != 1 ] && [ "${macos_native_expect_ready:-0}" = 1 ]; then
+    port=$(python3 - "$HOME/Library/Application Support/plurx/installation.json" <<'READ_PORT'
+import json, sys, urllib.parse
+with open(sys.argv[1]) as stream:
+    record = json.load(stream)
+origin = urllib.parse.urlsplit(record["browser_origin"])
+print(origin.port or 80)
+READ_PORT
+)
+    wait_ready "$port" "$HOME/Library/Logs/plurxd.log"
+  fi
+  uid=$(id -u)
+  app="$HOME/Applications/Plurx Server.app"
+  if [ "$dry_run" = 1 ]; then
+    say "would open $app when the current login has a GUI session"
+  elif launchctl print "gui/$uid" >/dev/null 2>&1; then
+    run /usr/bin/open "$app"
+  else
+    say "installed $app; open it from the GUI login to show the menu bar icon"
+  fi
+}
+
+macos_server_only_install() {
   local dir agents plist data uid
   dir=$(bin_dir)
   agents=$HOME/Library/LaunchAgents
@@ -850,6 +955,15 @@ macos_install() {
   macos_finish_subtitle_engine
   [ "$dry_run" = 1 ] || launchctl print "gui/$uid/$macos_agent_label" | grep -E 'state|pid' || true
   say "logs: tail -f ~/Library/Logs/plurxd.log"
+}
+
+
+macos_install() {
+  if [ "$server_only" = 1 ]; then
+    macos_server_only_install
+  else
+    macos_native_source_install
+  fi
 }
 
 macos_uninstall() {

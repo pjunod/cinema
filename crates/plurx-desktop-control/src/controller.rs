@@ -630,6 +630,9 @@ fn perform_update(i: &InstallationV1, store: &TransactionStore, j: &mut JournalV
     installed.current_version = candidate.manifest().version.clone();
     installed.current_tag = candidate.manifest().tag.clone();
     installed.current_commit = candidate.manifest().source_commit.clone();
+    if installed.method == InstallMethod::MacosNative {
+        installed.architecture = Architecture::Universal;
+    }
     installed.trust_key_ids = native::installed_trust_keys(&installed, candidate.key_id())?;
     installed.last_transaction_id = Some(j.transaction_id.clone());
     save_installation(&installed)?;

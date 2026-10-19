@@ -60,6 +60,50 @@ impl ReleaseIdentityV1 {
         Ok(())
     }
 }
+/// Local source installs explicitly attest their native architecture and exact
+/// checkout identity. This marker is covered by the same complete file closure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceInstallV1 {
+    pub schema_version: u32,
+    pub source_commit: String,
+    pub architecture: Architecture,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapPackageOrigin {
+    Release,
+    LocalSource,
+}
+/// Validate the explicit install route before any service or filesystem mutation.
+/// Public release archives remain universal, independently of a local source build.
+pub fn verify_bootstrap_identity(
+    root: &Path,
+    origin: BootstrapPackageOrigin,
+) -> Result<ReleaseIdentityV1> {
+    let dir = secure_fs::open_dir(root, native_uid())?;
+    let release: ReleaseIdentityV1 = dir.json("release.json")?;
+    release.validate()?;
+    match origin {
+        BootstrapPackageOrigin::Release if release.architecture != Architecture::Universal => {
+            return Err(invalid("native macOS release must be universal"));
+        }
+        BootstrapPackageOrigin::LocalSource => {
+            let source: SourceInstallV1 = dir.json("source-install-v1.json")?;
+            if source.schema_version != 1
+                || source.source_commit != release.source_commit
+                || source.architecture != release.architecture
+                || Some(source.architecture) != native_architecture()
+            {
+                return Err(invalid(
+                    "local source install identity/architecture mismatch",
+                ));
+            }
+        }
+        _ => (),
+    }
+    verify_closure(root, &release.version)?;
+    Ok(release)
+}
 /// Fresh installs may start by default; an identified legacy or recorded
 /// installation preserves its prior stopped state unless explicitly started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,16 +119,20 @@ impl BootstrapDisposition {
 }
 
 pub fn bootstrap_package(root: &Path, no_start: bool) -> Result<InstallationV1> {
+    bootstrap_package_with_origin(root, no_start, BootstrapPackageOrigin::Release)
+}
+pub fn bootstrap_source_package(root: &Path, no_start: bool) -> Result<InstallationV1> {
+    bootstrap_package_with_origin(root, no_start, BootstrapPackageOrigin::LocalSource)
+}
+fn bootstrap_package_with_origin(
+    root: &Path,
+    no_start: bool,
+    origin: BootstrapPackageOrigin,
+) -> Result<InstallationV1> {
     if !cfg!(target_os = "macos") || native_uid() == 0 || !root.is_absolute() {
         return Err(Error::new(ErrorCode::AuthorizationDenied,"macOS package bootstrap requires ordinary native owning UID and absolute extracted package directory"));
     }
-    let release: ReleaseIdentityV1 =
-        secure_fs::open_dir(root, native_uid())?.json("release.json")?;
-    release.validate()?;
-    if release.architecture != Architecture::Universal {
-        return Err(invalid("native macOS release must be universal"));
-    }
-    verify_closure(root, &release.version)?;
+    let release = verify_bootstrap_identity(root, origin)?;
     let record = default_record()?;
     if record.exists() {
         let old = InstallationV1::load(&record)?;
@@ -109,6 +157,7 @@ pub fn bootstrap_package(root: &Path, no_start: bool) -> Result<InstallationV1> 
         installed.current_version = release.version;
         installed.current_tag = format!("v{}", installed.current_version);
         installed.current_commit = release.source_commit;
+        installed.architecture = release.architecture;
         installed.trust_key_ids = update::production_keys()?
             .into_iter()
             .map(|k| k.id)
@@ -134,7 +183,7 @@ pub fn bootstrap_package(root: &Path, no_start: bool) -> Result<InstallationV1> 
         &release.source_commit,
         true,
         "http://127.0.0.1:32400",
-        Some(root),
+        Some((root, release.architecture)),
     )?;
     if disposition.starts_initial_daemon(no_start) {
         supervisor::start(&installed)?;
@@ -556,7 +605,7 @@ pub fn bootstrap(
         commit,
         desktop,
         browser_origin,
-        package_root,
+        package_root.map(|root| (root, Architecture::Universal)),
     )
     .map(|(installed, _)| installed)
 }
@@ -566,7 +615,7 @@ fn bootstrap_with_disposition(
     commit: &str,
     desktop: bool,
     browser_origin: &str,
-    package_root: Option<&Path>,
+    package_root: Option<(&Path, Architecture)>,
 ) -> Result<(InstallationV1, BootstrapDisposition)> {
     semver::Version::parse(version).map_err(|_| invalid("invalid bootstrap semver"))?;
     if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -616,7 +665,11 @@ fn bootstrap_with_disposition(
                 name: LAUNCH_LABEL.into(),
                 domain: format!("gui/{uid}"),
             },
-            Architecture::Universal,
+            package_root
+                .as_ref()
+                .ok_or_else(|| invalid("native bootstrap package root absent"))?
+                .1
+                .clone(),
         )
     } else {
         // Resolve the package-created service account from the OS account database.
@@ -687,7 +740,9 @@ fn bootstrap_with_disposition(
     let disposition = if mac {
         bootstrap_macos(
             &mut i,
-            package_root.ok_or_else(|| invalid("native bootstrap package root absent"))?,
+            package_root
+                .ok_or_else(|| invalid("native bootstrap package root absent"))?
+                .0,
         )?
     } else {
         BootstrapDisposition::Fresh

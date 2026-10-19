@@ -120,6 +120,13 @@ pub enum UpdateCommand {
 }
 #[derive(Debug, Subcommand)]
 pub enum BootstrapCommand {
+    /// Install an explicitly assembled native source runtime, never a release archive.
+    MacosSource {
+        #[arg(long)]
+        package: PathBuf,
+        #[arg(long)]
+        no_start: bool,
+    },
     Macos {
         #[arg(long)]
         package: PathBuf,
@@ -187,19 +194,23 @@ pub fn control_entry() -> i32 {
             Err(e) => emit(Err(e)),
         };
     }
-    if let ControlCommand::Bootstrap {
-        command: BootstrapCommand::Macos { package, no_start },
-    } = &cli.command
-    {
+    if let ControlCommand::Bootstrap { command } = &cli.command {
+        let (package, no_start, source) = match command {
+            BootstrapCommand::Macos { package, no_start } => (package, no_start, false),
+            BootstrapCommand::MacosSource { package, no_start } => (package, no_start, true),
+        };
         if cli.installation.is_some() {
             return emit(Err(Error::new(
                 ErrorCode::InvalidRequest,
                 "bootstrap uses only canonical native installation paths",
             )));
         }
-        return emit(
-            native::bootstrap_package(package, *no_start).and_then(|i| controller::status(&i)),
-        );
+        let installed = if source {
+            native::bootstrap_source_package(package, *no_start)
+        } else {
+            native::bootstrap_package(package, *no_start)
+        };
+        return emit(installed.and_then(|i| controller::status(&i)));
     }
     if matches!(
         cli.command,

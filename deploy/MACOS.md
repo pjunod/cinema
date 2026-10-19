@@ -39,23 +39,23 @@ make install-macos
 
 That one command:
 
-1. builds `plurxd` from this checkout (`cargo build --locked --release`) on
-   the Rust release [`rust-toolchain.toml`](../rust-toolchain.toml) pins,
-   through rustup, even when another Rust (Homebrew's `rust`) comes first on
-   `PATH` — the first build takes several minutes;
-2. downloads **Jellyfin FFmpeg 8.1.3-1** for your Mac's architecture,
-   verifies its SHA-256 against the pinned value, and installs it next to the
-   binary (below);
-3. installs `plurxd` into the Homebrew prefix — `/opt/homebrew/bin` on Apple
-   Silicon (no sudo), `/usr/local/bin` on Intel;
-4. renders `~/Library/LaunchAgents/com.plurx.plurxd.plist` from
-   [`com.plurx.plurxd.plist`](com.plurx.plurxd.plist) with your home directory,
-   the `plurxd` path, and the Jellyfin `ffmpeg`/`ffprobe` paths;
-5. loads and starts the agent, waits for `/readyz`, and prints the version the
-   server reports.
+1. builds `plurxd`, the local controller helpers and the native Swift menu-bar
+   app with the pinned Rust toolchain and Xcode command line tools;
+2. verifies the pinned Jellyfin FFmpeg, WebAssembly source parser and subtitle
+   engine, and stages their complete runtime before changing the service;
+3. installs the per-user native runtime under
+   `~/Library/Application Support/plurx/runtime` and the companion at
+   `~/Applications/Plurx Server.app`;
+4. adopts the existing `com.plurx.plurxd` LaunchAgent and preserves its data,
+   configuration, running/stopped choice and automatic startup policy;
+5. opens the companion in the logged-in GUI session. Its menu has status,
+   web interface, logs, Start/Stop/Restart, startup choices and release updates.
 
-It is not finished until the server answers. If it times out, it names the log
-to read.
+A bare daemon build or binary replacement does not install the tray. Reopen an
+installed companion with `open "$HOME/Applications/Plurx Server.app"`; choose
+**Show tray app at login** in its menu to retain it across future logins. See
+[desktop controls](../docs/server/DESKTOP-CONTROL.md) for observed startup state
+and the distinction between local source installs and signed release upgrades.
 
 To see every command without running any of them:
 
@@ -65,15 +65,17 @@ make install-macos INSTALL_FLAGS=--dry-run
 
 ### Installing a prebuilt binary instead
 
-If you already have a `plurxd` for macOS (a release build, or one built on
-another Mac), skip Rust entirely:
+A prebuilt daemon must report the exact current checkout through
+`plurxd --source-commit`. The controller and Swift companion still build locally:
 
 ```sh
 make install-macos INSTALL_FLAGS='--binary ~/Downloads/plurxd'
 ```
 
-`--prefix <dir>` puts the binary somewhere other than the Homebrew prefix; the
-agent and the media engine follow it.
+`--server-only --binary <file>` retains the legacy daemon-only installer and
+needs no Rust or Swift build. Its optional `--prefix <dir>` puts the daemon and
+media engine in a custom prefix. Default desktop installs use the fixed native
+layout and reject `--prefix` rather than silently ignoring it.
 
 ### The media engine: Jellyfin FFmpeg 8.1.3-1
 
@@ -183,8 +185,10 @@ or a plain folder elsewhere on the internal disk does not need it.
 | Upgrade | `git pull && make install-macos` |
 | Uninstall | `make uninstall` |
 
-**Upgrading** stops the agent, replaces the binary, and starts it again. Your
-plist is never overwritten, so edits you made to it survive.
+**Upgrading** prepares the complete new runtime first, then uses the native
+controller to drain and replace a managed service. It preserves stopped/running
+and startup choices. A source install is distinct from a signed GitHub release;
+release checks retain their signature and complete-artifact requirements.
 
 **Uninstalling** removes the agent, the binary and its Jellyfin FFmpeg, and
 keeps your data.

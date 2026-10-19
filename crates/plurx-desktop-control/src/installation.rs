@@ -30,6 +30,16 @@ pub enum Architecture {
     Arm64,
     Universal,
 }
+/// The only thin architecture admitted by local source bootstrap on this host.
+pub fn native_architecture() -> Option<Architecture> {
+    if cfg!(target_arch = "aarch64") {
+        Some(Architecture::Arm64)
+    } else if cfg!(target_arch = "x86_64") {
+        Some(Architecture::Amd64)
+    } else {
+        None
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstallationV1 {
@@ -188,7 +198,8 @@ impl InstallationV1 {
                         != Some(&runtime.join("control/com.plurx.plurxd.plist"))
                     || p.login_plist.as_ref()
                         != Some(&home.join("Library/LaunchAgents/com.plurx.plurxd.plist"))
-                    || self.architecture != Architecture::Universal
+                    || (self.architecture != Architecture::Universal
+                        && Some(self.architecture.clone()) != native_architecture())
                 {
                     return Err(reject(
                         "nonstandard macOS layout requires explicit bootstrap migration",
