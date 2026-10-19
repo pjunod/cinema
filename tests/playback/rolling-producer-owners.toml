@@ -5160,7 +5160,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # constructor is added; existing probe collector bounds remain unchanged.
 # Progressive translation: +5 constructors (held ffprobe, bounded window decode,
 # qualified recognizer; test-only shell and ps for process-group retirement).
-expected_occurrences = 280
+# HDR10-E physical window test: +1 `Command::new(ffmpeg)` decoding one processed
+# window in the ignored test; collected by `.output()` before its directory drops.
+expected_occurrences = 281
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5785,7 +5787,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # F5: +2 `VodServe::status()` calls in the frozen-output reporting tests.
 # Both read the attached rendition in process; neither starts an OS child,
 # spawns a task, or acquires a producer lease.
-expected_occurrences = 765
+# HDR10-E physical window test: +1 `.output()` on the finite ffmpeg decode of
+# one processed window (`processed_window_luma`), collected synchronously
+# before its temporary directory is dropped. Ignored test only; no producer.
+expected_occurrences = 766
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
