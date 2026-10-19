@@ -140,7 +140,7 @@ class TVNavigationTestCase: XCTestCase {
 
     /// Bounded setup steering only; never used to prove the measured journey.
     func reachForSetup(_ target: XCUIElement, in app: XCUIApplication, limit: Int) {
-        guard target.waitForExistence(timeout: 5) else {
+        guard target.exists || target.waitForExistence(timeout: 5) else {
             XCTFail("Setup control is missing: \(app.debugDescription)")
             return
         }
@@ -153,7 +153,7 @@ class TVNavigationTestCase: XCTestCase {
             if hasNativeFocus(target, in: app) { return }
             let current = app.descendants(matching: .any)
                 .matching(NSPredicate(format: "hasFocus == true")).firstMatch
-            guard current.waitForExistence(timeout: 3) else { break }
+            guard current.exists || current.waitForExistence(timeout: 3) else { break }
             let focusedTab = app.tabBars.buttons.matching(focused).firstMatch
             if !targetIsTab && focusedTab.exists { remote.press(.down); continue }
             if targetIsTab && !focusedTab.exists { remote.press(.up); continue }
