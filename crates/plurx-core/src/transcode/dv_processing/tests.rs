@@ -1186,7 +1186,8 @@ fn base_rpu_accepts_signalled_bounded_curve_extents_without_replacing_them() {
 fn every_display_metadata_version_the_master_reconstruction_ignores_is_accepted() {
     use dolby_vision::rpu::dovi_rpu::DoviRpu;
     use dolby_vision::rpu::extension_metadata::blocks::{
-        ExtMetadataBlock, ExtMetadataBlockLevel11, ExtMetadataBlockLevel8, ExtMetadataBlockLevel9,
+        ExtMetadataBlock, ExtMetadataBlockLevel10, ExtMetadataBlockLevel11,
+        ExtMetadataBlockLevel255, ExtMetadataBlockLevel8, ExtMetadataBlockLevel9,
     };
     use dolby_vision::rpu::extension_metadata::{CmV40DmData, DmData};
     fn widen(fixture: &[u8]) -> Vec<u8> {
@@ -1206,9 +1207,22 @@ fn every_display_metadata_version_the_master_reconstruction_ignores_is_accepted(
                 source_primary_index: 2,
                 ..Default::default()
             }),
+            ExtMetadataBlock::Level10(ExtMetadataBlockLevel10 {
+                length: 5,
+                target_display_index: 2,
+                target_max_pq: 2081,
+                target_min_pq: 62,
+                target_primary_index: 2,
+                ..Default::default()
+            }),
             ExtMetadataBlock::Level11(ExtMetadataBlockLevel11 {
                 content_type: 1,
                 reference_mode_flag: true,
+                ..Default::default()
+            }),
+            ExtMetadataBlock::Level255(ExtMetadataBlockLevel255 {
+                dm_run_mode: 0,
+                dm_run_version: 1,
                 ..Default::default()
             }),
         ] {
@@ -1233,12 +1247,13 @@ fn every_display_metadata_version_the_master_reconstruction_ignores_is_accepted(
         "../../../tests/fixtures/dv-runtime/frame-000.nal"
     ));
     let parsed = DvParsedMetadata::from_raw_rpu(&fel).expect("FEL RPU parses");
-    for level in [10, 255] {
-        assert!(
-            parsed.other_metadata_levels.contains(&level)
-                || parsed.creative_trim_levels.contains(&level),
-            "fixture keeps L{level}: {parsed:?}"
-        );
+    let carried: BTreeSet<u8> = parsed
+        .other_metadata_levels
+        .union(&parsed.creative_trim_levels)
+        .copied()
+        .collect();
+    for level in [8, 9, 10, 11, 255] {
+        assert!(carried.contains(&level), "L{level} is carried: {carried:?}");
     }
     assert!(parsed.runtime_supported(), "{parsed:?}");
     let base = widen(include_bytes!(
