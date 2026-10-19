@@ -155,6 +155,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var serverName: String? = null
         private set
+    var serverHostname: String? = null
+        private set
     var audioLang: String = "eng"
         private set
     var subLang: String = "eng"
@@ -224,6 +226,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             if (recovered != null) {
                                 bindOrigin(recovered.origin, saved.token)
                                 serverName = recovered.info.name
+                                serverHostname = null
                                 Session.displayModeMatch = recovered.info.display_mode_match
                                 Session.displayAwareAuto = recovered.info.playback_display_aware_auto
                                 Session.autoAbr = recovered.info.playback_auto_abr
@@ -1064,6 +1067,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         origin = normalized
         api = candidate
         serverName = info.name
+        serverHostname = null
         serverInstanceId = info.instance_id
         Session.displayModeMatch = info.display_mode_match
         Session.displayAwareAuto = info.playback_display_aware_auto
@@ -1117,7 +1121,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             authorization = Session::playbackAuthorization,
             fetch = { api().server() },
             apply = { info ->
-                serverName = info.name
+                val node = catchingUnlessCancelled { api().serverNode() }.getOrNull()
+                serverName = node?.display_name ?: info.name
+                serverHostname = node?.hostname
                 if (serverInstanceId != info.instance_id) invalidateLibraryPager()
                 serverInstanceId = info.instance_id
                 Session.displayModeMatch = info.display_mode_match

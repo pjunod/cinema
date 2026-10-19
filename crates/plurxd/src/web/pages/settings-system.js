@@ -390,8 +390,9 @@ function systemPanel(sys,playbackEvents){
   const enc=sys.encoders||{};
   const pills=[["NVENC",enc.nvenc],["QuickSync",enc.qsv],["VA-API",enc.vaapi],["VideoToolbox",enc.videotoolbox]]
     .filter(([,ok])=>ok).map(([n,ok])=>`<span class="pill" style="${ok?'color:var(--good);border-color:var(--good)':''}">${n} ${ok?'✓':'—'}</span>`).join(" ");
-  return `${setHead("System",`${esc(sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}`,pills)}${systemAttentionHtml(sys)}${transcoderCard(sys)}<div class="card"><h2 class="section" style="margin-top:0">This node</h2>
+  return `${setHead("System",`${esc(sys.display_name||sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}`,pills)}${systemAttentionHtml(sys)}${transcoderCard(sys)}<div class="card"><h2 class="section" style="margin-top:0">This node</h2>
       <dl class="kvgrid system-grid">
+        ${sys.hostname?`<dt>Host</dt><dd>${esc(sys.hostname)}</dd>`:""}
         <dt>Data dir</dt><dd>${esc(sys.data_dir)}</dd>
         <dt>ffmpeg</dt><dd>${sys.ffmpeg_version?esc(sys.ffmpeg_version):`<span style="color:var(--bad)">not found at \`${esc(sys.ffmpeg)}\` — scanning and transcoding will fail</span>`}</dd>
         <dt>Transcoder</dt><dd>${esc(sys.encoder_selected)} <span class="muted">(preference: ${esc(sys.hwaccel_pref)})</span></dd>

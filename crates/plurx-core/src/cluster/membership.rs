@@ -5131,6 +5131,24 @@ impl MembershipManager {
         Arc::clone(&self.clock)
     }
 
+    /// The short hostname this node is known by: the same name the roster,
+    /// Activity and the LAN picker show for it.
+    ///
+    /// A replicated node answers with the name it resolved at start (reported
+    /// name, else its advertised API host, else a reverse lookup). A node with
+    /// no replicated membership — the single-node SQLite deployment — resolves
+    /// the machine name directly. `None` only when no usable name exists
+    /// anywhere (a bare container id or an IP address is not a name).
+    #[must_use]
+    pub fn local_hostname(&self) -> Option<String> {
+        match self.inner.as_deref() {
+            Some(inner) if inner.local_hostname != UNKNOWN_HOSTNAME => {
+                Some(inner.local_hostname.clone())
+            }
+            _ => system_short_hostname(),
+        }
+    }
+
     #[must_use]
     pub fn clock_leadership_identity(&self) -> Option<ClockLeadershipIdentity> {
         let inner = self.inner.as_deref()?;
@@ -14340,8 +14358,11 @@ fn reverse_hostname(_address: IpAddr) -> Option<String> {
     None
 }
 
+/// This machine's short hostname: `PLURX_NODE_HOSTNAME` when set, else the OS
+/// hostname, reduced to its first label. A container id, an IP address or
+/// `localhost` is not a name, so those give `None`.
 #[cfg(unix)]
-pub(crate) fn system_short_hostname() -> Option<String> {
+pub fn system_short_hostname() -> Option<String> {
     if let Some(configured) = std::env::var("PLURX_NODE_HOSTNAME")
         .ok()
         .and_then(|hostname| short_hostname(&hostname))
@@ -14362,7 +14383,7 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn system_short_hostname() -> Option<String> {
+pub fn system_short_hostname() -> Option<String> {
     std::env::var("PLURX_NODE_HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .ok()

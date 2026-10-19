@@ -55,6 +55,7 @@ final class AppModel: ObservableObject {
     private(set) var username: String?
     private(set) var userId: Int?
     private(set) var serverName: String?
+    private(set) var serverHostname: String?
     private(set) var displayAwareAuto = false
     private(set) var autoAbr = false
     private(set) var displayAwareAutoProtocol: String?
@@ -322,6 +323,7 @@ final class AppModel: ObservableObject {
             origin = normalized
             api = a
             serverName = info.name
+            serverHostname = nil
             displayAwareAuto = info.playbackDisplayAwareAuto == true
             autoAbr = info.playbackAutoAbr == true
             displayAwareAutoProtocol = info.displayAwareAutoProtocol
@@ -619,6 +621,7 @@ final class AppModel: ObservableObject {
         guard generation == authenticationGeneration else { return }
         origin = recovered.origin
         serverName = recovered.name
+        serverHostname = nil
         displayAwareAuto = false
         autoAbr = false
         displayAwareAutoProtocol = nil
@@ -685,6 +688,11 @@ final class AppModel: ObservableObject {
         guard generation == authenticationGeneration else { return }
         if !transientAuthentication, settings.instanceId == nil { settings.instanceId = info.instanceId }
         serverName = info.name
+        serverHostname = nil
+        if let node = try? await requireAPI().serverNode(), generation == authenticationGeneration {
+            serverName = node.displayName ?? info.name
+            serverHostname = node.hostname
+        }
         displayAwareAuto = info.playbackDisplayAwareAuto == true
         autoAbr = info.playbackAutoAbr == true
         displayAwareAutoProtocol = info.displayAwareAutoProtocol
