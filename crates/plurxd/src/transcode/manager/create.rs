@@ -5023,3 +5023,6 @@ pub(super) fn constrain_finite_vod_rate(
 
 #[cfg(test)]
 mod retained_recovery_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod processed_reuse_tests;

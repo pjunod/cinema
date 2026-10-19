@@ -166,3 +166,36 @@ PRs B–F (MDCV/CLL writer reusing `crates/plurx-core/src/fmp4/hdr10_index.rs`; 
 - **Pixel 11 direct play of Animals fails** with ExoPlayer 4003 `ERROR_CODE_DECODING_FAILED`. The file is HEVC Main10 L5.0 HDR10, 3840×2160, 15 Mb/s, 24/1 nominal. Get a device logcat (MediaCodec/c2 errors) and compare with a title that plays.
 - **Apple TV UI test overruns:** `testLiveFullscreenRevealMoreReportAndBackRetainSession` goes past its 3 minutes. It predates #1197; rerun it on the Mac simulator.
 - **A second processed session is refused** while the first holds the processing slot ("DV processing needs a GPU slot and 15 CPU threads that other work holds"). After an Auto replacement the successor may lose HDR10-E. Check whether successors should reuse the prepared processed root (`capture_processed_root`).
+
+### Processed-root repair in progress (owner: Sol; native/publication: coordinator)
+
+`codex/cinema-processed-successor-reuse` removes the leftover throughput-only
+refresh/readers from exact-root reuse, retaining source/executable, full recipe,
+principal/playback, actual rendition/reservation and final attachment fences.
+The first pending staged successor can capture only its ledger-named local
+predecessor under the caller's admitted epoch. A narrow, nonserialized session
+seed preserves original Copy provenance; current planning/caps/decoder/audio
+and scope are reconstructed and checked against the actual encoding. Ordinary
+serialized restore still refuses processed descriptions. Changed recipes,
+destinations, heights or independent plays do not borrow capacity.
+
+Actual-owner cleanup is armed synchronously with registry attachment, before
+marking/facts/seal awaits. The predecessor is never retired early; normal durable
+seal/commit CAS still decides activation. Shared encoding priority is not changed
+by a speculative successor. No new render, speed receipt or sustainable bit is
+invented to admit an already-owned graph.
+
+Current source includes lifecycle regression controls for both processed
+destinations with a checked HEVC/PQ window, private-context loss on serialization,
+mixed GPU/CPU saturation, missing admitted epoch, input/owner drift, replay and
+exact-owner cleanup. These are authored, not executed evidence. Native pinned
+compile/static checks, remaining cancellation/commit/publication acceptance,
+independent complete-candidate review, affected tests and merge gate remain.
+The historical live request path remains unknown; this is no deployment or
+general Dolby rendering-accuracy claim.
+
+Regression anchors for the eventual PR and merge message:
+- `Regression-Test: crates/plurxd/src/vodencode_tests.rs::processed_root_reuse_needs_no_speed_or_missing_qualification_window`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_roots_reconstruct_both_destinations_without_serialized_authority_or_speed`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_root_refuses_current_input_and_owner_drift_without_spending_capacity`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::first_processed_attachment_arms_exact_owner_cleanup_before_returning`

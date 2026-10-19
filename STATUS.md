@@ -14,10 +14,14 @@ Exact-parent reuse no longer asks an already admitted graph to prove fresh
 throughput or create private qualification readers. Identity, reservation,
 source, executable and final attachment fences remain mandatory. Regression
 source covers idle, near-end and fully materialized roots under saturated
-capacity, single-worker custody and cancelled capture. Compilation and final
-independent review/affected qualification remain outstanding. Private staged
-successor provenance and owner/epoch reconstruction is the remaining source
-work; ordinary serialized descriptors still grant no execution authority.
+capacity, single-worker custody and cancelled capture. Private staged successor provenance, fresh-input reconstruction and the
+admitted predecessor epoch now reach the common exact-root attachment path.
+Cleanup is armed with the actual successor owner at registry commit, before
+later async marking/sealing. Ordinary serialized descriptors still grant no
+execution authority, and shared encoding priority is not changed by staging.
+Pinned native compilation, remaining lifecycle acceptance, independent final
+review and the affected qualification/merge gate remain outstanding; authored
+regressions have not yet been executed. No live failure reproduction is claimed.
 
 ## Native server tray, startup policy and release upgrades
 
