@@ -1068,3 +1068,22 @@ fn launch_lock_rejects_public_modes_and_hardlinks_without_replacing_the_inode() 
     std::fs::remove_file(alias).expect("remove hardlink");
     launch_lock::acquire(&i, false).expect("revalidated original lock");
 }
+
+#[test]
+fn bounded_journal_logs_require_the_narrow_helper_not_global_journal_membership() {
+    use clap::Parser;
+    use plurx_desktop_control::cli::{needs_authority, Cli};
+    let logs = Cli::try_parse_from(["plurx-control", "logs", "--lines", "100"])
+        .expect("bounded native log request");
+    // Ordinary Linux desktop users are not generally members of systemd-journal.
+    // Route this explicit read through the same fixed, finite polkit helper;
+    // do not broaden journal permissions or return an apparently empty journal.
+    assert!(needs_authority(&logs.command));
+    let status = Cli::try_parse_from(["plurx-control", "status"]).expect("status");
+    assert!(
+        !needs_authority(&status.command),
+        "polling must stay unprivileged"
+    );
+    assert!(Cli::try_parse_from(["plurx-control", "logs", "--lines", "1001"]).is_err());
+    assert!(Cli::try_parse_from(["plurx-control", "logs", "--unit", "other.service"]).is_err());
+}

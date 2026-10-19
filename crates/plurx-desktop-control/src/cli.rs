@@ -238,7 +238,6 @@ pub fn needs_authority(command: &ControlCommand) -> bool {
     !matches!(
         command,
         ControlCommand::Status
-            | ControlCommand::Logs { .. }
             | ControlCommand::Updates {
                 command: UpdateCommand::Status { .. }
             }

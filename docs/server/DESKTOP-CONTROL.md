@@ -44,7 +44,8 @@ make an upgrade pass.
 
 **Open plurx** opens the selected installation's validated local web address.
 **View logs** reads a bounded local log view: the per-user log on macOS or the
-`plurxd.service` journal on Linux. Neither action discovers or administers a
+`plurxd.service` journal on Linux. Linux log access uses the scoped administrator
+authorization helper; no global journal-group membership is needed. Neither action discovers or administers a
 remote server.
 
 **Start**, **Stop** and **Restart** operate on the exact native service. Stop and
