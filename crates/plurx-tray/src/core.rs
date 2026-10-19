@@ -10,6 +10,19 @@ use crate::protocol::{
     UpdateState,
 };
 
+/// An explicitly opened control window remains available without a tray, but
+/// indicator registration always needs both a proved local session and a host.
+pub fn tray_host_for_session(
+    eligibility: &crate::session::Eligibility,
+    observed_host: TrayHost,
+) -> TrayHost {
+    if eligibility.eligible && observed_host == TrayHost::Present {
+        TrayHost::Present
+    } else {
+        TrayHost::Absent
+    }
+}
+
 /// Why a controller command was issued; returned with its result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Purpose {

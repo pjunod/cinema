@@ -140,11 +140,12 @@ pub fn run(options: Options) -> i32 {
         let management = core::management_for(systemd);
         let mut core = Core::new(crate::APP_VERSION, management, crate::release_repository());
         let probe = dbus::probe_host();
-        core.snapshot.tray_host = if probe.host_present() {
+        let observed_host = if probe.host_present() {
             TrayHost::Present
         } else {
             TrayHost::Absent
         };
+        core.snapshot.tray_host = core::tray_host_for_session(&eligibility, observed_host);
         let window = window::ControlWindow::new(app, &tx);
         let shell = Rc::new(RefCell::new(Shell {
             core,
@@ -175,7 +176,9 @@ pub fn run(options: Options) -> i32 {
         std::mem::forget(app.hold());
         {
             let mut s = shell.borrow_mut();
-            s.spawn_tray();
+            if s.core.snapshot.tray_host == TrayHost::Present {
+                s.spawn_tray();
+            }
             let show_window = !autostarted || s.tray.is_none();
             if show_window {
                 s.show_window();

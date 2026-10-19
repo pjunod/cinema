@@ -1008,3 +1008,45 @@ fn every_state_has_its_own_symbolic_icon_name() {
     assert_eq!(names.len(), 5);
     assert!(names.contains("tv.plurx.Server-unknown-symbolic"));
 }
+
+#[test]
+fn manual_window_keeps_fallback_without_registering_tray_or_starting_server() {
+    let mut cases = Vec::new();
+    let mut remote = eligible_facts("x11");
+    remote.session.as_mut().unwrap().remote = true;
+    cases.push(remote);
+    let mut container = eligible_facts("wayland");
+    container.container = true;
+    cases.push(container);
+    let mut unknown = eligible_facts("x11");
+    unknown.session = None;
+    cases.push(unknown);
+    let mut headless = eligible_facts("x11");
+    headless.display = None;
+    cases.push(headless);
+    for facts in cases {
+        let eligibility = evaluate(&facts);
+        assert!(!eligibility.eligible);
+        let mut core = core_with(ServiceState::Stopped);
+        // Even a reachable watcher cannot authorize an automatic icon.
+        core.snapshot.tray_host =
+            crate::core::tray_host_for_session(&eligibility, TrayHost::Present);
+        assert_eq!(core.snapshot.tray_host, TrayHost::Absent);
+        // The explicit fallback remains available and polling never starts it.
+        assert!(find(&core.entries(), &Action::ShowWindow).unwrap().enabled);
+        assert_eq!(runs(&core.poll()), vec![Command::Status]);
+    }
+    let local = evaluate(&eligible_facts("x11"));
+    assert_eq!(
+        crate::core::tray_host_for_session(&local, TrayHost::Present),
+        TrayHost::Present
+    );
+    assert_eq!(
+        crate::core::tray_host_for_session(&local, TrayHost::Absent),
+        TrayHost::Absent
+    );
+    assert_eq!(
+        crate::core::tray_host_for_session(&local, TrayHost::Unknown),
+        TrayHost::Absent
+    );
+}
