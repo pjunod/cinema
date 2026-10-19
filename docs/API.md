@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-15, plurx has 381 routes declared by the ordinary listener's
+As of 2026-10-19, plurx has 382 routes declared by the ordinary listener's
 assembled router. The ordinary listener (`:32400` by default) serves the five
 surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
@@ -37,7 +37,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 381 routes across the registered routers.
+plurx has 382 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
