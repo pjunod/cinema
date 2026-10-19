@@ -319,19 +319,36 @@ function fallBackDirectedChange(p,change,why){
     detail:`via=fallback why=${why}`,reason:change.reason||"manual",
     message:`prepared handoff did not carry the change (${why}); reopening the stream`},
     playbackContext()));
-  if(change.fallback){
-    try{ const running=change.fallback(why); if(running&&running.catch) running.catch(()=>{}); }
-    catch(e){}
-    return true;
-  }
-  PENDING_ATTEMPT_REASON="quality";
-  // NOW the destination is published, and not a moment earlier. This is the
-  // call `setQuality` used to make at the tap, where it marked a seek that was
-  // not one and retired the very ask the change was about. Here the stream is
-  // genuinely being reopened at a position, which is exactly what it is for,
-  // and the change is already settled so nothing re-enters.
-  beginPlaybackControlSeek(p,pos);
-  play(p.fileId,p.title||"",Math.round(pos*1000),p.knownDur||0,p.meta);
+  // The fallback can replace PLAYER before it rejects. Keep its original
+  // owner and trigger; clientLog otherwise fills identity from the new player.
+  const context={session_id:p.sessionId||null,attempt:p.attemptId||null,
+    file_id:p.fileId||null,title:p.title||null,method:p.method||null,
+    vcodec:p.source?.video_codec||null,delivered_range:p.deliveredRange||null,
+    delivered_dv_profile:p.deliveredDvProfile||null,reason:change.reason||"manual",control:{}};
+  const trigger=String(why||"unknown").replace(/[^a-zA-Z0-9_.-]/g,"_").slice(0,64);
+  const failed=error=>{
+    // Error messages may contain a capability URL. Names/codes identify the
+    // failure class without copying credentials or an unbounded response.
+    const name=String(error?.name||"Error").replace(/[^a-zA-Z0-9_.-]/g,"_").slice(0,48);
+    const rawCode=String(error?.code||error?.streamFailure?.code||"");
+    const code=/^[a-zA-Z][a-zA-Z0-9_.-]{0,47}$/.test(rawCode)?rawCode:"";
+    const rawStatus=error?.status??error?.status_code;
+    const status=Number.isInteger(rawStatus)&&rawStatus>=100&&rawStatus<=599?rawStatus:null;
+    clientLog(Object.assign({level:"error",event:"quality_fallback_failed",
+      code:status,detail:`trigger=${trigger};cause=${name}${code?":"+code:""}${status?";http="+status:""}`,
+      message:"The quality recovery failed after its prepared handoff failed"},context));
+  };
+  try{
+    let running;
+    if(change.fallback) running=change.fallback(why);
+    else{
+      PENDING_ATTEMPT_REASON="quality";
+      // Publish the destination only when its reopen owns the new attempt.
+      beginPlaybackControlSeek(p,pos);
+      running=play(p.fileId,p.title||"",Math.round(pos*1000),p.knownDur||0,p.meta);
+    }
+    if(running&&running.catch) running.catch(failed);
+  }catch(error){ failed(error); }
   return true;
 }
 // A directed change that ended without a reopen: the successor took the
@@ -1183,10 +1200,27 @@ function attachSession(v, t, info, wantSec){
 // also why the route authenticates by session id rather than by header.
 function releaseSession(sessionId,token=TOKEN){
   if(!sessionId) return;
+  const current=typeof PLAYER==="undefined"?null:PLAYER;
+  const owner=[current,current?.mediaPredecessor].find(p=>p
+    &&(p.sessionId===sessionId||p.sharedDirect?.session_id===sessionId));
+  const context={session_id:sessionId,attempt:owner?.attemptId||null,
+    file_id:owner?.fileId||null,title:owner?.title||null,method:owner?.method||null,
+    vcodec:owner?.source?.video_codec||null,delivered_range:owner?.deliveredRange||null,
+    delivered_dv_profile:owner?.deliveredDvProfile||null,reason:"release",control:{}};
+  const failed=(error,status=null)=>{
+    const name=String(error?.name||"Error").replace(/[^a-zA-Z0-9_.-]/g,"_").slice(0,48);
+    const rawCode=String(error?.code||"");
+    const code=/^[a-zA-Z][a-zA-Z0-9_.-]{0,47}$/.test(rawCode)?rawCode:"";
+    clientLog(Object.assign({level:"error",event:"session_release_failed",code:status,
+      detail:status?`http=${status}`:`cause=${name}${code?":"+code:""}`,
+      message:"The server session could not be released; cleanup is unconfirmed"},context));
+  };
   try{
     fetch(API+`/hls/${sessionId}`,{method:"DELETE",keepalive:true,
-      headers:token?{"authorization":"Bearer "+token}:{}}).catch(()=>{});
-  }catch(e){}
+      headers:token?{"authorization":"Bearer "+token}:{}}).then(response=>{
+        if(!response.ok) failed(null,response.status);
+      },error=>failed(error));
+  }catch(error){ failed(error); }
 }
 // A Shared direct session ends with the attachment that reads it: the same
 // DELETE retires it. B also retires it after 300 s with no open body and no

@@ -342,7 +342,7 @@ test("Shared direct attachment polls no status, starts no control, DELETEs its B
   vm.runInContext(source+"\n"+functions+`
     const API="/api/v1",TOKEN="t",log=[],deletes=[],apis=[],changes=[];let PLAYER=null;
     const document={getElementById(){return null;}};
-    function fetch(url,o){deletes.push({url,method:o.method,keepalive:o.keepalive});return Promise.resolve();}
+    function fetch(url,o){deletes.push({url,method:o.method,keepalive:o.keepalive});return Promise.resolve({ok:true,status:204});}
     async function api(url){apis.push(url);return {};}
     function playbackOwnsAttachedMedia(p){return !!p;}function playbackWaitSurfaceLive(){return false;}function updateStats(){}
     function stopPlaybackControl(){log.push("stop-control");}function startPlaybackControl(){log.push("start-control");}

@@ -303,3 +303,138 @@ test("local Pair entry is excluded from network navigation labels and source spo
   assert.equal(h.dispatch({type:"select"},{source:"local_cec"}),"restricted_surface");assert.equal(activated,0);
   assert.equal(h.remote.dispatchPhysical({type:"select"},h.remote.snapshotPhysical()),"applied");assert.equal(activated,1);
 });
+
+function playbackFailureLogHarness(){
+  const reports=[],requests=[],diagnostics=[];
+  const player={sessionId:"outgoing",attemptId:"a7",fileId:7,title:"Original",
+    method:"remux",source:{video_codec:"hevc"},deliveredRange:"hdr10"};
+  const scope=vm.createContext({PLAYER:player,TOKEN:"secret-token",API:"/api/v1",
+    AUTH_GENERATION:1,ME:{id:1},window:{CinemaDiagnostics:{owns:()=>true}},
+    observeDiagnosticRequest:(...args)=>diagnostics.push(args),browserLabel:()=>"Chrome",refreshClientErrorReporterAuth:()=>{},
+    performance:{now:()=>0},clearTimeout:()=>{},
+    document:{getElementById:()=>({currentTime:14})},
+    positionForPlaybackIntent:()=>14,beginPlaybackControlSeek:()=>{},
+    playbackContext:()=>({session:scope.PLAYER.sessionId,attempt:scope.PLAYER.attemptId}),
+    fetch:(url,options)=>{
+      if(url.endsWith("/client-log")){reports.push(JSON.parse(options.body));return Promise.resolve({ok:true,status:204});}
+      requests.push({url,options});return scope.releaseFetch();
+    }});
+  vm.runInContext(shipped("clientLog","core/api.js"),scope);
+  for(const name of ["releaseSession","fallBackDirectedChange"])
+    vm.runInContext(shipped(name,"player/directed-change.js"),scope);
+  function replace(){scope.PLAYER={sessionId:"incoming",attemptId:"a99",fileId:99,title:"Incoming",method:"transcode",
+    controlReporter:{legacyContext:()=>({generation:"unrelated"})}};}
+  async function drain(){for(let i=0;i<5;i++)await Promise.resolve();}
+  return {scope,player,reports,requests,diagnostics,replace,drain};
+}
+test("failed session releases report HTTP rejection and immutable outgoing identity through clientLog",async()=>{
+  const h=playbackFailureLogHarness();let finish;
+  h.scope.releaseFetch=()=>new Promise(resolve=>{finish=resolve;});
+  h.scope.releaseSession("outgoing");h.replace();h.player.attemptId="changed";
+  finish({ok:false,status:503});await h.drain();
+  assert.equal(h.reports.length,1);
+  const report=h.reports[0];
+  assert.equal(report.event,"session_release_failed");assert.equal(report.level,"error");
+  assert.equal(report.session_id,"outgoing");assert.equal(report.attempt,"a7");
+  assert.equal(report.file_id,7);assert.equal(report.title,"Original");
+  assert.equal(report.code,503);assert.equal(report.detail,"http=503");
+  assert.deepEqual(report.control,{});assert.equal(h.requests[0].options.keepalive,true);
+  assert.equal(h.diagnostics.length,0,"the outgoing failure marked the incoming attachment failed");
+  h.scope.clientLog({event:"playback_failed",level:"error",message:"current failure",session_id:"incoming"});
+  assert.equal(h.diagnostics.length,1,"the current attachment's own failure was suppressed");
+  h.scope.clientLog({event:"playback_failed",level:"error",message:"current failure without handle"});
+  assert.equal(h.diagnostics.length,2,"legacy current-owner diagnostics were suppressed");
+});
+test("session release exceptions and promise rejections are bounded without copying URLs or tokens",async()=>{
+  for(const synchronous of [false,true]){
+    const h=playbackFailureLogHarness();
+    const error=Object.assign(new TypeError("https://host/hls/private?token=secret-token"),{code:"NETWORK_FAILED"});
+    h.scope.releaseFetch=()=>{if(synchronous)throw error;return Promise.reject(error);};
+    assert.doesNotThrow(()=>h.scope.releaseSession("outgoing"));await h.drain();
+    assert.equal(h.reports.length,1);assert.equal(h.reports[0].detail,"cause=TypeError:NETWORK_FAILED");
+    assert.ok(!JSON.stringify(h.reports).includes("https://"));assert.ok(!JSON.stringify(h.reports).includes("secret-token"));
+  }
+});
+test("an unmatched outgoing release never acquires the new player's identity and successful releases stay quiet",async()=>{
+  const h=playbackFailureLogHarness();h.replace();
+  h.scope.releaseFetch=()=>Promise.resolve({ok:false,status:500});
+  h.scope.releaseSession("outgoing");await h.drain();
+  assert.equal(h.reports[0].session_id,"outgoing");
+  for(const key of ["attempt","file_id","title","method","vcodec"])assert.equal(h.reports[0][key],null,key);
+  h.scope.releaseFetch=()=>Promise.resolve({ok:true,status:204});
+  h.scope.releaseSession("outgoing");await h.drain();assert.equal(h.reports.length,1);
+});
+test("failed quality recovery preserves its original fault and logs the recovery failure against its original owner",async()=>{
+  for(const mode of ["sync","promise","default"]){
+    const h=playbackFailureLogHarness();
+    const failure=()=>{h.replace();throw Object.assign(new TypeError("https://host/private?token=secret-token"),{code:"OPEN_FAILED"});};
+    const change={reason:"manual",intentGeneration:0,fallback:mode==="sync"?failure:
+      mode==="promise"?()=>Promise.resolve().then(failure):null};
+    h.player.directedChange=change;
+    h.scope.play=async()=>failure();
+    assert.equal(h.scope.fallBackDirectedChange(h.player,change,"no_first_frame"),true);
+    await h.drain();
+    assert.deepEqual(h.reports.map(report=>report.event),["quality_switch","quality_fallback_failed"]);
+    assert.equal(h.reports[0].level,"warn");assert.match(h.reports[0].detail,/no_first_frame/);
+    const report=h.reports[1];
+    assert.equal(report.level,"error");assert.equal(report.session_id,"outgoing");
+    assert.equal(report.attempt,"a7");assert.equal(report.file_id,7);assert.equal(report.delivered_range,"hdr10");
+    assert.equal(report.detail,"trigger=no_first_frame;cause=TypeError:OPEN_FAILED");
+    assert.ok(!JSON.stringify(h.reports).includes("https://"));assert.ok(!JSON.stringify(h.reports).includes("secret-token"));
+  }
+});
+test("successful quality recovery retains its recoverable fault without adding success or failure noise",async()=>{
+  const h=playbackFailureLogHarness();let recovered=0;
+  const change={reason:"manual",intentGeneration:0,fallback:async()=>{h.replace();recovered++;}};
+  h.player.directedChange=change;
+  assert.equal(h.scope.fallBackDirectedChange(h.player,change,"no_first_frame"),true);await h.drain();
+  assert.equal(recovered,1);assert.deepEqual(h.reports.map(report=>report.event),["quality_switch"]);
+  assert.match(h.reports[0].detail,/no_first_frame/);
+});
+test("failed quality recovery preserves typed API status and refusal code without copying its response message",async()=>{
+  for(const error of [Object.assign(new Error("secret-token https://host/private"),{status:503,code:"insufficient_capacity"}),
+    Object.assign(new Error("secret-token https://host/private"),{status_code:409,streamFailure:{code:"source_changed"}})]){
+    const h=playbackFailureLogHarness();
+    const change={reason:"manual",intentGeneration:0,fallback:async()=>{throw error;}};
+    h.player.directedChange=change;
+    h.scope.fallBackDirectedChange(h.player,change,"no_first_frame");await h.drain();
+    const report=h.reports[1];assert.equal(report.event,"quality_fallback_failed");
+    assert.equal(report.code,error.status||error.status_code);
+    assert.match(report.detail,error.code?/cause=Error:insufficient_capacity;http=503/:/cause=Error:source_changed;http=409/);
+    assert.ok(!JSON.stringify(report).includes("https://"));assert.ok(!JSON.stringify(report).includes("secret-token"));
+  }
+});
+test("a fallback AbortError remains visible after replacement without proof of an owned cancellation",async()=>{
+  const h=playbackFailureLogHarness();
+  const change={reason:"manual",intentGeneration:0,fallback:async()=>{h.replace();throw Object.assign(new Error("cancelled"),{name:"AbortError"});}};
+  h.player.directedChange=change;
+  h.scope.fallBackDirectedChange(h.player,change,"no_first_frame");await h.drain();
+  assert.deepEqual(h.reports.map(report=>report.event),["quality_switch","quality_fallback_failed"]);
+  assert.match(h.reports[1].detail,/cause=AbortError/);
+});
+test("a sessionless outgoing fallback failure stays logged without marking the incoming diagnostic attachment",async()=>{
+  const h=playbackFailureLogHarness();h.player.sessionId=null;h.player.method="remux";
+  const change={reason:"manual",intentGeneration:0,fallback:async()=>{h.replace();throw new TypeError("recovery failed");}};
+  h.player.directedChange=change;
+  h.scope.fallBackDirectedChange(h.player,change,"no_first_frame");await h.drain();
+  const report=h.reports.find(report=>report.event==="quality_fallback_failed");
+  assert.ok(report);assert.equal(report.session_id,null);assert.equal(report.attempt,"a7");assert.equal(report.file_id,7);
+  assert.equal(h.diagnostics.filter(([,kind])=>kind==="error").length,0,
+    "an explicitly unknown outgoing handle acquired incoming ownership");
+});
+test("current direct and progressive playback context and surface reports retain local diagnostic ownership",()=>{
+  for(const method of ["direct_play","remux"]){
+    const h=playbackFailureLogHarness();h.player.sessionId=null;h.player.method=method;
+    h.player.mediaAttachment={id:3};
+    h.scope.clientLog({event:"playback_failed",level:"error",message:"current failure",
+      session:null,attempt:"a7",file_id:7,attachment_id:3});
+    h.scope.clientLog({event:"surface_error",level:"error",message:"current surface failure",
+      session_id:null,attempt:"a7"});
+    assert.equal(h.diagnostics.length,2,method+" current faults lost diagnostic ownership");
+    assert.equal(h.reports.length,2);
+    h.scope.clientLog({event:"playback_failed",level:"error",message:"old attachment failure",
+      session:null,attempt:"a7",file_id:7,attachment_id:2});
+    assert.equal(h.diagnostics.length,2,"an old attachment marked its replacement failed");
+    assert.equal(h.reports.length,3,"an unowned local diagnostic dropped the server event");
+  }
+});
