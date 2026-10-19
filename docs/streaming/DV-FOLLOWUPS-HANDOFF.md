@@ -10,17 +10,25 @@ Repo: Forgejo `noirr/plurx`. Process:
 
 Already merged and deployed: #1197–#1203 (HDR10-E at all resolutions, 4K throughput, FEL/RPU/DYN indicator, Animals frame-rate fix) and #1208 (display-targeted plan). Chrome on a MacBook Pro shows FEL+RPU for HDR10-E.
 
-## A. Pixel fixes — branch `claude/pixel-hdr10e-and-animals` (head eed076a5e, no PR yet)
+## A. Pixel fixes — draft PR #1210 (source owner: Sol; publication: coordinator)
+
+Original authored head `eed076a5e` on `claude/pixel-hdr10e-and-animals` is
+preserved in the preparation branch `codex/cinema-pixel-hdr10e`, with current
+main's documentation incorporated. PR #1210 remains the delivery vehicle.
 
 **What it fixes:**
 1. **Avatar on a Pixel 11 never got HDR10-E.** The Pixel has no DV decoder, and the decision gave it a progressive remux of the HDR10 base. HDR10-E is applied only on an HLS session. With Developer → DV processing (`playback.dolby_vision_hdr_processing`) on, `routes_through_processed_hdr10` (`crates/plurxd/src/http/stream.rs`) now makes such a delivery a copy over HLS (`requires_hls: true`, reason named).
 2. **Animals' fallback transcode answered 500.** Its 2160p continuous AVC primary is outside H.264 High@5.0 (`decoder plan refused: continuous_video_envelope is invalid`). `continuous_candidates_from_workers(workers, rate)` (`crates/plurxd/src/http/hls/create.rs`) now offers only rows inside `continuous_avc_envelope_accepts` (made `pub`) at the source's measured rate, and none when the rate is unmeasured.
 
-**Status:** clippy passed on the first commit, and the catalog tests pass. `processed_hdr10_setting_routes_a_non_dv_client_over_hls` needs a valid run of the second commit.
+**Status:** source prepared, not deployed. The earlier clippy/catalog claims
+are inherited and do not establish this complete candidate's qualification;
+retained stale-binary runs are not valid evidence. Source-bound compiler/static
+receipts must cover the intended complete candidate. Regression tests are
+written but are not run during preparation.
 
 **Finish:**
-1. Build and run the filtered tests plus clippy (`-D warnings`) on a GPU test node.
-2. Open the PR, review, and run the fast lane.
+1. Compile and statically inspect the complete candidate with the pinned toolchain; retain exact source/archive identity and true exit statuses.
+2. Obtain one independent Fable adversarial review of the completed PR, fix findings, then run the affected filtered tests and fast lane once. Retry only failed or genuinely invalidated checks. Keep the draft PR's owner, status, evidence and next steps current.
 3. Merge with:
    - `Regression-Test: crates/plurxd/src/http/tests.rs::processed_hdr10_setting_routes_a_non_dv_client_over_hls`
    - `Regression-Test: crates/plurxd/src/http/hls/tests/chunk_06.rs::continuous_catalog_offers_only_rows_inside_the_avc_level_envelope`
