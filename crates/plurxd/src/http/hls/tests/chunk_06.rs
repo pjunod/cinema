@@ -5557,7 +5557,7 @@ async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection
         index: 2, codec: "eac3".into(), channels: Some(6), sample_rate: Some(48_000),
         channel_layout: Some("5.1".into()), language: None, title: None, default: true,
     }];
-    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["sdr","hdr10"],"max_height":2160}],
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["sdr","pq"],"max_height":2160}],
         "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls","hls_hevc_sample_entries":["hvc1"],"audio":["aac","eac3"],
         "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
             {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}]}"#);
@@ -5589,12 +5589,14 @@ async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection
         assert_eq!(query.copy_contract, Some((true, true, true)), "nonzero offset requires audio encoding");
         let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
         let mut request = body().into_request(file.id, 180);
+        let unselected_fingerprint = request.durable_intent_fingerprint(&principal);
+        request.candidate_context = Some(Box::new(TranscodeManager::candidate_context(&candidate)));
         let fingerprint = request.durable_intent_fingerprint(&principal);
-        let mut context = TranscodeManager::candidate_context(&candidate);
+        assert_ne!(fingerprint, unselected_fingerprint, "selected candidate binds intent");
+        let context = request.candidate_context.as_mut().expect("selected candidate");
         context.catalog_query = Some(query.clone());
         context.canonical_caps = Some(caps.clone());
         context.planning_snapshot = Some(Arc::new(snapshot.clone()));
-        request.candidate_context = Some(Box::new(context));
         assert_eq!(request.durable_intent_fingerprint(&principal), fingerprint,
             "catalog provenance does not change original client intent bytes");
         apply_plan_review(&mut request, review());
@@ -5695,7 +5697,7 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
         for route in ["native", "dv-declined", "converted-fallback"] {
             let mut caps_json = serde_json::json!({"v":2,
                 "video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],
-                    "present":["sdr","hdr10"],"max_height":2160}],
+                    "present":["sdr","pq"],"max_height":2160}],
                 "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls",
                 "hls_hevc_sample_entries":["hvc1"],"audio":["aac"],
                 "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]});
@@ -5738,12 +5740,14 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
             let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
             let mut request = body.into_request(file.id, 2160);
             request.audio_claim = plurx_core::playback::audio::AudioClaim::from_caps(&caps).expect("claim");
+            let unselected_fingerprint = request.durable_intent_fingerprint(&principal);
+            request.candidate_context = Some(Box::new(TranscodeManager::candidate_context(&candidate)));
             let fingerprint = request.durable_intent_fingerprint(&principal);
-            let mut context = TranscodeManager::candidate_context(&candidate);
+            assert_ne!(fingerprint, unselected_fingerprint, "selected candidate binds intent");
+            let context = request.candidate_context.as_mut().expect("selected candidate");
             context.catalog_query = Some(query.clone());
             context.canonical_caps = Some(caps.clone());
             context.planning_binding = Some(crate::media_pool::PlanningBinding::from_snapshot(&snapshot));
-            request.candidate_context = Some(Box::new(context));
             assert_eq!(request.durable_intent_fingerprint(&principal), fingerprint);
             apply_plan_review(&mut request, review());
             normalize_catalog_selection(&mut request, 2160, true).expect("ordinary Remux");

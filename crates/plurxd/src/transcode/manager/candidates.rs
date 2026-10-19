@@ -2002,7 +2002,7 @@ mod snapshot_catalog_regression {
             Some("main10")
         );
         let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
-            "v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["hdr10"],"max_width":320,"max_height":180}],
+            "v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["pq"],"max_width":320,"max_height":180}],
             "containers":["mp4"],"transports":["hls"],"dv_transport":"hls",
             "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
         })).expect("canonical P8 caps");
