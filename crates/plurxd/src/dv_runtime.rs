@@ -1694,6 +1694,21 @@ mod processed_selection_has_no_software_gates {
         assert!(!after_setting.contains("Ok(None)"), "{after_setting}");
     }
 
+    /// A Dolby Vision display's converted Profile 7 copy never reached the
+    /// reconstructed 8.1: the entry point returned for every DV copy before
+    /// reading FEL re-encode. Only a native (unconverted) DV copy is silent.
+    #[test]
+    fn a_converted_dv_copy_is_offered_the_reconstructed_profile81() {
+        let body = entry_body();
+        let silent = body
+            .split_once("let Some(original) = request.candidate_context")
+            .expect("candidate context read")
+            .0;
+        assert!(silent.contains("convert_dolby_vision: true"), "{silent}");
+        assert!(silent.contains("!profile81"), "{silent}");
+        assert!(body.contains("preferences.fel_reencode"), "{body}");
+    }
+
     #[test]
     fn every_catalog_start_is_offered_processing() {
         let source = include_str!("http/hls/create.rs");

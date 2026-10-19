@@ -1280,17 +1280,31 @@ impl TranscodeManager {
         #[cfg(target_os = "linux")]
         {
             use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
-            // Silent only where HDR10-E is not what this play is: a native
-            // Dolby Vision display (the DV route serves it), an SDR output,
-            // or the Developer-tab setting off. Everything after the setting
-            // check names its reason in the plan notes.
-            if matches!(
+            // Two processed destinations. A Profile 7 copy converted to 8.1
+            // for a Dolby Vision display becomes the reconstructed 8.1 (the
+            // FEL rebuilt into the picture, a new RPU) under FEL re-encode.
+            // Any other HDR10 delivery becomes HDR10-E under Dolby Vision
+            // processing.
+            let profile81 = matches!(
                 request.kind,
                 SessionKind::Copy {
-                    preserve_dolby_vision: true,
+                    convert_dolby_vision: true,
                     ..
                 }
-            ) {
+            );
+            // Silent only where no processed destination is what this play
+            // is: a native Dolby Vision copy (the display applies the RPU),
+            // an SDR output, or the Developer-tab setting off. Everything
+            // after the setting check names its reason in the plan notes.
+            if !profile81
+                && matches!(
+                    request.kind,
+                    SessionKind::Copy {
+                        preserve_dolby_vision: true,
+                        ..
+                    }
+                )
+            {
                 return Ok(None);
             }
             let Some(original) = request.candidate_context.as_ref() else {
@@ -1299,7 +1313,10 @@ impl TranscodeManager {
             // Compatible HDR10 copy does not set the legacy re-encode flag.
             // Its accepted destination still permits preference-driven DV
             // processing, subject to the actual completed decoder contract.
-            if !hdr10_intent && original.selected_candidate.grade != OutputGrade::Hdr10 {
+            if !profile81
+                && !hdr10_intent
+                && original.selected_candidate.grade != OutputGrade::Hdr10
+            {
                 return Ok(None);
             }
             let Some(planning) = self
@@ -1308,10 +1325,22 @@ impl TranscodeManager {
             else {
                 return Ok(None);
             };
-            if !Self::vod_dv_preferences_from_snapshot(&planning).hdr_processing
-                || !matches!(planning.file.dolby_vision.profile, Some(5 | 7 | 8))
-            {
+            let preferences = Self::vod_dv_preferences_from_snapshot(&planning);
+            let enabled = if profile81 {
+                preferences.fel_reencode
+            } else {
+                preferences.hdr_processing
+            };
+            if !enabled || !matches!(planning.file.dolby_vision.profile, Some(5 | 7 | 8)) {
                 return Ok(None);
+            }
+            if profile81
+                && (planning.file.dolby_vision.profile != Some(7)
+                    || planning.file.dolby_vision.el_present == Some(false))
+            {
+                return Err(
+                    "FEL re-encode needs a Profile 7 source with its enhancement layer".into(),
+                );
             }
             // The setting is on for a DV source: from here every decline is
             // reported with the ordinary start it falls back to.
@@ -1324,10 +1353,13 @@ impl TranscodeManager {
             let Some(caps) = original.canonical_caps.as_ref() else {
                 return Err("the client did not report its playback capabilities".into());
             };
-            if !caps
-                .hls_hevc_sample_entries
-                .as_ref()
-                .is_some_and(|entries| entries.iter().any(|entry| entry == "hvc1"))
+            // The converted 8.1 copy this replaces already established the
+            // client's Dolby Vision HLS signalling; HDR10-E is new HEVC.
+            if !profile81
+                && !caps
+                    .hls_hevc_sample_entries
+                    .as_ref()
+                    .is_some_and(|entries| entries.iter().any(|entry| entry == "hvc1"))
                 || !caps.containers.iter().any(|container| container == "mp4")
                 || !caps.transports.iter().any(|transport| transport == "hls")
             {
@@ -1367,8 +1399,12 @@ impl TranscodeManager {
             }
             let mut trial = request.clone();
             trial.request_id = Some(recovery.incarnation_id.clone());
-            trial.kind = SessionKind::Transcode { height };
-            trial.hdr10 = true;
+            // The 8.1 destination is chosen from the converted copy's kind
+            // (`vod_dv_processing_from_snapshot`), so that trial keeps it.
+            if !profile81 {
+                trial.kind = SessionKind::Transcode { height };
+                trial.hdr10 = true;
+            }
             if matches!(request.kind, SessionKind::Copy { .. }) {
                 // The copy route's retained passthrough/E-AC-3 answer cannot
                 // describe a new reconstructed AAC producer. Resolve the

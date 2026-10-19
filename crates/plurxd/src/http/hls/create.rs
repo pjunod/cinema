@@ -1306,10 +1306,9 @@ fn session_delivered_processing_shape(
     grade: plurx_core::transcode::OutputGrade,
     processed_dv_profile: Option<u8>,
 ) -> (Option<&'static str>, Option<u8>) {
-    if processed_dv_profile == Some(8)
-        && grade == plurx_core::transcode::OutputGrade::Hdr10
-        && matches!(kind, crate::transcode::SessionKind::Transcode { .. })
-    {
+    // A reconstructed 8.1 is processed whatever kind carried it: the
+    // converted copy it replaces keeps its `Copy` kind.
+    if processed_dv_profile == Some(8) && grade == plurx_core::transcode::OutputGrade::Hdr10 {
         return (Some("dolby_vision"), Some(8));
     }
     (
@@ -1349,9 +1348,7 @@ pub(super) fn session_enhancement(
     let (delivered, _) =
         session_delivered_processing_shape(source, kind, grade, processed_dv_profile);
     let (_, preserve, convert) = session_delivery_shape(kind);
-    let route = if processed_dv_profile == Some(8)
-        && matches!(kind, crate::transcode::SessionKind::Transcode { .. })
-    {
+    let route = if processed_dv_profile == Some(8) {
         EnhancementRoute::ReconstructedProfile81 {
             fel_contributed: processed_fel.unwrap_or(profile == Some(7) && has_el),
         }

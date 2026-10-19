@@ -3407,6 +3407,54 @@ async fn negotiated_relay_uses_owner_local_acquisition_and_preserves_cached_mani
 /// whether the first window's report has arrived: a create that beats its
 /// report must still describe HDR10-E, and a staged copy successor keeps the
 /// native DYN pill.
+/// The reconstructed 8.1 for a Dolby Vision display keeps the converted
+/// copy's `Copy` kind (that kind is what selects the 8.1 destination). It
+/// was described as the plain conversion — FEL "not used for this play" on
+/// a Studio Display — because only a `Transcode` kind counted as processed.
+#[test]
+fn a_reconstructed_profile81_copy_is_described_as_reconstructed() {
+    use plurx_core::playback::enhancement::EnhancementBadge;
+    use plurx_core::transcode::OutputGrade;
+    let file = dolby_vision_p7_file();
+    let converted = crate::transcode::SessionKind::Copy {
+        convert_dolby_vision: true,
+        aac: false,
+        preserve_dolby_vision: true,
+    };
+    assert_eq!(
+        session_delivered_processing_shape(Some(&file), &converted, OutputGrade::Hdr10, Some(8)),
+        (Some("dolby_vision"), Some(8))
+    );
+    let shown = session_enhancement(
+        Some(&file),
+        &converted,
+        OutputGrade::Hdr10,
+        Some(8),
+        Some(true),
+        None,
+        None,
+        None,
+    )
+    .expect("a Dolby Vision source");
+    assert_eq!(
+        shown.active,
+        [EnhancementBadge::Fel, EnhancementBadge::Rpu, EnhancementBadge::Dyn]
+    );
+    // The plain conversion still says why the FEL is unused.
+    let plain = session_enhancement(
+        Some(&file),
+        &converted,
+        OutputGrade::Hdr10,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("a Dolby Vision source");
+    assert_eq!(plain.active, [EnhancementBadge::Dyn]);
+}
+
 #[test]
 fn the_enhancement_follows_the_selected_plan_before_any_report() {
     use plurx_core::playback::enhancement::EnhancementBadge;
