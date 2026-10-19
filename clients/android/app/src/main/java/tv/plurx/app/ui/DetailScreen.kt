@@ -238,6 +238,7 @@ private fun DetailContent(
         add("detail:back")
         if (seriesPlayback != null || best != null && item.isPlayable) add("detail:play")
         if (canResume && best != null && item.isPlayable) add("detail:start-over")
+        if (annotations != null && (item.kind == "movie" || item.kind == "show")) { add("detail:watchlist"); add("detail:favorite") }
         if (item.isPlayableVideo && detail.files.size > 1 && best != null) add("choice:Version")
         if (item.isPlayableVideo && best != null) { add("choice:Audio"); add("choice:Subtitles") }
         addAll(detail.editions.map { "detail-edition:${it.id}" })
@@ -288,7 +289,16 @@ private fun DetailContent(
                     }
                 }
                 item.overview?.takeIf { it.isNotBlank() }?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodyMedium) }
-                Actions(vm = vm, item = item, annotations = annotations, onAnnotations = { annotations = it }, files = if (item.isPlayableVideo && best != null) listOf(best) else detail.files,
+                Actions(vm = vm, item = item, annotations = annotations, onAnnotations = { annotations = it },
+                    onAnnotationsRevert = { list, attempted ->
+                        annotations = annotations?.let { now ->
+                            when {
+                                list == "watchlist" && now.watchlist == attempted -> now.copy(watchlist = !attempted)
+                                list == "favorite" && now.favorite == attempted -> now.copy(favorite = !attempted)
+                                else -> now
+                            }
+                        }
+                    }, files = if (item.isPlayableVideo && best != null) listOf(best) else detail.files,
                     seriesPlayback = seriesPlayback, resumeMs = resumeMs, canResume = canResume,
                     trackChoices = trackChoices, requestInitialFocus = formFactor == FormFactor.Television,
                     reading = detail.reading, onPlay = onPlay, onViewPhoto = onViewPhoto,
@@ -467,6 +477,7 @@ private fun Actions(
     item: Item,
     annotations: ItemAnnotations?,
     onAnnotations: (ItemAnnotations) -> Unit,
+    onAnnotationsRevert: (list: String, attempted: Boolean) -> Unit,
     files: List<MediaFileDto>,
     seriesPlayback: EpisodePlaybackTarget?,
     resumeMs: Long,
@@ -482,6 +493,7 @@ private fun Actions(
     onWatchedChanged: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    var listBusy by remember(item.id) { mutableStateOf(emptySet<String>()) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val formFactor = currentFormFactor()
     val offlineRecords by vm.offlineRecords.collectAsStateWithLifecycle()
@@ -693,26 +705,33 @@ private fun Actions(
         }
 
         annotations?.let { a ->
+            // One write per list at a time; a failure undoes only its own
+            // field, and only while that field still shows its change.
+            fun toggle(list: String) {
+                if (list in listBusy) return
+                listBusy = listBusy + list
+                val target = if (list == "watchlist") !a.watchlist else !a.favorite
+                onAnnotations(if (list == "watchlist") a.copy(watchlist = target) else a.copy(favorite = target))
+                scope.launch {
+                    val ok = catchingUnlessCancelled { vm.setListed(item.id, list, target) }.isSuccess
+                    if (ok) vm.refreshLists() else onAnnotationsRevert(list, target)
+                    listBusy = listBusy - list
+                }
+            }
             item {
-                TvOutlinedButton(onClick = {
-                    val next = a.copy(watchlist = !a.watchlist)
-                    onAnnotations(next)
-                    scope.launch {
-                        if (catchingUnlessCancelled { vm.setListed(item.id, "watchlist", next.watchlist) }.isFailure) onAnnotations(a)
-                    }
-                }) {
+                TvOutlinedButton(
+                    modifier = Modifier.remoteAction("detail:watchlist", if (a.watchlist) "On watchlist" else "Watchlist") { toggle("watchlist"); RemoteOutcome.Applied },
+                    onClick = { toggle("watchlist") },
+                ) {
                     Icon(if (a.watchlist) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder, contentDescription = null, modifier = Modifier.size(18.dp))
                     Text(if (a.watchlist) "  On watchlist" else "  Watchlist")
                 }
             }
             item {
-                TvOutlinedButton(onClick = {
-                    val next = a.copy(favorite = !a.favorite)
-                    onAnnotations(next)
-                    scope.launch {
-                        if (catchingUnlessCancelled { vm.setListed(item.id, "favorite", next.favorite) }.isFailure) onAnnotations(a)
-                    }
-                }) {
+                TvOutlinedButton(
+                    modifier = Modifier.remoteAction("detail:favorite", if (a.favorite) "Favorited" else "Favorite") { toggle("favorite"); RemoteOutcome.Applied },
+                    onClick = { toggle("favorite") },
+                ) {
                     Icon(if (a.favorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, contentDescription = null, modifier = Modifier.size(18.dp))
                     Text(if (a.favorite) "  Favorited" else "  Favorite")
                 }

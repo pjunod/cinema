@@ -874,6 +874,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun annotations(itemId: Long): ItemAnnotations = api().annotations(itemId)
 
+    /** Re-read the reader's lists after a toggle so Home matches on return. */
+    suspend fun refreshLists() {
+        val watchlist = catchingUnlessCancelled { api().list("watchlist").items }.getOrNull()
+        val favorites = catchingUnlessCancelled { api().list("favorite").items }.getOrNull()
+        _home.value = _home.value.copy(
+            watchlist = watchlist ?: _home.value.watchlist,
+            favorites = favorites ?: _home.value.favorites,
+        )
+    }
+
     /** Put an item on, or take it off, the reader's `watchlist` or `favorite` list. */
     suspend fun setListed(itemId: Long, list: String, listed: Boolean) {
         if (listed) api().addToList(itemId, list) else api().removeFromList(itemId, list)
