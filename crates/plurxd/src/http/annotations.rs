@@ -130,7 +130,7 @@ fn finished_since(
 ) -> bool {
     match kind {
         ItemKind::Show => rollup.is_some_and(|r| r.complete()),
-        _ => watch.is_some_and(|w| w.watched && w.updated_at.saturating_mul(1000) >= added_at_ms),
+        _ => watch.is_some_and(|w| w.watched && w.updated_at >= added_at_ms.div_euclid(1000)),
     }
 }
 

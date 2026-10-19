@@ -8,6 +8,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- Item pages show review-site scores: IMDb, Rotten Tomatoes and Metacritic (through the OMDb key in Settings, unused until now) and TMDB's user score, each with its own mark. They are fetched on first view and kept for two weeks.
+- A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
+
 ### Fixed
 
 - HDR10-E at 4K is produced faster. The processing helper renders into 16-bit rather than 32-bit float textures, converts to 10-bit Y'CbCr in one compute pass, and queues each frame's download so the GPU finishes one frame while the next is decoded. On an Intel Alder Lake test node a 2-second 4K window takes 0.9–1.1 s in the helper instead of 1.7 s, and 1.75 s instead of 2.2 s with the hardware encoder (Profile 7 FEL); Profile 8 takes 2.1 s instead of 2.55 s, still short of real time there.
