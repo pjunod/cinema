@@ -34,7 +34,14 @@ written but are not run during preparation.
    - `Regression-Test: crates/plurxd/src/http/hls/tests/chunk_06.rs::continuous_catalog_offers_only_rows_inside_the_avc_level_envelope`
 4. After deploy, device check: Avatar on the Pixel shows the HDR10-E badge and FEL/RPU; Animals' fallback starts.
 
-## B. FEL→Profile 8.1 for DV displays — branch `claude/fel-p81-catalog-starts` (head 1eeb0542d, no PR, **never validly built**)
+## B. FEL→Profile 8.1 for DV displays — draft PR #1211 (source owner: Sol; publication: coordinator)
+
+Original authored head `1eeb0542d` is preserved on preparation branch
+`codex/cinema-fel-p81-catalog`. The intended Pixel candidate `08b51db215`
+and its documentation base are integrated for preparation only. B's final
+independent review and merge still wait for actual Pixel landing and any
+necessary base reconciliation. This candidate has no valid compiler or unit
+receipt yet; the earlier stale-binary output is not evidence.
 
 **Symptom:** Safari on a Studio Display, Avatar (P7 FEL), FEL re-encode on, gets the plain P7→8.1 conversion with "FEL: not used for this play" and no reason. The reconstructed 8.1 (FEL rebuilt, re-encoded, new RPU) is never reached, although #1199's physical test proves that path.
 
@@ -55,9 +62,25 @@ written but are not run during preparation.
 
 **Main risk:** an Encode-route candidate on a Copy-kind request. Check every place that assumes Encode ⇒ Transcode: `candidates.rs` restore (~1399, ~1447), successor predicates at the top of `manager/create.rs`, link receipts. Alternative if fragile: an explicit destination field on `SessionRequest` (note `deny_unknown_fields`), with a Transcode-kind trial. Also check `trial.audio_delivery = None` for copies and that `encoded_client_compatible` accepts the 8.1 output for Safari's caps.
 
+**Preparation findings, not final review:** the retained binding normalizes an
+encoded delivery to Transcode, while retained acquisition requires its kind
+to equal the request kind and resolves audio according to that request kind.
+The processed reuse scope also currently excludes preserving-DV copies and
+requires the HDR-processing preference, so a FEL-only Profile 8.1 start cannot
+reuse its predecessor through that scope. A frontier thinker must settle an
+explicit destination/Transcode-carrier design before implementation proceeds;
+do not relax retained equality or processed restoration refusals to hide the
+mismatch. Copy preparation also swallows detailed processing errors, and the
+unsupported-profile early return precedes the promised named Profile 8.1
+decline. These source contracts remain unfinished.
+
 **Finish:**
-1. Build and test; prove both new daemon tests fail on main.
-2. Draft PR, adversarial review, fast lane.
+1. Resolve the destination, reuse, audio and mixed-version contracts; complete
+   source regressions and source-bound compiler/static preparation. No units
+   during preparation.
+2. Obtain one independent frontier adversarial review of the complete PR,
+   fix findings, then run the affected tests, required old-code sensitivity
+   checks and fast lane once. Retry only failed or invalidated checks.
 3. Merge with the two daemon `Regression-Test:` lines.
 4. Device check after deploy: Safari plus Studio Display, Avatar from 10 minutes in, expecting FEL+RPU+DYN and "FEL: full enhancement layer reconstructed". Also check there is no stutter.
 
