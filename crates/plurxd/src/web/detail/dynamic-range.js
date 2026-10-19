@@ -126,7 +126,8 @@ function clearEffectiveProcessing(p){
 // (StartResponse.enhancement, crates/plurx-core/src/playback/enhancement.rs).
 // The server computes it so every client renders the same pills and lines
 // rather than reconstructing the delivery route; this only refuses what it
-// cannot render. Absent (no Dolby Vision, SDR output, an old server) is null.
+// cannot render. Absent (no Dolby Vision, an old server) is null; an SDR
+// play has details and no active badges.
 function playbackEnhancementFromWire(raw){
   const known=['FEL','RPU','DYN'];
   if(!raw||typeof raw!=='object'||!Array.isArray(raw.active)||!Array.isArray(raw.details)) return null;

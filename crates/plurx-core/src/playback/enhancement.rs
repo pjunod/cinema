@@ -55,6 +55,9 @@ pub enum EnhancementRoute {
     ProcessedHdr10 { fel_contributed: bool },
     /// The HDR10 base layer with the Dolby Vision metadata removed.
     Hdr10Base,
+    /// Tone-mapped to SDR for an SDR display: nothing of Dolby Vision reaches
+    /// the picture, and the rows say so rather than showing nothing.
+    ToneMappedSdr,
     /// SDR or any other output: no Dolby Vision enhancement applies.
     Other,
 }
@@ -200,6 +203,18 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
                 "DYN: not carried — HDR10 has no Dolby Vision dynamic metadata",
             ));
         }
+        EnhancementRoute::ToneMappedSdr => {
+            let why = "not used — this display gets SDR, tone-mapped from the HDR10 base";
+            if has_el {
+                details.push(detail(Fel, false, format!("FEL: {why}")));
+            }
+            details.push(detail(Rpu, false, format!("RPU: {why}")));
+            details.push(detail(
+                Dyn,
+                false,
+                "DYN: not carried — SDR has no Dolby Vision dynamic metadata",
+            ));
+        }
         EnhancementRoute::Other => return None,
     }
     let active = details
@@ -303,11 +318,30 @@ mod tests {
     }
 
     #[test]
-    fn non_dv_sources_and_sdr_show_nothing() {
+    fn non_dv_sources_and_other_outputs_show_nothing() {
         let mut none = facts(EnhancementRoute::Hdr10Base);
         none.source_profile = None;
         assert!(playback_enhancement(&none).is_none());
         assert!(playback_enhancement(&facts(EnhancementRoute::Other)).is_none());
+    }
+
+    /// An SDR display still learns what the source carries and why none of
+    /// it is in its picture: rows, no pills.
+    #[test]
+    fn a_tone_mapped_sdr_play_lists_every_enhancement_as_unused() {
+        let shown =
+            playback_enhancement(&facts(EnhancementRoute::ToneMappedSdr)).expect("DV source");
+        assert!(shown.active.is_empty());
+        assert_eq!(
+            shown.details.iter().map(|d| d.badge).collect::<Vec<_>>(),
+            [Fel, Rpu, Dyn]
+        );
+        assert!(shown.details.iter().all(|d| !d.active));
+        assert!(
+            shown.details[0].text.contains("SDR"),
+            "{}",
+            shown.details[0].text
+        );
     }
 
     #[test]
