@@ -921,6 +921,7 @@ impl Drop for ProcessedProbeLease {
 }
 
 impl PreparedRootAdmission {
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn production_evidence(&self) -> Option<crate::vodencode::ActiveProductionEvidence> {
         if self.reused_parent.is_some() {
             #[cfg(any(target_os = "linux", test))]
