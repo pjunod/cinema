@@ -11,6 +11,7 @@ pub(crate) const SCHEMA: &str = include_str!("dv_title_jobs.sql");
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TitleDemand {
     pub file_id: i64,
+    /// Monotonic source/probe/scanner demand generation, not a content hash.
     pub probe_revision: i64,
     pub source_size: i64,
     pub source_mtime: i64,
@@ -56,7 +57,7 @@ pub(super) async fn bind<T: QueueSql>(
     store: &T,
     revision: i64,
     scanner: &str,
-) -> Result<bool, StoreError> {
+) -> Result<Option<i64>, StoreError> {
     if revision <= 0 || !digest(scanner) {
         return Err(StoreError::Task("invalid title scanner binding".into()));
     }
@@ -64,11 +65,23 @@ pub(super) async fn bind<T: QueueSql>(
     let rows=store.queue_sql(r#"
 INSERT INTO background_job_commands(id,operation,request_json,result_json)
 SELECT json_extract($1,'$.id'),'bind_dv_title',json($1),json_object(
- 'file_id',file_id,'revision',revision,'changed',scanner_digest IS NOT json_extract($1,'$.scanner'),'bound',json('true'))
+ 'file_id',file_id,'previous_revision',revision,
+ 'revision',CASE WHEN scanner_digest IS NOT NULL AND scanner_digest IS NOT json_extract($1,'$.scanner')
+  THEN (SELECT seq+1 FROM sqlite_sequence WHERE name='dv_title_jobs_demand') ELSE revision END,
+ 'rotate',scanner_digest IS NOT NULL AND scanner_digest IS NOT json_extract($1,'$.scanner'),
+ 'changed',scanner_digest IS NOT json_extract($1,'$.scanner'),'bound',json('true'))
 FROM dv_title_jobs_demand WHERE revision=json_extract($1,'$.revision')
+ AND (scanner_digest IS NULL OR scanner_digest IS json_extract($1,'$.scanner')
+  OR (SELECT seq FROM sqlite_sequence WHERE name='dv_title_jobs_demand')<9223372036854775807)
 RETURNING result_json
 "#.into(),encode(&body)?,true,true).await?;
-    Ok(!rows.is_empty())
+    #[derive(Deserialize)]
+    struct Bound {
+        revision: i64,
+    }
+    rows.first()
+        .map(|row| decode::<Bound>(row).map(|bound| bound.revision))
+        .transpose()
 }
 
 pub(super) async fn publish<T: QueueSql>(

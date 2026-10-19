@@ -1,4 +1,8 @@
 //! One owned future inside the existing source-probe scheduler. No new daemon.
+#[cfg(test)]
+#[path = "title_work_tests.rs"]
+mod tests;
+
 use super::{now_ms, snapshot};
 use crate::{
     background_jobs::ActiveBackgroundJob, state::AppState, vodencode::dv_runtime::ToolSet,
@@ -7,8 +11,8 @@ use plurx_core::{
     error::StoreError,
     store::{
         background_jobs::{
-            CandidateQuery, ClaimJob, EnqueueJob, EnqueueOutcome, JobKind, JobPayload, JobRequest,
-            JobSettlement,
+            CandidateCursor, CandidateQuery, ClaimJob, EnqueueJob, EnqueueOutcome, JobKind,
+            JobPayload, JobRequest, JobSettlement,
         },
         dv_title_jobs::{TitleDemand, TitleOutput},
     },
@@ -21,6 +25,7 @@ pub(super) struct TitleTask {
     cancel: CancellationToken,
     job_id: String,
     probe_pipeline: String,
+    probe_after: Option<CandidateCursor>,
 }
 impl TitleTask {
     /// Discovery is bounded by the existing runner tick. Durable demand survives
@@ -54,7 +59,7 @@ impl TitleTask {
             *after = 0;
             return Ok(None);
         }
-        for demand in demands {
+        for mut demand in demands {
             *after = demand.probe_revision;
             let Some(file) = state.store.get_file(demand.file_id).await? else {
                 continue;
@@ -66,13 +71,14 @@ impl TitleTask {
             {
                 continue;
             }
-            if !state
+            let Some(revision) = state
                 .store
                 .bind_dv_title_demand(demand.probe_revision, &scanner)
                 .await?
-            {
+            else {
                 continue;
-            }
+            };
+            demand.probe_revision = revision;
             use sha2::{Digest, Sha256};
             let identity = hex::encode(Sha256::digest(
                 serde_json::to_vec(&(
@@ -169,6 +175,7 @@ impl TitleTask {
                 cancel,
                 job_id: id,
                 probe_pipeline,
+                probe_after: None,
             }));
         }
         Ok(None)
@@ -191,11 +198,14 @@ impl TitleTask {
             .job_candidates(CandidateQuery {
                 node_id: state.node_id.clone(),
                 kinds: vec![JobKind::MediaProbe],
-                after: None,
+                after: self.probe_after.clone(),
                 now_ms: now,
                 limit: 128,
             })
             .await?;
+        // Keep the keyset walk across scheduler ticks. A fixed first page can
+        // hide runnable probes behind locally unreadable or stale candidates.
+        self.probe_after = page.next;
         for job in page.jobs {
             let Ok(JobPayload::MediaProbe {
                 file_id,

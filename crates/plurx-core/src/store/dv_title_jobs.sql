@@ -2,8 +2,6 @@
 -- background job token owns execution. AUTOINCREMENT prevents source/reprobe ABA.
 CREATE TABLE IF NOT EXISTS dv_title_jobs_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=1));
 -- next statement
-INSERT INTO dv_title_jobs_schema VALUES(1,1) ON CONFLICT(singleton) DO NOTHING;
--- next statement
 CREATE TABLE IF NOT EXISTS dv_title_jobs_demand(
  revision INTEGER PRIMARY KEY AUTOINCREMENT,
  file_id INTEGER NOT NULL UNIQUE REFERENCES files(id) ON DELETE CASCADE,
@@ -75,7 +73,7 @@ END;
 -- next statement
 CREATE TRIGGER IF NOT EXISTS dv_title_jobs_terminal
 AFTER UPDATE OF state ON background_jobs
-WHEN NEW.kind='dv_title_scan' AND NEW.state IN ('succeeded','failed','cancelled')
+WHEN NEW.kind='dv_title_scan' AND NEW.state IN ('cancelling','succeeded','failed','cancelled')
 BEGIN
  UPDATE dv_title_jobs_demand SET terminal=1
  WHERE revision=json_extract(NEW.payload_json,'$.probe_revision')
@@ -104,6 +102,15 @@ END;
 CREATE TRIGGER IF NOT EXISTS dv_title_jobs_bind
 AFTER INSERT ON background_job_commands WHEN NEW.operation='bind_dv_title'
 BEGIN
+ -- Rotate a previously bound scanner generation before reuse, including A->B->A.
+ -- The command selected the next AUTOINCREMENT value in this same transaction.
+ -- Deleting the old generation invalidates its jobs before the new one exists.
+ DELETE FROM dv_title_jobs_demand
+ WHERE revision=json_extract(NEW.result_json,'$.previous_revision')
+  AND json_extract(NEW.result_json,'$.rotate')=1;
+ INSERT INTO dv_title_jobs_demand(revision,file_id,scanner_digest)
+ SELECT json_extract(NEW.result_json,'$.revision'),json_extract(NEW.result_json,'$.file_id'),
+  json_extract(NEW.request_json,'$.scanner') WHERE json_extract(NEW.result_json,'$.rotate')=1;
  UPDATE dv_title_jobs_demand SET scanner_digest=json_extract(NEW.request_json,'$.scanner'),terminal=0
  WHERE revision=json_extract(NEW.result_json,'$.revision') AND json_extract(NEW.result_json,'$.changed')=1;
  UPDATE files SET probe_json=json_remove(probe_json,'$.plurx_dv_title_v1')
@@ -112,8 +119,12 @@ BEGIN
 END;
 -- next statement
 -- Existing probed titles acquire demand once during migration; bootstrap replay
--- does not resurrect a terminal request or replace an active revision.
+-- does not resurrect terminal work or reseed a source awaiting fresh probe facts.
+-- The marker is committed after this seed in the same migration transaction.
 INSERT INTO dv_title_jobs_demand(file_id)
 SELECT id FROM files WHERE video_codec='hevc' AND dv_profile IN (5,7,8)
  AND dv_rpu_present=1 AND json_valid(probe_json)
+ AND NOT EXISTS(SELECT 1 FROM dv_title_jobs_schema WHERE singleton=1)
 ON CONFLICT(file_id) DO NOTHING;
+-- next statement
+INSERT INTO dv_title_jobs_schema VALUES(1,1) ON CONFLICT(singleton) DO NOTHING;

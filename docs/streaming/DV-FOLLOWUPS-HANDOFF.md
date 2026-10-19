@@ -63,13 +63,17 @@ written but are not run during preparation.
 
 ## C. Display-targeted HDR10-E — PR A of [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md)
 
-**Implementation update (2026-10-19):** Sol/Astra owns source on
+**Implementation update (2026-10-19):** Sol 6.1 owns current source on
 `codex/cinema-display-target-a`; coordinator owns publication. The build plan's
 current checkpoint and accepted explicit Annex B.2/B.3 RGB shader supersede the
 original built-in-libplacebo recipe below. API 374 inspection proved modified
 knee/adaptive/LMS behavior; no built-in ST2094-10 execution is claimed. Clip is
 explicit, without perceptual-equivalence claims. Scanner/policy/report/runtime
-and controls are authored, not qualified. Complete review/fixes and the once-only
+and controls are authored, not qualified. Durable title jobs now retain monotonic
+source/scanner generations, manual-cancel suppression and bounded ordinary-probe
+priority handoff; lifecycle/backend/reap regressions are authored, not executed.
+Prior Astra authorship is retained. Explicit-path local compiler/static checks
+do not establish Linux or numerical acceptance. Complete review/fixes and the once-only
 affected batch remain. Metadata/settings/client selection stay later PRs.
 
 1. **Title L1 scan,** stored with the DV facts:

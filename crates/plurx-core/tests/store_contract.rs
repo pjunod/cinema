@@ -21,6 +21,8 @@ use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[path = "store_contract/dv_title_jobs.rs"]
+mod dv_title_jobs;
 #[path = "store_contract/invitations.rs"]
 mod invitations;
 #[path = "store_contract/jellyfin_catalog.rs"]

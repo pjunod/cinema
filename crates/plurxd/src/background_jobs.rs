@@ -1248,6 +1248,7 @@ impl JobFence {
         Ok(published)
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) async fn publish_dv_title(
         &self,
         output: plurx_core::store::dv_title_jobs::TitleOutput,

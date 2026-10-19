@@ -63,6 +63,8 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                     if let Some(work) = title.take() {
                         work.stop().await;
                     }
+                    // Revisit ordinary priority order after the child is reaped.
+                    cursor = None;
                     yielded = true;
                 }
                 Ok(false) => {}
@@ -86,7 +88,8 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
             false
         };
         #[cfg(target_os = "linux")]
-        if title.is_none() && !yielded && !published && !shutdown.is_cancelled() {
+        if title.is_none() && cursor.is_none() && !yielded && !published && !shutdown.is_cancelled()
+        {
             match title_work::TitleTask::start(&state, &boot, &mut title_after).await {
                 Ok(work) => title = work,
                 Err(error) => tracing::warn!(%error,"title demand unavailable"),

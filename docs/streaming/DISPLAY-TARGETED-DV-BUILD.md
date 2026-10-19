@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** PR A implementation in progress; not qualified · **Updated:** 2026-10-19 · **Owner:** Sol/Astra (source), coordinator (publication) ·
+**Status:** PR A implementation in progress; not qualified · **Updated:** 2026-10-19 · **Owner:** Sol 6.1 (current source; prior Astra authorship retained), coordinator (publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 ## PR A implementation checkpoint
@@ -14,7 +14,7 @@
   L1 and per-frame target-operation receipts are asserted, not yet exercised.
   Production wrappers still select master. The unchanged helper bundle has
   static packaging/ABI proof; no numerical or physical qualification is claimed.
-- **Durable acquisition correction authored, not compiled/qualified:** ordinary
+- **Durable acquisition correction authored, not qualified:** ordinary
   facts again use production `leaf-probe-v2`; comparison with pre-C source found
   no changed ordinary conclusions warranting a library-wide reprobe. A shared
   SQLite/Hiqlite demand outbox seeds current DV facts. `DvTitleScan` v1 contains
@@ -25,18 +25,40 @@
   cause cancellation, child reap and release before ordinary admission. No new
   detached loop, watchdog or feature gate. Yield restarts the whole scan;
   sustained ordinary work can starve completion, with no partial eligibility.
-- Manual cancellation suppresses the same generation, unlike scheduler Yield.
-  Source/probe/scanner changes invalidate old work. Aggregate attachment and
+- Manual cancellation suppresses the same generation immediately on cancelling,
+  unlike scheduler Yield. Rebinding the same scanner cannot clear suppression.
+  Scanner A→B→A rotates the existing monotonic demand revision, so the final A
+  cannot reuse an old terminal request identity. Initial migration seeding runs
+  only before the extension marker is committed; replay cannot recreate demand
+  after a source-only update awaiting fresh ordinary facts.
+- Priority observation retains its bounded keyset cursor across scheduler ticks,
+  including beyond 128 locally unreadable probes. New title admission waits for
+  the ordinary walk to finish. Preemption awaits the child and releases admission
+  before restarting ordinary priority order. No separate polling mechanism.
+- Source/probe/scanner changes invalidate old work.
+  Aggregate attachment and
   settlement share a live-attempt/source-fenced transaction; attachment does not
   self-enqueue. Old unfiltered list/detail and UUID cancellation were inspected
   in source only; explicit new-kind filters hit a closed old enum, while retry
   and execution reject unsupported kinds. No mixed-version execution claim.
   Migration 114 is provisional behind this snapshot's existing 113; actual main/B
   schema numbering must be reconciled before landing.
-- Remaining: pinned controller compilation, lifecycle/race regression coverage
-  (source/scanner ABA, cancellation versus Yield, backend parity and resource
-  handoff), actual B integration, independent review/fixes and the once-only
-  qualification batch. This checkpoint is not ready for final review.
+- Authored, unexecuted regressions cover publication/replay/no self-enqueue,
+  cancel/publication/Yield ordering, source/scanner/reprobe ABA and delete/reinsert,
+  restart suppression, backend priority/offline/resource blockers, nested triggers
+  in both recursive modes, one-shot seeding, candidate pagination, and real child
+  reap with exact one-thread admission. Store contracts share the SQLite/Hiqlite
+  backend harness; native execution remains post-review.
+- Platform gates now match the Linux-only runtime; yield observation borrows the
+  owned task mutably rather than requiring a Sync future or detached task.
+  Explicit-path local Rust 1.97.1 all-target checking, core Clippy and
+  Hiqlite-contract-feature compilation passed. These macOS checks exclude the
+  Linux-only runtime. Earlier native checkpoint failure remains a failure; a new
+  exact-source controller Linux receipt is still required. Early local checks
+  that selected Homebrew subcommands are diagnostic only, not pinned evidence.
+- Remaining: complete-candidate pinned controller compilation/static checks,
+  actual B integration/schema reconciliation, independent review/fixes and the
+  once-only qualification batch. This checkpoint is not ready for final review.
 - Baseline Rust 1.97.1 all-target checking and helper compilation against the
   pinned libplacebo API 374 succeeded; these are baseline, not candidate receipts.
 - Complete-title scan groundwork is being implemented: one software base decoder,
@@ -58,6 +80,11 @@
   No units or controls have run: complete independent review/fixes precede their
   single affected batch. Final compilation/static checks, actual FEL-catalog B
   landing reconciliation and draft paperwork remain.
+- The shader controls also include independently derived, public-standard
+  constant-pixel witnesses: L1 average changes at 400 nits and L1 maximum changes
+  at 4000 nits must move in the predicted direction and match their own expected
+  10-bit codes within two. Hash inequality alone is insufficient. These are
+  authored controls, not observed numerical passes.
 - The scanner requires contiguous observed display-frame timing, clean decoder
   drain and an independent selected-video count/duration. Unknown endpoints or
   truncated containers returning clean EOF cannot claim completeness. Negative

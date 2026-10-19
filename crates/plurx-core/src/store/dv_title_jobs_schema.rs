@@ -79,4 +79,100 @@ mod tests {
             .expect("partial fixture");
         assert!(verify_sqlite(&conn).is_err());
     }
+
+    #[test]
+    fn title_source_only_update_and_schema_replay_cannot_reseed_stale_facts() {
+        for recursive in [false, true] {
+            let conn = rusqlite::Connection::open_in_memory().expect("fixture");
+            conn.pragma_update(None, "recursive_triggers", recursive)
+                .expect("trigger mode");
+            conn.execute_batch(DEPENDENCIES).expect("dependencies");
+            conn.execute_batch(
+                "INSERT INTO files VALUES(1,'/media/movie.mkv',100,1,'hevc',7,1,'{}');",
+            )
+            .expect("pre-migration probed source");
+            conn.execute_batch(super::super::dv_title_jobs::SCHEMA)
+                .expect("initial seed");
+            let revision: i64 = conn
+                .query_row("SELECT revision FROM dv_title_jobs_demand", [], |r| {
+                    r.get(0)
+                })
+                .expect("one initial demand");
+            conn.execute_batch("UPDATE files SET size=101 WHERE id=1")
+                .expect("source changed without fresh probe");
+            conn.execute_batch(super::super::dv_title_jobs::SCHEMA)
+                .expect("idempotent migration replay");
+            let count: i64 = conn
+                .query_row("SELECT count(*) FROM dv_title_jobs_demand", [], |r| {
+                    r.get(0)
+                })
+                .expect("no stale demand");
+            assert_eq!(count, 0, "recursive_triggers={recursive}");
+            conn.execute_batch("UPDATE files SET probe_json='{}' WHERE id=1")
+                .expect("fresh ordinary probe, even with identical facts");
+            let fresh: i64 = conn
+                .query_row("SELECT revision FROM dv_title_jobs_demand", [], |r| {
+                    r.get(0)
+                })
+                .expect("fresh demand");
+            assert!(fresh > revision);
+        }
+    }
+
+    #[test]
+    fn title_command_marker_prevents_nested_attach_invalidation_in_both_trigger_modes() {
+        for recursive in [false, true] {
+            let conn = rusqlite::Connection::open_in_memory().expect("fixture");
+            conn.pragma_update(None, "recursive_triggers", recursive)
+                .expect("trigger mode");
+            conn.execute_batch(DEPENDENCIES).expect("dependencies");
+            conn.execute_batch(super::super::dv_title_jobs::SCHEMA)
+                .expect("schema");
+            conn.execute_batch(
+                "INSERT INTO files VALUES(1,'/media/movie.mkv',100,1,'hevc',7,1,'{}');",
+            )
+            .expect("probed source");
+            let revision: i64 = conn
+                .query_row("SELECT revision FROM dv_title_jobs_demand", [], |r| {
+                    r.get(0)
+                })
+                .expect("demand");
+            conn.execute_batch(
+                r#"INSERT INTO background_job_commands VALUES('attach','publish_dv_title',
+                '{"output":{"file_id":1,"stats":{"schema":1}},"now_ms":1}',
+                '{"outcome":"published","file_id":1}');"#,
+            )
+            .expect("nested attach");
+            let after: i64 = conn
+                .query_row("SELECT revision FROM dv_title_jobs_demand", [], |r| {
+                    r.get(0)
+                })
+                .expect("same demand");
+            assert_eq!(after, revision, "recursive_triggers={recursive}");
+            let attached: i64 = conn
+                .query_row(
+                    "SELECT json_extract(probe_json,'$.plurx_dv_title_v1.schema') FROM files",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("aggregate not removed by nested invalidation");
+            assert_eq!(attached, 1);
+            let commands: i64 = conn
+                .query_row("SELECT count(*) FROM background_job_commands", [], |r| {
+                    r.get(0)
+                })
+                .expect("command consumed");
+            assert_eq!(commands, 0);
+            conn.execute_batch("UPDATE files SET mtime=2 WHERE id=1")
+                .expect("source-only supersession");
+            let aggregate: Option<String> = conn
+                .query_row(
+                    "SELECT json_extract(probe_json,'$.plurx_dv_title_v1') FROM files",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("aggregate query");
+            assert!(aggregate.is_none(), "recursive_triggers={recursive}");
+        }
+    }
 }

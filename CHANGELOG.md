@@ -16,6 +16,9 @@ bump may break compatibility and a **patch** bump never does.
   policy and raw-RPU L1 are checked before helper output is accepted. No display
   selection, metadata writer or targeted playback is exposed yet; no proprietary
   Dolby, perceptual-equivalence or display-accuracy claim.
+  Title acquisition uses durable source/scanner generations, retains demand on
+  scheduler preemption, suppresses manual cancellation, and yields its one-thread
+  admitted child to runnable ordinary probes before releasing resources.
 
 - Item pages show review-site scores: IMDb, Rotten Tomatoes and Metacritic (through the OMDb key in Settings, unused until now) and TMDB's user score, each with its own mark. They are fetched on first view and kept for two weeks.
 - A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.

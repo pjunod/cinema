@@ -50,6 +50,10 @@ def run(shader, root):
                    (oetf(200), oetf(1), oetf(9000)), (0., 0., 0.)] * 1024,
         'out-of-range': [(-0.1, 0., 1.1), (1.5, -1., 0.5),
                          (-1., -1., -1.), (2., 2., 2.)] * 1024,
+        # Public-standard analytical witnesses, supplied independently of the
+        # candidate shader. Hold these native pixels fixed while changing L1.
+        'witness400': [(oetf(400),) * 3] * 4096,
+        'witness4000': [(oetf(4000),) * 3] * 4096,
     }
     for name, pixels in patterns.items():
         values = [v for pixel in pixels for v in (*pixel, 1.)]
@@ -58,14 +62,18 @@ def run(shader, root):
         # Oracle uses precisely the binary32 input uploaded, not pre-rounded doubles.
         readback = struct.unpack('<' + 'f' * len(values), data)
         patterns[name] = [readback[i:i+3] for i in range(0, len(values), 4)]
-    cases, sensitivity = [], {}
+    cases, sensitivity, witnesses = [], {}, {}
     for nits in BUCKETS:
-        for max_pq, avg_pq, floor in [(4095, 1800, 50), (4095, 2500, 50),
-                                       (0, 0, 50), (4095, 0, 50),
-                                       (4095, 4095, 50), (4095, 1800, 0),
-                                       (1000, 500, 50)]:
+        metadata = [(4095, 1800, 50), (4095, 2500, 50),
+                    (0, 0, 50), (4095, 0, 50),
+                    (4095, 4095, 50), (4095, 1800, 0), (1000, 500, 50)]
+        if nits == 1000:
+            metadata += [(3900, 2048, 50), (3900, 2600, 50), (3800, 2048, 50)]
+        for max_pq, avg_pq, floor in metadata:
             curve = from_l1(max_pq, avg_pq, nits, floor)
             for pattern, rgb in patterns.items():
+                if pattern.startswith('witness') and max_pq not in (3800, 3900):
+                    continue
                 name = f'{nits}-{max_pq}-{avg_pq}-{floor}-{pattern}'
                 output = root / f'{name}.yuv'
                 argv = [str(shader), f'bt2020-pq-target-{nits}', str(floor), '4000',
@@ -95,6 +103,9 @@ def run(shader, root):
                 worst = max(abs(a - b) for a, b in zip(actual, reference, strict=True))
                 assert worst <= 2, (name, worst)
                 assert max(actual[:4096]) <= 64 + 876 * oetf(nits) + 1
+                if pattern.startswith('witness'):
+                    assert len(set(actual[:4096])) == 1, 'constant grayscale changed spatially'
+                    witnesses[max_pq, avg_pq, pattern] = actual[0]
                 if pattern == 'ramp':
                     assert actual[0] == 64, (name, 'zero black shifted')
                     assert all(a <= b for a, b in zip(actual[:4095], actual[1:4096]))
@@ -104,9 +115,24 @@ def run(shader, root):
                               'maximum_error_codes': worst, 'curve': curve.mode,
                               'trace': event, 'sha256': sha(output)})
         assert sensitivity[nits, 1800] != sensitivity[nits, 2500], 'ignored dynamic L1 average'
+    # Independently derived Annex B.2 examples: a static curve cannot pass merely
+    # by producing different hashes. Both witnesses must move in the right
+    # direction and agree with their own public-standard expected code.
+    analytical = {(3900, 2048, 'witness400'): 468,
+                  (3900, 2600, 'witness400'): 415,
+                  (3900, 2048, 'witness4000'): 678,
+                  (3800, 2048, 'witness4000'): 695}
+    for key, expected in analytical.items():
+        assert abs(witnesses[key] - expected) <= 2, (key, witnesses[key], expected)
+    assert witnesses[3900, 2600, 'witness400'] < witnesses[3900, 2048, 'witness400']
+    assert witnesses[3800, 2048, 'witness4000'] > witnesses[3900, 2048, 'witness4000']
     assert cases and all(row['samples'] > 0 for row in cases)
     receipt = {'shader_sha256': sha(shader), 'oracle_sha256': sha(Path(__file__).with_name('annex_b2.py')),
                'controller_sha256': sha(__file__), 'cases': cases, 'case_count': len(cases),
+               'analytical_witnesses': [
+                   {'max_pq': key[0], 'avg_pq': key[1], 'pattern': key[2],
+                    'expected_y': expected, 'actual_y': witnesses[key]}
+                   for key, expected in analytical.items()],
                'scope': 'synthetic post-reconstruction shader; not real-title or display acceptance'}
     (root / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
     return receipt
