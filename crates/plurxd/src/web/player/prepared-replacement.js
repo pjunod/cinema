@@ -1172,6 +1172,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     if(p.directedChange&&p.directedChange.autoMove)
       p.directedChange.committedActionId=state.actionId;
     p.preparedControlPending={actionId:state.actionId,sessionId:state.sessionId,
+      predecessorSessionId:state.predecessor?.sessionId||null,
       bootstrap:state.controlBootstrap,sharedContext:state.sharedContext};
     settleDirectedChange(p,p.directedChange,"committed",
       Math.round(performance.now()-((p.directedChange&&p.directedChange.tappedAt)||performance.now())));

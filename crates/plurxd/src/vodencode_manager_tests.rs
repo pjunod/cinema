@@ -171,7 +171,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         .await
         .expect("actual graph resources");
         let started = Instant::now();
-        let (verified, plan) = runtime
+        let (verified, plan) = match runtime
             .execute(
                 &file,
                 &encoding.plan,
@@ -185,7 +185,13 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
                 None,
             )
             .await
-            .expect("actual verified window");
+            .expect("actual verified window")
+        {
+            crate::vodencode::dv_runtime::WindowOutcome::Completed(window) => window,
+            crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
+                panic!("actual graph was cancelled instead of verifying its window")
+            }
+        };
         assert_eq!(
             plan.semantic_digest(),
             selected.semantic_digest(),

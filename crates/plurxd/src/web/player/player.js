@@ -192,6 +192,8 @@
  * @property {any} [surfaceState]          the presenter's shared state (PLAYBACK_SURFACE)
  * @property {any} [progressWatch]         the presentation-progress watch ({key, clock, frames, at, startedAt, fired})
  * @property {number|null} [presentationAdvancedAt] performance.now() the presented position last advanced
+ * @property {{attachment:any,element:HTMLMediaElement}|null} [transportPresentation] actual presentation proof for the current attachment and element
+ * @property {{attachment:any,element:HTMLMediaElement,intentGeneration:number,source:string|null,nativeExecution?:number,record:any,settled?:boolean,cancelledReason?:string,previous?:any}|null} [transportPlayInvocation] latest owned play invocation
  * @property {{attachment:any,since:number,done:boolean}|null} [startupEvidence] frame-driven first presentation sample owed to the current attachment
  * @property {number} [stallDeferrals]     times the current wait deferred to the server's verdict
  * @property {number|null} [stallDeferralsAt] the wait began-time those deferrals count against
@@ -575,8 +577,38 @@ function configureHlsStartupDeadline(player,graceMs){
   if(episode.transport==='native') armNativeHlsDeadline(player,episode);
   episode.pausedSeek?.armDeadline?.();
 }
+function notePlaybackPlayRejection(player,invocation,error){
+  const video=invocation.element, record=invocation.record;
+  const current=PLAYER===player&&player.transportPlayInvocation===invocation
+    &&player.mediaAttachment===invocation.attachment
+    &&document.getElementById("video")===video
+    &&(player.controlIntentGeneration||0)===invocation.intentGeneration
+    &&player.wantsPlayback===true
+    &&(video.getAttribute?.("src")||video.currentSrc||video.src||null)===invocation.source
+    &&player.hlsStartup?.native?.execution===invocation.nativeExecution;
+  const name=typeof error?.name==='string'&&/^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(error.name)?error.name:'Error';
+  const code=Number.isSafeInteger(error?.code)?error.code:null;
+  const status=Number.isSafeInteger(error?.status)&&error.status>=0&&error.status<=999?error.status:null;
+  const cancelled=name==='AbortError'&&!!invocation.cancelledReason;
+  // A changed attachment fences effects; it does not prove why the original
+  // browser command rejected. Keep even late failures visible on their owner.
+  clientLog({level:cancelled?'info':'warn',event:cancelled?'transport_play_cancelled':'transport_play_rejected',
+    message:cancelled?'An owned media command cancelled pending Play.':current?'The browser rejected the requested playback command.':'A retired playback command was rejected.',
+    detail:`${cancelled?'cancelled:'+invocation.cancelledReason:current?'rejected':'late_rejection'}:${name}:code=${code??'none'}:status=${status??'none'}`,code,
+    attempt:record.attempt,session_id:record.session,file_id:record.file_id,title:record.title,
+    method:record.method,vcodec:record.vcodec,
+    transport:record});
+  const episode=player.hlsStartup;
+  if(!cancelled&&current&&episode&&hlsStartupCurrent(player,episode)&&episode.state==='active'){
+    // This is a command failure, not a decoder verdict or viewer Pause.
+    // The startup owner's existing absolute deadline still owns diagnosis.
+    episode.playRejection={name,code,status};
+  }
+}
 function diagnoseHlsStartup(player){
   const episode=player&&player.hlsStartup;
+  if(episode?.playRejection) return {title:'The browser could not start playback.',
+    detail:`The browser rejected Play (${episode.playRejection.name}). Retry to issue a new playback request.`};
   const failure=episode&&episode.latestFailure;
   const explained=failure&&PlaybackPolicy.streamFailureOverlay(failure,Date.now());
   if(episode?.transport==='native'&&episode.state==='exhausted'&&failure?.message) return {
