@@ -31,6 +31,17 @@ pub struct ServerInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_aware_auto_protocol: Option<String>,
     pub name: String,
+    /// The short hostname of the node answering (`lab6`), from the same
+    /// resolution the cluster roster uses. Absent when the node has no usable
+    /// machine name. The LAN picker already publishes this name, so it is no
+    /// wider than discovery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    /// What a client should call this server: the operator's custom name when
+    /// one is set, otherwise the node's hostname — the rule the LAN picker
+    /// uses — and `name` only when neither exists. Clients show this rather
+    /// than re-deriving the rule.
+    pub display_name: String,
     /// Bare semver — clients compare this.
     pub version: &'static str,
     /// Git description of the exact build ("v0.1.0-14-gc0ffee"), for support.
@@ -74,6 +85,8 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         .get_setting(keys::SERVER_NAME)
         .await?
         .unwrap_or_else(|| state.server_name.clone());
+    let hostname = state.membership.local_hostname();
+    let display_name = plurx_core::config::server_display_name(&name, hostname.as_deref());
     let setup_required = state.store.count_users().await? == 0;
     let android_app = super::web::android_apk_path(&state.system.data_dir).is_some();
     let playback_auto_abr = state
@@ -95,6 +108,8 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         decoder_compaction_contract: plurx_core::playback::DECODER_COMPACTION_CONTRACT,
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         name,
+        hostname,
+        display_name,
         version: crate::version::SEMVER,
         build: crate::version::BUILD,
         built_at: crate::version::BUILT_AT,
@@ -220,6 +235,11 @@ pub struct SystemDto {
     pub hwaccel_restart_required: bool,
     pub transcoder_optimization: crate::transcoder_optimization::Status,
     pub name: String,
+    /// This node's short hostname; see [`ServerInfo::hostname`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    /// See [`ServerInfo::display_name`].
+    pub display_name: String,
     pub version: &'static str,
     pub build: &'static str,
     pub built_at: &'static str,
@@ -379,12 +399,15 @@ pub async fn system_info(
         .get_setting(keys::SERVER_NAME)
         .await?
         .unwrap_or_else(|| state.server_name.clone());
+    let hostname = state.membership.local_hostname();
     Ok(Json(SystemDto {
         node_id: state.node_id.clone(),
         hwaccel_requested: hwaccel_requested.unwrap_or_else(|| state.system.hwaccel_pref.clone()),
         hwaccel_restart_required,
         transcoder_optimization: optimization,
+        display_name: plurx_core::config::server_display_name(&name, hostname.as_deref()),
         name,
+        hostname,
         version: crate::version::SEMVER,
         build: crate::version::BUILD,
         built_at: crate::version::BUILT_AT,

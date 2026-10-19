@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tv.plurx.app.BuildConfig
 import tv.plurx.app.data.Appearance
+import tv.plurx.app.data.serverSettingsLabel
 import tv.plurx.app.data.HomeGrouping
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.OfflineNetwork
@@ -261,7 +262,7 @@ fun SettingsScreen(
 
             SettingsSection("Account", null) {
                 LabeledValueRow("Signed in as", vm.username ?: "—")
-                LabeledValueRow("Server", vm.serverName ?: vm.origin)
+                LabeledValueRow("Server", serverSettingsLabel(vm.serverName, vm.serverHostname) ?: vm.origin)
                 PreferenceAction("Change server", onClick = vm::changeServer)
                 PreferenceAction(
                     "Sign out",

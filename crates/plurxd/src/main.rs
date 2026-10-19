@@ -4056,15 +4056,14 @@ fn discovery_name(
 ) -> DiscoveryName {
     let configured = configured.trim();
     let machine = hostname.and_then(normalized_hostname);
-    let (label, names_the_machine) =
-        if !configured.is_empty() && !configured.eq_ignore_ascii_case("plurx") {
-            (configured.to_owned(), false)
-        } else {
-            match machine {
-                Some(host) => (host, true),
-                None => ("plurx".to_owned(), false),
-            }
-        };
+    let (label, names_the_machine) = if plurx_core::config::is_default_server_name(configured) {
+        match machine {
+            Some(host) => (host, true),
+            None => (plurx_core::config::DEFAULT_SERVER_NAME.to_owned(), false),
+        }
+    } else {
+        (configured.to_owned(), false)
+    };
     let Some(address) = address else {
         return DiscoveryName {
             label,
@@ -4425,7 +4424,7 @@ fn mdns_service_info(
     let host_suffix = node_label_suffix(node_id.unwrap_or(instance_id));
     let hostname = format!("plurx-{host_suffix}.local.");
     let logical_name = if name.trim().is_empty() {
-        "plurx"
+        plurx_core::config::DEFAULT_SERVER_NAME
     } else {
         name
     };

@@ -12599,3 +12599,29 @@ private struct PGSOverlayCasesFixture: Decodable {
     let tickCases: [TickCase]
     let manifestResponses: [ManifestResponse]
 }
+
+final class ServerLabelTests: XCTestCase {
+    private func decode(_ json: String) throws -> ServerInfo {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(ServerInfo.self, from: Data(json.utf8))
+    }
+
+    func testTheServerLabelIsTheServersDisplayNameNotTheSharedDefault() throws {
+        let info = try decode(#"{"name":"plurx","hostname":"lab6","display_name":"lab6"}"#)
+        XCTAssertEqual(info.label, "lab6")
+        XCTAssertEqual(serverSettingsLabel(name: info.label, hostname: info.hostname), "lab6")
+    }
+
+    func testAnOlderServerWithoutADisplayNameStillShowsItsName() throws {
+        let info = try decode(#"{"name":"plurx"}"#)
+        XCTAssertEqual(info.label, "plurx")
+        XCTAssertEqual(serverSettingsLabel(name: info.label, hostname: info.hostname), "plurx")
+    }
+
+    func testAChosenNameKeepsTheAnsweringNodeVisible() {
+        XCTAssertEqual(serverSettingsLabel(name: "Living Room", hostname: "lab6"), "Living Room · lab6")
+        XCTAssertEqual(serverSettingsLabel(name: nil, hostname: "lab6"), "lab6")
+        XCTAssertEqual(serverSettingsLabel(name: "Living Room", hostname: nil), "Living Room")
+    }
+}

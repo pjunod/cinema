@@ -6618,6 +6618,18 @@ async fn setup_then_login_flow() {
     // Fresh server reports setup_required.
     let (_, info) = call(&app, get("/api/v1/server", None)).await;
     assert_eq!(info["setup_required"], true);
+    // The node's own machine name rides along, and the label clients show is
+    // derived from it rather than being the shipped default.
+    let hostname =
+        plurx_core::cluster::membership::MembershipManager::unavailable().local_hostname();
+    assert_eq!(info["hostname"].as_str(), hostname.as_deref());
+    assert_eq!(
+        info["display_name"],
+        plurx_core::config::server_display_name(
+            info["name"].as_str().unwrap(),
+            hostname.as_deref()
+        )
+    );
 
     // Setup creates the admin and returns a working token.
     let token = setup_admin(&app).await;

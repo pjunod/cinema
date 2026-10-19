@@ -11,12 +11,32 @@ import Foundation
 struct ServerInfo: Codable {
     var setupRequired: Bool?
     var name: String?
+    /// The answering node's machine name (`lab6`); absent on servers that
+    /// predate it or have no usable hostname.
+    var hostname: String?
+    /// The server's own choice of what to call it: an operator-set name, else
+    /// the hostname. Older servers omit it, so `label` falls back to `name`.
+    var displayName: String?
     var version: String?
     var build: String?
     var instanceId: String?
     var playbackDisplayAwareAuto: Bool?
     var playbackAutoAbr: Bool?
     var displayAwareAutoProtocol: String?
+}
+
+extension ServerInfo {
+    /// What to call this server anywhere a person reads it.
+    var label: String? { displayName ?? name }
+}
+
+/// The Settings "Server" value: the server's label, with the answering node's
+/// hostname added when the label is a name an operator chose — so every node of
+/// a custom-named cluster still says which machine this client is talking to.
+func serverSettingsLabel(name: String?, hostname: String?) -> String? {
+    guard let name, !name.isEmpty else { return hostname }
+    guard let hostname, !hostname.isEmpty, hostname.caseInsensitiveCompare(name) != .orderedSame else { return name }
+    return "\(name) · \(hostname)"
 }
 
 struct ClusterIngress: Codable {
