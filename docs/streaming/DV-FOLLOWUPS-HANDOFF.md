@@ -42,8 +42,10 @@ and its documentation base are integrated for preparation only. B's final
 independent review and merge still wait for actual Pixel landing and any
 necessary base reconciliation. The source-bound baseline formatter passed;
 all-target compilation found an inaccessible regression helper (repaired in
-the implementation). The completed candidate still needs compilation and
-independent review. There is no affected-unit receipt; stale output is not evidence.
+the implementation). Completed-source formatting and all-target compilation then
+passed; Clippy found one manual-range-style lint, now repaired with identical
+bounds and even-height semantics. The exact-source Clippy retry and independent
+review remain. There is no affected-unit receipt; stale output is not evidence.
 
 **Symptom:** Safari on a Studio Display, Avatar (P7 FEL), FEL re-encode on, gets the plain P7→8.1 conversion with "FEL: not used for this play" and no reason. The reconstructed 8.1 (FEL rebuilt, re-encoded, new RPU) is never reached, although #1199's physical test proves that path.
 
@@ -77,9 +79,11 @@ whether this complete implementation is ready. The separate reservation-slot
 incident and general remote processed requalification remain out of B scope.
 
 **Finish:**
-1. Resolve the destination, reuse, audio and mixed-version contracts; complete
-   source regressions and source-bound compiler/static preparation. No units
-   during preparation.
+1. Complete source-bound compiler/static preparation for the accepted explicit
+   destination contract. The latest direct owner sequence requests the three
+   section-B regressions above after a valid build/clippy and before review;
+   retain those passes if review leaves their source unchanged. The quick
+   draft-paperwork operations-test exception also remains in effect.
 2. Obtain one independent frontier adversarial review of the complete PR,
    fix findings, then run the affected tests, required old-code sensitivity
    checks and fast lane once. Retry only failed or invalidated checks.

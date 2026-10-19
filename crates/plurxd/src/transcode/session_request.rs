@@ -1094,7 +1094,7 @@ impl SessionRequest {
         use plurx_core::transcode::dv_processing::{DvDestination, DvExistingRoute};
         if let Some(destination) = self.dv_processing_destination {
             if self.presentation != Presentation::Vod
-                || !matches!(self.kind, SessionKind::Transcode { height } if height >= 32 && height <= super::MAX_HEIGHT && height % 2 == 0)
+                || !matches!(self.kind, SessionKind::Transcode { height } if (32..=super::MAX_HEIGHT).contains(&height) && height % 2 == 0)
                 || !self.hdr10
                 || self.subtitle_burn.is_some()
                 || self.continuous_media.is_some()
