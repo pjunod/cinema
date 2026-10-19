@@ -29346,7 +29346,6 @@ async fn scan_identity_repair_contract() {
             .expect("copy-source watch");
         {
             use plurx_core::annotations::ItemList;
-            use plurx_core::store::AnnotationStore;
             for (show, list, at) in [
                 (first.0, ItemList::Favorite, 5),
                 (second.0, ItemList::Watchlist, 7),
@@ -29452,7 +29451,6 @@ async fn scan_identity_repair_contract() {
             // Memberships of the retired duplicate follow it onto the
             // survivor; the later add time wins where both were listed.
             use plurx_core::annotations::ItemList;
-            use plurx_core::store::AnnotationStore;
             for (list, at) in [(ItemList::Watchlist, 7), (ItemList::Favorite, 9)] {
                 let entries = store
                     .listed_items(copy_user.id, list, 10, 0)
@@ -31669,7 +31667,6 @@ async fn home_preview_contract_runs_through_dyn_store() {
 #[tokio::test]
 async fn annotation_contract_runs_through_dyn_store() {
     use plurx_core::annotations::{ItemList, ItemRatings, Rating, RatingSource};
-    use plurx_core::store::AnnotationStore;
     for_each_backend(|store, backend| async move {
         let user = store
             .create_user("annotation-contract", "hash", false)

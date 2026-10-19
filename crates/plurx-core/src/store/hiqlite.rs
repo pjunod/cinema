@@ -2042,6 +2042,7 @@ impl HiqliteAuthStore {
         store.install_invitation_schema(None).await?;
         store.install_subtitle_managed_schema(None).await?;
         store.install_subtitle_translation_schema(None).await?;
+        store.install_library_annotations_schema(None).await?;
         Ok(store)
     }
 
