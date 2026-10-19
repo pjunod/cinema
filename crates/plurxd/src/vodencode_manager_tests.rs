@@ -224,6 +224,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
 /// Decode a processed window and check its luma is a limited-range picture:
 /// legal codes only, nominally 64..=940, and, where the film has picture, not
 /// flat. A wrong range or bit shift in the export fails these.
+#[cfg(target_os = "linux")]
 fn processed_window_luma(
     window: &[u8],
     (width, height): (u32, u32),
