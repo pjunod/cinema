@@ -9,6 +9,18 @@ require("./prepared-frame-rendezvous.test.js");
 const fs = require("node:fs");
 const path = require("node:path");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
+const PREPARE_SESSION = "44444444-4444-4444-8444-444444444444";
+const PREPARE_ACTION_ID = "33333333-3333-4333-8333-333333333333";
+const PREPARE_FIXTURE = JSON.parse(`{
+  "type":"prepare",
+  "action_id":"${PREPARE_ACTION_ID}",
+  "session_id":"${PREPARE_SESSION}",
+  "playlist_url":"/api/v1/hls/${PREPARE_SESSION}/index.m3u8",
+  "media_origin_ms":0,
+  "effective_selection":{"quality_auto":true,"height":1080,
+    "audio_track":null,"subtitle_burn":null,"audio_offset_ms":0,
+    "codec":"server_selected","dynamic_range":"sdr"}}`);
+
 const TEST_CAPTURE_OWNER=Object.freeze({lifecycleId:"test-player",attachmentGeneration:1});
 const captureSnapshot=(value,intentGeneration=0,owner=TEST_CAPTURE_OWNER)=>
   control.capture(value,intentGeneration,owner);
@@ -361,6 +373,31 @@ async function flushDeep() {
 }
 
 async function main() {
+  await test("Close and pagehide retain an unacknowledged commit's predecessor after decoder retirement",()=>{
+    for(const pagehide of [false,true]){
+      const h=preparedHarness();
+      const incumbent={destroyed:false,destroy(){this.destroyed=true;}};
+      const p=h.set({offset:0,vod:true,prepared:null,priorKbps:0,pendingMediaChange:null,wantsPlayback:true,sessionId:"accepted-predecessor",attemptId:"a1",hls:incumbent});
+      const state=h.handle({...PREPARE_FIXTURE});
+      h.instances[0].events.manifest();h.spare.ranges=[[0,30]];h.instances[0].events.append();
+      h.provePrepared();
+      assert.equal(h.queue().at(-1).state,"committed");
+      h.fireAll();
+      assert.equal(incumbent.destroyed,true);assert.equal(p.preparedRetiring,null);assert.equal(state.predecessor,null);
+      assert.equal(p.preparedControlPending.predecessorSessionId,"accepted-predecessor",
+        "decoder retirement erased the still-accepted predecessor's cleanup owner");
+      // No commit acknowledgement was accepted. Its predecessor still owns
+      // server playback even though the successor owns the visible decoder.
+      if(pagehide) h.pagehide();else h.close({routeLeave:true});
+      assert.equal(h.released.filter(id=>id==="accepted-predecessor").length,1);
+      assert.equal(h.released.filter(id=>id===PREPARE_SESSION).length,1);
+      assert.equal(h.instances[0].destroyed,true);
+      for(const release of h.releaseStates){assert.equal(release.paused,true);assert.equal(release.src,null);assert.equal(release.hls,null);}
+      assert.equal(p.sessionId,null);
+    }
+  });
+
+
   assert.equal(control.validBootstrap(bootstrap()), true);
   assert.equal(control.validBootstrap(Object.assign(bootstrap(), { control_epoch: 0 })), false);
   assert.equal(control.validBootstrap(Object.assign(bootstrap(), { url: "https://attacker/control" })), false);
@@ -2246,17 +2283,6 @@ async function main() {
   // and eight sites read `action_id`, and `playlist_url`, `media_origin_ms`
   // and `effective_selection` are asserted nowhere. This fixture is what
   // catches the `prepare` / `prepare_replacement` trap in both directions.
-  const PREPARE_SESSION = "44444444-4444-4444-8444-444444444444";
-  const PREPARE_ACTION_ID = "33333333-3333-4333-8333-333333333333";
-  const PREPARE_FIXTURE = JSON.parse(`{
-    "type":"prepare",
-    "action_id":"${PREPARE_ACTION_ID}",
-    "session_id":"${PREPARE_SESSION}",
-    "playlist_url":"/api/v1/hls/${PREPARE_SESSION}/index.m3u8",
-    "media_origin_ms":0,
-    "effective_selection":{"quality_auto":true,"height":1080,
-      "audio_track":null,"subtitle_burn":null,"audio_offset_ms":0,
-      "codec":"server_selected","dynamic_range":"sdr"}}`);
   assert.equal(PREPARE_FIXTURE.type, "prepare", "the wire tag is `prepare`");
   assert.equal(control.PREPARE_REPLACEMENT_ACTION, "prepare_replacement",
     "the DECLARED name is `prepare_replacement` — the two differ, and only here");
@@ -4083,6 +4109,7 @@ async function main() {
       pause() { this.paused = true; },
       load() { this.loads += 1; },
       removeAttribute(name) { if (name === "src") this.src = null; delete this.attributes[name]; },
+      querySelectorAll() { return []; },
       setAttribute(name, value) { this.attributes[name] = value; },
       addEventListener(name, fn) { (this.listeners[name] = this.listeners[name] || []).push(fn); },
       removeEventListener(name, fn) {
@@ -4098,6 +4125,8 @@ async function main() {
     // leaves the page with its listeners.
     const created = [];
     const attached = [live];
+    const closeNodes = new Map(["modal", "player", "app"].map(id => [id,
+      { style: {}, classList: { contains: value => value === "open", remove() {} } }]));
     const parent = {
       appendChild(node) { node.parentNode = parent; attached.push(node); },
       removeChild(node) {
@@ -4109,7 +4138,7 @@ async function main() {
     };
     live.parentNode = parent;
     const document = {
-      getElementById: (id) => attached.find((node) => node.id === id) || null,
+      getElementById: (id) => attached.find((node) => node.id === id) || closeNodes.get(id) || null,
       createElement: () => {
         const node = element("");
         node.buffered.owner = node;
@@ -4147,6 +4176,13 @@ async function main() {
       "handleEnded", "renderPlayerInfo", "pbTick", "pbSyncPlayIcon", "SHARED_DECISION",
       [
         "let PLAYER=null; let quality='auto';const localStorage={getItem:()=>quality,setItem:(key,value)=>{quality=value;}};",
+        "let WATCH_CLOSE_PROMISE=null,WATCH_GENERATION=0,WATCH=null,STATS_TIMER=null; const location={hash:'#/'};",
+        "const beginPlaybackPreparation={};const released=[],releaseStates=[];",
+        "const PLAY_OPEN_GATE={invalidate(){},current(){return false;}};",
+        "function watchDetach(){return null;}function reportProgress(){return Promise.resolve();}",
+        "function exitPresentationModes(){}function clearPlayerMediaSession(){}function cancelPendingSeek(){}function resetPlaybackSurface(){}",
+        "function stopPlayerTimers(){stopPlaybackControl(PLAYER);}",
+        "function releaseSession(id){released.push(id);const v=document.getElementById('video');releaseStates.push({id,paused:v.paused,src:v.src,hls:PLAYER.hls});}",
         "function playbackContext(){return {};}",
         "function cancelHlsStartup(){}",
         // The sampling tick refreshes the wait sentence before each presenter
@@ -4228,6 +4264,8 @@ async function main() {
         transportTelemetrySources(),shippedSource("pausePlaybackInternally"),
         shippedSource("settleDirectedChange"),qualityCancellationSources(), shippedSource("supersedeDirectedChange"),
         shippedSource("teardownHls"),
+        shippedSource("retirePlaybackPredecessor"),shippedSource("resetMediaSource"),
+        shippedSource("stopPlaybackControl"),shippedSource("closePlayer"),shippedSource("closeVodForPageHide"),
         // ---- the directed change, end to end -----------------------------
         "let PENDING_ATTEMPT_REASON=null; const plays=[],mediaChanges=[];",
         "function playbackSurfaceStep(){return null;}",
@@ -4289,7 +4327,7 @@ async function main() {
         " selection(){return playbackControlSelection(PLAYER);},",
         " requestedRung(){return PLAYER&&PLAYER.autoRequestedHeight;},",
         " commit(){return commitPreparedReplacement(PLAYER,preparedState(PLAYER));},",
-        " plays, mediaChanges,",
+        " plays, mediaChanges,released,releaseStates,close:closePlayer,pagehide:closeVodForPageHide,",
         " surfaceRaised};",
       ].join("\n"),
     );
@@ -4376,6 +4414,7 @@ async function main() {
 
   await test("prepared HLS buffer readiness follows incumbent clock and releases listener ownership",
     ()=>preparedBufferObservationTests(preparedHarness,preparedPlayer,prepareAction));
+
 
   // A warmed successor remains under the incumbent until aligned advancing
   // successor frames meet a fresh incumbent frame.

@@ -678,9 +678,13 @@ function closePlayer(options={}){
   for(const owner of [PLAYER,PLAYER?.mediaPredecessor]){
     if(!owner) continue;
     queueRelease(owner.sessionId);queueRelease(owner.sharedDirect?.session_id);
+    // A Shared visible commit may still await acknowledgement or a recovery
+    // Start. Its validated accepted context continues to own that session.
+    if(owner.fileContext?.source_ref?.kind==="shared")queueRelease(owner.fileContext.session_id);
     for(const state of [owner.prepared,owner.preparedCommitting,
       owner.preparedRetiring,owner.preparedControlPending]){
       queueRelease(state?.sessionId);queueRelease(state?.predecessor?.sessionId);
+      queueRelease(state?.predecessorSessionId);
     }
   }
   const closingWatch=watchDetach();

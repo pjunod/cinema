@@ -287,6 +287,24 @@ test("normal Close clears the Shared direct source before releasing its captured
   assert.equal(outgoing.sharedDirect,null);assert.equal(p.mediaPredecessor,null);
   assert.equal(h.calls.filter(call=>call==="release:outgoing-direct").length,1);
 });
+test("Close and pagehide retain the accepted Shared session while committed recovery awaits a fresh Start",()=>{
+  for(const pagehide of [false,true])for(const outgoing of [false,true]){
+    const h=vodPageHideHarness(),p=h.session("successor");
+    p.fileContext={source_ref:{kind:"shared"},session_id:"accepted-predecessor"};
+    p.preparedControlPending={actionId:"commit",sessionId:"successor",predecessorSessionId:"accepted-predecessor"};
+    h.context.PLAYER=p;
+    Object.assign(h.context,{stopPlaybackControl:()=>{},positionForPlaybackIntent:()=>17,
+      play:()=>new Promise(()=>{})});
+    vm.runInContext(shipped("recoverSharedCommittedReplacement","player/prepared-replacement.js"),h.context);
+    assert.equal(h.context.recoverSharedCommittedReplacement(p,p.preparedControlPending),true);
+    assert.equal(p.preparedControlPending,null,"recovery transferred the pending commit out of its original field");
+    if(outgoing)h.context.PLAYER={fileId:2,sessionId:null,mediaPredecessor:p};
+    if(pagehide)h.hide(false);else h.context.closePlayer();
+    for(const id of ["successor","accepted-predecessor"])
+      assert.equal(h.calls.filter(call=>call==="release:"+id).length,1,id+" escaped the common Close drain");
+    assert.ok(h.calls.indexOf("destroy:successor")<h.calls.indexOf("release:successor"));
+  }
+});
 test("VOD pagehide cancels an initial open before its session returns",()=>{
   const h=vodPageHideHarness();h.context.PLAYER=null;h.modal.classList.remove("open");
   let cancelled=0,finished=0;

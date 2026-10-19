@@ -1,7 +1,7 @@
 # Browser HDR restart — preserve normal retirement through the DV adapter
 
 **Status:** open · **Updated:** 2026-10-19 · **Owner:** Codex ·
-**Branch:** `codex/browser-session-retirement` · fixes implemented locally;
+**Branch:** `codex/browser-session-retirement` · fixes implemented and locally qualified;
 deployment and acceptance open.
 
 Companion to [DV processing contracts](DV_HDR_M1_CONTRACTS.md) and
@@ -201,9 +201,22 @@ that lifecycle rather than owning a special second drain. This addresses the
 ownership defect for both player Close and document exit; available original
 telemetry does not prove that the reported stale session took this path.
 
+The adversarial review found one further ownership gap after presentation:
+decoder retirement can clear the predecessor before the server accepts the
+commit acknowledgement. The pending commit must retain its predecessor session
+ID independently of the retired decoder. Common Close drains that retained ID
+along with the successor, including on page exit; accepting the acknowledgement
+ends the pending ownership through the existing settlement path. This avoids
+relying on an ordinary control fetch surviving document unload or deriving a
+session handle from a reporter URL. Shared recovery may clear the pending
+commit while a fresh Start is still awaiting its response, so Close also drains
+the accepted Shared session retained in each closing owner's validated file
+context. Cleanup ownership survives both continuations until their existing
+owners settle.
+
 ## Local qualification and remaining acceptance
 
-The affected browser suites pass: **191 tests**, covering web control, native
+The affected browser suites pass, covering web control, native
 startup, surface policy, Close/pagehide, diagnostics and file context. Run with:
 
 ```sh
@@ -217,6 +230,8 @@ registration/Close/cancel resource-retention regression. Pinned Rust 1.97.1
 formatting and all-target Clippy pass on the source-only compiler copy;
 workspace/all-target Clippy also passes on the native development host.
 Static web checks pass with the existing type baseline unchanged.
+The complete Node web/playback lane (`make web-unit-check`) also passes after
+the adversarial finding and its Shared recovery continuation were repaired.
 
 Deployment and physical acceptance remain open. Recheck same-tab enhanced
 Close/Resume, Safari resume-to-first-frame and Close during a prepared switch.
